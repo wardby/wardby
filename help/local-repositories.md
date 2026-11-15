@@ -86,6 +86,13 @@ Things to know:
   to build on that branch. A continuation of a run (a lead agent revising its
   earlier work) fast-forwards the same branch. If that branch has moved, or is
   checked out in your repository, the run fails with `local_branch_conflict`.
+- To keep working on a run's branch yourself, pass
+  `trigger_agent {"agentId", "continuePriorRun": "<run id>", "task"}`. The
+  run continues on the first run's `wardby/run-<id>` branch. It is refused with
+  `no_pushed_branch` when that branch was never pushed (help article
+  `continue-coding-run`). On the Substrate launcher with warm rounds on, the
+  continuation can also resume the previous round's workspace (help article
+  `substrate-warm-rounds`); the pushed branch is still what it continues.
 - Wardby never deletes result branches. Remove one you no longer need with
   `git branch -D wardby/run-<run id>`.
 - `.wardby/services.yaml` works for local runs. It is read from the committed
@@ -204,6 +211,10 @@ article it follows; see [Get started](getting-started.md).
 - [`vcs_github_not_configured`](errors/vcs-github-not-configured.md): a coding
   agent uses a GitHub repository on a server with only local repositories
   configured.
+
+A `local:` repository can also be an extra, read-only or writable, in a run
+with several repositories: see
+[Several repositories in one coding run](multi-repository-runs.md).
 
 Related: [Get started](getting-started.md),
 [Connect GitHub repositories](github.md) (the alternative to a local

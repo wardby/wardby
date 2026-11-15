@@ -28,6 +28,7 @@ interface FakeRepositoryRow {
   agentId: string;
   provider: string;
   repository: string;
+  name: string;
   access: string;
   triggers: string[];
   checkName: string | null;
@@ -35,6 +36,9 @@ interface FakeRepositoryRow {
   waitForCi?: boolean;
   markReadyWhenPassing?: boolean;
   baseRef?: string | null;
+  ref?: string | null;
+  refFromFile?: string | null;
+  inDefaultSet?: boolean;
   createdAt: Date;
   authorizedVia?: string | null;
   authorizedById?: string | null;
@@ -67,20 +71,42 @@ function fakeDb(
         if (where?.NOT?.agentId !== undefined) result = result.filter((r) => r.agentId !== where.NOT!.agentId);
         return result.map((r) => ({ ...r }));
       },
+      findUnique: async ({ where }: { where: { agentId_name: { agentId: string; name: string } } }) => {
+        const { agentId, name } = where.agentId_name;
+        const row = rows.find((r) => r.agentId === agentId && r.name === name);
+        return row ? { ...row } : null;
+      },
+      findFirst: async ({
+        where,
+      }: {
+        where: { agentId: string; provider: string; repository: string; access: string; NOT?: { name: string } };
+      }) => {
+        const row = rows.find(
+          (r) =>
+            r.agentId === where.agentId &&
+            r.provider === where.provider &&
+            r.repository === where.repository &&
+            r.access === where.access &&
+            r.name !== where.NOT?.name,
+        );
+        return row ? { ...row } : null;
+      },
+      count: async ({ where }: { where: { agentId: string; inDefaultSet: boolean; NOT: { name: string } } }) =>
+        rows.filter(
+          (r) => r.agentId === where.agentId && !!r.inDefaultSet === where.inDefaultSet && r.name !== where.NOT.name,
+        ).length,
       upsert: async ({
         where,
         create,
         update,
       }: {
-        where: { agentId_provider_repository: { agentId: string; provider: string; repository: string } };
+        where: { agentId_name: { agentId: string; name: string } };
         create: Omit<FakeRepositoryRow, "id" | "createdAt">;
         update: Partial<FakeRepositoryRow>;
       }) => {
         if (opts.failUpsertWith) throw opts.failUpsertWith;
-        const { agentId, provider, repository } = where.agentId_provider_repository;
-        const existing = rows.find(
-          (r) => r.agentId === agentId && r.provider === provider && r.repository === repository,
-        );
+        const { agentId, name } = where.agentId_name;
+        const existing = rows.find((r) => r.agentId === agentId && r.name === name);
         if (existing) {
           Object.assign(existing, update);
           return { ...existing };
@@ -89,10 +115,20 @@ function fakeDb(
         rows.push(row);
         return { ...row };
       },
-      deleteMany: async ({ where }: { where: { agentId: string; provider: string; repository: string } }) => {
+      deleteMany: async ({
+        where,
+      }: {
+        where: { agentId: string; provider: string; repository: string; name?: string };
+      }) => {
         const before = rows.length;
         const kept = rows.filter(
-          (r) => !(r.agentId === where.agentId && r.provider === where.provider && r.repository === where.repository),
+          (r) =>
+            !(
+              r.agentId === where.agentId &&
+              r.provider === where.provider &&
+              r.repository === where.repository &&
+              (where.name === undefined || r.name === where.name)
+            ),
         );
         rows.length = 0;
         rows.push(...kept);
@@ -255,7 +291,6 @@ describe("repository tools", () => {
     });
 
     it.each([
-      [{ access: "read" }, "write"],
       [{ access: "write", triggers: ["push"] }, "triggers"],
       [{ access: "write", markReadyWhenPassing: true }, "markReadyWhenPassing"],
     ])("refuses a coding link with %j", async (extra, message) => {
@@ -268,6 +303,285 @@ describe("repository tools", () => {
       expect(result.isError).toBeTruthy();
       expect(errorText(result as never)).toContain(message);
       await client.close();
+    });
+
+    describe("read links, names and the default set", () => {
+      const call = async (client: Awaited<ReturnType<typeof connectClient>>, args: Record<string, unknown>) =>
+        client.callTool({ name: "link_repository", arguments: { agentId: "c1", ...args } });
+      const linkOf = (r: unknown) => (parseText(r as never) as { link: Record<string, unknown> }).link;
+      const SHA40 = "a".repeat(40);
+
+      it("creates a named read link with a commit ref", async () => {
+        const { mcp } = setup(agents(), "p1");
+        const client = await connectClient(mcp);
+        const ok = await call(client, {
+          repository: "upstream-org/upstream",
+          access: "read",
+          name: "base",
+          ref: SHA40,
+        });
+        expect(ok.isError).toBeFalsy();
+        expect(linkOf(ok)).toMatchObject({ name: "base", ref: SHA40, refFromFile: null, access: "read" });
+        await client.close();
+      });
+
+      it("links the same repository twice under different names", async () => {
+        const { mcp } = setup(agents(), "p1");
+        const client = await connectClient(mcp);
+        await call(client, { repository: "upstream-org/upstream", access: "read", name: "base", ref: SHA40 });
+        const second = await call(client, {
+          repository: "upstream-org/upstream",
+          access: "read",
+          name: "upstream",
+          ref: { fromFile: "upstream-sync" },
+        });
+        expect(linkOf(second)).toMatchObject({ name: "upstream", ref: null, refFromFile: "upstream-sync" });
+        const listed = await client.callTool({ name: "list_repositories", arguments: { agentId: "c1" } });
+        const { repositories } = parseText(listed as never) as { repositories: Record<string, unknown>[] };
+        expect(repositories).toHaveLength(2);
+        expect(repositories[0]).toHaveProperty("inDefaultSet", false);
+        expect(repositories[1]).toHaveProperty("refFromFile", "upstream-sync");
+        await client.close();
+      });
+
+      it("refuses a default name another repository already uses", async () => {
+        const seeded: FakeRepositoryRow = {
+          id: "r1",
+          agentId: "c1",
+          provider: "github",
+          repository: "upstream-org/upstream",
+          name: "upstream",
+          access: "read",
+          triggers: [],
+          checkName: null,
+          createdAt: new Date(),
+        };
+        const { mcp } = setup(agents(), "p1", [seeded]);
+        const client = await connectClient(mcp);
+        const result = await call(client, { repository: "other-org/upstream", access: "read", ref: "main" });
+        expect(errorText(result as never)).toContain(
+          'repository_name_taken: the name "upstream" is already used by another link on this agent (upstream-org/upstream); pass a different name.',
+        );
+        await client.close();
+      });
+
+      it("refuses a default name that doesn't fit the format and asks for an explicit name", async () => {
+        const { mcp } = setup(agents(), "p1");
+        const client = await connectClient(mcp);
+        const long = await call(client, { repository: `acme/${"x".repeat(64)}`, access: "write" });
+        expect(errorText(long as never)).toMatch(/^repository_name_invalid:/);
+        const named = await call(client, { repository: `acme/${"x".repeat(64)}`, access: "write", name: "long" });
+        expect(linkOf(named)).toMatchObject({ name: "long" });
+        const reserved = await call(client, { repository: "acme/workspace", access: "write" });
+        expect(errorText(reserved as never)).toMatch(/^repository_name_invalid:/);
+        const explicit = await call(client, { repository: "acme/ok", access: "write", name: "workspace" });
+        expect(errorText(explicit as never)).toMatch(/^repository_name_invalid:/);
+        const upper = await call(client, { repository: "acme/ok", access: "write", name: "Web" });
+        expect(errorText(upper as never)).toMatch(/^repository_name_invalid:/);
+        await client.close();
+      });
+
+      it("maps a pg-adapter unique race on agentId_name to repository_name_taken, naming a reused write-link name", async () => {
+        const race = new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+          code: "P2002",
+          clientVersion: "test",
+          meta: {
+            modelName: "AgentRepository",
+            driverAdapterError: {
+              cause: { kind: "UniqueConstraintViolation", constraint: { index: "AgentRepository_agentId_name_key" } },
+            },
+          },
+        });
+        const backfilled: FakeRepositoryRow = {
+          id: "r1",
+          agentId: "c1",
+          provider: "github",
+          repository: "acme/web",
+          name: "web-2",
+          access: "write",
+          triggers: [],
+          checkName: null,
+          createdAt: new Date(),
+        };
+        const { mcp } = setup(agents(), "p1", [backfilled], { failUpsertWith: race });
+        const client = await connectClient(mcp);
+        const reused = await call(client, { repository: "acme/web", access: "write" });
+        expect(errorText(reused as never)).toMatch(/^repository_name_taken:.*"web-2"/);
+        const fresh = await call(client, { repository: "acme/other", access: "write" });
+        expect(errorText(fresh as never)).toMatch(/^repository_name_taken:.*"other"/);
+        await client.close();
+      });
+
+      it("re-linking a read link updates it in place and clears refFromFile", async () => {
+        const { mcp } = setup(agents(), "p1");
+        const client = await connectClient(mcp);
+        await call(client, {
+          repository: "upstream-org/upstream",
+          access: "read",
+          name: "upstream",
+          ref: { fromFile: "upstream-sync" },
+        });
+        const again = await call(client, {
+          repository: "upstream-org/upstream",
+          access: "read",
+          name: "upstream",
+          ref: "main",
+        });
+        expect(linkOf(again)).toMatchObject({ name: "upstream", ref: "main", refFromFile: null });
+        const listed = await client.callTool({ name: "list_repositories", arguments: { agentId: "c1" } });
+        expect((parseText(listed as never) as { repositories: unknown[] }).repositories).toHaveLength(1);
+        await client.close();
+      });
+
+      it("re-linking a backfilled write link updates it instead of adding a duplicate", async () => {
+        const backfilled: FakeRepositoryRow = {
+          id: "r1",
+          agentId: "c1",
+          provider: "github",
+          repository: "acme/web",
+          name: "web-2",
+          access: "write",
+          triggers: [],
+          checkName: null,
+          createdAt: new Date(),
+        };
+        const { mcp } = setup(agents(), "p1", [backfilled]);
+        const client = await connectClient(mcp);
+        const again = await call(client, { repository: "acme/web", access: "write", baseRef: "develop" });
+        expect(again.isError).toBeFalsy();
+        expect(linkOf(again)).toMatchObject({ name: "web-2", baseRef: "develop" });
+        const listed = await client.callTool({ name: "list_repositories", arguments: { agentId: "c1" } });
+        expect((parseText(listed as never) as { repositories: unknown[] }).repositories).toHaveLength(1);
+        await client.close();
+      });
+
+      it.each([
+        [
+          { access: "read" },
+          "A read link of a coding agent needs ref (a branch, tag or commit SHA) or ref: { fromFile }.",
+        ],
+        [{ access: "read", ref: "main", baseRef: "x" }, "A read link takes no baseRef."],
+        [{ access: "write", ref: "main" }, "ref applies only to a read link."],
+      ])("refuses a coding link with %j", async (extra, message) => {
+        const { mcp } = setup(agents(), "p1");
+        const client = await connectClient(mcp);
+        const result = await call(client, { repository: "acme/service-a", ...extra });
+        expect(errorText(result as never)).toBe(message);
+        await client.close();
+      });
+
+      it.each(["../secrets", "a/../b", "/etc/upstream-sync", "./upstream-sync", "a//b"])(
+        "refuses a ref file path outside the repository (%s) at link time",
+        async (fromFile) => {
+          const { mcp } = setup(agents(), "p1");
+          const client = await connectClient(mcp);
+          const result = await call(client, {
+            repository: "upstream-org/upstream",
+            access: "read",
+            name: "base",
+            ref: { fromFile },
+          });
+          expect(errorText(result as never)).toBe("ref.fromFile must be a repository-relative file path.");
+          const listed = await client.callTool({ name: "list_repositories", arguments: { agentId: "c1" } });
+          expect((parseText(listed as never) as { repositories: unknown[] }).repositories).toHaveLength(0);
+          await client.close();
+        },
+      );
+
+      it("allows one write link per repository", async () => {
+        const { mcp } = setup(agents(), "p1");
+        const client = await connectClient(mcp);
+        await call(client, { repository: "acme/web", access: "write", name: "web" });
+        const second = await call(client, { repository: "acme/web", access: "write", name: "web-copy" });
+        expect(errorText(second as never)).toBe(
+          "A coding agent can have one write link per repository; web already is one.",
+        );
+        await client.close();
+      });
+
+      it("accepts a read link to the default repository but not a write link", async () => {
+        const { mcp } = setup(agents(), "p1");
+        const client = await connectClient(mcp);
+        const read = await call(client, { repository: "acme/default", access: "read", ref: "main" });
+        expect(read.isError).toBeFalsy();
+        const write = await call(client, { repository: "acme/default", access: "write" });
+        expect(errorText(write as never)).toContain("already its default");
+        await client.close();
+      });
+
+      it("limits the default set to CODING_MAX_RUN_REPOSITORIES", async () => {
+        const saved = process.env.CODING_MAX_RUN_REPOSITORIES;
+        process.env.CODING_MAX_RUN_REPOSITORIES = "5";
+        try {
+          const { mcp } = setup(agents(), "p1");
+          const client = await connectClient(mcp);
+          for (let i = 1; i <= 4; i++) {
+            const ok = await call(client, { repository: `acme/r${i}`, access: "write", inDefaultSet: true });
+            expect(ok.isError).toBeFalsy();
+          }
+          const fifth = await call(client, { repository: "acme/r5", access: "write", inDefaultSet: true });
+          expect(errorText(fifth as never)).toBe(
+            "repository_set_too_large: the default set would hold 6 repositories (the default repository plus 5 links); the limit is 5 (CODING_MAX_RUN_REPOSITORIES).",
+          );
+          // Re-linking a member does not count it twice.
+          const again = await call(client, { repository: "acme/r4", access: "write", inDefaultSet: true });
+          expect(again.isError).toBeFalsy();
+          await client.close();
+        } finally {
+          if (saved === undefined) delete process.env.CODING_MAX_RUN_REPOSITORIES;
+          else process.env.CODING_MAX_RUN_REPOSITORIES = saved;
+        }
+      });
+
+      it("takes name, ref and inDefaultSet only on a coding agent", async () => {
+        const { mcp } = setup(agents(), "p1");
+        const client = await connectClient(mcp);
+        for (const extra of [{ name: "x" }, { ref: "main" }, { inDefaultSet: true }]) {
+          const result = await client.callTool({
+            name: "link_repository",
+            arguments: { agentId: "a1", repository: "acme/web", access: "write", ...extra },
+          });
+          expect(errorText(result as never)).toBe(
+            "name, ref and inDefaultSet apply only to a coding agent's repository link.",
+          );
+        }
+        await client.close();
+      });
+
+      it("unlinks by name, removing only that row", async () => {
+        const { mcp } = setup(agents(), "p1");
+        const client = await connectClient(mcp);
+        await call(client, { repository: "upstream-org/upstream", access: "read", name: "base", ref: SHA40 });
+        await call(client, { repository: "upstream-org/upstream", access: "read", name: "upstream", ref: "main" });
+        const result = await client.callTool({
+          name: "unlink_repository",
+          arguments: { agentId: "c1", repository: "upstream-org/upstream", name: "base" },
+        });
+        expect(parseText(result as never)).toEqual({ unlinked: true });
+        const listed = await client.callTool({ name: "list_repositories", arguments: { agentId: "c1" } });
+        const { repositories } = parseText(listed as never) as { repositories: { name: string }[] };
+        expect(repositories.map((r) => r.name)).toEqual(["upstream"]);
+        await client.close();
+      });
+
+      it("refuses a read link outside the trusted accounts even with adminOverride", async () => {
+        const { gate } = gateAt("admin");
+        gate.checkAccount = vi.fn(async () => ({ ok: false, reason: "github_account_not_allowed" as const }));
+        const { mcp } = setup(agents(), "p1", [], {
+          gate,
+          roles: ["admin"],
+          scopes: ["agents:read", "agents:write", "agents:admin"],
+        });
+        const client = await connectClient(mcp);
+        const result = await call(client, {
+          repository: "outside-org/upstream",
+          access: "read",
+          ref: "main",
+          adminOverride: true,
+        });
+        expect(errorText(result as never)).toContain("github_account_not_allowed: ");
+        await client.close();
+      });
     });
 
     it("refuses the coding agent's own default repository", async () => {
@@ -746,6 +1060,7 @@ describe("repository tools", () => {
       agentId: "a1",
       provider: "github",
       repository: "openai/example",
+      name: "github:openai/example",
       access: "write",
       triggers: [],
       checkName: null,
@@ -970,6 +1285,7 @@ describe("link_repository check names (H5-2)", () => {
       agentId: "a9",
       provider: "github",
       repository: "o/r",
+      name: "github:o/r",
       access: "write",
       triggers: [],
       checkName: "wardby review",

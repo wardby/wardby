@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Paths under src/ (each copied with its .d.mts when one exists). */
-export const BUILD_MODULES = Object.freeze(["coding-worker/dependency-cache.mjs"]);
+export const BUILD_MODULES = Object.freeze(["coding-worker/dependency-cache.mjs", "coding-worker/result-bundle.mjs"]);
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 

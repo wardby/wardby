@@ -16,6 +16,17 @@ export interface QuickstartImages {
   driver?: string;
   /** The native sandbox worker image (docs/native-sandbox.md); absent from releases before it existed. */
   nativeWorker?: string;
+  /**
+   * The Substrate bridge images (docs/substrate-backend.md): the Claude Code worker and tool runners
+   * with the bridge as entrypoint, for JOB_LAUNCHER=substrate. Each optional (absent from releases
+   * before they existed) and pinned when present.
+   */
+  substrateAgent?: string;
+  substrateTool?: string;
+  substrateToolNodePython?: string;
+  /** The Codex worker images with the bridge as entrypoint (one actor per run); optional and pinned, as above. */
+  substrateCodex?: string;
+  substrateCodexNodePython?: string;
   source: "env" | "package" | "build";
 }
 
@@ -31,22 +42,28 @@ type PackageImages = Pick<
   | "claudeToolRunnerNodePython"
   | "driver"
   | "nativeWorker"
+  | "substrateAgent"
+  | "substrateTool"
+  | "substrateToolNodePython"
+  | "substrateCodex"
+  | "substrateCodexNodePython"
 >;
+
+const OPTIONAL_PINNED = [
+  "nativeWorker",
+  "substrateAgent",
+  "substrateTool",
+  "substrateToolNodePython",
+  "substrateCodex",
+  "substrateCodexNodePython",
+] as const;
 
 function readPackageImages(packageRoot: string): PackageImages | undefined {
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(packageRoot, "dist", "quickstart-images.json"), "utf8"));
     if (typeof parsed !== "object" || parsed === null) return undefined;
-    const {
-      runtime,
-      worker,
-      claudeWorker,
-      claudeToolRunner,
-      workerNodePython,
-      claudeToolRunnerNodePython,
-      driver,
-      nativeWorker,
-    } = parsed as Record<string, unknown>;
+    const { runtime, worker, claudeWorker, claudeToolRunner, workerNodePython, claudeToolRunnerNodePython, driver } =
+      parsed as Record<string, unknown>;
     if (typeof runtime !== "string" || typeof worker !== "string") return undefined;
     // An image is never resolved by tag: a tag can be repointed after release.
     if (!DIGEST_REF.test(runtime) || !DIGEST_REF.test(worker)) return undefined;
@@ -74,10 +91,12 @@ function readPackageImages(packageRoot: string): PackageImages | undefined {
       if (typeof driver !== "string" || !DIGEST_REF.test(driver)) return undefined;
       result.driver = driver;
     }
-    // Likewise the native sandbox worker.
-    if (nativeWorker !== undefined) {
-      if (typeof nativeWorker !== "string" || !DIGEST_REF.test(nativeWorker)) return undefined;
-      result.nativeWorker = nativeWorker;
+    // Likewise the native sandbox worker and the Substrate bridge images, each on its own.
+    for (const key of OPTIONAL_PINNED) {
+      const value = (parsed as Record<string, unknown>)[key];
+      if (value === undefined) continue;
+      if (typeof value !== "string" || !DIGEST_REF.test(value)) return undefined;
+      result[key] = value;
     }
     return result;
   } catch {

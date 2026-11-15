@@ -17,6 +17,7 @@ import type { AgentMemoryStore } from "../providers/memory/types.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import type { Datastore } from "../providers/datastore/types.js";
 import { PrismaGatewayLedger } from "./ledger.js";
+import { defaultRepositoryName } from "../coding/repository-names.js";
 
 // Passes through to the real dispatchRun unless a test queues a rejection.
 vi.mock("../core/dispatch.js", async (importOriginal) => {
@@ -433,6 +434,7 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
         agentId: fixer,
         provider: "github",
         repository,
+        name: defaultRepositoryName(repository),
         access: "write",
         triggers: [] as string[],
       }));
@@ -483,10 +485,18 @@ describe.skipIf(!process.env.DATABASE_URL)("durableDelegate (database)", () => {
             agentId: fixer,
             provider: "github",
             repository: `acme/trig-${tag}`,
+            name: defaultRepositoryName(`acme/trig-${tag}`),
             access: "write",
             triggers: ["mention"],
           },
-          { agentId: fixer, provider: "github", repository: `acme/read-${tag}`, access: "read", triggers: [] },
+          {
+            agentId: fixer,
+            provider: "github",
+            repository: `acme/read-${tag}`,
+            name: defaultRepositoryName(`acme/read-${tag}`),
+            access: "read",
+            triggers: [],
+          },
         ],
       });
       const l = await lead();

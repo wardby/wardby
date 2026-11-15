@@ -4,9 +4,11 @@
  * check skips it while its head is still that push (a person's later commit is reviewed).
  */
 import type { PrismaClient } from "#prisma";
+import { codeProviderOf } from "../coding/code-host.js";
 import { pullRequestOutcome } from "./host-status.js";
+import { resolveRunPullRequest, sameRepository } from "./run-pull-request.js";
 
-export type BudgetStoppedHeadDb = Pick<PrismaClient, "codingRun">;
+export type BudgetStoppedHeadDb = Pick<PrismaClient, "codingRun" | "codingRunRepository">;
 
 /** The run that pushed last: its status and the commit it pushed (result.commitSha). */
 export interface LastPusher {
@@ -22,13 +24,26 @@ const commitShaOf = (result: unknown): string | undefined => {
 
 /**
  * The newest continuation of `root` (by createdAt) whose result names pull request `prNumber`,
- * else the root itself.
+ * else the root itself. For a writable extra's pull request (`extra`, the row name, #537), the
+ * result read is each run's row of that name instead of the run's own (default repository's), so
+ * a number another repository of the set shares never matches.
  */
 export async function lastPusher(
   db: BudgetStoppedHeadDb,
   root: { runId: string; result: unknown; run: { status?: string } | null },
   prNumber: number,
+  extra?: string,
 ): Promise<LastPusher> {
+  if (extra !== undefined) {
+    const rows = await db.codingRunRepository.findMany({
+      where: { name: extra, codingRun: { OR: [{ runId: root.runId }, { rootCodingRunId: root.runId }] } },
+      select: { runId: true, result: true, codingRun: { select: { run: { select: { status: true } } } } },
+      orderBy: { createdAt: "desc" },
+    });
+    const pushed = rows.find((r) => pullRequestOutcome(r.result)?.pullRequestNumber === prNumber);
+    if (!pushed) return { status: root.run?.status, commitSha: undefined };
+    return { status: pushed.codingRun.run?.status, commitSha: commitShaOf(pushed.result) };
+  }
   const continuations = await db.codingRun.findMany({
     where: { rootCodingRunId: root.runId },
     select: { result: true, run: { select: { status: true } } },
@@ -38,39 +53,74 @@ export async function lastPusher(
   return { status: last.run?.status, commitSha: commitShaOf(last.result) };
 }
 
+/**
+ * Whether the last run that pushed to the pull request (the root, or a later continuation of it)
+ * stopped at its budget: its pushed changes are unfinished work, so the draft stays a draft. A
+ * continuation that finished the work makes it eligible again. `extra` names the root's writable
+ * row when the pull request is an extra repository's (#537); omitted, it is the default's.
+ */
+export async function lastPushStoppedAtBudget(
+  db: BudgetStoppedHeadDb,
+  root: { runId: string; result: unknown; run: { status?: string } | null },
+  prNumber: number,
+  extra?: string,
+): Promise<boolean> {
+  return (await lastPusher(db, root, prNumber, extra)).status === "budget_exhausted";
+}
+
 const ROOT_SELECT = {
   runId: true,
   repository: true,
   rootCodingRunId: true,
-  result: true,
   run: { select: { status: true } },
 } as const;
 
-/** The marker run's root coding run (rootCodingRunId, else itself), only when it is in `repository`. */
-async function markerRoot(db: BudgetStoppedHeadDb, markerRunId: string, repository: string) {
+/** The marker run's root coding run (rootCodingRunId, else itself). */
+async function markerRoot(db: BudgetStoppedHeadDb, markerRunId: string) {
   const marked = await db.codingRun.findUnique({ where: { runId: markerRunId }, select: ROOT_SELECT });
   if (!marked) return null;
-  const root = marked.rootCodingRunId
+  return marked.rootCodingRunId
     ? await db.codingRun.findUnique({ where: { runId: marked.rootCodingRunId }, select: ROOT_SELECT })
     : marked;
-  return root && root.repository.toLowerCase() === repository.toLowerCase() ? root : null;
 }
 
 /**
  * True when the pull request's head is the push of a run that stopped at its budget: the marker
- * run resolves (through rootCodingRunId) to a root coding run in `repository` recorded as this
- * pull request, and its last pusher stopped at its budget with `headSha` as its commit. Any
- * lookup failure is false, so the pull request is reviewed as usual.
+ * run resolves (resolveRunPullRequest) to a root coding run that recorded this pull request, in
+ * its default repository or a writable extra (#537), and that repository's last pusher stopped at
+ * its budget with `headSha` as its commit. Any lookup failure is false, so the pull request is
+ * reviewed as usual.
  */
 export async function headStoppedAtBudget(
   db: BudgetStoppedHeadDb,
-  input: { markerRunId: string | null | undefined; repository: string; prNumber: number; headSha: string },
+  input: {
+    markerRunId: string | null | undefined;
+    provider: string;
+    repository: string;
+    prNumber: number;
+    headSha: string;
+  },
 ): Promise<boolean> {
   try {
     if (!input.markerRunId) return false;
-    const root = await markerRoot(db, input.markerRunId, input.repository);
-    if (!root || pullRequestOutcome(root.result)?.pullRequestNumber !== input.prNumber) return false;
-    const last = await lastPusher(db, root, input.prNumber);
+    const target = await resolveRunPullRequest(db, {
+      markerRunId: input.markerRunId,
+      provider: input.provider,
+      repository: input.repository,
+      pullRequestNumber: input.prNumber,
+    });
+    if (!target.ok) return false;
+    const root = await db.codingRun.findUnique({
+      where: { runId: target.root.runId },
+      select: { runId: true, result: true, run: { select: { status: true } } },
+    });
+    if (!root) return false;
+    const last = await lastPusher(
+      db,
+      root,
+      input.prNumber,
+      target.repo.kind === "extra" ? target.repo.name : undefined,
+    );
     return last.status === "budget_exhausted" && last.commitSha === input.headSha;
   } catch {
     return false;
@@ -82,18 +132,30 @@ const IN_FLIGHT = ["pending", "running"] as const;
 
 /**
  * The coding run that may be pushing to the pull request right now: the marker's root coding
- * run (in `repository`) while it is pending or running, else its newest continuation that is.
- * Its result, and so whether it stopped at its budget, is recorded only after its push lands,
- * so a review of the head waits for it. Null when none is in flight or the marker resolves to
- * nothing.
+ * run while it is pending or running, else its newest continuation that is, when the pull
+ * request is in one of the root's writable repositories (its default one, or a writable extra's
+ * row, #537; provider and repository both match). A continuation works in its root's whole set,
+ * so any of them may push to any of those repositories. The pull request's number is not
+ * matched: a run in flight has not recorded it yet. Its result, and so whether it stopped at its
+ * budget, is recorded only after its push lands, so a review of the head waits for it. Null when
+ * none is in flight or the marker resolves to nothing.
  */
 export async function pushingRunInFlight(
   db: BudgetStoppedHeadDb,
-  input: { markerRunId: string | null | undefined; repository: string },
+  input: { markerRunId: string | null | undefined; provider: string; repository: string },
 ): Promise<string | null> {
   if (!input.markerRunId) return null;
-  const root = await markerRoot(db, input.markerRunId, input.repository);
+  const root = await markerRoot(db, input.markerRunId);
   if (!root) return null;
+  const inDefault =
+    codeProviderOf(root.repository) === input.provider && sameRepository(root.repository, input.repository);
+  if (!inDefault) {
+    const rows = await db.codingRunRepository.findMany({
+      where: { runId: root.runId, access: "write" },
+      select: { provider: true, repository: true },
+    });
+    if (!rows.some((r) => r.provider === input.provider && sameRepository(r.repository, input.repository))) return null;
+  }
   if (root.run && (IN_FLIGHT as readonly string[]).includes(root.run.status)) return root.runId;
   const continuation = await db.codingRun.findFirst({
     where: { rootCodingRunId: root.runId, run: { status: { in: [...IN_FLIGHT] } } },

@@ -134,12 +134,19 @@ cannot be asked to reach somewhere else. Model APIs can do that on the
 caller's behalf: an OpenAI hosted `mcp` tool or a remote `input_image` URL
 makes OpenAI's servers contact any host, and hosted-tool fees and non-default
 service tiers are billed outside the metered tokens. Code in a Codex worker can
-read the run capability, so the proxy validates every request body against an
+read the run capability on the Docker and Kubernetes launchers, so the proxy
+validates every request body against an
 allowlist before it resolves a credential, and refuses anything else with a
 `400` (`src/providers/coding-proxy/proxy.ts`). Each refusal is also written to
 the proxy audit log as `request.rejected` with the run id and the refusal
 code, so a smuggling attempt is attributable to its run. JSON nested too
 deeply to process is refused with `request_nesting_too_deep`.
+
+On the experimental [Substrate launcher](substrate-backend.md) a Codex worker
+holds only a placeholder, not the run capability. Substrate's egress gateway
+injects the real capability on the wire, so commands in the worker can use it
+within the proxy allowlist and budget but cannot read it or send it anywhere
+else.
 
 - **Anthropic Messages** (`parseAnthropicRequest`): a fixed set of keys,
   text/`tool_use`/`tool_result`/thinking blocks, exactly the two Wardby tool
@@ -245,7 +252,10 @@ attached. The worker still reaches only the proxy:
    `/mcp` route, and only while the session is active and before its deadline.
    It is not the run capability, and it is not accepted by the model routes.
 2. The worker (Claude Code or Codex, over HTTP) calls `POST /mcp` on the proxy
-   with `Authorization: Bearer <token>`. The proxy checks the token and
+   with `Authorization: Bearer <token>`, or, on the Substrate launcher, the
+   egress gateway adds the token in an `X-Wardby-Mcp-Token` header. The proxy
+   accepts that header only when `Authorization` is absent, and refuses a
+   request that has both (401). The proxy checks the token and
    forwards the request to the native gateway's `/coding-mcp` route
    (`WARDBY_MCP_GATEWAY_URL`). The proxy never sees an MCP server's URL or
    secrets. Without `WARDBY_MCP_GATEWAY_URL`, `/mcp` answers `503`
@@ -276,6 +286,12 @@ Where the token is exposed:
   server's own claim, which Wardby can't verify, so the allowlist remains the
   owner's control. A leaked token is limited to this run's allowed tools, the
   call limit and the run's deadline.
+
+On the Substrate launcher the worker holds a fixed placeholder and never the
+token: the egress gateway injects the real token on `/mcp` requests (see
+[MCP tools on Substrate](substrate-backend.md#mcp-tools)). Repository code in a
+Codex run can use the run's read-only tools through `/mcp`, but cannot read the
+token.
 
 A repository's own MCP configuration is never loaded. MCP tools need this
 release's Claude worker image and a new Codex driver image; an older image
@@ -460,7 +476,25 @@ collection. It creates exactly four private subdirectories and emits
 The worker sees only these volume subpaths:
 
 - `/workspace`: read-write checkout files.
-- Git metadata remains in the trusted keeper volume and is not mounted into the worker.
+- `/repos/<name>`: one folder for each extra repository of a run that has
+  several (see [A coding agent's repositories](coding-agent-setup.md#several-repositories-in-one-run)).
+  A writable extra is read-write like `/workspace`; a read link's folder is
+  mounted read-only and holds one commit's files with no git metadata (a remote link has no folder: it
+  is fetched into `/workspace`'s history). The
+  Codex worker and Claude Code's tool runner mount them; the Claude agent
+  container never does, as it never mounts `/workspace`. Only `/workspace` and
+  the writable `/repos/<name>` folders are collected after the run.
+  On the Substrate launcher a read link's folder is made read-only with file
+  permissions instead of a read-only mount; it is never uploaded or collected
+  (see [Extra repositories](substrate-backend.md#extra-repositories)).
+- Git metadata remains in the trusted keeper volume and is not mounted into the
+  worker. The one exception is a run with `codingProfile.gitHistory`: Wardby
+  builds a fresh `.git` in `/workspace` and in each writable `/repos/<name>`,
+  with its own config and no remotes, hooks or credentials, and the worker can
+  read and write it like any file. Nothing in it is trusted: Wardby never runs
+  git against it directly. The worker's commits come back as a bundle, which
+  Wardby validates fully in its own repository before anything is pushed (see
+  [Git history in a run](coding-agent-setup.md#git-history-in-a-run)).
 - `/run/wardby/input`: read-only, validated input artifact.
 - `/run/wardby/output`: read-write result artifact.
 
@@ -495,7 +529,8 @@ allocations at the host scheduler as well as per run.
 9. Cancel the proxy session, collect and validate bounded output, and re-read
    authoritative usage before any repository publication.
 10. For `changes_ready` only, copy the worker workspace into a new host staging
-    directory, reject special files, nested `.git`, escaping symlinks, and size
+    directory (a history run's result bundle is moved out first and its root
+    `.git` dropped), reject special files, nested `.git`, escaping symlinks, and size
     or entry-limit violations, then atomically replace the trusted checkout.
 11. Revalidate protected paths, Git configuration, branch ancestry, remotes,
     and budget; create one controlled commit, push one deterministic branch,
@@ -595,6 +630,13 @@ already finished (see [Stop or cancel a run](../help/stop-run.md)).
 Slot usage is derived from run state, so a crashed replica cannot leak slots:
 its runs are reconciled to `lost`, which frees them.
 
+`CODING_MAX_RUN_REPOSITORIES` (default `5`, from 1 to 17) caps the repositories
+one coding run can hold: its default repository plus its extras. The run's
+workspace disk budget and its 100,000-entry limit cover all of them together;
+a run whose repositories together exceed the entry limit fails in preparation
+with the `coding_failure_workspace` category. A value outside the range stops
+start-up.
+
 A native lead with `parallelDelegations` can dispatch several coding runs at
 once. They count against `CODING_MAX_CONCURRENT` like any other runs, and the
 ones over the cap queue. The lead waits for each run's queue time plus its
@@ -647,8 +689,8 @@ Operating the queue across replicas:
   and never time out.
 - Upgrade all replicas together. A replica running a version from before
   the queue ignores the cap, and its reconciler reaps queued runs as `lost`. Clones are shallow
-  (`--depth 1`); the worker never receives Git history and finalization needs
-  only the base commit.
+  (`--depth 1`); unless the agent sets `codingProfile.gitHistory`, the worker
+  never receives Git history and finalization needs only the base commit.
 
 Every wardby process also polls the model catalog on
 `WARDBY_MODEL_CATALOG_REFRESH_SECONDS` (default `45`), which decides whether

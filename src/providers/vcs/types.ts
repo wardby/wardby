@@ -4,6 +4,23 @@ import type { PackageAuditReport } from "../../coding/registry/audit-mode.js";
 /** What happened to a pull request description: wardby just wrote it (a new PR) or updated a fix round's. */
 export type DescriptionWriteOutcome = { kind: "written"; sha256: string } | DescriptionUpdateResult;
 
+/** A run's git history (#536): the clone depth, or the full history. Unset = no history (a depth-1 clone, no worker .git). */
+export interface GitHistorySetting {
+  depth: number | "full";
+}
+
+/**
+ * A read link fetched as a git remote into the default repository's history (#536). Its commit is
+ * stored at `refs/remotes/<name>/<label>`; `label` is the requested branch or tag name, else
+ * "pinned" (a SHA, a fromFile ref, or a name that is not a valid ref component).
+ */
+export interface RemoteLinkInput {
+  name: string;
+  repository: string;
+  resolvedSha: string;
+  label: string;
+}
+
 export interface VcsPrepareInput {
   runId: string;
   repository: string;
@@ -25,6 +42,41 @@ export interface VcsPrepareInput {
    * fact.
    */
   continuation?: { rootRunId: string };
+  /**
+   * A writable extra repository of a run with several: prepared at
+   * `<run>/repos/<name>/{workspace,git}` beside the run's default workspace,
+   * which must already exist. Unset for the default repository.
+   */
+  slot?: { name: string };
+  /**
+   * The run whose `wardby/run-<id>` names the branch and pull request when it
+   * is not this run: a writable extra in a continuation that has no branch
+   * yet (continuation unset; headRef is created off baseRef). With
+   * continuation it must equal continuation.rootRunId.
+   */
+  branchRunId?: string;
+  /** Git history (#536): a deeper (or full) clone and a fresh worker `.git` in the workspace. Unset = off. */
+  gitHistory?: GitHistorySetting;
+  /** The default repository's remote links (#536), fetched into its history. Needs gitHistory; never on a slot. */
+  remotes?: readonly RemoteLinkInput[];
+}
+
+/** One repository's files at one commit, for a run to read: no git metadata, never collected. */
+export interface ReadOnlyCopyInput {
+  runId: string;
+  /** The repository's name in the run (its folder under /repos/). */
+  name: string;
+  repository: string;
+  /** The full commit SHA dispatch resolved. */
+  commit: string;
+}
+
+export interface PreparedReadOnlyCopy {
+  runId: string;
+  name: string;
+  repository: string;
+  commit: string;
+  workspacePath: string;
 }
 
 /** Trusted paths are returned by the provider, never accepted from worker output. */
@@ -47,6 +99,10 @@ export interface PreparedWorkspace {
   protectedPaths: string[];
   collectExclude: string[];
   continuation?: { rootRunId: string };
+  /** See VcsPrepareInput.slot. */
+  slot?: { name: string };
+  /** See VcsPrepareInput.branchRunId: the publish identity when it is not this run's own. */
+  branchRunId?: string;
   /**
    * Set when prepareWorkspace merged the pull request's current target branch
    * into a continuation's workspace (it was behind): the target branch, the
@@ -55,6 +111,17 @@ export interface PreparedWorkspace {
    * from worker output.
    */
   targetMerge?: TargetMerge;
+  /** See VcsPrepareInput.gitHistory. */
+  gitHistory?: GitHistorySetting;
+  /** See VcsPrepareInput.remotes, as validated (a label that is not a valid ref component becomes "pinned"). */
+  remotes?: readonly RemoteLinkInput[];
+  /**
+   * History runs only: the worker's HEAD and the comparison base for the agent's commits -- baseCommit,
+   * or M0, the merge commit (parents baseCommit and the target) when a target merge was committed.
+   */
+  historyBase?: string;
+  /** History runs only: the resolvedSha of each remote, in order. */
+  remoteTips?: readonly string[];
 }
 
 export interface TargetMerge {
@@ -104,6 +171,12 @@ export interface FinalizeChangesDetails {
   related?: RelatedPullRequestsInput;
   /** Fix rounds: the control plane's record of the description wardby last wrote; enables the description update. */
   description?: { baseline: DescriptionBaseline };
+  /**
+   * A history run (#536): the worker's result bundle, as the collector moved it to a trusted path
+   * outside every workspace. Untrusted bytes: finalizeChanges validates it completely before pushing
+   * the agent's commits. Absent: the uncommitted files alone, as without history.
+   */
+  resultBundle?: string;
 }
 
 export type FinalizeChangesResult =
@@ -155,6 +228,9 @@ export interface VcsProvider {
   recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null>;
   finalizeChanges(workspace: PreparedWorkspace, details?: FinalizeChangesDetails): Promise<FinalizeChangesResult>;
   cleanup(workspace: PreparedWorkspace): Promise<void>;
+  /** A read-only copy of one commit beside the run's default workspace (which must already exist). */
+  prepareReadOnlyCopy?(input: ReadOnlyCopyInput): Promise<PreparedReadOnlyCopy>;
+  cleanupReadOnlyCopy?(copy: PreparedReadOnlyCopy): Promise<void>;
   /**
    * Best-effort "wardby is working on this" signal for a continuation
    * a no-op when `workspace.continuation` is unset, since a fresh run has
@@ -201,6 +277,8 @@ export interface VcsProvider {
    * provider (or test double) without it gives runs no services.
    */
   readRepositoryFile?(input: RepositoryFileInput): Promise<string | null>;
+  /** The commit a branch, tag or SHA names, or null when it does not exist. */
+  resolveRef?(input: { repository: string; ref: string; access: "read" | "write" }): Promise<string | null>;
   /**
    * Re-derive a continuation's pull request description without pushing (a fix
    * round that made no changes). Undefined when there is nothing to refresh
@@ -240,9 +318,10 @@ export interface ContinuationFinishedDetails {
   conflictMarkersSentence?: string;
   /**
    * Set with `budget_exhausted` when the run's changes so far were pushed anyway
-   * (the pull request it opened or continued, or a branch with no number).
+   * (the pull request it opened or continued, or a branch with no number). `repository` is set when
+   * that pull request is in another of the run's repositories than the one being notified.
    */
-  changesPushed?: { pullRequestNumber?: number };
+  changesPushed?: { pullRequestNumber?: number; repository?: string };
 }
 
 /** What wardby last wrote into a pull request description (control-plane records). */

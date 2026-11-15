@@ -85,6 +85,7 @@ describe("permission ranks", () => {
     expect(requiredLevel("write")).toBe("write");
     expect(requiredLevel("mention")).toBe("write");
     expect(requiredLevel("read")).toBe("read");
+    expect(requiredLevel("coding_read")).toBe("read");
   });
 });
 
@@ -394,6 +395,30 @@ describe("RepoAccessGate trusted GitHub accounts", () => {
   it("skips the check when no GitHub App is configured", async () => {
     const { gate } = setup({ trustedAccounts: async () => undefined });
     expect(await gate.authorizeUse(use({ authorizedVia: "admin" }))).toEqual({ ok: true });
+  });
+
+  it("keeps the allowlist a hard limit for a coding read link, admin approval included", async () => {
+    const saved = process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS;
+    process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS = "acme";
+    try {
+      const host = {
+        provider: "github",
+        repositoryPermission: vi.fn(),
+        appOwnerLogin: async () => "owner-org",
+      } as unknown as CodeReviewHost;
+      const gate = createRepoAccessGate({ db: {} as never, hosts: { github: host } });
+      const input = (repository: string) =>
+        use({ required: requiredLevel("coding_read"), repository, authorizedVia: "admin" });
+      expect(await gate.authorizeUse(input("outside-org/upstream"))).toEqual({
+        ok: false,
+        reason: "github_account_not_allowed",
+      });
+      process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS = "acme,outside-org";
+      expect(await gate.authorizeUse(input("outside-org/upstream"))).toEqual({ ok: true });
+    } finally {
+      if (saved === undefined) delete process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS;
+      else process.env.WARDBY_GITHUB_ALLOWED_ACCOUNTS = saved;
+    }
   });
 
   it("defaults to the App owner plus WARDBY_GITHUB_ALLOWED_ACCOUNTS", async () => {

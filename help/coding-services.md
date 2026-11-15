@@ -73,3 +73,9 @@ If a run is refused or fails over its services, read the page for its code:
 
 Read [`docs/coding-services.md`](../docs/coding-services.md) for the file
 format, catalog fields, built-in variables, custom entries, and capacity.
+
+## Substrate launcher
+
+The experimental `JOB_LAUNCHER=substrate` does not support this feature yet; a
+run that needs it fails with `substrate_feature_unsupported`. Use the Docker or
+Kubernetes launcher. See the `job-launcher-substrate` help article.

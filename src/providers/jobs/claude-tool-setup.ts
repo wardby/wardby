@@ -8,6 +8,7 @@
  * with the value in the CLI's own environment.
  */
 import { serviceEnvironment } from "../../coding-worker/driver.js";
+import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT } from "./docker-isolation.js";
 import type { JobSpec } from "./types.js";
@@ -40,11 +41,19 @@ export interface ClaudeToolSetup {
   commandTimeouts?: { defaultMs: number; maxMs: number };
 }
 
-export function claudeToolSetup(spec: JobSpec, capability: string): string {
+export interface ClaudeToolSetupOptions {
+  /**
+   * The coding proxy as the tool runner reaches it. Default: the Docker/Kubernetes host alias
+   * (`http://wardby-proxy:8787`); the Substrate launcher passes its configured proxy host and port.
+   */
+  proxyBaseUrl?: string;
+}
+
+export function claudeToolSetup(spec: JobSpec, capability: string, options: ClaudeToolSetupOptions = {}): string {
   if (spec.provider !== "claude-code") throw new Error("claude_tool_setup_provider");
   const registry = registryWorkerSetup({
-    proxyBaseUrl: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
-    capability,
+    proxyBaseUrl: options.proxyBaseUrl ?? `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+    token: deriveRegistryToken(capability),
     cacheRoot: `${TOOL_WORKSPACE}/.cache`,
   });
   const setup: ClaudeToolSetup = {

@@ -1,7 +1,25 @@
 import { atom, read, update } from "claude-code";
 import type { Register, UiCopyArgs } from "claude-code";
 
-import type { Filter, Older, OpenStep, Poll, Resume, RunDetail, RunRow, Step, Steps, TextField } from "../types";
+import type {
+  AgentLinks,
+  Filter,
+  LinkAgent,
+  LinkEdge,
+  LinkFlow,
+  LinkRepository,
+  LinksState,
+  Older,
+  OpenStep,
+  Poll,
+  Resume,
+  RunDetail,
+  RunRepository,
+  RunRow,
+  Step,
+  Steps,
+  TextField,
+} from "../types";
 
 const PANE = "wardby-runs";
 const ACTIVE = new Set(["pending", "running"]);
@@ -137,6 +155,917 @@ const SEARCH_PAUSE_MS = 600;
 // A query no run's id, agent name, status, trigger, repository or branch holds: a server that answers it
 // with runs ignores query (older than 0.9.7), so the pane doesn't search it.
 const PROBE_QUERY = "wardby-runs-probe-no-such-run-3f9c1d";
+
+// The pane's two tabs: runs (the list and a run's detail) and agents (flows: agents that work together).
+const tab = atom({ plugin: "wardby-runs", key: "tab" } as const, "runs" as "runs" | "agents");
+// list_agent_links' reply (wardby 0.9.14+), or what the pane built from per-agent calls on an older server.
+const links = atom(
+  { plugin: "wardby-runs", key: "links" } as const,
+  { at: 0, data: null, error: null, notice: null } as LinksState,
+  { shape: "links-1" },
+);
+// The Agents tab's flows the person opened or folded, by flow key; and the agent open in Detail or Flow.
+const flowOpen = atom({ plugin: "wardby-runs", key: "flowOpen" } as const, {} as Record<string, boolean>, {
+  shape: "flow-open-1",
+});
+const agentOpen = atom(
+  { plugin: "wardby-runs", key: "agentOpen" } as const,
+  null as { id: string; tab: "detail" | "flow" } | null,
+  { shape: "agent-open-1" },
+);
+// The Detail tab's get_agent reply for the agent last opened there, read once and kept for the session
+// (r reads it again). As the server sent it: names only, never a secret's value.
+const agentInfo = atom(
+  { plugin: "wardby-runs", key: "agentInfo" } as const,
+  null as { id: string; at: number; value: Record<string, unknown> | null; error: string | null } | null,
+  { shape: "agent-info-1" },
+);
+// The agent whose system prompt is shown in full on Detail (Show all), by agent id.
+const promptOpen = atom({ plugin: "wardby-runs", key: "promptOpen" } as const, null as string | null, {
+  shape: "prompt-open-1",
+});
+// The terminal Flow tree's cursor: the tree line it sits on, for the agent whose Flow tab is open (a
+// different agent starts it on that agent's own line).
+const flowCursor = atom(
+  { plugin: "wardby-runs", key: "flowCursor" } as const,
+  null as { id: string; line: number } | null,
+  {
+    shape: "flow-cursor-1",
+  },
+);
+// The most run chains "Recent runs in this flow" lists.
+const FLOW_RECENT = 5;
+// The agents and their links change rarely: the Agents tab reads them again after this long, or on r.
+const LINKS_REFRESH_MS = 5 * 60_000;
+// A failed read of the Agents tab's data (a server still starting, a network blip) is tried again after
+// 2 s, then twice as long each time, up to LINKS_REFRESH_MS. The first LINKS_QUIET_FAILURES read as waiting.
+const LINKS_RETRY_MS = 2000;
+const LINKS_QUIET_FAILURES = 3;
+// An older server without list_agent_links costs two calls an agent to draw flows: only up to this many.
+const FALLBACK_MAX_AGENTS = 30;
+const FLOWS_NOTICE = "Drawing flows needs wardby 0.9.14 or later.";
+const APPROXIMATE_NOTICE = "Older wardby: flows are approximate.";
+const FIX_ROUNDS = 2;
+// The Agents tab's "Unlinked agents" fold, kept in flowOpen beside the flows (whose keys are agent ids).
+const UNLINKED_KEY = "~unlinked";
+const EDGE_ORDER: LinkEdge["kind"][] = ["delegates", "fixes", "reviews", "after_merge", "status"];
+
+/** A repository as the server keys it in flows: "provider:name", a GitHub name in lower case. */
+const linkRepoKey = (provider: string, repository: string): string =>
+  `${provider}:${provider === "github" ? repository.toLowerCase() : repository}`;
+
+/**
+ * An older server's links, from list_subagents and list_repositories, by the rules list_agent_links uses:
+ * a lead delegates to its sub-agents; on a repository, a coding agent with write access is reviewed by each
+ * agent with the pull_request trigger, a reviewer's findings go to each agent with review_fix, and a merge
+ * starts each agent with push. Without the coding profile's own repository, so links may be missing.
+ */
+function fallbackEdges(
+  agents: LinkAgent[],
+  children: Record<string, { boundName: string; agentId: string }[]>,
+): LinkEdge[] {
+  const ids = new Set(agents.map((a) => a.id));
+  const edges = new Map<string, LinkEdge>();
+  const add = (edge: LinkEdge) => {
+    if (edge.from === edge.to) return;
+    const id = `${edge.from}\u0000${edge.to}\u0000${edge.kind}\u0000${edge.repository ?? ""}`;
+    if (!edges.has(id)) edges.set(id, edge);
+  };
+  for (const a of agents)
+    for (const child of children[a.id] ?? [])
+      if (ids.has(child.agentId))
+        add({ from: a.id, to: child.agentId, kind: "delegates", repository: null, label: child.boundName });
+  const on = (key: string, trigger: string): { agent: LinkAgent; link: LinkRepository }[] =>
+    agents.flatMap((agent) =>
+      agent.repositories
+        .filter((link) => linkRepoKey(link.provider, link.repository) === key && link.triggers.includes(trigger))
+        .map((link) => ({ agent, link })),
+    );
+  const keys = [
+    ...new Set(agents.flatMap((a) => a.repositories.map((l) => linkRepoKey(l.provider, l.repository)))),
+  ].sort();
+  for (const key of keys) {
+    const writers = agents.filter(
+      (a) =>
+        a.kind === "coding" &&
+        a.repositories.some((l) => linkRepoKey(l.provider, l.repository) === key && l.access === "write"),
+    );
+    const reviewers = on(key, "pull_request");
+    for (const w of writers)
+      for (const v of reviewers)
+        add({ from: w.id, to: v.agent.id, kind: "reviews", repository: key, label: "PR opened" });
+    for (const v of reviewers)
+      for (const f of on(key, "review_fix"))
+        add({
+          from: v.agent.id,
+          to: f.agent.id,
+          kind: "fixes",
+          repository: key,
+          label: `fix ≤${f.link.reviewFixMaxRounds ?? FIX_ROUNDS}`,
+        });
+    for (const w of writers)
+      for (const p of on(key, "push"))
+        add({ from: w.id, to: p.agent.id, kind: "after_merge", repository: key, label: "merged" });
+  }
+  return [...edges.values()].sort(
+    (a, b) =>
+      EDGE_ORDER.indexOf(a.kind) - EDGE_ORDER.indexOf(b.kind) ||
+      a.from.localeCompare(b.from) ||
+      a.to.localeCompare(b.to) ||
+      (a.repository ?? "").localeCompare(b.repository ?? ""),
+  );
+}
+
+/**
+ * AgentLinks built on the pane from an older server's per-agent replies: entry points from mention
+ * triggers ("manual" for an agent nothing starts), and flows as the groups the links connect, each named
+ * by its one repository or its lead's name.
+ */
+function fallbackLinks(
+  agents: LinkAgent[],
+  children: Record<string, { boundName: string; agentId: string }[]>,
+): AgentLinks {
+  const edges = fallbackEdges(agents, children);
+  const byId = new Map(agents.map((a) => [a.id, a]));
+  const byName = (a: string, b: string) => byId.get(a)!.name.localeCompare(byId.get(b)!.name) || a.localeCompare(b);
+  const withEntry = agents.map((a): LinkAgent => {
+    const mentions = a.repositories
+      .filter((l) => l.triggers.includes("mention"))
+      .map((l) => `mention:${linkRepoKey(l.provider, l.repository)}`);
+    const isStarted = edges.some((e) => e.to === a.id);
+    return { ...a, entry: mentions.length > 0 ? mentions : isStarted ? [] : ["manual"] };
+  });
+  const entries = new Map(withEntry.map((a) => [a.id, a.entry]));
+
+  // Union-find over every edge.
+  const parent = new Map(agents.map((a) => [a.id, a.id]));
+  const find = (id: string): string => {
+    let root = id;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    parent.set(id, root);
+    return root;
+  };
+  for (const e of edges) parent.set(find(e.from), find(e.to));
+  const groups = new Map<string, string[]>();
+  for (const a of agents) groups.set(find(a.id), [...(groups.get(find(a.id)) ?? []), a.id]);
+
+  const flows: LinkFlow[] = [];
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    const ids = [...members].sort(byName);
+    const incoming = new Set(edges.filter((e) => members.includes(e.to)).map((e) => e.to));
+    const triggered = ids.filter((id) => entries.get(id)!.some((p) => p.startsWith("mention:")));
+    const key = triggered[0] ?? ids.find((id) => !incoming.has(id)) ?? ids[0];
+    const repos = new Set<string>();
+    for (const e of edges) if (e.repository && members.includes(e.from)) repos.add(e.repository);
+    for (const id of ids)
+      for (const p of entries.get(id)!) if (p.startsWith("mention:")) repos.add(p.slice("mention:".length));
+    const repositories = [...repos].sort();
+    const lead = byId.get(key)!.name;
+    const name =
+      repositories.length === 1
+        ? repositories[0].replace(/^github:/, "")
+        : repositories.length === 0
+          ? lead
+          : `${lead} · ${repositories.length} repositories`;
+    const entryAgentIds = ids.filter((id) => entries.get(id)!.length > 0);
+    flows.push({ key, name, agentIds: ids, entryAgentIds, repositories, related: [] });
+  }
+  flows.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
+  const inFlow = new Set(flows.flatMap((f) => f.agentIds));
+  const unlinked = agents
+    .map((a) => a.id)
+    .filter((id) => !inFlow.has(id))
+    .sort(byName);
+  return { agents: withEntry, edges, flows, unlinked, hidden: { agents: 0, edges: 0 } };
+}
+
+/** A repository key as the pane writes it: "github:your-org/app" is "your-org/app"; "local:app" stays as it is. */
+function shortRepo(key: string): string {
+  return key.startsWith("github:") ? key.slice("github:".length) : key;
+}
+
+/**
+ * The status in "status:<provider>:<project>:<status>": a ticket status only a person sets (an approval
+ * column, say) that starts the agent. Null for any other entry.
+ */
+function personStatus(entry: string): string | null {
+  if (!entry.startsWith("status:")) return null;
+  const parts = entry.split(":");
+  return parts.length >= 4 ? parts.slice(3).join(":") : null;
+}
+
+/**
+ * How an agent starts, as a short label: "@mention", "Jira KEY", "schedule", "webhook", "▶ manual", or for
+ * a reviewer or after-merge agent whose pull requests come from people, "⚡ PR opened · <repo>" or "⚡ merged · <repo>".
+ */
+function entryLabel(entry: string): string {
+  const gate = personStatus(entry);
+  if (gate) return `◆ ${gate} · person`;
+  if (entry.startsWith("mention:")) return "@mention";
+  if (entry.startsWith("jira:")) return `Jira ${entry.slice("jira:".length)}`;
+  if (entry.startsWith("pull_request:")) return `⚡ PR opened · ${shortRepo(entry.slice("pull_request:".length))}`;
+  if (entry.startsWith("push:")) return `⚡ merged · ${shortRepo(entry.slice("push:".length))}`;
+  if (entry === "manual") return "▶ manual";
+  return entry;
+}
+
+/**
+ * A flow as one line, from its key agent: how it starts, then whom the key agent delegates to, who reviews
+ * their pull requests, how findings go back, and what a merge starts. Example:
+ * "@mention → delivery ⇢ builder → PR → reviewer ↺ fix ≤2".
+ */
+function flowStrip(flow: LinkFlow, data: AgentLinks): string {
+  const nameOf = (id: string) => data.agents.find((a) => a.id === id)?.name ?? id;
+  const key = data.agents.find((a) => a.id === flow.key);
+  const out = (from: Set<string>, kind: LinkEdge["kind"]) =>
+    data.edges.filter((edge) => edge.kind === kind && from.has(edge.from));
+  const parts: string[] = [];
+  if (key?.entry[0]) parts.push(entryLabel(key.entry[0]), "→");
+  parts.push(nameOf(flow.key));
+  const children = [...new Set(out(new Set([flow.key]), "delegates").map((edge) => edge.to))];
+  if (children.length > 0) parts.push("⇢", children.map(nameOf).join(" / "));
+  const walked = new Set([flow.key, ...children]);
+  const reviewers = [...new Set(out(walked, "reviews").map((edge) => edge.to))];
+  for (const id of reviewers) parts.push("→ PR →", nameOf(id));
+  for (const label of new Set(out(new Set(reviewers), "fixes").map((edge) => edge.label ?? "fix")))
+    parts.push(`↺ ${label}`);
+  for (const id of new Set(out(new Set([...walked, ...reviewers]), "after_merge").map((edge) => edge.to)))
+    parts.push("→ merged →", nameOf(id));
+  // Ticket hand-offs: an agent moves the ticket to a status that starts the next one.
+  for (const edge of out(new Set([...walked, ...reviewers]), "status"))
+    parts.push(`→ ${edge.label} →`, nameOf(edge.to));
+  // The flow's other person-started agents, in the order they appear: "◆ Approved · person → builder".
+  for (const id of flow.entryAgentIds) {
+    if (id === flow.key) continue;
+    const gate = data.agents
+      .find((a) => a.id === id)
+      ?.entry.map(personStatus)
+      .find((s) => s !== null);
+    if (gate) parts.push(`· ◆ ${gate} · person →`, nameOf(id));
+  }
+  return parts.join(" ");
+}
+
+/** One agent's runs in the pane's window: how many, their cost, the last three statuses (newest first), whether one is going. */
+function agentStats(rows: RunRow[], agentId: string): { runs: number; cost: number; last: string[]; running: boolean } {
+  const own = rows
+    .filter((row) => row.agentId === agentId)
+    .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+  return {
+    runs: own.length,
+    cost: own.reduce((sum, row) => sum + row.costUsd, 0),
+    last: own.slice(0, 3).map((row) => row.status),
+    running: own.some((row) => row.status === "running" || row.status === "pending"),
+  };
+}
+
+type AgentRole = "lead" | "reviewer" | "manual" | "sub" | "related";
+/**
+ * An agent's part in its flow, which sets its colour: a lead delegates (or is the flow's key agent), a
+ * reviewer is started by a pull request, a manual agent is started by hand, a sub-agent is only delegated
+ * to, and a related agent is shown beside the flow without a link into it.
+ */
+function agentRole(agent: LinkAgent, flow: LinkFlow | null, data: AgentLinks): AgentRole {
+  if (flow?.related.includes(agent.id)) return "related";
+  const out = data.edges.filter((edge) => edge.from === agent.id);
+  const into = data.edges.filter((edge) => edge.to === agent.id);
+  if (flow?.key === agent.id || out.some((edge) => edge.kind === "delegates")) return "lead";
+  if (into.some((edge) => edge.kind === "reviews")) return "reviewer";
+  if (agent.entry.includes("manual")) return "manual";
+  if (into.length > 0 && into.every((edge) => edge.kind === "delegates")) return "sub";
+  return agent.entry.length > 0 ? "lead" : "sub";
+}
+
+/** What starts an agent, as a chip: its own entry, or the link into it (a pull request, a merge); null for a sub-agent. */
+function entryChip(agent: LinkAgent, data: AgentLinks): string | null {
+  const entry = agent.entry[0];
+  if (entry?.startsWith("mention:")) return "⚡ mention";
+  if (entry === "manual") return "▶ manual";
+  if (entry === "schedule") return "⏱ schedule";
+  if (
+    entry?.startsWith("jira:") ||
+    entry?.startsWith("status:") ||
+    entry?.startsWith("pull_request:") ||
+    entry?.startsWith("push:")
+  )
+    return entryLabel(entry);
+  if (entry) return `⚡ ${entry}`;
+  const into = data.edges.filter((edge) => edge.to === agent.id);
+  if (into.some((edge) => edge.kind === "reviews")) return "⚡ PR opened";
+  if (into.some((edge) => edge.kind === "after_merge")) return "⚡ merged";
+  const status = into.find((edge) => edge.kind === "status");
+  if (status) return `⚡ ${status.label ?? "status"}`;
+  return null;
+}
+
+/** An entry point as the Flow tab writes it: "@mention your-org/mobile", "Jira KEY", "▶ manual", "⏱ schedule". */
+function entryLine(entry: string): string {
+  if (entry.startsWith("mention:")) return `@mention ${entry.slice("mention:".length).replace(/^[a-z]+:/, "")}`;
+  if (entry === "schedule") return "⏱ schedule";
+  return entryLabel(entry);
+}
+
+/** An agent's entry points on one line for the map: several mentions read as a count of repositories. */
+function entryText(agent: LinkAgent): string {
+  const mentions = agent.entry.filter((entry) => entry.startsWith("mention:"));
+  const rest = agent.entry.filter((entry) => !entry.startsWith("mention:"));
+  const parts = [
+    ...(mentions.length > 1 ? [`@mention · ${mentions.length} repositories`] : mentions.map(entryLine)),
+    ...rest.map(entryLine),
+  ];
+  return parts.join(" · ") || "▶ manual";
+}
+
+/** One line of the terminal's Flow tree: its depth, the agent it names (null for an entry or an event). */
+type TreeLine = { depth: number; agentId: string | null; text: string; ref?: boolean };
+// The order an agent's links are walked in the tree: hand-offs first, the loop back last.
+const TREE_ORDER: LinkEdge["kind"][] = ["delegates", "reviews", "after_merge", "status", "fixes"];
+
+/**
+ * A flow as a top-down tree, one block per entry agent (the key agent first): its entry line, then the
+ * agent, then its links depth first. A delegation is "⇢ <label> <name>"; a review is "→ (PR opened)" and
+ * the reviewer under it; a merge "→ (merged)" and the agent; a fix round "↺ <label> → back to <name>",
+ * never walked into. An agent drawn in full already is written again as "<name>  (shared, shown above)".
+ */
+function flowTree(flow: LinkFlow, data: AgentLinks): TreeLine[] {
+  const byId = new Map(data.agents.map((a) => [a.id, a]));
+  const nameOf = (id: string) => byId.get(id)?.name ?? id;
+  const members = new Set(flow.agentIds);
+  const drawn = new Set<string>();
+  const lines: TreeLine[] = [];
+  const agentLine = (id: string, depth: number, prefix: string) => {
+    if (drawn.has(id)) {
+      lines.push({ depth, agentId: id, text: `${prefix}${nameOf(id)}  (shared, shown above)`, ref: true });
+      return;
+    }
+    drawn.add(id);
+    lines.push({ depth, agentId: id, text: `${prefix}${nameOf(id)}` });
+    const seen = new Set<string>();
+    const out = data.edges
+      .filter((edge) => edge.from === id && members.has(edge.to))
+      .sort((a, b) => TREE_ORDER.indexOf(a.kind) - TREE_ORDER.indexOf(b.kind));
+    for (const edge of out) {
+      const key = `${edge.kind}\u0000${edge.to}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (edge.kind === "delegates") agentLine(edge.to, depth + 1, `⇢ ${edge.label ? `${edge.label} ` : ""}`);
+      else if (edge.kind === "fixes")
+        lines.push({ depth: depth + 1, agentId: null, text: `↺ ${edge.label ?? "fix"} → back to ${nameOf(edge.to)}` });
+      else {
+        const event =
+          edge.kind === "reviews"
+            ? (edge.label ?? "PR opened")
+            : edge.kind === "status"
+              ? `status: ${edge.label ?? "changed"}`
+              : "merged";
+        lines.push({ depth: depth + 1, agentId: null, text: `→ (${event})` });
+        agentLine(edge.to, depth + 2, "");
+      }
+    }
+  };
+  const entries = [flow.key, ...flow.entryAgentIds.filter((id) => id !== flow.key)].filter(
+    (id) => flow.entryAgentIds.includes(id) && byId.has(id),
+  );
+  for (const id of entries) {
+    lines.push({ depth: 0, agentId: null, text: byId.get(id)!.entry.map(entryLine).join(" · ") || "▶ manual" });
+    agentLine(id, 1, "");
+  }
+  // An agent no entry reaches still gets its own block.
+  for (const id of flow.agentIds) if (!drawn.has(id) && byId.has(id)) agentLine(id, 0, "");
+  return lines;
+}
+
+/** A node of the desktop Flow map: an agent's box, an event's pill, or an entry's text. */
+type MapNode = {
+  id: string;
+  kind: "agent" | "event" | "entry";
+  label: string;
+  /** The names a lead hands to this agent by (its delegation's bound name), written in its box. */
+  tag?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+type MapEdge = { from: string; to: string; dashed: boolean; label: string | null };
+const MAP_PAD = 16;
+// Room on the right for the fix rounds' curves back up.
+const MAP_LOOP = 64;
+const MAP_COL_GAP = 40;
+const MAP_ROW_GAP = 56;
+// Room for a node's text: about 7.2px a character at the name's 12px, 6.2px at the stats line's 10px,
+// and 18px of padding either side, so neither line runs into the border.
+const NODE_PAD = 18;
+const nodeWidth = (label: string, detail = ""): number =>
+  Math.ceil(Math.max(124, 7.2 * label.length + 2 * NODE_PAD, 6.2 * detail.length + 2 * NODE_PAD));
+
+/**
+ * A flow as a layered map: entries on top (text), then each agent in the row of its depth from the
+ * entries over delegations, reviews and merges (not fix rounds), with a "PR opened" pill per reviewed
+ * repository between writer and reviewer and a "merged" pill per merged repository. A row is ordered by
+ * name and centred. Delegations and fix rounds are dashed; fix rounds curve back up.
+ */
+function flowMap(
+  flow: LinkFlow,
+  data: AgentLinks,
+  /** The line under an agent's name, so its box is wide enough for it. */
+  detail: (id: string) => string = () => "",
+): { nodes: MapNode[]; edges: MapEdge[]; width: number; height: number } {
+  const byId = new Map(data.agents.map((a) => [a.id, a]));
+  const members = flow.agentIds.filter((id) => byId.has(id));
+  const inFlow = new Set(members);
+  const links = data.edges.filter((edge) => inFlow.has(edge.from) && inFlow.has(edge.to));
+  const nodes = new Map<string, { kind: MapNode["kind"]; label: string }>();
+  const edges: MapEdge[] = [];
+  const row = new Map<string, number>();
+  const addEdge = (edge: MapEdge) => {
+    if (!edges.some((e) => e.from === edge.from && e.to === edge.to && e.dashed === edge.dashed)) edges.push(edge);
+  };
+
+  for (const id of members) nodes.set(id, { kind: "agent", label: byId.get(id)!.name });
+  for (const id of flow.entryAgentIds.filter((id) => inFlow.has(id))) {
+    const agent = byId.get(id)!;
+    // A status only a person sets (an approval) gets a pill of its own; other entries share one line.
+    const gates = agent.entry.map(personStatus).filter((s): s is string => s !== null);
+    const rest = agent.entry.filter((e) => personStatus(e) === null);
+    const starts = [
+      ...(rest.length > 0 || gates.length === 0
+        ? [{ node: `entry:${id}`, label: entryText({ ...agent, entry: rest }) }]
+        : []),
+      ...gates.map((gate) => ({ node: `gate:${id}:${gate}`, label: `◆ ${gate} · person` })),
+    ];
+    for (const { node, label } of starts) {
+      nodes.set(node, { kind: "entry", label });
+      row.set(node, 0);
+      addEdge({ from: node, to: id, dashed: false, label: null });
+    }
+    row.set(id, 1);
+  }
+  const eventOf = (edge: LinkEdge): string => {
+    const id = `event:${edge.kind}:${edge.repository ?? ""}${edge.kind === "status" ? `:${(edge.label ?? "").toLowerCase()}` : ""}`;
+    const label =
+      edge.kind === "reviews" ? "PR opened" : edge.kind === "status" ? `status: ${edge.label ?? "changed"}` : "merged";
+    if (!nodes.has(id)) nodes.set(id, { kind: "event", label });
+    return id;
+  };
+  // Shortest depth from the entries; an event takes a row of its own.
+  const relax = (id: string, depth: number): boolean => {
+    if ((row.get(id) ?? Infinity) <= depth) return false;
+    row.set(id, depth);
+    return true;
+  };
+  for (let changed = true, rounds = 0; changed && rounds <= nodes.size * 2; rounds++) {
+    changed = false;
+    for (const edge of links) {
+      const from = row.get(edge.from);
+      if (from === undefined || edge.kind === "fixes") continue;
+      if (edge.kind === "delegates") changed = relax(edge.to, from + 1) || changed;
+      else {
+        const event = eventOf(edge);
+        changed = relax(event, from + 1) || changed;
+        changed = relax(edge.to, row.get(event)! + 1) || changed;
+      }
+    }
+  }
+  // Then push each node below everything that leads into it (bounded, so a status loop can't run away):
+  // an agent that a later agent delegates to sits under that agent, not beside its earlier lead.
+  const push = (id: string, depth: number): boolean => {
+    if ((row.get(id) ?? -1) >= depth) return false;
+    row.set(id, depth);
+    return true;
+  };
+  for (let changed = true, rounds = 0; changed && rounds <= nodes.size; rounds++) {
+    changed = false;
+    for (const edge of links) {
+      const from = row.get(edge.from);
+      if (from === undefined || edge.kind === "fixes") continue;
+      if (edge.kind === "delegates") changed = push(edge.to, from + 1) || changed;
+      else {
+        const event = eventOf(edge);
+        changed = push(event, from + 1) || changed;
+        changed = push(edge.to, row.get(event)! + 1) || changed;
+      }
+    }
+  }
+  for (const edge of links) {
+    // The bound name is written in the sub-agent's box, so the line carries no label.
+    if (edge.kind === "delegates") addEdge({ from: edge.from, to: edge.to, dashed: true, label: null });
+    else if (edge.kind === "fixes") addEdge({ from: edge.from, to: edge.to, dashed: true, label: edge.label ?? "fix" });
+    else {
+      const event = eventOf(edge);
+      addEdge({ from: edge.from, to: event, dashed: false, label: null });
+      addEdge({ from: event, to: edge.to, dashed: false, label: null });
+    }
+  }
+  // Whatever no entry reaches sits below the rest.
+  const last = Math.max(0, ...row.values());
+  for (const id of nodes.keys()) if (!row.has(id)) row.set(id, last + 1);
+
+  const rows: string[][] = [];
+  for (const [id, r] of row) (rows[r] ??= []).push(id);
+  const placed: MapNode[] = [];
+  const tags = new Map<string, string>();
+  for (const edge of links)
+    if (edge.kind === "delegates" && edge.label) {
+      const had = tags.get(edge.to);
+      const names = had ? had.slice(2).split(" · ") : [];
+      if (!names.includes(edge.label)) tags.set(edge.to, `⇢ ${[...names, edge.label].join(" · ")}`);
+    }
+  const heightOf = (id: string) => (nodes.get(id)!.kind !== "agent" ? 28 : tags.has(id) ? 64 : 50);
+  const widthOf = (id: string) => {
+    const { kind, label } = nodes.get(id)!;
+    return Math.max(nodeWidth(label, kind === "agent" ? detail(id) : ""), nodeWidth("", tags.get(id) ?? ""));
+  };
+  const rowWidth = (ids: string[]) =>
+    ids.reduce((sum, id) => sum + widthOf(id), 0) + MAP_COL_GAP * Math.max(0, ids.length - 1);
+  const used = rows.filter((ids) => ids && ids.length > 0);
+  const inner = Math.max(0, ...used.map(rowWidth));
+  // Each row under its parents: ordered by the mean centre of the nodes above that lead into it (fix
+  // rounds, which loop back up, do not count), so arrows cross as little as they can; then by name.
+  const centre = new Map<string, number>();
+  const byName = (a: string, b: string) => nodes.get(a)!.label.localeCompare(nodes.get(b)!.label) || a.localeCompare(b);
+  const pull = (id: string): number | null => {
+    const above = edges.filter((e) => e.to === id && centre.has(e.from)).map((e) => centre.get(e.from)!);
+    return above.length === 0 ? null : above.reduce((sum, x) => sum + x, 0) / above.length;
+  };
+  let y = MAP_PAD;
+  for (const ids of used) {
+    const keys = new Map(ids.map((id) => [id, pull(id)]));
+    ids.sort((a, b) => {
+      const ka = keys.get(a) ?? null;
+      const kb = keys.get(b) ?? null;
+      if (ka !== null && kb !== null && ka !== kb) return ka - kb;
+      if ((ka === null) !== (kb === null)) return ka === null ? 1 : -1;
+      return byName(a, b);
+    });
+    const tall = Math.max(...ids.map(heightOf));
+    let x = MAP_PAD + (inner - rowWidth(ids)) / 2;
+    for (const id of ids) {
+      const { kind, label } = nodes.get(id)!;
+      const w = widthOf(id);
+      const h = heightOf(id);
+      const tag = tags.get(id);
+      placed.push({ id, kind, label, ...(tag ? { tag } : {}), x, y: y + (tall - h) / 2, w, h });
+      centre.set(id, x + w / 2);
+      x += w + MAP_COL_GAP;
+    }
+    y += tall + MAP_ROW_GAP;
+  }
+  return { nodes: placed, edges, width: inner + 2 * MAP_PAD + MAP_LOOP, height: y - MAP_ROW_GAP + MAP_PAD };
+}
+
+/** Text made safe inside SVG markup. */
+const svgText = (text: string): string =>
+  text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+const EVENT_STROKE = "#a8a29e";
+// A ticket status only a person sets (an approval): wardby gold, readable on light and dark.
+const PERSON_GOLD = "#c9aa70";
+// Agent names on the map: a mid-tone that reads on light and dark (SVG takes no theme names).
+const MAP_LABEL = "#8a94a6";
+
+/**
+ * The Flow map as one SVG: agent boxes filled with a tint of their role's colour and stroked in it (red
+ * when their last run failed), the selected agent heavier, bold and ringed, the rest dimmed; events as
+ * dashed pills with italic labels; entries as text. Arrows run down; fix rounds curve back up on the right.
+ */
+function flowMapSvg(
+  map: ReturnType<typeof flowMap>,
+  opts: {
+    selected: string;
+    colour: (id: string) => string;
+    stats: (id: string) => string;
+    failed: (id: string) => boolean;
+    /** Dim every agent but the selected one; the larger browser page keeps them all at full strength. */
+    dimOthers?: boolean;
+  },
+): string {
+  const at = new Map(map.nodes.map((node) => [node.id, node]));
+  const font = 'font-family="system-ui,sans-serif"';
+  const parts: string[] = [
+    `<defs><marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L8,4 L0,8 z" fill="${EVENT_STROKE}" /></marker></defs>`,
+  ];
+  // Straight arrows leave a box's bottom and enter a box's top at points spread across its width, in the
+  // order of the box at the other end, so they neither meet in one point nor cross at the box. A box a fix
+  // round loops back into keeps its right quarter for that loop.
+  const isDown = (edge: MapEdge) => {
+    const a = at.get(edge.from);
+    const b = at.get(edge.to);
+    return !!a && !!b && b.y > a.y;
+  };
+  const midX = (id: string) => {
+    const node = at.get(id)!;
+    return node.x + node.w / 2;
+  };
+  const port = (node: MapNode, list: string[], id: string, hasLoop: boolean) => {
+    const span = hasLoop ? node.w * 0.66 : node.w;
+    return node.x + (span * (list.indexOf(id) + 1)) / (list.length + 1);
+  };
+  const ins = new Map<string, string[]>();
+  const outs = new Map<string, string[]>();
+  for (const edge of map.edges.filter(isDown)) {
+    (ins.get(edge.to) ?? ins.set(edge.to, []).get(edge.to)!).push(edge.from);
+    (outs.get(edge.from) ?? outs.set(edge.from, []).get(edge.from)!).push(edge.to);
+  }
+  for (const list of [...ins.values(), ...outs.values()]) list.sort((p, q) => midX(p) - midX(q));
+  const loopsInto = new Set(map.edges.filter((edge) => !isDown(edge)).map((edge) => edge.to));
+  for (const edge of map.edges) {
+    const a = at.get(edge.from);
+    const b = at.get(edge.to);
+    if (!a || !b) continue;
+    const dash = edge.dashed ? ' stroke-dasharray="5 4"' : "";
+    const line = `stroke="${EVENT_STROKE}" stroke-width="1.5" fill="none"${dash} marker-end="url(#arrow)"`;
+    if (b.y <= a.y) {
+      // A loop back up: out of the source's right edge, round the right of the map, over the target's row
+      // and down into its top, so it crosses no other box.
+      const sx = a.x + a.w;
+      const sy = a.y + a.h / 2;
+      const tx = b.x + (b.w * 3) / 4;
+      const top = b.y - 22;
+      // Square to the right margin (clear of every box), up it, across over the target and down.
+      const bend = map.width - MAP_PAD - 8;
+      const r = 10;
+      parts.push(
+        `<path d="M${sx},${sy} L${bend - r},${sy} Q${bend},${sy} ${bend},${sy - r} L${bend},${top + r} Q${bend},${top} ${bend - r},${top} L${tx + r},${top} Q${tx},${top} ${tx},${top + r} L${tx},${b.y - 2}" ${line} />`,
+      );
+      if (edge.label)
+        parts.push(
+          `<text x="${sx + 8}" y="${sy + 14}" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(edge.label)}</text>`,
+        );
+      continue;
+    }
+    const sx = port(a, outs.get(a.id) ?? [a.id], b.id, false);
+    const sy = a.y + a.h;
+    const tx = port(b, ins.get(b.id) ?? [b.id], a.id, loopsInto.has(b.id));
+    const ty = b.y - 2;
+    parts.push(`<path d="M${sx},${sy} L${tx},${ty}" ${line} />`);
+  }
+
+  for (const node of map.nodes) {
+    const cx = node.x + node.w / 2;
+    if (node.kind === "entry") {
+      // A status only a person sets (an approval) is a gold pill; other entries are plain text.
+      const isPerson = node.label.includes("· person");
+      if (isPerson)
+        parts.push(
+          `<rect x="${node.x}" y="${node.y}" width="${node.w}" height="${node.h}" rx="${node.h / 2}" fill="${PERSON_GOLD}2a" stroke="${PERSON_GOLD}" />`,
+        );
+      parts.push(
+        `<text x="${cx}" y="${node.y + node.h / 2 + 4}" text-anchor="middle" font-size="12"${isPerson ? ' font-weight="600"' : ""} fill="${isPerson ? PERSON_GOLD : EVENT_STROKE}" ${font}>${svgText(node.label)}</text>`,
+      );
+      continue;
+    }
+    if (node.kind === "event") {
+      parts.push(
+        `<rect x="${node.x}" y="${node.y}" width="${node.w}" height="${node.h}" rx="${node.h / 2}" fill="none" stroke="${EVENT_STROKE}" stroke-dasharray="4 3" />`,
+        `<text x="${cx}" y="${node.y + node.h / 2 + 4}" text-anchor="middle" font-size="11" font-style="italic" fill="${EVENT_STROKE}" ${font}>${svgText(node.label)}</text>`,
+      );
+      continue;
+    }
+    const colour = opts.colour(node.id).slice(0, 7);
+    const stroke = opts.failed(node.id) ? SVG_FAILED : colour;
+    const isSelected = node.id === opts.selected;
+    const group: string[] = [];
+    if (isSelected)
+      group.push(
+        `<rect x="${node.x - 4}" y="${node.y - 4}" width="${node.w + 8}" height="${node.h + 8}" rx="10" fill="none" stroke="${stroke}" stroke-opacity=".45" />`,
+      );
+    group.push(
+      `<rect x="${node.x}" y="${node.y}" width="${node.w}" height="${node.h}" rx="7" fill="${colour}2a" stroke="${stroke}" stroke-width="${isSelected ? 2 : 1}" />`,
+      ...(node.tag
+        ? [
+            `<text x="${cx}" y="${node.y + 17}" text-anchor="middle" font-size="10" font-style="italic" fill="${EVENT_STROKE}" ${font}>${svgText(node.tag)}</text>`,
+          ]
+        : []),
+      `<text x="${cx}" y="${node.y + (node.tag ? 35 : 21)}" text-anchor="middle" font-size="12"${isSelected ? ' font-weight="700"' : ""} fill="${MAP_LABEL}" ${font}>${svgText(node.label)}</text>`,
+      `<text x="${cx}" y="${node.y + (node.tag ? 52 : 38)}" text-anchor="middle" font-size="10" fill="${EVENT_STROKE}" ${font}>${svgText(opts.stats(node.id))}</text>`,
+    );
+    parts.push(isSelected || opts.dimOthers === false ? group.join("") : `<g opacity=".55">${group.join("")}</g>`);
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${map.width}" height="${map.height}" viewBox="0 0 ${map.width} ${map.height}">${parts.join("")}</svg>`;
+}
+
+/** One agent's row under the larger map. */
+type FlowPageAgent = { name: string; colour: string; kind: string; stats: string; budget: string; prompt: string };
+/** One run under the larger map; `depth` > 0 for a sub-agent's run under its lead's. */
+type FlowPageRun = { name: string; status: string; when: string; cost: string; depth: number; isFailed: boolean };
+
+/**
+ * The Flow map as a page of its own, for a browser: the map at the window's width, a legend, the flow's
+ * agents and its recent runs. Only what the pane already shows (names, models, budgets, a prompt's
+ * first line, run stats) goes in, every piece escaped; list_agent_links carries no secret values.
+ */
+function flowPageHtml(page: {
+  title: string;
+  svg: string;
+  mapWidth: number;
+  strip: string;
+  agents: FlowPageAgent[];
+  runs: FlowPageRun[];
+  generated: string;
+}): string {
+  const esc = svgText;
+  const agents = page.agents
+    .map(
+      (a) =>
+        `<tr><td><span class="bar" style="background:${esc(a.colour.slice(0, 7))}"></span>${esc(a.name)}</td>` +
+        `<td>${esc(a.kind)}</td><td>${esc(a.stats)}</td><td>${esc(a.budget)}</td><td class="dim">${esc(a.prompt)}</td></tr>`,
+    )
+    .join("");
+  const runs =
+    page.runs.length === 0
+      ? `<p class="dim">No runs in the pane's window.</p>`
+      : `<ul class="runs">${page.runs
+          .map(
+            (r) =>
+              `<li style="margin-left:${r.depth * 20}px"><span class="dot${r.isFailed ? " failed" : ""}"></span>` +
+              `${esc(r.name)} <span class="dim">· ${esc(r.status)} · ${esc(r.when)} · ${esc(r.cost)}</span></li>`,
+          )
+          .join("")}</ul>`;
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(page.title)} · wardby flow</title>
+<style>
+:root{--bg:#fafaf9;--fg:#1c1917;--dim:#78716c;--line:#e7e5e4;--card:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--fg:#f5f5f4;--dim:#a8a29e;--line:#44403c;--card:#292524}}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}
+main{max-width:1600px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;margin:28px 0 8px}
+.dim{color:var(--dim)}.strip{font-family:ui-monospace,monospace;font-size:13px;overflow-wrap:anywhere}
+.map{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;overflow:auto;margin-top:16px}
+.map svg{display:block;width:100%;height:auto;max-width:${Math.round(page.mapWidth * 2)}px;margin:0 auto}
+.legend{display:flex;flex-wrap:wrap;gap:16px;font-size:12px;margin-top:8px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block}
+table{border-collapse:collapse;width:100%}td{padding:6px 10px 6px 0;border-top:1px solid var(--line);vertical-align:top}
+.bar{display:inline-block;width:4px;height:14px;border-radius:2px;margin-right:8px;vertical-align:-2px}
+.runs{list-style:none;padding:0;margin:0}.runs li{padding:3px 0}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#15b982;margin-right:8px}.dot.failed{background:${SVG_FAILED}}
+@media (max-width:700px){td:nth-child(5){display:none}}
+</style></head><body><main>
+<h1>${esc(page.title)}</h1>
+<div class="strip dim">${esc(page.strip)}</div>
+<div class="map">${page.svg}</div>
+<div class="legend dim">
+<span><i class="sw" style="background:${ROLE_COLOR.lead}"></i>lead</span>
+<span><i class="sw" style="background:${ROLE_COLOR.reviewer}"></i>reviewer</span>
+<span><i class="sw" style="background:${ROLE_COLOR.manual}"></i>manual</span>
+<span><i class="sw" style="background:${ROLE_COLOR.sub}"></i>sub-agent</span>
+<span>solid arrow: trigger or hand-off</span><span>dashed: delegation or fix round</span>
+<span>red border: last run failed</span>
+</div>
+<h2>Agents</h2><table>${agents}</table>
+<h2>Recent runs</h2>${runs}
+<p class="dim" style="margin-top:32px">A snapshot from the wardby runs pane, ${esc(page.generated)}. Open it again from the pane for fresh numbers.</p>
+</main></body></html>
+`;
+}
+
+/** What openInBrowser needs of the engine. */
+type BrowserHost = {
+  env: { get: (name: string) => Promise<string | undefined> };
+  fs: { write: (path: string, text: string) => Promise<void> };
+  process: {
+    run: (argv: readonly string[]) => Promise<{ exitCode: number | null; stdout: string }>;
+  };
+};
+
+/**
+ * Writes a page to the temporary folder and opens it in the person's browser: `open` on macOS,
+ * `xdg-open` elsewhere, `start` on Windows (where `uname` does not run). Resolves with the file's path
+ * and whether a browser started; rejects only when the file could not be written.
+ */
+async function openInBrowser($: BrowserHost, name: string, html: string): Promise<{ path: string; isOpened: boolean }> {
+  const tmp = ((await $.env.get("TMPDIR")) || (await $.env.get("TEMP")) || "/tmp").replace(/[\\/]+$/, "");
+  const path = `${tmp}/wardby-flows/${name.replace(/[^A-Za-z0-9_-]/g, "_")}.html`;
+  await $.fs.write(path, html);
+  let system = "";
+  try {
+    system = (await $.process.run(["uname"])).stdout.trim();
+  } catch {
+    system = "Windows";
+  }
+  const argv =
+    system === "Darwin" ? ["open", path] : system === "Windows" ? ["cmd", "/c", "start", "", path] : ["xdg-open", path];
+  let isOpened = false;
+  try {
+    isOpened = (await $.process.run(argv)).exitCode === 0;
+  } catch {
+    isOpened = false;
+  }
+  return { path, isOpened };
+}
+
+/** An agent's kind for its pill: the coding agent's provider, else native. */
+const agentKind = (agent: LinkAgent): string =>
+  agent.kind === "coding"
+    ? agent.codingProvider === "codex"
+      ? "Codex"
+      : agent.codingProvider === "claude-code"
+        ? "Claude Code"
+        : "coding"
+    : "native";
+/** A model's short name: Claude models without the "claude-" prefix. */
+const shortModel = (model: string): string => model.replace(/^claude-/, "");
+
+/** What Detail shows from get_agent's reply: the prompt, the overrun, and the names of what is attached. */
+type AgentConfig = {
+  systemPrompt: string;
+  model: string | null;
+  budgetUsd: number | null;
+  overrunPercent: number;
+  mcpServers: string[];
+  tools: string[];
+  secrets: string[];
+  // Claude Code agents only.
+  claudeCode: { repoSkills: boolean; sessionResume: boolean } | null;
+};
+/**
+ * get_agent's reply as Detail draws it. Secret names come from each attached tool's allowedSecrets, as
+ * get_agent returns them: names only, never a value.
+ */
+function agentConfig(value: Record<string, unknown>): AgentConfig {
+  const list = (v: unknown): Record<string, unknown>[] =>
+    Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => !!x && typeof x === "object") : [];
+  const tools = list(value.tools);
+  const profile = value.codingProfile && typeof value.codingProfile === "object" ? value.codingProfile : null;
+  const p = (profile ?? {}) as Record<string, unknown>;
+  return {
+    systemPrompt: typeof value.systemPrompt === "string" ? plainText(value.systemPrompt) : "",
+    model: str(value.model),
+    budgetUsd: value.budgetUsd == null ? null : num(value.budgetUsd),
+    overrunPercent: num(value.allowedOverrunPercent),
+    mcpServers: list(value.mcpServers)
+      .map((m) => str(m.serverName))
+      .filter((n): n is string => n !== null),
+    tools: tools
+      .map((t) => (t.tool && typeof t.tool === "object" ? str((t.tool as Record<string, unknown>).name) : null))
+      .filter((n): n is string => n !== null),
+    secrets: [
+      ...new Set(
+        tools.flatMap((t) =>
+          Array.isArray(t.allowedSecrets) ? t.allowedSecrets.filter((x) => typeof x === "string") : [],
+        ),
+      ),
+    ] as string[],
+    claudeCode:
+      profile && p.provider === "claude-code"
+        ? { repoSkills: p.repoSkills !== false, sessionResume: p.sessionResume === true }
+        : null,
+  };
+}
+
+/** The middle value (the mean of the two middle ones for an even count); 0 for none. */
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** An agent's finished runs in the window: their median cost, how many succeeded, of how many. */
+function agentTypical(rows: RunRow[], agentId: string): { median: number; ok: number; n: number } {
+  const done = rows.filter((row) => row.agentId === agentId && !ACTIVE.has(row.status));
+  return {
+    median: median(done.map((row) => row.costUsd)),
+    ok: done.filter((row) => row.status === "succeeded").length,
+    n: done.length,
+  };
+}
+
+/** How an agent starts, one chip per entry (or the link into it), then its repositories' settings. */
+function runsWhen(agent: LinkAgent, data: AgentLinks): string[] {
+  const entries =
+    agent.entry.length > 0
+      ? agent.entry.map((entry) => entryChip({ ...agent, entry: [entry] }, data))
+      : [entryChip(agent, data)];
+  const notes = agent.repositories.flatMap((r) => [
+    ...(r.triggers.includes("review_fix") ? [`↺ review_fix ≤${r.reviewFixMaxRounds ?? FIX_ROUNDS}`] : []),
+    ...(r.waitForCi ? ["waits for CI"] : []),
+    ...(r.markReadyWhenPassing ? ["ready when passing"] : []),
+  ]);
+  return [...new Set([...entries.filter((c): c is string => c !== null), ...notes])];
+}
+
+/**
+ * The filter text's terms, lower case: commas separate terms, and a field matches when it holds any one
+ * ("delivery, builder" keeps both agents' rows). Empty for no filter.
+ */
+const filterTerms = (text: string): string[] =>
+  text
+    .toLowerCase()
+    .split(",")
+    .map((term) => term.trim())
+    .filter((term) => term !== "");
+/** Whether any filter term is in one of the fields; true for no filter. */
+const anyTerm = (text: string, fields: string[]): boolean => {
+  const terms = filterTerms(text);
+  return terms.length === 0 || fields.some((field) => terms.some((term) => field.toLowerCase().includes(term)));
+};
+
+/** Whether the filter text is in the agent's name, model or a repository. */
+const agentMatches = (agent: LinkAgent, text: string): boolean =>
+  anyTerm(text, [agent.name, agent.model, ...agent.repositories.map((r) => r.repository)]);
 
 // The status filter's choices: label, hotkey, and which statuses each keeps.
 const STATUS_FILTERS: { value: Filter["status"]; label: string; hotkey: string; keeps: (status: string) => boolean }[] =
@@ -415,14 +1344,10 @@ const branch = (depth: number): string => (depth === 0 ? "" : `${"   ".repeat(de
 
 function filtered(rows: RunRow[], f: Filter): RunRow[] {
   const keeps = STATUS_FILTERS.find((choice) => choice.value === f.status)?.keeps ?? (() => true);
-  const text = f.text.trim().toLowerCase();
   return rows.filter(
     (row) =>
       keeps(row.status) &&
-      (text === "" ||
-        [row.agentName, row.status, row.trigger, triggerLabel(row.trigger), row.task ?? ""].some((field) =>
-          field.toLowerCase().includes(text),
-        )),
+      anyTerm(f.text, [row.agentName, row.status, row.trigger, triggerLabel(row.trigger), row.task ?? ""]),
   );
 }
 
@@ -534,6 +1459,50 @@ function toRow(run: Record<string, unknown>, agent: Agent): RunRow {
   };
 }
 
+/** get_run's repositories (a multi-repository run); an older server, or a single-repository run, sends none. */
+function toRepositories(value: unknown): RunRepository[] {
+  if (!Array.isArray(value)) return [];
+  const found: RunRepository[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) continue;
+    const r = item as Record<string, unknown>;
+    const repository = str(r.repository);
+    if (!repository) continue;
+    found.push({
+      name: str(r.name) ?? repository,
+      access: r.access === "write" ? "write" : "read",
+      repository,
+      requestedRef: str(r.requestedRef),
+      resolvedSha: str(r.resolvedSha),
+      pullRequestNumber: typeof r.pullRequestNumber === "number" ? r.pullRequestNumber : null,
+      pullRequestUrl: str(r.pullRequestUrl),
+      resultBranch: str(r.resultBranch),
+    });
+  }
+  return found;
+}
+
+/** The repositories of a multi-repository run other than the default one, which the run's own fields describe. */
+function extraRepositories(info: RunDetail): RunRepository[] {
+  return info.repositories.filter((r) => r.repository !== info.repository);
+}
+
+/** An https clone URL for a repository, or null when its host is not known from its name or pull request link. */
+function cloneUrlOfRepository(r: RunRepository): string | null {
+  const fromPr = cloneUrlOf(r.pullRequestUrl);
+  if (fromPr) return fromPr;
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(r.repository)
+    ? `https://github.com/${r.repository}.git`
+    : null;
+}
+
+/** What to check out for an extra repository: its branch (writable) or its commit (read), as `name branch` or `name @ sha`. */
+function checkoutLine(r: RunRepository): string {
+  if (r.access === "write") return `${r.repository} ${r.resultBranch ?? r.requestedRef ?? ""}`.trim();
+  const at = r.resolvedSha ? r.resolvedSha.slice(0, 7) : r.requestedRef;
+  return at ? `${r.repository} @ ${at}` : r.repository;
+}
+
 function toDetail(run: Record<string, unknown>): RunDetail {
   const coding = (run.codingResult ?? {}) as Record<string, unknown>;
   const lastStep = (run.lastStep ?? {}) as Record<string, unknown>;
@@ -570,6 +1539,7 @@ function toDetail(run: Record<string, unknown>): RunDetail {
     repository: str(coding.repository),
     pullRequestUrl: str(coding.pullRequestUrl),
     resultBranch: str(run.resultBranch),
+    repositories: toRepositories(run.repositories),
     services: Array.isArray(run.services) ? run.services.map(String) : [],
     serviceStates,
     // The model the run was billed at (its catalog entry), when the server recorded one.
@@ -790,6 +1760,23 @@ const CARD_COLOR = {
   continue: WARDBY.slate,
 } as const;
 type CardKind = keyof typeof CARD_COLOR;
+/** Each agent role's colour on the Agents tab: its card's bar on the desktop, its row's ▎ in the terminal. */
+const ROLE_COLOR: Record<AgentRole, string> = {
+  lead: WARDBY.sky,
+  reviewer: WARDBY.mint,
+  manual: WARDBY.gold,
+  sub: WARDBY.slate,
+  // Grey at 80% opacity.
+  related: "#a8a29ecc",
+};
+/** The same roles as theme colour names, for the terminal, which takes no hex colour on text. */
+const ROLE_THEME: Record<AgentRole, string> = {
+  lead: "suggestion",
+  reviewer: "success",
+  manual: "warning",
+  sub: "inactive",
+  related: "inactive",
+};
 // What each card's bar stands for, as its SVG's alt (the element needs one to be drawn).
 const CARD_ALT: Record<CardKind, string> = {
   started: "Started by",
@@ -801,6 +1788,18 @@ const CARD_ALT: Record<CardKind, string> = {
   error: "Error",
   continue: "Continue locally",
 };
+/** The Detail tab's sections: each card's colour bar on the desktop, and its heading. */
+const AGENT_SECTIONS = {
+  prompt: { colour: WARDBY.navy, title: "System prompt" },
+  when: { colour: WARDBY.sky, title: "Runs when" },
+  budget: { colour: WARDBY.gold, title: "Model & budget" },
+  tools: { colour: WARDBY.mint, title: "Tools & connections" },
+  last: { colour: WARDBY.slate, title: "Last runs" },
+} as const;
+type AgentSection = keyof typeof AGENT_SECTIONS;
+// How many of an agent's runs Detail lists, and the rows of its system prompt shown before Show all.
+const AGENT_LAST_RUNS = 5;
+const PROMPT_ROWS = 6;
 // Shell tools: their rows show the command alone, since nearly every step is one.
 const SHELL_TOOLS = new Set(["Bash", "shell", "exec", "exec_command", "run_command", "local_shell"]);
 // A failed step's exit code sits on a soft tint of wardby red (14%, see-through on light and dark).
@@ -1045,7 +2044,7 @@ export const register: Register = (on, options) => {
         const raw = err instanceof Error ? err.message : "could not reach the wardby server";
         // Auto mode gates a mod's MCP calls too; say how to allow the read-only tools.
         const message = /auto mode/i.test(raw)
-          ? `auto mode refused the call. Allow mcp__${server}__list_runs, mcp__${server}__list_agents, mcp__${server}__get_run, mcp__${server}__get_run_steps and mcp__${server}__get_run_text in /permissions, then press r.`
+          ? `auto mode refused the call. Allow mcp__${server}__list_runs, mcp__${server}__list_agents, mcp__${server}__get_run, mcp__${server}__get_run_steps, mcp__${server}__get_run_text, mcp__${server}__list_agent_links and mcp__${server}__get_agent in /permissions, then press r.`
           : raw;
         await update($, poll, (p): Poll => ({ ...p, at: now, error: message }));
         failures += 1;
@@ -1471,7 +2470,8 @@ export const register: Register = (on, options) => {
     async function searchOlder(text: string, more: boolean): Promise<void> {
       const query = text.trim();
       const seq = ++searchSeq;
-      if (query === "") {
+      // Several comma-separated terms narrow only the runs the pane holds: the server searches one term.
+      if (query === "" || query.includes(",")) {
         await update($, older, () => IDLE_OLDER);
         return;
       }
@@ -1527,7 +2527,166 @@ export const register: Register = (on, options) => {
       }
     }
 
+    /**
+     * The Agents tab's data: list_agent_links in one call (wardby 0.9.14+). An older server without it gets
+     * flows built here from list_agents, list_subagents and list_repositories, when it has at most
+     * FALLBACK_MAX_AGENTS agents; past that the tab says which wardby draws flows. Skipped while what the
+     * pane holds is younger than LINKS_REFRESH_MS, unless forced (r). Only the pane calls it, so nothing is
+     * read while the pane is closed.
+     */
+    let isLinking = false;
+    async function refreshLinks(force = false): Promise<void> {
+      if (isLinking) return;
+      isLinking = true;
+      let isFallback = false;
+      try {
+        const now = await $.clock.now();
+        const held = await read($, links);
+        if (!force && held.at !== 0 && now < (held.retryAt ?? held.at + LINKS_REFRESH_MS)) return;
+        try {
+          let fresh: LinksState;
+          try {
+            const data = (await call("list_agent_links", {})) as AgentLinks;
+            fresh = { at: now, data, error: null, notice: null };
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "";
+            if (/auto mode/i.test(message) || !UNKNOWN_TOOL.test(message)) throw err;
+            isFallback = true;
+            fresh = await linksFromOlderServer(now);
+          }
+          await update($, links, () => fresh);
+        } catch (err) {
+          const raw = err instanceof Error ? err.message : "could not reach the wardby server";
+          const tools = isFallback
+            ? ["list_agents", "list_subagents", "list_repositories", "list_agent_links", "get_agent"]
+            : ["list_agent_links", "get_agent"];
+          const named = tools.map((t) => `mcp__${server}__${t}`);
+          // Auto mode gates a mod's MCP calls too; say how to allow the read-only tools the tab uses.
+          if (/auto mode/i.test(raw)) {
+            // Asking again changes nothing until the person allows the tools.
+            const error = `auto mode refused the call. Allow ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]} in /permissions, then press r.`;
+            await update($, links, (old): LinksState => ({
+              ...old,
+              at: now,
+              error,
+              failures: undefined,
+              retryAt: undefined,
+            }));
+            return;
+          }
+          // A server that is still starting (a local one can take seconds) fails the first call: try again
+          // soon, backing off, rather than waiting LINKS_REFRESH_MS.
+          const failures = ((await read($, links)).failures ?? 0) + 1;
+          const delay = Math.min(LINKS_REFRESH_MS, LINKS_RETRY_MS * 2 ** (failures - 1));
+          await update($, links, (old): LinksState => ({
+            ...old,
+            at: now,
+            error: raw,
+            failures,
+            retryAt: now + delay,
+          }));
+          // Only while the pane is open (its poll timer runs): a closed pane reads nothing.
+          $.clock.after(delay, () => {
+            if (timer) void refreshLinks(false);
+          });
+        }
+      } finally {
+        isLinking = false;
+      }
+    }
+
+    /** An older server's links: per-agent calls up to FALLBACK_MAX_AGENTS agents, else a notice. */
+    async function linksFromOlderServer(now: number): Promise<LinksState> {
+      const list = (await call("list_agents", { summary: true })) as Record<string, unknown>[];
+      if (list.length > FALLBACK_MAX_AGENTS) return { at: now, data: null, error: null, notice: FLOWS_NOTICE };
+      const children: Record<string, { boundName: string; agentId: string }[]> = {};
+      // One agent's call failing (deleted meanwhile, no access) leaves that agent without children or
+      // repositories rather than failing the tab; an auto-mode refusal still fails it, to show the hint.
+      async function perAgent<T>(tool: string, agentId: string, empty: T): Promise<T> {
+        try {
+          return ((await call(tool, { agentId })) ?? empty) as T;
+        } catch (err) {
+          if (/auto mode/i.test(err instanceof Error ? err.message : String(err))) throw err;
+          return empty;
+        }
+      }
+      const agentsNow = await Promise.all(
+        list.map(async (row): Promise<LinkAgent> => {
+          const id = String(row.id);
+          const [subs, repos] = await Promise.all([
+            perAgent<{ children?: { boundName: string; agentId: string }[] }>("list_subagents", id, {}),
+            perAgent<{ repositories?: Record<string, unknown>[] }>("list_repositories", id, {}),
+          ]);
+          children[id] = (subs.children ?? []).map((c) => ({
+            boundName: String(c.boundName),
+            agentId: String(c.agentId),
+          }));
+          return {
+            id,
+            name: String(row.name),
+            kind: String(row.kind ?? "native"),
+            codingProvider: str(row.codingProvider),
+            model: String(row.model ?? ""),
+            budgetUsd: num(row.budgetUsd),
+            access: String(row.access ?? "read"),
+            budgetGroup: null,
+            promptFirstLine: "",
+            entry: [],
+            repositories: (repos.repositories ?? []).map((l): LinkRepository => ({
+              provider: String(l.provider),
+              repository: String(l.repository),
+              access: l.access === "write" ? "write" : "read",
+              triggers: Array.isArray(l.triggers) ? l.triggers.map(String) : [],
+              reviewFixMaxRounds: typeof l.reviewFixMaxRounds === "number" ? l.reviewFixMaxRounds : null,
+              waitForCi: l.waitForCi === true,
+              markReadyWhenPassing: l.markReadyWhenPassing === true,
+            })),
+            notes: [],
+          };
+        }),
+      );
+      agentsNow.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+      return { at: now, data: fallbackLinks(agentsNow, children), error: null, notice: APPROXIMATE_NOTICE };
+    }
+
+    /**
+     * Detail's get_agent, once per agent for the session (force: r). A reply for an agent no longer open
+     * is dropped. The reply is kept as the server sent it; secrets appear in it by name only.
+     */
+    let agentLoading: string | null = null;
+    async function loadAgent(id: string, force = false): Promise<void> {
+      if (agentLoading === id) return;
+      const held = await read($, agentInfo);
+      if (!force && held?.id === id) return;
+      agentLoading = id;
+      try {
+        let fresh: { value: Record<string, unknown> | null; error: string | null };
+        try {
+          const value = (await call("get_agent", { id })) as Record<string, unknown> | null;
+          fresh = { value: value && typeof value === "object" ? value : null, error: null };
+        } catch (err) {
+          const raw = err instanceof Error ? err.message : "get_agent failed";
+          fresh = {
+            value: null,
+            error: /auto mode/i.test(raw)
+              ? `auto mode refused the call. Allow mcp__${server}__get_agent in /permissions, then press r.`
+              : raw,
+          };
+        }
+        if ((await read($, agentOpen))?.id !== id) return;
+        const at = await $.clock.now();
+        await update($, agentInfo, () => ({ id, at, ...fresh }));
+      } finally {
+        if (agentLoading === id) agentLoading = null;
+      }
+    }
+
     // Called without await from the pane's handlers: a pane closed or reloaded mid-search drops it quietly.
+    pane.loadAgent = (id, force) => loadAgent(id, force).catch(() => {});
+    pane.openAgent = async (id, choice) => {
+      await update($, agentOpen, () => ({ id, tab: choice }));
+      if (choice === "detail") await pane.loadAgent(id, false);
+    };
     pane.searchOlder = (text, more) => searchOlder(text, more).catch(() => {});
     pane.continueLocally = continueLocally;
     pane.cloneAndContinue = cloneAndContinue;
@@ -1537,6 +2696,7 @@ export const register: Register = (on, options) => {
     pane.loadFullText = loadFullText;
     pane.loadMoreSteps = (runId) => loadSteps(runId, false, null, true);
     pane.refresh = refresh;
+    pane.refreshLinks = refreshLinks;
     pane.start = () => {
       timer ??= $.clock.every(TICK_MS, () => {
         void $.clock.now().then((now) => {
@@ -1559,6 +2719,9 @@ export const register: Register = (on, options) => {
     loadFullText: (runId: string) => Promise<RunDetail | null>;
     loadMoreSteps: (runId: string) => Promise<void>;
     refresh: () => Promise<void>;
+    refreshLinks: (force?: boolean) => Promise<void>;
+    loadAgent: (id: string, force?: boolean) => Promise<void>;
+    openAgent: (id: string, tab: "detail" | "flow") => Promise<void>;
     searchOlder: (text: string, more: boolean) => Promise<void>;
     start: () => void;
     continueLocally: (runId: string, dir: string, repo: ResumeRepo) => Promise<void>;
@@ -1569,6 +2732,9 @@ export const register: Register = (on, options) => {
     loadFullText: async () => null,
     loadMoreSteps: async () => {},
     refresh: async () => {},
+    refreshLinks: async () => {},
+    loadAgent: async () => {},
+    openAgent: async () => {},
     searchOlder: async () => {},
     start: () => {},
     continueLocally: async () => {},
@@ -1664,6 +2830,46 @@ export const register: Register = (on, options) => {
     const rows = await read($, runs);
     const width = Math.max(24, (e.props.bodyColumns ?? 40) - 2);
     const isDesktop = e.surface === "desktop";
+    const currentTab = await read($, tab);
+    const linksState = await read($, links);
+    // The Agents tab reads its data when first shown and again once it is LINKS_REFRESH_MS old.
+    if (currentTab === "agents") void pane.refreshLinks(false);
+    const selectTab = (choice: "runs" | "agents") => {
+      void update($, tab, () => choice);
+      if (choice === "agents") void pane.refreshLinks(false);
+      // Typing on the Agents tab searches no runs; back on Runs, search for the filter's text if it changed.
+      if (choice === "runs")
+        void (async () => {
+          const text = (await read($, filter)).text;
+          if ((await read($, older)).text !== text.trim()) await pane.searchOlder(text, false);
+        })();
+    };
+    // Runs | Agents: hotkeys 1 and 2 beside Refresh in the terminal; on the desktop a button bar, the
+    // tab in force the primary button.
+    const tabButtons = (["runs", "agents"] as const).map((t) =>
+      isDesktop ? (
+        <Button
+          key={`tab-${t}`}
+          label={t === "runs" ? "Runs" : "Agents"}
+          variant={currentTab === t ? "primary" : "secondary"}
+          onPress={() => selectTab(t)}
+        />
+      ) : (
+        <Button key={`tab-${t}`} hotkey={t === "runs" ? "1" : "2"} onPress={() => selectTab(t)}>
+          {currentTab === t ? (
+            <Text bold>[{t === "runs" ? "Runs" : "Agents"}]</Text>
+          ) : (
+            <Text dimColor>{t === "runs" ? "Runs" : "Agents"}</Text>
+          )}
+        </Button>
+      ),
+    );
+    const tabBar = isDesktop ? (
+      <Box key="tab-bar" gap={1} alignItems="center">
+        {tabButtons}
+      </Box>
+    ) : null;
+    const updatedAt = currentTab === "agents" ? linksState.at : status.at;
     /**
      * A status pill: on the desktop a word on a soft tint of its colour; on the terminal, which paints no
      * tint, the word in its colour, after `mark` when given ("● running") or in brackets ("[ready]").
@@ -1677,6 +2883,33 @@ export const register: Register = (on, options) => {
         <Text color={TONES[tone].fg}>{mark ? (label ? `${mark} ${label}` : mark) : `[${label}]`}</Text>
       );
 
+    /**
+     * A desktop card: a soft panel with no border, so its colour bar sits flush on the top edge (a border's
+     * inset would leave a row of space above it); the content has its own padding below the bar.
+     */
+    const panelCard = (key: string, colour: string, alt: string, children: unknown) => (
+      <Box key={key} flexDirection="column" backgroundColor={CARD_BG}>
+        {Svg && (
+          <Box key={`${key}-bar`} paddingX={1}>
+            <Svg source={cardBarSvg(colour)} alt={alt} height={3} />
+          </Box>
+        )}
+        <Box key={`${key}-body`} flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
+          {children as never}
+        </Box>
+      </Box>
+    );
+    /**
+     * Copies text the pane already holds (as the server sent it, already redacted) and says how it went.
+     * Never adds a field: each caller copies exactly what it was given.
+     */
+    const copyText = (text: string) => (press: { surface: UiCopyArgs["surface"] }) =>
+      void $.ui
+        .copy({ text, surface: press.surface })
+        .then((result) => $.ui.toast(result.isCopied ? "Copied" : "Couldn't copy"))
+        .catch(() => $.ui.toast("Couldn't copy"));
+    const opened = await read($, agentOpen);
+
     const header = (
       <Box flexDirection="column">
         <Box gap={1}>
@@ -1684,18 +2917,24 @@ export const register: Register = (on, options) => {
             key="refresh"
             label="Refresh"
             {...(e.surface === "desktop" ? {} : { hotkey: "r" })}
-            onPress={() => void pane.refresh()}
+            onPress={() => {
+              if (currentTab !== "agents") return void pane.refresh();
+              void pane.refreshLinks(true);
+              // An agent open on Detail reads get_agent again too.
+              if (opened?.tab === "detail") void pane.loadAgent(opened.id, true);
+            }}
           />
+          {!isDesktop && tabButtons}
           {/* The desktop pane has its own close control. */}
           {e.surface !== "desktop" && (
             <Button key="close" label="Close" hotkey="x" onPress={() => void $.ui.close({ id: PANE })} />
           )}
           <Text dimColor wrap="truncate-end">
-            {status.at ? `Updated ${ago(new Date(status.at).toISOString(), now)} ago` : "Loading…"}
+            {updatedAt ? `Updated ${ago(new Date(updatedAt).toISOString(), now)} ago` : "Loading…"}
           </Text>
         </Box>
-        {status.error && <Text color={FAILED_COLOR}>wardby: {status.error}</Text>}
-        {status.limited && (
+        {currentTab === "runs" && status.error && <Text color={FAILED_COLOR}>wardby: {status.error}</Text>}
+        {currentTab === "runs" && status.limited && (
           <Box key="limited-notice">
             <Text color={WARN_COLOR} wrap="wrap">
               {LIMITED_NOTICE}
@@ -1704,6 +2943,872 @@ export const register: Register = (on, options) => {
         )}
       </Box>
     );
+
+    const f = await read($, filter);
+    /** The filter's text box and its Clear button, shared by both tabs: one filter for the whole pane. */
+    const filterBox = (placeholder: string, isFiltered: boolean) => (
+      <Box gap={1}>
+        {Input && (
+          <Input
+            key="filter-text"
+            placeholder={placeholder}
+            value={f.text}
+            onInput={(value: string) => {
+              void update($, filter, (old): Filter => ({ ...old, text: value }));
+              // The Agents tab filters what it holds; the runs search waits until Runs is shown.
+              if (currentTab === "runs") void pane.searchOlder(value, false);
+            }}
+            onSubmit={(value: string) => {
+              void update($, filter, (old): Filter => ({ ...old, text: value }));
+              if (currentTab === "runs") void pane.searchOlder(value, false);
+            }}
+          />
+        )}
+        {isFiltered && (
+          <Button
+            key="clear-filter"
+            label={isDesktop ? "Clear" : "Clear (l)"}
+            {...(isDesktop ? {} : { hotkey: "l" })}
+            onPress={() => {
+              void update($, filter, (): Filter => ({ status: "all", text: "" }));
+              void pane.searchOlder("", false);
+            }}
+          />
+        )}
+      </Box>
+    );
+
+    if (currentTab === "agents") {
+      const data = linksState.data;
+      const toggles = await read($, flowOpen);
+      // The filter's text: an agent shows when its name, model or a repository holds it.
+      const text = f.text.trim().toLowerCase();
+      const notices = (
+        <>
+          {linksState.error &&
+            ((linksState.failures ?? 0) > 0 && (linksState.failures ?? 0) <= LINKS_QUIET_FAILURES ? (
+              <Text dimColor wrap="wrap">
+                Waiting for the wardby server; trying again shortly ({linksState.error})
+              </Text>
+            ) : (
+              <Text color={FAILED_COLOR} wrap="wrap">
+                wardby: {linksState.error}
+              </Text>
+            ))}
+          {linksState.notice && (
+            <Box key="links-notice">
+              <Text color={WARN_COLOR} wrap="wrap">
+                {linksState.notice}
+              </Text>
+            </Box>
+          )}
+        </>
+      );
+      const openOn = (id: string, choice: "detail" | "flow") => void pane.openAgent(id, choice);
+      const flowOf = (all: AgentLinks, id: string): LinkFlow | null =>
+        all.flows.find((flow) => flow.agentIds.includes(id) || flow.related.includes(id)) ?? null;
+
+      /**
+       * An open agent's header: the breadcrumb (its Agents goes back to the list), the agent's name, and
+       * its Detail and Flow tabs (Flow only for an agent in a flow). Detail and Flow draw their bodies below.
+       */
+      const agentScreenHeader = (
+        all: AgentLinks,
+        agent: LinkAgent,
+        current: "detail" | "flow",
+        config: Record<string, unknown> | null,
+      ) => {
+        const flow = flowOf(all, agent.id);
+        const choices = flow ? (["detail", "flow"] as const) : (["detail"] as const);
+        const tabLabel = (choice: "detail" | "flow") => (choice === "detail" ? "Detail" : "Flow");
+        return (
+          <Box key="agent-header" flexDirection="column">
+            <Box>
+              <Button
+                key="crumb-agents"
+                {...(isDesktop ? {} : { hotkey: "b" })}
+                onPress={() => void update($, agentOpen, () => null)}
+              >
+                <Text dimColor>{`Agents › ${flow ? flow.name : "Unlinked"} › ${agent.name}`}</Text>
+              </Button>
+            </Box>
+            <Box gap={1} alignItems="center">
+              {isDesktop ? <Text weight="semibold">{agent.name}</Text> : <Text bold>{agent.name}</Text>}
+              {pill(agentKind(agent), "grey")}
+              <Text dimColor>{`you: ${agent.access}`}</Text>
+            </Box>
+            <Box gap={1} alignItems="center">
+              {/* The agent's runs: the Runs tab, filtered to its name. */}
+              <Button
+                key="agent-runs"
+                label="Runs →"
+                {...(isDesktop ? {} : { hotkey: "n" })}
+                onPress={() => {
+                  void update($, filter, (old): Filter => ({ ...old, text: agent.name }));
+                  void pane.searchOlder(agent.name, false);
+                  void update($, tab, () => "runs" as const);
+                }}
+              />
+              {/* get_agent's reply as the server sent it, system prompt included; secrets in it are names only. */}
+              {config && (
+                <Button
+                  key="copy-config"
+                  label="Copy config"
+                  {...(isDesktop ? { dimColor: true } : { hotkey: "c" })}
+                  onPress={copyText(JSON.stringify(config, null, 2))}
+                />
+              )}
+            </Box>
+            <Box gap={1} alignItems="center">
+              {choices.map((choice) =>
+                isDesktop ? (
+                  <Button
+                    key={`agent-tab-${choice}`}
+                    label={tabLabel(choice)}
+                    variant={current === choice ? "primary" : "secondary"}
+                    onPress={() => openOn(agent.id, choice)}
+                  />
+                ) : (
+                  <Button
+                    key={`agent-tab-${choice}`}
+                    hotkey={choice === "detail" ? "d" : "f"}
+                    onPress={() => openOn(agent.id, choice)}
+                  >
+                    {current === choice ? (
+                      <Text bold>[{tabLabel(choice)}]</Text>
+                    ) : (
+                      <Text dimColor>{tabLabel(choice)}</Text>
+                    )}
+                  </Button>
+                ),
+              )}
+            </Box>
+          </Box>
+        );
+      };
+
+      /**
+       * The Detail tab: get_agent's prompt, how the agent starts, its model and budget, what is attached
+       * (secrets by name only), and its last runs from the pane's window. Cards on the desktop, labelled
+       * blocks in the terminal.
+       */
+      const agentDetail = (
+        all: AgentLinks,
+        agent: LinkAgent,
+        info: { value: Record<string, unknown> | null; error: string | null } | null,
+        showAll: boolean,
+      ) => {
+        if (!info) return <Text dimColor>Loading…</Text>;
+        if (info.error || !info.value) {
+          return (
+            <Box key="agent-error">
+              <Text color={FAILED_COLOR} wrap="wrap">
+                {`wardby: ${info.error ?? "get_agent returned nothing"}`}
+              </Text>
+            </Box>
+          );
+        }
+        const config = agentConfig(info.value);
+        const section = (key: AgentSection, children: unknown, copy?: string) => {
+          const { colour, title } = AGENT_SECTIONS[key];
+          if (isDesktop) {
+            const head =
+              copy !== undefined ? (
+                <Box key={`agent-${key}-head`} alignItems="center">
+                  <Text weight="semibold" size="footnote">
+                    {title}
+                  </Text>
+                  <Box flexGrow={1} />
+                  <Button key={`copy-${key}`} label="Copy" dimColor onPress={copyText(copy)} />
+                </Box>
+              ) : (
+                <Box key={`agent-${key}-head`}>
+                  <Text weight="semibold" size="footnote">
+                    {title}
+                  </Text>
+                </Box>
+              );
+            return panelCard(`agent-${key}`, colour, `${title} card`, [head, children]);
+          }
+          return (
+            <Box key={`agent-${key}`} flexDirection="column">
+              <Text bold>{title.toUpperCase()}</Text>
+              {children as never}
+            </Box>
+          );
+        };
+        const inner = Math.max(20, width - 4);
+        const cut = showAll
+          ? { text: config.systemPrompt, more: 0 }
+          : collapse(config.systemPrompt, inner, PROMPT_ROWS);
+        const prompt = (
+          <Box key="agent-prompt-text" flexDirection="column">
+            <Text wrap="wrap">{cut.text || "(no system prompt)"}</Text>
+            {(cut.more > 0 || showAll) && (
+              <Button
+                key="prompt-all"
+                label={showAll ? "Show less" : `Show all (${cut.more} more ${cut.more === 1 ? "line" : "lines"})`}
+                {...(isDesktop ? { dimColor: true } : { hotkey: "m" })}
+                onPress={() => void update($, promptOpen, () => (showAll ? null : agent.id))}
+              />
+            )}
+          </Box>
+        );
+        const chips = runsWhen(agent, all);
+        const when = (
+          <Box key="agent-when-chips" gap={1} flexWrap="wrap">
+            {chips.length === 0 ? (
+              <Text dimColor>Nothing starts it but a lead or a person.</Text>
+            ) : (
+              chips.map((chip) => (
+                <Box key={`when-${chip}`}>{pill(chip, chip === "waits for CI" ? "amber" : "blue")}</Box>
+              ))
+            )}
+          </Box>
+        );
+        const budget = config.budgetUsd ?? agent.budgetUsd;
+        const typical = agentTypical(rows, agent.id);
+        const budgetLine =
+          `${usd(budget)} per run` +
+          (config.overrunPercent > 0 ? ` · +${config.overrunPercent}% overrun` : "") +
+          (agent.budgetGroup ? ` · group "${agent.budgetGroup.name}"` : "");
+        const money = (
+          <Box key="agent-budget-lines" flexDirection="column">
+            <Text>{shortModel(config.model ?? agent.model)}</Text>
+            <Text>{budgetLine}</Text>
+            {typical.n > 0 && (
+              <Text dimColor>{`Typical: ${usd(typical.median)} median · ${typical.ok} of ${typical.n} succeeded`}</Text>
+            )}
+          </Box>
+        );
+        const attached = [
+          ...config.mcpServers.map((name) => `MCP: ${name}`),
+          ...config.tools.map((name) => `tool: ${name}`),
+          // A tool's allowedSecrets, so a section with only these still lists them.
+          ...config.secrets.map((name) => `tool secret: ${name} (name only)`),
+          ...(config.claudeCode
+            ? [
+                `repo skills: ${config.claudeCode.repoSkills ? "on" : "off"}`,
+                `sessionResume: ${config.claudeCode.sessionResume ? "on" : "off"}`,
+              ]
+            : []),
+        ];
+        const tools = (
+          <Box key="agent-tools-lines" flexDirection="column">
+            {attached.length === 0 ? (
+              <Text dimColor>No tools or connections attached.</Text>
+            ) : (
+              attached.map((line) => (
+                <Box key={`attached-${line}`}>
+                  <Text wrap="truncate-end">{line}</Text>
+                </Box>
+              ))
+            )}
+          </Box>
+        );
+        const own = rows
+          .filter((row) => row.agentId === agent.id)
+          .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
+          .slice(0, AGENT_LAST_RUNS);
+        const last = (
+          <Box key="agent-last-rows" flexDirection="column">
+            {own.length === 0 ? (
+              <Text dimColor>No runs in the pane's window.</Text>
+            ) : (
+              own.map((row) => (
+                <Box key={`agent-last-${row.id}`} gap={1}>
+                  <Button
+                    key={`agent-run-${row.id}`}
+                    onPress={() => {
+                      void update($, tab, () => "runs" as const);
+                      void update($, selected, () => row.id);
+                      void pane.loadDetail(row.id);
+                    }}
+                  >
+                    {pill(row.status, statusTone(row.status), "●")}
+                  </Button>
+                  <Text
+                    dimColor
+                  >{`${ago(row.startedAt, now)} ago · ${usd(row.costUsd)} · ${triggerLabel(row.trigger)}`}</Text>
+                </Box>
+              ))
+            )}
+          </Box>
+        );
+        return (
+          <Box key="agent-detail" flexDirection="column" gap={1}>
+            {section("prompt", prompt, config.systemPrompt)}
+            {section("when", when)}
+            {section("budget", money)}
+            {section("tools", tools)}
+            {section("last", last)}
+          </Box>
+        );
+      };
+
+      /**
+       * The Flow tab: the flow as a tree in the terminal (j/k move a cursor over agents, o opens one) or as
+       * an SVG map on the desktop (a button per agent under it, since the map takes no clicks), the
+       * selected agent highlighted. Below: the flow's recent run chains and the agents that look related.
+       */
+      const agentFlow = (all: AgentLinks, agent: LinkAgent, cursor: { id: string; line: number } | null) => {
+        const flow = flowOf(all, agent.id);
+        if (!flow) return null;
+        const byId = new Map(all.agents.map((a) => [a.id, a]));
+        const nameOf = (id: string) => byId.get(id)?.name ?? id;
+        const roleOf = (id: string): AgentRole => {
+          const a = byId.get(id);
+          return a ? agentRole(a, flow, all) : "sub";
+        };
+        const statsOf = (id: string) => {
+          const s = agentStats(rows, id);
+          return `${shortModel(byId.get(id)?.model ?? "")} · ${s.runs} runs · ${usd(s.cost)}`;
+        };
+        const heading = (label: string) =>
+          isDesktop ? (
+            <Text weight="semibold" size="footnote">
+              {label}
+            </Text>
+          ) : (
+            <Text bold>{label}</Text>
+          );
+        const openHere = (id: string) => openOn(id, "flow");
+
+        let drawing: unknown;
+        if (isDesktop) {
+          const map = flowMap(flow, all, statsOf);
+          drawing = (
+            <Box key="flow-map" flexDirection="column" gap={1}>
+              {Svg && (
+                <Svg
+                  source={flowMapSvg(map, {
+                    selected: agent.id,
+                    colour: (id) => ROLE_COLOR[roleOf(id)],
+                    stats: statsOf,
+                    failed: (id) => {
+                      const last = agentStats(rows, id).last[0];
+                      return !!last && !ACTIVE.has(last) && last !== "succeeded";
+                    },
+                  })}
+                  alt={`Flow map of ${flow.name}`}
+                  width={map.width}
+                  height={map.height}
+                />
+              )}
+              <Box key="flow-nodes" gap={1} flexWrap="wrap">
+                {flow.agentIds
+                  .filter((id) => byId.has(id))
+                  .map((id) => (
+                    <Button
+                      key={`node-${id}`}
+                      label={nameOf(id)}
+                      variant={id === agent.id ? "primary" : "secondary"}
+                      onPress={() => openHere(id)}
+                    />
+                  ))}
+              </Box>
+            </Box>
+          );
+        } else {
+          const lines = flowTree(flow, all);
+          const selectable = lines.flatMap((line, i) => (line.agentId ? [i] : []));
+          const home = lines.findIndex((line) => line.agentId === agent.id && !line.ref);
+          const start = home >= 0 ? home : (selectable[0] ?? -1);
+          const at = cursor?.id === agent.id && selectable.includes(cursor.line) ? cursor.line : start;
+          const move = (step: number) =>
+            void update($, flowCursor, (c) => {
+              const from = c?.id === agent.id && selectable.includes(c.line) ? c.line : start;
+              const i = Math.min(selectable.length - 1, Math.max(0, selectable.indexOf(from) + step));
+              return selectable.length > 0 ? { id: agent.id, line: selectable[i] } : c;
+            });
+          drawing = (
+            <Box key="flow-tree" flexDirection="column">
+              {lines.map((line, i) => {
+                const lead = `${"  ".repeat(line.depth)}${i === at ? "› " : "  "}`;
+                if (!line.agentId)
+                  return (
+                    <Box key={`tree-${i}`}>
+                      <Text dimColor wrap="truncate-end">{`${lead}${line.text}`}</Text>
+                    </Box>
+                  );
+                const id = line.agentId;
+                return (
+                  <Box key={`tree-${i}`} gap={1}>
+                    <Button key={`tree-line-${i}`} onPress={() => openHere(id)}>
+                      {line.ref ? (
+                        <Text dimColor>{`${lead}${line.text}`}</Text>
+                      ) : (
+                        <Text color={ROLE_THEME[roleOf(id)]} bold={id === agent.id}>{`${lead}${line.text}`}</Text>
+                      )}
+                    </Button>
+                    {!line.ref && (
+                      <Text dimColor wrap="truncate-end">
+                        {statsOf(id)}
+                      </Text>
+                    )}
+                  </Box>
+                );
+              })}
+              {selectable.length > 0 && (
+                <Box key="flow-keys" gap={2}>
+                  <Button key="flow-prev" label="Previous (k)" hotkey="k" onPress={() => move(-1)} />
+                  <Button key="flow-next" label="Next (j)" hotkey="j" onPress={() => move(1)} />
+                  <Button
+                    key="flow-open"
+                    label="Open (o)"
+                    hotkey="o"
+                    onPress={() => {
+                      const id = lines[at]?.agentId;
+                      if (id) openHere(id);
+                    }}
+                  />
+                </Box>
+              )}
+            </Box>
+          );
+        }
+
+        // The pane's run chains that touch any of the flow's agents, newest first.
+        const members = new Set(flow.agentIds);
+        const chains: ListEntry[][] = [];
+        for (const entry of asChains(rows)) {
+          if (entry.kind === "heading" || entry.depth === 0) chains.push([entry]);
+          else chains[chains.length - 1]?.push(entry);
+        }
+        const recent = chains
+          .filter((chain) => chain.some((entry) => entry.kind === "run" && members.has(entry.row.agentId)))
+          .slice(0, FLOW_RECENT);
+        const names = flow.agentIds.filter((id) => byId.has(id)).map(nameOf);
+        const recentRuns = (
+          <Box key="flow-recent" flexDirection="column">
+            {heading("Recent runs in this flow")}
+            {recent.length === 0 ? (
+              <Text dimColor>No runs in the pane's window.</Text>
+            ) : (
+              recent.flat().map((entry) =>
+                entry.kind === "heading" ? (
+                  <Box key={`flow-recent-pr-${entry.pr}`}>
+                    <Text dimColor wrap="truncate-end">
+                      {entry.pr}
+                    </Text>
+                  </Box>
+                ) : (
+                  <Box key={`flow-recent-${entry.row.id}`} gap={1}>
+                    <Text>{branch(entry.depth)}</Text>
+                    {pill(entry.row.status.replaceAll("_", " "), statusTone(entry.row.status), "●")}
+                    <Text
+                      {...(entry.row.agentId === agent.id ? (isDesktop ? { weight: "semibold" } : { bold: true }) : {})}
+                    >
+                      {entry.event ? `${entry.row.agentName} · ${entry.event}` : entry.row.agentName}
+                    </Text>
+                    <Text dimColor>{`${ago(entry.row.startedAt, now)} ago · ${usd(entry.row.costUsd)}`}</Text>
+                  </Box>
+                ),
+              )
+            )}
+            <Box>
+              <Button
+                key="flow-runs"
+                label={isDesktop ? "Open in Runs →" : "Open in Runs → (g)"}
+                {...(isDesktop ? {} : { hotkey: "g" })}
+                onPress={() => {
+                  // One filter term per agent: the Runs tab keeps a run whose agent is any of them.
+                  void update($, filter, (old): Filter => ({ ...old, text: names.join(", ") }));
+                  void pane.searchOlder("", false);
+                  void update($, tab, () => "runs" as const);
+                }}
+              />
+            </Box>
+          </Box>
+        );
+
+        const related = flow.related.map((id) => byId.get(id)).filter((a): a is LinkAgent => !!a);
+        const relatedList = related.length > 0 && (
+          <Box key="flow-related" flexDirection="column">
+            {heading("Not linked, but looks related")}
+            {related.map((r) => {
+              const hasEdge = all.edges.some(
+                (edge) => edge.kind === "delegates" && (edge.from === r.id || edge.to === r.id),
+              );
+              const entry = entryChip(r, all);
+              return (
+                <Box key={`flow-related-${r.id}`} gap={1}>
+                  <Button key={`related-${r.id}`} onPress={() => openHere(r.id)}>
+                    <Text dimColor={!isDesktop}>{r.name}</Text>
+                  </Button>
+                  {entry && <Text dimColor>{entry}</Text>}
+                  {r.repositories.length === 0 && !hasEdge && <Text dimColor>no repository, no sub-agent edge</Text>}
+                </Box>
+              );
+            })}
+          </Box>
+        );
+
+        // The same map, larger, as a page in the browser: the pane's dock stops at under half the window.
+        const openLarger = () => {
+          const map = flowMap(flow, all, statsOf);
+          const failed = (id: string) => {
+            const last = agentStats(rows, id).last[0];
+            return !!last && !ACTIVE.has(last) && last !== "succeeded";
+          };
+          const html = flowPageHtml({
+            title: flow.name,
+            svg: flowMapSvg(map, {
+              selected: agent.id,
+              colour: (id) => ROLE_COLOR[roleOf(id)],
+              stats: statsOf,
+              failed,
+              dimOthers: false,
+            }),
+            mapWidth: map.width,
+            strip: flowStrip(flow, all),
+            agents: flow.agentIds
+              .map((id) => byId.get(id))
+              .filter((a): a is LinkAgent => !!a)
+              .map((a) => ({
+                name: a.name,
+                colour: ROLE_COLOR[roleOf(a.id)],
+                kind: agentKind(a),
+                stats: statsOf(a.id),
+                budget: `${usd(a.budgetUsd)} budget`,
+                prompt: a.promptFirstLine,
+              })),
+            runs: recent.flat().flatMap((entry) =>
+              entry.kind === "run"
+                ? [
+                    {
+                      name: entry.event ? `${entry.row.agentName} · ${entry.event}` : entry.row.agentName,
+                      status: entry.row.status.replaceAll("_", " "),
+                      when: `${ago(entry.row.startedAt, now)} ago`,
+                      cost: usd(entry.row.costUsd),
+                      depth: entry.depth,
+                      isFailed: !ACTIVE.has(entry.row.status) && entry.row.status !== "succeeded",
+                    },
+                  ]
+                : [],
+            ),
+            generated: new Date(now).toLocaleString(),
+          });
+          void openInBrowser($, `flow-${flow.key}`, html).then(
+            ({ path, isOpened }) =>
+              $.ui.toast(
+                isOpened ? "Opened the flow map in your browser" : `Couldn't open a browser. The page is at ${path}`,
+              ),
+            () => $.ui.toast("Couldn't write the flow page to the temporary folder"),
+          );
+        };
+        const larger = (
+          <Box key="flow-larger">
+            <Button
+              key="flow-open-larger"
+              label={isDesktop ? "Open larger ↗" : "Open in browser (w)"}
+              {...(isDesktop ? {} : { hotkey: "w" })}
+              onPress={openLarger}
+            />
+          </Box>
+        );
+
+        return (
+          <Box key="agent-flow" flexDirection="column" gap={1}>
+            {larger}
+            {drawing as never}
+            {recentRuns}
+            {relatedList}
+          </Box>
+        );
+      };
+
+      const openAgent = opened && data?.agents.find((a) => a.id === opened.id);
+      if (data && opened && openAgent) {
+        const held = await read($, agentInfo);
+        const info = held?.id === openAgent.id ? held : null;
+        // Opened before a reload, or the reply was dropped: read it now (once; loadAgent skips a held one).
+        if (opened.tab === "detail" && !info) void pane.loadAgent(openAgent.id, false);
+        const showAll = (await read($, promptOpen)) === openAgent.id;
+        const cursor = await read($, flowCursor);
+        return (
+          <Box flexDirection="column" gap={1}>
+            {header}
+            {tabBar}
+            {notices}
+            {agentScreenHeader(data, openAgent, opened.tab, info?.value ?? null)}
+            {opened.tab === "detail" && agentDetail(data, openAgent, info, showAll)}
+            {opened.tab === "flow" && agentFlow(data, openAgent, cursor)}
+          </Box>
+        );
+      }
+
+      type Placed = { agent: LinkAgent; role: AgentRole; under: string | null; edge: LinkEdge | null };
+      /**
+       * A flow's agents in drawing order, the filter applied: each agent that isn't a sub-agent (the key
+       * agent first), each followed by the sub-agents it delegates to (`under` names the lead), then any
+       * sub-agent whose lead is hidden, then the related agents.
+       */
+      const flowOrder = (all: AgentLinks, flow: LinkFlow): Placed[] => {
+        const byId = new Map(all.agents.map((a) => [a.id, a]));
+        const members = [flow.key, ...flow.agentIds.filter((id) => id !== flow.key)]
+          .map((id) => byId.get(id))
+          .filter((a): a is LinkAgent => !!a);
+        const shown = new Set(members.filter((a) => agentMatches(a, text)).map((a) => a.id));
+        const roles = new Map(members.map((a) => [a.id, agentRole(a, flow, all)]));
+        const out: Placed[] = [];
+        const placed = new Set<string>();
+        for (const agent of members) {
+          const role = roles.get(agent.id)!;
+          if (role === "sub" || !shown.has(agent.id)) continue;
+          out.push({ agent, role, under: null, edge: null });
+          placed.add(agent.id);
+          for (const edge of all.edges) {
+            const sub = byId.get(edge.to);
+            if (edge.from !== agent.id || edge.kind !== "delegates" || !sub || placed.has(sub.id)) continue;
+            if (!shown.has(sub.id) || roles.get(sub.id) !== "sub") continue;
+            out.push({ agent: sub, role: "sub", under: agent.id, edge });
+            placed.add(sub.id);
+          }
+        }
+        for (const agent of members)
+          if (!placed.has(agent.id) && shown.has(agent.id))
+            out.push({ agent, role: roles.get(agent.id)!, under: null, edge: null });
+        for (const id of flow.related) {
+          const agent = byId.get(id);
+          if (agent && agentMatches(agent, text)) out.push({ agent, role: "related", under: null, edge: null });
+        }
+        return out;
+      };
+
+      /** The other leads that delegate to a sub-agent, besides `lead`, as " · also used by <name>". */
+      const alsoUsedBy = (all: AgentLinks, subId: string, lead: string): string => {
+        const others = all.edges
+          .filter((edge) => edge.kind === "delegates" && edge.to === subId && edge.from !== lead)
+          .map((edge) => all.agents.find((a) => a.id === edge.from)?.name ?? edge.from);
+        return others.length > 0 ? ` · also used by ${[...new Set(others)].join(", ")}` : "";
+      };
+
+      /** The agents in no flow, the filter applied, and whether their rows are open (always while filtering). */
+      const unlinkedOf = (all: AgentLinks) => ({
+        agents: all.unlinked
+          .map((id) => all.agents.find((a) => a.id === id))
+          .filter((a): a is LinkAgent => !!a && agentMatches(a, text)),
+        isOpen: text !== "" || toggles[UNLINKED_KEY] === true,
+      });
+      const unlinkedButton = (count: number, isOpen: boolean) => (
+        <Button
+          key="unlinked"
+          onPress={() => void update($, flowOpen, (current) => ({ ...current, [UNLINKED_KEY]: !isOpen }))}
+        >
+          {isDesktop ? (
+            <Text weight="semibold">{`${isOpen ? "▾" : "▸"} Unlinked agents (${count})`}</Text>
+          ) : (
+            <Text bold>{`${isOpen ? "▾" : "▸"} Unlinked agents (${count})`}</Text>
+          )}
+        </Button>
+      );
+      const hiddenLine = (all: AgentLinks) =>
+        all.hidden.agents > 0 ? (
+          <Text key="hidden-agents" dimColor>
+            {`${all.hidden.agents} linked agent${all.hidden.agents === 1 ? "" : "s"} you can't see`}
+          </Text>
+        ) : null;
+
+      /** The desktop list: a bordered box per flow, its strip and a card per agent, sub-agents as lines under their lead. */
+      const agentsListDesktop = (all: AgentLinks) => {
+        const card = (agent: LinkAgent, role: AgentRole, subs: Placed[]) => {
+          const stats = agentStats(rows, agent.id);
+          const chip = entryChip(agent, all);
+          const chips: { label: string; tone: Tone }[] = [
+            { label: shortModel(agent.model), tone: "grey" },
+            { label: `${usd(agent.budgetUsd)} / run`, tone: "grey" },
+            ...(chip ? [{ label: chip, tone: "blue" as const }] : []),
+            ...(agent.repositories.some((r) => r.waitForCi) ? [{ label: "waits for CI", tone: "amber" as const }] : []),
+            ...agent.notes
+              .filter((note) => note.startsWith("mcp:"))
+              .map((note) => ({ label: `MCP: ${note.slice("mcp:".length)}`, tone: "grey" as const })),
+          ];
+          return (
+            <Box key={`card-${agent.id}`} flexDirection="column" marginTop={1} backgroundColor={CARD_BG}>
+              {Svg && (
+                <Box key={`card-${agent.id}-bar`} paddingX={1}>
+                  <Svg source={cardBarSvg(ROLE_COLOR[role])} alt={`${role} agent`} height={3} />
+                </Box>
+              )}
+              <Box flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
+                <Box alignItems="center" gap={1}>
+                  <Button key={`agent-${agent.id}`} onPress={() => openOn(agent.id, "detail")}>
+                    <Text weight="semibold" {...(role === "related" ? { dimColor: true } : {})}>
+                      {agent.name}
+                    </Text>
+                  </Button>
+                  {pill(agentKind(agent), "grey")}
+                  <Box flexGrow={1} />
+                  {stats.last.map((status, i) => (
+                    <Text key={`dot-${agent.id}-${i}`} color={statusColor(status)}>
+                      ●
+                    </Text>
+                  ))}
+                </Box>
+                {agent.promptFirstLine && (
+                  <Text dimColor size="caption" wrap="truncate-end">
+                    {plainText(agent.promptFirstLine)}
+                  </Text>
+                )}
+                <Box gap={1} flexWrap="wrap">
+                  {chips.map(({ label, tone }) => (
+                    <Box key={`chip-${agent.id}-${label}`}>{pill(label, tone)}</Box>
+                  ))}
+                </Box>
+                {subs.map(({ agent: sub, edge }) => (
+                  <Box key={`sub-${sub.id}`} marginLeft={2} gap={1} alignItems="center">
+                    <Text dimColor size="caption">
+                      sub-agent
+                    </Text>
+                    <Button key={`agent-${sub.id}`} onPress={() => openOn(sub.id, "detail")}>
+                      <Text weight="medium">{sub.name}</Text>
+                    </Button>
+                    <Text dimColor size="caption" wrap="truncate-end">
+                      {[agentKind(sub), shortModel(sub.model), usd(sub.budgetUsd), edge?.label]
+                        .filter(Boolean)
+                        .join(" · ") + alsoUsedBy(all, sub.id, agent.id)}
+                    </Text>
+                  </Box>
+                ))}
+              </Box>
+            </Box>
+          );
+        };
+        const loose = unlinkedOf(all);
+        return (
+          <Box key="agents-list" flexDirection="column" gap={1}>
+            {all.flows.map((flow) => {
+              const order = flowOrder(all, flow);
+              if (order.length === 0) return null;
+              const stats = flow.agentIds.map((id) => agentStats(rows, id));
+              const runCount = stats.reduce((sum, s) => sum + s.runs, 0);
+              const cost = stats.reduce((sum, s) => sum + s.cost, 0);
+              const n = flow.agentIds.length;
+              return (
+                <Box key={`flowbox-${flow.key}`} flexDirection="column" {...GROUP_BOX}>
+                  <Box alignItems="center" gap={1}>
+                    {/* The flow's name opens its key agent on Flow. */}
+                    <Button key={`flow-${flow.key}`} onPress={() => openOn(flow.key, "flow")}>
+                      <Text weight="semibold">{flow.name}</Text>
+                    </Button>
+                    <Text dimColor size="caption">
+                      {`${n} agent${n === 1 ? "" : "s"} · ${runCount} run${runCount === 1 ? "" : "s"} · ${usd(cost)}`}
+                    </Text>
+                  </Box>
+                  <Text dimColor size="caption" wrap="wrap">
+                    {flowStrip(flow, all)}
+                  </Text>
+                  {order
+                    .filter((entry) => entry.under === null)
+                    .map((entry) =>
+                      card(
+                        entry.agent,
+                        entry.role,
+                        order.filter((o) => o.under === entry.agent.id),
+                      ),
+                    )}
+                </Box>
+              );
+            })}
+            {loose.agents.length > 0 && (
+              <Box key="unlinked-box" flexDirection="column">
+                {unlinkedButton(loose.agents.length, loose.isOpen)}
+                {loose.isOpen && loose.agents.map((agent) => card(agent, agentRole(agent, null, all), []))}
+              </Box>
+            )}
+            {hiddenLine(all)}
+          </Box>
+        );
+      };
+
+      /** The terminal list: a foldable row per flow and its strip, then a row per agent. */
+      const agentsListTerminal = (all: AgentLinks) => {
+        // Under 70 columns the model and cost columns go.
+        const wide = width >= 70;
+        const row = (agent: LinkAgent, role: AgentRole, prefix: string) => {
+          const stats = agentStats(rows, agent.id);
+          const cols = [
+            agentKind(agent),
+            ...(wide ? [shortModel(agent.model), usd(agent.budgetUsd)] : []),
+            entryChip(agent, all) ?? "",
+            agent.repositories.some((r) => r.waitForCi) ? "waits for CI" : "",
+          ].filter(Boolean);
+          return (
+            <Box key={`row-${agent.id}`} flexDirection="column">
+              <Box>
+                <Button key={`agent-${agent.id}`} onPress={() => openOn(agent.id, "detail")}>
+                  <Text color={ROLE_THEME[role]}>▎</Text>
+                  <Text {...(role === "related" ? { dimColor: true } : { bold: true })}>
+                    {`${prefix}${agent.name}`.padEnd(20)}
+                  </Text>
+                </Button>
+                <Text dimColor wrap="truncate-end">
+                  {` ${cols.join("  ")}`}
+                </Text>
+                {stats.last.map((status, i) => (
+                  <Text key={`dot-${agent.id}-${i}`} color={statusColor(status)}>
+                    {" ●"}
+                  </Text>
+                ))}
+              </Box>
+              {agent.promptFirstLine && (
+                <Text dimColor wrap="truncate-end">
+                  {`  ${" ".repeat(prefix.length)}${plainText(agent.promptFirstLine)}`}
+                </Text>
+              )}
+            </Box>
+          );
+        };
+        const loose = unlinkedOf(all);
+        return (
+          <Box key="agents-list" flexDirection="column" gap={1}>
+            {all.flows.map((flow) => {
+              const order = flowOrder(all, flow);
+              if (order.length === 0) return null;
+              // Open unless folded; filtering shows every match.
+              const isOpen = text !== "" || toggles[flow.key] !== false;
+              return (
+                <Box key={`flowbox-${flow.key}`} flexDirection="column">
+                  <Button
+                    key={`flow-${flow.key}`}
+                    onPress={() => void update($, flowOpen, (current) => ({ ...current, [flow.key]: !isOpen }))}
+                  >
+                    <Text bold>{`${isOpen ? "▾" : "▸"} ${flow.name}`}</Text>
+                  </Button>
+                  <Text dimColor wrap="truncate-end">
+                    {`  ${flowStrip(flow, all)}`}
+                  </Text>
+                  {isOpen &&
+                    order.map((entry) =>
+                      row(entry.agent, entry.role, entry.under ? "  ⇢ " : entry.role === "related" ? "┆ " : ""),
+                    )}
+                </Box>
+              );
+            })}
+            {loose.agents.length > 0 && (
+              <Box key="unlinked-box" flexDirection="column">
+                {unlinkedButton(loose.agents.length, loose.isOpen)}
+                {loose.isOpen && loose.agents.map((agent) => row(agent, agentRole(agent, null, all), ""))}
+              </Box>
+            )}
+            {hiddenLine(all)}
+          </Box>
+        );
+      };
+
+      return (
+        <Box flexDirection="column" gap={1}>
+          {header}
+          {tabBar}
+          {notices}
+          {filterBox("Filter by agent, model or repository", text !== "")}
+          {!data && !linksState.error && !linksState.notice && <Text dimColor>Loading agents…</Text>}
+          {data && data.agents.length === 0 && <Text dimColor>No agents you can read.</Text>}
+          {data && (isDesktop ? agentsListDesktop(data) : agentsListTerminal(data))}
+        </Box>
+      );
+    }
 
     const olderRuns = await read($, older);
     // A run opened from the older runs the search found is drawn the same way as one of the day's.
@@ -1728,15 +3833,6 @@ export const register: Register = (on, options) => {
           <Text bold>{text}</Text>
         );
       /**
-       * Copies text the pane already holds (as the server sent it, already redacted) and says how it went.
-       * Never adds a field: each section copies exactly what it was given.
-       */
-      const copyText = (text: string) => (press: { surface: UiCopyArgs["surface"] }) =>
-        void $.ui
-          .copy({ text, surface: press.surface })
-          .then((result) => $.ui.toast(result.isCopied ? "Copied" : "Couldn't copy"))
-          .catch(() => $.ui.toast("Couldn't copy"));
-      /**
        * Copies one of get_run's long fields. When the server sent only its first page, the rest is read
        * first (get_run_text), so Copy gives the whole text; an older server's first page is copied as is.
        */
@@ -1750,22 +3846,12 @@ export const register: Register = (on, options) => {
       };
       /**
        * Each section is a rounded card with its kind's colour from the wardby.com palette: on the desktop a
-       * thin bar along the card's top (the theme's prompt-box border stays, visible in light and dark); on
-       * the terminal, which draws no SVG, the card's rounded border in that colour.
+       * thin bar along the card's top (panelCard); on the terminal, which draws no SVG, the card's rounded
+       * border in that colour.
        */
-      // Desktop: a soft panel with no border, so its colour bar sits flush on the top edge (a border's
-      // inset would leave a row of space above it); the content has its own padding below the bar.
-      // Terminal: the rounded border, in the card's colour.
       const card = (key: string, kind: CardKind, children: unknown) =>
         D && Svg ? (
-          <Box key={key} flexDirection="column" backgroundColor={CARD_BG}>
-            <Box key={`${key}-bar`} paddingX={1}>
-              <Svg source={cardBarSvg(CARD_COLOR[kind])} alt={`${CARD_ALT[kind]} card`} height={3} />
-            </Box>
-            <Box key={`${key}-body`} flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
-              {children as never}
-            </Box>
-          </Box>
+          panelCard(key, CARD_COLOR[kind], `${CARD_ALT[kind]} card`, children)
         ) : (
           <Box key={key} flexDirection="column" {...GROUP_BOX} borderColor={CARD_COLOR[kind]}>
             {children as never}
@@ -2114,6 +4200,11 @@ export const register: Register = (on, options) => {
       const prOutcome = open.outcomes.find((o) => o.kind === "pull_request" && o.url);
       const prUrl = shown?.pullRequestUrl ?? prOutcome?.url ?? null;
       const prNumber = prUrl ? /\/pull\/(\d+)/.exec(prUrl)?.[1] : null;
+      // A multi-repository run's other pull requests, one line each (those already drawn from the outcomes or as the default's are skipped).
+      const drawnUrls = new Set([...open.outcomes.map((o) => o.url), shown?.pullRequestUrl]);
+      const extraPrs = shown
+        ? extraRepositories(shown).filter((r) => r.pullRequestUrl && !drawnUrls.has(r.pullRequestUrl))
+        : [];
       // One dim line under the header: where, which model, how long, and when it finished or was last active.
       const when = open.finishedAt
         ? `finished ${ago(open.finishedAt, now)} ago`
@@ -2238,7 +4329,9 @@ export const register: Register = (on, options) => {
                     : null}
               </>,
             )}
-          {(open.outcomes.length > 0 || (shown && (shown.pullRequestUrl || shown.resultBranch || shown.outcome))) &&
+          {(open.outcomes.length > 0 ||
+            extraPrs.length > 0 ||
+            (shown && (shown.pullRequestUrl || shown.resultBranch || shown.outcome))) &&
             card(
               "produced-card",
               "produced",
@@ -2277,6 +4370,15 @@ export const register: Register = (on, options) => {
                     />
                   </Box>
                 )}
+                {extraPrs.map((r, i) => (
+                  <Box key={`extra-pr-${i}`} gap={1}>
+                    {pill("PR", "blue")}
+                    <Link
+                      href={r.pullRequestUrl as string}
+                      label={`Pull request${r.pullRequestNumber ? ` #${r.pullRequestNumber}` : ""} in ${r.repository}`}
+                    />
+                  </Box>
+                ))}
                 {!shown?.pullRequestUrl && shown?.resultBranch && <Text>Pushed branch {shown.resultBranch}</Text>}
                 {shown?.outcome && !shown.pullRequestUrl && !shown.resultBranch && (
                   <Text dimColor>{shown.outcome.replaceAll("_", " ")}</Text>
@@ -2463,6 +4565,20 @@ export const register: Register = (on, options) => {
                           </Text>
                         </Box>
                       )}
+                      {extraRepositories(shown).length > 0 && (
+                        <Box flexDirection="column">
+                          <Text>Also in this run (check each out yourself):</Text>
+                          {extraRepositories(shown).map((r, i) => {
+                            const url = cloneUrlOfRepository(r);
+                            return (
+                              <Box key={`extra-repo-${i}`} flexDirection="column">
+                                <Text mono>{checkoutLine(r)}</Text>
+                                {url && <Text mono>{`git clone ${url}`}</Text>}
+                              </Box>
+                            );
+                          })}
+                        </Box>
+                      )}
                       {state?.phase === "done" && state.cleanup && (
                         <Box flexDirection="column">
                           <Text>When you are done with it, remove the import:</Text>
@@ -2518,7 +4634,6 @@ export const register: Register = (on, options) => {
 
     const active = rows.filter((row) => ACTIVE.has(row.status)).length;
     const spent = rows.reduce((sum, row) => sum + row.costUsd, 0);
-    const f = await read($, filter);
     const groupToggles = await read($, groupOpen);
     const currentView = await read($, view);
     const pickedSteps = await read($, picked);
@@ -2527,6 +4642,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column" gap={1}>
         {header}
+        {tabBar}
         {isDesktop ? (
           // One sentence, not tiles: the timeline below is the page's one bold element.
           <Text>
@@ -2588,34 +4704,7 @@ export const register: Register = (on, options) => {
             ))}
           </Box>
         )}
-        <Box gap={1}>
-          {Input && (
-            <Input
-              key="filter-text"
-              placeholder="Filter by agent, status, trigger, task, repository or branch"
-              value={f.text}
-              onInput={(value: string) => {
-                void update($, filter, (old): Filter => ({ ...old, text: value }));
-                void pane.searchOlder(value, false);
-              }}
-              onSubmit={(value: string) => {
-                void update($, filter, (old): Filter => ({ ...old, text: value }));
-                void pane.searchOlder(value, false);
-              }}
-            />
-          )}
-          {isFiltered && (
-            <Button
-              key="clear-filter"
-              label={e.surface === "desktop" ? "Clear" : "Clear (l)"}
-              {...(e.surface === "desktop" ? {} : { hotkey: "l" })}
-              onPress={() => {
-                void update($, filter, (): Filter => ({ status: "all", text: "" }));
-                void pane.searchOlder("", false);
-              }}
-            />
-          )}
-        </Box>
+        {filterBox("Filter by agent, status, trigger, task, repository or branch", isFiltered)}
         {isFiltered && (
           <Text dimColor>
             {shown.length} of {rows.length} shown

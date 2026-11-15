@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { MCP_TOKEN_ENV } from "../../coding/mcp-token.js";
 import type { CodingProvider } from "../../coding/provider.js";
+import { jobRepositoriesValid, REPOSITORY_MOUNT_ROOT } from "./storage-init.js";
 import type { JobSpec } from "./types.js";
 
 export const CODING_WORKER_UID = 10001;
@@ -246,6 +247,8 @@ function validateSpec(spec: JobSpec): void {
     // share the network keeper's namespace: Codex's worker, and Claude Code's tool runner.
     if (spec.services.length === 0) throw isolationError();
   }
+  // Names, access and count only; the launcher checks each hostPath against its workspace root.
+  if (!jobRepositoriesValid(spec)) throw isolationError();
   assertFiniteRange(spec.limits.cpus, 0.1, 32);
   assertIntegerRange(spec.limits.memoryMb, 128, 65_536);
   assertIntegerRange(spec.limits.pids, 16, 4_096);
@@ -287,6 +290,23 @@ export function isolationNames(runId: string): DockerIsolationNames {
 
 function labels(runId: string): string[] {
   return ["--label", LABEL_MANAGED, "--label", LABEL_COMPONENT, "--label", `io.wardby.run-sha256=${runHash(runId)}`];
+}
+
+/** Each extra repository at /repos/<name>, from its own storage subpath; a read link read-only. */
+function repositoryMountArgs(spec: JobSpec, storageVolume: string): string[] {
+  return (spec.repositories ?? []).flatMap((r) => [
+    "--mount",
+    `type=volume,src=${storageVolume},dst=${REPOSITORY_MOUNT_ROOT}/${r.name},volume-subpath=repos/${r.name},volume-nocopy${r.access === "read" ? ",readonly" : ""}`,
+  ]);
+}
+
+/** The mounts repositoryMountArgs asks for, as an attestation expects them. */
+function expectedRepositoryMounts(spec: JobSpec): Array<{ path: string; writable: boolean; subpath: string }> {
+  return (spec.repositories ?? []).map((r) => ({
+    path: `${REPOSITORY_MOUNT_ROOT}/${r.name}`,
+    writable: r.access === "write",
+    subpath: `repos/${r.name}`,
+  }));
 }
 
 /** The fixed isolation labels every run object carries (docker-services.ts builds with them). */
@@ -530,6 +550,7 @@ export function buildWorkerCreateArgs(spec: JobSpec, proxyPort = CODING_PROXY_PO
     `/home/wardby:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.workspace},volume-subpath=workspace,volume-nocopy`,
+    ...repositoryMountArgs(spec, names.storageVolume),
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.input},volume-subpath=input,volume-nocopy,readonly`,
     "--mount",
@@ -717,6 +738,7 @@ export function buildClaudeToolRunnerCreateArgs(spec: JobSpec): string[] {
     `/home/wardby:rw,noexec,nosuid,nodev,size=${scratchMb}m,uid=${CODING_WORKER_UID},gid=${CODING_WORKER_GID},mode=0700`,
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.workspace},volume-subpath=workspace,volume-nocopy`,
+    ...repositoryMountArgs(spec, names.storageVolume),
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.tool},volume-subpath=tool,volume-nocopy`,
     // By name only: the value (claude-tool-setup.ts) is in the docker CLI's environment, never argv.
@@ -954,11 +976,17 @@ export function assertProxyContainerInspection(container: DockerContainerInspect
   }
 }
 
-function assertExactWorkerMounts(container: DockerContainerInspection, names: DockerIsolationNames): void {
+function assertExactWorkerMounts(
+  container: DockerContainerInspection,
+  names: DockerIsolationNames,
+  spec: JobSpec,
+): void {
+  const repositories = expectedRepositoryMounts(spec);
   const expected = new Map<string, boolean>([
     [WORKER_PATHS.workspace, true],
     [WORKER_PATHS.input, false],
     [WORKER_PATHS.output, true],
+    ...repositories.map((mount): [string, boolean] => [mount.path, mount.writable]),
   ]);
   const mounts = container.Mounts ?? [];
   if (mounts.length !== expected.size) throw isolationError();
@@ -977,6 +1005,10 @@ function assertExactWorkerMounts(container: DockerContainerInspection, names: Do
     [WORKER_PATHS.workspace, { readOnly: false, subpath: "workspace" }],
     [WORKER_PATHS.input, { readOnly: true, subpath: "input" }],
     [WORKER_PATHS.output, { readOnly: false, subpath: "output" }],
+    ...repositories.map((mount): [string, { readOnly: boolean; subpath: string }] => [
+      mount.path,
+      { readOnly: !mount.writable, subpath: mount.subpath },
+    ]),
   ]);
   if (requested.length !== expectedRequested.size) throw isolationError();
   for (const mount of requested) {
@@ -1049,7 +1081,7 @@ export function assertWorkerContainerInspection(
   }
   const tmpfs = host.Tmpfs ?? {};
   if (!tmpfs["/tmp"]?.includes("noexec") || !tmpfs["/home/wardby"]?.includes("noexec")) throw isolationError();
-  assertExactWorkerMounts(container, names);
+  assertExactWorkerMounts(container, names, spec);
 }
 
 function assertExactMountSet(
@@ -1168,6 +1200,7 @@ export function assertClaudeToolRunnerContainerInspection(
   if (!workerNetworkAttested(container, spec, networkKeeperId)) throw isolationError();
   assertExactMountSet(container, names, [
     { path: WORKER_PATHS.workspace, writable: true, subpath: "workspace" },
+    ...expectedRepositoryMounts(spec),
     { path: WORKER_PATHS.tool, writable: true, subpath: "tool" },
   ]);
 }

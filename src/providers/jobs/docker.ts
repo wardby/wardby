@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { normalizeCollectExclusions, type CollectExclusions } from "../../coding/collect-exclude.js";
 import { pruneCollectExcluded } from "./collect-prune.js";
+import { parseWorkerDiagnosticLine, type WorkerDiagnostic } from "./worker-diagnostic.js";
 import { spawn } from "node:child_process";
 import {
   lstat,
@@ -25,8 +26,6 @@ import {
   redactAndTruncate,
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
-  MAX_CODING_OUTPUT_ISSUES,
-  SAFE_CODING_OUTPUT_ISSUE,
 } from "../../coding/protocol.js";
 import {
   assertDockerHostSupportsIsolation,
@@ -43,6 +42,7 @@ import {
   dockerSupportsServicesFor,
   type DockerContainerInspection,
   type DockerHostInfo,
+  WORKER_PATHS,
 } from "./docker-isolation.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
@@ -60,8 +60,18 @@ import {
   type ServiceStateReporter,
   type ServiceStateUpdate,
 } from "./service-state.js";
-import type { JobHandle, JobResult, JobSpec, JobStatus, WorkspaceJobLauncher } from "./types.js";
-import { replaceDirectoryFromStaging } from "./workspace-swap.js";
+import { expectedRepositoryHostPath, repositoryStorageDirectories, storageInitScript } from "./storage-init.js";
+import type {
+  JobHandle,
+  JobRepositoryMount,
+  JobResult,
+  JobSpec,
+  JobStatus,
+  MaterializedWorkspace,
+  MaterializeWorkspaceOptions,
+  WorkspaceJobLauncher,
+} from "./types.js";
+import { replaceDirectoryFromStaging, takeResultBundle } from "./workspace-swap.js";
 
 const BACKEND = "docker";
 const STATE_SCHEMA_VERSION = 1;
@@ -77,37 +87,8 @@ export const SERVICE_IMAGE_PULL_TIMEOUT_MS = 300_000;
 export const DEFAULT_SERVICE_READY_TIMEOUT_MS = 120_000;
 const MAX_SERVICE_PROBE_OUTPUT_BYTES = 64 * 1024;
 const TERMINAL_PHASES = new Set<DockerJobRecord["phase"]>(["succeeded", "failed", "stopped", "lost", "removed"]);
-export const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|wardby_[a-z_]+)$/;
-
-export interface WorkerDiagnostic {
-  diagnostic: string;
-  diagnosticIssues?: string[];
-}
-
-/**
- * Worker output is untrusted: recognizes only the fixed `{"error": code}` line,
- * plus an optional `issues` list whose every entry must pass the shared pattern.
- * A list with any entry that does not is dropped whole rather than filtered, so
- * a malformed worker cannot smuggle a partial value through.
- */
-export function parseWorkerDiagnosticLine(line: string): WorkerDiagnostic | undefined {
-  let value: { error?: unknown; issues?: unknown } | null;
-  try {
-    value = JSON.parse(line) as { error?: unknown; issues?: unknown } | null;
-  } catch {
-    return undefined;
-  }
-  if (typeof value?.error !== "string" || !SAFE_WORKER_DIAGNOSTIC.test(value.error)) return undefined;
-  const issues = value.issues;
-  const safeIssues =
-    Array.isArray(issues) &&
-    issues.length > 0 &&
-    issues.length <= MAX_CODING_OUTPUT_ISSUES &&
-    issues.every((issue) => typeof issue === "string" && SAFE_CODING_OUTPUT_ISSUE.test(issue))
-      ? (issues as string[])
-      : undefined;
-  return { diagnostic: value.error, ...(safeIssues ? { diagnosticIssues: safeIssues } : {}) };
-}
+// Shared with the Kubernetes and Substrate launchers (worker-diagnostic.ts); re-exported for existing importers.
+export { parseWorkerDiagnosticLine, SAFE_WORKER_DIAGNOSTIC, type WorkerDiagnostic } from "./worker-diagnostic.js";
 const dockerLog = logger.child({ module: "docker-jobs" });
 export interface DockerCommandOptions {
   env?: Record<string, string>;
@@ -256,13 +237,18 @@ export class NodeDockerCommandRunner implements DockerCommandRunner {
 export interface DockerArtifactTransfer {
   seedDirectory(sourceDirectory: string, container: string, destination: string): Promise<void>;
   seedInput(sourceFile: string, container: string): Promise<void>;
+  /**
+   * Copies `source` from the keeper into `destination`. With `gitHistory` (#536), the root `.git`'s
+   * result bundle is taken to `gitHistory.bundleDestination` and the root `.git` dropped before validation.
+   */
   materializeDirectory(
     container: string,
     source: string,
     destination: string,
     maxBytes: number,
     exclusions: CollectExclusions,
-  ): Promise<void>;
+    gitHistory?: MaterializeWorkspaceOptions["gitHistory"],
+  ): Promise<MaterializedWorkspace>;
 }
 
 export function dockerTransferEnvironment(path: string): NodeJS.ProcessEnv {
@@ -386,22 +372,33 @@ export class NodeDockerArtifactTransfer implements DockerArtifactTransfer {
     destination: string,
     maxBytes: number,
     exclusions: CollectExclusions,
-  ): Promise<void> {
-    await replaceDirectoryFromStaging(
-      destination,
-      maxBytes,
-      "docker_workspace_destination_invalid",
-      async (staging) => {
-        await new NodeDockerCommandRunner({ dockerBinary: this.dockerBinary, homeDir: "/tmp", path: this.path }).run([
-          "container",
-          "cp",
-          `${container}:${source}/.`,
-          staging,
-        ]);
-        // Before replaceDirectoryFromStaging validates: excluded folders never count.
-        await pruneCollectExcluded(staging, exclusions);
-      },
-    );
+    gitHistory?: MaterializeWorkspaceOptions["gitHistory"],
+  ): Promise<MaterializedWorkspace> {
+    let bundle = false;
+    try {
+      await replaceDirectoryFromStaging(
+        destination,
+        maxBytes,
+        "docker_workspace_destination_invalid",
+        async (staging) => {
+          await new NodeDockerCommandRunner({ dockerBinary: this.dockerBinary, homeDir: "/tmp", path: this.path }).run([
+            "container",
+            "cp",
+            `${container}:${source}/.`,
+            staging,
+          ]);
+          // A history run's root .git leaves the copy here, its bundle kept; validation then never sees it.
+          if (gitHistory) bundle = await takeResultBundle(staging, gitHistory);
+          // Before replaceDirectoryFromStaging validates: excluded folders never count.
+          await pruneCollectExcluded(staging, exclusions);
+        },
+      );
+    } catch (error) {
+      // A workspace that was not collected leaves no bundle behind either.
+      if (bundle && gitHistory) await rm(gitHistory.bundleDestination, { force: true });
+      throw error;
+    }
+    return { bundle };
   }
 }
 
@@ -494,9 +491,11 @@ function hash(value: string): string {
 }
 
 function stableSpecHash(spec: JobSpec): string {
+  // agentId and warm are metadata (see JobSpec), never part of the job's identity.
+  const { agentId: _agentId, warm: _warm, ...job } = spec;
   return hash(
     JSON.stringify({
-      ...spec,
+      ...job,
       labels: Object.fromEntries(Object.entries(spec.labels).sort(([left], [right]) => left.localeCompare(right))),
     }),
   );
@@ -731,25 +730,47 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     });
   }
 
-  async materializeWorkspace(handle: JobHandle, destination: string): Promise<void> {
+  async materializeWorkspace(
+    handle: JobHandle,
+    destination: string,
+    name?: string,
+    options: MaterializeWorkspaceOptions = {},
+  ): Promise<MaterializedWorkspace> {
     await this.ready;
     const record = await this.findRecord(handle);
     if (!record) throw new Error("job_not_found");
-    await this.withRun(record.runId, async () => {
+    return this.withRun(record.runId, async () => {
       const current = await this.requireRecord(record.runId);
       await this.refresh(current);
       if (current.phase !== "succeeded") throw new Error("job_not_succeeded");
-      const expected = resolve(this.workspaceRoot, current.runId, "workspace");
+      let expected: string;
+      let source: string;
+      if (name === undefined) {
+        expected = resolve(this.workspaceRoot, current.runId, "workspace");
+        source = "/run/wardby/storage/workspace";
+      } else {
+        // Only a writable extra of this spec is ever collected; a read one never leaves the keeper.
+        const entry = current.spec.repositories?.find((r) => r.name === name);
+        if (entry?.access !== "write") throw new Error("docker_workspace_destination_invalid");
+        expected = this.repositoryHostPath(current.runId, entry);
+        source = `${WORKER_PATHS.storage}/repos/${entry.name}`;
+      }
       if (resolve(destination) !== expected || !expected.startsWith(`${this.workspaceRoot}${sep}`)) {
         throw new Error("docker_workspace_destination_invalid");
       }
-      await this.transfer.materializeDirectory(
+      const diskBytes = current.spec.limits.diskMb * 1024 * 1024;
+      return this.transfer.materializeDirectory(
         this.keeperName(current),
-        "/run/wardby/storage/workspace",
+        source,
         expected,
-        current.spec.limits.diskMb * 1024 * 1024,
+        diskBytes,
         // Names are always the current built-in list; only the paths come from the spec.
         normalizeCollectExclusions(current.spec.collectExclude?.paths),
+        options.gitHistory && {
+          ...options.gitHistory,
+          // A bundle never exceeds the run's disk, whatever the configured limit.
+          maxBundleBytes: Math.min(options.gitHistory.maxBundleBytes, diskBytes),
+        },
       );
     });
   }
@@ -808,6 +829,8 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
 
   private async launchLocked(spec: JobSpec): Promise<JobHandle> {
     const plan = buildDockerIsolationPlan(spec, this.options.proxyContainer);
+    // Before any side effect: every extra's files must be in this run's own repos/<name>.
+    for (const r of spec.repositories ?? []) this.repositoryHostPath(spec.runId, r);
     const services = buildDockerServicePlan(spec);
     const specHash = stableSpecHash(spec);
     const existing = await this.readRecord(spec.runId);
@@ -1298,9 +1321,40 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   private async seedRun(record: DockerJobRecord, keeper: string): Promise<void> {
     const runRoot = resolve(this.workspaceRoot, record.runId);
     if (!runRoot.startsWith(`${this.workspaceRoot}/`)) throw new Error("docker_workspace_path_invalid");
+    // Checked again at seeding: a re-provisioned record's spec is the one stored at launch.
+    const repositories = (record.spec.repositories ?? []).map((r) => ({
+      name: r.name,
+      hostPath: this.repositoryHostPath(record.runId, r),
+    }));
     await this.transfer.seedDirectory(resolve(runRoot, "workspace"), keeper, "/run/wardby/storage/workspace");
-    await this.transfer.seedDirectory(resolve(runRoot, "git"), keeper, "/run/wardby/storage/git");
+    // The control plane's own git folder (<runRoot>/git) is never seeded: no worker or tool-runner
+    // mount reads the keeper's storage/git, and Kubernetes never seeded it either. A history run's
+    // worker gets its repository as <workspace>/.git, prepared by the control plane (#536).
+    if (repositories.length > 0) {
+      // The keeper creates only its fixed folders; the extras' mount sources are made here, owned by the run uid.
+      await this.run([
+        "container",
+        "exec",
+        keeper,
+        "node",
+        "-e",
+        storageInitScript(WORKER_PATHS.storage, repositoryStorageDirectories(record.spec)),
+      ]);
+      for (const r of repositories) {
+        await this.transfer.seedDirectory(r.hostPath, keeper, `${WORKER_PATHS.storage}/repos/${r.name}`);
+      }
+    }
     await this.transfer.seedInput(record.spec.inputArtifact, keeper);
+  }
+
+  /**
+   * An extra repository's host path from the spec (the VCS's prepared workspace), refused unless it is
+   * this run's own repos/<name>/workspace under the workspace root.
+   */
+  private repositoryHostPath(runId: string, entry: JobRepositoryMount): string {
+    const expected = expectedRepositoryHostPath(this.workspaceRoot, runId, entry.name);
+    if (!expected || resolve(entry.hostPath) !== expected) throw new Error("docker_workspace_path_invalid");
+    return expected;
   }
 
   async readTranscript(handle: JobHandle, maxBytes: number): Promise<string | undefined> {

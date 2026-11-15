@@ -55,6 +55,20 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
     }),
   } as unknown as CodeReviewHost;
   const deps = { db, hosts: { github: host } };
+  /** A stored result of a run that opened pull request `prNumber` in `repo`. */
+  const opened = (repo: string, prNumber: number) => ({
+    schemaVersion: 1,
+    outcome: "pull_request_opened",
+    repository: repo,
+    baseRef: "main",
+    headRef: "wardby/run-x",
+    commitSha: "a".repeat(40),
+    pullRequestUrl: `https://github.com/${repo}/pull/${prNumber}`,
+    pullRequestNumber: prNumber,
+    summary: "Did the work.",
+    tests: [],
+    usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+  });
   const markedReadyAt = async () =>
     (await db.codingRun.findUniqueOrThrow({ where: { runId: id("root") }, select: { markedReadyAt: true } }))
       .markedReadyAt;
@@ -69,6 +83,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
         agentId: builder,
         provider: "github",
         repository,
+        name: `github:${repository}`,
         access: "write",
         markReadyWhenPassing: true,
         authorizedVia: "host_permission",
@@ -79,6 +94,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
         agentId: reviewer,
         provider: "github",
         repository,
+        name: `github:${repository}`,
         access: "write",
         triggers: ["pull_request"],
         checkName: `wardby review ${s8}`,
@@ -94,6 +110,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
           agentId: a,
           provider: "github",
           repository,
+          name: `github:${repository}`,
           access: "write",
           triggers: ["mention", "review_fix"],
           markReadyWhenPassing: true,
@@ -114,12 +131,7 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
           timeoutSec: 900,
           protectedPaths: [],
           budgetReservedUsd: 1,
-          result: {
-            outcome: "pull_request_opened",
-            repository,
-            pullRequestNumber: prNumber,
-            pullRequestUrl: `https://github.com/${repository}/pull/${prNumber}`,
-          },
+          result: opened(repository, prNumber),
         },
       });
     await db.run.create({ data: { id: id("root"), agentId: builder, status: "succeeded" } });
@@ -197,5 +209,148 @@ describe.skipIf(!process.env.DATABASE_URL)("mark ready when passing (database)",
       select: { markedReadyAt: true },
     });
     expect(row.markedReadyAt).toBeNull();
+  });
+});
+
+describe.skipIf(!process.env.DATABASE_URL)("mark ready: an extra repository's pull request (database)", () => {
+  const db = createPrismaClient();
+  const suffix = randomUUID();
+  const s8 = suffix.slice(0, 8);
+  const id = (name: string) => `markready-x-${name}-${suffix}`;
+  const owner = id("owner");
+  const builder = id("builder");
+  const reviewer = id("reviewer");
+  const fork = `your-org/fork-${s8}`;
+  const tools = `your-org/tools-${s8}`;
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const result = (repo: string, prNumber: number) => ({
+    schemaVersion: 1,
+    outcome: "pull_request_opened",
+    repository: repo,
+    baseRef: "main",
+    headRef: "wardby/run-x",
+    commitSha: "a".repeat(40),
+    pullRequestUrl: `https://github.com/${repo}/pull/${prNumber}`,
+    pullRequestNumber: prNumber,
+    summary: "Did the work.",
+    tests: [],
+    usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+  });
+  const host = {
+    provider: "github",
+    // The tools pull request's marker names the continuation that opened it.
+    pullRequestOrigin: vi.fn(async () => ({
+      headSha: SHA,
+      isFork: false,
+      state: "open",
+      labels: [],
+      draft: true,
+      markerRunId: id("cont"),
+    })),
+    readOwnChecks: vi.fn(
+      async () => new Map([[`wardby review ${s8}`, { status: "completed", conclusion: "success" }]]),
+    ),
+    readCi: vi.fn(async () => ({
+      headSha: SHA,
+      state: "passing",
+      checks: [],
+      truncated: false,
+      statusesUnavailable: false,
+    })),
+    markReadyForReview: vi.fn(async () => "marked" as const),
+  } as unknown as CodeReviewHost;
+  const deps = { db, hosts: { github: host } };
+
+  beforeAll(async () => {
+    await db.principal.create({ data: { id: owner, subject: owner } });
+    for (const a of [builder, reviewer]) {
+      await db.agent.create({ data: { id: a, name: a, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner } });
+    }
+    for (const repo of [fork, tools]) {
+      await db.agentRepository.create({
+        data: {
+          agentId: builder,
+          provider: "github",
+          repository: repo,
+          name: `github:${repo}`,
+          access: "write",
+          markReadyWhenPassing: true,
+          authorizedVia: "host_permission",
+        },
+      });
+      await db.agentRepository.create({
+        data: {
+          agentId: reviewer,
+          provider: "github",
+          repository: repo,
+          name: `github:${repo}`,
+          access: "write",
+          triggers: ["pull_request"],
+          checkName: `wardby review ${s8}`,
+          authorizedVia: "host_permission",
+        },
+      });
+    }
+    // root: default PR 7 in the fork; its tools row opened nothing. cont: opened tools PR 3.
+    for (const [runId, rootCodingRunId] of [
+      [id("root"), null],
+      [id("cont"), id("root")],
+    ] as const) {
+      await db.run.create({ data: { id: runId, agentId: builder, status: "succeeded" } });
+      await db.codingRun.create({
+        data: {
+          runId,
+          task: "t",
+          repository: fork,
+          baseRef: "main",
+          headRef: `wardby/run-${id("root")}`,
+          provider: "codex",
+          model: "m",
+          timeoutSec: 900,
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+          result: result(fork, 7),
+          ...(rootCodingRunId ? { rootCodingRunId } : {}),
+        },
+      });
+      await db.codingRunRepository.create({
+        data: {
+          runId,
+          position: 1,
+          name: "tools",
+          access: "write",
+          provider: "github",
+          repository: tools,
+          baseRef: "main",
+          headRef: `wardby/run-${id("root")}`,
+          ...(rootCodingRunId ? { pullRequestNumber: 3, result: result(tools, 3) } : {}),
+        },
+      });
+    }
+  });
+
+  afterAll(async () => {
+    await db.run.deleteMany({ where: { agentId: { in: [builder, reviewer] } } });
+    await db.agentRepository.deleteMany({ where: { agentId: { in: [builder, reviewer] } } });
+    await db.agent.deleteMany({ where: { id: { in: [builder, reviewer] } } });
+    await db.principal.deleteMany({ where: { id: owner } });
+    await db.$disconnect();
+  });
+
+  it("claims the extra's pull request once, on the root's row of that name, leaving the default's claim alone", async () => {
+    expect(await maybeMarkReady(deps, tools, 3, "github")).toBe("marked");
+    expect(await maybeMarkReady(deps, tools, 3, "github")).toBe("skipped");
+    expect(host.markReadyForReview).toHaveBeenCalledTimes(1);
+    const rows = await db.codingRunRepository.findMany({
+      where: { name: "tools", runId: { in: [id("root"), id("cont")] } },
+      select: { runId: true, markedReadyAt: true },
+    });
+    expect(rows.find((r) => r.runId === id("root"))?.markedReadyAt).toBeInstanceOf(Date);
+    expect(rows.find((r) => r.runId === id("cont"))?.markedReadyAt).toBeNull();
+    const root = await db.codingRun.findUniqueOrThrow({
+      where: { runId: id("root") },
+      select: { markedReadyAt: true },
+    });
+    expect(root.markedReadyAt).toBeNull();
   });
 });

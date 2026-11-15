@@ -1,17 +1,21 @@
 import { access, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS, type CodingTaskInput } from "../coding/protocol.js";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
-import { workerTaskNote } from "../coding-worker/task-note.js";
+import { repositoriesTaskNote, workerTaskNote } from "../coding-worker/task-note.js";
+import { INJECTED_MCP_TOKEN_PLACEHOLDER } from "../coding-worker/mcp-config.js";
 import {
   CLAUDE_OUTPUT_JSON_SCHEMA,
+  claudeOutputJsonSchema,
   CLAUDE_WORKER_SECURITY_INSTRUCTIONS,
   runClaudeCodingWorker,
   type ClaudeQueryFactory,
   type ClaudeQueryOptions,
 } from "./driver.js";
+import { callGitCheck, callResultBundle } from "./tool-socket.js";
 
 const input: CodingTaskInput = {
   schemaVersion: 1,
@@ -24,6 +28,9 @@ const input: CodingTaskInput = {
   budgetUsd: 1,
   deadlineAt: "2026-09-07T13:00:00.000Z",
 };
+
+/** A deadline far enough away that the bundle step has all the time it wants. */
+const FAR_DEADLINE = new Date(Date.now() + 24 * 3_600_000).toISOString();
 
 describe("runClaudeCodingWorker", () => {
   it("pins the proxy, disables built-ins, and permits only the socket relay", async () => {
@@ -75,6 +82,52 @@ describe("runClaudeCodingWorker", () => {
     expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).toContain("wardby_tools MCP tool");
   });
 
+  it("changes the git rule, and says so in the task note, only on a run with git history", async () => {
+    const history = { repositories: [{ path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [] }] };
+    const run = async (task: CodingTaskInput) => {
+      let captured: ClaudeQueryOptions | undefined;
+      const createQuery: ClaudeQueryFactory = (options) => {
+        captured = options;
+        return (async function* () {
+          yield { type: "system" };
+          yield {
+            type: "result",
+            subtype: "success",
+            result: JSON.stringify({
+              schemaVersion: 1,
+              runId: input.runId,
+              outcome: "no_changes",
+              summary: "None.",
+              tests: [],
+            }),
+          };
+        })();
+      };
+      await runClaudeCodingWorker({
+        input: task,
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createQuery,
+        // A run with git history checks that the tool runner has git first.
+        gitCheck: async () => ({ ok: true }),
+      });
+      return captured!;
+    };
+    const off = await run(input);
+    expect(off.developerInstructions).toBe(CLAUDE_WORKER_SECURITY_INSTRUCTIONS);
+    expect(off.developerInstructions).toContain("Never modify Git metadata.");
+    const on = await run({ ...input, gitHistory: history });
+    expect(on.developerInstructions).not.toContain("Never modify Git metadata.");
+    expect(on.developerInstructions).toBe(
+      CLAUDE_WORKER_SECURITY_INSTRUCTIONS.replace(
+        "Never modify Git metadata.",
+        "Use git only to commit your work; never fetch, push, or change Git configuration or hooks.",
+      ),
+    );
+    expect(on.prompt).toContain(workerTaskNote(undefined, undefined, history));
+  });
+
   it("keeps the session and reports its id only on a session-resume run", async () => {
     const persist: boolean[] = [];
     const createQuery: ClaudeQueryFactory = (options) => {
@@ -106,6 +159,40 @@ describe("runClaudeCodingWorker", () => {
     expect(onSessionId).toHaveBeenCalledWith("s-1");
     await runClaudeCodingWorker({ ...base, input });
     expect(persist).toEqual([true, false]);
+  });
+
+  it("resumes the given session (warm Substrate round) and keeps it; absent, nothing is resumed", async () => {
+    const seen: { persist: boolean; resume: string | undefined }[] = [];
+    const createQuery: ClaudeQueryFactory = (options) => {
+      seen.push({ persist: options.persistSession, resume: options.resumeSessionId });
+      return (async function* () {
+        yield {
+          type: "system",
+          subtype: "init",
+          session_id: "s-1",
+          mcp_servers: [{ name: "wardby_tools", status: "connected" }],
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: JSON.stringify({
+            schemaVersion: 1,
+            runId: input.runId,
+            outcome: "no_changes",
+            summary: "-",
+            tests: [],
+          }),
+        };
+      })();
+    };
+    const base = { proxyBaseUrl: "http://proxy", capability: "cap", signal: new AbortController().signal, createQuery };
+    const id = "0b5f0d6c-4a43-4a1c-9b7e-2f6a1d2c3e4f";
+    await runClaudeCodingWorker({ ...base, input: { ...input, resumeSessionId: id } });
+    await runClaudeCodingWorker({ ...base, input });
+    expect(seen).toEqual([
+      { persist: true, resume: id },
+      { persist: false, resume: undefined },
+    ]);
   });
 
   it("uses the run's turn limit, or the worker default when the agent sets none", async () => {
@@ -603,6 +690,7 @@ describe("runClaudeCodingWorker with MCP tools", () => {
   async function capture(
     mcpToken: string | undefined,
     servers: Array<{ name: string; status: string }> = [{ name: "wardby_tools", status: "connected" }],
+    mcpTokenHeader?: "x-wardby-mcp-token",
   ) {
     let captured: ClaudeQueryOptions | undefined;
     const progress = vi.fn();
@@ -612,6 +700,7 @@ describe("runClaudeCodingWorker with MCP tools", () => {
       capability: "rrp_worker_capability",
       signal: new AbortController().signal,
       ...(mcpToken !== undefined ? { mcpToken } : {}),
+      ...(mcpTokenHeader !== undefined ? { mcpTokenHeader } : {}),
       onProgress: progress,
       createQuery: (options) => {
         captured = options;
@@ -628,6 +717,27 @@ describe("runClaudeCodingWorker with MCP tools", () => {
   it("gives the query the proxy's /mcp route and the token", async () => {
     const { config } = await capture(TOKEN);
     expect(config.mcp).toEqual({ url: "http://wardby-proxy:8787/mcp", token: TOKEN });
+  });
+
+  it("gives the query the MCP header mode when it is set", async () => {
+    const { config } = await capture(INJECTED_MCP_TOKEN_PLACEHOLDER, undefined, "x-wardby-mcp-token");
+    expect(config.mcp).toStrictEqual({
+      url: "http://wardby-proxy:8787/mcp",
+      token: INJECTED_MCP_TOKEN_PLACEHOLDER,
+      header: "x-wardby-mcp-token",
+    });
+  });
+
+  it.each([
+    ["no token", undefined],
+    ["a real token", TOKEN],
+  ])("fails with a fixed code on header mode with %s, naming no value", async (_label, token) => {
+    const error = await capture(token, undefined, "x-wardby-mcp-token").then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect((error as Error).message).toBe("worker_mcp_header_needs_placeholder");
+    expect(String(error)).not.toContain(TOKEN);
   });
 
   it("keeps the token out of every environment and every progress event", async () => {
@@ -784,5 +894,336 @@ describe("runClaudeCodingWorker dependency cache", () => {
       { type: "result", subtype: "error_max_budget_usd" },
     );
     expect(output).toMatchObject({ outcome: "budget_exhausted", dependencyCache: { projects: [{ result: "hit" }] } });
+  });
+});
+
+describe("several repositories (#537)", () => {
+  const repositories = [
+    {
+      name: "base",
+      path: "/repos/base",
+      access: "read" as const,
+      repository: "upstream-org/upstream",
+      commit: "a".repeat(40),
+    },
+    {
+      name: "tools",
+      path: "/repos/tools",
+      access: "write" as const,
+      repository: "your-org/tools",
+      commit: "b".repeat(40),
+    },
+  ];
+
+  async function run(taskInput: CodingTaskInput) {
+    let captured: ClaudeQueryOptions | undefined;
+    await runClaudeCodingWorker({
+      input: taskInput,
+      proxyBaseUrl: "http://wardby-proxy:8787/",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      createQuery: (options) => {
+        captured = options;
+        return (async function* () {
+          yield { type: "system" };
+        })();
+      },
+    }).catch(() => undefined);
+    return captured!;
+  }
+
+  it("offers an optional pullRequests and names the folders, only with repositories", async () => {
+    const multi = await run({ ...input, repositories });
+    const schema = multi.outputSchema as {
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+    expect(schema.properties.pullRequests).toMatchObject({ type: "array" });
+    expect(schema.required).not.toContain("pullRequests");
+    expect(multi.prompt).toContain(repositoriesTaskNote(repositories));
+
+    const single = await run(input);
+    expect(single.outputSchema).toBe(CLAUDE_OUTPUT_JSON_SCHEMA);
+    expect(claudeOutputJsonSchema(false)).toBe(CLAUDE_OUTPUT_JSON_SCHEMA);
+    expect(single.prompt).toBe(
+      `Complete this software-engineering task using the wardby_tools MCP tool.\n\nTask:\n${input.task}\n\n${workerTaskNote(undefined)}\n\nThe final JSON runId must be ${input.runId}.`,
+    );
+  });
+});
+
+describe("runClaudeCodingWorker git history (#536)", () => {
+  const BASE = "a".repeat(40);
+  const TIP = "b".repeat(40);
+  const history = {
+    repositories: [
+      { path: "/workspace", baseCommit: BASE, excludeCommits: [TIP] },
+      { path: "/repos/api", baseCommit: "c".repeat(40), excludeCommits: [] },
+    ],
+  };
+  const success = (outcome: "changes_ready" | "no_changes" | "budget_exhausted") => ({
+    type: "result",
+    subtype: "success",
+    result: JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome, summary: "Done.", tests: [] }),
+  });
+  const queryOf =
+    (messages: Array<Record<string, unknown>>, order: string[] = []): ClaudeQueryFactory =>
+    () => {
+      order.push("query");
+      return (async function* () {
+        yield { type: "system" };
+        for (const message of messages) yield message as never;
+      })();
+    };
+
+  /** A fake tool runner socket that answers the git tools, recording every call (as tool-socket.test.ts). */
+  async function fakeToolRunner(answer: (name: string, args: Record<string, unknown>) => unknown) {
+    const directory = await mkdtemp(join(tmpdir(), "wardby-claude-git-socket-"));
+    const socketPath = join(directory, "runner.sock");
+    const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+    const server = createServer((socket) => {
+      socket.on("error", () => undefined);
+      let pending = "";
+      socket.on("data", (chunk) => {
+        pending += chunk.toString("utf8");
+        let end;
+        while ((end = pending.indexOf("\n")) >= 0) {
+          const message = JSON.parse(pending.slice(0, end));
+          pending = pending.slice(end + 1);
+          if (message.id === undefined) continue;
+          const reply =
+            message.method === "initialize"
+              ? { result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "wardby_tools" } } }
+              : (() => {
+                  calls.push(message.params);
+                  return {
+                    result: {
+                      content: [
+                        { type: "text", text: JSON.stringify(answer(message.params.name, message.params.arguments)) },
+                      ],
+                    },
+                  };
+                })();
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, ...reply })}\n`);
+        }
+      });
+    });
+    await new Promise<void>((done) => server.listen(socketPath, done));
+    cleanups.push(async () => {
+      await new Promise((done) => server.close(done));
+      await rm(directory, { recursive: true, force: true });
+    });
+    return {
+      calls,
+      gitCheck: () => callGitCheck({ socketPath }),
+      resultBundle: (repository: (typeof history.repositories)[number], timeoutMs?: number) =>
+        callResultBundle(repository, { socketPath, ...(timeoutMs === undefined ? {} : { timeoutMs }) }),
+    };
+  }
+  const cleanups: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    for (const cleanup of cleanups.splice(0)) await cleanup();
+  });
+
+  it("checks git at start, then bundles every history repository through the socket for changes_ready", async () => {
+    const order: string[] = [];
+    const runner = await fakeToolRunner((name) => {
+      order.push(name);
+      return name === "wardby_git_check" ? { ok: true } : { ok: true, bundled: true };
+    });
+    const result = await runClaudeCodingWorker({
+      input: { ...input, deadlineAt: FAR_DEADLINE, gitHistory: history },
+      proxyBaseUrl: "http://proxy",
+      capability: "cap",
+      signal: new AbortController().signal,
+      createQuery: queryOf([success("changes_ready")], order),
+      gitCheck: runner.gitCheck,
+      resultBundle: runner.resultBundle,
+      operatorLog: () => undefined,
+    });
+    expect(result.outcome).toBe("changes_ready");
+    expect(order).toEqual(["wardby_git_check", "query", "wardby_result_bundle", "wardby_result_bundle"]);
+    expect(runner.calls).toEqual([
+      { name: "wardby_git_check", arguments: {} },
+      {
+        name: "wardby_result_bundle",
+        arguments: { path: "/workspace", base_commit: BASE, exclude_commits: [TIP], timeout_ms: 600_000 },
+      },
+      {
+        name: "wardby_result_bundle",
+        arguments: { path: "/repos/api", base_commit: "c".repeat(40), exclude_commits: [], timeout_ms: 600_000 },
+      },
+    ]);
+  });
+
+  it("bundles budget_exhausted output too: the agent's own, the SDK's budget stop and the proxy's refusal", async () => {
+    for (const messages of [
+      [success("budget_exhausted")],
+      [{ type: "result", subtype: "error_max_budget_usd" }],
+      [{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["wardby_budget_exhausted"] }],
+    ]) {
+      const runner = await fakeToolRunner((name) =>
+        name === "wardby_git_check" ? { ok: true } : { ok: true, bundled: false, reason: "no_new_commits" },
+      );
+      const result = await runClaudeCodingWorker({
+        input: { ...input, deadlineAt: FAR_DEADLINE, gitHistory: history },
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createQuery: queryOf(messages),
+        gitCheck: runner.gitCheck,
+        resultBundle: runner.resultBundle,
+        operatorLog: () => undefined,
+      });
+      expect(result.outcome).toBe("budget_exhausted");
+      expect(runner.calls.filter((call) => call.name === "wardby_result_bundle")).toHaveLength(2);
+    }
+  });
+
+  it("skips the bundle step, logging result_bundle_deadline, when the run's deadline is too close", async () => {
+    for (const deadlineAt of [
+      new Date(Date.now() - 1_000).toISOString(),
+      new Date(Date.now() + 60_000).toISOString(),
+    ]) {
+      const logs: Array<Record<string, string>> = [];
+      const runner = await fakeToolRunner(() => ({ ok: true, bundled: true }));
+      const result = await runClaudeCodingWorker({
+        input: { ...input, deadlineAt, gitHistory: history },
+        proxyBaseUrl: "http://proxy",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createQuery: queryOf([success("changes_ready")]),
+        gitCheck: runner.gitCheck,
+        resultBundle: runner.resultBundle,
+        operatorLog: (event) => logs.push(event),
+      });
+      expect(result.outcome).toBe("changes_ready");
+      expect(runner.calls.map((call) => call.name)).toEqual(["wardby_git_check"]);
+      expect(logs).toEqual([
+        { warning: "result_bundle_failed", path: "/workspace", code: "result_bundle_deadline" },
+        { warning: "result_bundle_failed", path: "/repos/api", code: "result_bundle_deadline" },
+      ]);
+    }
+  });
+
+  it("caps the socket call's timeout, and the tool's own, at the time left before the deadline, less the margin", async () => {
+    const seen: number[] = [];
+    const runner = await fakeToolRunner(() => ({ ok: true, bundled: true }));
+    await runClaudeCodingWorker({
+      input: { ...input, deadlineAt: new Date(Date.now() + 5 * 60_000).toISOString(), gitHistory: history },
+      proxyBaseUrl: "http://proxy",
+      capability: "cap",
+      signal: new AbortController().signal,
+      createQuery: queryOf([success("changes_ready")]),
+      gitCheck: runner.gitCheck,
+      resultBundle: async (repository, timeoutMs) => {
+        seen.push(timeoutMs);
+        return runner.resultBundle(repository, timeoutMs);
+      },
+      operatorLog: () => undefined,
+    });
+    expect(seen).toHaveLength(2);
+    for (const timeoutMs of seen) {
+      expect(timeoutMs).toBeLessThanOrEqual(3 * 60_000);
+      expect(timeoutMs).toBeGreaterThan(3 * 60_000 - 30_000);
+    }
+    // The tool runner is told to stop a little sooner than the socket gives up.
+    const bundleCalls = runner.calls.filter((call) => call.name === "wardby_result_bundle");
+    for (const [index, call] of bundleCalls.entries()) {
+      const toolMs = call.arguments.timeout_ms as number;
+      expect(toolMs).toBeLessThan(seen[index]);
+      expect(toolMs).toBeGreaterThan(seen[index] - 10_000);
+    }
+  });
+
+  it("makes no bundle for no_changes, and calls neither tool when history is off", async () => {
+    const runner = await fakeToolRunner(() => ({ ok: true, bundled: true }));
+    await runClaudeCodingWorker({
+      input: { ...input, deadlineAt: FAR_DEADLINE, gitHistory: history },
+      proxyBaseUrl: "http://proxy",
+      capability: "cap",
+      signal: new AbortController().signal,
+      createQuery: queryOf([success("no_changes")]),
+      gitCheck: runner.gitCheck,
+      resultBundle: runner.resultBundle,
+    });
+    expect(runner.calls.map((call) => call.name)).toEqual(["wardby_git_check"]);
+    const off = await fakeToolRunner(() => ({ ok: true, bundled: true }));
+    const result = await runClaudeCodingWorker({
+      input,
+      proxyBaseUrl: "http://proxy",
+      capability: "cap",
+      signal: new AbortController().signal,
+      createQuery: queryOf([success("changes_ready")]),
+      gitCheck: off.gitCheck,
+      resultBundle: off.resultBundle,
+    });
+    expect(result.outcome).toBe("changes_ready");
+    expect(off.calls).toEqual([]);
+  });
+
+  it("fails with worker_git_unavailable, before the agent starts, when the tool runner has no git", async () => {
+    for (const make of [
+      async () => (await fakeToolRunner(() => ({ ok: false, reason: "git_unavailable" }))).gitCheck,
+      // An older tool runner without the tool, or an unreachable socket.
+      async () => async () => {
+        throw new Error("git_tool_unavailable");
+      },
+      async () => () => callGitCheck({ socketPath: join(tmpdir(), "wardby-no-such-socket.sock") }),
+      async () => undefined,
+    ]) {
+      const order: string[] = [];
+      const gitCheck = await make();
+      await expect(
+        runClaudeCodingWorker({
+          input: { ...input, deadlineAt: FAR_DEADLINE, gitHistory: history },
+          proxyBaseUrl: "http://proxy",
+          capability: "cap",
+          signal: new AbortController().signal,
+          createQuery: queryOf([success("changes_ready")], order),
+          ...(gitCheck ? { gitCheck } : {}),
+        }),
+      ).rejects.toThrow(/^worker_git_unavailable$/);
+      expect(order).toEqual([]);
+    }
+  });
+
+  it("never fails the run on a bundle failure: logs a fixed code and keeps going", async () => {
+    const logs: Array<Record<string, string>> = [];
+    const runner = await fakeToolRunner((name, args) => {
+      if (name === "wardby_git_check") return { ok: true };
+      return args.path === "/workspace"
+        ? { ok: false, reason: "result_bundle_git_failed" }
+        : { ok: false, reason: "ghp_FAKESECRET0123456789abcdefABCDEF012345" };
+    });
+    const result = await runClaudeCodingWorker({
+      input: {
+        ...input,
+        deadlineAt: FAR_DEADLINE,
+        gitHistory: {
+          repositories: [
+            ...history.repositories,
+            { path: "/etc/ghp_FAKESECRET0123456789abcdefABCDEF012345", baseCommit: BASE, excludeCommits: [] },
+          ],
+        },
+      },
+      proxyBaseUrl: "http://proxy",
+      capability: "cap",
+      signal: new AbortController().signal,
+      createQuery: queryOf([success("changes_ready")]),
+      gitCheck: runner.gitCheck,
+      resultBundle: async (repository) => {
+        if (repository.path.startsWith("/etc")) throw new Error("git_tool_failed");
+        return runner.resultBundle(repository);
+      },
+      operatorLog: (event) => logs.push(event),
+    });
+    expect(result.outcome).toBe("changes_ready");
+    expect(logs).toEqual([
+      { warning: "result_bundle_failed", path: "/workspace", code: "result_bundle_git_failed" },
+      { warning: "result_bundle_failed", path: "/repos/api", code: "result_bundle_failed" },
+      { warning: "result_bundle_failed", code: "git_tool_failed" },
+    ]);
+    expect(JSON.stringify(logs)).not.toContain("FAKESECRET");
+    expect(JSON.stringify(result)).not.toContain("FAKESECRET");
   });
 });

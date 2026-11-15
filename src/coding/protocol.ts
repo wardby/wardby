@@ -287,6 +287,14 @@ function isGitRef(value: string): boolean {
 /** Repository identity prefix for a git folder on the wardby host: `local:/abs/path`. */
 export const LOCAL_REPO_PREFIX = "local:";
 
+/** A coding link's folder under /repos/ (and its name in the run's input and output). */
+export const CODING_REPOSITORY_NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+/** Names the run's default repository (/workspace) in a driver's pullRequests; never a link name. */
+export const RESERVED_REPOSITORY_NAME = "workspace";
+export function isCodingRepositoryName(value: string): boolean {
+  return CODING_REPOSITORY_NAME.test(value) && value !== RESERVED_REPOSITORY_NAME;
+}
+
 export function isLocalRepository(value: string): boolean {
   return value.startsWith(LOCAL_REPO_PREFIX);
 }
@@ -335,6 +343,18 @@ const repositorySchema = z
   .transform(normalizeCodingRepository);
 
 export const CodingBaseRefSchema = z.string().refine(isGitRef, "must be a safe branch ref").transform(normalizeGitRef);
+
+export const COMMIT_SHA = /^[0-9a-f]{40}$/;
+/** Extras one run's input and JobSpec can carry; CODING_MAX_RUN_REPOSITORIES (default plus extras) is capped at this + 1. */
+export const MAX_RUN_REPOSITORIES_IN_INPUT = 16;
+/** A read link's ref: a branch, a tag, or a full commit SHA (stored lower-case). */
+export const CodingReadRefSchema = z
+  .string()
+  .refine(
+    (value) => COMMIT_SHA.test(value.toLowerCase()) || isGitRef(value),
+    "must be a branch, a tag or a 40-hex commit SHA",
+  )
+  .transform((value) => (COMMIT_SHA.test(value.toLowerCase()) ? value.toLowerCase() : normalizeGitRef(value)));
 
 export const CodingTaskOverrideSchema = boundedText(MAX_CODING_TASK_BYTES);
 
@@ -524,6 +544,43 @@ export const ClaudeContextFileSchema = z
   .strict();
 export type ClaudeContextFile = z.infer<typeof ClaudeContextFileSchema>;
 
+export const RunRepositoryInputSchema = z
+  .object({
+    name: z.string().refine(isCodingRepositoryName, "must be a repository folder name"),
+    path: z.string(),
+    access: z.enum(["read", "write"]),
+    repository: repositorySchema,
+    commit: z.string().regex(COMMIT_SHA),
+  })
+  .strict()
+  .refine((value) => value.path === `/repos/${value.name}`, { path: ["path"], message: "must be /repos/<name>" });
+export type RunRepositoryInput = z.infer<typeof RunRepositoryInputSchema>;
+
+/**
+ * Git history in the workspace (CodingAgentProfile.gitHistory, #536): each repository that keeps its
+ * `.git`, the commit it was prepared at, and the remote tips whose commits are already in the control
+ * plane (a result bundle excludes them). Written only on a run with history, so every other input is
+ * unchanged for workers that predate it (their strict schema would refuse the key).
+ */
+export const GitHistoryInputSchema = z
+  .object({
+    repositories: z
+      .array(
+        z
+          .object({
+            /** "/workspace" or "/repos/<name>". */
+            path: z.string(),
+            baseCommit: z.string().regex(COMMIT_SHA),
+            excludeCommits: z.array(z.string().regex(COMMIT_SHA)).max(17),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(17),
+  })
+  .strict();
+export type GitHistoryInput = z.infer<typeof GitHistoryInputSchema>;
+
 export const CodingTaskInputSchema = z
   .object({
     schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
@@ -564,6 +621,15 @@ export const CodingTaskInputSchema = z
      * true, so other runs' input is unchanged for workers that predate it.
      */
     sessionResume: z.literal(true).optional(),
+    /**
+     * Claude Code only, never written by the control plane: the Substrate agent bridge sets it on a warm
+     * follow-up round (SUBSTRATE_WARM_ROUNDS) to the previous round's session id, so the worker resumes
+     * that session. Absent on every other input, which is unchanged.
+     */
+    resumeSessionId: z
+      .string()
+      .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+      .optional(),
     /**
      * The run's workspace volume size in MiB (the job's limits.diskMb), so the dependency cache can
      * stay inside it: on Kubernetes the emptyDir sizeLimit is invisible to statfs. Written only with
@@ -618,9 +684,17 @@ export const CodingTaskInputSchema = z
       .object({ files: z.array(ClaudeContextFileSchema).min(1).max(CLAUDE_CONTEXT_LIMITS.maxFiles) })
       .strict()
       .optional(),
+    /** Extra repositories (#537), mounted at /repos/<name>; written only when the run has some. */
+    repositories: z.array(RunRepositoryInputSchema).min(1).max(MAX_RUN_REPOSITORIES_IN_INPUT).optional(),
+    /** Git history (#536); written only when the run has it. */
+    gitHistory: GitHistoryInputSchema.optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
+    const repositoryNames = (value.repositories ?? []).map((entry) => entry.name);
+    if (new Set(repositoryNames).size !== repositoryNames.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["repositories"], message: "must name each repository once" });
+    }
     const expectedHeadRunId = value.continuationOf?.runId ?? value.runId;
     if (value.headRef !== `wardby/run-${expectedHeadRunId}`) {
       ctx.addIssue({
@@ -651,6 +725,23 @@ export const CodingTaskInputSchema = z
     }
   });
 
+const optionalTag = z.preprocess(normalizeCodingTag, tagSchema) as unknown as OptionalTagSchema;
+
+/** Codex's strict mode lists every key as required, so null means "none" here too. */
+const nullable = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (v === null ? undefined : v), schema.optional());
+
+/** One pull request's note in a multi-repository run (#537); `workspace` names /workspace. */
+export const PullRequestNoteSchema = z
+  .object({
+    name: z.string().min(1).max(63),
+    title: optionalTag,
+    description: summaryText(),
+    mergeOrder: nullable(z.number().int().min(1).max(99)),
+  })
+  .strict();
+export type PullRequestNote = z.infer<typeof PullRequestNoteSchema>;
+
 const agentOutputFields = {
   schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
   runId: runIdSchema,
@@ -658,12 +749,29 @@ const agentOutputFields = {
   summary: summaryText(),
   tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
   // Model-written, so normalized rather than rejected; see normalizeCodingTag.
-  tag: z.preprocess(normalizeCodingTag, tagSchema) as unknown as OptionalTagSchema,
+  tag: optionalTag,
+  pullRequests: nullable(z.array(PullRequestNoteSchema).max(MAX_RUN_REPOSITORIES_IN_INPUT)),
 };
 
-function redactAgentOutput<T extends { summary: string; tests: { command: string }[]; tag?: string }>(value: T): T {
+function redactAgentOutput<
+  T extends {
+    summary: string;
+    tests: { command: string }[];
+    tag?: string;
+    pullRequests?: { title?: string; description: string }[];
+  },
+>(value: T): T {
   return {
     ...value,
+    ...(value.pullRequests !== undefined
+      ? {
+          pullRequests: value.pullRequests.map((pr) => ({
+            ...pr,
+            description: redactTokenShapedValues(pr.description),
+            ...(pr.title !== undefined ? { title: redactTokenShapedValues(pr.title) } : {}),
+          })),
+        }
+      : {}),
     summary: redactTokenShapedValues(value.summary),
     tests: value.tests.map((test) => ({ ...test, command: redactTokenShapedValues(test.command) })),
     ...(value.tag !== undefined ? { tag: redactTokenShapedValues(value.tag) } : {}),

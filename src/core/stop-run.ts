@@ -16,7 +16,8 @@
  * This module adds what a caller asks for on top: the run's in-flight delegated child runs are
  * stopped too (depth-first, so nothing keeps spending for a parent that stopped), who stopped it
  * and why is kept on the row (Run.stopRequestReason) and logged, and a run already finished is
- * returned unchanged.
+ * returned unchanged. With warm rounds, a coding run's stop also removes the sandboxes its agent
+ * retained for later rounds (Executor.removeRetainedRounds), finished or not: best effort.
  */
 import type { PrismaClient, RunStatus } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
@@ -33,7 +34,7 @@ export type StopRunDb = Pick<PrismaClient, "run">;
 
 export interface StopRunOptions {
   db: StopRunDb;
-  executor: Pick<Executor, "stop">;
+  executor: Pick<Executor, "stop" | "removeRetainedRounds">;
   runId: string;
   /** Who asked (a principal id), recorded with the reason. */
   stoppedBy: string;
@@ -61,9 +62,14 @@ export function stopRunReason(stoppedBy: string, reason?: string): string {
 
 export async function stopRun(options: StopRunOptions): Promise<StopRunResult> {
   const { db, runId } = options;
-  const row = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
+  const row = await db.run.findUnique({
+    where: { id: runId },
+    select: { status: true, agentId: true, agent: { select: { kind: true } } },
+  });
   if (!row) throw new Error(`Unknown run "${runId}".`);
   const previousStatus = row.status;
+  // The thread's retained round goes whether or not this run was still in flight.
+  if (row.agent?.kind === "coding") await removeRetainedRounds(options, row.agentId);
   if (!DRIVABLE.includes(previousStatus)) {
     return { runId, previousStatus, status: previousStatus, stopRequested: false, stoppedChildRunIds: [] };
   }
@@ -73,6 +79,18 @@ export async function stopRun(options: StopRunOptions): Promise<StopRunResult> {
   await stopOne(options, runId, reason, stoppedChildRunIds, 0, new Set());
   const after = await db.run.findUniqueOrThrow({ where: { id: runId }, select: { status: true } });
   return { runId, previousStatus, status: after.status, stopRequested: true, stoppedChildRunIds };
+}
+
+/** Never throws: a retained round left behind expires on its own. */
+async function removeRetainedRounds(options: StopRunOptions, agentId: string): Promise<void> {
+  try {
+    await options.executor.removeRetainedRounds?.(agentId);
+  } catch (err) {
+    stopLog.warn(
+      { runId: options.runId, errorName: err instanceof Error ? err.name : typeof err },
+      "could not remove retained rounds",
+    );
+  }
 }
 
 async function stopOne(

@@ -51,7 +51,7 @@ function withArticle(noun: string): string {
  * schema.prisma. Pinned against a real database in
  * core/prisma-adapter.database.test.ts.
  */
-function uniqueFields(meta: Record<string, unknown> | undefined, modelName: string | undefined): string[] {
+export function uniqueFields(meta: Record<string, unknown> | undefined, modelName: string | undefined): string[] {
   const target = meta?.target;
   if (Array.isArray(target) && target.every((t) => typeof t === "string")) return target;
   if (typeof target === "string") return [target];

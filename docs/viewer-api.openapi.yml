@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: wardby admin viewer API
-  version: 0.9.12
+  version: 0.9.14
   description: "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info, your documents and a live event stream. Response objects may gain new fields in later releases; clients should ignore unknown fields. See docs/viewer-api.md for the prose contract."
 servers:
   - url: https://{host}
@@ -1319,6 +1319,59 @@ components:
                       - image
                       - envNames
                     additionalProperties: false
+                repositories:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      access:
+                        type: string
+                        enum:
+                          - read
+                          - write
+                      asRemote:
+                        type: boolean
+                      repository:
+                        type: string
+                      requestedRef:
+                        type:
+                          - string
+                          - "null"
+                      resolvedSha:
+                        type:
+                          - string
+                          - "null"
+                      pullRequestNumber:
+                        anyOf:
+                          - type: integer
+                          - type: "null"
+                      pullRequestUrl:
+                        type:
+                          - string
+                          - "null"
+                      resultBranch:
+                        type:
+                          - string
+                          - "null"
+                      outcome:
+                        type:
+                          - string
+                          - "null"
+                    required:
+                      - name
+                      - access
+                      - asRemote
+                      - repository
+                      - requestedRef
+                      - resolvedSha
+                      - pullRequestNumber
+                      - pullRequestUrl
+                      - resultBranch
+                      - outcome
+                    additionalProperties: false
+                  description: The other repositories of a multi-repository coding run, in order (the default repository is `repository` above, with its pull request in `result`); empty for a single-repository run. Absent from servers older than the release that added it.
               required:
                 - provider
                 - repository
@@ -1327,6 +1380,7 @@ components:
                 - queuedAt
                 - failureCategory
                 - services
+                - repositories
               additionalProperties: false
             - type: "null"
       required:
@@ -1501,6 +1555,7 @@ components:
             - local
             - docker
             - kubernetes
+            - substrate
         kubernetes:
           anyOf:
             - type: object

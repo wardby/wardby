@@ -1,12 +1,12 @@
 import type { Prisma, PrismaClient, Run, RunTrigger, Task } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
-import { normalizeHostedRepository } from "../coding/code-host.js";
+import { codeProviderOf } from "../coding/code-host.js";
 import {
   CODING_PROTOCOL_VERSION,
   CodingTaskInputSchema,
   normalizeGitRef,
-  publicCodingRunResult,
   composeCodingTask,
+  publicCodingRunResult,
 } from "../coding/protocol.js";
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
 import { isPackageAuditActive } from "../coding/registry/audit-mode.js";
@@ -38,10 +38,27 @@ import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInp
 import { logger } from "./logger.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
 import {
+  resolveRunPullRequest,
+  rootPullRequests,
+  sameRepository,
+  type RunPullRequestTarget,
+} from "./run-pull-request.js";
+import {
   resolveCodingRepository,
   type CodingRepositoryReader,
   type CodingRepositoryTarget,
 } from "./coding-repository.js";
+import {
+  CODING_SET_LINK_FILTER,
+  planRepositorySet,
+  RepositoryRefUnreadableError,
+  RepositorySetRefusedError,
+  resolveRepositorySetRefs,
+  type PlannedRunRepository,
+  type ResolvedRunRepository,
+} from "./coding-repository-set.js";
+import { loadCodingRunRepositoryLimit } from "../config/providers.js";
+import { describeDenial, requiredLevel } from "./repo-access.js";
 import { CONTENDED_TX_MAX_WAIT_MS } from "./timing.js";
 import { dispatchRunStepsLevel } from "./run-steps/config.js";
 import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
@@ -55,6 +72,7 @@ export type DispatchDb = Pick<
   | "run"
   | "runHostCheck"
   | "codingRun"
+  | "codingRunRepository"
   | "task"
   | "webhook"
   | "budgetGroup"
@@ -71,6 +89,7 @@ export type DispatchTx = Pick<
   | "runHostStatus"
   | "runIssueStatus"
   | "codingRun"
+  | "codingRunRepository"
   | "codingService"
   | "task"
   | "webhook"
@@ -158,6 +177,8 @@ export interface DispatchRunOptions {
   taskOverride?: string;
   /** The repository for a coding run; must be on the agent's list. Default: codingProfile.repository. */
   codingRepository?: string;
+  /** The run's extra repositories by link name, replacing the agent's default set (#537). [] = the default repository only. */
+  codingRepositories?: string[];
   /** Refuse with repository_required when the agent has links and nothing names a repository. */
   requireExplicitRepository?: boolean;
   /**
@@ -384,17 +405,39 @@ interface CodingBranch {
   headRef?: string;
   continuationOf?: { runId: string };
   rootCodingRunId?: string;
+  /** A continuation's git history setting, copied from its root run like its repository rows (#536). */
+  gitHistory?: { depth: number | null; full: boolean };
   /** The pull request's effective mergeOrder (effectiveMergeOrder), inherited unless this dispatch sets its own. Undefined for a fresh branch. */
   mergeOrder?: number | null;
 }
 
-export type ContinuationRefusal = "unknown_run" | "other_repository" | "no_pull_request" | "other_owner";
+/**
+ * Why a continuation is refused. Dispatch itself gives all but other_agent_run and not_a_coding_run;
+ * a caller that names the run directly (trigger_agent's continuePriorRun, see checkContinuePriorRun
+ * in mcp/tools/trigger.ts) gives every code, before any run exists, and checks run_not_finished
+ * with the same isRunUnfinished rule. run_not_finished comes only from a dispatch that continues
+ * a run (trigger_agent, delegation), never from review-fix or mentions (see checkContinuation).
+ * Every code has a help article under help/errors/.
+ */
+export type ContinuationRefusal =
+  | "unknown_run"
+  | "other_repository"
+  | "no_pull_request"
+  | "no_pushed_branch"
+  | "other_owner"
+  | "other_agent_run"
+  | "not_a_coding_run"
+  | "run_not_finished";
 
 const CONTINUATION_REFUSALS: Readonly<Record<ContinuationRefusal, string>> = {
   unknown_run: "Cannot continue an unknown coding run.",
   other_repository: "Cannot continue a coding run from a different repository.",
   no_pull_request: "Cannot continue a coding run that never opened a pull request.",
+  no_pushed_branch: "Cannot continue a local-repository coding run that never pushed a branch.",
   other_owner: "Cannot continue a coding run opened by a different owner's agent.",
+  other_agent_run: "Cannot continue a run of a different agent; name a prior run of the agent you trigger.",
+  not_a_coding_run: "Cannot continue a run that has no coding run; it ended before its coding run was created.",
+  run_not_finished: "Cannot continue a coding run that has not finished; wait until it ends.",
 };
 
 /** A continuation refused because of the run it names. Its message is fixed text, safe to show the model. */
@@ -406,17 +449,26 @@ export class ContinuationRefusedError extends Error {
 }
 
 export type ContinuationCheck =
-  | { ok: true; root: { runId: string; baseRef: string; headRef: string; pullRequestNumber: number } }
+  | {
+      ok: true;
+      root: {
+        runId: string;
+        baseRef: string;
+        headRef: string;
+        /** The matched pull request's number: `repo`'s. */
+        pullRequestNumber: number;
+        repo: RunPullRequestTarget;
+      };
+    }
   | { ok: false; reason: ContinuationRefusal };
-
-/** Carries the root's opening agent's owner along with the row, for the same-owner check below. */
-const CONTINUATION_ROOT_INCLUDE = { run: { select: { agent: { select: { ownerId: true } } } } } as const;
 
 /**
  * Whether this deployment can continue coding run `runId` in `repository`: the
- * run (or its root) is in this database, in that repository, and opened a pull
- * request. A run id read from a pull request can name a run that another
- * deployment sharing the same App made, so check before relying on one.
+ * run (or its root) is in this database, `repository` is the root's default
+ * repository or one of its writable extras (#537 §4), and that repository's
+ * pull request was opened. A run id read from a pull request can name a run
+ * that another deployment sharing the same App made, so check before relying
+ * on one. See resolveRunPullRequest.
  *
  * `dispatchingOwnerId`, when given (even `null`), additionally fails closed
  * unless the root's opening agent has that exact owner: a sibling-hint or a
@@ -425,49 +477,38 @@ const CONTINUATION_ROOT_INCLUDE = { run: { select: { agent: { select: { ownerId:
  * let this dispatch push to a PR another owner's agent controls. `undefined`
  * skips the check for callers that only ask "does this deployment know this
  * run at all" (a user-facing refusal message, not a dispatch).
+ *
+ * `options.requireFinished` refuses (run_not_finished) a run that is still pending or running.
+ * Only a dispatch that actually continues the run sets it (continuationRoot: trigger_agent's and a
+ * delegation's continuePriorRun). Review-fix and mentions call this only to validate the pull
+ * request's marker run, which may legitimately still be going: they wait (in_flight,
+ * root_in_flight) or decline (follow_up_running) on their own, so they leave it off.
  */
 export async function checkContinuation(
-  reader: Pick<DispatchTx, "codingRun">,
+  reader: Pick<DispatchTx, "codingRun" | "codingRunRepository">,
   runId: string,
   repository: string,
   dispatchingOwnerId?: string | null,
+  /**
+   * The pull request the caller holds (a mention's or a fix round's): its provider, and its number,
+   * which the matched repository's pull request must be, so an extra whose pull request was
+   * replaced matches its own row rather than the oldest row for that repository. The provider
+   * defaults to the repository id's.
+   */
+  pullRequest?: { provider?: string; number?: number },
+  options?: { requireFinished?: boolean },
 ): Promise<ContinuationCheck> {
-  const candidate = await reader.codingRun.findUnique({ where: { runId }, include: CONTINUATION_ROOT_INCLUDE });
-  if (!candidate) return { ok: false, reason: "unknown_run" };
-  const root = candidate.rootCodingRunId
-    ? await reader.codingRun.findUnique({
-        where: { runId: candidate.rootCodingRunId },
-        include: CONTINUATION_ROOT_INCLUDE,
-      })
-    : candidate;
-  if (!root) return { ok: false, reason: "unknown_run" };
-  if (normalizeHostedRepository(root.repository) !== normalizeHostedRepository(repository)) {
-    return { ok: false, reason: "other_repository" };
-  }
-  const rootResult = publicCodingRunResult(root.result);
-  if (
-    (rootResult?.outcome !== "pull_request_opened" && rootResult?.outcome !== "pull_request_updated") ||
-    rootResult.pullRequestNumber === undefined
-  ) {
-    return { ok: false, reason: "no_pull_request" };
-  }
-  if (dispatchingOwnerId !== undefined) {
-    const rootOwnerId = root.run?.agent?.ownerId ?? null;
-    // A null owner on either side is never treated as a match: an owner-less
-    // agent gets no continuation trust, fail closed either direction.
-    if (dispatchingOwnerId === null || rootOwnerId === null || dispatchingOwnerId !== rootOwnerId) {
-      return { ok: false, reason: "other_owner" };
-    }
-  }
-  return {
-    ok: true,
-    root: {
-      runId: root.runId,
-      baseRef: root.baseRef,
-      headRef: root.headRef,
-      pullRequestNumber: rootResult.pullRequestNumber,
-    },
-  };
+  const resolved = await resolveRunPullRequest(reader, {
+    markerRunId: runId,
+    provider: pullRequest?.provider ?? codeProviderOf(repository),
+    repository,
+    ...(pullRequest?.number !== undefined ? { pullRequestNumber: pullRequest.number } : {}),
+    ...(dispatchingOwnerId !== undefined ? { dispatchingOwnerId } : {}),
+    ...(options?.requireFinished ? { requireFinished: true } : {}),
+  });
+  if (!resolved.ok) return resolved;
+  const { root, repo } = resolved;
+  return { ok: true, root: { ...root, pullRequestNumber: repo.pullRequestNumber, repo } };
 }
 
 function codingTarget(
@@ -489,7 +530,7 @@ function codingTarget(
  * (see checkContinuation), else the profile's base.
  */
 async function resolveCodingBranch(
-  reader: Pick<DispatchTx, "codingRun">,
+  reader: Pick<DispatchTx, "codingRun" | "codingRunRepository">,
   options: DispatchRunOptions,
   profile: { repository: string; baseRef: string },
   /** The dispatched (continuing) agent's current owner; checkContinuation fails closed against it. */
@@ -499,16 +540,83 @@ async function resolveCodingBranch(
   if (options.codingBaseRef !== undefined) {
     throw new Error("continuesCodingRunId cannot be combined with codingBaseRef.");
   }
-  const check = await checkContinuation(reader, options.continuesCodingRunId, profile.repository, ownerId);
-  if (!check.ok) throw new ContinuationRefusedError(check.reason);
-  const { root } = check;
+  const root = await continuationRoot(reader, options.continuesCodingRunId, profile.repository, ownerId);
+  const rootHistory = await reader.codingRun.findUniqueOrThrow({
+    where: { runId: root.runId },
+    select: { gitHistoryDepth: true, gitHistoryFull: true },
+  });
   return {
     baseRef: root.baseRef,
     headRef: root.headRef,
     continuationOf: { runId: root.runId },
     rootCodingRunId: root.runId,
+    gitHistory: { depth: rootHistory.gitHistoryDepth, full: rootHistory.gitHistoryFull },
     mergeOrder: await effectiveMergeOrder(reader, root.runId),
   };
+}
+
+/**
+ * The root a continuation dispatch continues (see checkContinuation): its /workspace is always the
+ * root's default repository, so a check that matched one of the root's extras is refused as another
+ * repository. A root whose default repository has no pull request yet (it had no changes, or its
+ * publish failed) while another repository of its set opened one is still continued: the follow-up
+ * retries the default repository's publish (#537 §3/§4).
+ */
+async function continuationRoot(
+  reader: Pick<DispatchTx, "codingRun" | "codingRunRepository">,
+  runId: string,
+  repository: string,
+  ownerId: string | null,
+): Promise<{ runId: string; baseRef: string; headRef: string }> {
+  // A run that is still going has no final branch or pull request to continue yet.
+  const check = await checkContinuation(reader, runId, repository, ownerId, undefined, { requireFinished: true });
+  if (check.ok) {
+    if (check.root.repo.kind !== "default") throw new ContinuationRefusedError("other_repository");
+    return check.root;
+  }
+  if (check.reason !== "no_pull_request") throw new ContinuationRefusedError(check.reason);
+  // The owner check came before no_pull_request, so it passed.
+  const marked = await reader.codingRun.findUnique({
+    where: { runId },
+    select: { runId: true, rootCodingRunId: true },
+  });
+  const rootId = marked?.rootCodingRunId ?? marked?.runId;
+  const root = rootId
+    ? await reader.codingRun.findUnique({
+        where: { runId: rootId },
+        select: { runId: true, repository: true, baseRef: true, headRef: true, result: true },
+      })
+    : null;
+  if (!root || !sameRepository(root.repository, repository)) throw new ContinuationRefusedError("no_pull_request");
+  // A local repository has no pull requests: its runs push their branch (wardby/run-<root id>) into
+  // the repository instead, and a follow-up continues on that branch exactly as a pull request
+  // continuation does on the pull request's head branch.
+  if (codeProviderOf(root.repository) === "local") {
+    if (!(await pushedRootBranch(reader, root))) throw new ContinuationRefusedError("no_pushed_branch");
+  } else if ((await rootPullRequests(reader, root.runId)).length === 0) {
+    throw new ContinuationRefusedError("no_pull_request");
+  }
+  return { runId: root.runId, baseRef: root.baseRef, headRef: root.headRef };
+}
+
+/**
+ * Whether the root's branch was pushed: the root's own result, or any continuation's, is
+ * branch_pushed on the root's head branch (a continuation pushes to the same branch).
+ */
+async function pushedRootBranch(
+  reader: Pick<DispatchTx, "codingRun">,
+  root: { runId: string; headRef: string; result: unknown },
+): Promise<boolean> {
+  const pushed = (value: unknown) => {
+    const result = publicCodingRunResult(value);
+    return result?.outcome === "branch_pushed" && result.headRef === root.headRef;
+  };
+  if (pushed(root.result)) return true;
+  const continuations = await reader.codingRun.findMany({
+    where: { rootCodingRunId: root.runId },
+    select: { result: true },
+  });
+  return continuations.some((continuation) => pushed(continuation.result));
 }
 
 /**
@@ -701,6 +809,136 @@ export async function resolveDispatchServices(
   );
 }
 
+/** The run's extra repositories (#537 §1) from the agent's set-eligible links, before any ref is resolved. */
+async function planExtras(
+  reader: Pick<DispatchTx, "agentRepository">,
+  options: DispatchRunOptions,
+  target: CodingRepositoryTarget,
+  profile: { baseRef: string; gitHistoryDepth: number | null; gitHistoryFull: boolean },
+): Promise<PlannedRunRepository[]> {
+  const links = await reader.agentRepository.findMany({
+    where: { agentId: options.agentId, ...CODING_SET_LINK_FILTER },
+    select: {
+      id: true,
+      name: true,
+      provider: true,
+      repository: true,
+      access: true,
+      baseRef: true,
+      ref: true,
+      refFromFile: true,
+      inDefaultSet: true,
+      asRemote: true,
+      createdAt: true,
+    },
+  });
+  return planRepositorySet({
+    links,
+    workspace: { provider: codeProviderOf(target.repository), repository: target.repository },
+    requested: options.codingRepositories,
+    limit: loadCodingRunRepositoryLimit(),
+    profileBaseRef: profile.baseRef,
+    historyOn: profile.gitHistoryFull || profile.gitHistoryDepth !== null,
+  });
+}
+
+/** What a plan is compared by: a link changed between the preview and the transaction refuses the dispatch. */
+function planKey(plan: readonly PlannedRunRepository[]): string {
+  return JSON.stringify(plan.map((r) => [r.name, r.linkId, r.access, r.requestedRef ?? r.refFromFile, r.asRemote]));
+}
+
+/**
+ * Every extra repository through the repository-access gate (the GitHub allowlist included, for read
+ * links too), before any of their refs is read: nothing is fetched from a repository the agent may not
+ * use. Returns the refusal (`repo_access_<reason>: …`) for the first denied row, else undefined. A row
+ * whose link is gone is not authorized.
+ */
+export async function authorizeRunRepositories(
+  reader: Pick<DispatchTx, "agentRepository">,
+  executor: Executor,
+  agentId: string,
+  ownerId: string | null,
+  rows: readonly Pick<PlannedRunRepository, "linkId" | "provider" | "repository" | "access">[],
+): Promise<string | undefined> {
+  if (rows.length === 0) return undefined;
+  if (!executor.authorizeCodingRepository) throw codingRepositoriesUnsupported();
+  const linkIds = rows.flatMap((r) => (r.linkId === null ? [] : [r.linkId]));
+  const links = await reader.agentRepository.findMany({
+    where: { agentId, id: { in: linkIds } },
+    select: { id: true, access: true, authorizedVia: true },
+  });
+  for (const row of rows) {
+    const link = links.find((l) => l.id === row.linkId && l.access === row.access);
+    const decision = link
+      ? await executor.authorizeCodingRepository({
+          ownerId,
+          provider: row.provider,
+          repository: row.repository,
+          required: requiredLevel(row.access === "read" ? "coding_read" : "coding"),
+          authorizedVia: link.authorizedVia,
+        })
+      : ({ ok: false, reason: "not_authorized" } as const);
+    if (!decision.ok) return `repo_access_${decision.reason}: ${describeDenial(decision, row.repository)}`;
+  }
+  return undefined;
+}
+
+/** A deployment whose executor cannot authorize or resolve extra repositories: a set refusal, so every entry point maps it. */
+function codingRepositoriesUnsupported(): RepositorySetRefusedError {
+  return new RepositorySetRefusedError(
+    "coding_repositories_unsupported",
+    "this deployment cannot resolve extra repositories.",
+  );
+}
+
+/** Resolves a plan's refs with the executor; throws coding_repositories_unsupported without its methods. */
+export function resolveExtrasWith(
+  executor: Executor,
+  plan: readonly PlannedRunRepository[],
+  workspace: { repository: string; baseRef: string },
+): Promise<ResolvedRunRepository[]> {
+  if (plan.length === 0) return Promise.resolve([]);
+  const readFile = executor.readCodingRepositoryFile?.bind(executor);
+  const resolveRef = executor.resolveCodingRepositoryRef?.bind(executor);
+  if (!readFile || !resolveRef) throw codingRepositoriesUnsupported();
+  return resolveRepositorySetRefs(plan, { workspace, readFile, resolveRef });
+}
+
+/**
+ * A continuation's rows: its root's, as they are (D5); never re-resolved. Each keeps its root row's
+ * merge order (#537), so a pull request the continuation records on its own row (a replacement)
+ * is still an ordered member of the set (orderedSeeds) when its publish sets no order of its own.
+ * Its outcome (result, pullRequestNumber, markedReadyAt and the description columns) is its own to
+ * record: a row names only a pull request its own run published.
+ */
+export async function copyRootRepositoryRows(
+  tx: Pick<DispatchTx, "codingRunRepository">,
+  rootRunId: string,
+  runId: string,
+): Promise<void> {
+  const rows = await tx.codingRunRepository.findMany({ where: { runId: rootRunId }, orderBy: { position: "asc" } });
+  if (rows.length === 0) return;
+  await tx.codingRunRepository.createMany({
+    data: rows.map((r) => ({
+      runId,
+      position: r.position,
+      name: r.name,
+      access: r.access,
+      provider: r.provider,
+      repository: r.repository,
+      requestedRef: r.requestedRef,
+      refFromFile: r.refFromFile,
+      resolvedSha: r.resolvedSha,
+      viaRepositoryLink: r.viaRepositoryLink,
+      asRemote: r.asRemote,
+      linkId: r.linkId,
+      baseRef: r.baseRef,
+      headRef: r.headRef,
+      mergeOrder: r.mergeOrder,
+    })),
+  });
+}
+
 /**
  * Persists every detached run input in one transaction, then invokes the
  * executor only after commit. A null result means the caller's transactional
@@ -708,6 +946,13 @@ export async function resolveDispatchServices(
  */
 export async function dispatchRun(options: DispatchRunOptions): Promise<DispatchRunResult | null> {
   const now = options.now ?? new Date();
+  if (options.continuesCodingRunId !== undefined && options.codingRepositories !== undefined) {
+    // A continuation always works in its root's set (#537 §4): a list here would be ignored, so it is refused.
+    throw new RepositorySetRefusedError(
+      "invalid_repositories",
+      "a continuation works in its root run's repositories; leave repositories out.",
+    );
+  }
   // Read outside the transaction only to decide whether to take the group
   // dispatch lock before the transaction's first read, and whether to read the
   // repository's service declaration (a network call); everything the run is
@@ -719,7 +964,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       kind: true,
       ownerId: true,
       budgetGroupId: true,
-      codingProfile: { select: { repository: true, baseRef: true, services: true } },
+      codingProfile: {
+        select: { repository: true, baseRef: true, services: true, gitHistoryDepth: true, gitHistoryFull: true },
+      },
     },
   });
   const lockGroups = preview?.kind === "coding" && preview.budgetGroupId != null;
@@ -732,10 +979,48 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     !deferCoding && preview?.kind === "coding" && preview.codingProfile
       ? await codingTarget(options.db, options, preview.codingProfile)
       : undefined;
+  // The run's extra repositories (#537): planned from the agent's links, each authorized, then each
+  // ref resolved to a commit, all before the transaction (network calls). A set or ref refusal
+  // propagates to a waiting caller: nothing has been written. A scheduled run has no caller waiting,
+  // so its set or ref refusal commits as a refused run below instead, like an access denial: the
+  // schedule advances rather than the scheduler retrying, and calling the host, on every tick. Its
+  // error is the refusal's own message, which never carries a ref file's content.
+  // A continuation takes its root's rows instead, and a deferred run resolves them when it starts.
+  const setRefusalOf = (err: unknown): string | undefined =>
+    options.trigger === "scheduled" &&
+    (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError)
+      ? err.message
+      : undefined;
+  let previewPlan: PlannedRunRepository[] | undefined;
+  let resolvedExtras: ResolvedRunRepository[] = [];
+  let extrasRefusal: string | undefined;
+  if (!deferCoding && preview?.codingProfile && previewTarget && options.continuesCodingRunId === undefined) {
+    try {
+      previewPlan = await planExtras(options.db, options, previewTarget, preview.codingProfile);
+      extrasRefusal = await authorizeRunRepositories(
+        options.db,
+        options.executor,
+        options.agentId,
+        preview.ownerId ?? null,
+        previewPlan,
+      );
+      if (!extrasRefusal) {
+        resolvedExtras = await resolveExtrasWith(options.executor, previewPlan, {
+          repository: previewTarget.repository,
+          baseRef: options.codingBaseRef ?? previewTarget.baseRef,
+        });
+      }
+    } catch (err) {
+      extrasRefusal = setRefusalOf(err);
+      if (extrasRefusal === undefined) throw err;
+    }
+  }
   // Only an agent allowed some service reads the repository's declaration; any
   // other coding agent never calls the host for it and gets no services.
+  // A run the set already refuses reads neither.
   const declarationRead =
     !deferCoding &&
+    !extrasRefusal &&
     preview?.kind === "coding" &&
     preview.codingProfile &&
     previewTarget &&
@@ -745,6 +1030,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   // The knowledge note's input: the repository's bundle index at the run's base (a network call).
   const knowledgeIndex =
     !deferCoding &&
+    !extrasRefusal &&
     preview?.kind === "coding" &&
     preview.codingProfile &&
     previewTarget &&
@@ -783,12 +1069,27 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         let services: ResolvedCodingService[] = [];
         let servicesRefusal: string | undefined;
         let target: CodingRepositoryTarget | undefined;
+        let inTxPlan: PlannedRunRepository[] = [];
+        let inTxSetRefusal: string | undefined;
         if (agent.kind === "coding") {
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
           // An unknown coding provider is a broken profile, not a catalog state: still thrown.
           assertCodingProvider(agent.codingProfile.provider);
           // Resolved again inside the transaction: an unlink since the preview refuses the run here.
           target = await codingTarget(tx, options, agent.codingProfile);
+          if (options.continuesCodingRunId === undefined) {
+            // Planned again inside the transaction: a link changed since the preview refuses the dispatch.
+            // A scheduled run's set refusal commits as a refused run (see the preview above).
+            try {
+              inTxPlan = await planExtras(tx, options, target, agent.codingProfile);
+            } catch (err) {
+              inTxSetRefusal = setRefusalOf(err);
+              if (inTxSetRefusal === undefined) throw err;
+            }
+            if (!deferCoding && !inTxSetRefusal && planKey(inTxPlan) !== planKey(previewPlan ?? [])) {
+              throw new Error("The coding agent's repository links changed during dispatch; try again.");
+            }
+          }
           // Recorded on the run row below: the run is billed at this entry for its whole life.
           // A model the catalog cannot run (missing, disabled, or another provider's) fails
           // the run here instead of throwing: the run row commits with the reason, so the
@@ -820,9 +1121,13 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             if ("refusal" in resolved) servicesRefusal = resolved.refusal;
             else services = resolved.services;
           }
-          if (!modelFailure && !servicesRefusal) codingBudget = await reserveCodingBudget(tx, agent, now, options);
+          if (!modelFailure && !servicesRefusal && !extrasRefusal && !inTxSetRefusal) {
+            codingBudget = await reserveCodingBudget(tx, agent, now, options);
+          }
         }
-        const refusal = servicesRefusal ?? codingBudget?.refusal;
+        const refusal = modelFailure
+          ? undefined
+          : (servicesRefusal ?? inTxSetRefusal ?? extrasRefusal ?? codingBudget?.refusal);
 
         const run = await tx.run.create({
           data: {
@@ -896,7 +1201,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
 
           // Resolved once: before the transaction when the declaration was read from it.
           const branch = declarationRead?.branch ?? (await resolveCodingBranch(tx, options, target, agent.ownerId));
-          const { baseRef, continuationOf, rootCodingRunId, mergeOrder: inheritedMergeOrder } = branch;
+          const { baseRef, continuationOf, rootCodingRunId, mergeOrder: inheritedMergeOrder, gitHistory } = branch;
           const headRef = branch.headRef ?? `wardby/run-${run.id}`;
           const mergeOrder = resolveMergeOrder(options, inheritedMergeOrder);
 
@@ -961,6 +1266,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               claudeBareMode: agent.codingProfile.claudeBareMode,
               dependencyCache: agent.codingProfile.dependencyCache,
               sessionResume: agent.codingProfile.sessionResume,
+              // A continuation keeps its root's setting, matching the rows copied from it.
+              gitHistoryDepth: gitHistory ? gitHistory.depth : agent.codingProfile.gitHistoryDepth,
+              gitHistoryFull: gitHistory ? gitHistory.full : agent.codingProfile.gitHistoryFull,
               // Fixed here so a run's tracing never changes mid-run.
               debugTrace: traced,
               debugTraceMaxMb: traced ? agent.codingProfile.debugTraceMaxMb : null,
@@ -972,12 +1280,40 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               services,
             },
           });
+          // The run's repository set, fixed here with the CodingRun (#537 §2).
+          if (rootCodingRunId) {
+            await copyRootRepositoryRows(tx, rootCodingRunId, run.id);
+          } else {
+            const rows: (PlannedRunRepository & { resolvedSha: string | null })[] = deferCoding
+              ? inTxPlan.map((r) => ({ ...r, requestedRef: r.refFromFile ? null : r.requestedRef, resolvedSha: null }))
+              : resolvedExtras;
+            if (rows.length > 0) {
+              await tx.codingRunRepository.createMany({
+                data: rows.map((r) => ({
+                  runId: run.id,
+                  position: r.position,
+                  name: r.name,
+                  access: r.access,
+                  provider: r.provider,
+                  repository: r.repository,
+                  requestedRef: r.requestedRef,
+                  refFromFile: r.refFromFile,
+                  resolvedSha: r.resolvedSha,
+                  asRemote: r.asRemote,
+                  linkId: r.linkId,
+                  baseRef: r.access === "write" ? r.baseRef : null,
+                  headRef: r.access === "write" ? headRef : null,
+                })),
+              });
+            }
+          }
         } else if (
           agent.kind !== "coding" &&
           (options.codingTask !== undefined ||
             options.codingBaseRef !== undefined ||
             options.continuesCodingRunId !== undefined ||
-            options.codingRepository !== undefined)
+            options.codingRepository !== undefined ||
+            options.codingRepositories !== undefined)
         ) {
           throw new Error("Coding overrides cannot be supplied for a native agent.");
         }

@@ -505,6 +505,17 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
       },
     });
     await run(theirs.id, { triggeredById: stranger.id });
+    // A repository of the run's set (not its default) matches too.
+    await db.codingRunRepository.create({
+      data: {
+        runId: coding.id,
+        position: 1,
+        name: "tools",
+        access: "read",
+        provider: "github",
+        repository: `your-org/tools-${tag}`,
+      },
+    });
 
     const mcp = await connect(owner);
     const ids = async (query: string, args: Record<string, unknown> = {}) =>
@@ -516,6 +527,7 @@ describe.skipIf(!process.env.DATABASE_URL)("list_runs across agents (PostgreSQL)
     expect(await ids(byName.id.slice(-10))).toEqual([byName.id]);
     expect(await ids(`REPO-${tag}`)).toEqual([coding.id]);
     expect(await ids(`branch-${tag}`)).toEqual([coding.id]);
+    expect(await ids(`TOOLS-${tag}`)).toEqual([coding.id]);
     expect(await ids("budget exhausted", { agentId: coder.id })).toEqual([coding.id]);
     expect(await ids("host_event", { agentId: coder.id })).toEqual([coding.id]);
     // Task and request texts can hold secret values: never searched.

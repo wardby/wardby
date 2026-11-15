@@ -97,7 +97,15 @@ describe.skipIf(!process.env.DATABASE_URL)("repository access authorization sche
     const [a, b, c, d] = [await make(), await make(), await make(), await make()];
     const link = (agentId: string, checkName: string | null) =>
       db.agentRepository.create({
-        data: { agentId, provider: "github", repository, access: "write", triggers: ["pull_request"], checkName },
+        data: {
+          agentId,
+          provider: "github",
+          repository,
+          name: `github:${repository}`,
+          access: "write",
+          triggers: ["pull_request"],
+          checkName,
+        },
       });
     await link(a, "wardby review");
     await expect(link(b, "wardby review")).rejects.toMatchObject({ code: "P2002" });

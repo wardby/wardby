@@ -8,7 +8,9 @@ import type {
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
+  PreparedReadOnlyCopy,
   PreparedWorkspace,
+  ReadOnlyCopyInput,
   VcsPrepareInput,
   VcsProvider,
 } from "./types.js";
@@ -68,12 +70,25 @@ export class RoutingVcsProvider implements VcsProvider {
     return (provider === "github" ? this.options.github : this.options.hosted?.get(provider)) ?? null;
   }
 
+  /**
+   * The provider of a workspace, which must also serve every remote link it fetches (#536): a remote
+   * is fetched with the default repository's own remote, so it must be on the same host. Dispatch
+   * refuses a cross-host remote first (repository_remote_invalid); this is the backstop.
+   */
+  private workspaceTarget(input: VcsPrepareInput): VcsProvider {
+    const target = this.target(input.repository);
+    for (const remote of input.remotes ?? []) {
+      if (this.optionalTarget(remote.repository) !== target) throw new Error("repository_remote_invalid");
+    }
+    return target;
+  }
+
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
-    return this.target(input.repository).prepareWorkspace(input);
+    return this.workspaceTarget(input).prepareWorkspace(input);
   }
 
   async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
-    return this.target(input.repository).recoverWorkspace(input);
+    return this.workspaceTarget(input).recoverWorkspace(input);
   }
 
   async finalizeChanges(
@@ -85,6 +100,18 @@ export class RoutingVcsProvider implements VcsProvider {
 
   async cleanup(workspace: PreparedWorkspace): Promise<void> {
     return this.target(workspace.repository).cleanup(workspace);
+  }
+
+  async prepareReadOnlyCopy(input: ReadOnlyCopyInput): Promise<PreparedReadOnlyCopy> {
+    const target = this.target(input.repository);
+    if (!target.prepareReadOnlyCopy) throw new Error("vcs_read_only_unsupported");
+    return target.prepareReadOnlyCopy(input);
+  }
+
+  async cleanupReadOnlyCopy(copy: PreparedReadOnlyCopy): Promise<void> {
+    const target = this.target(copy.repository);
+    if (!target.cleanupReadOnlyCopy) throw new Error("vcs_read_only_unsupported");
+    return target.cleanupReadOnlyCopy(copy);
   }
 
   async notifyContinuationStarted(workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {
@@ -108,6 +135,10 @@ export class RoutingVcsProvider implements VcsProvider {
 
   async continuationPullRequestDraft(workspace: PreparedWorkspace): Promise<boolean | undefined> {
     return this.optionalTarget(workspace.repository)?.continuationPullRequestDraft?.(workspace);
+  }
+
+  async resolveRef(input: { repository: string; ref: string; access: "read" | "write" }): Promise<string | null> {
+    return (await this.optionalTarget(input.repository)?.resolveRef?.(input)) ?? null;
   }
 
   async readRepositoryFile(input: RepositoryFileInput): Promise<string | null> {

@@ -31,6 +31,12 @@ describe("Claude SDK configuration", () => {
     expect(buildClaudeSdkOptions({ ...config(), persistSession: false }).persistSession).toBe(false);
   });
 
+  it("resumes a session only when one is given (warm Substrate rounds)", () => {
+    const id = "0b5f0d6c-4a43-4a1c-9b7e-2f6a1d2c3e4f";
+    expect(buildClaudeSdkOptions({ ...config(), resumeSessionId: id }).resume).toBe(id);
+    expect(buildClaudeSdkOptions(config())).not.toHaveProperty("resume");
+  });
+
   it("allows only the private socket relay and no Claude built-in tools", () => {
     const options = buildClaudeSdkOptions(config());
     expect(options).toMatchObject({
@@ -66,12 +72,16 @@ describe("Claude SDK configuration", () => {
     expect(tools.timeout).toBeLessThanOrEqual(2_147_483_647);
   });
 
-  it("never lets the agent call the worker's own dependency-cache tool, in any mode", () => {
+  it("never lets the agent call the worker's own dependency-cache and git tools, in any mode", () => {
     for (const options of [
       buildClaudeSdkOptions(config()),
       buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context", skills: true }),
     ]) {
-      expect(options.disallowedTools).toEqual(["mcp__wardby_tools__wardby_prepare_dependencies"]);
+      expect(options.disallowedTools).toEqual([
+        "mcp__wardby_tools__wardby_prepare_dependencies",
+        "mcp__wardby_tools__wardby_git_check",
+        "mcp__wardby_tools__wardby_result_bundle",
+      ]);
       expect(options.allowedTools).not.toContain("mcp__wardby_tools__wardby_prepare_dependencies");
       expect(options.allowedTools).not.toContain("mcp__wardby_tools");
     }
@@ -149,6 +159,37 @@ describe("Claude SDK configuration", () => {
       expect(JSON.stringify(options.env)).not.toContain(TOKEN);
       expect(JSON.stringify(servers.wardby_tools)).not.toContain(TOKEN);
       expect(JSON.stringify({ ...options, mcpServers: { wardby_tools: servers.wardby_tools } })).not.toContain(TOKEN);
+    });
+
+    it("header mode: the placeholder in x-wardby-mcp-token, no Authorization", () => {
+      const options = buildClaudeSdkOptions({
+        ...config(),
+        mcp: {
+          url: "http://wardby-proxy:8787/mcp",
+          token: "rmt_placeholder_injected_by_gateway",
+          header: "x-wardby-mcp-token",
+        },
+      });
+      expect((options.mcpServers as Record<string, unknown>).wardby_mcp).toEqual({
+        type: "http",
+        url: "http://wardby-proxy:8787/mcp",
+        headers: { "x-wardby-mcp-token": "rmt_placeholder_injected_by_gateway" },
+        alwaysLoad: true,
+        timeout: 300_000,
+      });
+      expect(options.allowedTools).toEqual(["mcp__wardby_tools__run_command", "mcp__wardby_mcp"]);
+    });
+
+    it("header mode refuses a real token", () => {
+      const real = "rmt_" + "A".repeat(43);
+      let error: unknown;
+      try {
+        buildClaudeSdkOptions({ ...config(), mcp: { url: mcp.url, token: real, header: "x-wardby-mcp-token" } });
+      } catch (caught) {
+        error = caught;
+      }
+      expect((error as Error).message).toBe("worker_mcp_header_needs_placeholder");
+      expect(String(error)).not.toContain(real);
     });
 
     it("is unchanged without MCP tools", () => {

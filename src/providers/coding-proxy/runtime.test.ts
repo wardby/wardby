@@ -8,7 +8,14 @@ import type { CodingProxy, CodingProxyOptions, ProxyResponseSink } from "./proxy
 import { DependencyCacheService } from "./dependency-cache/service.js";
 import { RunStepForwarder } from "./run-step-forwarder.js";
 import { RegistryService } from "./registry/service.js";
-import { createRegistryUpstream, loadMcpGatewayUrl, loadRunStepsUrl, startConfiguredCodingProxy } from "./runtime.js";
+import {
+  createRegistryUpstream,
+  loadMcpGatewayUrl,
+  loadRunStepsUrl,
+  loadSubstrateProxyConfig,
+  startConfiguredCodingProxy,
+  substrateRunLayoutLookup,
+} from "./runtime.js";
 import type { CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditEvent } from "./types.js";
 
@@ -45,7 +52,7 @@ describe("configured coding proxy runtime", () => {
       expect.objectContaining({
         host: "0.0.0.0",
         port: CODING_PROXY_PORT,
-        expectedHost: `${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+        expectedHosts: [`${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`],
         registry: expect.any(RegistryService),
       }),
     );
@@ -129,6 +136,106 @@ describe("configured coding proxy runtime", () => {
     expect(on.dependencyCache).toBeInstanceOf(DependencyCacheService);
     expect(on.sealsOnModelRequest).toBe(true);
     expect((on.dependencyCache as DependencyCacheService).uploadMs).toBe(900_000);
+  });
+
+  it("reads a Substrate run's layout from its row by token: single only when the row says so", async () => {
+    const rows: Record<string, { actorShape: string; repositories: unknown }> = {
+      "wr-single": { actorShape: "single", repositories: null },
+      "wr-pair": { actorShape: "pair", repositories: null },
+      "wr-odd": { actorShape: "other", repositories: null },
+    };
+    const findUnique = vi.fn(async ({ where }: { where: { token: string } }) => rows[where.token] ?? null);
+    const lookup = substrateRunLayoutLookup({ substrateRun: { findUnique } } as unknown as PrismaClient);
+    expect(await lookup("wr-single")).toEqual({ shape: "single" });
+    expect(await lookup("wr-pair")).toEqual({ shape: "pair" });
+    expect(await lookup("wr-odd")).toEqual({ shape: "pair" });
+    expect(await lookup("wr-missing")).toBeUndefined();
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { token: "wr-single" },
+      select: { actorShape: true, repositories: true },
+    });
+  });
+
+  it("reads a Substrate run's extra repositories only when they parse", async () => {
+    const rows: Record<string, { actorShape: string; repositories: unknown }> = {
+      "wr-extras": { actorShape: "pair", repositories: [{ name: "extra-alpha", access: "write" }] },
+      "wr-bad-extras": { actorShape: "single", repositories: [{ name: "x", access: "admin" }] },
+    };
+    const findUnique = vi.fn(async ({ where }: { where: { token: string } }) => rows[where.token] ?? null);
+    const lookup = substrateRunLayoutLookup({ substrateRun: { findUnique } } as unknown as PrismaClient);
+    expect(await lookup("wr-extras")).toEqual({
+      shape: "pair",
+      repositories: [{ name: "extra-alpha", access: "write" }],
+    });
+    const bad = await lookup("wr-bad-extras");
+    expect(bad).toEqual({ shape: "single" });
+    expect(bad).not.toHaveProperty("repositories");
+  });
+
+  it("mounts the Substrate routes only when SUBSTRATE_ATESPACE is set, and names what is missing", async () => {
+    const handle: CodingProxyServerHandle = { port: CODING_PROXY_PORT, close: async () => {} };
+    const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
+    const substrateOf = async (env: NodeJS.ProcessEnv) => {
+      const startServer = vi.fn(async () => handle);
+      const started = await startConfiguredCodingProxy({ db: {} as PrismaClient, env, startServer, startDenyPort });
+      await started.close();
+      return (startServer.mock.calls[0] as unknown[])[1] as { substrate?: unknown };
+    };
+    const base = { OPENAI_API_KEY: "test-secret" };
+    const blob = { BLOB_STORE: "local", BLOB_STORE_LOCAL_DIR: "/tmp/wardby-substrate-test" };
+    expect((await substrateOf(base)).substrate).toBeUndefined();
+    const on = {
+      ...base,
+      ...blob,
+      SUBSTRATE_ATESPACE: "wardby-runs",
+      SUBSTRATE_ACTOR_JWT_ISSUER: "https://idp.example.invalid",
+      SUBSTRATE_PROXY_HOST: "coding-proxy.example.svc.cluster.local",
+    };
+    expect(typeof (await substrateOf(on)).substrate).toBe("function");
+    const hostsOf = async (env: NodeJS.ProcessEnv) =>
+      ((await substrateOf(env)) as unknown as { expectedHosts: string[] }).expectedHosts;
+    expect(await hostsOf(base)).toEqual(["wardby-proxy:8787"]);
+    expect(await hostsOf(on)).toEqual(["wardby-proxy:8787", "coding-proxy.example.svc.cluster.local:8787"]);
+    // A Service that maps another port to 8787: the guard accepts the port actors use (same parser as
+    // the control plane), and the bare host on port 80, which clients leave out of Host.
+    expect(await hostsOf({ ...on, SUBSTRATE_PROXY_PORT: "9000" })).toEqual([
+      "wardby-proxy:8787",
+      "coding-proxy.example.svc.cluster.local:9000",
+    ]);
+    expect(await hostsOf({ ...on, SUBSTRATE_PROXY_PORT: "80" })).toEqual([
+      "wardby-proxy:8787",
+      "coding-proxy.example.svc.cluster.local:80",
+      "coding-proxy.example.svc.cluster.local",
+    ]);
+    for (const bad of ["0", "65536", "8787x", "1.5", "-1"])
+      await expect(substrateOf({ ...on, SUBSTRATE_PROXY_PORT: bad })).rejects.toThrow("SUBSTRATE_PROXY_PORT");
+    for (const bad of ["", "http://proxy.example", "proxy.example:8787", "proxy.example/x", "a b"])
+      await expect(substrateOf({ ...on, SUBSTRATE_PROXY_HOST: bad })).rejects.toThrow("SUBSTRATE_PROXY_HOST");
+    await expect(substrateOf({ ...on, SUBSTRATE_ACTOR_JWT_ISSUER: "" })).rejects.toThrow(
+      "SUBSTRATE_ACTOR_JWT_ISSUER is required",
+    );
+    await expect(
+      substrateOf({ ...base, SUBSTRATE_ATESPACE: "wardby-runs", SUBSTRATE_ACTOR_JWT_ISSUER: "x:" }),
+    ).rejects.toThrow(/BLOB_STORE|valid URL/);
+    await expect(substrateOf({ ...on, BLOB_STORE: "" })).rejects.toThrow("BLOB_STORE is required");
+    expect(loadSubstrateProxyConfig(on)?.jwksUrl.href).toBe("https://idp.example.invalid/openid/v1/jwks");
+    expect(
+      loadSubstrateProxyConfig({ ...on, SUBSTRATE_ACTOR_JWKS_URL: "https://keys.example.invalid/jwks" })?.jwksUrl.href,
+    ).toBe("https://keys.example.invalid/jwks");
+  });
+
+  it("reads SUBSTRATE_WARM_ROUNDS for the substrate routes (off unless true)", () => {
+    const on = {
+      SUBSTRATE_ATESPACE: "wardby-runs",
+      SUBSTRATE_ACTOR_JWT_ISSUER: "https://idp.example.invalid",
+      SUBSTRATE_PROXY_HOST: "coding-proxy.example.svc.cluster.local",
+      BLOB_STORE: "local",
+      BLOB_STORE_LOCAL_DIR: "/tmp/wardby-substrate-test",
+    };
+    expect(loadSubstrateProxyConfig(on)).not.toHaveProperty("warmRounds");
+    expect(loadSubstrateProxyConfig({ ...on, SUBSTRATE_WARM_ROUNDS: "false" })).not.toHaveProperty("warmRounds");
+    expect(loadSubstrateProxyConfig({ ...on, SUBSTRATE_WARM_ROUNDS: "true" })?.warmRounds).toBe(true);
+    expect(() => loadSubstrateProxyConfig({ ...on, SUBSTRATE_WARM_ROUNDS: "on" })).toThrow("SUBSTRATE_WARM_ROUNDS");
   });
 
   it("closes the proxy server when the deny port cannot bind", async () => {

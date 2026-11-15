@@ -2,11 +2,11 @@
 import { readCodingInput, writeCodingOutputAtomic } from "../coding-worker/artifact.js";
 import { describeError, workerDebugTracer, type DebugTracer } from "../coding-worker/debug-trace.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "../coding-worker/errors.js";
-import { readMcpToken } from "../coding-worker/mcp-config.js";
+import { readMcpConfig } from "../coding-worker/mcp-config.js";
 import type { CodingTaskInput } from "../coding/protocol.js";
 import { CLAUDE_CONFIG_DIR, runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
-import { assertToolRunnerReachable, callPrepareDependencies } from "./tool-socket.js";
+import { assertToolRunnerReachable, callGitCheck, callPrepareDependencies, callResultBundle } from "./tool-socket.js";
 import { runTitle, TRANSCRIPT_OUTPUT_PATH, writeWorkerTranscript } from "./transcript.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
@@ -32,18 +32,23 @@ try {
   stage = "execution";
   const proxyBaseUrl = required("WARDBY_PROXY_URL");
   const capability = required("WARDBY_RUN_CAPABILITY");
-  // Set only when the run has MCP tools; the driver then adds the wardby_mcp server.
-  const mcpToken = readMcpToken();
-  trace = workerDebugTracer(task, capability, (line) => process.stdout.write(line), mcpToken ? [mcpToken] : []);
+  // Set only when the run has MCP tools; the driver then adds the wardby_mcp server. On Substrate it
+  // is the gateway's placeholder, in header mode (readMcpConfig refuses anything else).
+  const mcp = readMcpConfig();
+  trace = workerDebugTracer(task, capability, (line) => process.stdout.write(line), mcp ? [mcp.token] : []);
   await assertToolRunnerReachable();
   const output = await runClaudeCodingWorker({
     input: task,
     proxyBaseUrl,
     capability,
-    ...(mcpToken ? { mcpToken } : {}),
+    ...(mcp ? { mcpToken: mcp.token } : {}),
+    ...(mcp?.header ? { mcpTokenHeader: mcp.header } : {}),
     signal: controller.signal,
     createQuery: createClaudeSdkQuery,
     prepareDependencies: () => callPrepareDependencies({ signal: controller.signal, deadlineAt: task.deadlineAt }),
+    // A run with git history (#536): the tool runner has the workspace and git; this container has neither.
+    gitCheck: () => callGitCheck({ signal: controller.signal }),
+    resultBundle: (repository, timeoutMs) => callResultBundle(repository, { signal: controller.signal, timeoutMs }),
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
     trace,
     onSessionId: (id) => {

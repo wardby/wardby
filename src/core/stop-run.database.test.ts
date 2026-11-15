@@ -19,6 +19,7 @@ describe.skipIf(!process.env.DATABASE_URL)("stopRun (database)", () => {
   const tag = randomUUID().slice(0, 8);
   const ownerId = `stop-owner-${tag}`;
   const agentId = `stop-agent-${tag}`;
+  const codingAgentId = `stop-coding-${tag}`;
   const providersWith = (llm: NativeRunProviders["llm"]): NativeRunProviders => ({
     llm,
     engine: new NativeEngine(),
@@ -32,11 +33,23 @@ describe.skipIf(!process.env.DATABASE_URL)("stopRun (database)", () => {
     await db.agent.create({
       data: { id: agentId, name: agentId, systemPrompt: "s", model: MODEL, budgetUsd: 1, maxTurns: 5, ownerId },
     });
+    await db.agent.create({
+      data: {
+        id: codingAgentId,
+        name: codingAgentId,
+        kind: "coding",
+        systemPrompt: "s",
+        model: MODEL,
+        budgetUsd: 1,
+        maxTurns: 5,
+        ownerId,
+      },
+    });
   });
   afterAll(async () => {
     await db.run.updateMany({ where: { agentId }, data: { parentRunId: null } });
-    await db.run.deleteMany({ where: { agentId } });
-    await db.agent.deleteMany({ where: { id: agentId } });
+    await db.run.deleteMany({ where: { agentId: { in: [agentId, codingAgentId] } } });
+    await db.agent.deleteMany({ where: { id: { in: [agentId, codingAgentId] } } });
     await db.principal.deleteMany({ where: { id: ownerId } });
     await db.$disconnect();
   });
@@ -100,5 +113,34 @@ describe.skipIf(!process.env.DATABASE_URL)("stopRun (database)", () => {
     const result = await stopRun({ db, executor, runId: run.id, stoppedBy: ownerId });
     expect(result).toMatchObject({ previousStatus: "failed", status: "failed", stopRequested: false });
     expect(await row(run.id)).toMatchObject({ status: "failed", error: "boom", stopRequestReason: null });
+  });
+
+  it("removes a coding agent's retained rounds on every stop_run of its runs, finished or not; never a native agent's", async () => {
+    const removed: string[] = [];
+    const executor = {
+      stop: async () => undefined,
+      removeRetainedRounds: async (id: string) => {
+        removed.push(id);
+        if (removed.length === 2) throw new Error("substrate_down");
+        return 1;
+      },
+    };
+    const finished = await db.run.create({
+      data: { agentId: codingAgentId, status: "succeeded", finishedAt: new Date() },
+    });
+    const pending = await db.run.create({ data: { agentId: codingAgentId } });
+    const native = await db.run.create({ data: { agentId, status: "succeeded", finishedAt: new Date() } });
+
+    expect(await stopRun({ db, executor, runId: finished.id, stoppedBy: ownerId })).toMatchObject({
+      status: "succeeded",
+      stopRequested: false,
+    });
+    // A failed removal never fails the stop.
+    expect(await stopRun({ db, executor, runId: pending.id, stoppedBy: ownerId })).toMatchObject({
+      status: "cancelled",
+      stopRequested: true,
+    });
+    await stopRun({ db, executor, runId: native.id, stoppedBy: ownerId });
+    expect(removed).toEqual([codingAgentId, codingAgentId]);
   });
 });

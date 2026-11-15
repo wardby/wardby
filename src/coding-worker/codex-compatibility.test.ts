@@ -12,8 +12,9 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, it } from "vitest";
-import { mcpTokenHash, mintMcpToken } from "../coding/mcp-token.js";
+import { INJECTED_MCP_TOKEN_PLACEHOLDER, mcpTokenHash, mintMcpToken } from "../coding/mcp-token.js";
 import { createMcpRoute } from "../providers/coding-proxy/mcp-route.js";
 import { MemoryProxyLedger } from "../providers/coding-proxy/memory-ledger.js";
 import { CodingProxy } from "../providers/coding-proxy/proxy.js";
@@ -22,8 +23,11 @@ import type { ProxyAuditEvent } from "../providers/coding-proxy/types.js";
 import { CODING_OUTPUT_JSON_SCHEMA, WORKER_SECURITY_INSTRUCTIONS } from "./driver.js";
 import { WARDBY_MCP_INSTRUCTIONS } from "./mcp-config.js";
 import { recordCodexRequests } from "./codex-recorder.test-support.js";
-import { createCodexSdkClient } from "./sdk.js";
+import { startGatewaySimulator } from "./gateway-simulator.test-support.js";
+import { startRecordingMcpServer } from "./mcp-stub.test-support.js";
+import { codexSdkOptions, createCodexSdkClient } from "./sdk.js";
 import { CODEX_BUILTIN_SKILLS } from "./skills.js";
+import { PLACEHOLDER_CAPABILITY } from "../providers/jobs/substrate/names.js";
 
 const require = createRequire(import.meta.url);
 const RECORD = process.env.CODEX_RECORD === "1";
@@ -296,6 +300,123 @@ describe.skipIf(RECORD || !codexBinaryInstalled())("pinned Codex CLI against the
     },
     120_000,
   );
+
+  it("header mode: Codex sends no Authorization and the proxy accepts the injected x-api-key", async () => {
+    const model = "gpt-5.6-terra";
+    const forwarded: Record<string, unknown>[] = [];
+    const audit: ProxyAuditEvent[] = [];
+    const proxy = new CodingProxy({
+      ledger: new MemoryProxyLedger(),
+      credentials: { resolve: async () => "UPSTREAM_SECRET_NOT_REAL" },
+      pricing: () => ({
+        encoding: "o200k_base",
+        inputPerMTok: 1,
+        cachedInputPerMTok: 0.1,
+        cacheWritePerMTok: 1,
+        outputPerMTok: 1,
+      }),
+      audit: (event) => audit.push(event),
+      fetch: async (_input, init) => {
+        const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+        forwarded.push(body);
+        return new Response(scriptedTurn(forwarded.length, body), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      },
+    });
+    const session = await proxy.createSession({
+      runId: "codex-compat-header-mode",
+      credentialRef: "openai/compatibility",
+      protocol: "openai-responses",
+      allowedModels: [model],
+      deadlineAt: new Date(Date.now() + 120_000),
+      budgetUsd: 10,
+    });
+    const rejected: string[] = [];
+    let server: CodingProxyServerHandle | undefined = await startCodingProxyServer(proxy, {
+      host: "127.0.0.1",
+      port: 0,
+      onRequest: (event) => {
+        if (event.status >= 400) rejected.push(`${event.protocol}:${event.status}`);
+      },
+    });
+    cleanup.push(async () => {
+      await server?.close();
+      server = undefined;
+    });
+    const gateway = await startGatewaySimulator(server.port, { capability: session.capability });
+    cleanup.push(gateway.close);
+    const root = await mkdtemp(join(tmpdir(), "wardby-codex-compat-header-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const workspace = join(root, "workspace");
+    await mkdir(home, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    await writeFile(join(workspace, "pixel.png"), Buffer.from(PNG_BASE64, "base64"));
+
+    const blocked = "http://127.0.0.1:9";
+    const client = createCodexSdkClient({
+      proxyBaseUrl: gateway.url,
+      capability: PLACEHOLDER_CAPABILITY,
+      capabilityHeader: "x-api-key",
+      developerInstructions: WORKER_SECURITY_INSTRUCTIONS,
+      environment: {
+        HOME: home,
+        LANG: "C.UTF-8",
+        PATH: "/usr/local/bin:/usr/bin:/bin",
+        TMPDIR: root,
+        HTTPS_PROXY: blocked,
+        HTTP_PROXY: blocked,
+        ALL_PROXY: blocked,
+        NO_PROXY: "127.0.0.1,localhost",
+      },
+      disabledSkills: [...CODEX_BUILTIN_SKILLS],
+    });
+    const thread = client.startThread({
+      model,
+      sandboxMode: "danger-full-access",
+      workingDirectory: workspace,
+      skipGitRepoCheck: true,
+      networkAccessEnabled: false,
+      webSearchMode: "disabled",
+      approvalPolicy: "never",
+    });
+    const streamed = await thread.runStreamed("Add hello.txt containing hello.", {
+      outputSchema: CODING_OUTPUT_JSON_SCHEMA,
+      signal: AbortSignal.timeout(90_000),
+    });
+    const events: Array<{ type: string; item?: { type: string } }> = [];
+    let failure: unknown;
+    try {
+      for await (const event of streamed.events) events.push(event);
+    } catch (error) {
+      failure = error;
+    }
+
+    const responses = gateway.observed.filter((entry) => entry.url.startsWith("/v1/responses"));
+    // Printed so the recorded outcome is evidence, not assertion (booleans only).
+    process.stderr.write(`[codex-header-mode] ${JSON.stringify(gateway.observed)}\n`);
+    expect(responses.length).toBeGreaterThanOrEqual(1);
+    expect(responses.every((entry) => entry.apiKeyIsPlaceholder)).toBe(true);
+    // Outcome A: Codex sets no Authorization at all in header mode.
+    expect(responses.every((entry) => !entry.hasAuthorization)).toBe(true);
+    expect(failure).toBeUndefined();
+    expect(responses.length).toBeGreaterThanOrEqual(3);
+    expect(rejected).toEqual([]);
+    expect(audit.filter((event) => event.type === "request.rejected")).toEqual([]);
+    expect(events.map((event) => event.type)).toContain("turn.completed");
+    expect(events.map((event) => event.type)).not.toContain("turn.failed");
+    expect(events.some((event) => event.item?.type === "command_execution")).toBe(true);
+    const sent = JSON.stringify(forwarded);
+    expect(sent).not.toContain(PLACEHOLDER_CAPABILITY);
+    expect(sent).not.toContain(session.capability);
+    const itemTypes = new Set(
+      forwarded.flatMap((body) => (body.input as Array<{ type: string }>).map((item) => item.type)),
+    );
+    expect(itemTypes).toContain("custom_tool_call_output");
+    expect(sent).toContain("data:image/png;base64,");
+  }, 120_000);
 });
 
 /**
@@ -525,5 +646,248 @@ describe.skipIf(RECORD || !codexBinaryInstalled())(
       },
       120_000,
     );
+
+    it("header mode: the egress gateway injects the capability and the MCP token; Codex sends only placeholders", async () => {
+      const model = "gpt-5.6-terra";
+      const token = mintMcpToken();
+      const gateway = await fakeGateway(token);
+      cleanup.push(gateway.close);
+      const forwarded: Record<string, unknown>[] = [];
+      const ledger = new MemoryProxyLedger();
+      const proxy = new CodingProxy({
+        ledger,
+        credentials: { resolve: async () => "UPSTREAM_SECRET_NOT_REAL" },
+        pricing: () => ({
+          encoding: "o200k_base",
+          inputPerMTok: 1,
+          cachedInputPerMTok: 0.1,
+          cacheWritePerMTok: 1,
+          outputPerMTok: 1,
+        }),
+        fetch: async (_input, init) => {
+          const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+          forwarded.push(body);
+          return new Response(scriptedMcpTurn(forwarded.length, model), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        },
+      });
+      const session = await proxy.createSession({
+        runId: "codex-compat-mcp-header-mode",
+        credentialRef: "openai/compatibility",
+        protocol: "openai-responses",
+        allowedModels: [model],
+        deadlineAt: new Date(Date.now() + 120_000),
+        budgetUsd: 10,
+        mcpTools: [
+          {
+            exposedName: "echo",
+            toolName: "echo",
+            serverId: "srv_compat",
+            serverName: "compat",
+            definition: { description: "Echo the text back.", inputSchema: { type: "object" } },
+          },
+        ],
+        mcpTokenHash: mcpTokenHash(token),
+      });
+      const rejected: string[] = [];
+      let server: CodingProxyServerHandle | undefined = await startCodingProxyServer(proxy, {
+        host: "127.0.0.1",
+        port: 0,
+        onRequest: (event) => {
+          if (event.status >= 400) rejected.push(`${event.protocol}:${event.status}`);
+        },
+        mcp: createMcpRoute({ ledger, gatewayUrl: gateway.url }),
+      });
+      cleanup.push(async () => {
+        await server?.close();
+        server = undefined;
+      });
+      const sim = await startGatewaySimulator(server.port, { capability: session.capability, mcpToken: token });
+      cleanup.push(sim.close);
+      const root = await mkdtemp(join(tmpdir(), "wardby-codex-compat-mcp-header-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      await mkdir(home, { recursive: true });
+      await mkdir(workspace, { recursive: true });
+
+      const blocked = "http://127.0.0.1:9";
+      const client = createCodexSdkClient({
+        proxyBaseUrl: sim.url,
+        capability: "rrp_placeholder_injected_by_gateway",
+        capabilityHeader: "x-api-key",
+        developerInstructions: `${WORKER_SECURITY_INSTRUCTIONS}\n${WARDBY_MCP_INSTRUCTIONS}`,
+        environment: {
+          HOME: home,
+          LANG: "C.UTF-8",
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          TMPDIR: root,
+          HTTPS_PROXY: blocked,
+          HTTP_PROXY: blocked,
+          ALL_PROXY: blocked,
+          NO_PROXY: "127.0.0.1,localhost",
+        },
+        disabledSkills: [...CODEX_BUILTIN_SKILLS],
+        mcpToken: "rmt_placeholder_injected_by_gateway",
+        mcpTokenHeader: "x-wardby-mcp-token",
+      });
+      const thread = client.startThread({
+        model,
+        sandboxMode: "danger-full-access",
+        workingDirectory: workspace,
+        skipGitRepoCheck: true,
+        networkAccessEnabled: false,
+        webSearchMode: "disabled",
+        approvalPolicy: "never",
+      });
+      const streamed = await thread.runStreamed("Echo hello.", {
+        outputSchema: CODING_OUTPUT_JSON_SCHEMA,
+        signal: AbortSignal.timeout(90_000),
+      });
+      const events: Array<{ type: string }> = [];
+      for await (const event of streamed.events) events.push(event);
+
+      expect(rejected).toEqual([]);
+      expect(events.map((event) => event.type)).toContain("turn.completed");
+      // The proxy built the gateway's Bearer from the token the egress gateway injected.
+      expect(gateway.calls.length).toBeGreaterThan(0);
+      expect(gateway.calls.every((call) => call.authorized)).toBe(true);
+      const toolCalls = gateway.calls.filter((call) => call.method === "tools/call");
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0]?.params).toMatchObject({ name: "echo", arguments: { text: "hello-from-fake-model" } });
+      const mcpRequests = sim.observed.filter((entry) => entry.url.startsWith("/mcp"));
+      expect(mcpRequests.length).toBeGreaterThan(0);
+      expect(mcpRequests.every((entry) => entry.mcpTokenIsPlaceholder)).toBe(true);
+      // Outcome A: Codex sets no Authorization at all in header mode, on any request.
+      expect(sim.observed.every((entry) => !entry.hasAuthorization)).toBe(true);
+      const sent = JSON.stringify(forwarded);
+      expect(sent).toContain("ECHO:hello-from-fake-model");
+      expect(sent).not.toContain(token);
+      expect(sent).not.toContain(session.capability);
+    }, 120_000);
+
+    it("MCP header mode spike: the pinned Codex CLI sends http_headers on a streamable-HTTP MCP server", async () => {
+      const model = "gpt-5.6-terra";
+      const stub = await startRecordingMcpServer(INJECTED_MCP_TOKEN_PLACEHOLDER);
+      cleanup.push(stub.close);
+      const forwarded: Record<string, unknown>[] = [];
+      const ledger = new MemoryProxyLedger();
+      const proxy = new CodingProxy({
+        ledger,
+        credentials: { resolve: async () => "UPSTREAM_SECRET_NOT_REAL" },
+        pricing: () => ({
+          encoding: "o200k_base",
+          inputPerMTok: 1,
+          cachedInputPerMTok: 0.1,
+          cacheWritePerMTok: 1,
+          outputPerMTok: 1,
+        }),
+        fetch: async (_input, init) => {
+          const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+          forwarded.push(body);
+          return new Response(scriptedMcpTurn(forwarded.length, model), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        },
+      });
+      const session = await proxy.createSession({
+        runId: "codex-compat-mcp-header-spike",
+        credentialRef: "openai/compatibility",
+        protocol: "openai-responses",
+        allowedModels: [model],
+        deadlineAt: new Date(Date.now() + 120_000),
+        budgetUsd: 10,
+        mcpTools: [
+          {
+            exposedName: "echo",
+            toolName: "echo",
+            serverId: "srv_compat",
+            serverName: "compat",
+            definition: { description: "Echo the text back.", inputSchema: { type: "object" } },
+          },
+        ],
+        mcpTokenHash: mcpTokenHash(mintMcpToken()),
+      });
+      const rejected: string[] = [];
+      let server: CodingProxyServerHandle | undefined = await startCodingProxyServer(proxy, {
+        host: "127.0.0.1",
+        port: 0,
+        onRequest: (event) => {
+          if (event.status >= 400) rejected.push(`${event.protocol}:${event.status}`);
+        },
+      });
+      cleanup.push(async () => {
+        await server?.close();
+        server = undefined;
+      });
+      const root = await mkdtemp(join(tmpdir(), "wardby-codex-compat-mcp-spike-"));
+      cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const home = join(root, "home");
+      const workspace = join(root, "workspace");
+      await mkdir(home, { recursive: true });
+      await mkdir(workspace, { recursive: true });
+
+      const blocked = "http://127.0.0.1:9";
+      // The worker's options without an MCP token (so no bearer_token_env_var and no token in env),
+      // then wardby_mcp pointed at the recording stub with the placeholder in a custom header.
+      const base = codexSdkOptions({
+        proxyBaseUrl: `http://127.0.0.1:${server.port}`,
+        capability: session.capability,
+        developerInstructions: `${WORKER_SECURITY_INSTRUCTIONS}\n${WARDBY_MCP_INSTRUCTIONS}`,
+        environment: {
+          HOME: home,
+          LANG: "C.UTF-8",
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          TMPDIR: root,
+          HTTPS_PROXY: blocked,
+          HTTP_PROXY: blocked,
+          ALL_PROXY: blocked,
+          NO_PROXY: "127.0.0.1,localhost",
+        },
+        disabledSkills: [...CODEX_BUILTIN_SKILLS],
+      });
+      const client = new Codex({
+        ...base,
+        config: {
+          ...base.config,
+          mcp_servers: {
+            wardby_mcp: {
+              url: `${stub.url}/mcp`,
+              http_headers: { "x-wardby-mcp-token": INJECTED_MCP_TOKEN_PLACEHOLDER },
+              tool_timeout_sec: 300,
+              default_tools_approval_mode: "approve",
+            },
+          },
+        },
+      });
+      const thread = client.startThread({
+        model,
+        sandboxMode: "danger-full-access",
+        workingDirectory: workspace,
+        skipGitRepoCheck: true,
+        networkAccessEnabled: false,
+        webSearchMode: "disabled",
+        approvalPolicy: "never",
+      });
+      const streamed = await thread.runStreamed("Echo hello.", {
+        outputSchema: CODING_OUTPUT_JSON_SCHEMA,
+        signal: AbortSignal.timeout(90_000),
+      });
+      const events: Array<{ type: string }> = [];
+      for await (const event of streamed.events) events.push(event);
+
+      // Printed so the recorded outcome is evidence, not assertion (booleans only).
+      process.stderr.write(`[codex-mcp-header-spike] ${JSON.stringify(stub.observed)}\n`);
+      expect(rejected).toEqual([]);
+      expect(events.map((event) => event.type)).toContain("turn.completed");
+      expect(stub.observed.filter((o) => o.method === "tools/call")).toHaveLength(1);
+      expect(stub.observed.every((o) => o.tokenHeaderIsPlaceholder)).toBe(true);
+      // Outcome A: with no bearer_token_env_var, Codex sends the custom header and no Authorization.
+      expect(stub.observed.every((o) => !o.hasAuthorization)).toBe(true);
+      expect(JSON.stringify(forwarded)).toContain("ECHO:hello-from-fake-model");
+    }, 120_000);
   },
 );

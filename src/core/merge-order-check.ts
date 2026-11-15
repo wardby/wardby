@@ -28,7 +28,12 @@ import type {
 } from "../providers/review-host/types.js";
 import { logger, type Logger } from "./logger.js";
 import { maybeMarkReady, type MarkReadyDb } from "./mark-ready.js";
-import { collectRelatedPullRequests, runTreeRoot, type RelatedPullRequestsDb } from "./related-pull-requests.js";
+import {
+  collectRelatedPullRequests,
+  markerRecordedFor,
+  runTreeRoot,
+  type RelatedPullRequestsDb,
+} from "./related-pull-requests.js";
 
 const moduleLog = logger.child({ module: "merge-order-check" });
 
@@ -262,12 +267,8 @@ export async function syncMergeOrderChecks(
         else if (memberHost?.pullRequestOrigin) origin = await memberHost.pullRequestOrigin(pr.repository, pr.number);
         else throw new Error("no_host_for_repository");
         let headSha: string | undefined;
-        if (origin.markerRunId) {
-          const opener = await deps.db.codingRun.findUnique({
-            where: { runId: origin.markerRunId },
-            select: { repository: true },
-          });
-          if (opener && opener.repository.toLowerCase() === pr.repository) headSha = origin.headSha;
+        if (origin.markerRunId && (await markerRecordedFor(deps.db, origin.markerRunId, pr.repository))) {
+          headSha = origin.headSha;
         }
         members.push({ member: { ...base, state: originState(origin) }, known: true, ...(headSha ? { headSha } : {}) });
       } catch (err) {
@@ -346,17 +347,32 @@ export async function syncMergeOrderChecksAfterRun(
 /** Most coding runs (seeds) looked up per pull request event or sweep pass. */
 const MAX_SEEDS = 20;
 
-/** Coding runs with a merge order whose outcome is pull request `repository#number`. */
+/**
+ * Coding runs with a merge order whose outcome is pull request `repository#number`: in their
+ * default repository, or in a writable extra repository whose row recorded that pull request and
+ * its own merge order (#537), on the repository's provider. A run may appear twice; callers dedupe
+ * by tree root.
+ */
 async function orderedSeeds(db: MergeOrderDb, repository: string, number: number): Promise<string[]> {
   const rows = await db.$queryRaw<Array<{ runId: string }>>`
-    SELECT cr."runId"
-    FROM "CodingRun" cr
-    WHERE cr."mergeOrder" IS NOT NULL
-      AND lower(cr."repository") = lower(${repository})
-      AND cr."result"->>'outcome' IN ('pull_request_opened', 'pull_request_updated')
-      AND lower(cr."result"->>'repository') = lower(${repository})
-      AND cr."result"->>'pullRequestNumber' = ${String(number)}
-    ORDER BY cr."updatedAt" DESC
+    SELECT "runId" FROM (
+      SELECT cr."runId", cr."updatedAt"
+      FROM "CodingRun" cr
+      WHERE cr."mergeOrder" IS NOT NULL
+        AND lower(cr."repository") = lower(${repository})
+        AND cr."result"->>'outcome' IN ('pull_request_opened', 'pull_request_updated')
+        AND lower(cr."result"->>'repository') = lower(${repository})
+        AND cr."result"->>'pullRequestNumber' = ${String(number)}
+      UNION ALL
+      SELECT crr."runId", crr."updatedAt"
+      FROM "CodingRunRepository" crr
+      WHERE crr."access" = 'write'
+        AND crr."mergeOrder" IS NOT NULL
+        AND crr."provider" = ${codeProviderOf(repository)}
+        AND lower(crr."repository") = lower(${repository})
+        AND crr."pullRequestNumber" = ${number}
+    ) seeds
+    ORDER BY "updatedAt" DESC
     LIMIT ${MAX_SEEDS}`;
   return rows.map((r) => r.runId);
 }
@@ -428,14 +444,24 @@ export async function sweepMergeOrderChecks(deps: MergeOrderSyncDeps, now: Date 
   let roots: Array<{ id: string }>;
   try {
     // Covers the MERGE_ORDER_SWEEP_SEEDS most recently updated coding runs with a merge order
-    // within the last 7 days; older sets rely on their pr_closed/pr_updated events alone.
+    // within the last 7 days, by their default repository's pull request or a writable extra's
+    // (#537); older sets rely on their pr_closed/pr_updated events alone.
     const rows = await deps.db.$queryRaw<Array<{ runId: string; repository: string }>>`
-      SELECT cr."runId", cr."repository"
-      FROM "CodingRun" cr
-      WHERE cr."mergeOrder" IS NOT NULL
-        AND cr."updatedAt" >= ${since}
-        AND cr."result"->>'outcome' IN ('pull_request_opened', 'pull_request_updated')
-      ORDER BY cr."updatedAt" DESC
+      SELECT "runId", "repository" FROM (
+        SELECT cr."runId", cr."repository", cr."updatedAt"
+        FROM "CodingRun" cr
+        WHERE cr."mergeOrder" IS NOT NULL
+          AND cr."updatedAt" >= ${since}
+          AND cr."result"->>'outcome' IN ('pull_request_opened', 'pull_request_updated')
+        UNION ALL
+        SELECT crr."runId", crr."repository", crr."updatedAt"
+        FROM "CodingRunRepository" crr
+        WHERE crr."access" = 'write'
+          AND crr."mergeOrder" IS NOT NULL
+          AND crr."pullRequestNumber" IS NOT NULL
+          AND crr."updatedAt" >= ${since}
+      ) seeds
+      ORDER BY "updatedAt" DESC
       LIMIT ${MERGE_ORDER_SWEEP_SEEDS}`;
     roots = [];
     for (const row of rows) {

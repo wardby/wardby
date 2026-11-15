@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { createPrismaClient } from "../../core/db.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaContainerExecutionStore } from "./container.js";
+import { defaultRepositoryName } from "../../coding/repository-names.js";
+import { systemPromptSha256 } from "../jobs/warm-fingerprint.js";
 
 const db = createPrismaClient();
 const suffix = randomUUID();
@@ -31,6 +33,140 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     await db.agent.deleteMany({ where: { id: agentId } });
     await db.principal.deleteMany({ where: { id: principalId } });
     await db.$disconnect();
+  });
+
+  it("warm rounds: finds the round a continuation follows, records warmStart, and loads the prompt's hash", async () => {
+    const ids = ["root", "round2", "round3", "later"].map((name) => `container-warm-${name}-${randomUUID()}`);
+    const [root, round2, round3, later] = ids;
+    const at = (seconds: number) => new Date(Date.UTC(2026, 10, 14, 12, 0, seconds));
+    const coding = (runId: string, rootCodingRunId: string | null, commitSha: string | null) => ({
+      runId,
+      task: "Fix it.",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: `wardby/run-${root}`,
+      provider: "claude-code",
+      model: "claude-sonnet-5",
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+      budgetReservedUsd: 1,
+      rootCodingRunId,
+      result: commitSha ? { outcome: "pull_request_updated", commitSha } : undefined,
+    });
+    try {
+      for (const [index, id] of ids.entries()) {
+        await db.run.create({ data: { id, agentId, executionManaged: true, startedAt: at(index) } });
+      }
+      await db.codingRun.create({ data: coding(root, null, "1".repeat(40)) });
+      await db.codingRun.create({ data: coding(round2, root, "2".repeat(40)) });
+      await db.codingRun.create({ data: coding(round3, root, null) });
+      await db.codingRun.create({ data: coding(later, root, null) });
+      const store = new PrismaContainerExecutionStore(db);
+      // The newest other run of the tree dispatched before this one, never a later one.
+      await expect(store.previousRound(round2, root)).resolves.toEqual({ runId: root, commitSha: "1".repeat(40) });
+      await expect(store.previousRound(round3, root)).resolves.toEqual({ runId: round2, commitSha: "2".repeat(40) });
+      await expect(store.previousRound(later, root)).resolves.toEqual({ runId: round3, commitSha: null });
+      await expect(store.previousRound(root, root)).resolves.toBeNull();
+      await expect(store.previousRound("missing", root)).resolves.toBeNull();
+
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: round2 } })).warmStart).toBeNull();
+      await store.recordWarmStart(round2, true);
+      await store.recordWarmStart(round3, false);
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: round2 } })).warmStart).toBe(true);
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: round3 } })).warmStart).toBe(false);
+
+      await expect(store.load(round2)).resolves.toMatchObject({
+        systemPromptSha256: systemPromptSha256("code safely"),
+        warmStart: true,
+      });
+
+      // The launch fingerprint: absent until recorded, then loaded as written.
+      expect(await store.load(round3)).not.toHaveProperty("warmFingerprint");
+      const fingerprint = "d".repeat(64);
+      await store.recordWarmFingerprint(round3, fingerprint);
+      await expect(store.load(round3)).resolves.toMatchObject({ warmFingerprint: fingerprint, warmStart: false });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: ids } } });
+      await db.run.deleteMany({ where: { id: { in: ids } } });
+    }
+  });
+
+  it("warm rounds: loads the run's secrets as identity and version only, and a rotation changes the version", async () => {
+    const runId = `container-secrets-${randomUUID()}`;
+    const fakeValue = `sk-fake-${randomUUID()}`;
+    const secret = await db.secret.create({
+      data: { name: `API_KEY_${suffix}`, ciphertext: `ct:${fakeValue}`, keyId: "appkey:test", ownerId: principalId },
+    });
+    const server = await db.mcpServer.create({
+      data: {
+        ownerId: principalId,
+        name: `docs-${suffix}`,
+        url: "https://mcp.example/mcp",
+        secretNames: [secret.name, "MISSING"],
+      },
+    });
+    try {
+      await db.agentSecret.create({ data: { agentId, secretId: secret.id, boundName: "API_KEY" } });
+      await db.agentMcpServer.create({
+        data: { agentId, serverId: server.id, allowedTools: ["search"], attachedById: principalId },
+      });
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId,
+          task: "Fix it.",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${runId}`,
+          provider: "claude-code",
+          model: "claude-sonnet-5",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      // Read only when something needs them: warm rounds, or a session-resume run's transcript.
+      expect((await new PrismaContainerExecutionStore(db).load(runId))!.secretVersions).toBeUndefined();
+      const store = new PrismaContainerExecutionStore(db, { warmRounds: true });
+      const loaded = await store.load(runId);
+      const at = secret.updatedAt.toISOString();
+      expect(loaded!.secretVersions).toEqual([
+        { id: secret.id, name: "API_KEY", updatedAt: at },
+        { id: secret.id, name: `mcp:${server.name}/${secret.name}`, updatedAt: at },
+      ]);
+      expect(JSON.stringify(loaded)).not.toContain(fakeValue);
+
+      await db.secret.update({ where: { id: secret.id }, data: { ciphertext: `ct:${fakeValue}-rotated` } });
+      const rotated = await store.load(runId);
+      expect(rotated!.secretVersions![0].updatedAt).not.toBe(at);
+
+      await db.agentSecret.deleteMany({ where: { agentId, secretId: secret.id } });
+      expect((await store.load(runId))!.secretVersions!.map((v) => v.name)).toEqual([
+        `mcp:${server.name}/${secret.name}`,
+      ]);
+
+      // Session resume with warm rounds off still reads them, and the launch versions round-trip
+      // as identity and version only (an extra field, such as a value, is never written).
+      await db.codingRun.update({ where: { runId }, data: { sessionResume: true } });
+      const resumeStore = new PrismaContainerExecutionStore(db);
+      const launched = (await resumeStore.load(runId))!.secretVersions!;
+      expect(launched).toHaveLength(1);
+      expect((await resumeStore.load(runId))!.launchSecretVersions).toBeUndefined();
+      await resumeStore.recordLaunchSecretVersions(runId, [{ ...launched[0], value: fakeValue } as never]);
+      const stored = await db.codingRun.findUnique({ where: { runId }, select: { launchSecretVersions: true } });
+      expect(stored!.launchSecretVersions).toEqual(launched);
+      expect(JSON.stringify(stored)).not.toContain(fakeValue);
+      expect((await resumeStore.load(runId))!.launchSecretVersions).toEqual(launched);
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId } });
+      await db.run.deleteMany({ where: { id: runId } });
+      await db.agentMcpServer.deleteMany({ where: { agentId } });
+      await db.agentSecret.deleteMany({ where: { agentId } });
+      await db.mcpServer.deleteMany({ where: { id: server.id } });
+      await db.secret.deleteMany({ where: { id: secret.id } });
+    }
   });
 
   it("loads the agent's current profile repository and its authorization stamp with the run", async () => {
@@ -84,6 +220,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
           agentId,
           provider: "github",
           repository: "openai/example",
+          name: defaultRepositoryName("openai/example"),
           access: "write",
           triggers: [],
           authorizedVia: "admin",
@@ -115,7 +252,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       const gone = { viaRepositoryLink: true, repositoryLinkExists: false, repositoryLinkAuthorizedVia: null };
       const link = { agentId, provider: "github", repository: "openai/example" };
       const updateLink = (data: { access?: string; triggers?: string[] }) =>
-        db.agentRepository.update({ where: { agentId_provider_repository: link }, data });
+        db.agentRepository.updateMany({ where: link, data });
       // Downgraded to read: no longer on the list.
       await updateLink({ access: "read" });
       await expect(store.load(runId)).resolves.toMatchObject(gone);
@@ -130,6 +267,185 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       await db.codingRun.deleteMany({ where: { runId } });
       await db.run.deleteMany({ where: { id: runId } });
       await db.agentRepository.deleteMany({ where: { agentId } });
+    }
+  });
+
+  it("loads a run's repository rows in order, with whether each link is still there and which branches exist", async () => {
+    const rootId = `container-repos-root-${randomUUID()}`;
+    const runId = `container-repos-${randomUUID()}`;
+    const codingRun = (id: string, rootCodingRunId: string | null) => ({
+      runId: id,
+      task: "Fix it.",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: `wardby/run-${rootCodingRunId ?? id}`,
+      provider: "codex",
+      model: "gpt-5.6-luna",
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+      budgetReservedUsd: 1,
+      rootCodingRunId,
+    });
+    try {
+      const base = await db.agentRepository.create({
+        data: {
+          agentId,
+          provider: "github",
+          repository: "openai/base",
+          name: "base",
+          access: "read",
+          ref: "main",
+          triggers: [],
+          authorizedVia: "admin",
+        },
+      });
+      const tools = await db.agentRepository.create({
+        data: {
+          agentId,
+          provider: "github",
+          repository: "openai/tools",
+          name: "tools",
+          access: "write",
+          triggers: [],
+          authorizedVia: "host_permission",
+        },
+      });
+      const docs = await db.agentRepository.create({
+        data: {
+          agentId,
+          provider: "github",
+          repository: "openai/docs",
+          name: "docs",
+          access: "write",
+          triggers: [],
+          authorizedVia: "admin",
+        },
+      });
+      await db.run.create({ data: { id: rootId, agentId, executionManaged: true } });
+      await db.codingRun.create({ data: codingRun(rootId, null) });
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
+      await db.codingRun.create({ data: codingRun(runId, rootId) });
+      const sha = "a".repeat(40);
+      const row = (
+        id: string,
+        position: number,
+        link: { id: string; name: string; repository: string },
+        access: string,
+      ) => ({
+        runId: id,
+        position,
+        name: link.name,
+        access,
+        provider: "github",
+        repository: link.repository,
+        requestedRef: "main",
+        resolvedSha: sha,
+        linkId: link.id,
+        ...(access === "write" ? { baseRef: "main", headRef: `wardby/run-${rootId}` } : {}),
+      });
+      // The root opened a pull request for tools only.
+      await db.codingRunRepository.createMany({
+        data: [
+          row(rootId, 1, base, "read"),
+          { ...row(rootId, 2, tools, "write"), pullRequestNumber: 7 },
+          row(rootId, 3, docs, "write"),
+        ],
+      });
+      await db.codingRunRepository.createMany({
+        data: [row(runId, 3, docs, "write"), row(runId, 1, base, "read"), row(runId, 2, tools, "write")],
+      });
+      const store = new PrismaContainerExecutionStore(db);
+      const loaded = await store.load(runId);
+      expect(loaded?.repositories).toEqual([
+        expect.objectContaining({
+          position: 1,
+          name: "base",
+          access: "read",
+          accessKnown: true,
+          repository: "openai/base",
+          resolvedSha: sha,
+          baseRef: null,
+          headRef: null,
+          linkId: base.id,
+          linkExists: true,
+          linkAuthorizedVia: "admin",
+          continuesBranch: false,
+        }),
+        expect.objectContaining({
+          position: 2,
+          name: "tools",
+          access: "write",
+          baseRef: "main",
+          headRef: `wardby/run-${rootId}`,
+          linkExists: true,
+          linkAuthorizedVia: "host_permission",
+          continuesBranch: true,
+          pullRequestNumber: null,
+        }),
+        expect.objectContaining({ position: 3, name: "docs", continuesBranch: false, linkExists: true }),
+      ]);
+      // A root run has no earlier branches: nothing continues.
+      expect((await store.load(rootId))?.repositories.map((r) => r.continuesBranch)).toEqual([false, false, false]);
+      // This run's own published rows never count: only the root or an earlier continuation made a
+      // branch, so a reload after this run publishes docs still creates docs' branch off its base.
+      await db.codingRunRepository.updateMany({
+        where: { runId, name: "docs" },
+        data: { resultBranch: `wardby/run-${rootId}`, pullRequestNumber: 9 },
+      });
+      expect((await store.load(runId))?.repositories.map((r) => [r.name, r.continuesBranch])).toEqual([
+        ["base", false],
+        ["tools", true],
+        ["docs", false],
+      ]);
+      // A stored access that is neither read nor write is flagged, so the executor refuses the row.
+      await db.codingRunRepository.updateMany({ where: { runId, name: "base" }, data: { access: "admin" } });
+      expect((await store.load(runId))?.repositories.map((r) => [r.name, r.accessKnown, r.linkExists])).toEqual([
+        ["base", false, false],
+        ["tools", true, true],
+        ["docs", true, true],
+      ]);
+      await db.codingRunRepository.updateMany({ where: { runId, name: "base" }, data: { access: "read" } });
+      // A link whose access changed, or that gained a trigger, or that is gone, no longer authorizes its row.
+      await db.agentRepository.update({ where: { id: tools.id }, data: { access: "read" } });
+      await db.agentRepository.update({ where: { id: docs.id }, data: { triggers: ["mention"] } });
+      await db.agentRepository.delete({ where: { id: base.id } });
+      const gone = await store.load(runId);
+      expect(gone?.repositories.map((r) => [r.name, r.linkExists, r.linkAuthorizedVia])).toEqual([
+        ["base", false, null],
+        ["tools", false, null],
+        ["docs", false, null],
+      ]);
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [runId, rootId] } } });
+      await db.run.deleteMany({ where: { id: { in: [runId, rootId] } } });
+      await db.agentRepository.deleteMany({ where: { agentId } });
+    }
+  });
+
+  it("loads no repositories for a single-repository run", async () => {
+    const runId = `container-single-${randomUUID()}`;
+    try {
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId,
+          task: "Fix it.",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${runId}`,
+          provider: "codex",
+          model: "gpt-5.6-luna",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+          budgetReservedUsd: 1,
+        },
+      });
+      await expect(new PrismaContainerExecutionStore(db).load(runId)).resolves.toMatchObject({ repositories: [] });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId } });
+      await db.run.deleteMany({ where: { id: runId } });
     }
   });
 
@@ -547,5 +863,212 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
       await db.codingRun.deleteMany({ where: { runId: { in: [fresh, round] } } });
       await db.run.deleteMany({ where: { id: { in: [fresh, round] } } });
     }
+  });
+
+  describe("a run with several repositories (#537)", () => {
+    const codingRunData = (runId: string) => ({
+      runId,
+      task: "Fix it.",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: `wardby/run-${runId}`,
+      provider: "codex",
+      model: "gpt-5.6-luna",
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+      budgetReservedUsd: 1,
+    });
+    const opened = (repository: string, baseRef: string, n: number) => ({
+      schemaVersion: 1 as const,
+      outcome: "pull_request_opened" as const,
+      repository,
+      baseRef,
+      headRef: "wardby/run-x",
+      commitSha: "d".repeat(40),
+      pullRequestNumber: n,
+      pullRequestUrl: `https://github.com/${repository}/pull/${n}`,
+      summary: `PR for ${repository}.`,
+      tests: [],
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+    });
+    async function seed(runId: string, names: string[]) {
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true, status: "running" } });
+      await db.codingRun.create({ data: codingRunData(runId) });
+      const rows = [];
+      for (const [i, name] of names.entries()) {
+        rows.push(
+          await db.codingRunRepository.create({
+            data: {
+              runId,
+              position: i + 1,
+              name,
+              access: "write",
+              provider: "github",
+              repository: `openai/${name}`,
+              requestedRef: "develop",
+              resolvedSha: "a".repeat(40),
+              baseRef: "develop",
+              headRef: `wardby/run-${runId}`,
+            },
+          }),
+        );
+      }
+      return rows;
+    }
+    async function drop(runIds: string[]) {
+      await db.codingRun.deleteMany({ where: { runId: { in: runIds } } });
+      await db.run.deleteMany({ where: { id: { in: runIds } } });
+    }
+
+    it("completePartially records what published, on the run and each row, and ends the run failed", async () => {
+      const runId = `container-partial-${randomUUID()}`;
+      try {
+        const [tools, docs] = await seed(runId, ["tools", "docs"]);
+        const store = new PrismaContainerExecutionStore(db);
+        const error = "partially_published: workspace: published; tools: published; docs: failed(workspace)";
+        await store.completePartially(runId, {
+          mainResult: opened("openai/example", "main", 42),
+          record: { baseSha: "b".repeat(40), mergeOrder: 1 },
+          extras: [
+            {
+              id: tools.id,
+              name: "tools",
+              result: opened("openai/tools", "develop", 7),
+              pullRequestNumber: 7,
+              resultBranch: null,
+              baseSha: "c".repeat(40),
+              mergeOrder: 2,
+              prDescriptionOutcome: "written",
+              prDescriptionSha256: "5".repeat(64),
+              prDescriptionRunId: runId,
+            },
+          ],
+          error,
+          audit: { failureCategory: "partially_published", diagnosticId: "coding_diag_x" },
+        });
+        const run = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
+        expect(run.status).toBe("failed");
+        expect(run.error).toBe(error);
+        expect(run.finishedAt).not.toBeNull();
+        expect(run.codingRun).toMatchObject({
+          result: expect.objectContaining({ pullRequestNumber: 42 }),
+          baseSha: "b".repeat(40),
+          mergeOrder: 1,
+          failureCategory: "partially_published",
+          diagnosticId: "coding_diag_x",
+        });
+        await expect(db.codingRunRepository.findUniqueOrThrow({ where: { id: tools.id } })).resolves.toMatchObject({
+          result: expect.objectContaining({ repository: "openai/tools", pullRequestNumber: 7 }),
+          pullRequestNumber: 7,
+          baseSha: "c".repeat(40),
+          mergeOrder: 2,
+          prDescriptionOutcome: "written",
+          prDescriptionSha256: "5".repeat(64),
+          prDescriptionRunId: runId,
+        });
+        // A repository that failed records nothing.
+        await expect(db.codingRunRepository.findUniqueOrThrow({ where: { id: docs.id } })).resolves.toMatchObject({
+          result: null,
+          pullRequestNumber: null,
+          mergeOrder: null,
+        });
+        // A second write changes nothing: the run already ended.
+        await store.completePartially(runId, {
+          mainResult: null,
+          record: {},
+          extras: [],
+          error: "partially_published: other",
+          audit: { failureCategory: "partially_published", diagnosticId: "coding_diag_y" },
+        });
+        await expect(db.run.findUniqueOrThrow({ where: { id: runId } })).resolves.toMatchObject({ error });
+      } finally {
+        await drop([runId]);
+      }
+    });
+
+    it("complete records each extra on its own row, never another run's", async () => {
+      const runId = `container-extras-${randomUUID()}`;
+      const other = `container-extras-other-${randomUUID()}`;
+      try {
+        const [tools] = await seed(runId, ["tools"]);
+        const [otherTools] = await seed(other, ["tools"]);
+        const store = new PrismaContainerExecutionStore(db);
+        const record = (id: string) => ({
+          id,
+          name: "tools",
+          result: opened("openai/tools", "develop", 7),
+          pullRequestNumber: 7,
+          resultBranch: null,
+          baseSha: "c".repeat(40),
+          mergeOrder: 2,
+        });
+        // The other run's row id, passed for this run: not written.
+        await store.complete(runId, "succeeded", opened("openai/example", "main", 42), {}, [
+          record(tools.id),
+          record(otherTools.id),
+        ]);
+        await expect(db.codingRunRepository.findUniqueOrThrow({ where: { id: tools.id } })).resolves.toMatchObject({
+          pullRequestNumber: 7,
+          mergeOrder: 2,
+        });
+        await expect(db.codingRunRepository.findUniqueOrThrow({ where: { id: otherTools.id } })).resolves.toMatchObject(
+          { pullRequestNumber: null, result: null },
+        );
+      } finally {
+        await drop([runId, other]);
+      }
+    });
+
+    it("reads and compare-and-sets an extra's description on the root's row of that name", async () => {
+      const rootId = `container-extra-desc-${randomUUID()}`;
+      try {
+        const [tools] = await seed(rootId, ["tools"]);
+        await db.codingRunRepository.update({
+          where: { id: tools.id },
+          data: { result: opened("openai/tools", "develop", 7), prDescriptionSha256: "1".repeat(64) },
+        });
+        const store = new PrismaContainerExecutionStore(db);
+        await expect(store.pullRequestDescriptionBaseline(rootId, "tools")).resolves.toEqual({
+          recordedSha256: "1".repeat(64),
+          previousAgentText: "PR for openai/tools.",
+          agentTextRunId: rootId,
+        });
+        const write = (expectedSha256: string) =>
+          store.recordPullRequestDescription({
+            rootRunId: rootId,
+            expectedSha256,
+            sha256: "2".repeat(64),
+            agentTextRunId: rootId,
+            name: "tools",
+          });
+        await expect(write("9".repeat(64))).resolves.toBe(false);
+        await expect(write("1".repeat(64))).resolves.toBe(true);
+        await expect(db.codingRunRepository.findUniqueOrThrow({ where: { id: tools.id } })).resolves.toMatchObject({
+          prDescriptionSha256: "2".repeat(64),
+        });
+        // The run's own (default repository) hash is untouched.
+        await expect(db.codingRun.findUniqueOrThrow({ where: { runId: rootId } })).resolves.toMatchObject({
+          prDescriptionSha256: null,
+        });
+      } finally {
+        await drop([rootId]);
+      }
+    });
+
+    it("pullRequestMarkedReady with a name reads the root's row of that extra, not the run's own flag", async () => {
+      const rootId = `container-extra-ready-${randomUUID()}`;
+      try {
+        const [tools] = await seed(rootId, ["tools", "docs"]);
+        await db.codingRunRepository.update({ where: { id: tools.id }, data: { markedReadyAt: new Date() } });
+        const store = new PrismaContainerExecutionStore(db);
+        await expect(store.pullRequestMarkedReady(rootId, "tools")).resolves.toBe(true);
+        await expect(store.pullRequestMarkedReady(rootId, "docs")).resolves.toBe(false);
+        await expect(store.pullRequestMarkedReady(rootId, "missing")).resolves.toBe(false);
+        await expect(store.pullRequestMarkedReady(rootId)).resolves.toBe(false);
+      } finally {
+        await drop([rootId]);
+      }
+    });
   });
 });

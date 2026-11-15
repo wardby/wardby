@@ -14,7 +14,12 @@ import {
   type RunStepsLevel,
 } from "../../core/run-steps/config.js";
 import { codeProviderOf } from "../../coding/code-host.js";
-import { CodingProfilePatchSchema, CodingProfileSchema, type CodingProfile } from "../../coding/profile.js";
+import {
+  CodingProfilePatchSchema,
+  CodingProfileSchema,
+  MAX_GIT_HISTORY_DEPTH,
+  type CodingProfile,
+} from "../../coding/profile.js";
 import {
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_CLAUDE_MAX_TURNS,
@@ -70,6 +75,7 @@ import { projectTool, TOOL_GRANTS_INCLUDE } from "./tools.js";
 import { withZod3ToolWarnings } from "../../core/zod3-window.js";
 import { requireAnyScope, requireScope } from "../auth/resource-server.js";
 import { logger } from "../../core/logger.js";
+import { removeRetainedRounds } from "./retained-rounds.js";
 import {
   authorizeRepositoryForSet,
   canonicalLocalRepository,
@@ -110,6 +116,41 @@ function requireDebugTraceScope(ctx: McpRequestContext): void {
 }
 
 const agentsLog = logger.child({ module: "mcp-agents" });
+
+/** What a coding agent's warm-round fingerprint covers (warm-fingerprint.ts), as an agent row has it. */
+interface WarmFingerprintSource {
+  kind: string;
+  model: string;
+  systemPrompt: string;
+  codingProfile: {
+    provider: string;
+    repository: string;
+    toolchain: string;
+    toolchainVersion: string | null;
+    workerImageRef: string | null;
+    workspaceDiskMb: number | null;
+  } | null;
+}
+
+/** Whether an update changed anything a retained round's fingerprint covers. */
+function warmFingerprintChanged(before: WarmFingerprintSource, after: WarmFingerprintSource): boolean {
+  if (before.kind !== "coding") return false;
+  const a = before.codingProfile;
+  const b = after.codingProfile;
+  return (
+    after.kind !== before.kind ||
+    after.model !== before.model ||
+    after.systemPrompt !== before.systemPrompt ||
+    !a ||
+    !b ||
+    a.provider !== b.provider ||
+    a.repository !== b.repository ||
+    a.toolchain !== b.toolchain ||
+    a.toolchainVersion !== b.toolchainVersion ||
+    a.workerImageRef !== b.workerImageRef ||
+    a.workspaceDiskMb !== b.workspaceDiskMb
+  );
+}
 
 const MAX_DEBUG_TRACE_MINUTES = 24 * 60;
 
@@ -430,6 +471,22 @@ const profileJsonSchema = {
       description:
         "Workspace disk size in MiB. Null uses the deployment default (CODING_DISK_MB), capped by the operator's CODING_MAX_DISK_MB.",
     },
+    gitHistory: {
+      type: ["object", "null"],
+      additionalProperties: false,
+      properties: {
+        depth: {
+          oneOf: [
+            { type: "integer", minimum: 1, maximum: MAX_GIT_HISTORY_DEPTH },
+            { type: "string", enum: ["full"] },
+          ],
+        },
+      },
+      required: ["depth"],
+      description:
+        'Give runs real git history in /workspace instead of a single snapshot commit: { depth: <1..100000> } commits, or { depth: "full" }. ' +
+        'Applies to every writable repository of a run. Null (default) turns it off. Remote repository links (link_repository as: "remote") need it on.',
+    },
     maxTurns: {
       type: ["integer", "null"],
       minimum: 1,
@@ -584,6 +641,16 @@ function requireModelAvailable(ctx: McpRequestContext, model: string, kind: "nat
   }
 }
 
+/** The stored columns for a validated profile: gitHistory is kept as gitHistoryDepth + gitHistoryFull (full overrides depth). */
+function profileColumns(profile: CodingProfile) {
+  const { gitHistory, ...rest } = profile;
+  return {
+    ...rest,
+    gitHistoryDepth: gitHistory && gitHistory.depth !== "full" ? gitHistory.depth : null,
+    gitHistoryFull: gitHistory?.depth === "full",
+  };
+}
+
 function storedProfile(profile: CodingAgentProfile): CodingProfile {
   return CodingProfileSchema.parse({
     provider: profile.provider,
@@ -598,6 +665,11 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     toolchainVersion: profile.toolchainVersion,
     workerImageRef: profile.workerImageRef,
     workspaceDiskMb: profile.workspaceDiskMb,
+    gitHistory: profile.gitHistoryFull
+      ? { depth: "full" }
+      : profile.gitHistoryDepth != null
+        ? { depth: profile.gitHistoryDepth }
+        : null,
     maxTurns: profile.maxTurns,
     maxOutputTokens: profile.maxOutputTokens,
     packageAllowlist: profile.packageAllowlist,
@@ -731,7 +803,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           })),
           ownerId: ctx.principal.id,
           ...(codingProfile && authorization
-            ? { codingProfile: { create: { ...codingProfile, ...profileStamp(authorization) } } }
+            ? { codingProfile: { create: { ...profileColumns(codingProfile), ...profileStamp(authorization) } } }
             : {}),
         },
         include: { codingProfile: true },
@@ -1091,8 +1163,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
                 ? { delete: true as const }
                 : undefined
               : existing.codingProfile
-                ? { update: { ...nextProfile!, ...stamp, ...trace } }
-                : { create: { ...nextProfile!, ...stamp, ...trace } };
+                ? { update: { ...profileColumns(nextProfile!), ...stamp, ...trace } }
+                : { create: { ...profileColumns(nextProfile!), ...stamp, ...trace } };
           const scheduleStart = await scheduleStartFields(tx, existing, {
             schedule: nextSchedule,
             timezone: nextTimezone,
@@ -1110,6 +1182,9 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
+      // Warm rounds: a change to what a retained round's fingerprint covers ends its retained sandboxes
+      // now (a later round would start fresh anyway).
+      if (warmFingerprintChanged(before, agent)) await removeRetainedRounds(ctx, agent.id);
       if (debugTraceUntil !== undefined || debugTraceMaxMb !== undefined) {
         agentsLog.info(
           {
@@ -1265,6 +1340,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         }
         throw err;
       }
+      // Warm rounds: a deleted agent's retained coding sandboxes go too (best effort; they expire anyway).
+      await removeRetainedRounds(ctx, args.id);
       return textResult({ deleted: args.id });
     },
   });

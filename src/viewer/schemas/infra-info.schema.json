@@ -9,7 +9,8 @@
           "enum": [
             "local",
             "docker",
-            "kubernetes"
+            "kubernetes",
+            "substrate"
           ]
         },
         "kubernetes": {

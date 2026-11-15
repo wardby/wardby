@@ -5,10 +5,11 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { COMMIT_SHA } from "./protocol.js";
 
 const run = promisify(execFile);
 
-export const SHA = /^[0-9a-f]{40}$/;
+export const SHA = COMMIT_SHA;
 export const MAX_REF_CHARS = 250;
 export const GIT_MAX_BUFFER = 16 * 1024 * 1024;
 

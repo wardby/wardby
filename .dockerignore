@@ -8,3 +8,5 @@ dist
 .env.*
 docs/private
 *.log
+# The Substrate bridge images copy the built bridge (src/substrate-bridge/Dockerfile.*).
+!dist/substrate-bridge

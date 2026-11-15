@@ -2,6 +2,7 @@
 import type { PrismaClient } from "#prisma";
 import type { RunDetail } from "./api-schema.js";
 import { loadGraphRuns, type IssueSites } from "./graph.js";
+import { RUN_REPOSITORY_SELECT, publicRunRepository } from "../coding/run-repositories.js";
 import { requestForReader } from "../core/run-request.js";
 import { RUN_TEXT_FIRST_PAGE_CHARS, textPiece } from "../mcp/tools/run-pages.js";
 
@@ -71,6 +72,7 @@ export async function loadRunDetail(
             queuedAt: true,
             failureCategory: true,
             services: true,
+            repositories: { orderBy: { position: "asc" }, select: RUN_REPOSITORY_SELECT },
           },
         },
       },
@@ -123,6 +125,7 @@ export async function loadRunDetail(
           queuedAt: coding.queuedAt ? coding.queuedAt.toISOString() : null,
           failureCategory: coding.failureCategory,
           services: serviceDetails(coding.services),
+          repositories: coding.repositories.map(publicRunRepository),
         }
       : null,
   };

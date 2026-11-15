@@ -145,3 +145,8 @@ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+This product includes a TypeScript client generated at build time from the
+Agent Substrate API definition (api/ateapi/v1/ateapi.proto),
+Copyright 2026 The Agent Substrate Authors, licensed under the Apache
+License, Version 2.0. Source: https://github.com/agent-substrate/substrate

@@ -71,11 +71,15 @@ The worker's execution backend is a seam (`WorkspaceJobLauncher`), and the
 choice does not change any boundary above — the worker still holds no
 credentials, still reaches only the proxy, and the proxy still owns the ledger.
 
-| `JOB_LAUNCHER` | Worker runs in                   | Isolation                                            |
-| -------------- | -------------------------------- | ---------------------------------------------------- |
-| `local`        | nowhere: no coding launcher      | native agents only; coding runs fail before starting |
-| `docker`       | a container on a per-run network | the diagram above                                    |
-| `kubernetes`   | a pod in a namespace             | per-run NetworkPolicy, attested pod, optional gVisor |
+| `JOB_LAUNCHER` | Worker runs in                                          | Isolation                                            |
+| -------------- | ------------------------------------------------------- | ---------------------------------------------------- |
+| `local`        | nowhere: no coding launcher                             | native agents only; coding runs fail before starting |
+| `docker`       | a container on a per-run network                        | the diagram above                                    |
+| `kubernetes`   | a pod in a namespace                                    | per-run NetworkPolicy, attested pod, optional gVisor |
+| `substrate`    | two Agent Substrate actors (Claude Code) or one (Codex) | gVisor, per-actor egress, no secret in an actor      |
+
+`substrate` is experimental; see
+[substrate-backend.md](substrate-backend.md).
 
 `local` is the default. It composes no coding launcher, so a coding run ends
 with "Coding agents need a container executor"; set `docker` or `kubernetes`

@@ -1,8 +1,8 @@
 /** The group query against real PostgreSQL: up to the top-level run, down every depth, continuations both ways. Skipped without DATABASE_URL. */
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "./db.js";
-import { collectRelatedPullRequests, openSiblings } from "./related-pull-requests.js";
+import { collectRelatedPullRequests, openSiblings, updateRelatedPullRequests } from "./related-pull-requests.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("collectRelatedPullRequests (database)", () => {
   const db = createPrismaClient();
@@ -72,6 +72,27 @@ describe.skipIf(!process.env.DATABASE_URL)("collectRelatedPullRequests (database
     await run(id("G"), 60);
     await run(id("g1"), 61, id("G"));
     await coding(id("g1"), { ...opened("acme/b", 2), outcome: "pull_request_updated" }, id("b"), false);
+
+    // A top-level coding run with several repositories: its default PR acme/main#5 and its row's acme/tools#6.
+    await run(id("multi"), 70);
+    await coding(id("multi"), opened("acme/main", 5), undefined, false);
+    await db.codingRun.update({ where: { runId: id("multi") }, data: { mergeOrder: 1 } });
+    await db.codingRunRepository.create({
+      data: {
+        runId: id("multi"),
+        position: 1,
+        name: "tools",
+        access: "write",
+        provider: "github",
+        repository: "acme/tools",
+        resolvedSha: "a".repeat(40),
+        baseRef: "main",
+        headRef: `wardby/run-${id("multi")}`,
+        result: opened("acme/tools", 6),
+        pullRequestNumber: 6,
+        mergeOrder: 2,
+      },
+    });
   });
 
   afterAll(async () => {
@@ -90,6 +111,34 @@ describe.skipIf(!process.env.DATABASE_URL)("collectRelatedPullRequests (database
         "acme/app#4",
       ]);
     }
+  });
+
+  it("lists a coding run's extra repositories' pull requests after its default one", async () => {
+    const group = await collectRelatedPullRequests(db, id("multi"));
+    expect(group.pullRequests.map((p) => [`${p.repository}#${p.number}`, p.openedByRunId, p.mergeOrder])).toEqual([
+      ["acme/main#5", id("multi"), 1],
+      ["acme/tools#6", id("multi"), 2],
+    ]);
+  });
+
+  it("rewrites the Related section of a coding run that opened pull requests in several repositories", async () => {
+    const host = {
+      provider: "github",
+      pullRequestOrigin: vi.fn(async () => ({
+        state: "open",
+        markerRunId: id("multi"),
+        headSha: "a".repeat(40),
+        isFork: false,
+        labels: [],
+      })),
+      replaceRelatedSection: vi.fn(async (_repository: string, _number: number, _input: unknown) => "updated" as const),
+    };
+    await updateRelatedPullRequests(db, { id: id("multi") }, { github: host } as never, undefined);
+    // Both pull requests, the row's included: the marker names this run, recorded for each repository.
+    expect(host.replaceRelatedSection.mock.calls.map(([repository, number]) => `${repository}#${number}`)).toEqual([
+      "acme/main#5",
+      "acme/tools#6",
+    ]);
   });
 
   it("resolves a follow-up request to the original request's set", async () => {

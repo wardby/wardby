@@ -102,10 +102,11 @@ function setup(
     planConcurrency: options.planConcurrency,
     planMaxPerRun: options.planMaxPerRun,
   });
-  const plan = async (body: string) => {
+  const plan = async (body: string, host?: string) => {
     const response = await service.plan({
       ecosystem: "npm",
       token: "rrg_token",
+      ...(host ? { host } : {}),
       readBody: async () => body,
       signal: new AbortController().signal,
     });
@@ -1097,6 +1098,16 @@ ${extraEdge ? '\n"evil@npm:^1.0.0":\n  version: 1.0.0\n  resolution: "evil@npm:1
         expect(approval.integrity).toBe(sri(approval.name, approval.version));
     });
   }
+
+  it("reads a yarn.lock resolved on the request's validated host as the registry's, not elsewhere", async () => {
+    const host = "coding-proxy.example.svc.cluster.local:8787";
+    const body = yarnClassic().replace("http://wardby-proxy:8787/registry/npm/", `http://${host}/registry/npm/`);
+    const onHost = setup(chain);
+    expect((await onHost.plan(body, host)).json).toEqual({ approved: 3, refused: [] });
+    // Without that host, the same URL is not the proxy's own registry.
+    const onAlias = setup(chain);
+    expect(refusedOf((await onAlias.plan(body)).json)["c@2.0.3"]).toBeDefined();
+  });
 
   for (const [format, body] of [
     ["pnpm-lock.yaml v9", pnpmV9()],

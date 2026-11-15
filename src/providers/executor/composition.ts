@@ -1,13 +1,17 @@
 import { tmpdir } from "node:os";
+import type { RunStepSink } from "../../core/run-steps/types.js";
 import { resolve } from "node:path";
 import type { PrismaClient } from "#prisma";
 import {
   loadBlobStoreConfig,
   loadCodingConcurrencyConfig,
+  loadCodingResultBundleMaxBytes,
   loadContainerExecutorConfig,
   loadGitHubVcsConfig,
   loadKubernetesJobConfig,
+  loadSubstrateJobConfig,
   loadProviderConfig,
+  type ContainerExecutorConfig,
   type ProviderConfig,
 } from "../../config/providers.js";
 import { summarizePackageAudit } from "../../coding/registry/audit-mode.js";
@@ -21,6 +25,8 @@ import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { onDocumentRunFinished } from "../../core/documents/agent-loop.js";
 import type { SelfDefectSink } from "../../core/self-defects.js";
 import { startDeferredForRequest } from "../../core/host-events.js";
+import { syncMergeOrderChecks } from "../../core/merge-order-check.js";
+import { changeHasExtraPullRequest, updateRelatedPullRequests } from "../../core/related-pull-requests.js";
 import { reReviewAfterNoChangeFix, type ReReviewDeps } from "../../core/review-fix.js";
 import { EnvironmentCredentialResolver } from "../coding-proxy/environment-credentials.js";
 import { CodingProxy } from "../coding-proxy/proxy.js";
@@ -33,6 +39,11 @@ import { assertPlatformConfig, platformProfile } from "../jobs/kubernetes-platfo
 import { preflightCanaryImage, runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
 import { CODING_WORKER_IMAGES_REQUIRED } from "../../coding/docker-preflight.js";
 import { KubernetesJobLauncher } from "../jobs/kubernetes.js";
+import { createSubstrateApi } from "../jobs/substrate/client.js";
+import type { SubstrateApi } from "../jobs/substrate/api.js";
+import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
+import { PrismaSubstrateRunStore } from "../jobs/substrate/run-store.js";
+import { PrismaRelayStore } from "../coding-proxy/substrate/prisma-relay-store.js";
 import type { WorkspaceJobLauncher } from "../jobs/types.js";
 import { buildVcsProvider } from "../vcs/index.js";
 import {
@@ -41,6 +52,7 @@ import {
   loadTranscriptRetentionDays,
 } from "../../coding/transcript/recorder.js";
 import { loadAgentSecretValues } from "../../core/secret-guard.js";
+import { agentSecretVersions } from "../../core/secret-versions.js";
 import { createBlobStore } from "../storage/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
 import { loadMcpToolPins } from "../../core/mcp-tools.js";
@@ -74,6 +86,19 @@ export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: s
         .catch((err: unknown) =>
           compositionLog.warn({ err, runId }, "could not release the reviews waiting for this run"),
         );
+      // A top-level coding run of a change with pull requests in several repositories (#537), its
+      // root or a follow-up that continued it, is its own request set: no lead ends after it to list
+      // them in each other's Related sections or to post their merge order checks. Both never throw.
+      void Promise.resolve()
+        .then(async () => {
+          const { db, hosts, issueTrackers } = deps();
+          if (!(await ownsPullRequestSet(db, runId))) return;
+          await updateRelatedPullRequests(db, { id: runId }, hosts, issueTrackers);
+          await syncMergeOrderChecks({ db, hosts }, runId);
+        })
+        .catch((err: unknown) =>
+          compositionLog.warn({ err, runId }, "could not update the related pull requests of this run"),
+        );
     });
 }
 
@@ -106,6 +131,13 @@ export function documentRunFinishedHook(
     });
 }
 
+/** A top-level coding run whose change (its root and the root's continuations) opened pull requests in extra repositories (#537). */
+async function ownsPullRequestSet(db: ReReviewDeps["db"], runId: string): Promise<boolean> {
+  const run = await db.run.findUnique({ where: { id: runId }, select: { parentRunId: true } });
+  if (!run || run.parentRunId !== null) return false;
+  return changeHasExtraPullRequest(db, runId);
+}
+
 export interface ConfiguredExecutorOptions {
   native: Executor;
   /**
@@ -119,6 +151,8 @@ export interface ConfiguredExecutorOptions {
   providerConfig?: ProviderConfig;
   /** Tests only: replaces the kubeconfig-backed client when JOB_LAUNCHER=kubernetes. */
   kubernetesApi?: KubernetesApi;
+  /** Tests only: replaces the gRPC client when JOB_LAUNCHER=substrate. */
+  substrateApi?: SubstrateApi;
   /** Repository authorization for coding runs; built from the configured review hosts when absent. */
   repoAccess?: RepoAccessGate;
   /**
@@ -128,6 +162,129 @@ export interface ConfiguredExecutorOptions {
   power?: Power;
   /** Decrypts agent secrets for transcript redaction (session resume). Absent: transcripts are never stored. */
   secretCipher?: Parameters<typeof loadAgentSecretValues>[1];
+  /** The process's run-steps writer (a continuation's warm-start step line). Absent: no such line. */
+  runSteps?: RunStepSink;
+}
+
+/**
+ * Every Claude tool-runner image the deployment configures (the default and the per-toolchain ones):
+ * on Substrate, the images that carry the tool bridge. An agent's workerImageRef is not among them.
+ */
+export function configuredClaudeToolImages(
+  config: Pick<ReturnType<typeof loadContainerExecutorConfig>, "claudeToolRunnerImage" | "claudeToolRunnerImages">,
+): string[] {
+  return [
+    ...(config.claudeToolRunnerImage !== undefined ? [config.claudeToolRunnerImage] : []),
+    ...Object.values(config.claudeToolRunnerImages).flatMap((versions) => Object.values(versions)),
+  ];
+}
+
+/**
+ * Every Codex worker image the deployment configures (CODING_WORKER_IMAGE and the per-toolchain
+ * ones): on Substrate, the images that carry the Codex bridge. An agent's workerImageRef is not among them.
+ */
+export function configuredCodexWorkerImages(
+  config: Pick<ContainerExecutorConfig, "workerImage" | "additionalWorkerImages">,
+): string[] {
+  return [
+    ...(config.workerImage !== undefined ? [config.workerImage] : []),
+    ...Object.values(config.additionalWorkerImages).flatMap((versions) => Object.values(versions)),
+  ];
+}
+
+/**
+ * Substrate only: every Codex worker image of a toolchain (CODING_WORKER_IMAGE_<TOOLCHAIN>_<VERSION>)
+ * is pulled by the Substrate Codex bridge too, so each must be a digest (the Kubernetes launcher
+ * checks only the images it pulls itself).
+ */
+export function assertSubstrateDigestImages(config: Pick<ContainerExecutorConfig, "additionalWorkerImages">): void {
+  for (const [toolchain, versions] of Object.entries(config.additionalWorkerImages)) {
+    for (const [version, image] of Object.entries(versions)) {
+      if (isRegistryDigest(image)) continue;
+      const variable = `CODING_WORKER_IMAGE_${toolchain}_${version}`.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+      throw new Error(`${variable} must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=substrate.`);
+    }
+  }
+}
+
+/** The worker images a registry-pulling launcher (Kubernetes, Substrate) will run must be digests. */
+function assertDigestImages(
+  config: Pick<
+    ReturnType<typeof loadContainerExecutorConfig>,
+    "workerImage" | "claudeWorkerImage" | "claudeToolRunnerImage" | "claudeToolRunnerImages"
+  >,
+  launcher: "kubernetes" | "substrate",
+): void {
+  if (config.workerImage !== undefined && !isRegistryDigest(config.workerImage)) {
+    throw new Error(`CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=${launcher}.`);
+  }
+  for (const image of [config.claudeWorkerImage, config.claudeToolRunnerImage]) {
+    if (image !== undefined && !isRegistryDigest(image)) {
+      throw new Error(
+        `CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be registry digests (repo@sha256:...) when JOB_LAUNCHER=${launcher}.`,
+      );
+    }
+  }
+  const claudePython = config.claudeToolRunnerImages["node-python"]?.["3.12"];
+  if (claudePython !== undefined && !isRegistryDigest(claudePython)) {
+    throw new Error(
+      `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=${launcher}.`,
+    );
+  }
+}
+
+/**
+ * The experimental Substrate launcher: the gRPC client, the per-run Secret in the credentials
+ * namespace, the run table, and the blob store shared with the coding proxy (BLOB_STORE).
+ */
+export function buildSubstrateJobLauncher(options: {
+  env: NodeJS.ProcessEnv;
+  db: PrismaClient;
+  workspaceRoot: string;
+  resolveCapability: (runId: string) => Promise<string>;
+  /** The run's MCP token (capabilities.mcpToken), asked only for a spec with mcpTools. */
+  resolveMcpToken?: (runId: string) => Promise<string | undefined>;
+  substrateApi?: SubstrateApi;
+  kubernetesApi?: KubernetesApi;
+  /** The configured Claude tool-runner images (they carry the Substrate tool bridge). */
+  bridgeToolImages: readonly string[];
+  /** The configured Codex worker images (they carry the Substrate Codex bridge). */
+  bridgeCodexImages: readonly string[];
+}): SubstrateJobLauncher {
+  const substrate = loadSubstrateJobConfig(options.env);
+  const blobStoreConfig = loadBlobStoreConfig(options.env);
+  if (!blobStoreConfig) throw new Error("BLOB_STORE is required when JOB_LAUNCHER=substrate.");
+  return new SubstrateJobLauncher({
+    api:
+      options.substrateApi ??
+      createSubstrateApi({
+        baseUrl: substrate.apiUrl,
+        tokenFile: substrate.tokenFile,
+        ...(substrate.caFile ? { caFile: substrate.caFile } : {}),
+        ...(substrate.serverName ? { serverName: substrate.serverName } : {}),
+      }),
+    runs: new PrismaSubstrateRunStore(options.db),
+    relay: new PrismaRelayStore(options.db),
+    bridgeToolImages: options.bridgeToolImages,
+    bridgeCodexImages: options.bridgeCodexImages,
+    blobs: createBlobStore(blobStoreConfig),
+    secrets: options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: substrate.kubeContext }),
+    config: {
+      atespace: substrate.atespace,
+      credentialsNamespace: substrate.credentialsNamespace,
+      proxyHost: substrate.proxyHost,
+      proxyPort: substrate.proxyPort,
+      ...(substrate.workerSelector ? { workerSelector: substrate.workerSelector } : {}),
+    },
+    workspaceRoot: options.workspaceRoot,
+    resolveCapability: options.resolveCapability,
+    ...(options.resolveMcpToken ? { resolveMcpToken: options.resolveMcpToken } : {}),
+    ...(substrate.collectGraceSec !== undefined ? { collectGraceMs: substrate.collectGraceSec * 1000 } : {}),
+    ...(substrate.startupTimeoutSec !== undefined ? { startupTimeoutMs: substrate.startupTimeoutSec * 1000 } : {}),
+    ...(substrate.warmRounds
+      ? { warmRounds: { parkTtlMs: substrate.warmRounds.parkTtlSec * 1000, parkMax: substrate.warmRounds.parkMax } }
+      : {}),
+  });
 }
 
 /**
@@ -137,7 +294,7 @@ export interface ConfiguredExecutorOptions {
 export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Executor {
   const env = options.env ?? process.env;
   const providerConfig = options.providerConfig ?? loadProviderConfig(env);
-  if (providerConfig.jobs !== "docker" && providerConfig.jobs !== "kubernetes") {
+  if (providerConfig.jobs !== "docker" && providerConfig.jobs !== "kubernetes" && providerConfig.jobs !== "substrate") {
     if (!options.nativeSandbox) return options.native;
     // No coding launcher: coding runs reach the native executor, whose runner fails them with
     // the "needs a container executor" explanation, exactly as without this wrapper.
@@ -174,22 +331,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   const onServiceState = prismaServiceStateReporter(options.db);
   let jobs: WorkspaceJobLauncher;
   if (providerConfig.jobs === "kubernetes") {
-    if (config.workerImage !== undefined && !isRegistryDigest(config.workerImage)) {
-      throw new Error("CODING_WORKER_IMAGE must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.");
-    }
-    for (const image of [config.claudeWorkerImage, config.claudeToolRunnerImage]) {
-      if (image !== undefined && !isRegistryDigest(image)) {
-        throw new Error(
-          "CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be registry digests (repo@sha256:...) when JOB_LAUNCHER=kubernetes.",
-        );
-      }
-    }
-    const claudePython = config.claudeToolRunnerImages["node-python"]?.["3.12"];
-    if (claudePython !== undefined && !isRegistryDigest(claudePython)) {
-      throw new Error(
-        "CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=kubernetes.",
-      );
-    }
+    assertDigestImages(config, "kubernetes");
     const kubernetes = loadKubernetesJobConfig(env);
     // The preflight only runs on the first launch; a configuration that cannot work should
     // fail the process at start-up, not the first coding run an hour later.
@@ -221,6 +363,20 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
         return { proxyIp };
       },
       onWarning: (message) => compositionLog.warn(message),
+    });
+  } else if (providerConfig.jobs === "substrate") {
+    assertDigestImages(config, "substrate");
+    assertSubstrateDigestImages(config);
+    jobs = buildSubstrateJobLauncher({
+      env,
+      db: options.db,
+      workspaceRoot,
+      resolveCapability: (runId) => capabilities.get(runId),
+      resolveMcpToken: (runId) => capabilities.mcpToken(runId),
+      substrateApi: options.substrateApi,
+      kubernetesApi: options.kubernetesApi,
+      bridgeToolImages: configuredClaudeToolImages(config),
+      bridgeCodexImages: configuredCodexWorkerImages(config),
     });
   } else {
     const stateRoot = resolve(config.stateRoot ?? resolve(tmpdir(), "wardby-docker-jobs"));
@@ -259,14 +415,17 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       const named = await loadAgentSecretValues(options.db, cipher, agentId);
       return named.flatMap((entry) => entry.values);
     },
+    secretVersions: (agentId) => agentSecretVersions(options.db, agentId),
     retentionDays: loadTranscriptRetentionDays(env),
     maxBytes: loadTranscriptMaxBytes(env),
   });
   const coding = new ContainerExecutor({
     transcripts,
+    ...(options.runSteps ? { runSteps: options.runSteps } : {}),
     store: new PrismaContainerExecutionStore(options.db, {
       maxConcurrent: concurrency.maxConcurrent,
       issueTrackers,
+      warmRounds: jobs.warmRounds === true,
       // Threads sent from a document: publish the run's edit and post its replies (never throws).
       // Without the cipher the agent's secrets cannot be redacted, so nothing is posted.
       ...(cipher
@@ -296,6 +455,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     anthropicCredentialRef: config.anthropicCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
+    resultBundleMaxBytes: loadCodingResultBundleMaxBytes(env),
     claudeCommandTimeouts: config.claudeCommandTimeouts,
     repoAccess,
     readLinkedIssue: linkedIssueReader({ hosts: reviewHosts, issueTrackers }),

@@ -131,6 +131,56 @@ describe("LocalRemote (real git, no Docker)", { timeout: 20_000 }, () => {
     expect(await git(f.src, ["rev-parse", `${result.commitSha}^`])).toBe(workspace.baseCommit);
   });
 
+  it("works as a run's writable extra and read-only copy beside the default repository", async () => {
+    const f = await fixture();
+    const tools = join(f.reposRoot, "tools");
+    const docs = join(f.reposRoot, "docs");
+    await makeRepo(tools);
+    await makeRepo(docs);
+    const older = await git(docs, ["rev-parse", "main^"]);
+    const primary = await f.provider.prepareWorkspace(input(f));
+
+    const slot = await f.provider.prepareWorkspace(input(f, { repository: `local:${tools}`, slot: { name: "tools" } }));
+    expect(slot.workspacePath).toBe(join(f.root, "vcs", "r1", "repos", "tools", "workspace"));
+    await writeFile(join(slot.workspacePath, "tool.txt"), "new\n");
+    const pushed = await f.provider.finalizeChanges(slot);
+    if (pushed.outcome !== "branch_pushed") throw new Error("expected branch_pushed");
+    expect(await git(tools, ["rev-parse", "wardby/run-r1"])).toBe(pushed.commitSha);
+    expect(await git(f.src, ["branch", "--list", "wardby/*"])).toBe("");
+
+    const copy = await f.provider.prepareReadOnlyCopy({
+      runId: "r1",
+      name: "docs",
+      repository: `local:${docs}`,
+      commit: older,
+    });
+    expect(await readFile(join(copy.workspacePath, "README.md"), "utf8")).toBe("hello\n");
+    expect(existsSync(join(f.root, "vcs", "r1", "repos", "docs", ".git-fetch"))).toBe(false);
+    expect(existsSync(join(copy.workspacePath, ".git"))).toBe(false);
+
+    await f.provider.cleanupReadOnlyCopy(copy);
+    await f.provider.cleanup(slot);
+    expect(existsSync(join(f.root, "vcs", "r1", "repos", "docs"))).toBe(false);
+    expect(existsSync(join(f.root, "vcs", "r1", "repos", "tools"))).toBe(false);
+    expect(existsSync(primary.workspacePath)).toBe(true);
+  });
+
+  it("refuses a read-only copy of a folder outside the trusted roots", async () => {
+    const f = await fixture();
+    const outside = join(f.root, "outside");
+    await makeRepo(outside);
+    await f.provider.prepareWorkspace(input(f));
+    await expect(
+      f.provider.prepareReadOnlyCopy({
+        runId: "r1",
+        name: "outside",
+        repository: `local:${outside}`,
+        commit: await git(outside, ["rev-parse", "main"]),
+      }),
+    ).rejects.toMatchObject({ code: "local_repo_not_allowed" });
+    expect(existsSync(join(f.root, "vcs", "r1", "repos", "outside"))).toBe(false);
+  });
+
   it("leaves the source checkout's HEAD, status, untracked files and config byte-identical", async () => {
     const f = await fixture();
     const before = await snapshot(f.src);

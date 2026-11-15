@@ -593,6 +593,131 @@ fails with category `continuation_closed` and pushes nothing — see
   the same time can briefly both see the same remaining run-tree budget and
   both be admitted against it.
 
+### Fork sync: one coding agent, git history and a remote
+
+A scheduled agent can keep a fork up to date with its upstream. It needs Wardby
+0.9.13 or later. The recommended setup uses
+[git history](coding-agent-setup.md#git-history-in-a-run), so the sync is a real
+`git merge` and its merge commit moves the merge base forward: the next run only
+merges what is new.
+
+1. **The agent.** A coding agent with `codingProfile.repository` set to
+   `your-org/your-fork`, a `defaultTask` (needed to schedule it) and
+   `gitHistory: { "depth": "full" }`. Codex and Claude Code both have git in
+   their standard images; a custom `workerImageRef` image needs `git` and, for
+   Codex, `driver-v31` or later.
+2. **The upstream as a remote**, read-only and in the default set:
+
+   ```json
+   {
+     "agentId": "<agent id>",
+     "repository": "upstream-org/upstream",
+     "access": "read",
+     "name": "upstream",
+     "ref": "main",
+     "inDefaultSet": true,
+     "as": "remote"
+   }
+   ```
+
+   The commit appears as the remote ref `upstream/main`.
+
+3. **The task** (`defaultTask`), in your own words, says: run
+   `git merge upstream/main`, resolve every conflict by reading both sides
+   (never leaving conflict markers), run the fork's tests, and commit. No marker
+   file is needed.
+4. **Schedule it** with `set_schedule`, for example `0 6 * * 1` with your
+   `timezone`. A scheduled run is top-level, and its pull request appears in
+   `run_completed.pullRequests`, so a run hook can post it to a channel.
+
+The run opens one pull request in the fork whose commits are the agent's merge
+commit and fix-ups, with upstream's commits as parents of the merge. Commit
+authors become `Wardby`. Review the first runs by hand. See also the
+[fork-sync help article](../help/fork-sync.md).
+
+#### Without git history: three folders
+
+If git is not available in your agent's image, or you prefer not to turn history
+on, use two read-only folders and a marker file instead.
+
+The run holds three copies of code, with no git history:
+
+| Folder            | What it is                                         | Access    |
+| ----------------- | -------------------------------------------------- | --------- |
+| `/workspace`      | the fork, `your-org/your-fork`, on its base branch | writable  |
+| `/repos/base`     | `upstream-org/upstream` at the last-synced commit  | read-only |
+| `/repos/upstream` | `upstream-org/upstream` at its `main`              | read-only |
+
+The fork keeps a one-line marker file at its root, `upstream-sync`, holding the
+upstream commit the fork was last synced to: a full 40-hex commit SHA (or a
+release tag that never moves), never a branch. The sync never
+needs history: it merges each changed file three ways from the fork's version,
+the last-synced version and the new upstream version, then moves the marker.
+
+1. **The agent.** A coding agent with `codingProfile.repository` set to
+   `your-org/your-fork` and a `defaultTask` (needed to schedule it).
+2. **Two read links to the same upstream repository** under different names,
+   both in the default set:
+
+   ```json
+   {
+     "agentId": "<agent id>",
+     "repository": "upstream-org/upstream",
+     "access": "read",
+     "name": "base",
+     "ref": { "fromFile": "upstream-sync" },
+     "inDefaultSet": true
+   }
+   ```
+
+   ```json
+   {
+     "agentId": "<agent id>",
+     "repository": "upstream-org/upstream",
+     "access": "read",
+     "name": "upstream",
+     "ref": "main",
+     "inDefaultSet": true
+   }
+   ```
+
+   `base` reads its commit from the fork's `upstream-sync` file at dispatch, so
+   it follows the marker with no change to the agent. The first time, create
+   the marker in the fork with the commit your fork currently matches. If the
+   file is missing or does not hold a valid commit, the run is refused with
+   `repository_ref_unreadable` and nothing starts.
+
+3. **The task** (`defaultTask`), in your own words, says:
+   - compare `/repos/base` with `/repos/upstream` and list the files that
+     changed upstream;
+   - for each, merge it three ways into the fork's file at `/workspace`;
+   - resolve every conflict by reading both sides, never leaving conflict
+     markers;
+   - write `upstream`'s full commit SHA into `upstream-sync` as a single line.
+     The run's task text carries one line per extra repository, giving its
+     folder, repository, full 40-hex commit and access (for example
+     `Extra repository /repos/upstream: upstream-org/upstream at <commit>, read-only.`);
+     the agent copies the value from there. Never write a branch name such as
+     `main`: the next run would then read `base` at the same commit as
+     `upstream`, see no changes, and the fork would silently stop syncing;
+   - run the fork's tests.
+
+4. **The merge command.** Use
+   `git merge-file <fork file> <base file> <upstream file>`, which writes the
+   merged result into the fork file and exits non-zero while conflicts remain.
+   Both Codex and Claude Code's tool runner have git. Alternatively,
+   `diff3 -m -E <fork file> <base file> <upstream file>` prints the merge
+   (redirect it into the fork file) and exits 1 when conflict markers were
+   written. State the one you want in the task.
+5. **Schedule it** with `set_schedule`, for example `0 6 * * 1` with your
+   `timezone`. A scheduled run is top-level, and its pull request appears in
+   `run_completed.pullRequests`, so a run hook can post it to a channel.
+
+The run opens one pull request in the fork. The read-only folders are not
+collected or pushed. Keep the budget generous enough for a large upstream
+change, and review the first runs by hand. See also
+[Several repositories in one run](coding-agent-setup.md#several-repositories-in-one-run).
+
 ### Together with Recipe A
 
 Coding runs automatically receive the repository's knowledge index and base

@@ -141,7 +141,10 @@ A Claude Code or Codex agent can use attached servers too. Attach them the same 
 `attach_mcp_server`. The tools reach the run like this:
 
 1. The worker calls the coding proxy's `/mcp` route with a per-run MCP token (`rmt_…`, in the
-   worker's `WARDBY_MCP_TOKEN`). Workers still reach only the proxy.
+   worker's `WARDBY_MCP_TOKEN`) as `Authorization: Bearer`. On the Substrate launcher the worker
+   holds a placeholder instead, and Substrate's egress gateway puts the token in the
+   `X-Wardby-Mcp-Token` header. The proxy accepts that header only when `Authorization` is
+   absent, and refuses a request with both (401). Workers still reach only the proxy.
 2. The proxy forwards the request to the native gateway's `/coding-mcp` route. The proxy never sees
    a server's URL or secrets. The gateway checks the token again, checks the live attachment and
    runs the call, and removes secret values from the result before it leaves.
@@ -169,6 +172,8 @@ deadline, and only its hash is stored.
   the result's `warnings` names those tools: "These MCP tools aren't read-only and won't be
   available to Codex runs: …". They stay attached but Codex runs don't get them. Detach them, or
   re-attach the server with only read-only tools, to remove the warning's cause.
+- **Substrate.** MCP tools work on the Substrate launcher too; the token never enters the worker.
+  See [MCP tools on Substrate](substrate-backend.md#mcp-tools).
 - **Call limit.** A run may make `WARDBY_MCP_MAX_CALLS_PER_RUN` calls (default `100`). Every call
   counts, whatever its outcome. Past the limit a call returns
   [`mcp_call_limit`](../help/errors/mcp-call-limit.md); the run goes on.

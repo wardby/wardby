@@ -223,6 +223,121 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveDeferredCodingRun (database)"
     expect(await runOf(run.id)).toMatchObject({ status: "cancelled", error: "stopped" });
   });
 
+  describe("extra repositories (#537)", () => {
+    let linkCounter = 0;
+    /** A deferred run with dispatch's unresolved rows: `base` from a ref file, `upstream` at main. */
+    async function runWithRepositories() {
+      const run = await unresolvedRun();
+      const n = ++linkCounter;
+      const link = (name: string, extra: Record<string, unknown>) =>
+        db.agentRepository.create({
+          data: {
+            agentId,
+            name: `${name}-${n}`,
+            provider: "github",
+            repository: `acme/${name}-${suffix}-${n}`,
+            access: "read",
+            authorizedVia: "admin",
+            ...extra,
+          },
+        });
+      const base = await link("base", { refFromFile: "upstream-sync" });
+      const upstream = await link("upstream", { ref: "main" });
+      const row = (position: number, l: typeof base, requestedRef: string | null) => ({
+        runId: run.id,
+        position,
+        name: l.name,
+        access: "read",
+        provider: "github",
+        repository: l.repository,
+        requestedRef,
+        refFromFile: l.refFromFile,
+        resolvedSha: null,
+        linkId: l.id,
+      });
+      await db.codingRunRepository.createMany({ data: [row(0, base, null), row(1, upstream, "main")] });
+      return run;
+    }
+    function repositoryExecutor(refFile: string | null) {
+      const { executor, spies } = fakeExecutor();
+      const authorizeCodingRepository = vi.fn(async () => ({ ok: true as const }));
+      const resolveCodingRepositoryRef = vi.fn(async ({ ref }: { ref: string }) =>
+        ref === "main" ? "d".repeat(40) : /^[0-9a-f]{40}$/.test(ref) ? ref : null,
+      );
+      executor.authorizeCodingRepository = authorizeCodingRepository;
+      executor.resolveCodingRepositoryRef = resolveCodingRepositoryRef;
+      spies.readCodingRepositoryFile.mockImplementation((async ({ path }: { path: string }) =>
+        path === "upstream-sync" ? refFile : INDEX) as never);
+      return { executor, spies, authorizeCodingRepository, resolveCodingRepositoryRef };
+    }
+    const rowsOf = (runId: string) =>
+      db.codingRunRepository.findMany({ where: { runId }, orderBy: { position: "asc" } });
+
+    it("fills each row's requested ref and commit when the run starts", async () => {
+      const run = await runWithRepositories();
+      const { executor, spies } = repositoryExecutor(`${"c".repeat(40)}\n`);
+
+      await expect(resolveDeferredCodingRun({ db, executor, runId: run.id })).resolves.toBe(true);
+
+      expect(spies.readCodingRepositoryFile).toHaveBeenCalledWith(
+        expect.objectContaining({ repository: "openai/example", baseRef: "main", path: "upstream-sync" }),
+      );
+      expect(await rowsOf(run.id)).toEqual([
+        expect.objectContaining({ requestedRef: "c".repeat(40), resolvedSha: "c".repeat(40) }),
+        expect.objectContaining({ requestedRef: "main", resolvedSha: "d".repeat(40) }),
+      ]);
+      expect((await codingRunOf(run.id)).workerImage).toBe(WORKER);
+    });
+
+    it("refuses the run when a ref file is unreadable, naming its path only", async () => {
+      const run = await runWithRepositories();
+      const { executor } = repositoryExecutor("not a ref\n");
+
+      await expect(resolveDeferredCodingRun({ db, executor, runId: run.id })).resolves.toBe(false);
+
+      const refused = await runOf(run.id);
+      expect(refused.status).toBe("refused");
+      expect(refused.error).toMatch(
+        /^repository_ref_unreadable: the ref file upstream-sync for link "base-\d+" is not/,
+      );
+      expect(refused.error).not.toContain("not a ref");
+      expect((await codingRunOf(run.id)).workerImage).toBeNull();
+    });
+
+    it("refuses the run when a row is not authorized, before resolving any ref", async () => {
+      const run = await runWithRepositories();
+      const { executor, spies, authorizeCodingRepository, resolveCodingRepositoryRef } = repositoryExecutor(
+        "c".repeat(40),
+      );
+      authorizeCodingRepository.mockResolvedValue({ ok: false, reason: "github_account_not_allowed" } as never);
+
+      await expect(resolveDeferredCodingRun({ db, executor, runId: run.id })).resolves.toBe(false);
+
+      expect((await runOf(run.id)).error).toMatch(/^repo_access_github_account_not_allowed: /);
+      expect(resolveCodingRepositoryRef).not.toHaveBeenCalled();
+      expect(spies.readCodingRepositoryFile).not.toHaveBeenCalledWith(
+        expect.objectContaining({ path: "upstream-sync" }),
+      );
+    });
+
+    it.each([
+      ["cannot authorize extra repositories", "authorizeCodingRepository"],
+      ["cannot resolve their refs", "resolveCodingRepositoryRef"],
+    ] as const)("refuses the run, not fails it, when the executor %s", async (_label, missing) => {
+      const run = await runWithRepositories();
+      const { executor } = repositoryExecutor(`${"c".repeat(40)}\n`);
+      delete executor[missing];
+
+      await expect(resolveDeferredCodingRun({ db, executor, runId: run.id })).resolves.toBe(false);
+
+      expect(await runOf(run.id)).toMatchObject({
+        status: "refused",
+        error: "coding_repositories_unsupported: this deployment cannot resolve extra repositories.",
+      });
+      expect((await codingRunOf(run.id)).workerImage).toBeNull();
+    });
+  });
+
   it("writes the coding run once when two starts race", async () => {
     const run = await unresolvedRun();
     const { executor } = fakeExecutor();

@@ -1,5 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,7 +20,7 @@ import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { CHILD_RUN_FAILURE_CODES } from "../../core/error-code.js";
 import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
-import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
+import { createRepoAccessGate, type RepoAccessDecision, type RepoAccessGate } from "../../core/repo-access.js";
 import { shippedCatalog } from "../llm/catalog.js";
 import { SHIPPED_CATALOG_VERSION } from "../llm/catalog-shipped.js";
 import { entryOf } from "../llm/catalog-types.js";
@@ -29,10 +29,20 @@ import {
   JobCapacityError,
   type JobHandle,
   type JobResult,
+  type JobRetention,
   type JobSpec,
   type JobStatus,
+  type MaterializeWorkspaceOptions,
+  type WarmOutcome,
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
+import {
+  systemPromptSha256,
+  warmFingerprint,
+  type WarmFingerprintInput,
+  type WarmSecretVersion,
+} from "../jobs/warm-fingerprint.js";
+import type { RunStepBatch } from "../../core/run-steps/types.js";
 import type {
   ContinuationFinishedDetails,
   ContinuationOutcome,
@@ -40,16 +50,20 @@ import type {
   DescriptionWriteOutcome,
   FinalizeChangesDetails,
   FinalizeChangesResult,
+  PreparedReadOnlyCopy,
   PreparedWorkspace,
+  ReadOnlyCopyInput,
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
+import { countWorkspaceEntries, GitCommandError, redactGitOutput } from "../vcs/git.js";
 import { pullRequestBody, type DescriptionBaseline, type RelatedPullRequestEntry } from "../vcs/github.js";
 import { descriptionSha256 } from "../vcs/pr-description.js";
 import {
   CAPACITY_RETRY_BACKOFF_MS,
   CATEGORY_BY_PREFIX,
   ContainerExecutor,
+  failureCategory,
   type CapacityRequeueOutcome,
   DESCRIPTION_REFRESH_TIMEOUT_MS,
   RunCapabilityVault,
@@ -63,10 +77,22 @@ import {
   type ContainerExecutionStore,
   type ContainerExecutorOptions,
   type ContainerRunSnapshot,
+  type ExtraPublishRecord,
+  type RunRepositorySnapshot,
   type ProvisioningClaim,
   storedTests,
 } from "./container.js";
-import type { RecordResult, RecordTranscriptInput, TranscriptStatus } from "../../coding/transcript/recorder.js";
+import {
+  RunTranscriptRecorder,
+  transcriptBlobKey,
+  type RecordResult,
+  type RecordTranscriptInput,
+  type RunTranscriptRecorderDeps,
+  type TranscriptStatus,
+} from "../../coding/transcript/recorder.js";
+import { sanitizeClaudeTranscript } from "../../coding/transcript/claude-code.js";
+import { formatTranscriptFile } from "../../coding/transcript/format.js";
+import { LocalBlobStore } from "../storage/local.js";
 
 /**
  * The executor's operator log, captured. The persisted run error is a bare
@@ -121,6 +147,7 @@ const LOCAL_REPOSITORY = "local:/srv/repos/example";
 
 function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSnapshot {
   return {
+    repositories: [],
     runId: "run-1",
     agentId: "agent-1",
     status: "running",
@@ -193,7 +220,9 @@ function gateWith(
 }
 
 class FakeStore implements ContainerExecutionStore {
-  completions: Array<{ status: string; result: unknown; record?: CodingRunRecord }> = [];
+  completions: Array<{ status: string; result: unknown; record?: CodingRunRecord; extras?: ExtraPublishRecord[] }> = [];
+  /** Every completePartially input (a run with several repositories, some published and some failed). */
+  partials: Array<Parameters<ContainerExecutionStore["completePartially"]>[1]> = [];
   terminations: unknown[] = [];
   /** Every handle written, in order, so tests can see whether one was stored before launching. */
   persistedHandles: JobHandle[] = [];
@@ -211,9 +240,9 @@ class FakeStore implements ContainerExecutionStore {
   }
 
   /** Fix-round description store methods; tests that need them assign them. */
-  pullRequestDescriptionBaseline?: (rootRunId: string) => Promise<StoredDescriptionBaseline>;
+  pullRequestDescriptionBaseline?: (rootRunId: string, name?: string) => Promise<StoredDescriptionBaseline>;
   pullRequestRunIds?: (rootRunId: string) => Promise<string[]>;
-  pullRequestMarkedReady?: (rootRunId: string) => Promise<boolean>;
+  pullRequestMarkedReady?: (rootRunId: string, name?: string) => Promise<boolean>;
   linkedIssueSource?: (rootRunId: string) => Promise<LinkedIssueSource>;
   delegatingEventTask?: (runId: string) => Promise<string | null>;
   recordPullRequestDescription?: (input: {
@@ -221,6 +250,7 @@ class FakeStore implements ContainerExecutionStore {
     expectedSha256: string | null;
     sha256: string;
     agentTextRunId: string;
+    name?: string;
   }) => Promise<boolean>;
   /** Overrun top-ups; tests that need it assign it. */
   topUpBudget?: (runId: string) => Promise<{ outcome: TopUpOutcome; near?: boolean }>;
@@ -294,16 +324,35 @@ class FakeStore implements ContainerExecutionStore {
     return "requeued";
   }
 
+  /** Every argument count complete was called with, in order. */
+  completeArity: number[] = [];
   async complete(
     runId: string,
     status: "succeeded" | "budget_exhausted",
     result: never,
     record?: CodingRunRecord,
+    extras?: ExtraPublishRecord[],
   ): Promise<void> {
+    this.completeArity.push(arguments.length);
     if (runId !== this.run.runId || ["succeeded", "budget_exhausted"].includes(this.run.status)) return;
     this.run.status = status;
     this.run.result = structuredClone(result);
-    this.completions.push({ status, result: structuredClone(result), record: structuredClone(record) });
+    this.completions.push({
+      status,
+      result: structuredClone(result),
+      record: structuredClone(record),
+      extras: structuredClone(extras),
+    });
+  }
+
+  async completePartially(
+    runId: string,
+    input: Parameters<ContainerExecutionStore["completePartially"]>[1],
+  ): Promise<void> {
+    if (runId !== this.run.runId || !["pending", "running"].includes(this.run.status)) return;
+    this.run.status = "failed";
+    this.run.result = structuredClone(input.mainResult);
+    this.partials.push(structuredClone(input));
   }
 
   async terminate(
@@ -359,7 +408,7 @@ class FakeJobs implements WorkspaceJobLauncher {
     }),
   };
 
-  constructor(private readonly events: string[]) {}
+  constructor(readonly events: string[]) {}
 
   plannedHandle(spec: JobSpec): JobHandle | undefined {
     return this.planned ? { ...this.planned, id: `${this.planned.id}-${spec.runId}` } : undefined;
@@ -397,9 +446,38 @@ class FakeJobs implements WorkspaceJobLauncher {
   }
   /** Set to give the launcher a transcript reader (it is optional on a real launcher). */
   readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
-  async materializeWorkspace(): Promise<void> {
+  /** Every materializeWorkspace call's repository name (undefined for the default workspace). */
+  materializedNames: Array<string | undefined> = [];
+  /** Every materializeWorkspace call's arguments after the handle, as passed (#536). */
+  materializeCalls: unknown[][] = [];
+  /** Repository names (undefined: the default) whose collection writes a result bundle (#536). */
+  bundlesFor = new Set<string | undefined>();
+  /** Whether each history collection found its bundleDestination already gone, by name. */
+  destinationFreeAtCollect = new Map<string | undefined, boolean>();
+  async materializeWorkspace(
+    _handle: JobHandle,
+    ...args: [destination: string, name?: string, options?: MaterializeWorkspaceOptions]
+  ): Promise<{ bundle: boolean }> {
+    const [, name, options] = args;
     this.materializations += 1;
-    this.events.push("materialize");
+    this.materializedNames.push(name);
+    this.materializeCalls.push(args);
+    this.events.push(name === undefined ? "materialize" : `materialize:${name}`);
+    const destination = options?.gitHistory?.bundleDestination;
+    if (destination === undefined) return { bundle: false };
+    // "wx" fails if the destination exists: the check and the write are one operation.
+    if (!this.bundlesFor.has(name)) {
+      this.destinationFreeAtCollect.set(name, !existsSync(destination));
+      return { bundle: false };
+    }
+    try {
+      await writeFile(destination, "a bundle", { flag: "wx" });
+      this.destinationFreeAtCollect.set(name, true);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      this.destinationFreeAtCollect.set(name, false);
+    }
+    return { bundle: true };
   }
 }
 
@@ -408,6 +486,20 @@ class FakeVcs implements VcsProvider {
   finalized = 0;
   cleaned = 0;
   workspace: PreparedWorkspace | null = null;
+  /** Writable extras prepared and not yet removed, by slot name; removing the default workspace removes them too. */
+  slots = new Map<string, PreparedWorkspace>();
+  /** Read-only copies made and not yet removed, by name; removing the default workspace removes them too. */
+  copies = new Map<string, PreparedReadOnlyCopy>();
+  /** Every prepareWorkspace input, in order. */
+  prepareInputs: VcsPrepareInput[] = [];
+  /** Every prepareReadOnlyCopy input, in order. */
+  copyInputs: ReadOnlyCopyInput[] = [];
+  /** Names of the slots and copies removed one by one. */
+  cleanedSlots: string[] = [];
+  cleanedCopies: string[] = [];
+  /** Every writable extra's and read-only copy's workspacePath as prepared, by name (kept after cleanup). */
+  slotPaths = new Map<string, string>();
+  copyPaths = new Map<string, string>();
   lastFinalizeDetails?: FinalizeChangesDetails;
   lastPrepareInput?: VcsPrepareInput;
   /** Make finalize report a pushed branch (a local repository) instead of a pull request. */
@@ -416,6 +508,18 @@ class FakeVcs implements VcsProvider {
   finalizeEmpty = false;
   /** The description outcome finalize reports on a pull request, when set. */
   finalizeDescription?: DescriptionWriteOutcome;
+  /** Every finalizeChanges call, by slot name (undefined for the default workspace). */
+  finalizeCalls: Array<{ slot?: string; details?: FinalizeChangesDetails }> = [];
+  /** Per slot: finalize reports an empty diff. */
+  emptySlots = new Set<string>();
+  /** Per slot: finalize throws this. */
+  slotErrors = new Map<string, Error>();
+  /** Per slot: the pull request number finalize opens (default 7). */
+  slotNumbers = new Map<string, number>();
+  /** Per slot: the description outcome finalize reports on its pull request, when set. */
+  slotDescriptions = new Map<string, DescriptionWriteOutcome>();
+  /** Runs as finalizeChanges starts, with the slot name (undefined for the default workspace). */
+  onFinalize?: (slot: string | undefined) => void;
   /** The target-branch merge prepare reports on a continuation's workspace, when set. */
   targetMerge?: PreparedWorkspace["targetMerge"];
   /** The no-push description refresh; tests that need it assign it. */
@@ -448,6 +552,24 @@ class FakeVcs implements VcsProvider {
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
     this.prepared += 1;
+    this.prepareInputs.push(structuredClone(input));
+    if (input.slot) {
+      // Like the real provider: a slot lives in the run directory the default workspace made.
+      if (!this.workspace) throw new Error("vcs_workspace_path_invalid");
+      this.events.push(`prepare:${input.slot.name}`);
+      const slot = {
+        ...this.makeWorkspace(input),
+        id: `vcs-${input.runId}:${input.slot.name}`,
+        baseCommit: "b".repeat(40),
+        workspacePath: join(this.root, input.runId, "repos", input.slot.name, "workspace"),
+        gitMetadataPath: join(this.root, input.runId, "repos", input.slot.name, "git"),
+        ...(input.gitHistory ? { historyBase: "b".repeat(40), remoteTips: [] } : {}),
+      };
+      await mkdir(slot.workspacePath, { recursive: true });
+      this.slots.set(input.slot.name, slot);
+      this.slotPaths.set(input.slot.name, slot.workspacePath);
+      return slot;
+    }
     this.lastPrepareInput = input;
     this.events.push("prepare");
     this.workspace = this.makeWorkspace(input);
@@ -457,7 +579,26 @@ class FakeVcs implements VcsProvider {
     return this.workspace;
   }
   async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
+    if (input.slot) return this.slots.get(input.slot.name) ?? null;
     return this.workspace?.runId === input.runId ? this.workspace : null;
+  }
+  /** Runs at the start of prepareReadOnlyCopy (a test may slow it down or make it fail). */
+  onPrepareCopy?: (input: ReadOnlyCopyInput) => Promise<void>;
+  async prepareReadOnlyCopy(input: ReadOnlyCopyInput): Promise<PreparedReadOnlyCopy> {
+    this.copyInputs.push(structuredClone(input));
+    this.events.push(`copy:${input.name}`);
+    await this.onPrepareCopy?.(input);
+    if (!this.workspace) throw new Error("vcs_workspace_path_invalid");
+    const copy = { ...input, workspacePath: join(this.root, input.runId, "repos", input.name, "workspace") };
+    await mkdir(copy.workspacePath, { recursive: true });
+    this.copies.set(input.name, copy);
+    this.copyPaths.set(input.name, copy.workspacePath);
+    return copy;
+  }
+  async cleanupReadOnlyCopy(copy: PreparedReadOnlyCopy): Promise<void> {
+    this.cleanedCopies.push(copy.name);
+    this.events.push(`cleanupCopy:${copy.name}`);
+    this.copies.delete(copy.name);
   }
   async finalizeChanges(
     workspace: PreparedWorkspace,
@@ -465,7 +606,35 @@ class FakeVcs implements VcsProvider {
   ): Promise<FinalizeChangesResult> {
     this.finalized += 1;
     this.lastFinalizeDetails = details;
-    this.events.push("finalize");
+    this.finalizeCalls.push({ slot: workspace.slot?.name, details: structuredClone(details) });
+    const slot = workspace.slot?.name;
+    this.events.push(slot === undefined ? "finalize" : `finalize:${slot}`);
+    this.onFinalize?.(slot);
+    if (slot !== undefined) {
+      const error = this.slotErrors.get(slot);
+      if (error) throw error;
+      if (this.emptySlots.has(slot)) {
+        return {
+          outcome: "no_changes",
+          repository: workspace.repository,
+          baseRef: workspace.baseRef,
+          baseCommit: "c".repeat(40),
+        };
+      }
+      const number = this.slotNumbers.get(slot) ?? 7;
+      const description = this.slotDescriptions.get(slot);
+      return {
+        outcome: workspace.continuation ? "pull_request_updated" : "pull_request_opened",
+        repository: workspace.repository,
+        baseRef: workspace.baseRef,
+        baseCommit: "c".repeat(40),
+        headRef: workspace.headRef,
+        commitSha: "d".repeat(40),
+        pullRequestNumber: number,
+        pullRequestUrl: `https://github.com/${workspace.repository}/pull/${number}`,
+        ...(description ? { description: structuredClone(description) } : {}),
+      };
+    }
     if (this.finalizeEmpty) {
       return { outcome: "no_changes", repository: workspace.repository, baseRef: "main", baseCommit: "a".repeat(40) };
     }
@@ -500,10 +669,19 @@ class FakeVcs implements VcsProvider {
         : {}),
     };
   }
-  async cleanup(): Promise<void> {
+  async cleanup(workspace: PreparedWorkspace): Promise<void> {
+    if (workspace.slot) {
+      this.cleanedSlots.push(workspace.slot.name);
+      this.events.push(`cleanup:${workspace.slot.name}`);
+      this.slots.delete(workspace.slot.name);
+      return;
+    }
     this.cleaned += 1;
     this.events.push("cleanup");
     this.workspace = null;
+    // Like the real provider: the default workspace's removal takes the whole run directory.
+    this.slots.clear();
+    this.copies.clear();
   }
   async notifyContinuationStarted(_workspace: PreparedWorkspace, details?: { agentName?: string }): Promise<void> {
     this.notifyStartedCalls += 1;
@@ -540,6 +718,9 @@ class FakeVcs implements VcsProvider {
       workspacePath: join(this.root, input.runId, "workspace"),
       gitMetadataPath: join(this.root, input.runId, "git"),
       ...(input.continuation && this.targetMerge ? { targetMerge: structuredClone(this.targetMerge) } : {}),
+      ...(input.gitHistory
+        ? { historyBase: "a".repeat(40), remoteTips: (input.remotes ?? []).map((remote) => remote.resolvedSha) }
+        : {}),
     };
   }
 }
@@ -1825,6 +2006,38 @@ describe("ContainerExecutor", () => {
     expect(created.store.completions[0]?.record).toEqual({ baseSha: "a".repeat(40) });
   });
 
+  it("continues a local-repository run on its pushed branch the same way on every launcher", async () => {
+    // A Docker-like launcher (handle known only after launch), a Kubernetes-like one (planned handle)
+    // and a Substrate-like one: the continuation is prepared, pushed and recorded identically.
+    for (const planned of [undefined, { backend: "kubernetes", id: "job" }, { backend: "substrate", id: "actor" }]) {
+      const created = await harness(
+        {
+          repository: LOCAL_REPOSITORY,
+          profileRepository: LOCAL_REPOSITORY,
+          rootCodingRunId: "root-run",
+          headRef: "wardby/run-root-run",
+        },
+        IMAGE,
+        undefined,
+        undefined,
+        // A stand-in gate: the real one resolves local paths against LOCAL_REPO_ROOTS on disk.
+        { repoAccess: { authorizeUse: async () => ({ ok: true }) } as never },
+      );
+      created.jobs.planned = planned;
+      created.vcs.pushBranchOnly = true;
+      await created.executor.start("run-1");
+
+      expect(created.vcs.lastPrepareInput).toMatchObject({
+        repository: LOCAL_REPOSITORY,
+        headRef: "wardby/run-root-run",
+        continuation: { rootRunId: "root-run" },
+      });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.run.result).toMatchObject({ outcome: "branch_pushed", headRef: "wardby/run-root-run" });
+      expect(created.store.completions[0]?.record).toMatchObject({ resultBranch: "wardby/run-root-run" });
+    }
+  });
+
   it("revision-in-place: threads continuation through to the VCS layer and persists pull_request_updated", async () => {
     const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
     await created.executor.start("run-1");
@@ -3021,6 +3234,7 @@ describe("ContainerExecutor", () => {
       const created = await harness();
       created.jobs.materializeWorkspace = async () => {
         created.store.run.costUsd = created.store.run.budgetUsd + 0.01;
+        return { bundle: false };
       };
       await created.executor.start("run-1");
 
@@ -3152,6 +3366,7 @@ describe("ContainerExecutor", () => {
       allowedModels: ["claude-sonnet-5"],
     });
     expect(created.jobs.lastSpec).toMatchObject({
+      agentId: "agent-1",
       provider: "claude-code",
       image: CLAUDE_IMAGE,
       toolImage: CLAUDE_TOOL_IMAGE,
@@ -3530,6 +3745,7 @@ describe("ContainerExecutor", () => {
       created.jobs.result.resultArtifact = stoppedArtifact;
       created.jobs.materializeWorkspace = async () => {
         created.store.run.status = "cancelled";
+        return { bundle: false };
       };
       await created.executor.start("run-1");
 
@@ -4140,6 +4356,45 @@ describe("ContainerExecutor", () => {
     };
     await created.executor.start("run-1");
     expect(beatsDuringLaunch).toBeGreaterThan(0);
+  });
+
+  // Reproduces the run-swept-while-cloning case: claimProvisioning sets heartbeatAt once, and a clone
+  // that outlives HEARTBEAT_TIMEOUT_MS let recover() abandon the run as coding_ambiguous_provisioning.
+  it("beats the heartbeat while a slow workspace is prepared", async () => {
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, { heartbeatIntervalMs: 5 });
+    let beatsDuringPrepare = 0;
+    const inner = created.vcs.prepareWorkspace.bind(created.vcs);
+    created.vcs.prepareWorkspace = async (input) => {
+      const before = created.store.heartbeats;
+      await new Promise((r) => setTimeout(r, 80));
+      beatsDuringPrepare = created.store.heartbeats - before;
+      return inner(input);
+    };
+    await created.executor.start("run-1");
+    expect(beatsDuringPrepare).toBeGreaterThan(0);
+  });
+
+  it("beats the heartbeat while the input is written", async () => {
+    // A continuation: writeInput reads the stored PR description baseline from the store, a step that runs
+    // inside writeInput and nowhere else (prepareWorkspace has already returned by then).
+    const created = await harness(
+      { rootCodingRunId: "root-run", headRef: "wardby/run-root-run" },
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      undefined,
+      { heartbeatIntervalMs: 5 },
+    );
+    let beatsDuringInput = 0;
+    let calls = 0;
+    created.store.pullRequestDescriptionBaseline = async () => {
+      const before = created.store.heartbeats;
+      await new Promise((r) => setTimeout(r, 80));
+      // Later calls (finishing the run) are outside writeInput; keep the beats seen by the first.
+      if (calls++ === 0) beatsDuringInput = created.store.heartbeats - before;
+      return { recordedSha256: null, previousAgentText: "Previous body", agentTextRunId: "root-run" };
+    };
+    await created.executor.start("run-1");
+    expect(beatsDuringInput).toBeGreaterThan(0);
   });
 
   it("stops beating once the launch returns, leaving the poll loop in charge", async () => {
@@ -4997,6 +5252,1293 @@ describe("ContainerExecutor in-flight repository re-checks (M-1, M-2)", () => {
   });
 });
 
+describe("ContainerExecutor with several repositories (#537)", () => {
+  const SHA_A = "a".repeat(40);
+  function extraRow(overrides: Partial<RunRepositorySnapshot> & { name: string }): RunRepositorySnapshot {
+    return {
+      id: `row-${overrides.name}`,
+      position: 1,
+      access: "read",
+      asRemote: false,
+      accessKnown: true,
+      provider: "github",
+      repository: `openai/${overrides.name}`,
+      requestedRef: "main",
+      resolvedSha: SHA_A,
+      baseRef: null,
+      headRef: null,
+      linkId: `link-${overrides.name}`,
+      linkExists: true,
+      linkAuthorizedVia: "admin",
+      continuesBranch: false,
+      pullRequestNumber: null,
+      mergeOrder: null,
+      result: null,
+      ...overrides,
+    };
+  }
+  const readRow = (name: string, overrides: Partial<RunRepositorySnapshot> = {}) => extraRow({ name, ...overrides });
+  const writeRow = (name: string, overrides: Partial<RunRepositorySnapshot> = {}) =>
+    extraRow({ name, access: "write", baseRef: "develop", headRef: "wardby/run-run-1", ...overrides });
+  const allowAll = () => ({
+    authorizeUse: vi.fn(async (_input: unknown): Promise<RepoAccessDecision> => ({ ok: true })),
+  });
+  const reasonLogged = (code: string) =>
+    logged.some((line) => typeof line.payload.reason === "string" && line.payload.reason.includes(code));
+  const terminationError = (created: Awaited<ReturnType<typeof harness>>) =>
+    (created.store.terminations[0] as { error: string } | undefined)?.error;
+  function expectNothingLeft(created: Awaited<ReturnType<typeof harness>>) {
+    expect(created.vcs.workspace).toBeNull();
+    expect([...created.vcs.slots.keys()]).toEqual([]);
+    expect([...created.vcs.copies.keys()]).toEqual([]);
+  }
+
+  it("prepares the default workspace first, then every extra, and runs", async () => {
+    const created = await harness({ repositories: [readRow("base"), writeRow("tools")] }, IMAGE, undefined, undefined, {
+      repoAccess: allowAll() as never,
+    });
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    const prepares = created.events.filter((e) => e.startsWith("prepare") || e.startsWith("copy:"));
+    expect(prepares[0]).toBe("prepare");
+    expect([...prepares.slice(1)].sort()).toEqual(["copy:base", "prepare:tools"]);
+    expect(created.vcs.copyInputs).toEqual([
+      { runId: "run-1", name: "base", repository: "openai/base", commit: SHA_A },
+    ]);
+    const tools = created.vcs.prepareInputs.find((input) => input.slot?.name === "tools");
+    expect(tools).toEqual({
+      runId: "run-1",
+      repository: "openai/tools",
+      baseRef: "develop",
+      headRef: "wardby/run-run-1",
+      protectedPaths: created.vcs.prepareInputs[0].protectedPaths,
+      collectExclude: created.vcs.prepareInputs[0].collectExclude,
+      slot: { name: "tools" },
+      continuation: undefined,
+    });
+    // Everything was cleaned up after the run.
+    expect(created.vcs.cleanedSlots).toEqual(["tools"]);
+    expect(created.vcs.cleanedCopies).toEqual(["base"]);
+    expect(created.vcs.cleaned).toBe(1);
+    expectNothingLeft(created);
+  });
+
+  it("prepares at most three extras at once", async () => {
+    const rows = ["a", "b", "c", "d", "e"].map((name, i) => readRow(name, { position: i + 1 }));
+    const created = await harness({ repositories: rows }, IMAGE, undefined, undefined, {
+      repoAccess: allowAll() as never,
+    });
+    let inFlight = 0;
+    let most = 0;
+    created.vcs.onPrepareCopy = async () => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((r) => setTimeout(r, 15));
+      inFlight -= 1;
+    };
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.vcs.copyInputs.map((c) => c.name)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(most).toBe(3);
+  });
+
+  it("authorizes every repository, read rows at read and write rows at write, before anything is cloned", async () => {
+    const gate = allowAll();
+    const created = await harness({ repositories: [readRow("base"), writeRow("tools")] }, IMAGE, undefined, undefined, {
+      repoAccess: gate as never,
+    });
+    gate.authorizeUse.mockImplementation(async () => {
+      created.events.push("authorize");
+      return { ok: true as const };
+    });
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(gate.authorizeUse).toHaveBeenCalledWith(
+      expect.objectContaining({ repository: "openai/base", required: "read", authorizedVia: "admin" }),
+    );
+    expect(gate.authorizeUse).toHaveBeenCalledWith(
+      expect.objectContaining({ repository: "openai/tools", required: "write", authorizedVia: "admin" }),
+    );
+    // The default repository and both extras, all before the first clone (the final push re-checks later).
+    expect(created.events.slice(0, 4)).toEqual(["authorize", "authorize", "authorize", "prepare"]);
+  });
+
+  it("refuses a read row outside the GitHub allowlist even when it is admin-approved, before any clone", async () => {
+    const gate = createRepoAccessGate({
+      db: { hostIdentity: { findUnique: async () => null, updateMany: async () => ({ count: 0 }) } } as never,
+      hosts: {},
+      trustedAccounts: async () => new Set(["openai"]),
+    });
+    const created = await harness(
+      { repositories: [readRow("base", { repository: "elsewhere/base", linkAuthorizedVia: "admin" })] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(terminationError(created)).toMatch(/^coding_failure_repo_access:coding_diag_/);
+    expect(reasonLogged("repo_access_github_account_not_allowed")).toBe(true);
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.vcs.copyInputs).toEqual([]);
+    expect(created.jobs.launches).toBe(0);
+  });
+
+  it("refuses a row whose link is gone before any clone", async () => {
+    const created = await harness(
+      { repositories: [writeRow("tools"), readRow("base", { linkExists: false })] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(terminationError(created)).toMatch(/^coding_failure_repo_access:coding_diag_/);
+    expect(reasonLogged("repo_access_not_authorized")).toBe(true);
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.vcs.copyInputs).toEqual([]);
+    expect(created.sessions.creates).toBe(0);
+  });
+
+  it("re-authorizes a continuation's extras too: the allowlist may have narrowed since the root run", async () => {
+    const gate = allowAll();
+    gate.authorizeUse.mockImplementation(async (input: unknown) =>
+      (input as { repository: string }).repository === "openai/base"
+        ? { ok: false, reason: "github_account_not_allowed" }
+        : { ok: true },
+    );
+    const created = await harness(
+      { rootCodingRunId: "root-run", headRef: "wardby/run-root-run", repositories: [readRow("base")] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(reasonLogged("repo_access_github_account_not_allowed")).toBe(true);
+    expect(created.vcs.prepared).toBe(0);
+  });
+
+  it("refuses a row dispatch never resolved, before any clone", async () => {
+    for (const row of [readRow("base", { resolvedSha: null }), writeRow("tools", { baseRef: null })]) {
+      logged.length = 0;
+      const created = await harness({ repositories: [row] }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+      });
+      await created.executor.start("run-1");
+      expect(created.store.run.status, row.name).toBe("refused");
+      expect(terminationError(created)).toMatch(/^coding_failure_preflight:coding_diag_/);
+      expect(reasonLogged("coding_repository_unresolved")).toBe(true);
+      expect(created.vcs.prepared).toBe(0);
+      expect(created.vcs.copyInputs).toEqual([]);
+    }
+  });
+
+  it("refuses a row with an unknown access, never treating it as read, before any clone", async () => {
+    const gate = allowAll();
+    const created = await harness(
+      { repositories: [readRow("base", { accessKnown: false })] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(terminationError(created)).toMatch(/^coding_failure_preflight:coding_diag_/);
+    expect(reasonLogged("coding_repository_unresolved")).toBe(true);
+    expect(gate.authorizeUse.mock.calls.map(([input]) => (input as { repository: string }).repository)).not.toContain(
+      "openai/base",
+    );
+    expect(created.vcs.prepared).toBe(0);
+    expect(created.vcs.copyInputs).toEqual([]);
+  });
+
+  it("refuses a writable row stored on another branch than the run's, before any clone", async () => {
+    const created = await harness(
+      { repositories: [writeRow("tools", { headRef: "wardby/run-other" })] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(reasonLogged("coding_repository_unresolved")).toBe(true);
+    expect(created.vcs.prepared).toBe(0);
+  });
+
+  it("re-authorizes one row by name with `only`, leaving the others untouched", async () => {
+    const gate = allowAll();
+    const created = await harness(
+      {
+        repositories: [
+          readRow("base", { linkExists: false }),
+          writeRow("tools"),
+          writeRow("docs", { accessKnown: false }),
+        ],
+      },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: gate as never },
+    );
+    const run = await created.store.load("run-1");
+    const authorizeExtras = (
+      created.executor as unknown as {
+        authorizeExtras(run: ContainerRunSnapshot, opts: { inFlight: boolean; only?: string }): Promise<void>;
+      }
+    ).authorizeExtras.bind(created.executor);
+    // Only tools is checked: base's missing link and docs' unknown access are not looked at.
+    await authorizeExtras(run!, { inFlight: true, only: "tools" });
+    expect(gate.authorizeUse).toHaveBeenCalledTimes(1);
+    expect(gate.authorizeUse.mock.calls[0][0]).toMatchObject({
+      repository: "openai/tools",
+      required: "write",
+      retryTransient: true,
+    });
+    // The named row itself is still refused when its link is gone or the gate denies it.
+    await expect(authorizeExtras(run!, { inFlight: true, only: "base" })).rejects.toThrow("repo_access_not_authorized");
+    gate.authorizeUse.mockResolvedValueOnce({ ok: false, reason: "github_account_not_allowed" });
+    await expect(authorizeExtras(run!, { inFlight: true, only: "tools" })).rejects.toThrow(
+      "repo_access_github_account_not_allowed",
+    );
+    // A name that matches no row checks nothing.
+    gate.authorizeUse.mockClear();
+    await authorizeExtras(run!, { inFlight: true, only: "missing" });
+    expect(gate.authorizeUse).not.toHaveBeenCalled();
+  });
+
+  it("names a continuation's writable extras by the root's branch: continued when it exists, created when not", async () => {
+    const created = await harness(
+      {
+        rootCodingRunId: "root-run",
+        headRef: "wardby/run-root-run",
+        repositories: [
+          writeRow("tools", { continuesBranch: true, headRef: "wardby/run-root-run" }),
+          writeRow("docs", { headRef: "wardby/run-root-run" }),
+        ],
+      },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    await created.executor.start("run-1");
+    const bySlot = (name: string) => created.vcs.prepareInputs.find((input) => input.slot?.name === name);
+    expect(bySlot("tools")).toMatchObject({ headRef: "wardby/run-root-run", continuation: { rootRunId: "root-run" } });
+    expect(bySlot("tools")).not.toHaveProperty("branchRunId");
+    expect(bySlot("docs")).toMatchObject({ headRef: "wardby/run-root-run", branchRunId: "root-run" });
+    expect(bySlot("docs")?.continuation).toBeUndefined();
+  });
+
+  it("cleans up the default workspace, each writable extra and each read copy after a failure", async () => {
+    const created = await harness({ repositories: [readRow("base"), writeRow("tools")] }, IMAGE, undefined, undefined, {
+      repoAccess: allowAll() as never,
+    });
+    created.jobs.launchError = new Error("launch exploded");
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("failed");
+    expect(created.vcs.cleanedSlots).toEqual(["tools"]);
+    expect(created.vcs.cleanedCopies).toEqual(["base"]);
+    expect(created.vcs.cleaned).toBe(1);
+    expectNothingLeft(created);
+  });
+
+  it("leaves nothing behind when an extra fails part way, waiting for the ones still being prepared", async () => {
+    const rows = ["slow", "broken", "fine", "never"].map((name, i) => readRow(name, { position: i + 1 }));
+    const created = await harness({ repositories: rows }, IMAGE, undefined, undefined, {
+      repoAccess: allowAll() as never,
+    });
+    created.vcs.onPrepareCopy = async (input) => {
+      if (input.name === "slow") await new Promise((r) => setTimeout(r, 30));
+      if (input.name === "broken") throw new Error("vcs_read_only_fetch_failed");
+    };
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("refused");
+    expect(reasonLogged("vcs_read_only_fetch_failed")).toBe(true);
+    // No new extra starts after the failure; the slow one finished before anything was removed.
+    expect(created.vcs.copyInputs.map((c) => c.name)).toEqual(["slow", "broken", "fine"]);
+    expect(created.events.lastIndexOf("cleanup")).toBeGreaterThan(created.events.indexOf("copy:slow"));
+    expect([...created.vcs.cleanedCopies].sort()).toEqual(["fine", "slow"]);
+    expect(created.jobs.launches).toBe(0);
+    expectNothingLeft(created);
+  });
+
+  it("beats the heartbeat while an extra is prepared", async () => {
+    const created = await harness({ repositories: [readRow("base")] }, IMAGE, undefined, undefined, {
+      repoAccess: allowAll() as never,
+      heartbeatIntervalMs: 5,
+    });
+    let beats = 0;
+    created.vcs.onPrepareCopy = async () => {
+      const before = created.store.heartbeats;
+      await new Promise((r) => setTimeout(r, 80));
+      beats = created.store.heartbeats - before;
+    };
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(beats).toBeGreaterThan(0);
+  });
+
+  it("caps the entries of every repository together", async () => {
+    async function run(filesEach: number) {
+      const counted: string[][] = [];
+      const created = await harness({ repositories: [readRow("base")] }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+        // The shared counter, with a cap small enough for a test tree.
+        countEntries: async (paths) => {
+          counted.push(paths);
+          for (const path of paths) {
+            for (let i = 0; i < filesEach; i++) await writeFile(join(path, `file-${i}.txt`), "x");
+          }
+          return countWorkspaceEntries(paths, 5);
+        },
+      });
+      await created.executor.start("run-1");
+      return { created, counted };
+    }
+    // 3 + 3 entries: each repository is under the cap, together they are not.
+    const over = await run(3);
+    expect(over.created.store.run.status).toBe("refused");
+    expect(reasonLogged("vcs_workspace_entry_limit")).toBe(true);
+    expect(over.counted[0]).toHaveLength(2);
+    expect(over.created.jobs.launches).toBe(0);
+    expectNothingLeft(over.created);
+    // 2 + 2 entries fit.
+    const under = await run(2);
+    expect(under.created.store.run.status).toBe("succeeded");
+  });
+
+  it("does not count entries again for a single-repository run", async () => {
+    const countEntries = vi.fn(async () => undefined);
+    const created = await harness({}, IMAGE, undefined, undefined, { countEntries });
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(countEntries).not.toHaveBeenCalled();
+  });
+
+  it("a launched run recovers its writable extras and makes no read copies (its job already has them)", async () => {
+    const handle = { backend: "fake", id: "job-1" };
+    const created = await harness(
+      { jobHandle: handle, proxySessionId: "session-1", repositories: [readRow("base"), writeRow("tools")] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    const input = {
+      runId: "run-1",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: "wardby/run-run-1",
+      protectedPaths: ["CODEOWNERS"],
+    };
+    await created.vcs.prepareWorkspace(input);
+    await created.vcs.prepareWorkspace({ ...input, repository: "openai/tools", slot: { name: "tools" } });
+    const before = created.vcs.prepared;
+    await created.executor.start("run-1");
+    expect(created.vcs.prepared).toBe(before);
+    expect(created.vcs.copyInputs).toEqual([]);
+    expect(created.vcs.cleanedSlots).toEqual(["tools"]);
+    expectNothingLeft(created);
+  });
+
+  it("fails a launched run whose writable extra is gone", async () => {
+    const handle = { backend: "fake", id: "job-1" };
+    const created = await harness(
+      { jobHandle: handle, proxySessionId: "session-1", repositories: [writeRow("tools")] },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never },
+    );
+    await created.vcs.prepareWorkspace({
+      runId: "run-1",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: "wardby/run-run-1",
+      protectedPaths: ["CODEOWNERS"],
+    });
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("failed");
+    expect(reasonLogged("coding_workspace_lost")).toBe(true);
+    expectNothingLeft(created);
+  });
+
+  // Secrets row 4 (JobSpec): a run's repositories reach the launcher as name, access and path only.
+  it.each([
+    ["codex", {}, undefined],
+    [
+      "claude-code",
+      { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const,
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+    ],
+  ])("gives a %s job each extra at its prepared path and nothing else of the row", async (_label, run, claude) => {
+    const FAKE = "ghs_FAKEtoken0123456789abcdefABCDEF";
+    const created = await harness(
+      { ...run, repositories: [writeRow("tools", { position: 1 }), readRow("base", { position: 2 })] },
+      IMAGE,
+      undefined,
+      claude,
+      { repoAccess: allowAll() as never },
+    );
+    const createSession = created.sessions.createSession.bind(created.sessions);
+    created.sessions.createSession = async (input) => ({ ...(await createSession(input)), capability: FAKE });
+    let held: string | undefined;
+    created.jobs.onLaunch = () => void created.capabilities.get("run-1").then((value) => (held = value));
+    await created.executor.start("run-1");
+    expect(held).toBe(FAKE);
+    const spec = created.jobs.specs[0];
+    expect(spec.repositories).toEqual([
+      { name: "tools", access: "write", hostPath: created.vcs.slotPaths.get("tools") },
+      { name: "base", access: "read", hostPath: created.vcs.copyPaths.get("base") },
+    ]);
+    for (const entry of spec.repositories!) expect(Object.keys(entry).sort()).toEqual(["access", "hostPath", "name"]);
+    expect(JSON.stringify(spec.repositories)).not.toContain(FAKE);
+    expect(JSON.stringify(spec)).not.toContain(FAKE);
+    // The capacity probe, asked before anything is prepared, lists none.
+    expect(created.jobs.capacityChecks.every((probe) => probe.repositories === undefined)).toBe(true);
+  });
+
+  it("writes the extras into input.json with the commit each was prepared at, and no secret", async () => {
+    const FAKE = "ghs_FAKEtoken0123456789abcdefABCDEF";
+    const created = await harness(
+      { repositories: [readRow("base", { position: 1 }), writeRow("tools", { position: 2 })] },
+      IMAGE,
+      undefined,
+      undefined,
+      {
+        repoAccess: allowAll() as never,
+      },
+    );
+    const createSession = created.sessions.createSession.bind(created.sessions);
+    created.sessions.createSession = async (input) => ({ ...(await createSession(input)), capability: FAKE });
+    let text = "";
+    created.jobs.onLaunch = () => {
+      text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+    };
+    await created.executor.start("run-1");
+    expect((JSON.parse(text) as { repositories: unknown }).repositories).toEqual([
+      { name: "base", path: "/repos/base", access: "read", repository: "openai/base", commit: SHA_A },
+      { name: "tools", path: "/repos/tools", access: "write", repository: "openai/tools", commit: "b".repeat(40) },
+    ]);
+    expect(text).not.toContain(FAKE);
+  });
+
+  it("leaves repositories out of input.json for a single-repository run", async () => {
+    const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+    let text = "";
+    created.jobs.onLaunch = () => {
+      text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+    };
+    await created.executor.start("run-1");
+    expect(text).not.toBe("");
+    expect("repositories" in (JSON.parse(text) as object)).toBe(false);
+  });
+
+  describe("the task text names each extra's full commit", () => {
+    const taskOf = (text: string) => (JSON.parse(text) as { task: string }).task;
+    const extraLines = [
+      `Extra repository /repos/base: openai/base at ${SHA_A}, read-only.`,
+      `Extra repository /repos/tools: openai/tools at ${"b".repeat(40)}, writable.`,
+    ].join("\n");
+
+    it.each([
+      ["codex", {}, undefined],
+      [
+        "claude-code",
+        { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const,
+        { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+      ],
+    ])("for a %s run", async (_label, run, claude) => {
+      const created = await harness(
+        { ...run, repositories: [readRow("base", { position: 1 }), writeRow("tools", { position: 2 })] },
+        IMAGE,
+        undefined,
+        claude,
+        { repoAccess: allowAll() as never },
+      );
+      let text = "";
+      created.jobs.onLaunch = () => {
+        text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+      };
+      await created.executor.start("run-1");
+      expect(taskOf(text)).toContain(`\n\n${extraLines}`);
+    });
+
+    it("for a continuation", async () => {
+      const created = await harness(
+        {
+          rootCodingRunId: "root-run",
+          headRef: "wardby/run-root-run",
+          repositories: [
+            readRow("base", { position: 1 }),
+            writeRow("tools", { position: 2, headRef: "wardby/run-root-run", continuesBranch: true }),
+          ],
+        },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: allowAll() as never },
+      );
+      let text = "";
+      created.jobs.onLaunch = () => {
+        text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+      };
+      await created.executor.start("run-1");
+      expect(taskOf(text)).toContain(`\n\n${extraLines}`);
+    });
+
+    it("leaves a single-repository run's task text unchanged", async () => {
+      const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+      let text = "";
+      created.jobs.onLaunch = () => {
+        text = readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8");
+      };
+      await created.executor.start("run-1");
+      expect(taskOf(text)).not.toContain("Extra repository");
+      expect(taskOf(text)).toBe(
+        `${created.store.run.task}\n\nBase commit: ${"a".repeat(40)} (the commit this workspace was checked out at; the workspace has no git metadata).`,
+      );
+    });
+  });
+
+  describe("git history at prepare (#536)", () => {
+    const SHA_C = "c".repeat(40);
+    async function launchedWith(overrides: Partial<ContainerRunSnapshot>) {
+      const created = await harness(overrides, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { created, input: input! };
+    }
+
+    it("fetches remote rows as remotes: no folder, no copy, no mount, and their tips are the excluded commits", async () => {
+      const { created, input } = await launchedWith({
+        gitHistoryDepth: 20,
+        repositories: [
+          readRow("upstream", { position: 1, asRemote: true, repository: "openai/upstream", resolvedSha: SHA_C }),
+          writeRow("tools", { position: 2 }),
+        ],
+      });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.copyInputs).toEqual([]);
+      expect(created.events.some((event) => event === "copy:upstream")).toBe(false);
+      const [main, tools] = created.vcs.prepareInputs;
+      expect(main.gitHistory).toEqual({ depth: 20 });
+      expect(main.remotes).toEqual([
+        { name: "upstream", repository: "openai/upstream", resolvedSha: SHA_C, label: "main" },
+      ]);
+      // A writable extra gets history but never remotes.
+      expect(tools.slot).toEqual({ name: "tools" });
+      expect(tools.gitHistory).toEqual({ depth: 20 });
+      expect(tools).not.toHaveProperty("remotes");
+      expect(created.jobs.lastSpec!.repositories).toEqual([
+        { name: "tools", access: "write", hostPath: created.vcs.slotPaths.get("tools") },
+      ]);
+      expect(input.gitHistory).toEqual({
+        repositories: [
+          { path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [SHA_C] },
+          { path: "/repos/tools", baseCommit: "b".repeat(40), excludeCommits: [] },
+        ],
+      });
+      expect((input.repositories as { name: string }[]).map((r) => r.name)).toEqual(["tools"]);
+      expect(input.task).toContain(`remotes: upstream/main at ${SHA_C}`);
+      expect(input.task).not.toContain("/repos/upstream");
+    });
+
+    it("gives a run with only remote rows no repositories at all, and full history as depth full", async () => {
+      const { created, input } = await launchedWith({
+        gitHistoryFull: true,
+        repositories: [readRow("upstream", { asRemote: true, resolvedSha: SHA_C })],
+      });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.prepareInputs[0].gitHistory).toEqual({ depth: "full" });
+      expect(created.jobs.lastSpec).not.toHaveProperty("repositories");
+      expect(input).not.toHaveProperty("repositories");
+      expect(input.gitHistory).toEqual({
+        repositories: [{ path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [SHA_C] }],
+      });
+    });
+
+    it("labels a remote pinned for a SHA or a fromFile ref, else by its requested ref", async () => {
+      const { created } = await launchedWith({
+        gitHistoryDepth: 5,
+        repositories: [
+          readRow("bysha", { position: 1, asRemote: true, requestedRef: SHA_C, resolvedSha: SHA_C }),
+          readRow("byfile", { position: 2, asRemote: true, requestedRef: "v2.0", refFromFile: ".upstream-ref" }),
+          readRow("bytag", { position: 3, asRemote: true, requestedRef: "v2.0" }),
+        ],
+      });
+      expect(created.vcs.prepareInputs[0].remotes?.map((remote) => [remote.name, remote.label])).toEqual([
+        ["bysha", "pinned"],
+        ["byfile", "pinned"],
+        ["bytag", "v2.0"],
+      ]);
+    });
+
+    it("refuses a remote row dispatch never resolved, before anything is cloned", async () => {
+      const { created } = await launchedWith({
+        gitHistoryDepth: 5,
+        repositories: [readRow("upstream", { asRemote: true, resolvedSha: null })],
+      });
+      expect(created.store.run.status).toBe("refused");
+      expect(created.vcs.prepareInputs).toEqual([]);
+    });
+
+    it("passes no history fields without history", async () => {
+      const { created, input } = await launchedWith({ repositories: [writeRow("tools")] });
+      expect(
+        created.vcs.prepareInputs.every((prepared) => !("gitHistory" in prepared) && !("remotes" in prepared)),
+      ).toBe(true);
+      expect(input).not.toHaveProperty("gitHistory");
+    });
+  });
+
+  describe("git history at collect (#536)", () => {
+    async function finishedWith(overrides: Partial<ContainerRunSnapshot>, bundlesFor: (string | undefined)[] = []) {
+      const created = await harness(overrides, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+      for (const name of bundlesFor) created.jobs.bundlesFor.add(name);
+      const seenAtFinalize = new Map<string | undefined, boolean>();
+      const launched = { workspacePath: "" };
+      created.jobs.onLaunch = () => {
+        launched.workspacePath = created.vcs.workspace!.workspacePath;
+      };
+      created.vcs.onFinalize = (slot) => {
+        const call = created.vcs.finalizeCalls.at(-1);
+        if (call?.details?.resultBundle) seenAtFinalize.set(slot, existsSync(call.details.resultBundle));
+      };
+      await created.executor.start("run-1");
+      return { created, seenAtFinalize, workspacePath: launched.workspacePath };
+    }
+    const bundlesDir = (workspacePath: string) => join(workspacePath, "..", "result-bundles");
+
+    it("collects the default repository's bundle outside the workspace and passes it to finalize, then removes it", async () => {
+      const { created, seenAtFinalize, workspacePath } = await finishedWith({ gitHistoryDepth: 20 }, [undefined]);
+      expect(created.store.run.status).toBe("succeeded");
+      const destination = join(bundlesDir(workspacePath), "workspace.bundle");
+      expect(created.jobs.materializeCalls).toEqual([
+        [
+          workspacePath,
+          undefined,
+          { gitHistory: { bundleDestination: destination, maxBundleBytes: 256 * 1024 * 1024 } },
+        ],
+      ]);
+      expect(destination.startsWith(`${workspacePath}/`)).toBe(false);
+      expect(created.vcs.finalizeCalls[0].details?.resultBundle).toBe(destination);
+      expect(seenAtFinalize.get(undefined)).toBe(true);
+      expect(existsSync(destination)).toBe(false);
+      expect((await stat(bundlesDir(workspacePath))).mode & 0o777).toBe(0o700);
+    });
+
+    it("removes a stale file at the destination before collecting, and passes no bundle the collector did not write", async () => {
+      const created = await harness({ gitHistoryDepth: 20 }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+      });
+      created.jobs.onLaunch = () => {
+        // A file left from an earlier attempt: never taken for this collection's bundle.
+        const dir = join(created.vcs.workspace!.workspacePath, "..", "result-bundles");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "workspace.bundle"), "stale");
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.destinationFreeAtCollect.get(undefined)).toBe(true);
+      expect(created.vcs.finalizeCalls[0].details).not.toHaveProperty("resultBundle");
+    });
+
+    it("collects each writable extra's bundle to its own path, and removes every bundle after publishing", async () => {
+      const { created, seenAtFinalize, workspacePath } = await finishedWith(
+        { gitHistoryDepth: 20, repositories: [writeRow("tools", { position: 1 }), writeRow("docs", { position: 2 })] },
+        [undefined, "tools"],
+      );
+      expect(created.store.run.status).toBe("succeeded");
+      const dir = bundlesDir(workspacePath);
+      const byName = new Map(created.jobs.materializeCalls.map((call) => [call[1], call[2]]));
+      expect(byName.get(undefined)).toEqual({
+        gitHistory: { bundleDestination: join(dir, "workspace.bundle"), maxBundleBytes: 256 * 1024 * 1024 },
+      });
+      expect(byName.get("tools")).toEqual({
+        gitHistory: { bundleDestination: join(dir, "tools.bundle"), maxBundleBytes: 256 * 1024 * 1024 },
+      });
+      expect(byName.get("docs")).toEqual({
+        gitHistory: { bundleDestination: join(dir, "docs.bundle"), maxBundleBytes: 256 * 1024 * 1024 },
+      });
+      const details = new Map(created.vcs.finalizeCalls.map((call) => [call.slot, call.details]));
+      expect(details.get(undefined)?.resultBundle).toBe(join(dir, "workspace.bundle"));
+      expect(details.get("tools")?.resultBundle).toBe(join(dir, "tools.bundle"));
+      expect(details.get("docs")).not.toHaveProperty("resultBundle");
+      expect(seenAtFinalize.get("tools")).toBe(true);
+      for (const name of ["workspace", "tools", "docs"]) expect(existsSync(join(dir, `${name}.bundle`))).toBe(false);
+    });
+
+    it("removes the bundles when publishing fails", async () => {
+      const created = await harness(
+        { gitHistoryDepth: 20, repositories: [writeRow("tools", { position: 1 })] },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: allowAll() as never },
+      );
+      created.jobs.bundlesFor.add(undefined);
+      created.jobs.bundlesFor.add("tools");
+      created.vcs.slotErrors.set("tools", new Error("vcs_result_history_invalid"));
+      let workspacePath = "";
+      created.jobs.onLaunch = () => {
+        workspacePath = created.vcs.workspace!.workspacePath;
+      };
+      await created.executor.start("run-1");
+      expect(created.vcs.finalizeCalls.find((call) => call.slot === "tools")?.details?.resultBundle).toBeDefined();
+      const dir = bundlesDir(workspacePath);
+      expect(existsSync(join(dir, "workspace.bundle"))).toBe(false);
+      expect(existsSync(join(dir, "tools.bundle"))).toBe(false);
+    });
+
+    it("without history, collects exactly as before: no options, no bundle, no bundle folder", async () => {
+      const single = await finishedWith({});
+      expect(single.created.jobs.materializeCalls).toEqual([[single.workspacePath]]);
+      expect(single.created.vcs.finalizeCalls[0].details).not.toHaveProperty("resultBundle");
+      expect(existsSync(bundlesDir(single.workspacePath))).toBe(false);
+      const several = await finishedWith({ repositories: [writeRow("tools", { position: 1 })] });
+      expect(several.created.jobs.materializeCalls).toEqual([
+        [several.workspacePath],
+        [several.created.vcs.slotPaths.get("tools"), "tools"],
+      ]);
+      expect(several.created.vcs.finalizeCalls.every((call) => !("resultBundle" in (call.details ?? {})))).toBe(true);
+      expect(existsSync(bundlesDir(several.workspacePath))).toBe(false);
+    });
+  });
+
+  describe("git history in input.json (#536)", () => {
+    const history = {
+      repositories: [
+        { path: "/workspace", baseCommit: "a".repeat(40), excludeCommits: [] as string[] },
+        { path: "/repos/tools", baseCommit: "b".repeat(40), excludeCommits: ["c".repeat(40)] },
+      ],
+    };
+    const wording = { depth: 20, remotes: [{ ref: "upstream/pinned", commit: "c".repeat(40) }] };
+    type WriteInput = (
+      run: ContainerRunSnapshot,
+      deadlineAt: Date,
+      workspaces: unknown,
+      history?: unknown,
+    ) => Promise<string>;
+    async function written(withHistory: boolean) {
+      const created = await harness(
+        { repositories: [readRow("base", { position: 1 }), writeRow("tools", { position: 2 })] },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: allowAll() as never },
+      );
+      const workspaces = {
+        main: { workspacePath: join(created.root, "ws"), baseCommit: "a".repeat(40) },
+        writable: new Map([["tools", { baseCommit: "b".repeat(40) }]]),
+        readOnly: [],
+      };
+      const write = (created.executor as unknown as { writeInput: WriteInput }).writeInput.bind(created.executor);
+      const path = await write(
+        created.store.run,
+        new Date("2026-11-13T00:00:00Z"),
+        workspaces,
+        withHistory ? { input: history, wording } : undefined,
+      );
+      return JSON.parse(readFileSync(path, "utf8")) as { task: string; gitHistory?: unknown };
+    }
+
+    it("writes the key and the history wording when given history", async () => {
+      const parsed = await written(true);
+      expect(parsed.gitHistory).toEqual(history);
+      expect(parsed.task).toContain(
+        `Base commit: ${"a".repeat(40)} (the workspace has git history to depth 20; remotes: upstream/pinned at ${"c".repeat(40)}; fetching and pushing are not possible \u2014 commit your work).`,
+      );
+      expect(parsed.task).toContain(
+        `Extra repository /repos/tools: openai/tools at ${"b".repeat(40)}, writable, with git history.`,
+      );
+      expect(parsed.task).toContain(`Extra repository /repos/base: openai/base at ${SHA_A}, read-only.`);
+      expect(parsed.task).not.toContain("no git metadata");
+    });
+
+    it("writes no key and today's wording without history", async () => {
+      const parsed = await written(false);
+      expect("gitHistory" in parsed).toBe(false);
+      expect(parsed.task).toContain("the workspace has no git metadata");
+      expect(parsed.task).toContain(`openai/tools at ${"b".repeat(40)}, writable.`);
+    });
+  });
+
+  it("gives a job without extras no repositories key at all", async () => {
+    const created = await harness({}, IMAGE, undefined, undefined, { repoAccess: allowAll() as never });
+    await created.executor.start("run-1");
+    expect("repositories" in created.jobs.specs[0]).toBe(false);
+  });
+
+  describe("publishing each repository", () => {
+    const FAKE = "ghs_FAKEtoken0123456789abcdefABCDEF";
+    function workerOutput(overrides: Record<string, unknown> = {}) {
+      return JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "changes_ready",
+        summary: "Fixed it.",
+        tests: [{ command: "npm test", outcome: "passed" }],
+        ...overrides,
+      });
+    }
+    async function multi(rows: RunRepositorySnapshot[], output: Record<string, unknown> = {}, run = {}) {
+      const created = await harness({ repositories: rows, ...run }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+      });
+      created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput(output) };
+      return created;
+    }
+    const extrasOf = (created: Awaited<ReturnType<typeof harness>>) => created.store.completions[0]?.extras;
+
+    it("(a) publishes the default repository first, then each changed extra with its own description", async () => {
+      const created = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        pullRequests: [{ name: "tools", title: "tools-fix", description: "Tools PR." }],
+      });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools"]);
+      const [main, tools] = created.vcs.finalizeCalls;
+      expect(main.details?.summary).toBe("Fixed it.");
+      expect(tools.details?.summary).toBe("Tools PR.");
+      expect(tools.details?.tag).toBe("tools-fix");
+      expect(tools.details?.related?.entries).toEqual([
+        { repository: "openai/example", number: 42, mergeOrder: 1 },
+        { repository: "openai/tools", self: true, mergeOrder: 2 },
+      ]);
+      expect(created.events.indexOf("finalize")).toBeLessThan(created.events.indexOf("finalize:tools"));
+      expect(created.store.completions).toHaveLength(1);
+      expect(created.store.completions[0].status).toBe("succeeded");
+      expect(created.store.completions[0].result).toMatchObject({ pullRequestNumber: 42, summary: "Fixed it." });
+      expect(extrasOf(created)).toEqual([
+        expect.objectContaining({
+          id: "row-tools",
+          name: "tools",
+          pullRequestNumber: 7,
+          baseSha: "c".repeat(40),
+          resultBranch: null,
+          result: expect.objectContaining({
+            outcome: "pull_request_opened",
+            repository: "openai/tools",
+            baseRef: "develop",
+            pullRequestNumber: 7,
+            summary: "Tools PR.",
+            tag: "tools-fix",
+          }),
+        }),
+      ]);
+    });
+
+    it("(b) collects and publishes a changed extra even when the worker says no_changes", async () => {
+      const created = await multi([writeRow("tools")], { outcome: "no_changes" });
+      created.vcs.finalizeEmpty = true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.materializedNames).toEqual([undefined, "tools"]);
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools"]);
+      expect(created.store.completions[0].result).toMatchObject({ outcome: "no_changes" });
+      expect(extrasOf(created)).toEqual([expect.objectContaining({ name: "tools", pullRequestNumber: 7 })]);
+    });
+
+    it("(c) numbers the run's pull requests after the inherited order, an explicit order winning", async () => {
+      const numbered = await multi([writeRow("tools")]);
+      await numbered.executor.start("run-1");
+      expect(numbered.store.completions[0].record?.mergeOrder).toBe(1);
+      expect(extrasOf(numbered)?.[0].mergeOrder).toBe(2);
+
+      const inherited = await multi([writeRow("tools")], {}, { mergeOrder: 3 });
+      await inherited.executor.start("run-1");
+      // The default repository keeps its own order; the next one comes after the inherited one.
+      expect(inherited.store.completions[0].record?.mergeOrder).toBeUndefined();
+      expect(extrasOf(inherited)?.[0].mergeOrder).toBe(5);
+
+      const explicit = await multi([writeRow("tools")], {
+        pullRequests: [{ name: "tools", description: "Tools PR.", mergeOrder: 5 }],
+      });
+      await explicit.executor.start("run-1");
+      expect(explicit.store.completions[0].record?.mergeOrder).toBe(1);
+      expect(extrasOf(explicit)?.[0].mergeOrder).toBe(5);
+    });
+
+    it("never numbers a pull request past step 99", async () => {
+      const created = await multi([writeRow("tools"), writeRow("docs", { position: 2 })], {}, { mergeOrder: 98 });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      // The default repository keeps its inherited 98; the extras would be 100 and 101.
+      expect(created.store.completions[0].record?.mergeOrder).toBeUndefined();
+      expect(extrasOf(created)?.map((extra) => extra.mergeOrder)).toEqual([99, 99]);
+      for (const call of created.vcs.finalizeCalls) {
+        for (const entry of call.details?.related?.entries ?? []) {
+          expect(entry.mergeOrder ?? 0).toBeLessThanOrEqual(99);
+        }
+      }
+    });
+
+    it("gives a lone pull request the order a run with one repository would", async () => {
+      // Only the default repository pushed: no order of its own, as with one repository.
+      const defaultOnly = await multi([writeRow("tools")]);
+      defaultOnly.vcs.emptySlots.add("tools");
+      await defaultOnly.executor.start("run-1");
+      expect(defaultOnly.store.run.status).toBe("succeeded");
+      expect(defaultOnly.store.completions[0].result).toMatchObject({ pullRequestNumber: 42 });
+      expect(defaultOnly.store.completions[0].record).not.toHaveProperty("mergeOrder");
+
+      // Only an extra pushed: no order, or the inherited one, or the driver's own.
+      const extraOnly = await multi([writeRow("tools")]);
+      extraOnly.vcs.finalizeEmpty = true;
+      await extraOnly.executor.start("run-1");
+      expect(extrasOf(extraOnly)).toEqual([expect.objectContaining({ pullRequestNumber: 7, mergeOrder: null })]);
+      expect(extraOnly.store.completions[0].record).not.toHaveProperty("mergeOrder");
+
+      const inherited = await multi([writeRow("tools")], {}, { mergeOrder: 3 });
+      inherited.vcs.finalizeEmpty = true;
+      await inherited.executor.start("run-1");
+      expect(extrasOf(inherited)).toEqual([expect.objectContaining({ pullRequestNumber: 7, mergeOrder: 3 })]);
+
+      const given = await multi([writeRow("tools")], {
+        pullRequests: [{ name: "tools", description: "Tools PR.", mergeOrder: 6 }],
+      });
+      given.vcs.finalizeEmpty = true;
+      await given.executor.start("run-1");
+      expect(extrasOf(given)).toEqual([expect.objectContaining({ pullRequestNumber: 7, mergeOrder: 6 })]);
+    });
+
+    it("(d) ends partially_published when an extra fails after the default published", async () => {
+      const created = await multi([writeRow("tools"), writeRow("docs", { position: 2 })]);
+      created.vcs.slotErrors.set("tools", new Error("vcs_head_ref_conflict"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.completions).toEqual([]);
+      expect(created.store.terminations).toEqual([]);
+      expect(created.store.partials).toHaveLength(1);
+      const partial = created.store.partials[0];
+      expect(partial.error).toBe(
+        "partially_published: workspace: published; tools: failed(workspace); docs: published",
+      );
+      expect(partial.error).not.toContain("vcs_head_ref_conflict");
+      expect(partial.audit.failureCategory).toBe("partially_published");
+      expect(partial.audit.diagnosticId).toMatch(/^coding_diag_/);
+      // The rest were still tried; what published stays recorded.
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools", "docs"]);
+      expect(partial.mainResult).toMatchObject({ outcome: "pull_request_opened", pullRequestNumber: 42 });
+      expect(partial.extras.map((extra) => extra.name)).toEqual(["docs"]);
+      expect(reasonLogged("vcs_head_ref_conflict")).toBe(true);
+      expect(created.observer.events.at(-2)).toMatchObject({ stage: "terminal", outcome: "failed" });
+    });
+
+    it("(d) fails the run with the failure itself when nothing published", async () => {
+      const created = await multi([writeRow("tools")]);
+      created.vcs.finalizeEmpty = true;
+      created.vcs.slotErrors.set("tools", new Error("vcs_head_ref_conflict"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.store.partials).toEqual([]);
+      expect(terminationError(created)).toMatch(/^coding_failure_workspace:coding_diag_/);
+    });
+
+    it("(e) keeps a token in a failed push out of Run.error and the logs", async () => {
+      const created = await multi([writeRow("tools")]);
+      created.vcs.slotErrors.set(
+        "tools",
+        new GitCommandError(128, redactGitOutput(`remote: rejected https://x-access-token:${FAKE}@github.com`, [FAKE])),
+      );
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      const partial = created.store.partials[0];
+      expect(partial.error).toBe("partially_published: workspace: published; tools: failed(workspace)");
+      expect(JSON.stringify(created.store.partials)).not.toContain(FAKE);
+      expect(JSON.stringify(logged)).not.toContain(FAKE);
+      expect(reasonLogged("git_command_failed")).toBe(true);
+    });
+
+    it("(f) a budget stop keeps each writable repository's changes, recording the kept extras on their rows", async () => {
+      const created = await multi([writeRow("tools"), writeRow("docs", { position: 2 })], {
+        outcome: "budget_exhausted",
+      });
+      created.vcs.emptySlots.add("docs");
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools", "docs"]);
+      const tools = created.vcs.finalizeCalls[1].details;
+      expect(tools?.summary).toBe(budgetStoppedSummary("Fixed it.", undefined));
+      expect(created.store.completions[0].status).toBe("budget_exhausted");
+      expect(created.store.completions[0].result).toMatchObject({ outcome: "pull_request_opened" });
+      expect(extrasOf(created)).toEqual([
+        expect.objectContaining({ name: "tools", pullRequestNumber: 7, mergeOrder: 2 }),
+      ]);
+    });
+
+    it("(f) a budget stop that kept only an extra's changes says so on the status comment", async () => {
+      const created = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        outcome: "budget_exhausted",
+      });
+      created.vcs.finalizeEmpty = true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(extrasOf(created)).toEqual([expect.objectContaining({ name: "tools", pullRequestNumber: 7 })]);
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({
+        outcome: "budget_exhausted",
+        changesPushed: { pullRequestNumber: 7, repository: "openai/tools" },
+      });
+    });
+
+    it("(f) a budget stop that kept the default repository's changes reports its own pull request", async () => {
+      const created = await multi([writeRow("tools")], { outcome: "budget_exhausted" });
+      await created.executor.start("run-1");
+      expect(created.vcs.notifyFinishedCalls[0]).toMatchObject({ changesPushed: { pullRequestNumber: 42 } });
+      expect(created.vcs.notifyFinishedCalls[0].changesPushed).not.toHaveProperty("repository");
+    });
+
+    it("(f) a budget stop whose extra fails to push still keeps the others", async () => {
+      const created = await multi([writeRow("tools")], { outcome: "budget_exhausted" });
+      created.vcs.slotErrors.set("tools", new Error("vcs_head_ref_conflict"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.store.completions[0].result).toMatchObject({ outcome: "pull_request_opened" });
+      expect(extrasOf(created)).toEqual([]);
+    });
+
+    describe("in a continuation", () => {
+      const CONTINUATION = { rootCodingRunId: "root-run", headRef: "wardby/run-root-run" };
+      const continued = (name: string, overrides: Partial<RunRepositorySnapshot> = {}) =>
+        writeRow(name, { headRef: "wardby/run-root-run", continuesBranch: true, ...overrides });
+      const baseline = {
+        recordedSha256: "f".repeat(64),
+        previousAgentText: "Tools before.",
+        agentTextRunId: "root-run",
+      };
+
+      it("records the description of an extra's first pull request on the root's row of that name", async () => {
+        const created = await multi([writeRow("tools", { headRef: "wardby/run-root-run" })], {}, CONTINUATION);
+        created.store.pullRequestDescriptionBaseline = async () => baseline;
+        const recorded: unknown[] = [];
+        created.store.recordPullRequestDescription = async (input) => {
+          recorded.push(input);
+          return true;
+        };
+        created.vcs.slotDescriptions.set("tools", { kind: "written", sha256: "e".repeat(64) });
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.vcs.finalizeCalls[1]).toMatchObject({ slot: "tools" });
+        // A fresh pull request: no baseline to replace.
+        expect(created.vcs.finalizeCalls[1].details).not.toHaveProperty("description");
+        expect(recorded).toEqual([
+          {
+            rootRunId: "root-run",
+            expectedSha256: null,
+            sha256: "e".repeat(64),
+            agentTextRunId: "run-1",
+            name: "tools",
+          },
+        ]);
+        expect(extrasOf(created)).toEqual([
+          expect.objectContaining({
+            name: "tools",
+            pullRequestNumber: 7,
+            prDescriptionOutcome: "written",
+            prDescriptionSha256: "e".repeat(64),
+            prDescriptionRunId: "run-1",
+          }),
+        ]);
+      });
+
+      it("records nothing on the root's row for an extra that continued its pull request", async () => {
+        const created = await multi([continued("tools")], {}, CONTINUATION);
+        const asked: Array<string | undefined> = [];
+        created.store.pullRequestDescriptionBaseline = async (_root, name) => {
+          asked.push(name);
+          return baseline;
+        };
+        const recorded: Array<{ name?: string; expectedSha256: string | null }> = [];
+        created.store.recordPullRequestDescription = async (input) => {
+          recorded.push(input);
+          return true;
+        };
+        created.vcs.slotDescriptions.set("tools", {
+          kind: "replaced",
+          sha256: "e".repeat(64),
+          agentTextRunId: "run-1",
+        });
+        await created.executor.start("run-1");
+        expect(asked).toContain("tools");
+        expect(recorded.filter((input) => input.name === "tools")).toEqual([
+          expect.objectContaining({ expectedSha256: "f".repeat(64) }),
+        ]);
+      });
+
+      it("refreshes the description of a continued extra that changed nothing", async () => {
+        const created = await multi([continued("tools", { repository: "openai/tools" })], {}, CONTINUATION);
+        created.vcs.emptySlots.add("tools");
+        const asked: Array<string | undefined> = [];
+        created.store.pullRequestDescriptionBaseline = async (_root, name) => {
+          asked.push(name);
+          return baseline;
+        };
+        const recorded: Array<{ name?: string }> = [];
+        created.store.recordPullRequestDescription = async (input) => {
+          recorded.push(input);
+          return true;
+        };
+        const refreshed: Array<{ repository: string; slot?: string; summary?: string }> = [];
+        created.vcs.refreshPullRequestDescription = async (workspace, details) => {
+          refreshed.push({
+            repository: workspace.repository,
+            slot: (workspace as PreparedWorkspace).slot?.name,
+            summary: details.summary,
+          });
+          return { kind: "unchanged", sha256: "9".repeat(64), agentTextRunId: "root-run" };
+        };
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+        expect(refreshed).toContainEqual({ repository: "openai/tools", slot: "tools", summary: "Fixed it." });
+        expect(asked).toContain("tools");
+        expect(recorded).toContainEqual(expect.objectContaining({ name: "tools", sha256: "9".repeat(64) }));
+        expect(extrasOf(created)).toEqual([
+          expect.objectContaining({ name: "tools", pullRequestNumber: null, prDescriptionOutcome: "unchanged" }),
+        ]);
+      });
+
+      it("refreshes a no-change extra only after checking that repository's access again", async () => {
+        const gate = allowAll();
+        const created = await harness(
+          { repositories: [continued("tools")], ...CONTINUATION },
+          IMAGE,
+          undefined,
+          undefined,
+          {
+            repoAccess: gate as never,
+          },
+        );
+        created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput() };
+        created.vcs.emptySlots.add("tools");
+        created.store.pullRequestDescriptionBaseline = async () => baseline;
+        let refreshes = 0;
+        created.vcs.refreshPullRequestDescription = async () => {
+          refreshes += 1;
+          return { kind: "unchanged", sha256: "9".repeat(64), agentTextRunId: "root-run" };
+        };
+        created.vcs.onFinalize = (slot) => {
+          if (slot === "tools") {
+            gate.authorizeUse.mockImplementation(async (input: unknown) =>
+              (input as { repository: string }).repository === "openai/tools"
+                ? { ok: false, reason: "not_authorized" }
+                : { ok: true },
+            );
+          }
+        };
+        await created.executor.start("run-1");
+        expect(refreshes).toBe(0);
+        expect(extrasOf(created)).toEqual([expect.objectContaining({ prDescriptionOutcome: "skipped:error" })]);
+      });
+
+      it("asks whether each extra's own pull request was marked ready on a budget stop", async () => {
+        const created = await multi(
+          [continued("tools"), continued("docs", { position: 2 })],
+          {
+            outcome: "budget_exhausted",
+          },
+          CONTINUATION,
+        );
+        created.vcs.continuationPullRequestDraft = async () => undefined;
+        const asked: Array<string | undefined> = [];
+        created.store.pullRequestMarkedReady = async (_root, name) => {
+          asked.push(name);
+          // Only tools' pull request was marked ready; the default's and docs' are drafts.
+          return name === "tools";
+        };
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("budget_exhausted");
+        expect(asked).toEqual([undefined, "tools", "docs"]);
+        expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "docs"]);
+      });
+    });
+
+    it("(g) never collects or finalizes a read repository", async () => {
+      const created = await multi([readRow("base"), writeRow("tools", { position: 2 })]);
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.materializedNames).toEqual([undefined, "tools"]);
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "tools"]);
+    });
+
+    it("re-authorizes each extra by name right before its push, refusing only that one", async () => {
+      const gate = allowAll();
+      const created = await harness(
+        { repositories: [writeRow("tools"), writeRow("docs", { position: 2 })] },
+        IMAGE,
+        undefined,
+        undefined,
+        { repoAccess: gate as never },
+      );
+      created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput() };
+      created.jobs.onLaunch = () => {
+        gate.authorizeUse.mockImplementation(async (input: unknown) =>
+          (input as { repository: string }).repository === "openai/tools"
+            ? { ok: false, reason: "not_authorized" }
+            : { ok: true },
+        );
+      };
+      await created.executor.start("run-1");
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined, "docs"]);
+      expect(created.store.partials[0].error).toBe(
+        "partially_published: workspace: published; tools: failed(repo_access); docs: published",
+      );
+    });
+
+    it("refuses to push a writable row stored without its branch", async () => {
+      const created = await multi([writeRow("tools")]);
+      created.jobs.onLaunch = () => {
+        created.store.run.repositories[0].headRef = null;
+      };
+      await created.executor.start("run-1");
+      expect(created.store.partials[0].error).toBe(
+        "partially_published: workspace: published; tools: failed(preflight)",
+      );
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined]);
+    });
+
+    it("caps the entries of every collected repository together", async () => {
+      const counted: string[][] = [];
+      const created = await harness({ repositories: [writeRow("tools")] }, IMAGE, undefined, undefined, {
+        repoAccess: allowAll() as never,
+        countEntries: async (paths) => {
+          counted.push(paths);
+          // The first count is at prepare time; the job then "writes" 3 entries into each repository.
+          if (counted.length === 1) return;
+          for (const path of paths) for (let i = 0; i < 3; i++) await writeFile(join(path, `file-${i}.txt`), "x");
+          return countWorkspaceEntries(paths, 5);
+        },
+      });
+      created.jobs.result = { exitCode: 0, reason: "completed", resultArtifact: workerOutput() };
+      await created.executor.start("run-1");
+      expect(counted).toHaveLength(2);
+      expect(counted[1]).toEqual([counted[0][0], created.vcs.slotPaths.get("tools")]);
+      expect(created.store.run.status).toBe("failed");
+      expect(reasonLogged("vcs_workspace_entry_limit")).toBe(true);
+      expect(created.vcs.finalizeCalls).toEqual([]);
+    });
+
+    it("(h) a single-repository run completes exactly as before, with no extras", async () => {
+      const created = await harness();
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      // runId, status, result and record: never a fifth (extras) argument.
+      expect(created.store.completeArity).toEqual([4]);
+      expect(created.store.completions[0].extras).toBeUndefined();
+      expect(created.vcs.finalizeCalls.map((call) => call.slot)).toEqual([undefined]);
+    });
+  });
+});
+
 describe("normalizeCollectedLockfiles", () => {
   const lock = (resolved: string) =>
     `{\n  "packages": {\n    "node_modules/pkg": {\n      "resolved": "${resolved}"\n    }\n  }\n}\n`;
@@ -5113,6 +6655,28 @@ describe("CATEGORY_BY_PREFIX", () => {
       expect(CHILD_RUN_FAILURE_CODES.has(`coding_failure_${category}`), category).toBe(true);
     }
   });
+
+  it("files git history's codes (#536): the vcs_ ones as workspace, a git-less image as preflight", () => {
+    const expected: Record<string, string> = {
+      vcs_result_bundle_invalid: "workspace",
+      vcs_result_bundle_too_large: "workspace",
+      vcs_result_history_invalid: "workspace",
+      vcs_result_commit_limit: "workspace",
+      vcs_result_commit_unsafe: "workspace",
+      vcs_result_path_excluded: "workspace",
+      "vcs_remote_fetch_failed:upstream": "workspace",
+      vcs_history_shortened: "workspace",
+      vcs_git_history_invalid: "workspace",
+      vcs_worker_git_invalid: "workspace",
+      kubernetes_result_bundle_read_failed: "workspace",
+      job_worker_git_unavailable: "preflight",
+      worker_git_unavailable: "preflight",
+      job_result_bundle_limit_invalid: "preflight",
+    };
+    for (const [code, category] of Object.entries(expected)) {
+      expect(failureCategory(new Error(code)), code).toBe(category);
+    }
+  });
 });
 
 describe("storedTests", () => {
@@ -5132,5 +6696,1076 @@ describe("storedTests", () => {
       { command: "npm audit", outcome: "skipped" },
       { command: "npm run lint", outcome: "failed" },
     ]);
+  });
+});
+
+describe("ContainerExecutor warm rounds", () => {
+  /** The capability FakeSessions hands out, and a fake secret value for error paths. */
+  const FAKE_CAPABILITY = `rrp_${"x".repeat(32)}`;
+  const PROMPT_SHA = systemPromptSha256("You fix bugs.");
+  const claudeRun = {
+    provider: "claude-code",
+    model: "claude-sonnet-5",
+    workerImage: CLAUDE_IMAGE,
+    systemPromptSha256: PROMPT_SHA,
+    secretVersions: [] as WarmSecretVersion[],
+  } as const;
+  const continuation = { ...claudeRun, rootCodingRunId: "root-run", headRef: "wardby/run-root-run" } as const;
+  const fingerprintFor = (overrides: Partial<WarmFingerprintInput> = {}) =>
+    warmFingerprint({
+      agentId: "agent-1",
+      provider: "claude-code",
+      model: "claude-sonnet-5",
+      workerImage: CLAUDE_IMAGE,
+      toolImage: CLAUDE_TOOL_IMAGE,
+      cpu: 1,
+      memoryMb: 1024,
+      diskMb: 512,
+      systemPromptSha256: PROMPT_SHA,
+      repository: "openai/example",
+      secrets: [],
+      ...overrides,
+    });
+
+  /**
+   * A launcher that retains (Substrate-like): records retain/warmOutcome/removeParked calls.
+   * `warmRounds: false` is a Substrate launcher with warm rounds off (it still implements retain).
+   */
+  function warmLauncher(jobs: FakeJobs, warmRounds = true) {
+    const calls = {
+      retains: [] as Array<{ handle: JobHandle; retention: JobRetention }>,
+      outcomes: [] as JobHandle[],
+      removedFor: [] as Array<{ agentId: string }>,
+    };
+    const extended = jobs as FakeJobs &
+      Required<Pick<WorkspaceJobLauncher, "retain" | "warmOutcome" | "removeParked">> & { warmRounds?: boolean };
+    extended.warmRounds = warmRounds;
+    let outcome: WarmOutcome | undefined | Error = { adopted: true };
+    let retainAnswer: boolean | Error = true;
+    extended.retain = async (handle, retention) => {
+      calls.retains.push({ handle, retention });
+      jobs.events?.push("retain");
+      if (retainAnswer instanceof Error) throw retainAnswer;
+      return retainAnswer;
+    };
+    extended.warmOutcome = async (handle) => {
+      calls.outcomes.push(handle);
+      if (outcome instanceof Error) throw outcome;
+      return outcome;
+    };
+    extended.removeParked = async (filter) => {
+      calls.removedFor.push(filter);
+      return 2;
+    };
+    return {
+      calls,
+      setOutcome: (value: WarmOutcome | undefined | Error) => (outcome = value),
+      setRetain: (value: boolean | Error) => (retainAnswer = value),
+    };
+  }
+
+  async function warmHarness(
+    overrides: Partial<ContainerRunSnapshot> = {},
+    options: {
+      warm?: boolean;
+      /** A retaining launcher with warm rounds off (Substrate with SUBSTRATE_WARM_ROUNDS unset). */
+      warmOff?: boolean;
+      previous?: { runId: string; commitSha: string | null } | null;
+      /** More executor options (a transcript recorder, say). */
+      extra?: Partial<ContainerExecutorOptions>;
+    } = {},
+  ) {
+    const steps: Array<{ runId: string; batch: RunStepBatch }> = [];
+    const created = await harness(
+      { ...claudeRun, ...overrides },
+      IMAGE,
+      new InMemoryCodingRunObserver(),
+      { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+      {
+        runSteps: {
+          record: async (runId, batch) => {
+            steps.push({ runId, batch: structuredClone(batch) });
+          },
+        },
+        ...options.extra,
+      },
+    );
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "changes_ready",
+      summary: "Fixed it.",
+      tests: [],
+    });
+    const warm = options.warm === false ? undefined : warmLauncher(created.jobs, !options.warmOff);
+    const previousCalls: Array<[string, string]> = [];
+    const warmStarts: Array<[string, boolean]> = [];
+    const fingerprints: Array<[string, string]> = [];
+    const store = created.store as FakeStore &
+      Partial<
+        Pick<
+          ContainerExecutionStore,
+          "previousRound" | "recordWarmStart" | "recordWarmFingerprint" | "recordLaunchSecretVersions"
+        >
+      >;
+    const launchVersions: Array<[string, WarmSecretVersion[]]> = [];
+    store.recordLaunchSecretVersions = async (runId, versions) => {
+      launchVersions.push([runId, structuredClone([...versions])]);
+      store.run.launchSecretVersions = structuredClone([...versions]);
+    };
+    store.recordWarmFingerprint = async (runId, fingerprint) => {
+      fingerprints.push([runId, fingerprint]);
+      store.run.warmFingerprint = fingerprint;
+    };
+    store.previousRound = async (runId, rootRunId) => {
+      previousCalls.push([runId, rootRunId]);
+      return options.previous === undefined ? { runId: "run-0", commitSha: "e".repeat(40) } : options.previous;
+    };
+    store.recordWarmStart = async (runId, warmStart) => {
+      warmStarts.push([runId, warmStart]);
+      store.run.warmStart = warmStart;
+    };
+    return { ...created, warm, steps, previousCalls, warmStarts, fingerprints, launchVersions };
+  }
+
+  describe("retain vs remove", () => {
+    it("retains a delivered Claude Code run with the pushed commit and its fingerprint, and does not remove it", async () => {
+      const created = await warmHarness();
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([
+        { handle: created.jobs.handle, retention: { headSha: "b".repeat(40), fingerprint: fingerprintFor() } },
+      ]);
+      expect(created.jobs.removals).toBe(0);
+      expect(created.events).toContain("retain");
+    });
+
+    it("retains a pushed branch (a local repository) too", async () => {
+      const created = await warmHarness();
+      created.vcs.pushBranchOnly = true;
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toHaveLength(1);
+      expect(created.warm!.calls.retains[0].retention.headSha).toBe("b".repeat(40));
+      expect(created.jobs.removals).toBe(0);
+    });
+
+    it("removes a succeeded run that pushed nothing", async () => {
+      const created = await warmHarness();
+      created.vcs.finalizeEmpty = true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a run the worker said changed nothing", async () => {
+      const created = await warmHarness();
+      created.jobs.result.resultArtifact = JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "no_changes",
+        summary: "Nothing to do.",
+        tests: [],
+      });
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a failed job", async () => {
+      const created = await warmHarness();
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a run whose push failed", async () => {
+      const created = await warmHarness();
+      created.vcs.onFinalize = () => {
+        throw new Error("vcs_push_failed");
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("failed");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a budget-stopped run, even one whose changes were pushed", async () => {
+      const created = await warmHarness();
+      created.jobs.result.resultArtifact = JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "budget_exhausted",
+        summary: "Ran out.",
+        tests: [],
+      });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a stopped run", async () => {
+      const created = await warmHarness({ status: "running", jobHandle: { backend: "fake", id: "job-1" } });
+      await created.executor.stop("run-1");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a Codex run on the same launcher", async () => {
+      const created = await warmHarness({ provider: "codex", model: "gpt-5.6-luna", workerImage: null });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes a run whose fingerprint is unknown (no system prompt hash)", async () => {
+      const created = await warmHarness({ systemPromptSha256: undefined });
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("cancels the run's session (revoking its capability and registry token) before it retains the job", async () => {
+      const created = await warmHarness();
+      await created.executor.start("run-1");
+      expect(created.sessions.cancels).toBeGreaterThan(0);
+      const cancelAt = created.events.indexOf("cancel");
+      expect(cancelAt).toBeGreaterThanOrEqual(0);
+      expect(cancelAt).toBeLessThan(created.events.indexOf("retain"));
+    });
+
+    it("removes, never retains, a delivered run whose session could not be cancelled (its credentials may still work)", async () => {
+      const created = await warmHarness();
+      created.sessions.cancelSession = async () => {
+        throw new Error("proxy_unavailable");
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes the job when retain throws", async () => {
+      const created = await warmHarness();
+      created.warm!.setRetain(new Error("substrate_down"));
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toHaveLength(1);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("does not remove again when retain declines (it removed the job itself)", async () => {
+      const created = await warmHarness();
+      created.warm!.setRetain(false);
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toHaveLength(1);
+      expect(created.jobs.removals).toBe(0);
+    });
+
+    it("never collects an ended run's handle on a retaining launcher's terminal cleanup", async () => {
+      const created = await warmHarness({ status: "succeeded", jobHandle: { backend: "fake", id: "job-1" } });
+      await created.executor.start("run-1");
+      expect(created.events).not.toContain("collect");
+      expect(created.jobs.removals).toBe(1);
+      expect(created.jobs.materializations).toBe(0);
+    });
+
+    it("recovering an ended, retained run neither collects nor materializes it", async () => {
+      const created = await warmHarness({ status: "succeeded", jobHandle: { backend: "fake", id: "job-1" } });
+      await expect(created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" })).resolves.toMatchObject({
+        state: "terminal",
+      });
+      expect(created.events).not.toContain("collect");
+      expect(created.jobs.materializations).toBe(0);
+    });
+  });
+
+  describe("rounds with extra repositories (always fresh)", () => {
+    function folderRow(name: string, access: "read" | "write"): RunRepositorySnapshot {
+      return {
+        id: `row-${name}`,
+        name,
+        position: 1,
+        access,
+        asRemote: false,
+        accessKnown: true,
+        provider: "github",
+        repository: `openai/${name}`,
+        requestedRef: "main",
+        resolvedSha: "a".repeat(40),
+        baseRef: access === "write" ? "develop" : null,
+        headRef: access === "write" ? "wardby/run-run-1" : null,
+        linkId: `link-${name}`,
+        linkExists: true,
+        linkAuthorizedVia: "admin",
+        continuesBranch: false,
+        pullRequestNumber: null,
+        mergeOrder: null,
+        result: null,
+      };
+    }
+    const extra = {
+      repoAccess: { authorizeUse: vi.fn(async () => ({ ok: true })) } as never,
+      countEntries: async () => undefined,
+    };
+
+    it("never retains a delivered round whose extras are all read-only", async () => {
+      const created = await warmHarness({ repositories: [folderRow("docs", "read")] }, { extra });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("never retains one with a writable extra", async () => {
+      const created = await warmHarness({ repositories: [folderRow("tools", "write")] }, { extra });
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.fingerprints).toEqual([]);
+    });
+
+    it("launches and probes a continuation of one without warm", async () => {
+      const created = await warmHarness({ ...continuation, repositories: [folderRow("docs", "read")] }, { extra });
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+      expect(created.fingerprints).toEqual([]);
+      expect(created.steps).toEqual([]);
+    });
+  });
+
+  describe("launchers without retain (Docker, Kubernetes)", () => {
+    it("removes as before, asks for no previous round, and launches and probes without warm", async () => {
+      const created = await warmHarness(continuation, { warm: false });
+      created.jobs.capacity = true;
+      (created.store as { markQueued?: unknown }).markQueued = async () => undefined;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.removals).toBe(1);
+      expect(created.previousCalls).toEqual([]);
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+      expect(created.steps).toEqual([]);
+      expect(created.warmStarts).toEqual([]);
+      expect(created.events).toContain("collect");
+    });
+
+    it("still collects an ended run's handle on terminal cleanup", async () => {
+      const created = await warmHarness(
+        { status: "succeeded", jobHandle: { backend: "fake", id: "job-1" } },
+        { warm: false },
+      );
+      await created.executor.start("run-1");
+      expect(created.events).toContain("collect");
+      expect(created.jobs.removals).toBe(1);
+    });
+  });
+
+  describe("continuations", () => {
+    it("launches a continuation with warm naming the previous round, its prepared head and the fingerprint", async () => {
+      const created = await warmHarness(continuation);
+      await created.executor.start("run-1");
+      expect(created.previousCalls).toEqual([["run-1", "root-run"]]);
+      expect(created.jobs.specs[0].warm).toEqual({
+        fromRunId: "run-0",
+        headSha: "a".repeat(40),
+        fingerprint: fingerprintFor(),
+      });
+    });
+
+    it("probes capacity with warm too, carrying the commit the previous round pushed", async () => {
+      const created = await warmHarness(continuation);
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.jobs.capacityChecks).toHaveLength(1);
+      expect(created.jobs.capacityChecks[0].warm).toEqual({
+        fromRunId: "run-0",
+        headSha: "e".repeat(40),
+        fingerprint: fingerprintFor(),
+      });
+    });
+
+    describe("MCP tool pins", () => {
+      const PIN: McpToolPin = {
+        exposedName: "docs__search",
+        toolName: "search",
+        serverId: "server-1",
+        serverName: "docs",
+        definition: { description: "Search docs", inputSchema: { type: "object" } },
+      };
+      const PINNED = fingerprintFor({ mcpTools: [{ serverId: "server-1", exposedName: "docs__search" }] });
+
+      it("puts the run's MCP pins in the launch fingerprint", async () => {
+        const created = await warmHarness(continuation, { extra: { mcpToolPins: async () => [PIN] } });
+        await created.executor.start("run-1");
+        expect(created.jobs.specs[0].warm?.fingerprint).toBe(PINNED);
+        expect(created.fingerprints[0][1]).toBe(PINNED);
+        expect(PINNED).not.toBe(fingerprintFor());
+      });
+
+      it("takes the fingerprint's pins and the spec's mcpTools from the same list", async () => {
+        const pinned = await warmHarness(continuation, { extra: { mcpToolPins: async () => [PIN] } });
+        await pinned.executor.start("run-1");
+        expect(pinned.jobs.specs[0].mcpTools).toBe(true);
+        expect(pinned.jobs.specs[0].warm?.fingerprint).toBe(PINNED);
+        const none = await warmHarness(continuation, { extra: { mcpToolPins: async () => [] } });
+        await none.executor.start("run-1");
+        expect(none.jobs.specs[0].mcpTools).toBeUndefined();
+        expect(none.jobs.specs[0].warm?.fingerprint).toBe(fingerprintFor());
+      });
+
+      it("the capacity probe still names the round it continues", async () => {
+        const created = await warmHarness(continuation, { extra: { mcpToolPins: async () => [PIN] } });
+        created.jobs.capacity = true;
+        await created.executor.start("run-1");
+        expect(created.jobs.capacityChecks[0].warm?.fromRunId).toBe("run-0");
+      });
+    });
+
+    it("probes without warm when the previous round pushed nothing", async () => {
+      const created = await warmHarness(continuation, { previous: { runId: "run-0", commitSha: null } });
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+      expect(created.jobs.specs[0].warm).toMatchObject({ fromRunId: "run-0", headSha: "a".repeat(40) });
+    });
+
+    it("sets no warm on a run that continues nothing", async () => {
+      const created = await warmHarness();
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.previousCalls).toEqual([]);
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+      expect(created.warm!.calls.outcomes).toEqual([]);
+      expect(created.steps).toEqual([]);
+      expect(created.warmStarts).toEqual([]);
+    });
+
+    it("sets no warm when there is no previous round", async () => {
+      const created = await warmHarness(continuation, { previous: null });
+      await created.executor.start("run-1");
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(created.steps).toEqual([]);
+    });
+
+    it("sets no warm when prepare merged the target branch into the workspace", async () => {
+      const created = await warmHarness(continuation);
+      created.vcs.targetMerge = { ref: "main", targetCommit: "f".repeat(40), conflictedPaths: [] };
+      await created.executor.start("run-1");
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+    });
+
+    it("sets no warm for a Codex continuation", async () => {
+      const created = await warmHarness({
+        ...continuation,
+        provider: "codex",
+        model: "gpt-5.6-luna",
+        workerImage: null,
+      });
+      await created.executor.start("run-1");
+      expect(created.previousCalls).toEqual([]);
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+    });
+
+    it("starts fresh (no warm) when the previous round cannot be read", async () => {
+      const created = await warmHarness(continuation);
+      (created.store as { previousRound?: unknown }).previousRound = async () => {
+        throw new Error(`db down ${FAKE_CAPABILITY}`);
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(JSON.stringify(logged)).not.toContain(FAKE_CAPABILITY);
+    });
+
+    it("a changed model changes the continuation's fingerprint", async () => {
+      const created = await warmHarness({ ...continuation, model: "claude-opus-5" });
+      await created.executor.start("run-1");
+      expect(created.jobs.specs[0].warm?.fingerprint).toBe(fingerprintFor({ model: "claude-opus-5" }));
+      expect(created.jobs.specs[0].warm?.fingerprint).not.toBe(fingerprintFor());
+    });
+
+    it("writes the resumed step line and records warmStart true", async () => {
+      const created = await warmHarness(continuation);
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.outcomes).toEqual([created.jobs.handle]);
+      expect(created.warmStarts).toEqual([["run-1", true]]);
+      expect(created.steps).toEqual([
+        {
+          runId: "run-1",
+          batch: {
+            steps: [
+              {
+                kind: "said",
+                callId: "said:wardby-warm-start",
+                text: "Resumed the previous round's workspace and session",
+                truncated: false,
+              },
+            ],
+            results: [],
+          },
+        },
+      ]);
+    });
+
+    it.each([
+      ["branch_moved", "Started a fresh workspace: the branch changed since the previous round"],
+      ["capacity", "Started a fresh workspace: there was no room to resume the previous round"],
+      ["not_parked", "Started a fresh workspace: the previous round was not kept"],
+    ] as const)("writes the fresh-workspace step line for %s and records warmStart false", async (reason, line) => {
+      const created = await warmHarness(continuation);
+      created.warm!.setOutcome({ adopted: false, reason });
+      await created.executor.start("run-1");
+      expect(created.warmStarts).toEqual([["run-1", false]]);
+      expect(created.steps.map((s) => s.batch.steps[0])).toEqual([
+        { kind: "said", callId: "said:wardby-warm-start", text: line, truncated: false },
+      ]);
+    });
+
+    it("writes nothing when the launcher reports no outcome, or fails to", async () => {
+      for (const outcome of [undefined, new Error(`boom ${FAKE_CAPABILITY}`)]) {
+        const created = await warmHarness(continuation);
+        created.warm!.setOutcome(outcome);
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.steps).toEqual([]);
+        expect(created.warmStarts).toEqual([]);
+      }
+      expect(JSON.stringify(logged)).not.toContain(FAKE_CAPABILITY);
+    });
+
+    it("still delivers the run when recording warmStart or the step fails", async () => {
+      const created = await warmHarness(continuation, {});
+      (created.store as { recordWarmStart?: unknown }).recordWarmStart = async () => {
+        throw new Error("db down");
+      };
+      (created.executor as unknown as { options: { runSteps: unknown } }).options.runSteps = {
+        record: async () => {
+          throw new Error("writer down");
+        },
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+    });
+
+    it("keeps secret values out of the step line, warmStart and the logs", async () => {
+      const created = await warmHarness(continuation);
+      created.warm!.setOutcome({ adopted: false, reason: "fingerprint_changed" });
+      await created.executor.start("run-1");
+      const published = JSON.stringify({ steps: created.steps, warmStarts: created.warmStarts, logged });
+      expect(published).not.toContain(FAKE_CAPABILITY);
+      expect(published).not.toContain(PROMPT_SHA);
+      expect(published).not.toContain(created.jobs.specs[0].warm!.fingerprint);
+    });
+  });
+
+  describe("warm rounds off on a retaining launcher (Substrate without SUBSTRATE_WARM_ROUNDS)", () => {
+    it("takes the plain path: no previous round, no warm on the launch or the probe, removed at the end", async () => {
+      const created = await warmHarness(continuation, { warmOff: true });
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.previousCalls).toEqual([]);
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+      expect(created.warm!.calls.outcomes).toEqual([]);
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.fingerprints).toEqual([]);
+      expect(created.steps).toEqual([]);
+      expect(created.warmStarts).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+      expect(created.events).toContain("collect");
+      expect(created.events).not.toContain("retain");
+    });
+
+    it("still collects an ended run's handle on terminal cleanup, then removes it", async () => {
+      const created = await warmHarness(
+        { status: "succeeded", jobHandle: { backend: "fake", id: "job-1" } },
+        { warmOff: true },
+      );
+      await created.executor.start("run-1");
+      expect(created.events).toContain("collect");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("recovering a finished continuation removes it and reports no warm outcome", async () => {
+      const created = await warmHarness(
+        { ...continuation, status: "running", jobHandle: { backend: "fake", id: "job-1" }, warmStart: null },
+        { warmOff: true },
+      );
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warm!.calls.outcomes).toEqual([]);
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("removes no parks", async () => {
+      const created = await warmHarness({}, { warmOff: true });
+      await expect(created.executor.removeRetainedRounds("agent-1")).resolves.toBe(0);
+      expect(created.warm!.calls.removedFor).toEqual([]);
+    });
+  });
+
+  describe("secrets changed between rounds", () => {
+    const OLD_VALUE = "sk-fake-old-secret-value-000001";
+    const NEW_VALUE = "sk-fake-new-secret-value-000002";
+    const V1: WarmSecretVersion = { id: "secret-1", name: "API_KEY", updatedAt: "2026-11-14T10:00:00.000Z" };
+    const V2: WarmSecretVersion = { ...V1, updatedAt: "2026-11-14T11:00:00.000Z" };
+
+    /**
+     * Round 2 of a chain whose round 1 was retained under `retained`. The fake launcher adopts only
+     * when the fingerprints match, as Substrate does; an adopted round's session (and so its
+     * transcript) still holds round 1's raw tool output with the value round 1 saw, a cold one only
+     * its own. The recorder redacts against the values current now, as RunTranscriptRecorder does.
+     */
+    async function secondRound(secretVersions: WarmSecretVersion[], retained: string) {
+      const storedTranscripts: string[] = [];
+      const next = await warmHarness(
+        { ...continuation, sessionResume: true, secretVersions },
+        {
+          extra: {
+            transcripts: {
+              record: async (input) => {
+                const text = (await input.read(1 << 20)) ?? "";
+                storedTranscripts.push(text.split(NEW_VALUE).join("[REDACTED]"));
+                return "stored";
+              },
+            },
+          },
+        },
+      );
+      let adopted = false;
+      next.jobs.onLaunch = () => {
+        adopted = next.jobs.lastSpec?.warm?.fingerprint === retained;
+        next.warm!.setOutcome(adopted ? { adopted: true } : { adopted: false, reason: "fingerprint_changed" });
+      };
+      next.jobs.readTranscript = async () =>
+        adopted ? `round 1 tool output: ${OLD_VALUE}\nround 2: ${NEW_VALUE}` : `round 2: ${NEW_VALUE}`;
+      await next.executor.start("run-1");
+      return { next, storedTranscripts };
+    }
+
+    it("a secret rotated between rounds starts the next round fresh, and its transcript never holds the old value", async () => {
+      const first = await warmHarness({ secretVersions: [V1] });
+      await first.executor.start("run-1");
+      const retained = first.warm!.calls.retains[0].retention.fingerprint;
+      expect(retained).toBe(fingerprintFor({ secrets: [V1] }));
+
+      const { next, storedTranscripts } = await secondRound([V2], retained);
+      expect(next.jobs.specs[0].warm?.fingerprint).toBe(fingerprintFor({ secrets: [V2] }));
+      expect(next.warmStarts).toEqual([["run-1", false]]);
+      expect(next.steps.map((step) => step.batch.steps[0].text)).toEqual([
+        "Started a fresh workspace: the agent's settings changed since the previous round",
+      ]);
+      expect(storedTranscripts).toHaveLength(1);
+      expect(storedTranscripts.join("")).not.toContain(OLD_VALUE);
+      expect(storedTranscripts.join("")).not.toContain(NEW_VALUE);
+    });
+
+    it("a secret detached between rounds starts the next round fresh too", async () => {
+      const first = await warmHarness({ secretVersions: [V1] });
+      await first.executor.start("run-1");
+      const { next, storedTranscripts } = await secondRound([], first.warm!.calls.retains[0].retention.fingerprint);
+      expect(next.warmStarts).toEqual([["run-1", false]]);
+      expect(storedTranscripts.join("")).not.toContain(OLD_VALUE);
+    });
+
+    it("unchanged secrets still resume", async () => {
+      const first = await warmHarness({ secretVersions: [V1] });
+      await first.executor.start("run-1");
+      const { next } = await secondRound([V1], first.warm!.calls.retains[0].retention.fingerprint);
+      expect(next.warmStarts).toEqual([["run-1", true]]);
+    });
+
+    it("a run whose secrets could not be read is never retained and never resumes", async () => {
+      const created = await warmHarness({ secretVersions: undefined });
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.fingerprints).toEqual([]);
+      const next = await warmHarness({ ...continuation, secretVersions: undefined });
+      await next.executor.start("run-1");
+      expect(next.jobs.specs[0]).not.toHaveProperty("warm");
+    });
+
+    it("keeps secret versions and values out of the step lines and the logs", async () => {
+      const first = await warmHarness({ secretVersions: [V1] });
+      await first.executor.start("run-1");
+      const { next } = await secondRound([V2], first.warm!.calls.retains[0].retention.fingerprint);
+      const published = JSON.stringify({ steps: next.steps, logged });
+      for (const text of [OLD_VALUE, NEW_VALUE, V1.updatedAt, V2.updatedAt]) expect(published).not.toContain(text);
+    });
+  });
+
+  describe("a secret rotated while an adopted round runs", () => {
+    const S1 = "sk-fake-rotated-secret-value-000001";
+    const S2 = "sk-fake-rotated-secret-value-000002";
+    const V1: WarmSecretVersion = { id: "secret-1", name: "API_KEY", updatedAt: "2026-11-14T10:00:00.000Z" };
+    const V2: WarmSecretVersion = { ...V1, updatedAt: "2026-11-14T10:30:00.000Z" };
+    const FIXTURE = readFileSync(
+      new URL("../../coding/transcript/fixtures/claude-session.jsonl", import.meta.url),
+      "utf8",
+    );
+
+    /** A worker transcript whose tool output holds `text` (round 1's raw output, resumed). */
+    function workerTranscript(text: string): string {
+      const sanitized = sanitizeClaudeTranscript(FIXTURE)!;
+      const lines = sanitized.lines.map((line) => {
+        const record = JSON.parse(line) as { message?: { content?: unknown } };
+        const content = record.message?.content;
+        if (Array.isArray(content)) {
+          for (const block of content as Array<Record<string, unknown>>) {
+            if (block.type === "tool_result") block.content = text;
+          }
+        }
+        return JSON.stringify(record);
+      });
+      return formatTranscriptFile(
+        {
+          type: "wardby-transcript",
+          version: 1,
+          provider: "claude-code",
+          sessionId: sanitized.sessionId,
+          status: "ok",
+        },
+        lines,
+      );
+    }
+
+    /**
+     * Round 2 adopting round 1's kept session, with a real RunTranscriptRecorder whose secret values
+     * and versions are the vault's current ones. `rotate` rotates S1 to S2 once the round launched.
+     */
+    async function adoptedRound(rotate: boolean) {
+      const dir = await mkdtemp(join(tmpdir(), "warm-rotate-"));
+      const rows = new Map<string, Record<string, unknown>>();
+      const vault = { value: S1, version: V1 };
+      const db = {
+        runTranscript: {
+          upsert: async (args: { where: { runId: string }; create: Record<string, unknown> }) => {
+            rows.set(args.where.runId, args.create);
+            return args.create;
+          },
+          findMany: async () => [],
+          deleteMany: async () => ({ count: 0 }),
+        },
+      } as unknown as RunTranscriptRecorderDeps["db"];
+      const recorder = new RunTranscriptRecorder({
+        db,
+        blobs: new LocalBlobStore(dir),
+        secretValues: async () => [vault.value],
+        secretVersions: async () => [vault.version],
+        retentionDays: 30,
+        maxBytes: 10 * 1024 * 1024,
+      });
+      const first = await warmHarness({ secretVersions: [V1] });
+      await first.executor.start("run-1");
+      const retained = first.warm!.calls.retains[0].retention.fingerprint;
+      const next = await warmHarness(
+        { ...continuation, sessionResume: true, secretVersions: [V1] },
+        { extra: { transcripts: recorder } },
+      );
+      next.jobs.onLaunch = () => {
+        expect(next.jobs.lastSpec?.warm?.fingerprint).toBe(retained);
+        next.warm!.setOutcome({ adopted: true });
+        if (rotate) {
+          vault.value = S2;
+          vault.version = V2;
+          next.store.run.secretVersions = [V2];
+        }
+      };
+      // The resumed session still holds round 1's raw tool output, with the value it saw (S1).
+      next.jobs.readTranscript = async () => workerTranscript(`round 1 tool output: ${S1}`);
+      await next.executor.start("run-1");
+      const stored = await readFile(join(dir, transcriptBlobKey("run-1"))).catch(() => undefined);
+      return { next, rows, stored, dir };
+    }
+
+    it("stores no transcript, and neither value appears anywhere", async () => {
+      const { next, rows, stored, dir } = await adoptedRound(true);
+      try {
+        expect(next.warmStarts).toEqual([["run-1", true]]);
+        expect(next.launchVersions).toEqual([["run-1", [V1]]]);
+        expect(stored).toBeUndefined();
+        expect(rows.get("run-1")).toMatchObject({ status: "not_captured", reason: "secrets_changed", blobKey: null });
+        const published = JSON.stringify({ rows: [...rows.values()], steps: next.steps, logged, run: next.store.run });
+        for (const value of [S1, S2]) expect(published).not.toContain(value);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("without a rotation, the adopted round's transcript is stored with the value redacted", async () => {
+      const { rows, stored, dir } = await adoptedRound(false);
+      try {
+        expect(rows.get("run-1")).toMatchObject({ status: "stored" });
+        expect(stored).toBeDefined();
+        const { gunzipSync } = await import("node:zlib");
+        const text = gunzipSync(stored!).toString("utf8");
+        expect(text).toContain("round 1 tool output: [REDACTED]");
+        expect(text).not.toContain(S1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("records no launch versions for a run without session resume", async () => {
+      const created = await warmHarness({ secretVersions: [V1] });
+      await created.executor.start("run-1");
+      expect(created.launchVersions).toEqual([]);
+    });
+  });
+
+  describe("rounds with git history (always fresh)", () => {
+    it.each([
+      ["a depth", { gitHistoryDepth: 20 }],
+      ["full history", { gitHistoryFull: true }],
+    ] as const)("never retains a delivered round with %s", async (_label, history) => {
+      const created = await warmHarness(history);
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("never retains one recovered with a fingerprint recorded at launch", async () => {
+      const created = await warmHarness({
+        gitHistoryDepth: 20,
+        status: "running",
+        jobHandle: { backend: "fake", id: "job-1" },
+        proxySessionId: "session-1",
+        warmFingerprint: fingerprintFor(),
+      });
+      const executor = created.executor as unknown as {
+        preflight(run: ContainerRunSnapshot, options: { launched: boolean }): VcsPrepareInput;
+      };
+      await created.vcs.prepareWorkspace(executor.preflight(created.store.run, { launched: true }));
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+    });
+
+    it("launches and probes a continuation of one without warm", async () => {
+      for (const history of [{ gitHistoryDepth: 5 }, { gitHistoryFull: true }]) {
+        const created = await warmHarness({ ...continuation, ...history });
+        created.jobs.capacity = true;
+        await created.executor.start("run-1");
+        expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+        expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+        expect(created.fingerprints).toEqual([]);
+        expect(created.steps).toEqual([]);
+      }
+    });
+  });
+
+  describe("the launch fingerprint", () => {
+    const EDITED_SHA = systemPromptSha256("You fix bugs, carefully.");
+    /** The workspace the process that launched the run prepared (a recovered run finishes in it). */
+    const preparedBefore = (created: Awaited<ReturnType<typeof warmHarness>>) => {
+      const executor = created.executor as unknown as {
+        preflight(run: ContainerRunSnapshot, options: { launched: boolean }): VcsPrepareInput;
+      };
+      return created.vcs.prepareWorkspace(executor.preflight(created.store.run, { launched: true }));
+    };
+
+    it("is computed at launch and recorded; a prompt edited mid-run is retained under the old value", async () => {
+      const created = await warmHarness();
+      let polls = 0;
+      created.jobs.status = async () => {
+        polls += 1;
+        if (polls === 1) {
+          // The agent's prompt is edited while the round runs: every later load sees the new hash.
+          created.store.run.systemPromptSha256 = EDITED_SHA;
+          return { state: "running" };
+        }
+        return { state: "succeeded" };
+      };
+      await created.executor.start("run-1");
+      expect(polls).toBeGreaterThan(1);
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.fingerprints).toEqual([["run-1", fingerprintFor()]]);
+      expect(created.warm!.calls.retains.map((r) => r.retention.fingerprint)).toEqual([fingerprintFor()]);
+
+      // The next round runs with the new prompt: its fingerprint differs from the retained one, so the
+      // launcher starts it cold for fingerprint_changed.
+      const retained = created.warm!.calls.retains[0].retention.fingerprint;
+      const next = await warmHarness({ ...continuation, systemPromptSha256: EDITED_SHA });
+      next.jobs.onLaunch = () => {
+        const asked = next.jobs.lastSpec?.warm?.fingerprint;
+        next.warm!.setOutcome(
+          asked === retained ? { adopted: true } : { adopted: false, reason: "fingerprint_changed" },
+        );
+      };
+      await next.executor.start("run-1");
+      expect(next.jobs.specs[0].warm?.fingerprint).toBe(fingerprintFor({ systemPromptSha256: EDITED_SHA }));
+      expect(next.jobs.specs[0].warm?.fingerprint).not.toBe(retained);
+      expect(next.warmStarts).toEqual([["run-1", false]]);
+      expect(next.steps.map((step) => step.batch.steps[0].text)).toEqual([
+        "Started a fresh workspace: the agent's settings changed since the previous round",
+      ]);
+    });
+
+    it("a recovered run is retained under the fingerprint recorded at launch, not one computed now", async () => {
+      const created = await warmHarness({
+        status: "running",
+        jobHandle: { backend: "fake", id: "job-1" },
+        proxySessionId: "session-1",
+        systemPromptSha256: EDITED_SHA,
+        warmFingerprint: fingerprintFor(),
+      });
+      await preparedBefore(created);
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains.map((r) => r.retention.fingerprint)).toEqual([fingerprintFor()]);
+    });
+
+    it("a recovered run with no recorded launch fingerprint is removed, not retained", async () => {
+      const created = await warmHarness({
+        status: "running",
+        jobHandle: { backend: "fake", id: "job-1" },
+        proxySessionId: "session-1",
+      });
+      await preparedBefore(created);
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("a failed fingerprint write does not fail the launch", async () => {
+      const created = await warmHarness();
+      (created.store as { recordWarmFingerprint?: unknown }).recordWarmFingerprint = async () => {
+        throw new Error("db down");
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains.map((r) => r.retention.fingerprint)).toEqual([fingerprintFor()]);
+    });
+  });
+
+  describe("warm outcome on recover", () => {
+    const launched = { ...continuation, status: "running", jobHandle: { backend: "fake", id: "job-1" } } as const;
+
+    it("reports the outcome a continuation never recorded (its launcher died first)", async () => {
+      for (const state of ["running", "succeeded"] as const) {
+        const created = await warmHarness({ ...launched, warmStart: null });
+        created.jobs.statusValue = { state };
+        await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+        expect(created.warm!.calls.outcomes).toEqual([created.jobs.handle]);
+        expect(created.warmStarts).toEqual([["run-1", true]]);
+        expect(created.steps.map((step) => step.batch.steps[0])).toEqual([
+          {
+            kind: "said",
+            callId: "said:wardby-warm-start",
+            text: "Resumed the previous round's workspace and session",
+            truncated: false,
+          },
+        ]);
+      }
+    });
+
+    it("does not report again once warmStart is recorded", async () => {
+      const created = await warmHarness({ ...launched, warmStart: false });
+      created.jobs.statusValue = { state: "running" };
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warm!.calls.outcomes).toEqual([]);
+      expect(created.steps).toEqual([]);
+    });
+
+    it("records a cold continuation with no round to follow as not resumed, once, so recover stops asking", async () => {
+      const created = await warmHarness({ ...launched, warmStart: null });
+      created.jobs.statusValue = { state: "running" };
+      created.warm!.setOutcome(undefined);
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warmStarts).toEqual([["run-1", false]]);
+      // No step line: nothing was attempted.
+      expect(created.steps).toEqual([]);
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warm!.calls.outcomes).toEqual([created.jobs.handle]);
+      expect(created.warmStarts).toEqual([["run-1", false]]);
+    });
+
+    it("records a cold outcome whose reason has no wording as not resumed, once, with no step line", async () => {
+      const created = await warmHarness({ ...launched, warmStart: null });
+      created.jobs.statusValue = { state: "running" };
+      created.warm!.setOutcome({ adopted: false, reason: "a_reason_outside_the_list" } as unknown as WarmOutcome);
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warm!.calls.outcomes).toEqual([created.jobs.handle]);
+      expect(created.warmStarts).toEqual([["run-1", false]]);
+      expect(created.steps).toEqual([]);
+    });
+
+    it("asks again on the next pass when the warm outcome could not be read", async () => {
+      const created = await warmHarness({ ...launched, warmStart: null });
+      created.jobs.statusValue = { state: "running" };
+      created.warm!.setOutcome(new Error("substrate_down"));
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warmStarts).toEqual([]);
+      created.warm!.setOutcome({ adopted: true });
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warmStarts).toEqual([["run-1", true]]);
+    });
+
+    it("asks nothing for a run that continues nothing", async () => {
+      const created = await warmHarness({ status: "running", jobHandle: { backend: "fake", id: "job-1" } });
+      created.jobs.statusValue = { state: "running" };
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warm!.calls.outcomes).toEqual([]);
+    });
+  });
+
+  describe("reading the previous round", () => {
+    it("is not read for a run another process is provisioning", async () => {
+      const created = await warmHarness({ ...continuation, provisioningClaim: "claim-other" });
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.previousCalls).toEqual([]);
+      expect(created.jobs.capacityChecks).toEqual([]);
+    });
+
+    it("is not read when no probe needs it and every slot is taken", async () => {
+      const created = await warmHarness(continuation);
+      (created.jobs as { hasCapacityFor?: unknown }).hasCapacityFor = undefined;
+      created.store.slotsFull = true;
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(0);
+      expect(created.previousCalls).toEqual([]);
+    });
+
+    it("is read once for the probe and the launch together", async () => {
+      const created = await warmHarness(continuation);
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.previousCalls).toEqual([["run-1", "root-run"]]);
+      expect(created.jobs.capacityChecks[0].warm?.fromRunId).toBe("run-0");
+      expect(created.jobs.specs[0].warm?.fromRunId).toBe("run-0");
+    });
+  });
+
+  describe("removeRetainedRounds", () => {
+    it("asks the launcher to remove the agent's parks", async () => {
+      const created = await warmHarness();
+      await expect(created.executor.removeRetainedRounds("agent-1")).resolves.toBe(2);
+      expect(created.warm!.calls.removedFor).toEqual([{ agentId: "agent-1" }]);
+    });
+
+    it("is 0 on a launcher without removeParked, and never throws", async () => {
+      const plain = await warmHarness({}, { warm: false });
+      await expect(plain.executor.removeRetainedRounds("agent-1")).resolves.toBe(0);
+      const failing = await warmHarness();
+      (failing.jobs as { removeParked?: unknown }).removeParked = async () => {
+        throw new Error("substrate_down");
+      };
+      await expect(failing.executor.removeRetainedRounds("agent-1")).resolves.toBe(0);
+    });
   });
 });

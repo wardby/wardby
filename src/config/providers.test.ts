@@ -10,8 +10,11 @@ import {
   loadGitHubUserAuthConfig,
   loadDbosConfig,
   loadCodingConcurrencyConfig,
+  loadCodingResultBundleMaxBytes,
+  loadCodingRunRepositoryLimit,
   loadShutdownDrainSeconds,
   loadKubernetesJobConfig,
+  loadSubstrateJobConfig,
   loadJiraConfig,
   loadSlackConfig,
 } from "./providers.js";
@@ -325,6 +328,12 @@ describe("loadCodingConcurrencyConfig", () => {
     });
   });
 
+  it.each(["0", "18", "many"])("rejects CODING_MAX_RUN_REPOSITORIES=%s at start-up", (value) => {
+    expect(() => loadCodingConcurrencyConfig({ CODING_MAX_RUN_REPOSITORIES: value })).toThrow(
+      /CODING_MAX_RUN_REPOSITORIES must be/,
+    );
+  });
+
   it.each(["0", "-1", "1.5", "many"])("rejects CODING_MAX_CONCURRENT=%s", (value) => {
     expect(() => loadCodingConcurrencyConfig({ CODING_MAX_CONCURRENT: value })).toThrow(
       "CODING_MAX_CONCURRENT must be a positive integer.",
@@ -462,6 +471,122 @@ describe("loadKubernetesJobConfig", () => {
       );
     },
   );
+});
+
+describe("loadSubstrateJobConfig", () => {
+  const base = {
+    SUBSTRATE_API_URL: "https://api.ate.example:443",
+    SUBSTRATE_TOKEN_FILE: "/var/run/token",
+    SUBSTRATE_PROXY_HOST: "proxy.example",
+    SUBSTRATE_ATESPACE: "wardby-runs",
+  };
+
+  it("applies defaults", () => {
+    expect(loadSubstrateJobConfig(base)).toEqual({
+      apiUrl: "https://api.ate.example:443",
+      tokenFile: "/var/run/token",
+      atespace: "wardby-runs",
+      credentialsNamespace: "wardby-run-secrets",
+      proxyHost: "proxy.example",
+      proxyPort: 8787,
+    });
+  });
+
+  it("reads every optional variable", () => {
+    expect(
+      loadSubstrateJobConfig({
+        ...base,
+        SUBSTRATE_CA_FILE: "/ca.pem",
+        SUBSTRATE_SERVER_NAME: "api.ate",
+        SUBSTRATE_ATESPACE: "runs",
+        SUBSTRATE_CREDENTIALS_NAMESPACE: "secrets",
+        SUBSTRATE_KUBE_CONTEXT: "kind-x",
+        SUBSTRATE_PROXY_PORT: "9000",
+        SUBSTRATE_WORKER_SELECTOR: "pool=a, zone=b",
+        SUBSTRATE_COLLECT_GRACE_SEC: "60",
+        SUBSTRATE_STARTUP_TIMEOUT_SEC: "600",
+      }),
+    ).toMatchObject({
+      collectGraceSec: 60,
+      startupTimeoutSec: 600,
+      caFile: "/ca.pem",
+      serverName: "api.ate",
+      atespace: "runs",
+      credentialsNamespace: "secrets",
+      kubeContext: "kind-x",
+      proxyPort: 9000,
+      workerSelector: { pool: "a", zone: "b" },
+    });
+  });
+
+  it.each(["SUBSTRATE_API_URL", "SUBSTRATE_TOKEN_FILE", "SUBSTRATE_PROXY_HOST", "SUBSTRATE_ATESPACE"])(
+    "requires %s by name",
+    (name) => {
+      expect(() => loadSubstrateJobConfig({ ...base, [name]: "" })).toThrow(`${name} is required`);
+    },
+  );
+
+  it("rejects bad values without echoing them", () => {
+    expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_PROXY_PORT: "secretish" })).toThrow(
+      /SUBSTRATE_PROXY_PORT/,
+    );
+    expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_PROXY_PORT: "secretish" })).not.toThrow(/secretish/);
+    expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_WORKER_SELECTOR: "novalue" })).toThrow(
+      "SUBSTRATE_WORKER_SELECTOR",
+    );
+    expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_API_URL: "not a url" })).toThrow("SUBSTRATE_API_URL");
+    expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_ATESPACE: "Bad_Name" })).toThrow("SUBSTRATE_ATESPACE");
+    for (const [name, value] of [
+      ["SUBSTRATE_COLLECT_GRACE_SEC", "5"],
+      ["SUBSTRATE_COLLECT_GRACE_SEC", "soon"],
+      ["SUBSTRATE_STARTUP_TIMEOUT_SEC", "10"],
+      ["SUBSTRATE_STARTUP_TIMEOUT_SEC", "1.5"],
+    ] as const) {
+      expect(() => loadSubstrateJobConfig({ ...base, [name]: value })).toThrow(name);
+    }
+  });
+
+  it("turns warm rounds on only with SUBSTRATE_WARM_ROUNDS=true, with its park TTL and park cap", () => {
+    expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "false" })).not.toHaveProperty("warmRounds");
+    expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_PARK_TTL_SEC: "120" })).not.toHaveProperty("warmRounds");
+    expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true" }).warmRounds).toEqual({
+      parkTtlSec: 3600,
+      parkMax: 10,
+    });
+    expect(
+      loadSubstrateJobConfig({
+        ...base,
+        SUBSTRATE_WARM_ROUNDS: "true",
+        SUBSTRATE_PARK_TTL_SEC: "120",
+        SUBSTRATE_PARK_MAX: "3",
+      }).warmRounds,
+    ).toEqual({ parkTtlSec: 120, parkMax: 3 });
+    // 0 turns parking off (warm rounds stay on, so the bridges keep their templates); 1000 is the top.
+    for (const parkMax of [0, 1000]) {
+      expect(
+        loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true", SUBSTRATE_PARK_MAX: String(parkMax) })
+          .warmRounds,
+      ).toEqual({ parkTtlSec: 3600, parkMax });
+    }
+    // The spike's Secret mode is gone: the variable is ignored.
+    expect(
+      loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true", SUBSTRATE_WARM_SECRET: "fresh" }).warmRounds,
+    ).toEqual({ parkTtlSec: 3600, parkMax: 10 });
+    for (const [name, value] of [
+      ["SUBSTRATE_WARM_ROUNDS", "yes"],
+      ["SUBSTRATE_PARK_TTL_SEC", "30"],
+      ["SUBSTRATE_PARK_MAX", "-1"],
+      ["SUBSTRATE_PARK_MAX", "1001"],
+      ["SUBSTRATE_PARK_MAX", "2.5"],
+      ["SUBSTRATE_PARK_MAX", "lots"],
+    ] as const) {
+      expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true", [name]: value })).toThrow(name);
+      // The error names the variable, never the value.
+      expect(() => loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "true", [name]: value })).not.toThrow(
+        value,
+      );
+    }
+  });
 });
 
 describe("loadGitHubEventConfig", () => {
@@ -651,5 +776,45 @@ describe("loadLocalRepoRoots (via providers config)", () => {
   it("is empty when LOCAL_REPO_ROOTS is unset", async () => {
     const { loadLocalRepoRoots } = await import("./providers.js");
     expect(loadLocalRepoRoots({})).toEqual({ roots: [], missing: [] });
+  });
+});
+
+describe("loadCodingRunRepositoryLimit", () => {
+  it("loads CODING_MAX_RUN_REPOSITORIES with default 5", () => {
+    expect(loadCodingRunRepositoryLimit({})).toBe(5);
+    expect(loadCodingRunRepositoryLimit({ CODING_MAX_RUN_REPOSITORIES: "8" })).toBe(8);
+    expect(() => loadCodingRunRepositoryLimit({ CODING_MAX_RUN_REPOSITORIES: "0" })).toThrow(
+      "CODING_MAX_RUN_REPOSITORIES must be a positive integer.",
+    );
+    // The launch caps allow 16 extras: 1 default + 16.
+    expect(loadCodingRunRepositoryLimit({ CODING_MAX_RUN_REPOSITORIES: "17" })).toBe(17);
+    expect(() => loadCodingRunRepositoryLimit({ CODING_MAX_RUN_REPOSITORIES: "18" })).toThrow(
+      "CODING_MAX_RUN_REPOSITORIES must be at most 17 (the default repository plus 16 extras).",
+    );
+  });
+});
+
+describe("loadCodingResultBundleMaxBytes (#536)", () => {
+  it("loads CODING_MAX_RESULT_BUNDLE_MB as bytes, default 256", () => {
+    expect(loadCodingResultBundleMaxBytes({})).toBe(256 * 1024 * 1024);
+    expect(loadCodingResultBundleMaxBytes({ CODING_MAX_RESULT_BUNDLE_MB: "64" })).toBe(64 * 1024 * 1024);
+  });
+
+  it.each(["0", "-1", "1.5", "many", ""])("rejects CODING_MAX_RESULT_BUNDLE_MB=%j", (value) => {
+    expect(() => loadCodingResultBundleMaxBytes({ CODING_MAX_RESULT_BUNDLE_MB: value })).toThrow(
+      "CODING_MAX_RESULT_BUNDLE_MB must be a positive integer.",
+    );
+  });
+
+  it("rejects a value too large to count in bytes", () => {
+    expect(() =>
+      loadCodingResultBundleMaxBytes({ CODING_MAX_RESULT_BUNDLE_MB: String(Number.MAX_SAFE_INTEGER) }),
+    ).toThrow(/CODING_MAX_RESULT_BUNDLE_MB must be at most/);
+  });
+
+  it("is checked at start-up with the other coding limits", () => {
+    expect(() => loadCodingConcurrencyConfig({ CODING_MAX_RESULT_BUNDLE_MB: "0" })).toThrow(
+      "CODING_MAX_RESULT_BUNDLE_MB must be a positive integer.",
+    );
   });
 });

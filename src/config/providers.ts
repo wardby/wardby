@@ -6,12 +6,14 @@
  * code change. The `assembleProviders` factory (which constructs the concrete
  * adapters) is added once the adapters exist.
  */
+import { MAX_RUN_REPOSITORIES_IN_INPUT } from "../coding/protocol.js";
 import {
   GVISOR_RUNTIME_CLASS,
   KUBERNETES_PLATFORMS,
   platformProfile,
   type KubernetesPlatform,
 } from "../providers/jobs/kubernetes-platform.js";
+import { CODING_PROXY_PORT } from "../providers/jobs/docker-isolation.js";
 import type { BlobStoreConfig } from "../providers/storage/index.js";
 import {
   DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS,
@@ -22,7 +24,7 @@ import {
 import { loadMobileConfig, type MobileConfig } from "./mobile.js";
 import { testSimulatorBase } from "./test-simulators.js";
 
-export type JobLauncherKind = "local" | "docker" | "kubernetes";
+export type JobLauncherKind = "local" | "docker" | "kubernetes" | "substrate";
 export type EmailProviderKind = "smtp" | "ses";
 export type SecretCipherKind = "app-key" | "kms";
 export type AuthProviderKind = "delegating" | "self-hosted";
@@ -584,10 +586,39 @@ export function loadShutdownDrainSeconds(env: NodeJS.ProcessEnv = process.env): 
 }
 
 export function loadCodingConcurrencyConfig(env: NodeJS.ProcessEnv = process.env): CodingConcurrencyConfig {
+  // Validated here so a bad CODING_MAX_RUN_REPOSITORIES stops start-up, not one link_repository call.
+  loadCodingRunRepositoryLimit(env);
+  // Likewise a bad CODING_MAX_RESULT_BUNDLE_MB stops start-up, not one history run's collection.
+  loadCodingResultBundleMaxBytes(env);
   return {
     maxConcurrent: optionalPositiveInteger(env.CODING_MAX_CONCURRENT, "CODING_MAX_CONCURRENT") ?? 4,
     queueTimeoutSec: optionalPositiveInteger(env.CODING_QUEUE_TIMEOUT_SEC, "CODING_QUEUE_TIMEOUT_SEC") ?? 3600,
   };
+}
+
+/** CODING_MAX_RUN_REPOSITORIES: the default repository plus the extras one coding run may have (#537), at most 17. */
+export function loadCodingRunRepositoryLimit(env: NodeJS.ProcessEnv = process.env): number {
+  const limit = optionalPositiveInteger(env.CODING_MAX_RUN_REPOSITORIES, "CODING_MAX_RUN_REPOSITORIES") ?? 5;
+  if (limit > MAX_RUN_REPOSITORIES_IN_INPUT + 1) {
+    throw new Error(
+      `CODING_MAX_RUN_REPOSITORIES must be at most ${MAX_RUN_REPOSITORIES_IN_INPUT + 1} (the default repository plus ${MAX_RUN_REPOSITORIES_IN_INPUT} extras).`,
+    );
+  }
+  return limit;
+}
+
+const MAX_RESULT_BUNDLE_MB = Math.floor(Number.MAX_SAFE_INTEGER / (1024 * 1024));
+
+/**
+ * CODING_MAX_RESULT_BUNDLE_MB (default 256), in bytes: the largest result bundle a history run's
+ * collector takes (#536). The collectors cap it again at the run's own disk.
+ */
+export function loadCodingResultBundleMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const megabytes = optionalPositiveInteger(env.CODING_MAX_RESULT_BUNDLE_MB, "CODING_MAX_RESULT_BUNDLE_MB") ?? 256;
+  if (megabytes > MAX_RESULT_BUNDLE_MB) {
+    throw new Error(`CODING_MAX_RESULT_BUNDLE_MB must be at most ${MAX_RESULT_BUNDLE_MB}.`);
+  }
+  return megabytes * 1024 * 1024;
 }
 
 const DNS_1123_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -691,6 +722,122 @@ export function loadKubernetesJobConfig(env: NodeJS.ProcessEnv = process.env): K
   if (preflightTimeoutMs !== undefined) config.preflightTimeoutMs = preflightTimeoutMs;
   if (readyTimeoutMs !== undefined) config.readyTimeoutMs = readyTimeoutMs;
   if (enforcementExecTimeoutMs !== undefined) config.enforcementExecTimeoutMs = enforcementExecTimeoutMs;
+  return config;
+}
+
+/** JOB_LAUNCHER=substrate (experimental): the Substrate API, where run Secrets go, and how actors reach the coding proxy. */
+export interface SubstrateJobConfig {
+  apiUrl: string;
+  tokenFile: string;
+  caFile?: string;
+  serverName?: string;
+  atespace: string;
+  credentialsNamespace: string;
+  kubeContext?: string;
+  proxyHost: string;
+  proxyPort: number;
+  workerSelector?: Record<string, string>;
+  /** SUBSTRATE_COLLECT_GRACE_SEC: after the worker exits, how long the workspace may take (launcher default 120 s). */
+  collectGraceSec?: number;
+  /** SUBSTRATE_STARTUP_TIMEOUT_SEC: how long the actors may take to reach the coding proxy (launcher default 300 s). */
+  startupTimeoutSec?: number;
+  /**
+   * SUBSTRATE_WARM_ROUNDS=true (experimental spike): park a succeeded run's actors for a follow-up
+   * and let a continuation adopt them. SUBSTRATE_PARK_TTL_SEC (60..86400, default 3600) bounds the
+   * park; SUBSTRATE_PARK_MAX (0..1000, default 10; 0 = never park) bounds how many runs are parked at once.
+   */
+  warmRounds?: { parkTtlSec: number; parkMax: number };
+}
+
+const DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE = "wardby-run-secrets";
+
+function requiredEnv(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name]?.trim();
+  if (!value) throw new Error(`${name} is required when JOB_LAUNCHER=substrate.`);
+  return value;
+}
+
+/** `k=v,k=v` into a map; errors name the variable, never the value. */
+function parseWorkerSelector(raw: string | undefined): Record<string, string> | undefined {
+  const text = raw?.trim();
+  if (!text) return undefined;
+  const selector: Record<string, string> = {};
+  for (const pair of text.split(",")) {
+    const index = pair.indexOf("=");
+    const key = index > 0 ? pair.slice(0, index).trim() : "";
+    const value = index > 0 ? pair.slice(index + 1).trim() : "";
+    if (!key || !value) throw new Error("SUBSTRATE_WORKER_SELECTOR must be comma-separated key=value pairs.");
+    selector[key] = value;
+  }
+  return selector;
+}
+
+/**
+ * SUBSTRATE_PROXY_PORT: the port actors use to reach the coding proxy at SUBSTRATE_PROXY_HOST
+ * (default the proxy's own, 8787). The one parser, shared by the control plane (actor URLs and
+ * egress) and the coding proxy (its Host guard), so the two can never disagree.
+ */
+export function substrateProxyPort(env: NodeJS.ProcessEnv = process.env): number {
+  const portText = env.SUBSTRATE_PROXY_PORT?.trim();
+  const proxyPort = portText ? Number(portText) : CODING_PROXY_PORT;
+  if ((portText && !/^\d+$/.test(portText)) || !Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65_535) {
+    throw new Error("SUBSTRATE_PROXY_PORT must be an integer from 1 to 65535.");
+  }
+  return proxyPort;
+}
+
+export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): SubstrateJobConfig {
+  const apiUrl = requiredEnv(env, "SUBSTRATE_API_URL");
+  try {
+    new URL(apiUrl);
+  } catch {
+    throw new Error("SUBSTRATE_API_URL must be a valid URL.");
+  }
+  const tokenFile = requiredEnv(env, "SUBSTRATE_TOKEN_FILE");
+  const proxyHost = requiredEnv(env, "SUBSTRATE_PROXY_HOST");
+  const proxyPort = substrateProxyPort(env);
+  // Required, no default: the coding proxy uses the same variable as its on/off switch.
+  const atespace = dnsLabel(requiredEnv(env, "SUBSTRATE_ATESPACE"), "SUBSTRATE_ATESPACE", "");
+  const credentialsNamespace = dnsLabel(
+    env.SUBSTRATE_CREDENTIALS_NAMESPACE?.trim() || undefined,
+    "SUBSTRATE_CREDENTIALS_NAMESPACE",
+    DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE,
+  );
+  const config: SubstrateJobConfig = { apiUrl, tokenFile, atespace, credentialsNamespace, proxyHost, proxyPort };
+  const caFile = env.SUBSTRATE_CA_FILE?.trim();
+  if (caFile) config.caFile = caFile;
+  const serverName = env.SUBSTRATE_SERVER_NAME?.trim();
+  if (serverName) config.serverName = serverName;
+  const kubeContext = env.SUBSTRATE_KUBE_CONTEXT?.trim();
+  if (kubeContext) config.kubeContext = kubeContext;
+  const workerSelector = parseWorkerSelector(env.SUBSTRATE_WORKER_SELECTOR);
+  if (workerSelector) config.workerSelector = workerSelector;
+  const collectGraceSec = optionalBoundedInteger(
+    env.SUBSTRATE_COLLECT_GRACE_SEC?.trim() || undefined,
+    "SUBSTRATE_COLLECT_GRACE_SEC",
+    10,
+    3_600,
+  );
+  if (collectGraceSec !== undefined) config.collectGraceSec = collectGraceSec;
+  const startupTimeoutSec = optionalBoundedInteger(
+    env.SUBSTRATE_STARTUP_TIMEOUT_SEC?.trim() || undefined,
+    "SUBSTRATE_STARTUP_TIMEOUT_SEC",
+    30,
+    7_200,
+  );
+  if (startupTimeoutSec !== undefined) config.startupTimeoutSec = startupTimeoutSec;
+  const warm = env.SUBSTRATE_WARM_ROUNDS?.trim().toLowerCase();
+  if (warm !== undefined && warm !== "" && warm !== "true" && warm !== "false") {
+    throw new Error("SUBSTRATE_WARM_ROUNDS must be true or false.");
+  }
+  if (warm === "true") {
+    const parkTtlSec =
+      optionalBoundedInteger(env.SUBSTRATE_PARK_TTL_SEC?.trim() || undefined, "SUBSTRATE_PARK_TTL_SEC", 60, 86_400) ??
+      3_600;
+    const parkMax =
+      optionalBoundedInteger(env.SUBSTRATE_PARK_MAX?.trim() || undefined, "SUBSTRATE_PARK_MAX", 0, 1_000) ?? 10;
+    config.warmRounds = { parkTtlSec, parkMax };
+  }
   return config;
 }
 

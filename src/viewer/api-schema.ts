@@ -187,6 +187,24 @@ export const RunDetailSchema = GraphRunSchema.extend({
           envNames: z.array(z.string()),
         }),
       ),
+      repositories: z
+        .array(
+          z.object({
+            name: z.string(),
+            access: z.enum(["read", "write"]),
+            asRemote: z.boolean(),
+            repository: z.string(),
+            requestedRef: z.string().nullable(),
+            resolvedSha: z.string().nullable(),
+            pullRequestNumber: z.number().int().nullable(),
+            pullRequestUrl: z.string().nullable(),
+            resultBranch: z.string().nullable(),
+            outcome: z.string().nullable(),
+          }),
+        )
+        .describe(
+          "The other repositories of a multi-repository coding run, in order (the default repository is `repository` above, with its pull request in `result`); empty for a single-repository run. Absent from servers older than the release that added it.",
+        ),
     })
     .nullable(),
 });
@@ -241,7 +259,7 @@ export type ViewerEvent = z.infer<typeof ViewerEventSchema>;
 
 /** How this deployment runs coding jobs, for the desktop viewer's Infrastructure view (GET /admin/api/infra). */
 export const InfraInfoSchema = z.object({
-  launcher: z.enum(["local", "docker", "kubernetes"]),
+  launcher: z.enum(["local", "docker", "kubernetes", "substrate"]),
   kubernetes: z
     .object({
       namespace: z.string(),

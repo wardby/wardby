@@ -23,6 +23,18 @@ const catalog: HelpCatalog = {
       plainText: "Deploy Wardby on GKE Autopilot. Use private Cloud SQL.",
       headings: [{ level: 1, text: "Deploy Wardby on GKE Autopilot", slug: "deploy-wardby-on-gke-autopilot" }],
     },
+    {
+      id: "agent-flows",
+      title: "See how your agents work together (flows)",
+      summary: "list_agent_links returns agents, how they link and how they start, grouped into flows.",
+      audience: "operator",
+      tags: ["flows", "agent links", "list_agent_links", "agents tab"],
+      appliesTo: ">=0.9.14",
+      sourcePath: "agent-flows.md",
+      markdown: "# See how your agents work together\n\nA flow is a group of agents that hand work to each other.",
+      plainText: "See how your agents work together. A flow is a group of agents that hand work to each other.",
+      headings: [{ level: 1, text: "See how your agents work together", slug: "see-how-your-agents-work-together" }],
+    },
   ],
 };
 
@@ -74,6 +86,14 @@ describe("help MCP tools", () => {
         }),
       ],
     });
+    await client.close();
+  });
+
+  it.each(["flow", "agent links", "list_agent_links"])("finds the agent-flows article for %j", async (query) => {
+    const client = await connect();
+    const result = await client.callTool({ name: "search_help", arguments: { query } });
+    const ids = (content(result) as { results: { id: string }[] }).results.map((r) => r.id);
+    expect(ids[0]).toBe("agent-flows");
     await client.close();
   });
 

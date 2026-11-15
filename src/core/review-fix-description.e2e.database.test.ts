@@ -355,7 +355,9 @@ class FinishedJobs implements WorkspaceJobLauncher {
   }
   async stop(): Promise<void> {}
   async remove(): Promise<void> {}
-  async materializeWorkspace(): Promise<void> {}
+  async materializeWorkspace(): Promise<{ bundle: boolean }> {
+    return { bundle: false };
+  }
 }
 
 const sessions: CodingSessionController = {
@@ -415,6 +417,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
           agentId: delivery,
           provider: "github",
           repository,
+          name: `github:${repository}`,
           access: "write",
           triggers: ["mention", "review_fix"],
           markReadyWhenPassing: true,
@@ -426,6 +429,7 @@ describe.skipIf(!process.env.DATABASE_URL)(
           agentId: reviewer,
           provider: "github",
           repository,
+          name: `github:${repository}`,
           access: "write",
           triggers: ["pull_request"],
           checkName: CHECK_NAME,

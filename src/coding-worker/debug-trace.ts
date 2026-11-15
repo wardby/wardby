@@ -1,6 +1,7 @@
 import { DEFAULT_DEBUG_TRACE_MAX_MB, MAX_DEBUG_TRACE_LINE_BYTES, MAX_REDACTED_SPAN } from "../coding/protocol.js";
 import { redactSecrets } from "../coding/redact.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
+import type { WorkerCredentials } from "./credentials.js";
 
 /**
  * Admin-requested debug trace (CodingTaskInput.debugTrace). When a run is
@@ -119,12 +120,29 @@ export function workerDebugTracer(
   write: (line: string) => void,
   /** Other values the worker holds, redacted the same way: the run's MCP token, when it has one. */
   otherSecrets: readonly string[] = [],
+  /** The run's registry token: the one the worker was handed (Substrate), else derived from the capability. */
+  registryToken: string = deriveRegistryToken(capability),
 ): DebugTracer | undefined {
   if (input.debugTrace !== true) return undefined;
   return createDebugTracer({
     runId: input.runId,
-    secrets: [capability, deriveRegistryToken(capability), ...otherSecrets],
+    secrets: [capability, registryToken, ...otherSecrets],
     write,
     ...(input.debugTraceMaxMb ? { maxTotalBytes: input.debugTraceMaxMb * 1024 * 1024 } : {}),
   });
+}
+
+/**
+ * The worker's tracer from its credentials as read (readWorkerCredentials) and its MCP token: every
+ * value the worker holds is redacted, the registry token it was handed (Substrate) included. main.ts
+ * passes the credentials whole, so no value can be dropped on the way.
+ */
+export function workerTracerFor(
+  input: { runId: string; debugTrace?: boolean; debugTraceMaxMb?: number },
+  credentials: Pick<WorkerCredentials, "capability" | "registryToken">,
+  mcpToken: string | undefined,
+  write: (line: string) => void,
+): DebugTracer | undefined {
+  // An unset registryToken takes workerDebugTracer's default: the token derived from the capability.
+  return workerDebugTracer(input, credentials.capability, write, mcpToken ? [mcpToken] : [], credentials.registryToken);
 }

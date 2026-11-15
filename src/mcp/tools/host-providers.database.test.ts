@@ -692,6 +692,7 @@ describe("host provider tools", () => {
         agentId: a.id,
         provider: used,
         repository: "acme/web",
+        name: `${used}:${"acme/web"}`,
         access: "read",
         authorizedVia: "admin",
         authorizedById: p.id,

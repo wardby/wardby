@@ -24,6 +24,7 @@ describe.skipIf(!process.env.DATABASE_URL)("code-review host schema (PostgreSQL)
         agentId: agent.id,
         provider: "github",
         repository: "chfields/knock-knock-jokes",
+        name: `github:${"chfields/knock-knock-jokes"}`,
         access: "write",
         triggers: ["pull_request"],
         checkName: "wardby review",
@@ -32,7 +33,13 @@ describe.skipIf(!process.env.DATABASE_URL)("code-review host schema (PostgreSQL)
     expect(link.triggers).toEqual(["pull_request"]);
     await expect(
       db.agentRepository.create({
-        data: { agentId: agent.id, provider: "github", repository: "chfields/knock-knock-jokes", access: "read" },
+        data: {
+          agentId: agent.id,
+          provider: "github",
+          repository: "chfields/knock-knock-jokes",
+          name: `github:${"chfields/knock-knock-jokes"}`,
+          access: "read",
+        },
       }),
     ).rejects.toMatchObject({ code: "P2002" });
 

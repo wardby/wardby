@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import type { ClaudeQueryFactory, ClaudeQueryOptions, ClaudeSdkMessage } from "./driver.js";
-import { PREPARE_DEPENDENCIES_TOOL } from "./tool-socket.js";
-import { WARDBY_MCP_SERVER, WARDBY_MCP_TIMEOUT_MS } from "../coding-worker/mcp-config.js";
+import { GIT_CHECK_TOOL, PREPARE_DEPENDENCIES_TOOL, RESULT_BUNDLE_TOOL } from "./tool-socket.js";
+import { assertMcpHeaderPlaceholder, WARDBY_MCP_SERVER, WARDBY_MCP_TIMEOUT_MS } from "../coding-worker/mcp-config.js";
 
 const runtimeRequire = createRequire(import.meta.url);
 const TOOL_NAME = "mcp__wardby_tools__run_command";
@@ -11,6 +11,8 @@ const TOOL_NAME = "mcp__wardby_tools__run_command";
  * dontAsk plus allowedTools would already deny it, this keeps it out of the tool list as well.
  */
 const PREPARE_DEPENDENCIES_TOOL_NAME = `mcp__wardby_tools__${PREPARE_DEPENDENCIES_TOOL}`;
+/** The tool runner's git tools (#536, tool-socket.ts), which the worker alone calls: disallowed the same way. */
+const GIT_TOOL_NAMES = [GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL].map((tool) => `mcp__wardby_tools__${tool}`);
 /**
  * Claude Code's own wall-clock limit on one wardby_tools call (its per-server MCP `timeout`, which
  * also sets the idle limit): above the longest command the tool runner can be set to run
@@ -20,6 +22,9 @@ const PREPARE_DEPENDENCIES_TOOL_NAME = `mcp__wardby_tools__${PREPARE_DEPENDENCIE
 export const WARDBY_TOOLS_TIMEOUT_MS = 7_200_000 + 60_000;
 
 export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string, unknown> {
+  // Claude Code passes the MCP config on its own command line: in header mode (Substrate) only the
+  // gateway's placeholder may ever go there.
+  if (config.mcp) assertMcpHeaderPlaceholder(config.mcp.token, config.mcp.header);
   const abortController = new AbortController();
   if (config.signal.aborted) abortController.abort();
   else config.signal.addEventListener("abort", () => abortController.abort(), { once: true });
@@ -38,7 +43,7 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     // On a run with MCP tools, the server-level rule allows every tool of wardby_mcp: the proxy and
     // the gateway allow only the run's pinned tools, and dontAsk denies anything not allowed here.
     allowedTools: [TOOL_NAME, ...(skills ? ["Skill"] : []), ...(config.mcp ? [`mcp__${WARDBY_MCP_SERVER}`] : [])],
-    disallowedTools: [PREPARE_DEPENDENCIES_TOOL_NAME],
+    disallowedTools: [PREPARE_DEPENDENCIES_TOOL_NAME, ...GIT_TOOL_NAMES],
     strictMcpConfig: true,
     mcpServers: {
       wardby_tools: {
@@ -49,13 +54,16 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
         alwaysLoad: true,
       },
       // The token rides only in this header (Claude Code passes it on its own command line, inside
-      // this container, which runs no model commands); never in an environment.
+      // this container, which runs no model commands); never in an environment. Header mode
+      // (Substrate) sends the placeholder in its own header and no Authorization.
       ...(config.mcp
         ? {
             [WARDBY_MCP_SERVER]: {
               type: "http",
               url: config.mcp.url,
-              headers: { Authorization: `Bearer ${config.mcp.token}` },
+              headers: config.mcp.header
+                ? { [config.mcp.header]: config.mcp.token }
+                : { Authorization: `Bearer ${config.mcp.token}` },
               alwaysLoad: true,
               timeout: WARDBY_MCP_TIMEOUT_MS,
             },
@@ -72,6 +80,8 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     permissionMode: "dontAsk",
     // Only a session-resume run keeps the session file (under CLAUDE_CONFIG_DIR) for transcript capture.
     persistSession: config.persistSession,
+    // Only on a warm Substrate follow-up round: continue the previous round's conversation.
+    ...(config.resumeSessionId ? { resume: config.resumeSessionId } : {}),
     env: config.environment,
     // Only on a traced run; otherwise the SDK's default handling is unchanged.
     ...(config.stderr ? { stderr: config.stderr } : {}),

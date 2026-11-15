@@ -347,6 +347,38 @@ cache before you set `dependencyCache: true` on an agent that uses it.
 Images built `FROM` that release carry the cache module at
 `/opt/wardby/coding-worker/dependency-cache.mjs`; keep that path.
 
+## Several repositories in one run need a current driver
+
+A run with extra repositories ([several repositories in one
+run](coding-agent-setup.md#several-repositories-in-one-run)) adds a
+`repositories` key to the run input. Wardby writes it only when the run has
+extras, so runs with only the default repository work as before. A Codex worker
+built on a driver older than `driver-v30` validates its input with a strict
+schema, so it rejects every run that has extras (`worker_input_failed`). The
+same holds if you pin `CODING_CLAUDE_WORKER_IMAGE` to a Claude Code worker
+image from an older release. A Claude Code `workerImageRef` tool runner needs no
+rebuild: the extra folders are mounted into it and it needs no new code.
+Rebuild a Codex `workerImageRef` image on a current `driver-vN` digest before
+its agent gets extras, from links in its default set or a `repositories` list.
+
+## Git history needs a current driver and git
+
+A run with [git history](coding-agent-setup.md#git-history-in-a-run)
+(`codingProfile.gitHistory`) adds a `gitHistory` key to the run input. Wardby
+writes it only when history is on. A Codex worker built on a driver older than
+`driver-v31` rejects that input (`worker_input_failed`), so rebuild a Codex
+`workerImageRef` image on a current `driver-vN` digest before turning history
+on. The image must also keep `git` (the driver image has it): at the start of a
+history run the driver checks it, and a missing git fails the run with
+`worker_git_unavailable`.
+
+A Claude Code `workerImageRef` tool runner needs `git` as well, because the
+agent's commits and the result bundle are made there. The release's
+`wardby-claude-tool-runner` image has git on every run, history or not, so an
+image built `FROM` it keeps it; do not remove it. The Claude agent container
+itself stays git-free. See
+[`worker_git_unavailable`](../help/errors/worker-git-unavailable.md).
+
 ## What this doesn't cover
 
 wardby does not re-validate the contents of your built image beyond the

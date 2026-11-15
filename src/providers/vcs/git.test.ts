@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import { logger } from "../../core/logger.js";
@@ -20,6 +22,7 @@ import type {
 import {
   GitCommandError,
   GitVcsProvider,
+  countWorkspaceEntries,
   NodeGitCommandRunner,
   protectedPathMatcher,
   redactGitOutput,
@@ -28,6 +31,7 @@ import {
   type GitCommandRunner,
 } from "./git.js";
 import { GitHubRemote } from "./github-remote.js";
+import type { GitRemote } from "./remote.js";
 import { holdsValueFragment } from "../../sandbox/secret-fragments.test-support.js";
 import type { VcsPrepareInput } from "./types.js";
 import { collectExclusions, gitExcludePathspecs } from "../../coding/collect-exclude.js";
@@ -152,6 +156,10 @@ class ScriptedGitRunner implements GitCommandRunner {
   /** When set alongside `pushFails`, the remote branch moves here as the push fails (a racing writer). */
   remoteShaOnFailedPush: string | null = null;
   headRef = "wardby/run-run-1";
+  /** What `rev-parse` answers for a remote link's ref (refs/remotes/<name>/<label>). */
+  remoteRefs: Record<string, string> = {};
+  /** Thrown by a fetch from an https URL (a remote link's fetch). */
+  fetchError: Error | null = null;
 
   async run(args: readonly string[], options?: GitCommandOptions): Promise<GitCommandResult> {
     const copied = [...args];
@@ -170,6 +178,7 @@ class ScriptedGitRunner implements GitCommandRunner {
         "rev-parse",
         "ls-remote",
         "push",
+        "fetch",
       ].includes(value),
     );
     if (command === "clone") {
@@ -195,9 +204,14 @@ class ScriptedGitRunner implements GitCommandRunner {
       if (copied.includes("get-url")) return { stdout: `${this.remoteUrl}\n`, stderr: "" };
       return { stdout: "origin\n", stderr: "" };
     }
+    if (command === "fetch" && this.fetchError && copied.some((arg) => arg.startsWith("https://"))) {
+      throw this.fetchError;
+    }
     if (command === "rev-parse") {
       const revision = copied.at(-1)!;
       if (revision.startsWith("refs/remotes/origin/")) return { stdout: `${BASE_SHA}\n`, stderr: "" };
+      const remoteTip = this.remoteRefs[revision.replace(/\^\{commit\}$/, "")];
+      if (remoteTip) return { stdout: `${remoteTip}\n`, stderr: "" };
       if (revision === "HEAD^") return { stdout: `${BASE_SHA}\n`, stderr: "" };
       return { stdout: `${this.headSha}\n`, stderr: "" };
     }
@@ -1117,6 +1131,226 @@ describe("GitVcsProvider", () => {
   });
 });
 
+describe("GitVcsProvider git history (#536)", () => {
+  const UPSTREAM_SHA = "d".repeat(40);
+  const upstream = { name: "upstream", repository: "openai/upstream", resolvedSha: UPSTREAM_SHA, label: "main" };
+
+  async function historyHarness() {
+    const created = await harness();
+    created.git.remoteRefs["refs/remotes/upstream/main"] = UPSTREAM_SHA;
+    created.git.remoteRefs["refs/remotes/upstream/pinned"] = UPSTREAM_SHA;
+    return created;
+  }
+
+  it("clones to the history depth, or with no depth for full history (history off stays depth 1)", async () => {
+    const depthOf = (calls: RecordedCall[]) => {
+      const clone = calls.find((call) => call.args.includes("clone"))!;
+      const at = clone.args.indexOf("--depth");
+      return at < 0 ? null : clone.args[at + 1];
+    };
+    const fifty = await historyHarness();
+    await fifty.provider.prepareWorkspace({ ...fifty.input, gitHistory: { depth: 50 } });
+    expect(depthOf(fifty.git.calls)).toBe("50");
+    const full = await historyHarness();
+    await full.provider.prepareWorkspace({ ...full.input, gitHistory: { depth: "full" } });
+    expect(depthOf(full.git.calls)).toBeNull();
+    const clone = full.git.calls.find((call) => call.args.includes("clone"))!;
+    expect(clone.args).toEqual(expect.arrayContaining(["--single-branch", "--no-tags", "--separate-git-dir"]));
+    const off = await historyHarness();
+    await off.provider.prepareWorkspace(off.input);
+    expect(depthOf(off.git.calls)).toBe("1");
+  });
+
+  it("fetches each remote's commit into refs/remotes/<name>/<label>, hardened, under the remote's read access", async () => {
+    const { provider, git, input } = await historyHarness();
+    const prepared = await provider.prepareWorkspace({ ...input, gitHistory: { depth: 50 }, remotes: [upstream] });
+    const fetch = git.calls.find(
+      (call) => call.args.includes("fetch") && call.args.includes("https://github.com/openai/upstream.git"),
+    )!;
+    expect(fetch).toBeDefined();
+    expect(fetch.args.slice(fetch.args.indexOf("fetch"))).toEqual([
+      "fetch",
+      "--no-tags",
+      "--no-write-fetch-head",
+      "--depth",
+      "50",
+      "https://github.com/openai/upstream.git",
+      `${UPSTREAM_SHA}:refs/remotes/upstream/main`,
+    ]);
+    expect(fetch.args).toEqual(expect.arrayContaining(["credential.helper=", "protocol.allow=never"]));
+    expect(fetch.args.join(" ")).not.toContain(TOKEN);
+    expect(fetch.options?.authToken).toBe(TOKEN);
+    expect(prepared).toMatchObject({
+      gitHistory: { depth: 50 },
+      historyBase: BASE_SHA,
+      remoteTips: [UPSTREAM_SHA],
+      remotes: [upstream],
+    });
+    // Full history fetches the remote with no depth either.
+    const full = await historyHarness();
+    await full.provider.prepareWorkspace({ ...full.input, gitHistory: { depth: "full" }, remotes: [upstream] });
+    const fullFetch = full.git.calls.find((call) => call.args.includes("https://github.com/openai/upstream.git"))!;
+    expect(fullFetch.args).not.toContain("--depth");
+  });
+
+  it("builds the worker .git from the control plane's git dir by path, with its own fixed config", async () => {
+    const { provider, git, input } = await historyHarness();
+    const prepared = await provider.prepareWorkspace({ ...input, gitHistory: { depth: 50 }, remotes: [upstream] });
+    const workerGit = resolve(prepared.workspacePath, ".git");
+    const worker = git.calls.filter((call) => call.args[0] === `--git-dir=${workerGit}`);
+    const init = worker.find((call) => call.args.includes("init"))!;
+    expect(init.args).toContain("--template=");
+    const fetch = worker.find((call) => call.args.includes("fetch"))!;
+    expect(fetch.args).toEqual(expect.arrayContaining(["protocol.file.allow=always", "--update-shallow"]));
+    expect(fetch.args.slice(fetch.args.indexOf(prepared.gitMetadataPath))).toEqual([
+      prepared.gitMetadataPath,
+      `${BASE_SHA}:refs/heads/wardby/run-run-1`,
+      `${UPSTREAM_SHA}:refs/remotes/upstream/main`,
+    ]);
+    expect(fetch.options?.authToken).toBeUndefined();
+    const symbolic = worker.find((call) => call.args.includes("symbolic-ref"))!;
+    expect(symbolic.args.slice(-2)).toEqual(["HEAD", "refs/heads/wardby/run-run-1"]);
+    const readTree = worker.find((call) => call.args.includes("read-tree"))!;
+    expect(readTree.args).toContain(`--work-tree=${prepared.workspacePath}`);
+    expect(readTree.args.at(-1)).toBe(BASE_SHA);
+    expect(readTree.args).not.toContain("-u");
+    expect(await readFile(resolve(workerGit, "config"), "utf8")).toBe(
+      [
+        "[core]",
+        "\trepositoryformatversion = 0",
+        "\tbare = false",
+        "\thooksPath = /dev/null",
+        "[commit]",
+        "\tgpgSign = false",
+        "[tag]",
+        "\tgpgSign = false",
+        "[user]",
+        "\tname = Wardby",
+        "\temail = wardby@users.noreply.github.com",
+        "",
+      ].join("\n"),
+    );
+    // No worker .git without history.
+    const off = await historyHarness();
+    const plain = await off.provider.prepareWorkspace(off.input);
+    expect(existsSync(resolve(plain.workspacePath, ".git"))).toBe(false);
+  });
+
+  it("files a remote whose label is not a valid ref component under pinned, and refuses an invalid name", async () => {
+    const { provider, git, input } = await historyHarness();
+    const prepared = await provider.prepareWorkspace({
+      ...input,
+      gitHistory: { depth: 5 },
+      remotes: [{ ...upstream, label: "bad..label" }],
+    });
+    expect(prepared.remotes).toEqual([{ ...upstream, label: "pinned" }]);
+    expect(git.calls.some((call) => call.args.includes(`${UPSTREAM_SHA}:refs/remotes/upstream/pinned`))).toBe(true);
+    for (const name of ["origin", "Up", "a..b", "x.lock", "a/b", ""]) {
+      const other = await historyHarness();
+      await expect(
+        other.provider.prepareWorkspace({ ...other.input, gitHistory: { depth: 5 }, remotes: [{ ...upstream, name }] }),
+      ).rejects.toThrow("repository_remote_invalid");
+    }
+    const twice = await historyHarness();
+    await expect(
+      twice.provider.prepareWorkspace({ ...twice.input, gitHistory: { depth: 5 }, remotes: [upstream, upstream] }),
+    ).rejects.toThrow("repository_remote_invalid");
+    const noHistory = await historyHarness();
+    await expect(noHistory.provider.prepareWorkspace({ ...noHistory.input, remotes: [upstream] })).rejects.toThrow(
+      "repository_remote_needs_history",
+    );
+    const slot = await historyHarness();
+    await mkdir(resolve(slot.rootDir, "run-1"), { recursive: true });
+    await expect(
+      slot.provider.prepareWorkspace({
+        ...slot.input,
+        slot: { name: "tools" },
+        gitHistory: { depth: 5 },
+        remotes: [upstream],
+      }),
+    ).rejects.toThrow("repository_remote_invalid");
+    for (const depth of [0, 100_001, 1.5]) {
+      const bad = await historyHarness();
+      await expect(bad.provider.prepareWorkspace({ ...bad.input, gitHistory: { depth } })).rejects.toThrow(
+        "vcs_git_history_invalid",
+      );
+    }
+  });
+
+  it("keeps the token out of vcs_remote_fetch_failed", async () => {
+    const { provider, git, input, rootDir } = await historyHarness();
+    git.fetchError = new GitCommandError(128, `fatal: https://x-access-token:${TOKEN}@github.com/openai/upstream.git`);
+    const error = await provider.prepareWorkspace({ ...input, gitHistory: { depth: 5 }, remotes: [upstream] }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(String(error)).toContain("vcs_remote_fetch_failed:upstream");
+    for (let link = error as Error | undefined; link !== undefined; link = link.cause as Error | undefined) {
+      expect(link.message).not.toContain(TOKEN);
+      expect(link.stack ?? "").not.toContain(TOKEN);
+      expect(JSON.stringify(link)).not.toContain(TOKEN);
+    }
+    expect(String((error as Error).cause)).toContain("[REDACTED]");
+    expect(existsSync(resolve(rootDir, "run-1"))).toBe(false);
+  });
+
+  it("recovers the history fields, and gitHistory is part of the handle", async () => {
+    const { provider, input } = await historyHarness();
+    const historyInput = { ...input, gitHistory: { depth: 50 }, remotes: [upstream] };
+    const prepared = await provider.prepareWorkspace(historyInput);
+    await expect(provider.recoverWorkspace(historyInput)).resolves.toEqual(prepared);
+    // A handle whose history fields disagree with themselves is refused.
+    await expect(provider.finalizeChanges({ ...prepared, gitHistory: undefined })).rejects.toThrow(
+      "repository_remote_needs_history",
+    );
+    await expect(
+      provider.finalizeChanges({ ...prepared, gitHistory: undefined, remotes: undefined, remoteTips: undefined }),
+    ).rejects.toThrow("vcs_workspace_handle_invalid");
+    for (const changed of [
+      { historyBase: undefined },
+      { remoteTips: [] },
+      { remotes: [{ ...upstream, label: "a..b" }] },
+    ]) {
+      await expect(provider.finalizeChanges({ ...prepared, ...changed })).rejects.toThrow(
+        "vcs_workspace_handle_invalid",
+      );
+    }
+    // Without history, a handle carrying history fields is refused too.
+    const plain = await historyHarness();
+    const off = await plain.provider.prepareWorkspace(plain.input);
+    await expect(plain.provider.finalizeChanges({ ...off, historyBase: BASE_SHA })).rejects.toThrow(
+      "vcs_workspace_handle_invalid",
+    );
+  });
+
+  it("allows only the workspace root's .git, only with history on, and checks its config", async () => {
+    const { provider, input } = await historyHarness();
+    const historyInput = { ...input, gitHistory: { depth: 50 } };
+    const prepared = await provider.prepareWorkspace(historyInput);
+    expect(existsSync(resolve(prepared.workspacePath, ".git", "config"))).toBe(true);
+    // History off: the same root .git is a nested repository.
+    await expect(provider.recoverWorkspace(input)).rejects.toThrow("vcs_nested_repository");
+    // Anywhere else, .git is still refused.
+    await mkdir(resolve(prepared.workspacePath, "vendor", ".git"), { recursive: true });
+    await expect(provider.recoverWorkspace(historyInput)).rejects.toThrow("vcs_nested_repository");
+    await rm(resolve(prepared.workspacePath, "vendor"), { recursive: true });
+    // The root .git's config must be safe (the worker can write it).
+    await writeFile(resolve(prepared.workspacePath, ".git", "config"), "[credential]\n\thelper = store\n");
+    await expect(provider.recoverWorkspace(historyInput)).rejects.toThrow("vcs_git_config_unsafe");
+    // Never followed as a symlink.
+    await rm(resolve(prepared.workspacePath, ".git", "config"));
+    await symlink("/etc/passwd", resolve(prepared.workspacePath, ".git", "config"));
+    await expect(provider.recoverWorkspace(historyInput)).rejects.toThrow("vcs_git_config_unsafe");
+    // A .git that is a file (a gitdir pointer) or a symlink is refused.
+    await rm(resolve(prepared.workspacePath, ".git"), { recursive: true });
+    await writeFile(resolve(prepared.workspacePath, ".git"), "gitdir: /elsewhere\n");
+    await expect(provider.recoverWorkspace(historyInput)).rejects.toThrow("vcs_nested_repository");
+    await rm(resolve(prepared.workspacePath, ".git"));
+    await symlink("/tmp", resolve(prepared.workspacePath, ".git"));
+    await expect(provider.recoverWorkspace(historyInput)).rejects.toThrow("vcs_nested_repository");
+  });
+});
+
 describe("protectedPathMatcher", () => {
   it("protects matches of any pattern unless an exception matches", () => {
     const isProtected = protectedPathMatcher([".github/workflows/**", ".wardby/**", "!.wardby/services.yaml"]);
@@ -1391,5 +1625,495 @@ describe("NodeGitCommandRunner authUsername", () => {
     expect(String(error)).toContain("token=[REDACTED]");
     expect(String(error)).toContain("x-token-auth");
     expect(String(error)).not.toContain(fakeToken);
+  });
+});
+
+const FAKE_SECRET = "ghs_FAKEtoken0123456789abcdefABCDEF";
+
+/** Real git over file:// bare repositories, through a fake GitRemote that hands out `token` (none by default). */
+describe("GitVcsProvider per-repository workspaces (real git)", { timeout: 30_000 }, () => {
+  const run = (cwd: string, args: string[]) =>
+    execFileSync("git", ["-c", "commit.gpgSign=false", ...args], {
+      cwd,
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: cwd,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_AUTHOR_NAME: "Test",
+        GIT_AUTHOR_EMAIL: "test@example.invalid",
+        GIT_COMMITTER_NAME: "Test",
+        GIT_COMMITTER_EMAIL: "test@example.invalid",
+      },
+    })
+      .toString()
+      .trim();
+
+  interface Bare {
+    repository: string;
+    bare: string;
+    commits: string[];
+  }
+
+  /** A bare repository `name` whose main has one commit per entry of `versions` (README.md holding it). */
+  async function bareRepo(root: string, name: string, versions: string[] = ["v1\n", "v2\n"]): Promise<Bare> {
+    const seed = resolve(root, `${name}-seed`);
+    await mkdir(seed, { recursive: true });
+    run(seed, ["init", "--quiet", "--initial-branch=main"]);
+    const commits: string[] = [];
+    for (const version of versions) {
+      await writeFile(resolve(seed, "README.md"), version);
+      run(seed, ["add", "README.md"]);
+      run(seed, ["commit", "--quiet", "-m", version.trim()]);
+      commits.push(run(seed, ["rev-parse", "HEAD"]));
+    }
+    const bare = resolve(root, `${name}.git`);
+    run(root, ["clone", "--quiet", "--bare", seed, bare]);
+    return { repository: `test/${name}`, bare, commits };
+  }
+
+  function fileRemote(bares: Bare[], token?: string): GitRemote {
+    const byName = new Map(bares.map((entry) => [entry.repository, entry.bare]));
+    return {
+      gitConfig: ["-c", "protocol.file.allow=always"],
+      normalizeRepository: (repository) => repository,
+      cloneUrl: (repository) => {
+        const bare = byName.get(repository);
+        if (!bare) throw new Error("vcs_remote_invalid");
+        return pathToFileURL(bare).href;
+      },
+      withAccess: (_repository, fn) => fn(token),
+      withReadAccess: (_repository, fn) => fn(token),
+      assertContinuationOpen: async () => undefined,
+      publish: async ({ workspace }) => ({ kind: "branch", branch: workspace.headRef }),
+      conflictError: () => new Error("conflict"),
+    };
+  }
+
+  async function setup(token?: string, git?: GitCommandRunner) {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "wardby-vcs-slots-")));
+    roots.push(root);
+    const main = await bareRepo(root, "app");
+    const tools = await bareRepo(root, "tools");
+    const base = await bareRepo(root, "base");
+    const remote = fileRemote([main, tools, base], token);
+    const rootDir = resolve(root, "vcs");
+    const make = () => new GitVcsProvider({ rootDir, remote, ...(git ? { git } : {}) });
+    const input: VcsPrepareInput = {
+      runId: "run-1",
+      repository: main.repository,
+      baseRef: "main",
+      headRef: "wardby/run-run-1",
+      protectedPaths: [".github/workflows/**"],
+    };
+    return { root, rootDir, main, tools, base, remote, provider: make(), make, input };
+  }
+
+  async function namesUnder(directory: string): Promise<string[]> {
+    const names: string[] = [];
+    for (const entry of await readdir(directory, { withFileTypes: true, recursive: true })) names.push(entry.name);
+    return names;
+  }
+
+  it("prepares a writable slot beside the default, pushes its branch, and cleans up only the slot", async () => {
+    const { rootDir, tools, provider, input } = await setup();
+    const primary = await provider.prepareWorkspace(input);
+    const slot = await provider.prepareWorkspace({ ...input, repository: tools.repository, slot: { name: "tools" } });
+    expect(slot).toMatchObject({
+      id: "vcs-run-1:tools",
+      slot: { name: "tools" },
+      workspacePath: resolve(rootDir, "run-1", "repos", "tools", "workspace"),
+      gitMetadataPath: resolve(rootDir, "run-1", "repos", "tools", "git"),
+      baseCommit: tools.commits.at(-1),
+    });
+    expect(slot).not.toHaveProperty("branchRunId");
+    expect(await readFile(resolve(slot.workspacePath, "README.md"), "utf8")).toBe("v2\n");
+    await writeFile(resolve(slot.workspacePath, "tool.txt"), "new\n");
+    const result = await provider.finalizeChanges(slot);
+    expect(result).toMatchObject({ outcome: "branch_pushed", headRef: "wardby/run-run-1" });
+    expect(run(tools.bare, ["rev-parse", "refs/heads/wardby/run-run-1"])).toBe(
+      (result as { commitSha: string }).commitSha,
+    );
+
+    await provider.cleanup(slot);
+    expect(existsSync(resolve(rootDir, "run-1", "repos", "tools"))).toBe(false);
+    expect(existsSync(primary.workspacePath)).toBe(true);
+    expect(existsSync(primary.gitMetadataPath)).toBe(true);
+    // A slot handle can't clean up the default, nor the default's handle a slot.
+    await expect(provider.cleanup({ ...slot, workspacePath: primary.workspacePath })).rejects.toThrow(
+      "vcs_workspace_handle_invalid",
+    );
+    await expect(provider.cleanup({ ...primary, slot: { name: "tools" } })).rejects.toThrow(
+      "vcs_workspace_handle_invalid",
+    );
+  });
+
+  it("refuses a slot before the default workspace exists, and a slot name that isn't a repository name", async () => {
+    const { rootDir, tools, provider, input } = await setup();
+    await expect(
+      provider.prepareWorkspace({ ...input, repository: tools.repository, slot: { name: "tools" } }),
+    ).rejects.toThrow("vcs_workspace_path_invalid");
+    expect(existsSync(resolve(rootDir, "run-1"))).toBe(false);
+    await provider.prepareWorkspace(input);
+    for (const name of ["workspace", "../x", "Tools", ""]) {
+      await expect(
+        provider.prepareWorkspace({ ...input, repository: tools.repository, slot: { name } }),
+      ).rejects.toThrow("vcs_slot_invalid");
+    }
+  });
+
+  it("refuses a second slot of the same name and leaves the first intact", async () => {
+    const { tools, provider, input } = await setup();
+    await provider.prepareWorkspace(input);
+    const slot = await provider.prepareWorkspace({ ...input, repository: tools.repository, slot: { name: "tools" } });
+    await expect(
+      provider.prepareWorkspace({ ...input, repository: tools.repository, slot: { name: "tools" } }),
+    ).rejects.toThrow("vcs_workspace_exists");
+    expect(existsSync(slot.workspacePath)).toBe(true);
+  });
+
+  it("recovers a slot from a fresh provider instance", async () => {
+    const { tools, provider, make, input } = await setup();
+    await provider.prepareWorkspace(input);
+    const slotInput = { ...input, repository: tools.repository, slot: { name: "tools" } };
+    const slot = await provider.prepareWorkspace(slotInput);
+    await expect(make().recoverWorkspace(slotInput)).resolves.toEqual(slot);
+    await expect(make().recoverWorkspace({ ...slotInput, slot: { name: "other" } })).resolves.toBeNull();
+  });
+
+  it("copies one commit read-only, with no git metadata left anywhere under the copy", async () => {
+    const { rootDir, base, provider, input } = await setup();
+    await provider.prepareWorkspace(input);
+    const copy = await provider.prepareReadOnlyCopy({
+      runId: "run-1",
+      name: "base",
+      repository: base.repository,
+      commit: base.commits[0],
+    });
+    expect(copy).toEqual({
+      runId: "run-1",
+      name: "base",
+      repository: base.repository,
+      commit: base.commits[0],
+      workspacePath: resolve(rootDir, "run-1", "repos", "base", "workspace"),
+    });
+    expect(await readFile(resolve(copy.workspacePath, "README.md"), "utf8")).toBe("v1\n");
+    const names = await namesUnder(resolve(rootDir, "run-1", "repos", "base"));
+    expect(names.sort()).toEqual(["README.md", "workspace"]);
+
+    await provider.cleanupReadOnlyCopy(copy);
+    expect(existsSync(resolve(rootDir, "run-1", "repos", "base"))).toBe(false);
+    expect(existsSync(resolve(rootDir, "run-1", "workspace"))).toBe(true);
+    await expect(provider.cleanupReadOnlyCopy({ ...copy, workspacePath: rootDir })).rejects.toThrow(
+      "vcs_workspace_handle_invalid",
+    );
+  });
+
+  it("fails a read-only copy of an unknown commit and removes what it started", async () => {
+    const { rootDir, base, provider, input } = await setup();
+    await provider.prepareWorkspace(input);
+    await expect(
+      provider.prepareReadOnlyCopy({
+        runId: "run-1",
+        name: "base",
+        repository: base.repository,
+        commit: "d".repeat(40),
+      }),
+    ).rejects.toThrow("vcs_read_only_fetch_failed");
+    expect(existsSync(resolve(rootDir, "run-1", "repos", "base"))).toBe(false);
+  });
+
+  it("validates a read-only copy's input and needs the run's default workspace first", async () => {
+    const { base, provider, input } = await setup();
+    const copyInput = { runId: "run-1", name: "base", repository: base.repository, commit: base.commits[0] };
+    await expect(provider.prepareReadOnlyCopy(copyInput)).rejects.toThrow("vcs_workspace_path_invalid");
+    await provider.prepareWorkspace(input);
+    for (const bad of [{ name: "workspace" }, { name: "../base" }, { commit: "main" }, { runId: "../run-1" }]) {
+      await expect(provider.prepareReadOnlyCopy({ ...copyInput, ...bad })).rejects.toThrow(
+        "vcs_read_only_input_invalid",
+      );
+    }
+  });
+
+  it("refuses a read-only copy holding a symlink out of the workspace", async () => {
+    const { root, input } = await setup();
+    const seed = resolve(root, "linky-seed");
+    await mkdir(seed);
+    run(seed, ["init", "--quiet", "--initial-branch=main"]);
+    await symlink("/etc", resolve(seed, "etc-link"));
+    run(seed, ["add", "etc-link"]);
+    run(seed, ["commit", "--quiet", "-m", "link"]);
+    const commit = run(seed, ["rev-parse", "HEAD"]);
+    run(root, ["clone", "--quiet", "--bare", seed, resolve(root, "linky.git")]);
+    const linky: Bare = { repository: "test/linky", bare: resolve(root, "linky.git"), commits: [commit] };
+    const rootDir = resolve(root, "vcs-linky");
+    const app = await bareRepo(root, "app2");
+    const linkProvider = new GitVcsProvider({ rootDir, remote: fileRemote([linky, app]) });
+    await linkProvider.prepareWorkspace({ ...input, repository: "test/app2" });
+    await expect(
+      linkProvider.prepareReadOnlyCopy({ runId: "run-1", name: "linky", repository: linky.repository, commit }),
+    ).rejects.toThrow("vcs_symlink_escape");
+    expect(existsSync(resolve(rootDir, "run-1", "repos", "linky"))).toBe(false);
+  });
+
+  it("refuses a read-only copy whose checkout holds a nested repository", async () => {
+    // Git itself refuses to check out a path named .git, so this runner plants
+    // one right after the copy's read-tree, as a hostile tree would need to.
+    const real = new NodeGitCommandRunner({ homeDir: tmpdir() });
+    const planting: GitCommandRunner = {
+      async run(args, options) {
+        const result = await real.run(args, options);
+        if (args.includes("read-tree") && options?.cwd) {
+          await mkdir(resolve(options.cwd, "vendor", ".git"), { recursive: true });
+        }
+        return result;
+      },
+    };
+    const { rootDir, base, make, input } = await setup();
+    await make().prepareWorkspace(input);
+    const plantingProvider = new GitVcsProvider({ rootDir, remote: fileRemote([base]), git: planting });
+    await expect(
+      plantingProvider.prepareReadOnlyCopy({
+        runId: "run-1",
+        name: "base",
+        repository: base.repository,
+        commit: base.commits[0],
+      }),
+    ).rejects.toThrow("vcs_nested_repository");
+    expect(existsSync(resolve(rootDir, "run-1", "repos", "base"))).toBe(false);
+  });
+
+  it("creates another run's branch when branchRunId names it, and carries branchRunId through recovery", async () => {
+    const { main, provider, make, input } = await setup();
+    const borrowed = { ...input, runId: "run-2", headRef: "wardby/run-root-1", branchRunId: "root-1" };
+    const { branchRunId: _unused, ...withoutBranchRunId } = borrowed;
+    await expect(provider.prepareWorkspace(withoutBranchRunId)).rejects.toThrow("vcs_head_ref_invalid");
+    const prepared = await provider.prepareWorkspace(borrowed);
+    expect(prepared).toMatchObject({
+      branchRunId: "root-1",
+      headRef: "wardby/run-root-1",
+      baseCommit: main.commits[1],
+    });
+    expect(run(prepared.workspacePath, [`--git-dir=${prepared.gitMetadataPath}`, "symbolic-ref", "HEAD"])).toBe(
+      "refs/heads/wardby/run-root-1",
+    );
+    const recovered = await make().recoverWorkspace(borrowed);
+    expect(recovered?.branchRunId).toBe("root-1");
+    expect(recovered).toEqual(prepared);
+  });
+
+  it("requires branchRunId to equal the continuation's root run when both are set", async () => {
+    const { provider, input } = await setup();
+    await expect(
+      provider.prepareWorkspace({
+        ...input,
+        runId: "run-2",
+        headRef: "wardby/run-root-1",
+        continuation: { rootRunId: "root-1" },
+        branchRunId: "other-1",
+      }),
+    ).rejects.toThrow("vcs_head_ref_invalid");
+    await expect(
+      provider.prepareWorkspace({ ...input, runId: "run-2", headRef: "wardby/run-root-1", branchRunId: "../x" }),
+    ).rejects.toThrow("vcs_branch_run_id_invalid");
+  });
+
+  describe("keeps a fake token out of every failure (read and write extras)", () => {
+    /** A git that fails clone and fetch printing the token it was handed, and succeeds otherwise. */
+    async function leakyGit(root: string): Promise<GitCommandRunner> {
+      const executable = resolve(root, "leaky-git.mjs");
+      await writeFile(
+        executable,
+        [
+          `#!${process.execPath}`,
+          "import { readFileSync } from 'node:fs';",
+          "const args = process.argv.slice(2);",
+          "if (args.includes('clone') || args.includes('fetch')) {",
+          "  let piped = '';",
+          "  try { piped = readFileSync(3, 'utf8').trim(); } catch {}",
+          `  console.error('fatal: could not read from https://x-access-token:' + piped + '@github.com/o/r.git (${FAKE_SECRET})');`,
+          "  process.exit(128);",
+          "}",
+        ].join("\n"),
+      );
+      await chmod(executable, 0o700);
+      return new NodeGitCommandRunner({ gitBinary: executable, homeDir: root });
+    }
+
+    function causes(error: unknown): unknown[] {
+      const chain: unknown[] = [];
+      for (let current = error; current !== undefined && chain.length < 10;) {
+        chain.push(current);
+        current = current instanceof Error ? current.cause : undefined;
+      }
+      return chain;
+    }
+
+    function expectNoSecret(error: unknown): void {
+      expect(error).toBeInstanceOf(Error);
+      for (const link of causes(error)) {
+        expect(String(link)).not.toContain(FAKE_SECRET);
+        expect(JSON.stringify(link)).not.toContain(FAKE_SECRET);
+        expect((link as Error).stack ?? "").not.toContain(FAKE_SECRET);
+        expect(holdsValueFragment(String(link), FAKE_SECRET)).toBe(false);
+      }
+    }
+
+    it("for a writable slot whose clone fails", async () => {
+      const scratch = await mkdtemp(join(tmpdir(), "wardby-leaky-"));
+      roots.push(scratch);
+      const { rootDir, tools, make, input } = await setup(FAKE_SECRET, await leakyGit(scratch));
+      await mkdir(resolve(rootDir, "run-1"), { recursive: true, mode: 0o700 });
+      const error = await make()
+        .prepareWorkspace({ ...input, repository: tools.repository, slot: { name: "tools" } })
+        .then(
+          () => null,
+          (err: unknown) => err,
+        );
+      expect(String(error)).toContain("git_command_failed:128");
+      expect(String(error)).toContain("[REDACTED]");
+      expectNoSecret(error);
+      expect(existsSync(resolve(rootDir, "run-1", "repos", "tools"))).toBe(false);
+      expect(existsSync(resolve(rootDir, "run-1"))).toBe(true);
+    });
+
+    it("for a read-only copy whose fetch fails", async () => {
+      const scratch = await mkdtemp(join(tmpdir(), "wardby-leaky-"));
+      roots.push(scratch);
+      const { rootDir, base, make } = await setup(FAKE_SECRET, await leakyGit(scratch));
+      await mkdir(resolve(rootDir, "run-1"), { recursive: true, mode: 0o700 });
+      const error = await make()
+        .prepareReadOnlyCopy({ runId: "run-1", name: "base", repository: base.repository, commit: base.commits[0] })
+        .then(
+          () => null,
+          (err: unknown) => err,
+        );
+      expect(String(error)).toContain("vcs_read_only_fetch_failed");
+      expect(String((error as Error).cause)).toContain("[REDACTED]");
+      expectNoSecret(error);
+      expect(existsSync(resolve(rootDir, "run-1", "repos", "base"))).toBe(false);
+    });
+  });
+});
+
+describe("GitHubRemote publish with branchRunId", () => {
+  it("opens the pull request under the branch run's identity", async () => {
+    const { provider, github, git, input } = await harness();
+    git.headRef = "wardby/run-root-1";
+    const prepared = await provider.prepareWorkspace({
+      ...input,
+      runId: "run-2",
+      headRef: "wardby/run-root-1",
+      branchRunId: "root-1",
+    });
+    expect(prepared.branchRunId).toBe("root-1");
+    await provider.finalizeChanges(prepared);
+    expect(github.pullRequestCalls).toHaveLength(1);
+    expect(github.pullRequestCalls[0]).toMatchObject({ runId: "root-1", headRef: "wardby/run-root-1" });
+  });
+});
+
+describe("countWorkspaceEntries", () => {
+  it("counts every entry of several trees together, never following a symlink", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wardby-count-entries-"));
+    try {
+      const [one, two] = [join(root, "one"), join(root, "two")];
+      await mkdir(join(one, "dir"), { recursive: true });
+      await writeFile(join(one, "dir", "a.txt"), "a");
+      await mkdir(two);
+      await writeFile(join(two, "b.txt"), "b");
+      await symlink(root, join(two, "loop"));
+      // one: dir, dir/a.txt; two: b.txt, loop (not followed) = 4.
+      await expect(countWorkspaceEntries([one, two], 4)).resolves.toBeUndefined();
+      await expect(countWorkspaceEntries([one, two], 3)).rejects.toThrow("vcs_workspace_entry_limit");
+      await expect(countWorkspaceEntries([one], 3)).resolves.toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("NodeGitCommandRunner timeoutMs, input and env (#536)", () => {
+  const roots: string[] = [];
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  async function fakeGit(script: string): Promise<{ root: string; executable: string }> {
+    const root = await mkdtemp(join(tmpdir(), "wardby-git-timeout-"));
+    roots.push(root);
+    const executable = resolve(root, "fake-git.sh");
+    await writeFile(executable, `#!/bin/sh\n${script}\n`);
+    await chmod(executable, 0o700);
+    return { root, executable };
+  }
+
+  it("kills a command that outlives its timeout, with every child it started, as timed_out", async () => {
+    // A shell that starts a child: killing only the shell would leave sleep holding the pipes open.
+    const { root, executable } = await fakeGit(`echo started; sleep 30; echo never`);
+    const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root, path: "/usr/bin:/bin" });
+    const started = Date.now();
+    const error = await runner.run(["fetch"], { timeoutMs: 300 }).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(GitCommandError);
+    expect((error as Error).message).toContain("timed_out");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("finishes normally under its timeout", async () => {
+    const { root, executable } = await fakeGit(`echo done`);
+    const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root, path: "/usr/bin:/bin" });
+    await expect(runner.run(["status"], { timeoutMs: 5_000 })).resolves.toMatchObject({ stdout: "done\n" });
+  });
+
+  it("writes input to stdin and sets only the commit identity variables it allows", async () => {
+    const { root, executable } = await fakeGit(
+      `cat; echo "|$GIT_AUTHOR_NAME|$GIT_AUTHOR_EMAIL|$GIT_AUTHOR_DATE|$GIT_COMMITTER_NAME|$GIT_COMMITTER_EMAIL|$GIT_COMMITTER_DATE"`,
+    );
+    const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root, path: "/usr/bin:/bin" });
+    const result = await runner.run(["commit-tree"], {
+      input: "message\n",
+      env: {
+        GIT_AUTHOR_NAME: "Wardby",
+        GIT_AUTHOR_EMAIL: "wardby@users.noreply.github.com",
+        GIT_AUTHOR_DATE: "@1700000000 +0100",
+        GIT_COMMITTER_NAME: "Wardby",
+        GIT_COMMITTER_EMAIL: "wardby@users.noreply.github.com",
+        GIT_COMMITTER_DATE: "@1700000001 +0000",
+      },
+    });
+    expect(result.stdout).toBe(
+      "message\n|Wardby|wardby@users.noreply.github.com|@1700000000 +0100|Wardby|wardby@users.noreply.github.com|@1700000001 +0000\n",
+    );
+    await expect(
+      runner.run(["status"], { env: { GIT_DIR: "/elsewhere" } as unknown as GitCommandOptions["env"] }),
+    ).rejects.toThrow("git_env_invalid");
+  });
+
+  it("pipes a stream to stdin byte for byte, and kills the command when the stream fails", async () => {
+    const { root, executable } = await fakeGit(`od -An -tx1 | tr -d ' \\n'`);
+    const runner = new NodeGitCommandRunner({ gitBinary: executable, homeDir: root, path: "/usr/bin:/bin" });
+    const bytes = Buffer.from([0x50, 0x41, 0x43, 0x4b, 0x00, 0xff, 0x80, 0x0a]);
+    await expect(
+      runner.run(["index-pack"], { input: Readable.from([bytes]), timeoutMs: 5_000 }),
+    ).resolves.toMatchObject({
+      stdout: bytes.toString("hex"),
+    });
+    const failing = new Readable({
+      read() {
+        this.destroy(new Error("read failed"));
+      },
+    });
+    const { executable: waiting } = await fakeGit(`cat >/dev/null; echo finished`);
+    const waitingRunner = new NodeGitCommandRunner({ gitBinary: waiting, homeDir: root, path: "/usr/bin:/bin" });
+    const error = await waitingRunner.run(["index-pack"], { input: failing, timeoutMs: 5_000 }).then(
+      () => null,
+      (caught: unknown) => caught as Error,
+    );
+    // Killed at once (not left waiting on stdin until its timeout), and never a success.
+    expect(error?.message).toMatch(/^git_command_failed:/);
+    expect(error?.message).not.toContain("timed_out");
   });
 });

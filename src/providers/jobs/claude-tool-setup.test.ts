@@ -88,7 +88,7 @@ describe("claudeToolSetup", () => {
   it("hands the tool runner the registry settings a Codex shell gets, under /workspace/.cache", () => {
     const expected = registryWorkerSetup({
       proxyBaseUrl: "http://wardby-proxy:8787",
-      capability: CAPABILITY,
+      token: deriveRegistryToken(CAPABILITY),
       cacheRoot: "/workspace/.cache",
     });
     expect(JSON.parse(claudeToolSetup(spec, CAPABILITY))).toEqual({
@@ -96,6 +96,19 @@ describe("claudeToolSetup", () => {
       env: expected.env,
       files: expected.files,
     });
+  });
+
+  it("points the registry at a caller-given proxy base URL, and only there", () => {
+    const expected = registryWorkerSetup({
+      proxyBaseUrl: "http://coding-proxy.example.internal:9000",
+      token: deriveRegistryToken(CAPABILITY),
+      cacheRoot: "/workspace/.cache",
+    });
+    const raw = claudeToolSetup(spec, CAPABILITY, { proxyBaseUrl: "http://coding-proxy.example.internal:9000" });
+    expect(JSON.parse(raw)).toEqual({ schemaVersion: 1, env: expected.env, files: expected.files });
+    expect(raw).not.toContain("wardby-proxy");
+    // No options, or no proxyBaseUrl, is exactly the default.
+    expect(claudeToolSetup(spec, CAPABILITY, {})).toBe(claudeToolSetup(spec, CAPABILITY));
   });
 
   it("carries the registry-only token and never the capability", () => {
@@ -135,7 +148,7 @@ describe("claudeToolSetup", () => {
   it("leaves room for every variable of the most services a run can carry", () => {
     const registry = registryWorkerSetup({
       proxyBaseUrl: "http://wardby-proxy:8787",
-      capability: CAPABILITY,
+      token: deriveRegistryToken(CAPABILITY),
       cacheRoot: "/workspace/.cache",
     });
     expect(MAX_ENV_ENTRIES).toBeGreaterThanOrEqual(

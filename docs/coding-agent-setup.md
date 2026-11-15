@@ -71,14 +71,20 @@ is the way to approve a repository there.
 
 ## A coding agent's repositories
 
-A coding agent works in one repository per run, chosen from its list:
+A coding agent works in a **default repository** (mounted at `/workspace`) and,
+since 0.9.13, can also have more repositories in the same run, writable or
+read-only, each in its own folder under `/repos/<name>`. Its list comes from
+its links:
 
 - `codingProfile.repository` is the **default** repository.
-- `link_repository` adds more. A link on a coding agent takes
-  `access: "write"`, no triggers, no `checkName` and an optional `baseRef`
-  (the base branch for runs in that repository; default: the profile's
-  `baseRef`). The repository must be on GitHub or a `local:` path. Linking the
-  default repository again is refused.
+- `link_repository` adds more. A link on a coding agent takes no triggers and
+  no `checkName`, and either `access: "write"` with an optional `baseRef` (the
+  base branch for runs in that repository; default: the profile's `baseRef`),
+  or `access: "read"` with a required `ref` (or `ref: { fromFile }`) and no
+  `baseRef`. Either can also take `name` and `inDefaultSet`; see
+  [Several repositories in one run](#several-repositories-in-one-run). The
+  repository must be on GitHub or a `local:` path. Linking the default
+  repository again as a write link is refused.
 - `unlink_repository` removes one.
 
 ```json
@@ -89,7 +95,8 @@ Only the agent's owner (or an admin approving explicitly with `adminOverride`)
 can add a repository, and the same authorization applies as for the default;
 see [Repository authorization](#repository-authorization).
 
-The repository is chosen when the run starts and never changes during it:
+The default repository of a run is chosen when the run starts and never
+changes during it:
 
 - `trigger_agent` takes an optional `repository`. Leave it out and the run uses
   the default repository. Name one that is not on the list and the call is
@@ -108,6 +115,20 @@ The repository is chosen when the run starts and never changes during it:
   `continuePriorRun` is given: a follow-up works in the repository of the run
   it continues. Without a choice the call is refused with
   `repository_required`.
+
+- `trigger_agent` takes `continuePriorRun` (owner only): the id of a finished
+  earlier run of the same coding agent. The new run continues that run's
+  branch (its pull request, or for a local repository its pushed
+  `wardby/run-<id>` branch) in its repositories, so leave `baseRef` and
+  `repositories` out. A refusal starts with a fixed code (`unknown_run`,
+  `other_agent_run`, `not_a_coding_run`, `run_not_finished`,
+  `other_repository`, `no_pull_request`, `no_pushed_branch`, `other_owner`);
+  see the help article `errors/continuation-refused`. On the Substrate
+  launcher with warm rounds on, the round can resume the previous round's
+  workspace and session; see `substrate-warm-rounds`.
+- `trigger_agent` also takes `repositories`, and a webhook body
+  `wardbyRepositories`, to choose the extra repositories of one run; see
+  [Several repositories in one run](#several-repositories-in-one-run).
 
 Everything else about the agent is shared across its repositories: toolchain,
 worker image, services, system prompt, budget, protected paths and the package
@@ -130,6 +151,301 @@ repository their runs should not work in.
 
 For the refusals, see [Repository required](../help/errors/repository-required.md)
 and [Repository not on the agent's list](../help/errors/repository-not-listed.md).
+
+### Several repositories in one run
+
+A run always has its default repository at `/workspace`. Each extra repository
+is a link on the agent and appears in the run at `/repos/<name>`. Extras are
+**writable** (a write link) or **read-only** (a read link). Unless
+[git history](#git-history-in-a-run) is on, no folder has git metadata, so the
+run's task text carries one line per extra with its folder,
+repository, full commit and access, for example
+`Extra repository /repos/upstream: upstream-org/upstream at <commit>, read-only.`
+A run with only its default repository gets no such lines.
+
+**Read links.** `link_repository` with `access: "read"` adds a repository the
+run can look at but never change:
+
+```json
+{
+  "agentId": "<agent id>",
+  "repository": "upstream-org/upstream",
+  "access": "read",
+  "name": "upstream",
+  "ref": "main",
+  "inDefaultSet": true
+}
+```
+
+- A read link needs a `ref`: a branch, a tag or a full 40-hex commit SHA. It
+  takes no triggers, `checkName` or `baseRef`. The repository can be on GitHub
+  or a `local:` path.
+- The run gets one commit's files and no git history (a link with
+  `as: "remote"` is the exception; see [Git history in a
+  run](#git-history-in-a-run)). The commit is resolved
+  when the run is dispatched and recorded on the run, so a branch that moves
+  later does not change a run already started. Nothing in a read-only folder is
+  collected, committed or pushed.
+- The agent's owner needs read access to the repository on the host (or an
+  admin approves the link with `adminOverride`), as for any link. A public
+  repository is cloned anonymously when the GitHub App is not installed on it.
+- Read links follow the GitHub allowlist like every link. To read another
+  account's repository, add that account to `WARDBY_GITHUB_ALLOWED_ACCOUNTS`;
+  an administrator's approval does not reach past it.
+
+**`name`.** The folder name under `/repos/` and the way the run, `trigger_agent`
+and delegation refer to the link. It matches `[a-z0-9][a-z0-9._-]{0,62}` and is
+not `workspace`. The default is the repository's short name in lower case
+(`your-org/api` is `api`). Names are unique per agent. The same repository
+can be linked more than once under different names only as read links: an
+agent has at most one write link per repository, and a second is refused. A
+name already used by another link is
+refused with `repository_name_taken`, and a name (or default name) that does
+not fit the format with `repository_name_invalid`; pass an explicit `name` in
+either case. See [Repository name taken](../help/errors/repository-name-taken.md)
+and [Repository name invalid](../help/errors/repository-name-invalid.md).
+
+**`ref` and `fromFile`.** Instead of a fixed ref, a read link can take
+`ref: { "fromFile": "<path>" }`. The file is read from the **default
+repository's** base branch when the run is dispatched and holds one trimmed
+line of at most 255 bytes: a branch, a tag or a 40-hex commit SHA. A missing,
+empty, too long or invalid file, or a ref that does not exist, refuses the run
+before anything is created with `repository_ref_unreadable`. The message names
+the link and the file's path and never the file's content. A scheduled run has
+no caller to answer, so this refusal, like `repository_set_too_large` and
+`coding_repositories_unsupported`, is recorded as a `refused` run with the same
+message in `list_runs`, and the schedule moves on to its next time instead of
+retrying. See
+[Repository ref could not be read](../help/errors/repository-ref-unreadable.md).
+
+**The default set.** A link with `inDefaultSet: true` is in every run of the
+agent. A run's repositories are the default repository plus the links in the
+default set. There is no "all repositories" switch, so linking a repository
+never widens an existing agent's runs by itself.
+
+**Per-run lists.** One run can name its own list of link names, which replaces
+the default set for that run (`[]` means the default repository only):
+
+- `trigger_agent` takes `repositories`. As with `repository`, only the agent's
+  owner can pass it, unless `codingProfile.allowWebhookTaskOverride` is on.
+- A webhook body can carry `wardbyRepositories` (up to 32 names) under the same
+  `allowWebhookTaskOverride` rule as `wardbyRepository`. A refusal is a 400
+  with `{ "error": "invalid_repositories" }`, and for a name or size refusal
+  also `"error_description"` (`repository_not_listed`,
+  `repository_set_too_large`, or `coding_repositories_unsupported` when this
+  deployment's executor cannot resolve extra repositories); an unreadable ref
+  is a 400
+  `{ "error": "repository_ref_unreadable" }`.
+- A lead's `delegate_to_<name>` call takes `repositories` when the sub-agent
+  has any set-eligible link. A set or ref refusal comes back to the lead as
+  `{ "error": "<code>", "message": "…" }`.
+- A name that is not a set-eligible link of the agent is refused with
+  `repository_not_listed`; a repeated name, or `repositories` sent with a
+  continuation (a follow-up works in its run's own set), with
+  `invalid_repositories`. `repositories` on a native agent is refused too.
+  See [Invalid repositories](../help/errors/invalid-repositories.md).
+- `repository` still chooses which writable link is the run's default
+  repository at `/workspace`.
+
+**Limits.**
+
+- `CODING_MAX_RUN_REPOSITORIES` (default `5`) caps the repositories of one run:
+  the default repository plus its extras. It must be between 1 and 17 (the
+  default repository plus 16 extras); a larger value fails config load and
+  stops start-up. `link_repository` refuses a default set over it, and a
+  per-run list over it is refused at dispatch, both with
+  `repository_set_too_large`. See
+  [Repository set too large](../help/errors/repository-set-too-large.md).
+- Shared across the run: the workspace disk budget (`workspaceDiskMb`) and the
+  100,000-entry cap on files and folders cover all repositories together.
+- Per writable repository: `VCS_MAX_CHANGED_FILES`, `VCS_MAX_DIFF_BYTES` and
+  the protected paths apply to each repository's own changes.
+- Only the default repository supplies `CLAUDE.md`, skills, the dependency
+  cache, `services.yaml` and the knowledge index.
+- `CODING_MAX_RESULT_BUNDLE_MB` (default `256`, a positive whole number, capped
+  at the run's disk) caps the result bundle a git-history run returns for each
+  repository; see [Git history in a run](#git-history-in-a-run). A bad value
+  stops start-up.
+
+**Publishing.** Each writable repository with changes gets its own branch
+(`wardby/run-<id of the root run>`) and pull request, the default repository first and
+then the extras in the order of the run's set. The pull requests list each
+other in their "Related pull requests" section, and each carries its own merge
+order. A run whose repositories all published (or had nothing to publish)
+succeeds. If some published and others failed, the run ends **failed** with
+`partially_published`: what published stays published, and the error lists
+each repository as `published`, `no_changes` or the category it failed with. A
+follow-up retries the failed ones. See
+[Partially published](../help/errors/partially-published.md).
+
+**Authorization.** Before the clone, and again before each push, every
+repository of the run is checked against the agent owner's current access and
+the link must still exist with the same access. A denial refuses the run (or
+the push) with the matching `repo_access_*` code; see
+[Repository access refused](../help/errors/repo-access.md).
+
+**Follow-ups.** A follow-up, a review fix round or mark-ready always works in
+the set of the run it continues, with the same names and resolved commits; it
+never re-resolves refs. A follow-up can start from the pull request of any
+writable repository of the set, and each repository's pull request is updated
+in place (a repository that only now has changes gets a new one). Only one
+follow-up runs at a time for each run, single-repository runs included: a
+mention that arrives meanwhile gets a comment saying a follow-up is already
+running, and the person mentions again after it finishes. This is a change for
+single-repository runs, which could previously overlap. A repository other than
+the default one still needs its own review link with the triggers you want
+before it gets reviews or fix rounds.
+
+**Where it shows.** `get_run` lists a run's `repositories`; `list_runs`
+repository search matches any of them; the viewer and the Claude Code pane
+show one pull request line for each repository changed. A top-level coding
+run's own pull requests appear in `run_completed.pullRequests` and in the
+finished comment, as a delegated sub-run's always did.
+
+**Resume locally.** Local session resume maps only `/workspace`: a resumed
+session sees the default repository, and `/repos/<name>` folders are not
+recreated on the developer's machine. The pane lists each extra repository
+with its branch or commit and a clone command instead.
+
+For a worked example, see the fork-sync recipe in
+[Agent recipes](agent-recipes.md#fork-sync-one-coding-agent-git-history-and-a-remote).
+
+### Git history in a run
+
+By default a run's folders hold files only and Wardby commits the agent's
+changes as one commit. With `codingProfile.gitHistory` the default repository
+and every writable extra get a real `.git`, so the agent can use `log`,
+`blame`, `bisect`, `merge` and `commit`, and the pull request carries its real
+commits, merge commits included. The motivating case is a fork sync: merge
+`upstream/main`, fix the conflicts, commit; the merge commit moves the merge
+base forward so the next sync only merges what is new. It needs Wardby 0.9.13
+or later.
+
+**Setting.** `codingProfile.gitHistory` is `{ "depth": <1..100000> }` or
+`{ "depth": "full" }`, and `null` (the default) is off. `create_agent` and
+`update_agent` take it, and `update_agent` clears it with `null`. It is stored as
+`gitHistoryDepth` and `gitHistoryFull`, and `get_agent` shows those two fields
+rather than `gitHistory` (full overrides depth). It is fixed at dispatch and
+copied to the run, so a change applies to later runs. A numeric depth can give
+somewhat more history than asked; it normally gives at least the depth, but
+that is not guaranteed, so use `"full"` for fork sync.
+
+**Remote links.** A read link with `as: "remote"` is fetched into the default
+repository's `.git` instead of mounted at `/repos/<name>`. Its `name` is the git
+remote name (`origin` is reserved), and its resolved commit is stored as
+`refs/remotes/<name>/<label>`, where the label is the branch or tag you gave as
+`ref`, or `pinned` for a 40-hex SHA or a `fromFile` ref.
+
+```json
+{
+  "agentId": "<agent id>",
+  "repository": "upstream-org/upstream",
+  "access": "read",
+  "name": "upstream",
+  "ref": "main",
+  "inDefaultSet": true,
+  "as": "remote"
+}
+```
+
+- `as` is `"folder"` (default) or `"remote"`. A remote must be a read link on a
+  coding agent, on the same host as the default repository (GitHub with GitHub,
+  `local:` with `local:`); otherwise it is refused with
+  `repository_remote_invalid`, at link time or at dispatch.
+- A run whose set includes a remote link while `gitHistory` is off is refused
+  with `repository_remote_needs_history`; a scheduled run records it as
+  `refused`.
+- Remote links count toward `CODING_MAX_RUN_REPOSITORIES`; allowlist, access
+  checks and the other read-link rules are unchanged.
+- The commit is fetched by Wardby before the run, with the same access as a
+  read-only folder. A failure is `vcs_remote_fetch_failed`.
+
+**Operator notes on remotes.**
+
+- Merging a remote pushes that remote's history into the default repository's
+  branch. If the upstream is private, its history becomes part of the fork,
+  which may be public.
+- Prefer a branch or tag `ref` for remote links. A remote fetched by a raw SHA
+  or a `fromFile` SHA is trusted as upstream content, and its changes are not
+  checked against `protectedPaths`. Only use SHAs you trust.
+
+**What the agent gets.** The task text says the workspace has history to the
+configured depth (or full), lists each remote as `<name>/<label> at <commit>`,
+and says fetching and pushing are not possible, so the agent commits its work;
+uncommitted changes are collected as well. Wardby builds the worker's `.git`
+itself: its own config, no hooks, no remotes, no URLs and no credentials. A
+worker that replaces or corrupts `.git` cannot affect Wardby's repository,
+because only a validated bundle is imported.
+
+**What is pushed.** When the run ends (also when it stops with
+`budget_exhausted`), the worker returns its new commits as a bundle. Wardby
+fetches it with object checks, then:
+
+- requires at most 500 new commits per repository (`vcs_result_commit_limit`);
+- requires each commit message to be at most 64 KiB and free of token-shaped
+  text, as are the author and committer names and emails
+  (`vcs_result_commit_unsafe`);
+- requires the base to be an ancestor of the result, and every new commit's
+  parents to be other new commits, the base, or a remote's fetched tip
+  (`vcs_result_history_invalid`);
+- refuses a bundle that is not a valid single-head bundle
+  (`vcs_result_bundle_invalid`) or is larger than `CODING_MAX_RESULT_BUNDLE_MB`
+  (`vcs_result_bundle_too_large`);
+- refuses any commit touching a path no run collects (`node_modules`, `.venv`,
+  `venv`, `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.tox`,
+  `.vite`, `.cache`, and the agent's `collectExclude`)
+  (`vcs_result_path_excluded`);
+- rewrites each commit with the author and committer
+  `Wardby <wardby@users.noreply.github.com>`, keeping the tree, the parents, the
+  message and the original author and committer dates. Signatures are dropped
+  and non-UTF-8 messages are re-encoded;
+- runs the usual checks on the agent's own changes: the changed-file and
+  diff-byte limits, `protectedPaths` for every path the agent's commits and
+  merge resolutions touch, and conflict markers in the final tree of every
+  merge. Upstream's own commits, reaching the pull request as parents of a
+  merge or by a fast-forward to a remote's tip, are upstream's: they are not
+  checked against `protectedPaths`, and a fast-forward pushes upstream's tip
+  unchanged;
+- commits any uncommitted files on top as `Wardby run <id>`.
+
+If there is no new commit, the result is the usual files-only result.
+
+**Continuations.** A follow-up, fix round or mark-ready clones the pull request
+branch with the same depth. When it merges the target branch first, Wardby
+commits that merge before the run starts. If it conflicts, the merge is
+committed with the conflict markers in place and the agent must resolve them;
+the final tree is checked for markers.
+
+**Images.** The standard images include git. A Codex `workerImageRef` image
+needs `driver-v31` or later and `git`; a Claude Code `workerImageRef` tool runner
+needs `git`. Otherwise the run fails with `worker_git_unavailable`. See
+[Build your own worker image](coding-worker-byo-images.md#git-history-needs-a-current-driver-and-git).
+
+**Same everywhere.** Codex and Claude Code, Docker and Kubernetes, GitHub and
+`local:` behave the same.
+
+**Rare failures.** `vcs_history_shortened` is reported as
+`vcs_remote_fetch_failed:origin` (a continuation's deepening made a shallow,
+merge-heavy history shorter; use `"full"`). `vcs_git_history_invalid` and
+`vcs_worker_git_invalid` are internal consistency checks.
+`kubernetes_result_bundle_read_failed` is a failure to read the bundle on
+Kubernetes. `job_result_bundle_limit_invalid` is a bad
+`CODING_MAX_RESULT_BUNDLE_MB`. The first four fail the run in the `workspace`
+category; the last in `preflight`.
+
+Help articles: [Git history in coding runs](../help/git-history.md),
+[`repository_remote_invalid`](../help/errors/repository-remote-invalid.md),
+[`repository_remote_needs_history`](../help/errors/repository-remote-needs-history.md),
+[`vcs_remote_fetch_failed`](../help/errors/vcs-remote-fetch-failed.md),
+[`vcs_result_bundle_invalid`](../help/errors/vcs-result-bundle-invalid.md),
+[`vcs_result_bundle_too_large`](../help/errors/vcs-result-bundle-too-large.md),
+[`vcs_result_history_invalid`](../help/errors/vcs-result-history-invalid.md),
+[`vcs_result_commit_limit`](../help/errors/vcs-result-commit-limit.md),
+[`vcs_result_commit_unsafe`](../help/errors/vcs-result-commit-unsafe.md),
+[`vcs_result_path_excluded`](../help/errors/vcs-result-path-excluded.md) and
+[`worker_git_unavailable`](../help/errors/worker-git-unavailable.md). For a
+worked example, see the fork-sync recipe in
+[Agent recipes](agent-recipes.md#fork-sync-one-coding-agent-git-history-and-a-remote).
 
 ## See what a run was asked to do
 
@@ -189,8 +505,9 @@ JOB_LAUNCHER=docker
 
 ### What a coding run does
 
-1. Wardby clones the repository's **committed** history at the base ref
-   (`baseRef`, default the profile's). Untracked and uncommitted files, such as
+1. Wardby clones the repository's **committed** state at the base ref
+   (`baseRef`, default the profile's), one commit deep unless
+   [`gitHistory`](#git-history-in-a-run) is on. Untracked and uncommitted files, such as
    `.env.local`, never leave the host. `trigger_agent` returns `warnings` when
    the working tree is dirty or the repository uses submodules or Git LFS;
    uncommitted changes are not included, and submodules and LFS are not
@@ -198,7 +515,8 @@ JOB_LAUNCHER=docker
 2. The worker runs in the usual sandbox. `.wardby/services.yaml` works: it is
    read from the committed file at the base ref (never the working tree) and
    fails with the same errors as on GitHub (see [coding-services.md](coding-services.md)).
-3. Wardby validates the result and pushes one commit to the branch
+3. Wardby validates the result and pushes one commit (with `gitHistory` on, the
+   agent's own commits, rewritten to Wardby's identity) to the branch
    `wardby/run-<run id>` in the source repository. Your working tree, index
    and checked-out branch are never modified. `get_run` reports `resultBranch`
    and `baseSha`.
@@ -344,6 +662,22 @@ See [release verification](release-verification.md) for the complete gate.
 
 If the repository has `docs/knowledge/index.md`, every coding run's prompt
 includes it. See [Architecture knowledge bundles](knowledge.md).
+
+## Choosing a job launcher
+
+`JOB_LAUNCHER` selects where coding runs execute:
+
+- `docker`: a container per run on the control-plane host; the simplest setup
+  and the one this guide walks through.
+- `kubernetes`: a pod per run; see
+  [Coding-worker isolation](coding-worker-isolation.md#kubernetes-launcher-job_launcherkubernetes).
+- `substrate` (**experimental**): two gVisor-sandboxed Agent Substrate actors
+  per run for Claude Code, or one actor for Codex, with no Wardby secret in
+  either. Both providers are refused the same features: coding services, the
+  dependency cache and a custom worker image (`workerImageRef`). See
+  [Substrate job launcher](substrate-backend.md).
+
+`local` (the default) runs no coding agents.
 
 ## Repository instructions
 
@@ -829,6 +1163,16 @@ session in its own in-memory scratch of up to 80 MiB, which counts toward the
 run's memory, and reads at most 64 MiB of it when the run ends. Each run
 records a status of `stored`, `too_large`, `not_captured` or `failed`, with a
 short reason code and no content.
+
+**Secrets that change mid-run.** When the run launches, the server records
+which secrets the agent is given and when each last changed (identity and
+change time only, never a value). When the run ends it compares them with the
+current ones. If any secret changed in between (a new value, an OAuth sign-in
+or token refresh, a broker change, or a secret attached or detached, directly
+or through an MCP server), the session may hold an old value that redaction
+no longer knows, so nothing is stored: the status is `not_captured` with
+reason `secrets_changed`. Avoid rotating an agent's secrets while a run you
+want to resume is in progress.
 
 The blob store settings must be present on the **server process** (the
 control plane that launches coding runs), not only on the coding proxy. The

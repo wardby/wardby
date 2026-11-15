@@ -41,6 +41,10 @@ export interface GitRemote {
   cloneUrl(repository: string): string;
   /** Runs fn with an auth token for git (GitHub: installation token; local: undefined). */
   withAccess<T>(repository: string, fn: (token: string | undefined) => Promise<T>): Promise<T>;
+  /** The commit a ref names, or null when it does not exist (read links need no write access). */
+  resolveCommit?(repository: string, ref: string, access: "read" | "write"): Promise<string | null>;
+  /** Like withAccess for a read-only clone: GitHub may pass no token for a public repository without the App. */
+  withReadAccess?<T>(repository: string, fn: (token: string | undefined) => Promise<T>): Promise<T>;
   /** Continuation precondition (GitHub: the PR is still open). */
   assertContinuationOpen(input: {
     repository: string;

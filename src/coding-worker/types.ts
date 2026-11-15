@@ -1,11 +1,13 @@
 import type { CodingAgentOutput, CodingTaskInput } from "../coding/protocol.js";
 import type { DebugTracer } from "./debug-trace.js";
+import type { MCP_TOKEN_HEADER } from "./mcp-config.js";
 import type {
   dependencyCacheBudget,
   dependencyCacheTimeLimit,
   prepareDependencies,
   sealUploadWindow,
 } from "./dependency-cache.mjs";
+import type { createResultBundle, gitAvailable, resolveHistoryPath } from "./result-bundle.mjs";
 
 /** What the driver uses from the dependency cache module (dependency-cache.mjs); injectable for tests. */
 export interface DependencyCacheModule {
@@ -14,6 +16,13 @@ export interface DependencyCacheModule {
   dependencyCacheBudget: typeof dependencyCacheBudget;
   dependencyCacheTimeLimit: typeof dependencyCacheTimeLimit;
   BUDGET_MEASURE_TIMEOUT_MS: number;
+}
+
+/** What the driver uses from the result bundle module (result-bundle.mjs); injectable for tests. */
+export interface ResultBundleModule {
+  createResultBundle: typeof createResultBundle;
+  gitAvailable: typeof gitAvailable;
+  resolveHistoryPath: typeof resolveHistoryPath;
 }
 
 export type WorkerProgressEvent =
@@ -56,6 +65,10 @@ export interface WorkerClientConfig {
   disabledSkills: string[];
   /** The run's MCP token, set only when the run has MCP tools: sdk.ts then adds the wardby_mcp server. */
   mcpToken?: string;
+  /** Substrate: the capability is a placeholder the egress gateway replaces; it goes in this header, never Authorization. */
+  capabilityHeader?: "x-api-key";
+  /** Substrate: the MCP token is a placeholder the egress gateway replaces; it goes in this header, never Authorization. */
+  mcpTokenHeader?: typeof MCP_TOKEN_HEADER;
 }
 
 export type WorkerClientFactory = (config: WorkerClientConfig) => WorkerAgentClient;
@@ -74,4 +87,18 @@ export interface WorkerRunOptions {
   loadDependencyCache?: () => Promise<DependencyCacheModule>;
   /** The run's MCP token (WARDBY_MCP_TOKEN), set only when the run has MCP tools. */
   mcpToken?: string;
+  /** Tests only: replaces loading the result bundle module, which happens only on a run with git history. */
+  loadResultBundle?: () => Promise<ResultBundleModule>;
+  /** The git the history check and the result bundle run; "git" (on PATH) by default. */
+  gitBinary?: string;
+  /** Where the extra repositories are (/repos/<name>); "/repos" by default. */
+  reposRoot?: string;
+  /** One operator log line (a fixed-code JSON object); stderr by default. */
+  operatorLog?: (event: Record<string, string>) => void;
+  /** Substrate: the run's registry token as handed over (WARDBY_REGISTRY_TOKEN); else derived from the capability. */
+  registryToken?: string;
+  /** Substrate: send the (placeholder) capability in this header (WARDBY_CAPABILITY_HEADER); forwarded to createClient. */
+  capabilityHeader?: "x-api-key";
+  /** Substrate: send the (placeholder) MCP token in this header (WARDBY_MCP_TOKEN_HEADER); forwarded to createClient. */
+  mcpTokenHeader?: typeof MCP_TOKEN_HEADER;
 }

@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { jobLauncherContract } from "./contract-suite.js";
 import { FakeJobLauncher } from "./fake.js";
 import type { JobSpec } from "./types.js";
@@ -15,14 +18,55 @@ function spec(runId = "run-1"): JobSpec {
   };
 }
 
-jobLauncherContract("Fake", () => {
-  const launcher = new FakeJobLauncher();
-  return {
-    launcher,
-    spec: spec(),
-    finish: (handle, result) => launcher.finish(handle, result),
-    lose: (handle) => launcher.lose(handle),
-  };
+const fakeRoots: string[] = [];
+afterEach(async () => {
+  await Promise.all(fakeRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+jobLauncherContract(
+  "Fake",
+  () => {
+    const launcher = new FakeJobLauncher();
+    return {
+      launcher,
+      spec: spec(),
+      finish: (handle, result) => launcher.finish(handle, result),
+      lose: (handle) => launcher.lose(handle),
+    };
+  },
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "wardby-fake-collect-"));
+    fakeRoots.push(root);
+    const destination = join(root, "workspace");
+    await mkdir(destination);
+    const launcher = new FakeJobLauncher();
+    return {
+      launcher,
+      spec: spec(),
+      destination,
+      finish: (handle) => launcher.finish(handle),
+      fillJobWorkspace: async (handle, files) => {
+        const jobWorkspace = join(root, "job-workspace");
+        for (const [path, content] of Object.entries(files)) {
+          await mkdir(dirname(join(jobWorkspace, path)), { recursive: true });
+          await writeFile(join(jobWorkspace, path), content);
+        }
+        launcher.setJobWorkspace(handle, jobWorkspace);
+      },
+    };
+  },
+);
+
+describe("FakeJobLauncher workspace collection", () => {
+  it("refuses to collect before the job succeeded, or without a job workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wardby-fake-collect-"));
+    fakeRoots.push(root);
+    const launcher = new FakeJobLauncher();
+    const handle = await launcher.launch(spec());
+    await expect(launcher.materializeWorkspace(handle, root)).rejects.toThrow("job_not_succeeded");
+    await launcher.finish(handle);
+    await expect(launcher.materializeWorkspace(handle, root)).rejects.toThrow("job_workspace_missing");
+  });
 });
 
 describe("FakeJobLauncher controls", () => {

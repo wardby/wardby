@@ -7,9 +7,13 @@ import {
   describeError,
   redactSecrets,
   workerDebugTracer,
+  workerTracerFor,
 } from "./debug-trace.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
+
 import { holdsValueFragment } from "../sandbox/secret-fragments.test-support.js";
+
+const FAKE_CAP_FOR_TRACE = "rrp_fake_capability_value_000001";
 
 const CAPABILITY = `rrp_${"A".repeat(43)}`;
 
@@ -168,6 +172,88 @@ describe("workerDebugTracer", () => {
       expect(lines.join("\n")).not.toContain(token);
       expect(lines.join("\n")).toContain("[REDACTED]");
     }
+  });
+
+  it("redacts a given registry token and the placeholder capability, raw and JSON-escaped", () => {
+    const placeholder = "rrp_placeholder_injected_by_gateway";
+    const registryToken = "rrg_FAKE_REGISTRY_TOKEN_NOT_REAL_000000000000000";
+    const lines: string[] = [];
+    const tracer = workerDebugTracer(
+      { runId: "run_123", debugTrace: true },
+      placeholder,
+      (line) => lines.push(line),
+      [],
+      registryToken,
+    );
+    const values = [registryToken, placeholder];
+    const escaped = values.map((value) => JSON.stringify(value).slice(1, -1));
+    tracer!.record("event", {
+      text: `npm used ${registryToken}; codex sent x-api-key ${placeholder}`,
+      nested: { json: JSON.stringify({ token: registryToken, capability: placeholder }) },
+      escaped,
+      [registryToken]: placeholder,
+    });
+    const written = lines.join("\n");
+    for (const value of [...values, ...escaped]) expect(written).not.toContain(value);
+    expect(written).toContain("[REDACTED]");
+    // The derived token of the placeholder is still redacted without a given one.
+    const fallback: string[] = [];
+    workerDebugTracer({ runId: "run_123", debugTrace: true }, placeholder, (line) => fallback.push(line))!.record(
+      "event",
+      deriveRegistryToken(placeholder),
+    );
+    expect(fallback.join("")).not.toContain(deriveRegistryToken(placeholder));
+  });
+
+  it("redacts a given registry token that is not rrg_-shaped, so the exact-value wiring is proven", () => {
+    const placeholder = "rrp_placeholder_injected_by_gateway";
+    const given = "plain-given-token-xyz";
+    const lines: string[] = [];
+    const tracer = workerDebugTracer(
+      { runId: "run_123", debugTrace: true },
+      placeholder,
+      (line) => lines.push(line),
+      [],
+      given,
+    );
+    tracer!.record("event", { text: `npm used ${given}`, [given]: given });
+    expect(lines.join("\n")).not.toContain(given);
+    expect(lines.join("\n")).toContain("[REDACTED]");
+    // Without the token passed in, the value is not recognised: the test fails if the wiring is dropped.
+    const unwired: string[] = [];
+    workerDebugTracer({ runId: "run_123", debugTrace: true }, placeholder, (line) => unwired.push(line))!.record(
+      "event",
+      { text: given },
+    );
+    expect(unwired.join("\n")).toContain(given);
+  });
+
+  it("builds the worker's tracer from its credentials, redacting a given registry token whatever its shape", () => {
+    const placeholder = "rrp_placeholder_injected_by_gateway";
+    const given = "plain-given-token-xyz";
+    const mcp = "mcp-token-value-abc";
+    const lines: string[] = [];
+    const tracer = workerTracerFor(
+      { runId: "run_123", debugTrace: true },
+      { capability: placeholder, registryToken: given },
+      mcp,
+      (line) => lines.push(line),
+    );
+    tracer!.record("event", { text: `npm used ${given} and ${mcp} with ${placeholder}` });
+    const out = lines.join("\n");
+    expect(out).not.toContain(given);
+    expect(out).not.toContain(mcp);
+    expect(out).not.toContain(placeholder);
+    expect(out).toContain("[REDACTED]");
+    // Without a given token (Docker, Kubernetes): the token derived from the capability, as before.
+    const derived: string[] = [];
+    workerTracerFor({ runId: "run_123", debugTrace: true }, { capability: FAKE_CAP_FOR_TRACE }, undefined, (line) =>
+      derived.push(line),
+    )!.record("event", { text: deriveRegistryToken(FAKE_CAP_FOR_TRACE) });
+    expect(derived.join("\n")).not.toContain(deriveRegistryToken(FAKE_CAP_FOR_TRACE));
+    expect(
+      workerTracerFor({ runId: "run_123" }, { capability: placeholder }, undefined, () => undefined),
+    ).toBeUndefined();
   });
 
   it("caps the run at the input's debugTraceMaxMb, or the default without one", () => {

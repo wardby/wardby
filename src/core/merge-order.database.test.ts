@@ -85,6 +85,7 @@ describe.skipIf(!process.env.DATABASE_URL)("CodingRun.mergeOrder (database)", ()
     await db.run.update({
       where: { id: root!.run.id },
       data: {
+        status: "succeeded",
         codingRun: {
           update: {
             result: {
@@ -121,6 +122,7 @@ describe.skipIf(!process.env.DATABASE_URL)("CodingRun.mergeOrder (database)", ()
     await db.run.update({
       where: { id: root!.run.id },
       data: {
+        status: "succeeded",
         codingRun: {
           update: {
             result: {
@@ -166,6 +168,7 @@ describe.skipIf(!process.env.DATABASE_URL)("CodingRun.mergeOrder (database)", ()
       await db.run.update({
         where: { id: runId },
         data: {
+          status: "succeeded",
           startedAt: new Date(clock),
           codingRun: {
             update: {

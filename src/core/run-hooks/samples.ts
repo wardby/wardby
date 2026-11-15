@@ -43,7 +43,20 @@ export const SAMPLE_PAYLOADS: Record<HookEventKind, RecordedPayload> = {
     finishedAt: "2026-01-01T00:05:00.000Z",
     costUsd: "0.000000",
     reason: null,
-    pullRequests: [],
+    pullRequests: [
+      {
+        repository: "your-org/app",
+        number: 12,
+        url: "https://github.com/your-org/app/pull/12",
+        outcome: "pull_request_opened",
+      },
+      {
+        repository: "your-org/tools",
+        number: 7,
+        url: "https://github.com/your-org/tools/pull/7",
+        outcome: "pull_request_opened",
+      },
+    ],
   },
 };
 

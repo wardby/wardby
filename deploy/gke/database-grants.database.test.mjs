@@ -17,6 +17,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../../src/core/db.ts";
 import { PrismaProxyLedger } from "../../src/providers/coding-proxy/prisma-ledger.ts";
 import { PrismaRegistryStore } from "../../src/providers/coding-proxy/registry/prisma-store.ts";
+import { PrismaRelayStore } from "../../src/providers/coding-proxy/substrate/prisma-relay-store.ts";
+import { createSubstrateRunFixture } from "../../src/providers/coding-proxy/substrate/substrate-fixture.test-support.ts";
 import { PrismaGatewayLedger } from "../../src/native-worker/ledger.ts";
 import { missingGrantsQuery, proxyGrantChecks } from "./proxy-grant-checks.mjs";
 
@@ -400,6 +402,44 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
     }
   });
 
+  it("lets the coding proxy relay Substrate lines through its run row and nothing more", async () => {
+    const token = `wr-${suffix}${suffix}${suffix}`.slice(0, 23);
+    const { runId: relayRunId, agentId: relayAgentId } = await createSubstrateRunFixture(admin, token);
+    try {
+      const proxy = clientAs(roles.proxy);
+      clients.push(proxy);
+      const relay = new PrismaRelayStore(proxy);
+      const channel = await relay.openChannel(token);
+      await relay.fromAgent(token, channel, 1, "hello");
+      await relay.requestCollect(token);
+      expect((await relay.pollTool(token, 0, 0)).map((event) => event.type)).toEqual(["open", "line", "collect"]);
+      await relay.fromTool(token, channel, 1, "back");
+      expect(await relay.pollAgent(token, channel, 0, 0)).toEqual([{ seq: 1, type: "line", line: "back" }]);
+      await relay.dropRelay(token);
+      // The launcher's own columns and the row itself are not the proxy's to change.
+      await expect(proxy.$executeRawUnsafe(`UPDATE "SubstrateRun" SET "phase" = 'x' WHERE false`)).rejects.toThrow(
+        /permission denied/,
+      );
+      // The Substrate routes read the run's actor shape by its token; the launcher alone sets it.
+      expect(
+        (await proxy.substrateRun.findUnique({ where: { token }, select: { actorShape: true } }))?.actorShape,
+      ).toBe("pair");
+      await expect(
+        proxy.$executeRawUnsafe(`UPDATE "SubstrateRun" SET "actorShape" = 'single' WHERE false`),
+      ).rejects.toThrow(/permission denied/);
+      await expect(proxy.$executeRawUnsafe(`DELETE FROM "SubstrateRun" WHERE false`)).rejects.toThrow(
+        /permission denied/,
+      );
+      await expect(
+        proxy.$executeRawUnsafe(`INSERT INTO "SubstrateRun" ("runId") SELECT NULL WHERE false`),
+      ).rejects.toThrow(/permission denied/);
+    } finally {
+      await admin.codingRun.deleteMany({ where: { runId: relayRunId } });
+      await admin.run.deleteMany({ where: { id: relayRunId } });
+      await admin.agent.deleteMany({ where: { id: relayAgentId } });
+    }
+  });
+
   it("keeps the app out of the migration history", async (ctx) => {
     const [{ exists }] = await admin.$queryRawUnsafe(
       `SELECT to_regclass('public."_prisma_migrations"') IS NOT NULL AS exists`,
@@ -439,9 +479,12 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
         .replace(/\bRegistryApprovedVersion\b/g, `RegistryApprovedVersion${missing}`)
         .replace(/\bRegistryPlanRefusal\b/g, `RegistryPlanRefusal${missing}`)
         .replace(/\bDependencySnapshot\b/g, `DependencySnapshot${missing}`)
+        .replace(/\bSubstrateRelayChannel\b/g, `SubstrateRelayChannel${missing}`)
+        .replace(/\bSubstrateRelayEvent\b/g, `SubstrateRelayEvent${missing}`)
+        .replace(/\bSubstrateRun\b/g, `SubstrateRun${missing}`)
         .replace(/\b_prisma_migrations\b/g, `_prisma_migrations${missing}`);
       expect(sql).not.toMatch(
-        /"(CodingProxySession|CodingProxyRequest|Run|RunModelUsage|CodingRun|RegistryAllowance|RegistryFetch|RegistryAuditRecord|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|DependencySnapshot|_prisma_migrations)"/,
+        /"(CodingProxySession|CodingProxyRequest|Run|RunModelUsage|CodingRun|RegistryAllowance|RegistryFetch|RegistryAuditRecord|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|DependencySnapshot|SubstrateRelayChannel|SubstrateRelayEvent|SubstrateRun|_prisma_migrations)"/,
       );
       for (const st of statements(sql)) await admin.$executeRawUnsafe(st);
       const [{ tables, columns }] = await admin.$queryRawUnsafe(

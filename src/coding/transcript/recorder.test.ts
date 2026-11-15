@@ -24,6 +24,8 @@ const CAPABILITY = "rrp_abcdefghijklmnop";
 const RAW2 = 'fake"sec\\ret-0002';
 const NOW = new Date("2026-03-01T00:00:00.000Z");
 const DAY = 24 * 60 * 60 * 1000;
+const V1 = { id: "secret-1", name: "API_KEY", updatedAt: "2026-03-01T00:00:00.000Z" };
+const V2 = { ...V1, updatedAt: "2026-03-01T00:05:00.000Z" };
 
 const okHeader = (sessionId: string): TranscriptHeader => ({
   type: "wardby-transcript",
@@ -89,6 +91,7 @@ describe("RunTranscriptRecorder", () => {
       db: fake.db as unknown as RunTranscriptRecorderDeps["db"],
       blobs,
       secretValues: async () => [SECRET, RAW2],
+      secretVersions: async () => [V1],
       retentionDays: 30,
       maxBytes: 10 * 1024 * 1024,
       now: () => NOW,
@@ -99,6 +102,7 @@ describe("RunTranscriptRecorder", () => {
     runId: "run1",
     agentId: "agent1",
     provider: "claude-code",
+    launchSecretVersions: [V1],
     read: async () => workerFile() as string | undefined,
     ...over,
   });
@@ -213,6 +217,82 @@ describe("RunTranscriptRecorder", () => {
     expect(row()).toMatchObject({ reason: "secrets_unavailable", blobKey: null });
     await expect(blobs.get(transcriptBlobKey("run1"))).rejects.toBeInstanceOf(BlobStoreError);
     noLeak();
+  });
+
+  describe("a secret that changed while the run ran", () => {
+    // The session saw the old value; redaction now knows only the new one.
+    const OLD = "sk-fake-old-value-000001";
+    const NEW = "sk-fake-new-value-000002";
+    const rotated = () => recorder({ secretValues: async () => [NEW], secretVersions: async () => [V2] });
+    const sessionWithOld = async () => workerFile([], `saw ${OLD} then ${NEW}`) as string | undefined;
+
+    const nothingStored = async () => {
+      await expect(blobs.get(transcriptBlobKey("run1"))).rejects.toBeInstanceOf(BlobStoreError);
+      const json = JSON.stringify({ calls: fake.upsert.mock.calls, rows: [...fake.rows.values()] });
+      for (const text of [OLD, NEW, V1.updatedAt, V2.updatedAt]) expect(json).not.toContain(text);
+    };
+
+    it("stores nothing when a secret was rotated (not_captured / secrets_changed)", async () => {
+      expect(await rotated().record(input({ read: sessionWithOld }))).toBe("not_captured");
+      expect(row()).toMatchObject({
+        status: "not_captured",
+        reason: "secrets_changed",
+        blobKey: null,
+        sha256: null,
+        sessionId: "00000000-0000-4000-8000-000000000001",
+      });
+      await nothingStored();
+    });
+
+    it("stores nothing when a secret was attached, detached or renamed", async () => {
+      const cases = [
+        [],
+        [V1, { id: "secret-2", name: "OTHER", updatedAt: V1.updatedAt }],
+        [{ ...V1, name: "RENAMED" }],
+      ];
+      for (const current of cases) {
+        const status = await recorder({ secretVersions: async () => current }).record(input({ read: sessionWithOld }));
+        expect(status).toBe("not_captured");
+        expect(row()).toMatchObject({ reason: "secrets_changed" });
+      }
+      await nothingStored();
+    });
+
+    it("stores nothing when the launch versions were not recorded", async () => {
+      const status = await recorder().record(input({ launchSecretVersions: undefined, read: sessionWithOld }));
+      expect(status).toBe("not_captured");
+      expect(row()).toMatchObject({ reason: "secrets_changed" });
+      await nothingStored();
+    });
+
+    it("fails closed when the current versions can't be read", async () => {
+      const status = await recorder({
+        secretVersions: async () => {
+          throw new Error(`db says ${OLD}`);
+        },
+      }).record(input({ read: sessionWithOld }));
+      expect(status).toBe("failed");
+      expect(row()).toMatchObject({ reason: "secrets_unavailable" });
+      await nothingStored();
+    });
+
+    it("reads the versions after the values, so a change in between is caught", async () => {
+      const order: string[] = [];
+      const status = await recorder({
+        secretValues: async () => (order.push("values"), [SECRET]),
+        secretVersions: async () => (order.push("versions"), [V1]),
+      }).record(input());
+      expect(status).toBe("stored");
+      expect(order).toEqual(["values", "versions"]);
+    });
+
+    it("still stores when nothing changed, in any order", async () => {
+      const two = [V1, { id: "secret-2", name: "OTHER", updatedAt: V1.updatedAt }];
+      const status = await recorder({ secretVersions: async () => [...two].reverse() }).record(
+        input({ launchSecretVersions: two }),
+      );
+      expect(status).toBe("stored");
+    });
   });
 
   it("re-sanitises the worker body", async () => {

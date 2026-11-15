@@ -14,6 +14,11 @@ const workerNodePython = `ghcr.io/o/r/wardby-coding-worker-node-python@${digest(
 const claudeToolRunnerNodePython = `ghcr.io/o/r/wardby-claude-tool-runner-node-python@${digest("f")}`;
 const driver = `ghcr.io/o/r/wardby-coding-worker-driver@${digest("1")}`;
 const nativeWorker = `ghcr.io/o/r/wardby-native-worker@${digest("2")}`;
+const substrateAgent = `ghcr.io/o/r/wardby-substrate-agent@${digest("3")}`;
+const substrateTool = `ghcr.io/o/r/wardby-substrate-tool@${digest("4")}`;
+const substrateToolNodePython = `ghcr.io/o/r/wardby-substrate-tool-node-python@${digest("5")}`;
+const substrateCodex = `ghcr.io/o/r/wardby-substrate-codex@${digest("6")}`;
+const substrateCodexNodePython = `ghcr.io/o/r/wardby-substrate-codex-node-python@${digest("7")}`;
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), "wardby-images-"));
@@ -229,6 +234,68 @@ describe("resolveQuickstartImages", () => {
     });
     writePackageFile(dir, { runtime, worker, nativeWorker: "ghcr.io/o/r/wardby-native-worker:v1" });
     expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toHaveProperty("unavailable");
+  });
+
+  it("reads the Substrate bridge images when the release has them, each optional and pinned", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, substrateAgent, substrateTool, substrateToolNodePython });
+    expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toEqual({
+      runtime,
+      worker,
+      substrateAgent,
+      substrateTool,
+      substrateToolNodePython,
+      source: "package",
+    });
+    writePackageFile(dir, { runtime, worker, substrateTool });
+    expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toEqual({
+      runtime,
+      worker,
+      substrateTool,
+      source: "package",
+    });
+    for (const bad of [
+      { substrateAgent: "ghcr.io/o/r/wardby-substrate-agent:v1" },
+      { substrateTool: 7 },
+      { substrateToolNodePython: null },
+    ]) {
+      writePackageFile(dir, { runtime, worker, ...bad });
+      expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toHaveProperty("unavailable");
+    }
+  });
+
+  it("reads the Substrate Codex bridge images when the release has them, each optional and pinned", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, substrateCodex, substrateCodexNodePython });
+    expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toEqual({
+      runtime,
+      worker,
+      substrateCodex,
+      substrateCodexNodePython,
+      source: "package",
+    });
+    writePackageFile(dir, { runtime, worker, substrateCodex });
+    expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toEqual({
+      runtime,
+      worker,
+      substrateCodex,
+      source: "package",
+    });
+    for (const bad of [
+      { substrateCodex: "ghcr.io/o/r/wardby-substrate-codex:v1" },
+      { substrateCodexNodePython: "ghcr.io/o/r/wardby-substrate-codex-node-python:v1" },
+      { substrateCodex: 7 },
+      { substrateCodexNodePython: null },
+    ]) {
+      writePackageFile(dir, { runtime, worker, ...bad });
+      expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toHaveProperty("unavailable");
+    }
+  });
+
+  it("ignores keys it does not know", () => {
+    const dir = root();
+    writePackageFile(dir, { runtime, worker, somethingNewer: "x" });
+    expect(resolveQuickstartImages({ env: {}, packageRoot: dir })).toEqual({ runtime, worker, source: "package" });
   });
 
   it("rejects the whole package file when a Node + Python image is not digest-pinned", () => {

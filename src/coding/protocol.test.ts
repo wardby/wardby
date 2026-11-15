@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  CodingReadRefSchema,
+  RunRepositoryInputSchema,
   CODING_TASK_TRAILER_RESERVE_BYTES,
   CODING_PROTOCOL_VERSION,
   CodingAgentOutputSchema,
@@ -12,6 +14,7 @@ import {
   isSafeContextPath,
   normalizeCodingTag,
   CodingTaskInputSchema,
+  GitHistoryInputSchema,
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
   CLAUDE_CONTEXT_LIMITS,
@@ -760,5 +763,138 @@ describe("truncateText", () => {
     const cut = truncateText("é".repeat(100), 40);
     expect(Buffer.byteLength(cut)).toBeLessThanOrEqual(40);
     expect(cut.endsWith(SUMMARY_TRUNCATED_MARKER)).toBe(true);
+  });
+});
+
+describe("CodingReadRefSchema", () => {
+  it("accepts a branch, a tag and a full SHA (lower-cased)", () => {
+    expect(CodingReadRefSchema.parse("main")).toBe("main");
+    expect(CodingReadRefSchema.parse("v1.2.3")).toBe("v1.2.3");
+    expect(CodingReadRefSchema.parse("A".repeat(40))).toBe("a".repeat(40));
+  });
+  it.each(["", "-x", "a..b", "a b", "refs/heads/"])("refuses %j", (ref) => {
+    expect(CodingReadRefSchema.safeParse(ref).success).toBe(false);
+  });
+});
+
+describe("input.repositories", () => {
+  const base = {
+    schemaVersion: CODING_PROTOCOL_VERSION,
+    runId: "run-1",
+    repository: "o/r",
+    baseRef: "main",
+    headRef: "wardby/run-run-1",
+    task: "t",
+    model: "claude-sonnet-5",
+    budgetUsd: 1,
+    deadlineAt: new Date().toISOString(),
+  };
+  const entry = {
+    name: "base",
+    path: "/repos/base",
+    access: "read",
+    repository: "upstream-org/upstream",
+    commit: "a".repeat(40),
+  };
+
+  it("accepts extras at /repos/<name>", () => {
+    const parsed = CodingTaskInputSchema.parse({ ...base, repositories: [entry] });
+    expect(parsed.repositories?.[0].name).toBe("base");
+    expect(RunRepositoryInputSchema.safeParse(entry).success).toBe(true);
+  });
+  it("still parses an input without repositories (single-repository run)", () => {
+    expect(CodingTaskInputSchema.parse(base)).not.toHaveProperty("repositories");
+  });
+  it.each([
+    [{ ...entry, path: "/repos/other" }],
+    [{ ...entry, name: "workspace", path: "/repos/workspace" }],
+    [{ ...entry, token: "ghs_FAKEtoken0123456789abcdefABCDEF" }],
+  ])("refuses %j (no token fields)", (bad) => {
+    expect(CodingTaskInputSchema.safeParse({ ...base, repositories: [bad] }).success).toBe(false);
+  });
+  it("refuses duplicate names and an empty list", () => {
+    expect(CodingTaskInputSchema.safeParse({ ...base, repositories: [entry, entry] }).success).toBe(false);
+    expect(CodingTaskInputSchema.safeParse({ ...base, repositories: [] }).success).toBe(false);
+  });
+});
+
+describe("output pullRequests", () => {
+  const output = { schemaVersion: 1, runId: "run-1", outcome: "changes_ready", summary: "s", tests: [] };
+  it("is optional and null means none (Codex strict mode)", () => {
+    expect(CodingAgentOutputSchema.parse({ ...output, pullRequests: null }).pullRequests).toBeUndefined();
+    expect(CodingAgentOutputSchema.parse(output).pullRequests).toBeUndefined();
+  });
+  it("parses entries, normalizes title as a tag, nulls drop, and redacts descriptions", () => {
+    const parsed = CodingAgentOutputSchema.parse({
+      ...output,
+      pullRequests: [
+        {
+          name: "workspace",
+          title: "Sync Upstream",
+          description: "token ghs_FAKEtoken0123456789abcdefABCDEF",
+          mergeOrder: null,
+        },
+        { name: "tools", title: null, description: "d", mergeOrder: 2 },
+      ],
+    });
+    expect(parsed.pullRequests?.[0]).toEqual({
+      name: "workspace",
+      title: "sync-upstream",
+      description: expect.not.stringContaining("ghs_FAKE"),
+    });
+    expect(parsed.pullRequests?.[1]).toEqual({ name: "tools", description: "d", mergeOrder: 2 });
+  });
+  it("refuses a mergeOrder outside 1-99", () => {
+    expect(
+      CodingAgentOutputSchema.safeParse({ ...output, pullRequests: [{ name: "x", description: "d", mergeOrder: 100 }] })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe("input.gitHistory", () => {
+  const sha = "a".repeat(40);
+  const entry = { path: "/workspace", baseCommit: sha, excludeCommits: [] as string[] };
+  const base = { ...input, deadlineAt: "2026-09-06T15:00:00Z" };
+
+  it("accepts a repository list with baseCommit and excludeCommits", () => {
+    const history = {
+      repositories: [entry, { path: "/repos/tools", baseCommit: sha, excludeCommits: ["b".repeat(40)] }],
+    };
+    expect(GitHistoryInputSchema.parse(history)).toEqual(history);
+    expect(CodingTaskInputSchema.parse({ ...base, gitHistory: history }).gitHistory).toEqual(history);
+  });
+
+  it("rejects a bad SHA, extra keys and an empty list", () => {
+    expect(GitHistoryInputSchema.safeParse({ repositories: [{ ...entry, baseCommit: "abc" }] }).success).toBe(false);
+    expect(GitHistoryInputSchema.safeParse({ repositories: [{ ...entry, baseCommit: "A".repeat(40) }] }).success).toBe(
+      false,
+    );
+    expect(GitHistoryInputSchema.safeParse({ repositories: [{ ...entry, excludeCommits: ["xyz"] }] }).success).toBe(
+      false,
+    );
+    expect(GitHistoryInputSchema.safeParse({ repositories: [{ ...entry, extra: 1 }] }).success).toBe(false);
+    expect(GitHistoryInputSchema.safeParse({ repositories: [entry], extra: 1 }).success).toBe(false);
+    expect(GitHistoryInputSchema.safeParse({ repositories: [] }).success).toBe(false);
+  });
+
+  it("caps the repositories and each exclude list at 17", () => {
+    expect(GitHistoryInputSchema.safeParse({ repositories: Array.from({ length: 17 }, () => entry) }).success).toBe(
+      true,
+    );
+    expect(GitHistoryInputSchema.safeParse({ repositories: Array.from({ length: 18 }, () => entry) }).success).toBe(
+      false,
+    );
+    const excludes = (n: number) => ({
+      repositories: [{ ...entry, excludeCommits: Array.from({ length: n }, () => sha) }],
+    });
+    expect(GitHistoryInputSchema.safeParse(excludes(17)).success).toBe(true);
+    expect(GitHistoryInputSchema.safeParse(excludes(18)).success).toBe(false);
+  });
+
+  it("serializes with no gitHistory key when history is off", () => {
+    const parsed = CodingTaskInputSchema.parse(base);
+    expect("gitHistory" in parsed).toBe(false);
+    expect("gitHistory" in JSON.parse(JSON.stringify(parsed))).toBe(false);
   });
 });

@@ -100,7 +100,10 @@ describe("package blocked status", () => {
         const db = {
           agent: { findUnique: async () => ({ name: "lead" }) },
           runHostCheck: { findUnique: async () => null },
-          run: { findMany: async () => [{ id: "c", status: "succeeded", codingRun: { result: null } }] },
+          run: {
+            findUnique: async () => null,
+            findMany: async () => [{ id: "c", status: "succeeded", codingRun: { result: null } }],
+          },
           registryFetch: {
             findMany: async () => [
               { ...refusals("wardby_graph_limit")[0], outcome: "refused", version: null, sizeBytes: null },
@@ -203,7 +206,10 @@ describe("package blocked status", () => {
   });
   it("loads all coding children with one query and falls back on read failure", async () => {
     const db = {
-      run: { findMany: vi.fn(async () => [{ id: "c", status: "succeeded", codingRun: { result: null } }]) },
+      run: {
+        findUnique: async () => null,
+        findMany: vi.fn(async () => [{ id: "c", status: "succeeded", codingRun: { result: null } }]),
+      },
       registryFetch: {
         findMany: vi.fn(async () => [
           { ...refusals("wardby_graph_limit")[0], outcome: "refused", version: null, sizeBytes: null },
@@ -258,6 +264,7 @@ describe("package blocked status", () => {
     agent: { findUnique: async () => ({ name: "lead" }) },
     runHostCheck: { findUnique: async () => null },
     run: {
+      findUnique: async () => null,
       findMany: async () => [{ id: "c", status: failed ? "failed" : "succeeded", codingRun: { result } }],
     },
     registryFetch: {
@@ -359,6 +366,7 @@ describe("package blocked status", () => {
         agent: { findUnique: async () => ({ name: "lead" }) },
         runHostCheck: { findUnique: async () => null },
         run: {
+          findUnique: async () => null,
           findMany: async () => [
             { id: "a", status: "failed", codingRun: { result: null } },
             { id: "b", status: "succeeded", codingRun: { result: { outcome: "no_changes" } } },

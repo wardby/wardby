@@ -838,3 +838,125 @@ describe("isImmutableDockerImage", () => {
     expect(isImmutableDockerImage(reference)).toBe(false);
   });
 });
+
+describe("Docker isolation with extra repositories (#537)", () => {
+  const names = isolationNames(spec.runId);
+  const repositories: JobSpec["repositories"] = [
+    { name: "base", access: "read", hostPath: "/ws/run-sensitive-name/repos/base/workspace" },
+    { name: "tools", access: "write", hostPath: "/ws/run-sensitive-name/repos/tools/workspace" },
+  ];
+  const codex: JobSpec = { ...spec, repositories };
+  const claude: JobSpec = { ...claudeWithoutServices, repositories };
+  const readMount = `type=volume,src=${names.storageVolume},dst=/repos/base,volume-subpath=repos/base,volume-nocopy,readonly`;
+  const writeMount = `type=volume,src=${names.storageVolume},dst=/repos/tools,volume-subpath=repos/tools,volume-nocopy`;
+  const mountsOf = (args: readonly string[]) => flagValues(args, "--mount");
+
+  it("mounts each extra at /repos/<name> in the Codex worker, read links read-only", () => {
+    const mounts = mountsOf(buildWorkerCreateArgs(codex));
+    expect(mounts).toContain(readMount);
+    expect(mounts).toContain(writeMount);
+    expect(mounts.indexOf(readMount)).toBeGreaterThan(
+      mounts.findIndex((value) => value.includes(`dst=${WORKER_PATHS.workspace},`)),
+    );
+  });
+
+  it("mounts the same in Claude's tool runner and none in Claude's agent", () => {
+    const tools = mountsOf(buildClaudeToolRunnerCreateArgs(claude));
+    expect(tools).toContain(readMount);
+    expect(tools).toContain(writeMount);
+    expect(mountsOf(buildClaudeAgentCreateArgs(claude)).join(" ")).not.toContain("/repos");
+  });
+
+  function withRepositoryMounts(
+    inspection: DockerContainerInspection,
+    baseWritable = false,
+  ): DockerContainerInspection {
+    const extra: Array<[string, boolean, string]> = [
+      ["/repos/base", baseWritable, "repos/base"],
+      ["/repos/tools", true, "repos/tools"],
+    ];
+    return {
+      ...inspection,
+      HostConfig: {
+        ...inspection.HostConfig!,
+        Mounts: [
+          ...(inspection.HostConfig!.Mounts ?? []),
+          ...extra.map(([Target, writable, Subpath]) => ({
+            Type: "volume",
+            Source: names.storageVolume,
+            Target,
+            ReadOnly: !writable,
+            VolumeOptions: { NoCopy: true, Subpath },
+          })),
+        ],
+      },
+      Mounts: [
+        ...(inspection.Mounts ?? []),
+        ...extra.map(([Destination, RW]) => ({ Type: "volume", Name: names.storageVolume, Destination, RW })),
+      ],
+    };
+  }
+
+  it("attests a Codex worker with exactly its repository mounts", () => {
+    const capability = "test-capability";
+    expect(() =>
+      assertWorkerContainerInspection(withRepositoryMounts(validWorkerInspection()), codex, capability),
+    ).not.toThrow();
+    expect(() =>
+      assertWorkerContainerInspection(withRepositoryMounts(validWorkerInspection(), true), codex, capability),
+    ).toThrow("docker_isolation_unsupported");
+    // Missing mounts, and mounts a spec without repositories never asked for, are both drift.
+    expect(() => assertWorkerContainerInspection(validWorkerInspection(), codex, capability)).toThrow(
+      "docker_isolation_unsupported",
+    );
+    expect(() =>
+      assertWorkerContainerInspection(withRepositoryMounts(validWorkerInspection()), spec, capability),
+    ).toThrow("docker_isolation_unsupported");
+  });
+
+  it("attests Claude's tool runner with exactly its repository mounts", () => {
+    const tool = claudeInspection("tool", names.network, [names.network]);
+    expect(() =>
+      assertClaudeToolRunnerContainerInspection(withRepositoryMounts(tool), claude, TOOL_SETUP),
+    ).not.toThrow();
+    expect(() =>
+      assertClaudeToolRunnerContainerInspection(withRepositoryMounts(tool, true), claude, TOOL_SETUP),
+    ).toThrow("docker_isolation_unsupported");
+    expect(() => assertClaudeToolRunnerContainerInspection(tool, claude, TOOL_SETUP)).toThrow(
+      "docker_isolation_unsupported",
+    );
+  });
+
+  it("keeps a spec without repositories byte-for-byte unchanged", () => {
+    const { names: _a, ...withNone } = buildDockerIsolationPlan(spec, "trusted-proxy");
+    const { names: _b, ...withUndefined } = buildDockerIsolationPlan(
+      { ...spec, repositories: undefined },
+      "trusted-proxy",
+    );
+    expect(withUndefined).toEqual(withNone);
+    // The recorded snapshots under "Docker isolation parity for runs without services" pin these arguments.
+  });
+
+  it.each([
+    ["an invalid name", [{ name: "Bad/Name", access: "write", hostPath: "/x" }]],
+    ["the reserved name", [{ name: "workspace", access: "write", hostPath: "/x" }]],
+    ["an unknown access", [{ name: "base", access: "admin", hostPath: "/x" }]],
+    ["an empty host path", [{ name: "base", access: "read", hostPath: "" }]],
+    ["an extra key", [{ name: "base", access: "read", hostPath: "/x", token: "ghs_x" }]],
+    [
+      "a duplicate name",
+      [
+        { name: "base", access: "read", hostPath: "/x" },
+        { name: "base", access: "write", hostPath: "/y" },
+      ],
+    ],
+    ["an empty list", []],
+    [
+      "more than 16 entries",
+      Array.from({ length: 17 }, (_value, index) => ({ name: `r${index}`, access: "read", hostPath: "/x" })),
+    ],
+  ])("refuses a spec with %s", (_label, entries) => {
+    const bad = { ...spec, repositories: entries } as unknown as JobSpec;
+    expect(() => buildWorkerCreateArgs(bad)).toThrow("docker_isolation_unsupported");
+  });
+});

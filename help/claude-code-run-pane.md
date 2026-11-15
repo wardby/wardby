@@ -36,14 +36,17 @@ server named `wardby` yet. Or install it yourself with
 
 If the pane says auto mode refused a call, allow `mcp__wardby__list_runs`,
 `mcp__wardby__list_agents`, `mcp__wardby__get_run`,
-`mcp__wardby__get_run_transcript`, `mcp__wardby__get_run_steps` and
-`mcp__wardby__get_run_text` in `/permissions`. Run `wardby claude-plugin install` again to add a rule a newer
+`mcp__wardby__get_run_transcript`, `mcp__wardby__get_run_steps`,
+`mcp__wardby__get_run_text`, `mcp__wardby__list_agent_links`,
+`mcp__wardby__get_agent`, `mcp__wardby__list_subagents` and
+`mcp__wardby__list_repositories` in `/permissions`. Run `wardby claude-plugin install` again to add a rule a newer
 pane needs.
 
 The filter box first narrows the runs the pane holds: those still running and
-those from the last 24 hours, matched by agent, status, trigger or task. With
-Wardby 0.9.7 or later it also asks the server, and lists older runs whose id,
-agent name, status, trigger, repository or branch matches under **Older runs**,
+those from the last 24 hours, matched by agent, status, trigger or task. Separate
+terms with commas to match any of them (`builder, reviewer`). With
+Wardby 0.9.7 or later a single term also asks the server, and lists older runs whose id,
+agent name, status, trigger, repository (any of the run's) or branch matches under **Older runs**,
 with **Load more** for the next page. The server never searches task text,
 since it can hold secret values.
 
@@ -55,6 +58,11 @@ keys it shows. The desktop app needs no setting.
 `wardby doctor` and `wardby claude-plugin status` check the setup; `wardby claude-plugin
 uninstall` removes the plugin and the rules install added. To continue a run
 from the pane, see `resume-runs-locally`.
+
+A coding run over several repositories shows one pull request line for each
+repository it changed. **Continue locally** continues in your clone of the
+default repository and lists each other repository with its branch (or, for a
+read-only one, its commit) and a `git clone` line to copy.
 
 A running run's detail shows its **Recent steps** (the last 8 tool calls and
 messages: a ✓ or the exit code of a failed command, then the tool and its
@@ -94,5 +102,11 @@ list: "This wardby server is older than 0.8.0, so the pane runs in a limited
 mode: no pull-request grouping, outcomes or run steps." It still lists each
 agent's latest runs. Upgrade the server to 0.8.0 or later; the notice goes away
 at the pane's next check.
+
+The **Agents** tab draws how your agents work together: a list grouped by flow,
+and a Detail and Flow tab for each agent. It needs wardby 0.9.14 or later. See
+[See how your agents work together](agent-flows.md).
+
+See also [Several repositories in one coding run](multi-repository-runs.md).
 
 The full guide is [Claude Code plugin](../docs/claude-code-plugin.md).

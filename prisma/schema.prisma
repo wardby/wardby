@@ -496,6 +496,10 @@ model CodingAgentProfile {
   workerImageRef           String?
   /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
   workspaceDiskMb          Int?
+  /// Git history in runs (#536): the clone depth (1..100000) when gitHistoryFull is false. Null with full false = off.
+  gitHistoryDepth          Int?
+  /// Git history in runs: the full history; overrides gitHistoryDepth.
+  gitHistoryFull           Boolean           @default(false)
   packageAllowlist         Json              @default("{}")
   packagePolicy            Json              @default("{}")
   /// Admin-requested debug trace: while now < debugTraceUntil, every coding
@@ -536,6 +540,7 @@ model CodingAgentProfile {
 /// one coding run. Policy is copied from the profile before work starts.
 model CodingRun {
   runId                 String              @id
+  substrate             SubstrateRun?
   run                   Run                 @relation(fields: [runId], references: [id], onDelete: Cascade)
   task                  String
   /// The run's own request (the trigger's task or the agent's default task), without the agent's standing instructions. Null on older runs.
@@ -580,6 +585,10 @@ model CodingRun {
   queuedAt              DateTime?
   /// Per-agent workspace size in MiB; null = CODING_DISK_MB.
   workspaceDiskMb       Int?
+  /// Fixed at dispatch from the profile's gitHistoryDepth (null with full false = history off).
+  gitHistoryDepth       Int?
+  /// Fixed at dispatch from the profile's gitHistoryFull.
+  gitHistoryFull        Boolean             @default(false)
   packageAllowlist      Json                @default("{}")
   packagePolicy         Json                @default("{}")
   /// Fixed at dispatch from the profile's debugTraceUntil: the worker writes a
@@ -632,6 +641,17 @@ model CodingRun {
   dependencyCacheResult Json?
   /// Fixed at dispatch: the profile's packageAuditMode when its window was open, else null.
   packageAuditMode      PackageAuditMode?
+  /// Substrate warm rounds only: true when this round resumed the previous round's parked workspace
+  /// and session, false when it started fresh. Null = not a continuation on Substrate with warm rounds.
+  warmStart             Boolean?
+  /// Substrate warm rounds only: the agent fingerprint (SHA-256 hex) computed once when the run
+  /// launched; a delivered round is retained under it. Null = warm rounds off or not computed.
+  warmFingerprint       String?
+  /// Claude Code runs (warm rounds, or session resume): every secret delivered to the run when it
+  /// launched, as identity and version only ([{ id, name, updatedAt }], core/secret-versions.ts),
+  /// never a value or a hash of one. Transcript capture compares it with the versions current then
+  /// and stores nothing when they differ. Null = not recorded (then no transcript is stored).
+  launchSecretVersions  Json?
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
   proxySession          CodingProxySession?
@@ -646,6 +666,7 @@ model CodingRun {
   rootCodingRun   CodingRun?  @relation("CodingRunContinuation", fields: [rootCodingRunId], references: [runId])
   continuations   CodingRun[] @relation("CodingRunContinuation")
 
+  repositories             CodingRunRepository[]
   registryAllowances       RegistryAllowance[]
   registryFetches          RegistryFetch[]
   registryApprovedVersions RegistryApprovedVersion[]
@@ -1565,6 +1586,18 @@ model AgentRepository {
   /// Only on a coding agent's link: the base branch for runs in this repository.
   /// Null = the coding profile's baseRef.
   baseRef              String?
+  /// The link's name, unique per agent. Coding links: the folder under /repos/ ([a-z0-9][a-z0-9._-]{0,62},
+  /// never "workspace"), default the repository's short name. Other links: `<provider>:<repository>`.
+  name                 String
+  /// Read coding links only: a branch, a tag or a 40-hex commit SHA. Exactly one of ref / refFromFile.
+  ref                  String?
+  /// Read coding links only: a path in the default repository whose one-line content is the ref, read at dispatch.
+  refFromFile          String?
+  /// Coding links only: part of the agent's default set (every run gets it unless the run names its own list).
+  inDefaultSet         Boolean  @default(false)
+  /// Read coding links only (#536): the repository is fetched as a git remote named `name` in the run's /workspace
+  /// history instead of mounted as a folder. Needs the agent's gitHistory on.
+  asRemote             Boolean  @default(false)
   createdAt            DateTime @default(now())
 
   /// How this link was authorized: "host_permission" (the agent owner's
@@ -1576,9 +1609,55 @@ model AgentRepository {
   authorizedById String?
   authorizedAt   DateTime?
 
-  @@unique([agentId, provider, repository])
+  @@unique([agentId, name])
   @@unique([provider, repository, checkName])
   @@index([provider, repository])
+}
+
+/// One extra repository of a coding run (#537): the default repository stays on CodingRun at /workspace;
+/// each extra is at /repos/<name>. Written at dispatch with the CodingRun; a continuation copies its root's rows.
+model CodingRunRepository {
+  id                   String    @id @default(cuid())
+  runId                String
+  codingRun            CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  /// Order listed (the per-run list's order, else the default set's link order).
+  position             Int
+  name                 String
+  /// "read" or "write".
+  access               String
+  provider             String
+  repository           String
+  /// The ref asked for (a read link's ref or the ref its file named; a write row's base branch). Null until a
+  /// deferred run resolves it.
+  requestedRef         String?
+  /// The link's refFromFile, when the ref came from a file.
+  refFromFile          String?
+  /// The commit requestedRef resolved to at dispatch (null until a deferred run's start resolves it).
+  resolvedSha          String?
+  viaRepositoryLink    Boolean   @default(true)
+  /// Copied from the link (#536): fetched as a git remote named `name` instead of mounted as a folder.
+  asRemote             Boolean   @default(false)
+  /// The AgentRepository row this came from (audit and re-check; no FK: the link may be removed).
+  linkId               String?
+  /// Writable rows only.
+  baseRef              String?
+  headRef              String?
+  baseSha              String?
+  resultBranch         String?
+  /// The CodingRunResultSchema shape for this repository.
+  result               Json?
+  pullRequestNumber    Int?
+  mergeOrder           Int?
+  markedReadyAt        DateTime?
+  prDescriptionSha256  String?
+  prDescriptionRunId   String?
+  prDescriptionOutcome String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@unique([runId, name])
+  @@index([provider, repository, pullRequestNumber])
+  @@index([mergeOrder])
 }
 
 /// A pull-request review deferred because its head's CI was still pending
@@ -2548,4 +2627,82 @@ model ToolConnectionGrant {
   updatedAt   DateTime @updatedAt
 
   @@unique([toolId, connection])
+}
+
+/// A coding run launched on Agent Substrate (JOB_LAUNCHER=substrate): the launch fence, its phase,
+/// and the counters of its tool relay. Holds no credentials and no task content.
+model SubstrateRun {
+  runId        String                  @id
+  codingRun    CodingRun               @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  /// substrateRunToken(runId): names the run's actors, blobs and relay.
+  token        String                  @unique
+  specHash     String
+  /// provisioning | running | requeued (active); stopped | removed | timed_out | lost | crashed |
+  /// tool_failed | provisioning_failed | collect_timeout | startup_timeout (terminal; see
+  /// SubstratePhase in run-store.ts)
+  phase        String
+  deadlineAt   DateTime
+  /// Last seq assigned on the tool-bound queue.
+  toolSeq      Int                     @default(0)
+  nextChannel  Int                     @default(1)
+  /// Undelivered relay line bytes (back-pressure).
+  relayBytes   Int                     @default(0)
+  /// Warm rounds: the round this row's actors are on (1 for a cold launch; an adopter's is the parked run's + 1).
+  round        Int                     @default(1)
+  /// Warm rounds, set when parked: the commit the round pushed and the agent fingerprint it ran with.
+  headSha      String?
+  fingerprint  String?
+  /// Warm rounds: when the run was parked (null unless it was).
+  parkedAt     DateTime?
+  /// The run's agent (from the JobSpec); null on rows from before warm rounds.
+  agentId      String?
+  /// Warm rounds: why this continuation launched cold (not_parked | expired | actor_missing |
+  /// actor_not_suspended | branch_moved | fingerprint_changed | capacity); null when it adopted or
+  /// continued nothing.
+  coldReason   String?
+  /// The run's actors: pair (agent + tool: Claude Code) | single (one agent actor that also holds
+  /// the workspace: Codex). Read by the launcher and the coding proxy's Substrate routes.
+  actorShape   String                  @default("pair")
+  /// The run's extra repositories (#537), set at claim: [{ name, access }] in spec order, never a host
+  /// path; null for a run without any. Read by the launcher and the coding proxy's Substrate routes.
+  repositories Json?
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+  channels     SubstrateRelayChannel[]
+  events       SubstrateRelayEvent[]
+
+  @@index([phase, parkedAt])
+  @@index([agentId, phase])
+}
+
+/// One socket connection between a run's agent and tool bridges.
+model SubstrateRelayChannel {
+  runToken  String
+  run       SubstrateRun @relation(fields: [runToken], references: [token], onDelete: Cascade)
+  channel   String
+  /// Last sendSeq accepted from each side (de-duplicates sender retries).
+  agentSeen Int          @default(0)
+  toolSeen  Int          @default(0)
+  /// Last seq assigned on this channel's agent-bound queue.
+  agentSeq  Int          @default(0)
+  createdAt DateTime     @default(now())
+
+  @@id([runToken, channel])
+}
+
+/// A queued relay message. queue = "tool" (tool-bound) or the channel id (agent-bound).
+/// line holds repository tool traffic: never logged; deleted once acknowledged, when the tool
+/// bridge reports its workspace, and in any case when the launcher removes the run.
+model SubstrateRelayEvent {
+  runToken  String
+  run       SubstrateRun @relation(fields: [runToken], references: [token], onDelete: Cascade)
+  queue     String
+  seq       Int
+  /// open | line | close | collect
+  type      String
+  channel   String?
+  line      String?      @db.Text
+  createdAt DateTime     @default(now())
+
+  @@id([runToken, queue, seq])
 }

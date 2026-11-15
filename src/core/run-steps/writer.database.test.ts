@@ -3,6 +3,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../db.js";
 import { RunStepWriter } from "./writer.js";
 import { MAX_RUN_STEPS, type ExtractedStep, type StepStatus } from "./types.js";
+import { WARM_START_STEP_ID } from "../../coding/warm-start-wording.js";
 
 const db = createPrismaClient();
 const agentIds: string[] = [];
@@ -95,6 +96,19 @@ describe.skipIf(!process.env.DATABASE_URL)("RunStepWriter (PostgreSQL)", () => {
     const rows = await rowsOf(run.id);
     expect(rows.map((r) => r.callId)).toEqual(["c1", "c2"]);
     expect(rows[0].status).toBe("ok");
+  });
+
+  it("stores a fixed-id said step once, even when two processes' writers both record it", async () => {
+    // The warm-start line (WARM_START_STEP_ID) relies on this: the launching process and a recovering
+    // one may both report it.
+    const run = await newRun();
+    const line = { kind: "said" as const, callId: WARM_START_STEP_ID, text: "Resumed", truncated: false };
+    await Promise.all([
+      writer().record(run.id, { steps: [line], results: [] }),
+      writer().record(run.id, { steps: [line], results: [] }),
+    ]);
+    await writer().record(run.id, { steps: [line], results: [] });
+    expect((await rowsOf(run.id)).map((r) => r.callId)).toEqual([WARM_START_STEP_ID]);
   });
 
   it("writes one run's batches in the order they arrived", async () => {
