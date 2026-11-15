@@ -15,7 +15,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mcpTokenHash, mintMcpToken } from "../coding/mcp-token.js";
+import { INJECTED_MCP_TOKEN_PLACEHOLDER, mcpTokenHash, mintMcpToken } from "../coding/mcp-token.js";
 import { CODING_PROTOCOL_VERSION } from "../coding/protocol.js";
 import { WARDBY_MCP_SERVER, wardbyMcpUrl } from "../coding-worker/mcp-config.js";
 import { createMcpRoute } from "../providers/coding-proxy/mcp-route.js";
@@ -65,8 +65,6 @@ const MODEL = "claude-sonnet-5";
 const RUN_ID = "claude-compat-mcp";
 const PINNED = `mcp__${WARDBY_MCP_SERVER}__echo`;
 const UNPINNED = `mcp__${WARDBY_MCP_SERVER}__other`;
-// Test-local until the shared placeholder constant lands.
-const INJECTED_MCP_TOKEN_PLACEHOLDER_FOR_SPIKE = "rmt_placeholder_injected_by_gateway";
 
 function sse(blocks: Array<{ type: "tool_use"; id: string; name: string; input: unknown }>): string {
   const frames: unknown[] = [
@@ -376,7 +374,7 @@ describe.skipIf(!loaded)("pinned Claude Code calling wardby_mcp through the codi
 
   it("MCP header mode spike: the pinned Claude Code sends a custom header on its HTTP MCP server", async () => {
     const { sdk, z } = loaded!;
-    const stub = await startRecordingMcpServer(INJECTED_MCP_TOKEN_PLACEHOLDER_FOR_SPIKE);
+    const stub = await startRecordingMcpServer(INJECTED_MCP_TOKEN_PLACEHOLDER);
     cleanup.push(stub.close);
 
     const forwarded: Array<{ body: Record<string, unknown> }> = [];
@@ -482,7 +480,7 @@ describe.skipIf(!loaded)("pinned Claude Code calling wardby_mcp through the codi
       contextDirectory: null,
       skills: false,
       persistSession: false,
-      mcp: { url: wardbyMcpUrl(proxyBaseUrl), token: INJECTED_MCP_TOKEN_PLACEHOLDER_FOR_SPIKE },
+      mcp: { url: wardbyMcpUrl(proxyBaseUrl), token: INJECTED_MCP_TOKEN_PLACEHOLDER },
     });
     // wardby_mcp pointed at the recording stub, the placeholder in a custom header and no Authorization.
     const mcpServers = {
@@ -490,7 +488,7 @@ describe.skipIf(!loaded)("pinned Claude Code calling wardby_mcp through the codi
       [WARDBY_MCP_SERVER]: {
         type: "http",
         url: `${stub.url}/mcp`,
-        headers: { "x-wardby-mcp-token": INJECTED_MCP_TOKEN_PLACEHOLDER_FOR_SPIKE },
+        headers: { "x-wardby-mcp-token": INJECTED_MCP_TOKEN_PLACEHOLDER },
         alwaysLoad: true,
         timeout: 300_000,
       },

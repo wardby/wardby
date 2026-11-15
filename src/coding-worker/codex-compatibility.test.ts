@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, it } from "vitest";
-import { mcpTokenHash, mintMcpToken } from "../coding/mcp-token.js";
+import { INJECTED_MCP_TOKEN_PLACEHOLDER, mcpTokenHash, mintMcpToken } from "../coding/mcp-token.js";
 import { createMcpRoute } from "../providers/coding-proxy/mcp-route.js";
 import { MemoryProxyLedger } from "../providers/coding-proxy/memory-ledger.js";
 import { CodingProxy } from "../providers/coding-proxy/proxy.js";
@@ -32,8 +32,6 @@ const require = createRequire(import.meta.url);
 const RECORD = process.env.CODEX_RECORD === "1";
 const FIXTURES = fileURLToPath(new URL("../providers/coding-proxy/fixtures/", import.meta.url));
 const CODEX_FIXTURE = /^codex-(.+)-responses-requests\.json$/;
-// Test-local until the shared placeholder constant lands.
-const INJECTED_MCP_TOKEN_PLACEHOLDER_FOR_SPIKE = "rmt_placeholder_injected_by_gateway";
 
 function pinnedCodexVersion(): string {
   return (require("./package.json") as { dependencies: Record<string, string> }).dependencies["@openai/codex-sdk"];
@@ -695,7 +693,7 @@ describe.skipIf(RECORD || !codexBinaryInstalled())(
 
     it("MCP header mode spike: the pinned Codex CLI sends http_headers on a streamable-HTTP MCP server", async () => {
       const model = "gpt-5.6-terra";
-      const stub = await startRecordingMcpServer(INJECTED_MCP_TOKEN_PLACEHOLDER_FOR_SPIKE);
+      const stub = await startRecordingMcpServer(INJECTED_MCP_TOKEN_PLACEHOLDER);
       cleanup.push(stub.close);
       const forwarded: Record<string, unknown>[] = [];
       const ledger = new MemoryProxyLedger();
@@ -781,7 +779,7 @@ describe.skipIf(RECORD || !codexBinaryInstalled())(
           mcp_servers: {
             wardby_mcp: {
               url: `${stub.url}/mcp`,
-              http_headers: { "x-wardby-mcp-token": INJECTED_MCP_TOKEN_PLACEHOLDER_FOR_SPIKE },
+              http_headers: { "x-wardby-mcp-token": INJECTED_MCP_TOKEN_PLACEHOLDER },
               tool_timeout_sec: 300,
               default_tools_approval_mode: "approve",
             },

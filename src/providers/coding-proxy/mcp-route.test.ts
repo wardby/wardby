@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { HTTP_LIMITS } from "../../mcp/transport/http-limits.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
-import { createMcpRoute, MCP_FORWARD_MAX_MS, mcpLogMethod } from "./mcp-route.js";
+import { createMcpRoute, MCP_FORWARD_MAX_MS, mcpLogMethod, mcpTokenOf } from "./mcp-route.js";
 
 const NOW = new Date("2026-11-06T12:00:00.000Z");
 const GATEWAY = "http://gateway.test:8790";
@@ -115,7 +115,9 @@ async function setup(
   };
   const authorized = (body: string, headers: Record<string, string> = {}) =>
     call({ body, headers: { authorization: `Bearer ${token}`, ...headers } });
-  return { ledger, token, gateway, logs, call, authorized };
+  const injected = (body: string, headers: Record<string, string> = {}) =>
+    call({ body, headers: { "x-wardby-mcp-token": token, ...headers } });
+  return { ledger, token, gateway, logs, call, authorized, injected };
 }
 
 afterEach(() => {
@@ -333,6 +335,104 @@ describe("coding proxy /mcp route", () => {
       const res = await pending;
       expect(res.statusCode).toBe(502);
       expect(h.logs.at(-1)).toMatchObject({ status: 502, reason: "gateway_timeout" });
+    });
+  });
+
+  describe("x-wardby-mcp-token (Substrate header mode; Task 1A outcome A)", () => {
+    const TOOLS_LIST = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}';
+    const REFUSAL = {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32001, message: "A valid MCP token for an active run is required." },
+    };
+    const LOG_KEYS = ["event", "sessionId", "method", "status", "reason", "durationMs"];
+
+    it("accepts the token in x-wardby-mcp-token when Authorization is absent", async () => {
+      const h = await setup();
+      const res = await h.injected(TOOLS_LIST);
+      expect(res.statusCode).toBe(200);
+      expect(h.gateway).toHaveBeenCalledTimes(1);
+      const init = h.gateway.mock.calls[0][1] as RequestInit;
+      const forwarded = new Headers(init.headers);
+      expect(forwarded.get("authorization")).toBe(`Bearer ${h.token}`);
+      expect(forwarded.get("x-wardby-mcp-token")).toBeNull();
+      expect([...forwarded.keys()].sort()).toEqual(["authorization", "content-type"]);
+    });
+
+    const refused: Array<[string, (token: string, other: string) => Record<string, string>]> = [
+      [
+        "both headers carrying the same token",
+        (token) => ({ authorization: `Bearer ${token}`, "x-wardby-mcp-token": token }),
+      ],
+      [
+        "both headers with different tokens",
+        (token, other) => ({ authorization: `Bearer ${other}`, "x-wardby-mcp-token": token }),
+      ],
+      [
+        "the placeholder (an injection that did not happen)",
+        () => ({ "x-wardby-mcp-token": "rmt_placeholder_injected_by_gateway" }),
+      ],
+      ["an empty header", () => ({ "x-wardby-mcp-token": "" })],
+      ["an unknown token", (_token, other) => ({ "x-wardby-mcp-token": other })],
+      // Outcome A: Codex sends no Authorization, so a placeholder Bearer beside the header is refused too.
+      [
+        "a placeholder Bearer beside the header",
+        (token) => ({ authorization: "Bearer rmt_placeholder_injected_by_gateway", "x-wardby-mcp-token": token }),
+      ],
+    ];
+
+    it.each(refused)("refuses %s with the fixed 401, without calling the gateway", async (_label, headersOf) => {
+      const h = await setup();
+      const res = await h.call({ body: TOOLS_LIST, headers: headersOf(h.token, mintMcpToken()) });
+      expect(res.statusCode).toBe(401);
+      expect(res.headers["www-authenticate"]).toBeUndefined();
+      expect(res.json()).toEqual(REFUSAL);
+      expect(h.gateway).not.toHaveBeenCalled();
+    });
+
+    it("answers a GET carrying the header with 405, like one carrying Authorization", async () => {
+      const h = await setup();
+      const res = await h.call({ method: "GET", headers: { "x-wardby-mcp-token": h.token } });
+      expect(res.statusCode).toBe(405);
+      expect(res.headers.allow).toBe("POST");
+      expect(h.gateway).not.toHaveBeenCalled();
+    });
+
+    it("never logs or echoes a token from either header", async () => {
+      const h = await setup();
+      const other = mintMcpToken();
+      const responses = [
+        await h.injected(TOOLS_LIST),
+        await h.call({ method: "GET", headers: { "x-wardby-mcp-token": h.token } }),
+        await h.call({ method: "GET", headers: { "x-wardby-mcp-token": other } }),
+        ...(await Promise.all(
+          refused.map(([, headersOf]) => h.call({ body: TOOLS_LIST, headers: headersOf(h.token, other) })),
+        )),
+      ];
+      const failing = await setup({
+        fetchImpl: async () => {
+          throw new Error("gateway failed");
+        },
+      });
+      responses.push(await failing.injected(TOOLS_LIST));
+      expect(responses.map((res) => res.statusCode)).toEqual([200, 405, 405, 401, 401, 401, 401, 401, 401, 502]);
+      const logs = [...h.logs, ...failing.logs];
+      expect(logs).toHaveLength(responses.length);
+      const logged = JSON.stringify(logs);
+      for (const secret of [h.token, other, failing.token]) {
+        expect(logged).not.toContain(secret);
+        for (const res of responses) expect(res.body.toString("utf8")).not.toContain(secret);
+      }
+      for (const entry of logs) expect(LOG_KEYS).toEqual(expect.arrayContaining(Object.keys(entry)));
+    });
+
+    it.each([
+      [{}, undefined],
+      [{ authorization: "Bearer abc" }, "abc"],
+      [{ "x-wardby-mcp-token": "abc" }, "abc"],
+      [{ authorization: "Basic x", "x-wardby-mcp-token": "abc" }, undefined],
+    ])("mcpTokenOf(%j) is %j", (headers, expected) => {
+      expect(mcpTokenOf(headers)).toBe(expected);
     });
   });
 

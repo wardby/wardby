@@ -1,17 +1,19 @@
 /**
  * The coding proxy's /mcp route (remote MCP servers, phase 2): the worker's MCP server URL. It
  * checks the run's MCP token (`rmt_…`, WARDBY_MCP_TOKEN in the worker) against the proxy session,
- * then forwards the JSON-RPC body unchanged, with the same Authorization, to the native gateway's
- * /coding-mcp route (WARDBY_MCP_GATEWAY_URL), which checks the token again and runs the call. The
- * proxy never sees an MCP server URL or secret; the gateway redacts results before they get here.
+ * then forwards the JSON-RPC body unchanged to the native gateway's /coding-mcp route
+ * (WARDBY_MCP_GATEWAY_URL), which checks the token again and runs the call. The token arrives in
+ * `Authorization: Bearer` or, on Substrate, in `X-Wardby-Mcp-Token` (filled by the egress gateway),
+ * never both; the proxy forwards an `Authorization: Bearer` it builds from the token it checked, so
+ * the gateway is unchanged. The proxy never sees an MCP server URL or secret; the gateway redacts
+ * results before they get here.
  *
  * Secrets: the token is only hashed and forwarded, never logged or echoed. The route's log line
  * carries the session id, a sanitized JSON-RPC method, the status and a fixed reason code only:
  * never the body, the token or an error's text. Every body this route writes is fixed text or the
- * gateway's answer, unchanged.
- */
-import type { IncomingMessage, ServerResponse } from "node:http";
-import { isMcpToken, mcpTokenHash, MCP_TOKEN_REQUIRED_MESSAGE } from "../../coding/mcp-token.js";
+ * gateway's answer, unchanged. */
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
+import { isMcpToken, mcpTokenHash, MCP_TOKEN_HEADER, MCP_TOKEN_REQUIRED_MESSAGE } from "../../coding/mcp-token.js";
 import { logger } from "../../core/logger.js";
 import { HTTP_LIMITS, HttpBoundaryError, readBodyBytes } from "../../mcp/transport/http-limits.js";
 import type { ProxyLedger } from "./types.js";
@@ -46,6 +48,19 @@ function methodOf(body: Buffer): string {
   } catch {
     return "other";
   }
+}
+
+/**
+ * The MCP token a request carries: `Authorization: Bearer <token>`, or, when Authorization is absent,
+ * the MCP_TOKEN_HEADER value. Both present → undefined (401): Codex 0.160.1 and Claude Code send the
+ * custom header without Authorization (Task 1A outcome A), so no placeholder Bearer is accepted.
+ */
+export function mcpTokenOf(headers: IncomingHttpHeaders): string | undefined {
+  const authorization = headers.authorization;
+  const injected = headers[MCP_TOKEN_HEADER];
+  if (injected === undefined) return /^Bearer (\S+)$/.exec(authorization ?? "")?.[1];
+  if (typeof injected !== "string") return undefined;
+  return authorization === undefined ? injected : undefined;
 }
 
 export interface McpRouteOptions {
@@ -114,7 +129,7 @@ export function createMcpRoute(options: McpRouteOptions): (req: IncomingMessage,
         send(503, JSON.stringify({ error: "mcp_unavailable", message: MCP_UNAVAILABLE_MESSAGE }));
         return;
       }
-      const token = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1];
+      const token = mcpTokenOf(req.headers);
       const session = isMcpToken(token)
         ? await options.ledger.findSessionByMcpTokenHash(mcpTokenHash(token))
         : undefined;
@@ -158,7 +173,7 @@ export function createMcpRoute(options: McpRouteOptions): (req: IncomingMessage,
       try {
         const upstream = await fetchImpl(`${gatewayUrl}${GATEWAY_PATH}`, {
           method: "POST",
-          headers: { authorization: req.headers.authorization!, "content-type": "application/json" },
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
           body: new Uint8Array(body),
           redirect: "error",
           signal: controller.signal,
