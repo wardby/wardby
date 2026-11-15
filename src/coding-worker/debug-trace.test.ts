@@ -11,8 +11,9 @@ import {
 } from "./debug-trace.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 
-const FAKE_CAP_FOR_TRACE = "rrp_fake_capability_value_000001";
 import { holdsValueFragment } from "../sandbox/secret-fragments.test-support.js";
+
+const FAKE_CAP_FOR_TRACE = "rrp_fake_capability_value_000001";
 
 const CAPABILITY = `rrp_${"A".repeat(43)}`;
 

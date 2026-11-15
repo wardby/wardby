@@ -162,15 +162,17 @@ export function configuredCodexWorkerImages(
 }
 
 /**
- * Substrate only: the Codex node-python worker image is pulled by the Substrate Codex bridge too,
- * so it must be a digest (the Kubernetes launcher checks only the images it pulls itself).
+ * Substrate only: every Codex worker image of a toolchain (CODING_WORKER_IMAGE_<TOOLCHAIN>_<VERSION>)
+ * is pulled by the Substrate Codex bridge too, so each must be a digest (the Kubernetes launcher
+ * checks only the images it pulls itself).
  */
-function assertSubstrateDigestImages(config: Pick<ContainerExecutorConfig, "additionalWorkerImages">): void {
-  const codexPython = config.additionalWorkerImages["node-python"]?.["3.12"];
-  if (codexPython !== undefined && !isRegistryDigest(codexPython)) {
-    throw new Error(
-      "CODING_WORKER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=substrate.",
-    );
+export function assertSubstrateDigestImages(config: Pick<ContainerExecutorConfig, "additionalWorkerImages">): void {
+  for (const [toolchain, versions] of Object.entries(config.additionalWorkerImages)) {
+    for (const [version, image] of Object.entries(versions)) {
+      if (isRegistryDigest(image)) continue;
+      const variable = `CODING_WORKER_IMAGE_${toolchain}_${version}`.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+      throw new Error(`${variable} must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=substrate.`);
+    }
   }
 }
 

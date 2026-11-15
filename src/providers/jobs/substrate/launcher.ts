@@ -373,19 +373,20 @@ function oldestFirst(parks: SubstrateRunRecord[]): SubstrateRunRecord[] {
   return [...parks.filter((park) => !park.parkedAt), ...parks.filter((park) => park.parkedAt)];
 }
 
-/** A run's templates: the agent's, and the tool's in the paired shape only. */
-interface RunTemplates {
-  shape: SubstrateActorShape;
-  agent: ActorTemplateSpec;
-  tool?: ActorTemplateSpec;
+/** A run's templates: the agent's and the tool's (pair), or the one agent actor's (single). */
+type RunTemplates =
+  { shape: "pair"; agent: ActorTemplateSpec; tool: ActorTemplateSpec } | { shape: "single"; agent: ActorTemplateSpec };
+
+/** The templates of every actor of the run. */
+function actorTemplates(templates: RunTemplates): ActorTemplateSpec[] {
+  return templates.shape === "pair" ? [templates.agent, templates.tool] : [templates.agent];
 }
 
 /** Whether every actor of the run can be placed in `free`; true when the room is unknown (the launch decides). */
-function placeable(free: Room[] | undefined, templates: Pick<RunTemplates, "agent" | "tool">): boolean {
+function placeable(free: Room[] | undefined, templates: RunTemplates): boolean {
   if (!free) return true;
   const size = (t: ActorTemplateSpec) => ({ cpuMillicores: t.cpuMillicores, memoryBytes: t.memoryBytes });
-  const all = [templates.agent, templates.tool].filter((t): t is ActorTemplateSpec => t !== undefined);
-  return canPlaceAll(free, all.map(size));
+  return canPlaceAll(free, actorTemplates(templates).map(size));
 }
 
 /** Whether the workers' total free CPU or memory went up from `before` to `after`. */
@@ -663,8 +664,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     try {
       const capability = await this.options.resolveCapability(spec.runId);
       if (!CAPABILITY.test(capability)) throw new Error("substrate_capability_invalid");
-      await this.ensureTemplate(templates.agent, call);
-      if (templates.tool) await this.ensureTemplate(templates.tool, call);
+      for (const template of actorTemplates(templates)) await this.ensureTemplate(template, call);
       const input = await this.stageInput(spec.inputArtifact, token);
       await this.stageSetup(spec, capability, token, inputHasGitHistory(input));
       await this.stageSeed(spec, token);
@@ -677,7 +677,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
         if (!(error instanceof KubernetesAlreadyExistsError)) throw error;
       }
       // The fence already serialized launches of this run, so an existing actor is our own.
-      const templateOf = (name: string) => (name === agent ? templates.agent.name : templates.tool!.name);
+      const templateOf = (name: string) =>
+        name !== agent && templates.shape === "pair" ? templates.tool.name : templates.agent.name;
       for (const name of actorNamesFor(token, shape)) {
         const template = templateOf(name);
         await call("createActor", async () => {
@@ -1132,7 +1133,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * another. No workers: false. Any error (an unreachable API): true, so the launch itself decides
    * (a refusal there is a JobCapacityError).
    */
-  private async fits(templates: Pick<RunTemplates, "agent" | "tool">): Promise<boolean> {
+  private async fits(templates: RunTemplates): Promise<boolean> {
     return placeable(await this.freeRoom(), templates);
   }
 
@@ -1159,10 +1160,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * as one did not add to it: where a suspended actor already gives back its room, removing parks
    * cannot make room, so at most one goes per call.
    */
-  private async evictUntilFits(
-    templates: Pick<RunTemplates, "agent" | "tool">,
-    keep: string | undefined,
-  ): Promise<boolean> {
+  private async evictUntilFits(templates: RunTemplates, keep: string | undefined): Promise<boolean> {
     let before = await this.freeRoom();
     if (placeable(before, templates)) return true;
     for (const park of await this.parks()) {

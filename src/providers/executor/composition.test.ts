@@ -9,6 +9,7 @@ import { FakeKubernetesApi } from "../jobs/fake-kubernetes-api.js";
 import { FakeSubstrateApi } from "../jobs/substrate/fake-api.js";
 import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
 import {
+  assertSubstrateDigestImages,
   buildConfiguredExecutor,
   buildSubstrateJobLauncher,
   configuredClaudeToolImages,
@@ -117,6 +118,22 @@ describe("JOB_LAUNCHER=substrate", () => {
       "CODING_WORKER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=substrate.",
     );
     expect(build({ CODING_WORKER_IMAGE_NODE_PYTHON_3_12: REGISTRY_IMAGE })).toBeInstanceOf(RoutingExecutor);
+  });
+
+  it("checks every additional Codex worker image, not only node-python 3.12", () => {
+    const digest = `registry.example/worker@sha256:${"e".repeat(64)}`;
+    expect(() =>
+      assertSubstrateDigestImages({
+        additionalWorkerImages: { "node-python": { "3.12": digest }, "node-go": { "1.23": LOCAL_IMAGE } },
+      }),
+    ).toThrow(
+      "CODING_WORKER_IMAGE_NODE_GO_1_23 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=substrate.",
+    );
+    expect(() =>
+      assertSubstrateDigestImages({
+        additionalWorkerImages: { "node-python": { "3.12": digest, "3.13": digest }, "node-go": { "1.23": digest } },
+      }),
+    ).not.toThrow();
   });
 
   it("builds a SubstrateJobLauncher", () => {
