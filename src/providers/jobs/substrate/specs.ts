@@ -6,6 +6,9 @@
 // A run with extra repositories gets one more durable volume, `repos`, mounted at /repos on the
 // workspace holder only (the tool actor, or a Codex run's one actor; never Claude's agent). The
 // volume carries no repository name: the holder's bridge makes /repos/<name> from its setup.
+//
+// Every template sets the bridge's command (BRIDGE_COMMANDS), standard and custom images alike,
+// and the command is part of its name: an image's ENTRYPOINT is never used.
 
 import { createHash } from "node:crypto";
 import type { V1Secret } from "@kubernetes/client-node";
@@ -31,6 +34,16 @@ export interface SubstrateLaunchConfig {
 
 /** The template env that switches the bridges into warm rounds (substrate-bridge/constants.ts WARM_ROUNDS_ENV). */
 export const WARM_ROUNDS_ENV = "WARDBY_SUBSTRATE_WARM_ROUNDS";
+
+/**
+ * The command every template sets (ruling D5: standard and custom images alike), so an image's
+ * ENTRYPOINT never matters, as on Kubernetes and Docker, and one custom image runs on all three.
+ */
+export const BRIDGE_COMMANDS = {
+  agent: ["node", "/opt/wardby/substrate-bridge/agent.js"],
+  tool: ["node", "/opt/wardby/substrate-bridge/tool.js"],
+  codex: ["node", "/opt/wardby/substrate-bridge/codex.js"],
+} as const satisfies Record<"agent" | "tool" | "codex", readonly string[]>;
 
 const READY_PORT = 8080;
 const ACTOR_METADATA_DIR = "/run/ate/actor";
@@ -71,15 +84,25 @@ function toolSize(spec: JobSpec): Size {
 }
 
 // Digest of every template field that is not image or size, with worker selector keys sorted so
-// the same selector always hashes the same way. `repos` (the /repos volume) is hashed in only when
-// set, so every template without it keeps the name (and golden snapshot) it had before.
-function templateVariant(config: SubstrateLaunchConfig, options: { repos?: boolean } = {}): string {
+// the same selector always hashes the same way. The role's bridge command is hashed in, so a change
+// to it renames the template. `repos` (the /repos volume) is hashed in only when set, so a template
+// without it keeps one name whether or not repositories exist anywhere.
+function templateVariant(
+  config: SubstrateLaunchConfig,
+  role: keyof typeof BRIDGE_COMMANDS,
+  options: { repos?: boolean } = {},
+): string {
   const selector = Object.fromEntries(
     Object.entries(config.workerSelector ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   );
   return createHash("sha256")
     .update(
-      JSON.stringify({ env: workerEnv(config), workerSelector: selector, ...(options.repos ? { repos: true } : {}) }),
+      JSON.stringify({
+        env: workerEnv(config),
+        workerSelector: selector,
+        command: BRIDGE_COMMANDS[role],
+        ...(options.repos ? { repos: true } : {}),
+      }),
     )
     .digest("hex");
 }
@@ -119,12 +142,13 @@ export function agentTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Act
   const size = agentSize(spec);
   return {
     atespace: config.atespace,
-    name: templateName("agent", spec.image, size.cpuMillicores, size.memoryBytes, templateVariant(config)),
+    name: templateName("agent", spec.image, size.cpuMillicores, size.memoryBytes, templateVariant(config, "agent")),
     ...(config.workerSelector ? { workerSelector: config.workerSelector } : {}),
     containers: [
       {
         name: "agent",
         image: spec.image,
+        command: [...BRIDGE_COMMANDS.agent],
         env: workerEnv(config),
         wakeupProbe: { path: "/readyz", port: READY_PORT },
         volumeMounts: [{ name: "run", mountPath: "/run/wardby" }, actorMount],
@@ -152,13 +176,14 @@ export function codexTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Act
       spec.image,
       size.cpuMillicores,
       size.memoryBytes,
-      templateVariant(cold, { repos: storage.repos }),
+      templateVariant(cold, "codex", { repos: storage.repos }),
     ),
     ...(config.workerSelector ? { workerSelector: config.workerSelector } : {}),
     containers: [
       {
         name: "agent",
         image: spec.image,
+        command: [...BRIDGE_COMMANDS.codex],
         env: workerEnv(cold),
         wakeupProbe: { path: "/readyz", port: READY_PORT },
         volumeMounts: storage.volumeMounts,
@@ -181,13 +206,14 @@ export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Acto
       spec.toolImage,
       size.cpuMillicores,
       size.memoryBytes,
-      templateVariant(config, { repos: storage.repos }),
+      templateVariant(config, "tool", { repos: storage.repos }),
     ),
     ...(config.workerSelector ? { workerSelector: config.workerSelector } : {}),
     containers: [
       {
         name: "tool",
         image: spec.toolImage,
+        command: [...BRIDGE_COMMANDS.tool],
         env: workerEnv(config),
         wakeupProbe: { path: "/readyz", port: READY_PORT },
         volumeMounts: storage.volumeMounts,

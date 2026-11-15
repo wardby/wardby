@@ -226,6 +226,7 @@ describe("createSubstrateApi (Connect adapter)", () => {
     expect(t?.metadata).toMatchObject({ atespace: "wardby-runs", name: "tpl" });
     expect(t?.workerSelector?.matchLabels).toEqual({ pool: "gvisor" });
     expect(t?.containers[0]?.wakeupProbe?.httpGet).toMatchObject({ path: "/healthz", port: 8080 });
+    expect(t?.containers[0]?.command).toEqual(["run"]);
     expect(t?.resources?.limits).toMatchObject({ cpuMillicores: 500n, memoryBytes: 1024n });
     expect(t?.snapshotConfig?.preferredFidelity).toBe(3);
     expect(t?.volumes).toHaveLength(3);
@@ -249,6 +250,49 @@ describe("createSubstrateApi (Connect adapter)", () => {
     expect(first?.https?.ports?.numbers).toEqual([443]);
     expect(first?.https?.effects?.replaceHeaders[0]?.actorJwt?.expirationSeconds).toBe(300n);
     expect(second?.http?.hostnames).toEqual(["p"]);
+  });
+
+  function metadataTemplate(path: string): ActorTemplateSpec {
+    return {
+      atespace: "wardby-runs",
+      name: "tpl",
+      containers: [{ name: "main", image: "repo@sha256:abc", volumeMounts: [{ name: "meta", mountPath: "/meta" }] }],
+      volumes: [{ name: "meta", actorMetadata: { path } }],
+      cpuMillicores: 500,
+      memoryBytes: 1024,
+      snapshotFidelity: "MEMORY",
+    };
+  }
+
+  it("refuses an absolute actorMetadata path before any call", async () => {
+    let called = false;
+    const api = control({
+      createActorTemplate: (req: CreateActorTemplateRequest) => {
+        called = true;
+        return req.actorTemplate;
+      },
+    });
+    const error = await api.ensureActorTemplate(metadataTemplate("/run/ate/actor")).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("substrate_template_invalid");
+    expect((error as Error).message).not.toContain("/run/ate/actor");
+    expect(called).toBe(false);
+  });
+
+  it("puts the files at the volume root for an empty path", async () => {
+    let template: CreateActorTemplateRequest | undefined;
+    const api = control({
+      createActorTemplate: (req: CreateActorTemplateRequest) => {
+        template = req;
+        return req.actorTemplate;
+      },
+    });
+    await api.ensureActorTemplate(metadataTemplate(""));
+    const items = template?.actorTemplate?.volumes[0]?.systemInfo?.dataSources[0]?.actorMetadata?.items;
+    expect(items?.map((i) => i.path)).toEqual(["name", "atespace", "uid"]);
   });
 
   it("lists free worker capacity across pages", async () => {

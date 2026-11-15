@@ -144,6 +144,8 @@ function volumeToWire(volume: ActorTemplateSpec["volumes"][number]): WireVolume 
       }),
     });
   }
+  // Relative to the volume; a fixed message, never the path.
+  if (volume.actorMetadata.path.startsWith("/")) throw new Error("substrate_template_invalid");
   const dir = volume.actorMetadata.path.replace(/\/+$/, "");
   const item = (field: ActorMetadataField, file: string) =>
     create(ActorMetadataItemSchema, { field, path: dir ? `${dir}/${file}` : file });

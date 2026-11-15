@@ -24,8 +24,10 @@ export interface ActorTemplateSpec {
     | { name: string; durableDir: true }
     | { name: string; trustBundle: { names: string[]; path: string } }
     /**
-     * A systemInfo volume exposing the actor's own metadata: the actor's name, atespace and
-     * uid are written as the files `<path>/name`, `<path>/atespace` and `<path>/uid`.
+     * A systemInfo volume exposing the actor's own metadata as the files `name`, `atespace` and `uid`.
+     * `path` is relative to the volume (Substrate refuses an absolute one): `""` puts the files at the
+     * volume's root, `"actor"` at `actor/name` etc. The client refuses an absolute path
+     * (substrate_template_invalid) before any call.
      */
     | { name: string; actorMetadata: { path: string } }
   )[];
