@@ -7,8 +7,11 @@ import {
   describeError,
   redactSecrets,
   workerDebugTracer,
+  workerTracerFor,
 } from "./debug-trace.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
+
+const FAKE_CAP_FOR_TRACE = "rrp_fake_capability_value_000001";
 import { holdsValueFragment } from "../sandbox/secret-fragments.test-support.js";
 
 const CAPABILITY = `rrp_${"A".repeat(43)}`;
@@ -222,6 +225,34 @@ describe("workerDebugTracer", () => {
       { text: given },
     );
     expect(unwired.join("\n")).toContain(given);
+  });
+
+  it("builds the worker's tracer from its credentials, redacting a given registry token whatever its shape", () => {
+    const placeholder = "rrp_placeholder_injected_by_gateway";
+    const given = "plain-given-token-xyz";
+    const mcp = "mcp-token-value-abc";
+    const lines: string[] = [];
+    const tracer = workerTracerFor(
+      { runId: "run_123", debugTrace: true },
+      { capability: placeholder, registryToken: given },
+      mcp,
+      (line) => lines.push(line),
+    );
+    tracer!.record("event", { text: `npm used ${given} and ${mcp} with ${placeholder}` });
+    const out = lines.join("\n");
+    expect(out).not.toContain(given);
+    expect(out).not.toContain(mcp);
+    expect(out).not.toContain(placeholder);
+    expect(out).toContain("[REDACTED]");
+    // Without a given token (Docker, Kubernetes): the token derived from the capability, as before.
+    const derived: string[] = [];
+    workerTracerFor({ runId: "run_123", debugTrace: true }, { capability: FAKE_CAP_FOR_TRACE }, undefined, (line) =>
+      derived.push(line),
+    )!.record("event", { text: deriveRegistryToken(FAKE_CAP_FOR_TRACE) });
+    expect(derived.join("\n")).not.toContain(deriveRegistryToken(FAKE_CAP_FOR_TRACE));
+    expect(
+      workerTracerFor({ runId: "run_123" }, { capability: placeholder }, undefined, () => undefined),
+    ).toBeUndefined();
   });
 
   it("caps the run at the input's debugTraceMaxMb, or the default without one", () => {

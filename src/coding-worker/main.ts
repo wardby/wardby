@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readCodingInput, writeCodingOutputAtomic } from "./artifact.js";
 import { readWorkerCredentials } from "./credentials.js";
-import { describeError, workerDebugTracer, type DebugTracer } from "./debug-trace.js";
+import { describeError, workerTracerFor, type DebugTracer } from "./debug-trace.js";
 import { runCodingWorker } from "./driver.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "./errors.js";
 import { readMcpToken } from "./mcp-config.js";
@@ -30,12 +30,11 @@ try {
   stage = "execution";
   const proxyBaseUrl = required("WARDBY_PROXY_URL");
   // WARDBY_RUN_CAPABILITY, plus on Substrate the header mode and the registry token (credentials.ts).
-  const { capability, capabilityHeader, registryToken } = readWorkerCredentials(process.env);
+  const credentials = readWorkerCredentials(process.env);
+  const { capability, capabilityHeader, registryToken } = credentials;
   // Set only when the run has MCP tools; the driver then adds the wardby_mcp server.
   const mcpToken = readMcpToken();
-  // An unset registryToken takes the parameter's default: the token derived from the capability.
-  const write = (line: string) => process.stdout.write(line);
-  trace = workerDebugTracer(input, capability, write, mcpToken ? [mcpToken] : [], registryToken);
+  trace = workerTracerFor(input, credentials, mcpToken, (line) => process.stdout.write(line));
   const output = await runCodingWorker({
     input,
     workspace: WORKSPACE_PATH,
