@@ -16,6 +16,7 @@ import {
   type Harness,
 } from "./launcher.test-support.js";
 import type { Room } from "./placement.js";
+import type { SubstrateRunRecord } from "./run-store.js";
 import { SubstrateJobLauncher, type WarmRoundsOptions } from "./launcher.js";
 import {
   BLOB,
@@ -218,6 +219,29 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(await h.runs.countParked()).toBe(0);
     expect(h.api.actors.size).toBe(0);
     for (const key of (await allBlobs(h)).keys()) expect(key).not.toContain(h.token);
+  });
+
+  it("retain removes a run whose stored repositories cannot be read, and never parks it", async () => {
+    const h = await warmHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await finishRound(h, h.token, "run-1", 1);
+    expect((await h.launcher.status(handle)).state).toBe("succeeded");
+    // What the database store gives for a stored value that does not parse.
+    const get = h.runs.get.bind(h.runs);
+    const getByToken = h.runs.getByToken.bind(h.runs);
+    const unreadable = (record: SubstrateRunRecord | undefined): SubstrateRunRecord | undefined =>
+      record ? { ...record, repositoriesUnreadable: true } : record;
+    h.runs.get = async (runId) => unreadable(await get(runId));
+    h.runs.getByToken = async (token) => unreadable(await getByToken(token));
+    const suspended: string[] = [];
+    h.api.suspendActor = async (_atespace, name) => {
+      suspended.push(name);
+    };
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(false);
+    expect(suspended).toEqual([]);
+    expect((await get("run-1"))?.phase).toBe("removed");
+    expect(await h.runs.countParked()).toBe(0);
+    expect(h.api.actors.size).toBe(0);
   });
 
   it("gives the bridges the warm-rounds switch through the templates (their own templates)", async () => {

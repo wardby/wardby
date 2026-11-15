@@ -1825,8 +1825,10 @@ describe("extra repositories", () => {
     await finish(h);
     const read: string[] = [];
     const getStream = h.blobs.getStream.bind(h.blobs);
+    const get = h.blobs.get.bind(h.blobs);
     const head = h.blobs.head.bind(h.blobs);
     h.blobs.getStream = async (key) => (read.push(key), getStream(key));
+    h.blobs.get = async (key) => (read.push(key), get(key));
     h.blobs.head = async (key) => (read.push(key), head(key));
     await expect(h.launcher.materializeWorkspace(handle, repoFolder(h, "extra-beta"), "extra-beta")).rejects.toThrow(
       "substrate_workspace_destination_invalid",
