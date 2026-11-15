@@ -62,6 +62,12 @@ export interface RunnerHandle {
   stderr?: NodeJS.ReadableStream;
   /** Ends the runner (warm rounds: between rounds, before the next round's runner starts). */
   stop?: () => void;
+  /**
+   * Force-ends the runner and every process it started (its process group), whether or not the
+   * runner itself already exited. Warm rounds call it after stop, so no process a round's tool started
+   * keeps that round's environment into the next round.
+   */
+  kill?: () => void;
 }
 
 export interface ToolOptions {
@@ -111,7 +117,18 @@ export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: st
   const child = spawn(process.execPath, [entry], {
     env: { ...env, WARDBY_TOOL_SETUP: toolSetup },
     stdio: ["ignore", "pipe", "pipe"],
+    // Its own process group, so stop and kill reach every process the runner's tools started.
+    detached: true,
   });
+  /** Signals the runner's process group; a group whose processes are all gone is not an error. */
+  const signalGroup = (signal: NodeJS.Signals): void => {
+    if (child.pid === undefined) return;
+    try {
+      process.kill(-child.pid, signal);
+    } catch {
+      // ESRCH: nothing left in the group.
+    }
+  };
   // Passed on unchanged to the actor's log.
   child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
   const exited = new Promise<number>((resolve) => {
@@ -125,7 +142,13 @@ export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: st
     });
     void exited.then(() => reject(new BridgeError("substrate_bridge_runner_exited")));
   });
-  return { ready, exited, stderr: child.stderr, stop: () => child.kill("SIGTERM") };
+  return {
+    ready,
+    exited,
+    stderr: child.stderr,
+    stop: () => signalGroup("SIGTERM"),
+    kill: () => signalGroup("SIGKILL"),
+  };
 };
 
 /**
@@ -481,6 +504,10 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     if (!retired) return;
     retired.retiring = true;
     retired.runner.stop?.();
+    await waitAtMost(retired.runner.exited, RUNNER_STOP_MS);
+    // Whatever is left of the runner's process group after the grace period (the runner itself if it
+    // ignored SIGTERM, or a process one of its tools started) holds round n's environment: end it.
+    retired.runner.kill?.();
     await waitAtMost(retired.runner.exited, RUNNER_STOP_MS);
   };
 

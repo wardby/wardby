@@ -7320,6 +7320,17 @@ describe("ContainerExecutor warm rounds", () => {
       expect(created.warmStarts).toEqual([["run-1", false]]);
     });
 
+    it("records a cold outcome whose reason has no wording as not resumed, once, with no step line", async () => {
+      const created = await warmHarness({ ...launched, warmStart: null });
+      created.jobs.statusValue = { state: "running" };
+      created.warm!.setOutcome({ adopted: false, reason: "a_reason_outside_the_list" } as unknown as WarmOutcome);
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warm!.calls.outcomes).toEqual([created.jobs.handle]);
+      expect(created.warmStarts).toEqual([["run-1", false]]);
+      expect(created.steps).toEqual([]);
+    });
+
     it("asks again on the next pass when the warm outcome could not be read", async () => {
       const created = await warmHarness({ ...launched, warmStart: null });
       created.jobs.statusValue = { state: "running" };

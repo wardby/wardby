@@ -51,6 +51,51 @@ setTimeout(() => process.exit(7), 100);
     expect([...written, ...errors].join("")).not.toContain("SETUP-VALUE-123");
   });
 
+  it("stop and kill reach the runner's whole process group, even a runner and child that ignore SIGTERM", async () => {
+    const childPidFile = join(dir, "child.pid");
+    const entry = await script(`
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {});
+const child = spawn(
+  process.execPath,
+  ["-e", 'process.on("SIGTERM", () => {}); console.log("up"); setInterval(() => {}, 1000);'],
+  { stdio: ["ignore", "pipe", "ignore"] },
+);
+// Ready only once the child ignores SIGTERM too.
+child.stdout.once("data", () => {
+  writeFileSync(process.env.CHILD_PID_FILE, String(child.pid));
+  console.log("wardby_tool_runner_ready");
+});
+setInterval(() => {}, 1000);
+`);
+    const handle = spawnRunner("x", { CHILD_PID_FILE: childPidFile }, entry);
+    await handle.ready;
+    const childPid = Number(await readFile(childPidFile, "utf8"));
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(alive(childPid)).toBe(true);
+    let exited = false;
+    void handle.exited.then(() => (exited = true));
+    handle.stop!();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Both ignore SIGTERM: a stop alone leaves them running.
+    expect(exited).toBe(false);
+    expect(alive(childPid)).toBe(true);
+    handle.kill!();
+    expect(await handle.exited).toBe(1);
+    for (let i = 0; i < 50 && alive(childPid); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(alive(childPid)).toBe(false);
+    // A group already gone is not an error.
+    expect(() => handle.kill!()).not.toThrow();
+  });
+
   it("rejects ready when the runner exits first", async () => {
     const entry = await script("process.exit(3);\n");
     const handle = spawnRunner("x", {}, entry);

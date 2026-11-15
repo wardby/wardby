@@ -206,6 +206,7 @@ describe("substrate bridges, warm rounds", () => {
     setups: string[];
     toolLists: string[][];
     stops: number[];
+    kills: number[];
     /** Ends the n-th runner with a code, as if it exited on its own. */
     exits: Array<(code: number) => void>;
   }> {
@@ -223,6 +224,7 @@ describe("substrate bridges, warm rounds", () => {
     };
     const setups: string[] = [];
     const stops: number[] = [];
+    const kills: number[] = [];
     const exits: Array<(code: number) => void> = [];
     tool = await runTool({
       proxyUrl,
@@ -249,6 +251,7 @@ describe("substrate bridges, warm rounds", () => {
             stops.push(setups.length);
             void server.then((s) => s.close(() => exit(0)));
           },
+          kill: () => void kills.push(setups.length),
         };
       },
     });
@@ -328,11 +331,11 @@ describe("substrate bridges, warm rounds", () => {
         };
       },
     });
-    return { workspace, inputs, setups, toolLists, stops, exits };
+    return { workspace, inputs, setups, toolLists, stops, kills, exits };
   }
 
   it("runs round 2 on the same bridges: next input, resumed session, fresh tool runner, same workspace", async () => {
-    const { workspace, inputs, setups, toolLists, stops } = await startBridges(true);
+    const { workspace, inputs, setups, toolLists, stops, kills } = await startBridges(true);
     expect(agent!.warmRounds).toBe(true);
     expect(tool!.warmRounds).toBe(true);
     await agent!.uploaded;
@@ -342,6 +345,9 @@ describe("substrate bridges, warm rounds", () => {
     expect(inputs[0]).toEqual({ runId: "run-1", task: "round one", sessionResume: true });
     // Between rounds: the tool runner is ended; the agent keeps asking for round 2's input.
     await waitFor(() => (stops.length === 1 ? true : undefined));
+    // ...and its process group force-ended after it, so nothing round 1's tools started outlives it.
+    await waitFor(() => (kills.length === 1 ? true : undefined));
+    expect(kills).toEqual(stops);
     await waitFor(() => (requests.some((r) => r.includes("/input?round=2")) ? true : undefined));
     // Something round 1 left in the workspace (an install, a virtualenv): kept as it is.
     await writeFile(join(workspace, "made-in-round-1.txt"), "kept\n");
@@ -474,7 +480,9 @@ describe("substrate bridges, warm rounds", () => {
                 );
               },
       });
-      // Round 1 runs. The fake runner holds its token, which shows the check can see one.
+      // Round 1 runs. The fake runner holds its token, which shows the check can see one. The real
+      // runner keeps its token in its own process, never this heap, so that variant has no positive
+      // control of its own: it relies on the fake variant's, which proves heapHolds finds a held token.
       if (kind !== "the real runner process") expect(await heapHolds(token1)).toBe(true);
       await relay.requestCollect(TOKEN);
       expect(await tool.collected).toBe("ok");
@@ -505,7 +513,17 @@ describe("substrate bridges, warm rounds", () => {
     expect(tails[0].tail).toContain("worker stderr of round 2");
     expect(tails[0].tail).not.toContain("worker stderr of round 1");
     // Round 2's tail carries round 2's bridge events only (round 1 logged its input without a round).
-    expect(tails[0].tail).not.toMatch(/"event":"substrate_bridge_input_ready","runToken":"[^"]+"}/);
+    // Parsed, not matched as text, so the check does not depend on the order of a log line's fields.
+    const inputReady = tails[0].tail!.split("\n").flatMap((line): { event?: string; round?: number }[] => {
+      try {
+        const fields = JSON.parse(line.slice(line.indexOf("{"))) as { event?: string; round?: number };
+        return fields.event === "substrate_bridge_input_ready" ? [fields] : [];
+      } catch {
+        return [];
+      }
+    });
+    expect(inputReady.length).toBeGreaterThan(0);
+    expect(inputReady.every((fields) => fields.round === 2)).toBe(true);
     expect(requests).toContain(`POST /substrate/runs/${TOKEN}/diagnostics?round=2`);
     // The exit report asks the tool for round 2's workspace: let that collect finish before teardown.
     await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN, 2))) ? true : undefined));

@@ -260,6 +260,13 @@ export function createSubstrateRoutes(
    * its actors may be parked (warm rounds), so a finished round's capability is refused here (401) on
    * every route, the next round's input included; its registry-only token stops working the same way
    * (the registry looks it up through the same session).
+   *
+   * One place accepts the capability after cancel: the control plane's run-steps ingress
+   * (src/core/run-steps/ingress.ts) checks only the deadline, and accepts until the deadline plus its
+   * grace, so a cancelled session's last steps still land. That is safe for a parked round: only the
+   * coding proxy's run-steps relay reaches the ingress (in-cluster or on the run's isolated network,
+   * reachable from the proxy alone), and the proxy relays steps only from requests it accepted, which
+   * need an active session.
    */
   async function agentAuth(request: IncomingMessage, token: string): Promise<boolean> {
     const key = request.headers["x-api-key"];

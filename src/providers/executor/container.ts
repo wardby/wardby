@@ -4198,8 +4198,8 @@ export class ContainerExecutor implements Executor {
    * After a continuation launched with JobSpec.warm: records whether it resumed the retained round
    * (CodingRun.warmStart) and writes the run's fixed step line saying so (warm-start-wording.ts).
    * Best effort: never fails the run. Only fixed text and a boolean leave here. Says what it found:
-   * `reported`, `none` (the launcher has no warm outcome for the job) or `unknown` (not read, or not
-   * reportable).
+   * `reported`, `none` (the launcher has no warm outcome for the job, or a cold one whose reason has
+   * no wording: nothing to report, then or later) or `unknown` (not read: ask again later).
    */
   private async reportWarmStart(
     run: ContainerRunSnapshot,
@@ -4219,7 +4219,9 @@ export class ContainerExecutor implements Executor {
     }
     if (!outcome) return "none";
     const line = warmStartLine(outcome);
-    if (!line) return "unknown";
+    // Only a cold outcome can lack wording (a reason outside the fixed list): reading it again finds
+    // the same, so it counts as no outcome and recover stops asking.
+    if (!line) return "none";
     await this.recordWarmStart(run.runId, outcome.adopted);
     await runSteps
       ?.record(run.runId, {
