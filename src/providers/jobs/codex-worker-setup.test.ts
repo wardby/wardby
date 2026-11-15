@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { collectExclusions } from "../../coding/collect-exclude.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
+import type { ResolvedCodingService } from "../../coding/services/catalog.js";
 import {
   CODEX_WORKER_SETUP_LIMITS,
   codexWorkerSetup,
   holderSetupRepositories,
   type CodexWorkerSetup,
+  type HolderSetupService,
   type HolderSetupRepository,
 } from "./codex-worker-setup.js";
+import { MAX_SERVICE_SCRIPT_BYTES, MAX_SERVICE_SCRIPTS_BYTES, serviceStartScript } from "./substrate/service-script.js";
 import type { JobSpec } from "./types.js";
 
 const FAKE_CAP = "rrp_fake_capability_value_000001";
@@ -88,6 +91,66 @@ describe("codexWorkerSetup", () => {
     expect((JSON.parse(raw) as CodexWorkerSetup).repositories).toEqual(repositories);
     expect(raw).not.toContain("hostPath");
     expect(raw).not.toContain("/runs/");
+  });
+});
+
+const FAKE_SERVICE: ResolvedCodingService = {
+  name: "fakedb",
+  version: "1",
+  image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,
+  port: 5999,
+  serviceEnv: { FAKEDB_PASSWORD: "FAKE_SERVICE_ENV_VALUE_0001" },
+  testEnv: {},
+  readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 3 },
+  startCommand: ["true"],
+  resources: { cpuMillicores: 100, memoryMib: 64, diskMib: 64 },
+  dataPath: "/var/lib/fakedb",
+  writablePaths: [],
+};
+
+describe("codexWorkerSetup services", () => {
+  it("has neither services nor servicesWaitMs without services", () => {
+    const parsed = JSON.parse(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+    expect(parsed).not.toHaveProperty("services");
+    expect(parsed).not.toHaveProperty("servicesWaitMs");
+  });
+
+  it("lists name and script only, with the wait bound", () => {
+    const entries = [{ name: "fakedb", script: "S", env: { X: "y" } }] as never as HolderSetupService[];
+    const setup = JSON.parse(
+      codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false, services: { entries, waitMs: 45_000 } }),
+    ) as CodexWorkerSetup;
+    expect(setup.services).toEqual([{ name: "fakedb", script: "S" }]);
+    expect(setup.servicesWaitMs).toBe(45_000);
+  });
+
+  it("stays inside the setup bound", () => {
+    const entry = (name: string, size: number) => ({ name, script: "x".repeat(size) });
+    const five = ["a", "b", "c", "d", "e"].map((n) => entry(n, MAX_SERVICE_SCRIPT_BYTES));
+    expect(() =>
+      codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false, services: { entries: five, waitMs: 1 } }),
+    ).not.toThrow();
+    const six = Array.from({ length: 7 }, (_, i) => entry(`s${i}`, MAX_SERVICE_SCRIPT_BYTES));
+    expect(() =>
+      codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false, services: { entries: six, waitMs: 1 } }),
+    ).toThrow("codex_worker_setup_too_large");
+    const total = Array.from({ length: 4 }, (_, i) => entry(`t${i}`, MAX_SERVICE_SCRIPTS_BYTES / 4));
+    expect(() =>
+      codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false, services: { entries: total, waitMs: 1 } }),
+    ).not.toThrow();
+  });
+
+  it("keeps service env values and the capability out of everything but the scripts", () => {
+    const raw = codexWorkerSetup({ ...spec, services: [FAKE_SERVICE] }, FAKE_CAP, {
+      collectResultBundle: false,
+      services: { entries: [{ name: "fakedb", script: serviceStartScript(FAKE_SERVICE) }], waitMs: 33_000 },
+    });
+    expect(raw).toContain("FAKE_SERVICE_ENV_VALUE_0001");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    delete parsed.services;
+    const rest = JSON.stringify(parsed);
+    expect(rest).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
+    expect(raw).not.toContain(FAKE_CAP);
   });
 });
 
