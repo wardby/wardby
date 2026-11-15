@@ -384,7 +384,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * there is a JobCapacityError).
    */
   async hasCapacityFor(spec: JobSpec): Promise<boolean> {
-    if (this.warm) await this.sweepParkedSometimes();
+    await this.sweepParkedSometimes();
     let templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec };
     try {
       templates = this.templatesFor(spec);
@@ -402,8 +402,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     const specHash = stableSpecHash(spec);
     const deadline = () => new Date(this.now() + spec.timeoutSec * 1000);
     let coldReason: WarmColdReason | undefined;
+    // Removal of kept rounds never depends on the switch (warm rounds off: every one goes).
+    await this.sweepParkedSometimes();
     if (this.warm) {
-      await this.sweepParkedSometimes();
       // A relaunch of a run that has a row keeps whatever that row says.
       if (!(await this.runs.get(spec.runId))) {
         if (!(await this.fits(templates))) await this.evictUntilFits(templates, spec.warm?.fromRunId);
@@ -998,10 +999,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   /**
    * Removes every park of `filter.agentId`'s runs (WorkspaceJobLauncher.removeParked), each as an
    * expired park is removed; how many went. Never throws: a park that cannot be removed now (or
-   * when the store cannot be read) is left to the sweep.
+   * when the store cannot be read) is left to the sweep. Removal only, so it works with warm rounds
+   * off too.
    */
   async removeParked(filter: { agentId: string }): Promise<number> {
-    if (!this.warm) return 0;
     let removed = 0;
     for (const park of await this.parks()) {
       if (park.agentId !== filter.agentId) continue;
@@ -1016,9 +1017,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     return removed;
   }
 
-  /** Start-up: removes the parks that expired while no control plane was sweeping. Never throws. */
+  /**
+   * Start-up: removes the parks that expired while no control plane was sweeping, and with warm
+   * rounds off every park left from when they were on. Never throws.
+   */
   async warmUp(): Promise<void> {
-    if (!this.warm) return;
     this.lastSweepAt = this.now();
     await this.sweepParked().catch(() => undefined);
   }
@@ -1187,11 +1190,14 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     await this.sweepParked().catch(() => undefined);
   }
 
-  /** Removes every parked run past its expiry (deadlineAt). */
+  /**
+   * Removes every parked run past its expiry (deadlineAt); with warm rounds off, every parked run
+   * (nothing adopts one, so a park left from when they were on is only cost). Removal only: never
+   * parks or adopts.
+   */
   async sweepParked(): Promise<void> {
-    if (!this.warm) return;
     for (const record of await this.runs.listParked()) {
-      if (record.deadlineAt.getTime() > this.now()) continue;
+      if (this.warm && record.deadlineAt.getTime() > this.now()) continue;
       try {
         if (await this.removeParkedRun(record)) {
           this.warmEvent({ event: "substrate_warm_expired", runId: record.runId, runToken: record.token });
@@ -1352,7 +1358,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   /**
    * Every resource of the run, one step per deletion, so none waits on (or is skipped by) another.
    * With `outcome: false`, not the blobs that carry the run's outcome (result, exit, done) nor the
-   * round record. With warm rounds: every round's files (`rounds` from the run's row).
+   * round record. Every round's files (`rounds` from the run's row), whatever the warm-rounds
+   * setting now: a run from when it was on is removed in full after it is turned off.
    */
   private deletions(
     token: string,
@@ -1370,13 +1377,12 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       () => this.deleteSecret(token),
       ...blobs.map((blob) => () => this.deleteBlob(blob(token))),
     ];
-    if (!this.warm) return steps;
     for (let round = 2; round <= rounds; round += 1) {
       for (const name of ROUND_BLOBS) {
         if (outcome || !OUTCOME_ROUND_BLOBS.includes(name)) steps.push(() => this.deleteBlob(BLOB[name](token, round)));
       }
     }
-    if (outcome) steps.push(() => this.deleteBlob(roundBlob(token)));
+    if (outcome && (this.warm || rounds > 1)) steps.push(() => this.deleteBlob(roundBlob(token)));
     return steps;
   }
 
@@ -1398,7 +1404,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     }
     await settleAll(outcome);
     await this.deleteBlob(BLOB.done(token, rounds));
-    if (this.warm) await this.deleteBlob(roundBlob(token));
+    if (this.warm || rounds > 1) await this.deleteBlob(roundBlob(token));
   }
 
   private async deleteSecret(name: string): Promise<void> {

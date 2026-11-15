@@ -574,8 +574,59 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     await restarted.warmUp();
     expect((await s.runs.get("run-1"))!.phase).toBe("removed");
     expect(s.api.actors.size).toBe(0);
-    // Without warm rounds, warm-up does nothing.
+    // Without warm rounds, warm-up has nothing left to remove.
     await expect(restartedLauncher(s, null).warmUp()).resolves.toBeUndefined();
+  });
+
+  describe("turning warm rounds off", () => {
+    it("removes every kept round at start-up (warmUp), expired or not, and the sweep does too", async () => {
+      const h = await warmHarness();
+      await parkedRoundOne(h);
+      expect(h.api.actors.size).toBe(2);
+      const off = restartedLauncher(h, null);
+      await off.warmUp();
+      expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+      expect(h.api.actors.size).toBe(0);
+      expect(h.api.egressPolicies.size).toBe(0);
+      expect([...(await allBlobs(h)).keys()]).toEqual([]);
+
+      const s = await warmHarness();
+      await parkedRoundOne(s);
+      await restartedLauncher(s, null).sweepParked();
+      expect((await s.runs.get("run-1"))!.phase).toBe("removed");
+      expect(s.api.actors.size).toBe(0);
+    });
+
+    it("launch and the capacity probe sweep kept rounds too, and never park or adopt", async () => {
+      const h = await warmHarness();
+      await parkedRoundOne(h);
+      const off = restartedLauncher(h, null);
+      const spec2 = await followUp(h, "run-2");
+      const handle = await off.launch(spec2);
+      expect(handle.id).toBe(`wardby-runs/${substrateRunToken("run-2")}`);
+      expect(await h.runs.get("run-2")).toMatchObject({ token: substrateRunToken("run-2"), round: 1 });
+      expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+      expect([...h.api.actors.keys()].filter((key) => key.includes(h.token))).toEqual([]);
+
+      const s = await warmHarness();
+      await parkedRoundOne(s);
+      await restartedLauncher(s, null).hasCapacityFor(await otherRun(s, "run-3"));
+      expect((await s.runs.get("run-1"))!.phase).toBe("removed");
+    });
+
+    it("removes a later round in flight when it was turned off in full, every round's files included", async () => {
+      const h = await warmHarness();
+      await parkedRoundOne(h);
+      const second = await h.launcher.launch(await followUp(h, "run-2"));
+      await finishRound(h, h.token, "run-2", 2);
+      await h.blobs.put(BLOB.transcript(h.token, 2), Buffer.from("t"));
+      const off = restartedLauncher(h, null);
+      expect((await off.status(second)).state).toBe("succeeded");
+      await off.remove(second);
+      expect((await h.runs.get("run-2"))!.phase).toBe("removed");
+      expect([...h.api.actors.keys()].filter((key) => key.includes(h.token))).toEqual([]);
+      for (const key of (await allBlobs(h)).keys()) expect(key).not.toContain(h.token);
+    });
   });
 
   it("does not adopt an expired park (launch's own sweep removes it first)", async () => {
@@ -871,7 +922,7 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(await h.launcher.removeParked({ agentId: "agent-1" })).toBe(0);
   });
 
-  it("removeParked() is 0 with warm rounds off, and leaves a park it cannot remove to the sweep", async () => {
+  it("removeParked() is 0 with nothing kept, and leaves a park it cannot remove to the sweep", async () => {
     const off = await makeHarness();
     expect(await off.launcher.removeParked({ agentId: "agent-1" })).toBe(0);
     const h = await warmHarness();

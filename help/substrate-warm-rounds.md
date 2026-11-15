@@ -61,6 +61,8 @@ with no step line.
   launched with (provider, model, prompt, repository, toolchain, images, limits
   or disk). `delete_agent` removes them too.
 - A kept round expires after `SUBSTRATE_PARK_TTL_SEC`.
+- Turning warm rounds off removes every kept round when the control plane next
+  starts.
 - Past `SUBSTRATE_PARK_MAX`, the oldest is removed.
 - Under capacity pressure kept rounds are removed oldest first, stopping once a
   removal frees no room, never the one being continued.

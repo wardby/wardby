@@ -176,6 +176,9 @@ Also:
 - The actor **templates change name** when warm rounds are on, so the first run
   after you turn it on rebuilds the golden snapshots, as after any template
   change. Turning it off again changes them back.
+- **Turning it off** removes every kept round when the control plane next
+  starts (and on its regular sweep), expired or not, with all of each run's
+  per-round files. Nothing is kept or resumed while it is off.
 
 ### When a round starts fresh
 
