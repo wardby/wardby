@@ -562,6 +562,63 @@ describe("substrate routes", () => {
       expect((await fetch(`${base}/input?round=x`, agent())).status).toBe(400);
     });
 
+    it("refuses a finished round's capability (its session was cancelled) on every agent route, the next round's input included", async () => {
+      // run-1 (round 1) finished: the executor cancelled its session before its actors were parked.
+      // run-2 adopted them and holds the token now.
+      let run1Status: "active" | "cancelled" = "active";
+      let holder = "run-1";
+      overrides = {
+        warmRounds: true,
+        ledger: {
+          findSessionByCapabilityHash: async (hash) =>
+            hash === capabilityHash(CAPABILITY)
+              ? { ...sessionFor("run-1"), status: run1Status }
+              : hash === capabilityHash(OTHER_CAPABILITY)
+                ? sessionFor("run-2")
+                : null,
+        },
+        tokenForRun: async (runId) => (runId === holder ? TOKEN : "wa-retired"),
+      };
+      await start();
+      await blobs.put(BLOB.input(TOKEN), Buffer.from('{"round":1}'));
+      // While round 1 runs, its capability works.
+      expect((await fetch(`${base}/input`, agent())).status).toBe(200);
+      run1Status = "cancelled";
+      const routes: Array<[string, RequestInit]> = [
+        ["input", {}],
+        ["input?round=2", {}],
+        ["channels", { method: "POST" }],
+        ["channels/c1/lines", json({ seq: 1, line: "x" })],
+        ["channels/c1/lines?after=0", {}],
+        ["result", upload("{}")],
+        ["result?round=2", upload("{}")],
+        ["transcript?round=2", upload("t")],
+        ["exit?round=2", upload(JSON.stringify({ code: 1 }))],
+        ["diagnostics?round=2", upload("tail")],
+      ];
+      // Before and after the adoption: refused, whatever round it names.
+      for (const adopted of [false, true]) {
+        if (adopted) {
+          holder = "run-2";
+          await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+          await blobs.put(BLOB.input(TOKEN, 2), Buffer.from('{"round":2}'));
+        }
+        for (const [path, init] of routes) {
+          const answer = await fetch(`${base}/${path}`, agent(init));
+          expect([path, answer.status]).toEqual([path, 401]);
+          expect(await answer.json()).toEqual({ error: { type: "unauthorized" } });
+        }
+      }
+      // The adopting run's own capability is served.
+      const input = await fetch(`${base}/input?round=2`, { headers: { "x-api-key": OTHER_CAPABILITY } });
+      expect(input.status).toBe(200);
+      // Nothing was written for the refused requests.
+      expect(await blobs.head(BLOB.result(TOKEN))).toBeNull();
+      expect(await blobs.head(BLOB.result(TOKEN, 2))).toBeNull();
+      expect(await blobs.head(BLOB.exit(TOKEN, 2))).toBeNull();
+      expect(warnCalls).toEqual([]);
+    });
+
     it("serves and stores the current round's files, for the run holding the token", async () => {
       // run-2 adopted run-1's actors: its row holds TOKEN; run-1's row moved to a retired token.
       overrides = {

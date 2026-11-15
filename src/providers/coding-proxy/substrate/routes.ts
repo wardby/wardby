@@ -252,6 +252,13 @@ export function createSubstrateRoutes(
   /** `<run token>/<side>` whose diagnostics were logged: a repeat is answered but not logged again. */
   const diagnosticsSeen = new Set<string>();
 
+  /**
+   * No live credential at rest: a capability works only while its session is active and in time, and
+   * only for the token its run holds now. The executor cancels a run's session as the run ends, before
+   * its actors may be parked (warm rounds), so a finished round's capability is refused here (401) on
+   * every route, the next round's input included; its registry-only token stops working the same way
+   * (the registry looks it up through the same session).
+   */
   async function agentAuth(request: IncomingMessage, token: string): Promise<boolean> {
     const key = request.headers["x-api-key"];
     if (typeof key !== "string" || key === "") return false;

@@ -2543,7 +2543,22 @@ export class ContainerExecutor implements Executor {
   ): Promise<void> {
     const existingWorkspace = isRunWorkspaces(heldWorkspaces) ? heldWorkspaces.main : heldWorkspaces;
     const sessionId = existingSessionId ?? run.proxySessionId;
-    if (sessionId) await this.options.sessions.cancelSession(sessionId).catch(() => undefined);
+    // No live credential at rest (warm rounds): cancelling the session revokes the run's capability
+    // and its registry-only token (the proxy and the registry accept either only while the session is
+    // active). It happens first, and a job is retained only once it succeeded: when it cannot be
+    // confirmed, the job is removed as before, never parked holding a credential that still works.
+    const credentialsRevoked = sessionId
+      ? await this.options.sessions.cancelSession(sessionId).then(
+          () => true,
+          (error: unknown) => {
+            containerLog.warn(
+              { runId: run.runId, event: "coding.session_cancel_failed", errorName: errorName(error) },
+              "could not cancel a finished run's proxy session; it lapses at its deadline, and its job is not retained",
+            );
+            return false;
+          },
+        )
+      : true;
     // For notifyContinuationFinished in the `finally` below -- defaults to
     // "failed" and is only flipped right before a success or out-of-budget return.
     let outcome: ContinuationOutcome = "failed";
@@ -2718,7 +2733,9 @@ export class ContainerExecutor implements Executor {
       }
       this.terminal(pushed.current, "succeeded");
       outcome = "succeeded";
-      if (finalized.outcome !== "no_changes") retention = this.retentionFor(run, finalized.commitSha);
+      if (finalized.outcome !== "no_changes" && credentialsRevoked) {
+        retention = this.retentionFor(run, finalized.commitSha);
+      }
       overrun = this.overrunDetails(pushed.current);
       if (finalized.outcome === "pull_request_updated" && finalized.targetMerge) {
         merged = { mergeSentence: mergeSentence(finalized.targetMerge) };

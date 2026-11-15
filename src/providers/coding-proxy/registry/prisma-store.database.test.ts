@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createPrismaClient } from "../../../core/db.js";
 import { afterAll, describe, expect, it } from "vitest";
+import { PrismaProxyLedger } from "../prisma-ledger.js";
 import { PrismaRegistryStore } from "./prisma-store.js";
 
 const db = createPrismaClient();
@@ -48,7 +49,7 @@ async function seedRun(options: {
       registryTokenHash: options.registryTokenHash,
     },
   });
-  return { db, runId, agentId };
+  return { db, runId, agentId, sessionId };
 }
 
 describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () => {
@@ -114,6 +115,18 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
     expect(fetches[1]).toMatchObject({ name: "evil", outcome: "refused", reason: "wardby_package_not_allowed" });
 
     expect(await store.findRunByRegistryTokenHash("h1", new Date(Date.now() + 10 * 86_400_000))).toBeNull();
+  });
+
+  it("stops resolving a run's registry-only token once its session is cancelled (the run ended)", async () => {
+    const hash = `h-cancel-${randomUUID()}`;
+    const { runId, agentId, sessionId } = await seedRun({ registryTokenHash: hash, allowlist: {} });
+    runIds.push(runId);
+    agentIds.push(agentId);
+    const store = new PrismaRegistryStore(db);
+    expect(await store.findRunByRegistryTokenHash(hash, new Date())).toMatchObject({ runId });
+    // What the executor does as a run ends, before a warm round may be parked.
+    await new PrismaProxyLedger(db).cancelSession(sessionId);
+    expect(await store.findRunByRegistryTokenHash(hash, new Date())).toBeNull();
   });
 
   it("stores facts once, looks up approvals with their download URL, and drops approvals with the run", async () => {

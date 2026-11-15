@@ -204,7 +204,8 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     throw new BridgeError(code);
   };
 
-  // 1. The tool setup (before the first events poll, which deletes it on the proxy).
+  // 1. The tool setup (before the first events poll, which deletes it on the proxy). It carries the
+  // run's registry-only token; once the runner has started, the runner is its only holder (`current`).
   let toolSetup: string;
   let exclusions: CollectExclusions;
   try {
@@ -265,7 +266,10 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   // 3. The tool runner (warm rounds: one per round, each with its round's tool setup).
   let resolveRunnerExited!: (code: number) => void;
   const runnerExited = new Promise<number>((resolve) => (resolveRunnerExited = resolve));
-  /** The current round's runner, and whether the bridge itself is ending it (between rounds). */
+  /**
+   * The current round's runner, and whether the bridge itself is ending it (between rounds). It is
+   * the only holder of the round's tool setup (and so of its registry-only token) once started.
+   */
   let current: { runner: RunnerHandle; retiring: boolean } | undefined;
   const startRunner = async (setup: string): Promise<boolean> => {
     const runner = (options.launchRunner ?? spawnRunner)(setup, env);
@@ -465,16 +469,27 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   };
 
   /**
+   * Ends the round's runner and drops it. The round's registry-only token belongs to a finished run,
+   * and the runner is its only holder: once this returns, nothing of the bridge refers to it, so a
+   * suspended actor holds no copy. (Its own function, so no frame that waits for the next round keeps
+   * the runner alive.)
+   */
+  const retireRunner = async (): Promise<void> => {
+    const retired = current;
+    current = undefined;
+    if (!retired) return;
+    retired.retiring = true;
+    retired.runner.stop?.();
+    await waitAtMost(retired.runner.exited, RUNNER_STOP_MS);
+  };
+
+  /**
    * Warm rounds: after a round's workspace is stored, end its tool runner (its registry token belongs
    * to a finished run) and wait, across the launcher's suspend and resume, for the next round's tool
    * setup. /workspace stays as it is (repository, virtualenvs, installs): it is not seeded again.
    */
   const nextRound = async (): Promise<boolean> => {
-    if (current) {
-      current.retiring = true;
-      current.runner.stop?.();
-      await waitAtMost(current.runner.exited, RUNNER_STOP_MS);
-    }
+    await retireRunner();
     for (const { socket } of connections.values()) socket.destroy();
     connections.clear();
     round += 1;

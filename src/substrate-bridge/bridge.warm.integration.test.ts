@@ -1,12 +1,14 @@
 // Warm rounds end to end without Substrate: real routes (warm rounds on), memory relay, local blobs,
 // the real tool runner, a stub worker. The "launcher" steps between rounds are done by hand here.
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { getHeapSnapshot } from "node:v8";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseToolSetup } from "../claude-tool-runner/command.mjs";
 import { claudeToolSetup } from "../providers/jobs/claude-tool-setup.js";
@@ -20,7 +22,7 @@ import type { ProxySession } from "../providers/coding-proxy/types.js";
 import { run as runAgent, type AgentHandle } from "./agent.js";
 import { PLACEHOLDER_CAPABILITY, WARM_ROUNDS_ENV } from "./constants.js";
 import { DEFAULT_POLICY } from "./http.js";
-import { run as runTool, type ToolHandle } from "./tool.js";
+import { run as runTool, spawnRunner, type ToolHandle } from "./tool.js";
 
 const exec = promisify(execFile);
 const ATESPACE = "wardby-runs";
@@ -42,6 +44,21 @@ const spec: JobSpec = {
   limits: { cpus: 1, memoryMb: 2048, pids: 128, diskMb: 2048 },
   labels: {},
 };
+
+/** Whether a heap snapshot of this process (taken after a full GC) contains `needle`'s bytes. */
+async function heapHolds(needle: Buffer): Promise<boolean> {
+  const snapshot = getHeapSnapshot();
+  let carry = Buffer.alloc(0);
+  for await (const chunk of snapshot) {
+    const window = Buffer.concat([carry, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)]);
+    if (window.includes(needle)) {
+      snapshot.destroy();
+      return true;
+    }
+    carry = window.subarray(Math.max(0, window.length - needle.length + 1));
+  }
+  return false;
+}
 
 async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, ms = 15_000): Promise<T> {
   const until = Date.now() + ms;
@@ -85,6 +102,7 @@ describe("substrate bridges, warm rounds", () => {
   let proxy: Server;
   let proxyUrl: string;
   let blobs: LocalBlobStore;
+  let relay: MemoryRelayStore;
   let agent: AgentHandle | undefined;
   let tool: ToolHandle | undefined;
   let logs: string[];
@@ -96,7 +114,7 @@ describe("substrate bridges, warm rounds", () => {
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "bridge-warm-"));
     blobs = new LocalBlobStore(join(dir, "blobs"));
-    const relay = new MemoryRelayStore();
+    relay = new MemoryRelayStore();
     relay.register(TOKEN, 1 << 20);
     logs = [];
     routeLogs = [];
@@ -341,4 +359,65 @@ describe("substrate bridges, warm rounds", () => {
     expect(await blobs.head(BLOB.result(TOKEN, 2))).toBeNull();
     expect(stops).toEqual([]);
   });
+
+  it.each(["a runner that keeps its setup", "the real runner process"])(
+    "holds no copy of a finished round's registry token while it waits for the next round (%s)",
+    async (kind) => {
+      // The tokens exist in this process only as Buffers (never as a JS string the test keeps), so a
+      // heap snapshot finds one only if the bridge (or something it keeps alive) still holds it.
+      const fresh = (): Buffer => Buffer.from(`rrg_${randomBytes(16).toString("hex")}`);
+      const token1 = fresh();
+      const token2 = fresh();
+      const setupBlob = (token: Buffer): Buffer =>
+        Buffer.concat([
+          Buffer.from('{"toolSetup":"{\\"env\\":{\\"NPM_TOKEN\\":\\"'),
+          token,
+          Buffer.from('\\"}}","collectExclude":{"names":[],"paths":[]}}'),
+        ]);
+      await stageRoundOne();
+      await blobs.put(BLOB.toolSetup(TOKEN), setupBlob(token1));
+      // A stand-in for the tool runner's entry: ready at once, ends on SIGTERM.
+      const runnerEntry = join(dir, "runner-entry.mjs");
+      await writeFile(runnerEntry, 'console.log("wardby_tool_runner_ready"); setInterval(() => {}, 1000);\n');
+      const started: number[] = [];
+      tool = await runTool({
+        proxyUrl,
+        env: { PATH: process.env.PATH ?? "/usr/bin", [WARM_ROUNDS_ENV]: "1" },
+        metadataDir: await names("tool"),
+        workspace: join(dir, "workspace"),
+        socketPath: join(dir, "tool", "runner.sock"),
+        readyPort: 0,
+        tempRoot: dir,
+        tarCommand: await tarForTests(dir),
+        policy: FAST,
+        log,
+        nextRoundPollMs: 20,
+        onRoundStarted: (round) => void started.push(round),
+        // A runner keeps its tool setup while it lives; the real one has it in its environment.
+        launchRunner:
+          kind === "the real runner process"
+            ? (setupText, runnerEnv) => spawnRunner(setupText, runnerEnv, runnerEntry)
+            : (setupText) => {
+                let exit!: (code: number) => void;
+                const exited = new Promise<number>((resolve) => (exit = resolve));
+                return Object.assign(
+                  { ready: Promise.resolve(), exited, stop: () => exit(0) },
+                  { heldSetup: setupText },
+                );
+              },
+      });
+      // Round 1 runs. The fake runner holds its token, which shows the check can see one.
+      if (kind !== "the real runner process") expect(await heapHolds(token1)).toBe(true);
+      await relay.requestCollect(TOKEN);
+      expect(await tool.collected).toBe("ok");
+      await waitFor(() => (requests.some((r) => r.includes("/tool-setup?round=2")) ? true : undefined));
+      // Waiting for round 2 (the actor may be suspended now): round 1's token is gone.
+      expect(await heapHolds(token1)).toBe(false);
+      await blobs.put(BLOB.toolSetup(TOKEN), setupBlob(token2));
+      await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+      await waitFor(() => (started.includes(2) ? true : undefined));
+      if (kind !== "the real runner process") expect(await heapHolds(token2)).toBe(true);
+      expect(await heapHolds(token1)).toBe(false);
+    },
+  );
 });

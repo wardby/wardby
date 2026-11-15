@@ -6868,6 +6868,26 @@ describe("ContainerExecutor warm rounds", () => {
       expect(created.jobs.removals).toBe(1);
     });
 
+    it("cancels the run's session (revoking its capability and registry token) before it retains the job", async () => {
+      const created = await warmHarness();
+      await created.executor.start("run-1");
+      expect(created.sessions.cancels).toBeGreaterThan(0);
+      const cancelAt = created.events.indexOf("cancel");
+      expect(cancelAt).toBeGreaterThanOrEqual(0);
+      expect(cancelAt).toBeLessThan(created.events.indexOf("retain"));
+    });
+
+    it("removes, never retains, a delivered run whose session could not be cancelled (its credentials may still work)", async () => {
+      const created = await warmHarness();
+      created.sessions.cancelSession = async () => {
+        throw new Error("proxy_unavailable");
+      };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
     it("removes the job when retain throws", async () => {
       const created = await warmHarness();
       created.warm!.setRetain(new Error("substrate_down"));
