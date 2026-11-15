@@ -2,7 +2,8 @@
  * What Claude Code's tool runner (the credential-free container that runs commands in the
  * repository) needs from the trusted launcher: the package-registry settings every Codex shell
  * gets, built from the run's registry-only token (deriveRegistryToken, never the capability), and
- * the run's service test variables, and whether the run's dependency cache is on. Delivered as the
+ * the run's service test variables, whether the run's dependency cache is on, and whether the
+ * workspace is a resumed one (a Substrate warm round). Delivered as the
  * WARDBY_TOOL_SETUP environment variable (CLAUDE_TOOL_SETUP_ENV, docker-isolation.ts; a test keeps it
  * equal to the tool runner's TOOL_SETUP_ENV): a Kubernetes Secret key, or `docker create --env NAME`
  * with the value in the CLI's own environment.
@@ -39,6 +40,11 @@ export interface ClaudeToolSetup {
   diskMb?: number;
   /** The run's run_command time limits (JobSpec.commandTimeouts); an older tool runner ignores the key. */
   commandTimeouts?: { defaultMs: number; maxMs: number };
+  /**
+   * With dependencyCache only: the workspace is resumed from an earlier round (Substrate warm
+   * rounds), so the tool runner skips the cache (`reused_workspace`). The proxy refuses it anyway.
+   */
+  workspaceReused?: true;
 }
 
 export interface ClaudeToolSetupOptions {
@@ -47,6 +53,8 @@ export interface ClaudeToolSetupOptions {
    * (`http://wardby-proxy:8787`); the Substrate launcher passes its configured proxy host and port.
    */
   proxyBaseUrl?: string;
+  /** The Substrate launcher's adopt path. Ignored unless the spec has dependencyCache. */
+  workspaceReused?: boolean;
 }
 
 export function claudeToolSetup(spec: JobSpec, capability: string, options: ClaudeToolSetupOptions = {}): string {
@@ -61,7 +69,13 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
     // Same precedence as the Codex driver: the registry's own settings win over a service's.
     env: { ...serviceEnvironment(spec.services), ...registry.env },
     files: registry.files,
-    ...(spec.dependencyCache ? { dependencyCache: true, diskMb: spec.limits.diskMb } : {}),
+    ...(spec.dependencyCache
+      ? {
+          dependencyCache: true,
+          diskMb: spec.limits.diskMb,
+          ...(options.workspaceReused ? { workspaceReused: true as const } : {}),
+        }
+      : {}),
     ...(spec.commandTimeouts ? { commandTimeouts: { ...spec.commandTimeouts } } : {}),
   };
   const raw = JSON.stringify(setup);

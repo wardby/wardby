@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { once } from "node:events";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -143,7 +143,7 @@ async function connect(socketPath) {
 const callTool = (client, name, args = {}) => client.request("tools/call", { name, arguments: args });
 const toolJson = (response) => JSON.parse(response.result.content[0].text);
 
-async function withRunner({ dependencyCache = true, diskMb = 2048, module } = {}, body) {
+async function withRunner({ dependencyCache = true, diskMb = 2048, workspaceReused = false, module } = {}, body) {
   const directory = await mkdtemp(join(tmpdir(), "wardby-claude-depcache-"));
   const workspace = join(directory, "workspace");
   const socketPath = join(directory, "runner.sock");
@@ -164,6 +164,7 @@ async function withRunner({ dependencyCache = true, diskMb = 2048, module } = {}
         },
       ],
       ...(dependencyCache ? { dependencyCache: true, ...(diskMb === null ? {} : { diskMb }) } : {}),
+      ...(workspaceReused ? { workspaceReused: true } : {}),
     }),
     workspace,
   );
@@ -627,5 +628,33 @@ test("the git tools are not commands: a bundle before any command leaves the dep
     await callTool(client, RESULT_BUNDLE_TOOL, { path: "/workspace", base_commit: base, exclude_commits: [] });
     const ran = await callTool(client, "run_command", { command: "git --version" });
     assert.match(ran.result.content[0].text, /^exit_code=0\ngit version /);
+  });
+});
+
+test("an adopted round's prepare answers reused_workspace without touching the cache, and still seals before the first command", async () => {
+  const order = [];
+  const module = fakeModule(order);
+  await withRunner({ module, workspaceReused: true }, async ({ connect }) => {
+    const client = await connect();
+    const listed = await client.request("tools/list");
+    assert.ok(listed.result.tools.some((tool) => tool.name === PREPARE_DEPENDENCIES_TOOL));
+    const expected = { projects: [], reason: "reused_workspace" };
+    assert.deepEqual(toolJson(await callTool(client, PREPARE_DEPENDENCIES_TOOL)), expected);
+    assert.deepEqual(order, []);
+    assert.equal(module.calls.prepare.length, 0);
+    const second = await connect();
+    assert.deepEqual(toolJson(await callTool(second, PREPARE_DEPENDENCIES_TOOL)), expected);
+    await callTool(client, "run_command", { command: "true" });
+    assert.deepEqual(order, ["seal"]);
+  });
+});
+
+test("the prepare of an adopted round writes nothing in the workspace", async () => {
+  await withRunner({ module: fakeModule(), workspaceReused: true }, async ({ connect, workspace }) => {
+    const before = await readdir(workspace);
+    const client = await connect();
+    await callTool(client, PREPARE_DEPENDENCIES_TOOL);
+    assert.deepEqual(await readdir(workspace), before);
+    assert.deepEqual(before, []);
   });
 });

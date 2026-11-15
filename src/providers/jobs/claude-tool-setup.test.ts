@@ -167,6 +167,19 @@ describe("claudeToolSetup", () => {
     );
   });
 
+  it("marks an adopted round's setup workspaceReused only on a cache run, and the tool runner reads it back", () => {
+    const cached = { ...spec, dependencyCache: true as const };
+    const on = claudeToolSetup(cached, CAPABILITY, { workspaceReused: true });
+    expect(JSON.parse(on)).toMatchObject({ workspaceReused: true });
+    expect(parseToolSetup(on).workspaceReused).toBe(true);
+    const noCache = claudeToolSetup(spec, CAPABILITY, { workspaceReused: true });
+    expect(JSON.parse(noCache)).not.toHaveProperty("workspaceReused");
+    const noOption = claudeToolSetup(cached, CAPABILITY);
+    expect(JSON.parse(noOption)).not.toHaveProperty("workspaceReused");
+    expect(claudeToolSetup(cached, CAPABILITY, { workspaceReused: false })).toBe(noOption);
+    for (const text of [on, noCache, noOption]) expect(text).not.toContain(CAPABILITY);
+  });
+
   it("refuses to build a setup the tool runner would reject, rather than launching a runner that never gets ready", () => {
     const oversized = (testEnv: Record<string, string>) => ({
       ...spec,

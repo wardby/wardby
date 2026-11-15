@@ -54,6 +54,8 @@ const loadDefaultDependencyCache = () => import("../coding-worker/dependency-cac
  * the first command the run's upload window is always sealed (memoized; the proxy's seal is
  * idempotent), whether or not prepare ran, failed or was skipped, so nothing a command (the
  * agent) does can be uploaded as a snapshot. The proxy's upload deadline is the backstop.
+ * An adopted warm round (`setup.workspaceReused`) answers `reused_workspace` and never prepares:
+ * its workspace already holds the previous round's tree, and the proxy refuses it the cache anyway.
  */
 function dependencyGate(setup, workspacePath, loadDependencyCache) {
   let preparing;
@@ -80,6 +82,7 @@ function dependencyGate(setup, workspacePath, loadDependencyCache) {
       if (preparing) return preparing;
       if (commandStarted) return Promise.resolve({ projects: [], reason: "already_started" });
       preparing = (async () => {
+        if (setup.workspaceReused) return { projects: [], reason: "reused_workspace" };
         if (deadlineAt !== undefined && !Number.isFinite(Date.parse(deadlineAt)))
           return { projects: [], reason: "invalid_deadline" };
         try {
