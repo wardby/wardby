@@ -1350,7 +1350,12 @@ describe("substrate routes", () => {
       ["POST", "repos/%2e%2e/workspace"],
       ["POST", "repos/../workspace"],
       ["GET", "repos/./seed"],
-    ])("%s %s (a dot segment) is unmatched and never reaches the default routes", async (method, path) => {
+      // URL parsing reads `\` as `/` for http: each of these would otherwise resolve to `workspace`.
+      ["POST", "repos\\..\\workspace"],
+      ["POST", "repos/a\\..\\..\\workspace"],
+      ["POST", "repos%5c..\\..\\workspace"],
+      ["POST", "repos%5c..%5cworkspace"],
+    ])("%s %s (a path URL parsing changes) is unmatched and never reaches the default routes", async (method, path) => {
       const lookup = vi.fn(async () => LAYOUT);
       overrides = { runLayoutForToken: lookup };
       await blobs.put(BLOB.seed(TOKEN), Buffer.from("default-seed"));
@@ -1407,6 +1412,26 @@ describe("substrate routes", () => {
       expect(await answer.json()).toEqual({ error: { type: "substrate_run_collected" } });
       expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
       expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+    });
+
+    it("still answers 409 when deleting a late upload's blob fails", async () => {
+      await start();
+      const putStream = blobs.putStream.bind(blobs);
+      vi.spyOn(blobs, "putStream").mockImplementation(async (key, body, options) => {
+        const stored = await putStream(key, body, options);
+        if (key === REPO_BLOB.workspace(TOKEN, "extra-alpha")) {
+          await blobs.put(BLOB.done(TOKEN), Buffer.from(JSON.stringify({ workspace: "ok" })));
+        }
+        return stored;
+      });
+      const remove = vi.spyOn(blobs, "delete").mockRejectedValue(new Error("store down"));
+      const answer = await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("tar")));
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toEqual({ error: { type: "substrate_run_collected" } });
+      expect(remove).toHaveBeenCalledWith(REPO_BLOB.workspace(TOKEN, "extra-alpha"));
+      await settle();
+      expect(routeLines()).toEqual([expect.objectContaining({ route: "repos.workspace", status: 409 })]);
+      expect(routeLines()[0]).not.toHaveProperty("errorKind");
     });
 
     it("logs the repository only after auth, and only a name on the row", async () => {

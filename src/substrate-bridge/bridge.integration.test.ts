@@ -1425,6 +1425,86 @@ process.exit(spawnSync(${JSON.stringify(base)}, args, { stdio: "inherit" }).stat
           code: "result_bundle_tampered",
         },
       ]);
+      const skipped = parsedLogs().filter((entry) => entry.event === "substrate_bridge_result_bundle_skipped");
+      expect(skipped).toEqual([
+        {
+          event: "substrate_bridge_result_bundle_skipped",
+          runToken: TOKEN,
+          round: 1,
+          reason: "bundle_symlink",
+          repository: "extra-alpha",
+        },
+      ]);
+    });
+
+    it("fails only that repository when its folder is swapped while it is archived", async () => {
+      const { workspace, toolSetup } = await stage({ repositories: [alpha(), beta] });
+      // A tar that archives alpha's folder, then puts another directory in its place.
+      const base = await tarForTests(dir);
+      const shim = join(dir, "swapping-extra-tar.mjs");
+      await writeFile(
+        shim,
+        `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { mkdirSync, renameSync } from "node:fs";
+const args = process.argv.slice(2);
+const status = spawnSync(${JSON.stringify(base)}, args, { stdio: "inherit" }).status ?? 1;
+if (args.includes("-c") && args[args.indexOf("-C") + 1] === ${JSON.stringify(repos("extra-alpha"))}) {
+  renameSync(${JSON.stringify(repos("extra-alpha"))}, ${JSON.stringify(repos("alpha-moved"))});
+  mkdirSync(${JSON.stringify(repos("extra-alpha"))});
+}
+process.exit(status);
+`,
+        { mode: 0o755 },
+      );
+      tool = await startTool(workspace, toolSetup, { tarCommand: shim });
+      agent = await runAgent(await workerOptions({ launchWorker: () => exitingWorker() }));
+      await agent.uploaded;
+      expect(await tool.collected).toBe("ok");
+      expect(await done()).toEqual({ workspace: "ok" });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+      const failed = parsedLogs().filter((entry) => entry.event === "substrate_bridge_collect_failed");
+      expect(failed).toEqual([
+        {
+          event: "substrate_bridge_collect_failed",
+          runToken: TOKEN,
+          repository: "extra-alpha",
+          code: "repository_changed",
+        },
+      ]);
+      expect(routes()).not.toContain("repos.workspace");
+    });
+
+    it("fails only that repository, unread, when its folder is swapped for a symlink", async () => {
+      const { workspace, toolSetup } = await stage({ repositories: [alpha(), beta] });
+      const elsewhere = join(dir, "elsewhere-repo");
+      tool = await startTool(workspace, toolSetup);
+      agent = await runAgent(
+        await workerOptions({
+          launchWorker: () =>
+            exitingWorker(async () => {
+              await mkdir(elsewhere, { recursive: true });
+              await writeFile(join(elsewhere, "not-seeded.txt"), "outside the seeded folder\n");
+              await rename(repos("extra-alpha"), repos("alpha-moved"));
+              await symlink(elsewhere, repos("extra-alpha"));
+            }),
+        }),
+      );
+      await agent.uploaded;
+      expect(await tool.collected).toBe("ok");
+      expect(await done()).toEqual({ workspace: "ok" });
+      expect(await blobs.head(REPO_BLOB.workspace(TOKEN, "extra-alpha"))).toBeNull();
+      const failed = parsedLogs().filter((entry) => entry.event === "substrate_bridge_collect_failed");
+      expect(failed).toEqual([
+        {
+          event: "substrate_bridge_collect_failed",
+          runToken: TOKEN,
+          repository: "extra-alpha",
+          code: "repository_changed",
+        },
+      ]);
+      expect(routes()).not.toContain("repos.workspace");
+      expect(routes()).not.toContain("workspace-failed");
     });
 
     /** A seed with one entry, `../escape`: tar.ts refuses it. */
@@ -1487,7 +1567,7 @@ process.exit(spawnSync(${JSON.stringify(base)}, args, { stdio: "inherit" }).stat
       expect(withRepository.length).toBeGreaterThan(0);
       for (const entry of withRepository)
         for (const key of Object.keys(entry))
-          expect(["event", "runToken", "repository", "entries", "code"]).toContain(key);
+          expect(["event", "runToken", "repository", "entries", "code", "round", "reason"]).toContain(key);
       const everything = logs.join("\n");
       // Raw and as a JSON string (each log line is JSON).
       for (const value of [REGISTRY_TOKEN, CAPABILITY, "alpha\n", toolSetup, setupText])

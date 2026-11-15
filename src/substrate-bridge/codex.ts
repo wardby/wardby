@@ -55,6 +55,7 @@ import {
   collectWorkspace,
   endGroup,
   extractRepositorySeeds,
+  type RepositoryFolders,
   extractSeed,
   fetchSetup,
   parseSetupRepositories,
@@ -242,10 +243,21 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
   const { registryToken, exclusions, collectResultBundle, repositories } = setup;
   log("substrate_bridge_setup_ready", { runToken: token });
 
+  /** Each extra's folder as seeded, re-checked before it is collected. */
+  let repositoryFolders: RepositoryFolders = new Map();
   // 4. The seed, checked and extracted into the workspace; then each extra repository's, into its folder.
   try {
     await extractSeed({ url: `${base}/seed`, headers, workspace, stage, tar, policy, log });
-    await extractRepositorySeeds({ base, headers, reposRoot, repositories, stage, tar, policy, log });
+    repositoryFolders = await extractRepositorySeeds({
+      base,
+      headers,
+      reposRoot,
+      repositories,
+      stage,
+      tar,
+      policy,
+      log,
+    });
   } catch (error) {
     if (
       error instanceof BridgeError &&
@@ -314,6 +326,7 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
         headers,
         reposRoot,
         repositories,
+        folders: repositoryFolders,
         stage,
         tar,
         exclusions,

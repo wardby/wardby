@@ -549,8 +549,11 @@ export function createSubstrateRoutes(
   return async (request, response, clearBodyTimer) => {
     const startedAt = performance.now();
     const url = new URL(request.url ?? "/", "http://substrate.invalid");
-    // A raw dot segment would be resolved away (`repos/%2e%2e/workspace` → `workspace`): unmatched instead.
-    const found = DOT_SEGMENT.test((request.url ?? "/").split("?")[0]) ? null : RUN_PATH.exec(url.pathname);
+    // URL parsing resolves dot segments (`repos/%2e%2e/workspace` → `workspace`), turns `\` into `/`
+    // and re-encodes characters, so a path it changed in any way could reach a route the caller did not
+    // name: such a request is unmatched (404, no layout lookup). The dot-segment check stays as well.
+    const rawPath = (request.url ?? "/").split(/[?#]/, 1)[0];
+    const found = rawPath !== url.pathname || DOT_SEGMENT.test(rawPath) ? null : RUN_PATH.exec(url.pathname);
     const matched = found ? match(request.method ?? "", found[2]) : undefined;
     const token = found?.[1] ?? "unknown";
     const route = matched?.name ?? "unmatched";
@@ -794,10 +797,18 @@ export function createSubstrateRoutes(
             limits.workspaceBytes,
             clearBodyTimer,
           );
-          // `done` may have been written while the body streamed: the outcome is fixed, so the late
-          // upload is refused and its blob removed (the collector never reads an extra after `done`).
+          // `done` may have been written while the body streamed. The launcher's collect follows `done`,
+          // so it may already have read this blob, or may not: the upload is refused and its blob removed
+          // best-effort either way. Only a misbehaving holder can cause this (the bridge uploads every extra
+          // before the default `workspace` post that writes `done`), and the holder could equally have sent
+          // that folder in order, so a late upload that is or is not collected gives it nothing new. The
+          // run's cleanup removes a blob the delete leaves behind.
           if (await blobs.head(BLOB.done(token, round))) {
-            await blobs.delete(REPO_BLOB.workspace(token, name, round));
+            try {
+              await blobs.delete(REPO_BLOB.workspace(token, name, round));
+            } catch {
+              // Best-effort: the answer is 409 whatever the delete did.
+            }
             throw new RouteError(409, "substrate_run_collected");
           }
           sendJson(response, 200, {});

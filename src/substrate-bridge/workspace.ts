@@ -345,8 +345,9 @@ export function parseSetupRepositories(value: unknown): SetupRepository[] | unde
 }
 
 /**
- * Makes everything under `root` (and `root` itself) read-only: directories 0555, files 0444, children
- * before their directory. Symlinks are left alone (lstat: never followed, so nothing outside the tree
+ * Makes everything under `root` (and `root` itself) read-only: directories and files with any execute
+ * bit 0555, other files 0444 (as Docker and Kubernetes read-only mounts keep a script runnable; the
+ * explicit mode also clears setuid, setgid and sticky), children before their directory. Symlinks are left alone (lstat: never followed, so nothing outside the tree
  * is touched). The whole tree is listed first; past `maxEntries` entries (the root counts) it throws
  * BridgeError("substrate_bridge_seed_failed") before anything is changed.
  */
@@ -363,7 +364,7 @@ export async function makeReadOnly(root: string, maxEntries: number): Promise<vo
       entries.push({ path, mode: 0o555 });
       for (const name of await readdir(path)) pending.push(join(path, name));
     } else {
-      entries.push({ path, mode: 0o444 });
+      entries.push({ path, mode: metadata.mode & 0o111 ? 0o555 : 0o444 });
     }
   }
   // Every directory was listed before its children: change them in reverse, so a directory goes last.
@@ -373,13 +374,28 @@ export async function makeReadOnly(root: string, maxEntries: number): Promise<vo
   }
 }
 
+/** An extra repository's folder as the bridge seeded it (lstat dev/ino), checked again before collect. */
+export type RepositoryFolder = { dev: number; ino: number };
+
+/** Each seeded extra's folder identity, by repository name. */
+export type RepositoryFolders = ReadonlyMap<string, RepositoryFolder>;
+
+/** Whether `path` is still the real directory `folder` recorded (lstat: a symlink never matches). */
+async function isSameFolder(path: string, folder: RepositoryFolder): Promise<boolean> {
+  const metadata = await lstat(path).catch(() => undefined);
+  return !!metadata?.isDirectory() && metadata.dev === folder.dev && metadata.ino === folder.ino;
+}
+
 /** The run token of a bridge's `<proxy>/substrate/runs/<token>` base. */
 const runTokenOf = (base: string): string => base.slice(base.lastIndexOf("/") + 1);
 
 /**
  * Each extra repository's seed (GET repos/<name>/seed) into `<reposRoot>/<name>`, in setup order, with
  * extractSeed (the same checks and tar flags as the `/workspace` seed); a read one is then made
- * read-only. Throws extractSeed's codes, or substrate_bridge_seed_failed when the read-only walk fails.
+ * read-only. Returns each folder's identity (lstat dev/ino, a real directory), which collectRepositories
+ * re-checks: `/repos/<name>` is a plain directory, not a mount point, so a tool process could swap it.
+ * Throws extractSeed's codes, or substrate_bridge_seed_failed when the read-only walk fails or the folder
+ * is not a real directory.
  */
 export async function extractRepositorySeeds(o: {
   base: string;
@@ -390,8 +406,9 @@ export async function extractRepositorySeeds(o: {
   tar: string;
   policy: RetryPolicy;
   log: Logger;
-}): Promise<void> {
+}): Promise<Map<string, RepositoryFolder>> {
   const token = runTokenOf(o.base);
+  const folders = new Map<string, RepositoryFolder>();
   // extractSeed's own "extracted" line would carry no repository: this function logs its own.
   const log: Logger = (event, fields) => {
     if (event !== "substrate_bridge_seed_extracted") o.log(event, fields);
@@ -414,14 +431,21 @@ export async function extractRepositorySeeds(o: {
         throw new BridgeError("substrate_bridge_seed_failed");
       }
     }
+    const metadata = await lstat(workspace).catch(() => undefined);
+    if (!metadata?.isDirectory()) throw new BridgeError("substrate_bridge_seed_failed");
+    folders.set(name, { dev: metadata.dev, ino: metadata.ino });
     o.log("substrate_bridge_repository_seed_extracted", { runToken: token, repository: name, entries });
   }
+  return folders;
 }
 
 /**
  * Each write extra's `<reposRoot>/<name>`, in setup order, with collectWorkspace (uploaded to
  * `repos/<name>/workspace`, a failure logged only). Read extras are never uploaded. Call it before the
  * `/workspace` collect, whose upload writes `done` (the proxy refuses an extra's upload after it).
+ * Each folder must still be the directory extractRepositorySeeds recorded (`folders`), before the tar and
+ * again before the upload; otherwise that repository fails with code `repository_changed` and nothing
+ * under it is read further.
  */
 export async function collectRepositories(o: {
   base: string;
@@ -430,6 +454,7 @@ export async function collectRepositories(o: {
   headers: Record<string, string>;
   reposRoot: string;
   repositories: readonly SetupRepository[];
+  folders: RepositoryFolders;
   stage: string;
   tar: string;
   exclusions: CollectExclusions;
@@ -441,6 +466,13 @@ export async function collectRepositories(o: {
   const outcomes: Record<string, "ok" | "rejected" | "failed"> = {};
   for (const { name, access, collectResultBundle } of o.repositories) {
     if (access !== "write") continue;
+    const folder = o.folders.get(name);
+    if (!folder) {
+      // Never seeded by this bridge: nothing to compare against, so it is not read.
+      o.log("substrate_bridge_collect_failed", { runToken: o.token, repository: name, code: REPOSITORY_CHANGED });
+      outcomes[name] = "failed";
+      continue;
+    }
     outcomes[name] = await collectWorkspace({
       base: o.base,
       round: o.round,
@@ -458,6 +490,7 @@ export async function collectRepositories(o: {
       uploadPath: `repos/${name}/workspace`,
       onFailure: "log",
       repository: name,
+      folder,
     }).catch((): "failed" => {
       // Whatever went wrong fails this repository only: the /workspace collect still follows.
       o.log("substrate_bridge_collect_failed", { runToken: o.token, repository: name, code: "unexpected" });
@@ -485,6 +518,9 @@ const TAMPERING_SKIPS: ReadonlySet<BundleSkip> = new Set([
 
 /** The collect code for a tampering skip (no real exit status of tar or the shell). */
 const TAMPERED_CODE = -1;
+
+/** An extra's collect code when its folder is no longer the directory the bridge seeded. */
+const REPOSITORY_CHANGED = "repository_changed";
 
 const BUNDLE_COPY_CHUNK = 1024 * 1024;
 
@@ -571,8 +607,10 @@ export async function collectWorkspace(o: {
   uploadPath?: string;
   /** `log`: an extra repository's failure is logged only (default: post workspace-failed). */
   onFailure?: "workspace-failed" | "log";
-  /** The extra repository's name, for the `log` mode's line. */
+  /** The extra repository's name, for the `log` mode's lines. */
   repository?: string;
+  /** An extra's seeded folder: re-checked before the tar and before the upload (see collectRepositories). */
+  folder?: RepositoryFolder;
 }): Promise<"ok" | "rejected" | "failed"> {
   const { base, round, token, headers, workspace, stage, tar, exclusions, collectResultBundle, policy, log } = o;
   const uploadPath = o.uploadPath ?? "workspace";
@@ -580,6 +618,12 @@ export async function collectWorkspace(o: {
   const tarPath = join(stage, "workspace.tar");
   const failExtra = (code: string | number): void =>
     log("substrate_bridge_collect_failed", { runToken: token, repository: o.repository ?? "", code });
+  const folderChanged = async (): Promise<boolean> =>
+    o.folder !== undefined && !(await isSameFolder(workspace, o.folder));
+  if (await folderChanged()) {
+    failExtra(REPOSITORY_CHANGED);
+    return "failed";
+  }
   const createExclusions = collectResultBundle
     ? { names: exclusions.names, paths: [...exclusions.paths, ".git"] }
     : exclusions;
@@ -589,7 +633,12 @@ export async function collectWorkspace(o: {
     try {
       const skipped = await stageResultBundle(workspace, bundleStage, o.beforeResultBundleRecheck);
       if (skipped) {
-        log("substrate_bridge_result_bundle_skipped", { runToken: token, round, reason: skipped });
+        log("substrate_bridge_result_bundle_skipped", {
+          runToken: token,
+          round,
+          reason: skipped,
+          ...(o.repository ? { repository: o.repository } : {}),
+        });
         if (TAMPERING_SKIPS.has(skipped)) code = TAMPERED_CODE;
       } else {
         const appended = await exec(tar, [
@@ -625,6 +674,12 @@ export async function collectWorkspace(o: {
       "workspace-failed",
       o.signal,
     );
+    return "failed";
+  }
+  // Swapped while it was read (a symlink or another folder in its place): the tar is not the seeded folder.
+  if (await folderChanged()) {
+    await rm(tarPath, { force: true }).catch(() => undefined);
+    failExtra(REPOSITORY_CHANGED);
     return "failed";
   }
   const outcome = await uploadFile(

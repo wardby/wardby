@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { chmod, lstat, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   endGroup,
@@ -11,6 +13,8 @@ import {
   type ProcEntry,
   type ProcessSeams,
 } from "./workspace.js";
+
+const exec = promisify(execFile);
 
 const GROUP = 4242;
 
@@ -214,6 +218,32 @@ describe.skipIf(process.getuid?.() === 0)("makeReadOnly", () => {
     const linkAfter = await lstat(join(root, "link"));
     expect(linkAfter.mode).toBe(linkBefore.mode);
     await expect(writeFile(join(root, "new.txt"), "x")).rejects.toMatchObject({ code: "EACCES" });
+  });
+
+  it("keeps a script runnable (0555) and a plain file 0444, clearing setuid, setgid and sticky", async () => {
+    const root = await tree();
+    const script = join(root, "sub", "run.sh");
+    await writeFile(script, "#!/bin/sh\necho ran\n", { mode: 0o755 });
+    await chmod(script, 0o755);
+    const owner = join(root, "owner-x.bin");
+    await writeFile(owner, "x\n");
+    await chmod(owner, 0o744);
+    const special = join(root, "special.sh");
+    await writeFile(special, "#!/bin/sh\n");
+    await chmod(special, 0o6755);
+    const plain = join(root, "plain.txt");
+    await writeFile(plain, "p\n");
+    await chmod(plain, 0o4644);
+    await chmod(join(root, "sub"), 0o1755);
+    await makeReadOnly(root, 20);
+    const mode = async (path: string) => (await stat(path)).mode & 0o7777;
+    expect(await mode(script)).toBe(0o555);
+    expect(await mode(owner)).toBe(0o555);
+    expect(await mode(special)).toBe(0o555);
+    expect(await mode(plain)).toBe(0o444);
+    expect(await mode(join(root, "a.txt"))).toBe(0o444);
+    expect(await mode(join(root, "sub"))).toBe(0o555);
+    expect((await exec(script, [])).stdout).toBe("ran\n");
   });
 
   it("refuses a tree past its bound, before changing anything", async () => {
