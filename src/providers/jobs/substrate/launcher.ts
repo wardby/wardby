@@ -29,7 +29,8 @@
  *   a launch: with no room, the oldest are removed first. Handles are then `<atespace>/<runId>`: the
  *   token, and the round, are always read from the run's row (never derived from the run id).
  */
-import { lstat, readFile, rm } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, open, rm } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { collectExclusions } from "../../../coding/collect-exclude.js";
@@ -779,15 +780,21 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   /** Stages the worker input and returns what was staged (stageSetup reads its git history). */
   private async stageInput(inputArtifact: string, token: string, round = 1): Promise<Buffer> {
     let body: Buffer;
+    // One descriptor for the check and the read (never a symlink), so the file checked is the file read.
+    const source = await open(inputArtifact, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch((error: unknown) => {
+      throw new Error("substrate_input_artifact_invalid", { cause: error });
+    });
     try {
-      const source = await lstat(inputArtifact);
-      if (!source.isFile() || source.size > MAX_CODING_INPUT_BYTES) throw new Error("substrate_input_artifact_invalid");
-      body = await readFile(inputArtifact);
+      const stats = await source.stat();
+      if (!stats.isFile() || stats.size > MAX_CODING_INPUT_BYTES) throw new Error("substrate_input_artifact_invalid");
+      body = await source.readFile();
     } catch (error) {
       if (error instanceof Error && error.message === "substrate_input_artifact_invalid") throw error;
       throw new Error("substrate_input_artifact_invalid", { cause: error });
+    } finally {
+      await source.close();
     }
-    // Re-check what was read: the file could have changed after lstat.
+    // Re-check what was read: the file could have grown after the stat.
     if (body.length > MAX_CODING_INPUT_BYTES) throw new Error("substrate_input_artifact_invalid");
     await this.blobs.put(BLOB.input(token, round), body, { contentType: "application/json" });
     return body;
