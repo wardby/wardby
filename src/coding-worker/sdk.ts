@@ -1,7 +1,7 @@
 import { Codex } from "@openai/codex-sdk";
 import { INJECTED_CAPABILITY_PLACEHOLDER } from "./credentials.js";
 import {
-  INJECTED_MCP_TOKEN_PLACEHOLDER,
+  assertMcpHeaderPlaceholder,
   MCP_TOKEN_ENV,
   type MCP_TOKEN_HEADER,
   WARDBY_MCP_SERVER,
@@ -87,10 +87,8 @@ function wardbyProxyProvider(config: WorkerClientConfig): WardbyProxyProvider {
 
 export function codexSdkOptions(config: WorkerClientConfig) {
   // Header mode puts the MCP token in Codex's `-c` command-line config, readable by every process in
-  // the container: only the gateway's placeholder may ever go there. No value in the message.
-  if (config.mcpTokenHeader && config.mcpToken !== INJECTED_MCP_TOKEN_PLACEHOLDER) {
-    throw new Error("worker_mcp_header_needs_placeholder");
-  }
+  // the container.
+  assertMcpHeaderPlaceholder(config.mcpToken, config.mcpTokenHeader);
   return {
     ...(config.capabilityHeader ? {} : { apiKey: config.capability }),
     // The Codex process env. The shells' own env is only shell_environment_policy.set, which never holds

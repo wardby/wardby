@@ -1,11 +1,7 @@
 import { createRequire } from "node:module";
 import type { ClaudeQueryFactory, ClaudeQueryOptions, ClaudeSdkMessage } from "./driver.js";
 import { GIT_CHECK_TOOL, PREPARE_DEPENDENCIES_TOOL, RESULT_BUNDLE_TOOL } from "./tool-socket.js";
-import {
-  INJECTED_MCP_TOKEN_PLACEHOLDER,
-  WARDBY_MCP_SERVER,
-  WARDBY_MCP_TIMEOUT_MS,
-} from "../coding-worker/mcp-config.js";
+import { assertMcpHeaderPlaceholder, WARDBY_MCP_SERVER, WARDBY_MCP_TIMEOUT_MS } from "../coding-worker/mcp-config.js";
 
 const runtimeRequire = createRequire(import.meta.url);
 const TOOL_NAME = "mcp__wardby_tools__run_command";
@@ -27,10 +23,8 @@ export const WARDBY_TOOLS_TIMEOUT_MS = 7_200_000 + 60_000;
 
 export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string, unknown> {
   // Claude Code passes the MCP config on its own command line: in header mode (Substrate) only the
-  // gateway's placeholder may ever go there. No value in the message.
-  if (config.mcp?.header && config.mcp.token !== INJECTED_MCP_TOKEN_PLACEHOLDER) {
-    throw new Error("worker_mcp_header_needs_placeholder");
-  }
+  // gateway's placeholder may ever go there.
+  if (config.mcp) assertMcpHeaderPlaceholder(config.mcp.token, config.mcp.header);
   const abortController = new AbortController();
   if (config.signal.aborted) abortController.abort();
   else config.signal.addEventListener("abort", () => abortController.abort(), { once: true });

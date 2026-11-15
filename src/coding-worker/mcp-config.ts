@@ -61,8 +61,19 @@ export function readMcpConfig(env: NodeJS.ProcessEnv = process.env): McpConfig |
   const token = env[MCP_TOKEN_ENV];
   const header = env[MCP_TOKEN_HEADER_ENV];
   if (header === undefined) return token ? { token } : undefined;
-  if (header !== MCP_TOKEN_HEADER || token !== INJECTED_MCP_TOKEN_PLACEHOLDER) {
+  if (header !== MCP_TOKEN_HEADER) throw new Error("worker_mcp_header_needs_placeholder");
+  assertMcpHeaderPlaceholder(token, header);
+  return { token: INJECTED_MCP_TOKEN_PLACEHOLDER, header };
+}
+
+/**
+ * Header mode puts the MCP token on a command line inside the container (Codex's `-c` config, Claude
+ * Code's MCP config), so only the gateway's placeholder may ever go there. Throws
+ * Error("worker_mcp_header_needs_placeholder") when `header` is set and `token` is not exactly
+ * INJECTED_MCP_TOKEN_PLACEHOLDER (a missing token included). The message never names a value.
+ */
+export function assertMcpHeaderPlaceholder(token: string | undefined, header: string | undefined): void {
+  if (header !== undefined && token !== INJECTED_MCP_TOKEN_PLACEHOLDER) {
     throw new Error("worker_mcp_header_needs_placeholder");
   }
-  return { token, header };
 }

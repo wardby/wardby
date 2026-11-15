@@ -9,9 +9,11 @@ import {
 import { MCP_FORWARD_MAX_MS } from "../providers/coding-proxy/mcp-route.js";
 import { DEFAULT_TOOL_MAX_TIMEOUT_MS } from "../sandbox/tool-timeout.js";
 import {
+  assertMcpHeaderPlaceholder,
   INJECTED_MCP_TOKEN_PLACEHOLDER,
   MCP_TOKEN_ENV,
   MCP_TOKEN_HEADER,
+  MCP_TOKEN_HEADER_ENV,
   readMcpConfig,
   WARDBY_MCP_INSTRUCTIONS,
   WARDBY_MCP_SERVER,
@@ -80,9 +82,28 @@ describe("worker MCP configuration", () => {
   });
 
   it("matches the control plane's header and placeholder", () => {
+    // The launcher sets this variable (the bridges re-declare it; their constants test keeps it equal).
+    expect(MCP_TOKEN_HEADER_ENV).toBe("WARDBY_MCP_TOKEN_HEADER");
     expect(MCP_TOKEN_HEADER).toBe(CONTROL_PLANE_HEADER);
     expect(INJECTED_MCP_TOKEN_PLACEHOLDER).toBe(CONTROL_PLANE_PLACEHOLDER);
     expect(isMcpToken(INJECTED_MCP_TOKEN_PLACEHOLDER)).toBe(false);
+  });
+
+  it("allows header mode only with the placeholder token, naming no value", () => {
+    expect(() => assertMcpHeaderPlaceholder(undefined, undefined)).not.toThrow();
+    expect(() => assertMcpHeaderPlaceholder(realToken, undefined)).not.toThrow();
+    expect(() => assertMcpHeaderPlaceholder(INJECTED_MCP_TOKEN_PLACEHOLDER, MCP_TOKEN_HEADER)).not.toThrow();
+    expect(() => assertMcpHeaderPlaceholder(undefined, MCP_TOKEN_HEADER)).toThrow(
+      /^worker_mcp_header_needs_placeholder$/,
+    );
+    let error: unknown;
+    try {
+      assertMcpHeaderPlaceholder(realToken, MCP_TOKEN_HEADER);
+    } catch (caught) {
+      error = caught;
+    }
+    expect((error as Error).message).toBe("worker_mcp_header_needs_placeholder");
+    expect(String(error)).not.toContain(realToken);
   });
 
   it("words the prompt note for both workers without naming any other tool", () => {
