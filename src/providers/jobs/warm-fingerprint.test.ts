@@ -5,6 +5,7 @@ import {
   systemPromptSha256,
   warmFingerprint,
   type WarmFingerprintInput,
+  type WarmMcpToolPin,
   type WarmSecretVersion,
 } from "./warm-fingerprint.js";
 
@@ -88,5 +89,46 @@ describe("warmFingerprint", () => {
 
   it("sorts nested keys too", () => {
     expect(canonicalJson({ b: [{ d: 1, c: 2 }], a: null })).toBe('{"a":null,"b":[{"c":2,"d":1}]}');
+  });
+});
+
+describe("warmFingerprint MCP tool pins", () => {
+  const PINS: WarmMcpToolPin[] = [
+    { serverId: "srv-docs", exposedName: "docs__search" },
+    { serverId: "srv-issues", exposedName: "issues__get" },
+  ];
+  const WITH = { ...INPUT, mcpTools: PINS };
+
+  it("is today's fingerprint without pins", () => {
+    const golden = "3c002da7b8612c87bd6ee1970a57542b28c5c23b8f65d5df50d4b698aed1e1df";
+    expect(warmFingerprint(INPUT)).toBe(golden);
+    expect(warmFingerprint({ ...INPUT, mcpTools: [] })).toBe(golden);
+  });
+
+  it("pins the canonical JSON with pins", () => {
+    expect(canonicalJson({ ...INPUT, mcpTools: PINS })).toBe(
+      '{"agentId":"agent-1","cpu":1,"diskMb":512,"mcpTools":[{"exposedName":"docs__search","serverId":"srv-docs"},{"exposedName":"issues__get","serverId":"srv-issues"}],"memoryMb":1024,"model":"claude-sonnet-5","provider":"claude-code","repository":"openai/example","secrets":[],"systemPromptSha256":"465b460d16929578f1309cdae3f261f0e98dde7d633069f552a9207d7b0c6e42","toolImage":"registry.example/claude-tools@sha256:' +
+        "c".repeat(64) +
+        '","workerImage":"registry.example/claude@sha256:' +
+        "a".repeat(64) +
+        '"}',
+    );
+    expect(warmFingerprint(WITH)).toBe("63df6d9077c7607299329afbf4424930a8183d1987cd0fc16f47a535dc12c713");
+  });
+
+  it("ignores pin order and extra pin fields", () => {
+    const base = warmFingerprint(WITH);
+    expect(warmFingerprint({ ...INPUT, mcpTools: [...PINS].reverse() })).toBe(base);
+    const fat = PINS.map((pin) => ({ ...pin, definition: { description: "x", inputSchema: {} } }));
+    expect(warmFingerprint({ ...INPUT, mcpTools: fat })).toBe(base);
+  });
+
+  it.each([
+    ["an exposedName", [{ serverId: "srv-docs", exposedName: "docs__find" }, PINS[1]]],
+    ["a serverId", [{ serverId: "srv-docs-2", exposedName: "docs__search" }, PINS[1]]],
+    ["a dropped pin", [PINS[0]]],
+    ["no pins", []],
+  ] as const)("changes with %s", (_label, pins) => {
+    expect(warmFingerprint({ ...INPUT, mcpTools: pins })).not.toBe(warmFingerprint(WITH));
   });
 });

@@ -11,6 +11,9 @@
  * then, so a secret rotated, re-connected, re-brokered, attached or detached between rounds must
  * start the next round fresh.
  *
+ * The run's MCP tool pins go in as identity only (which tool of which server, never its definition),
+ * and only when the run has some, so a fingerprint without them is unchanged.
+ *
  * SHA-256 hex (WARM_FINGERPRINT) over the canonical JSON of exactly these fields: object keys
  * sorted, no whitespace. The fingerprint is not secret, but it is never logged or published either
  * (only compared); the system prompt goes in as its own SHA-256, never as text.
@@ -27,6 +30,12 @@ export interface WarmSecretVersion {
   updatedAt: string;
 }
 
+/** One pinned MCP tool, as the fingerprint sees it: which tool of which server (no definition). */
+export interface WarmMcpToolPin {
+  serverId: string;
+  exposedName: string;
+}
+
 export interface WarmFingerprintInput {
   agentId: string;
   provider: string;
@@ -41,6 +50,8 @@ export interface WarmFingerprintInput {
   repository: string;
   /** Every secret delivered to the run, in any order (sorted here). */
   secrets: readonly WarmSecretVersion[];
+  /** The run's MCP tool pins, in any order (sorted here). Absent or empty: left out, so the fingerprint is today's. */
+  mcpTools?: readonly WarmMcpToolPin[];
 }
 
 const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
@@ -80,6 +91,13 @@ export function warmFingerprint(input: WarmFingerprintInput): string {
     secrets: [...input.secrets]
       .map(({ id, name, updatedAt }) => ({ id, name, updatedAt }))
       .sort((a, b) => compare(a.name, b.name) || compare(a.id, b.id) || compare(a.updatedAt, b.updatedAt)),
+    ...(input.mcpTools && input.mcpTools.length > 0
+      ? {
+          mcpTools: input.mcpTools
+            .map(({ serverId, exposedName }) => ({ serverId, exposedName }))
+            .sort((a, b) => compare(a.exposedName, b.exposedName) || compare(a.serverId, b.serverId)),
+        }
+      : {}),
   };
   return sha256(canonicalJson(fields));
 }

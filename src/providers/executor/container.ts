@@ -2101,7 +2101,7 @@ export class ContainerExecutor implements Executor {
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
         // Computed once, here, from the values the run launches with (an agent edited mid-run does not
         // change it), and recorded before the launch so a restarted control plane retains under it too.
-        launchFingerprint = this.warmFingerprintOf(run);
+        launchFingerprint = this.warmFingerprintOf(run, mcpTools);
         if (launchFingerprint) await this.recordLaunchFingerprint(runId, launchFingerprint);
         // The secret versions the run launches with (identity and version only), for transcript
         // capture; kept on this snapshot too, as a run that ends before the next poll is not reloaded.
@@ -4162,12 +4162,12 @@ export class ContainerExecutor implements Executor {
 
   /**
    * The agent fingerprint (warm-fingerprint.ts) of the job this run launches with: its resolved
-   * images and limits, model, agent, system prompt, repository and secrets (identity and version
-   * only). Undefined when any is unknown
+   * images and limits, model, agent, system prompt, repository, secrets (identity and version
+   * only) and MCP tool pins. Undefined when any is unknown
    * (then nothing is retained or resumed), and for a run with git history (never warm: see
    * retentionFor).
    */
-  private warmFingerprintOf(run: ContainerRunSnapshot): string | undefined {
+  private warmFingerprintOf(run: ContainerRunSnapshot, pins: readonly McpToolPin[]): string | undefined {
     if (!this.warmRounds || run.provider !== "claude-code" || !run.systemPromptSha256) return undefined;
     if (gitHistoryOf(run) || !run.secretVersions) return undefined;
     try {
@@ -4185,6 +4185,7 @@ export class ContainerExecutor implements Executor {
         systemPromptSha256: run.systemPromptSha256,
         repository: run.repository,
         secrets: run.secretVersions,
+        mcpTools: pins,
       });
       return WARM_FINGERPRINT.test(fingerprint) ? fingerprint : undefined;
     } catch {
@@ -4316,7 +4317,9 @@ export class ContainerExecutor implements Executor {
     // the retained sandbox it is about to resume; the branch is not fetched yet, so the probe carries
     // the commit that round pushed.
     const previous = await previousRound();
-    const warm = this.warmStartFor(previous, previous?.commitSha ?? undefined, this.warmFingerprintOf(run));
+    // The pins are not loaded yet, so none go into this fingerprint: the probe's `warm` is read only for
+    // `fromRunId` (hasCapacityFor evicts around it), never compared.
+    const warm = this.warmStartFor(previous, previous?.commitSha ?? undefined, this.warmFingerprintOf(run, []));
     const probe = {
       ...this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true }),
       ...(warm ? { warm } : {}),

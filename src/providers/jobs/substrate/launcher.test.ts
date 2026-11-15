@@ -1439,34 +1439,48 @@ describe("MCP tools", () => {
     }
   });
 
-  it("keeps the MCP token out of templates, policies, blobs, failure reports and events", async () => {
-    for (const provider of ["claude-code", "codex"] as const) {
-      const h = await makeHarness({ provider, mcpTokenFor: () => FAKE_MCP });
-      const calls = recordCalls(h);
-      const spec = { ...h.spec, mcpTools: true as const };
-      const handle = await h.launcher.launch(spec);
-      expect(await h.launcher.status(handle)).toEqual({ state: "running" });
-      // A failing Substrate call is reported too: its record carries no token.
-      const failing = await makeHarness({ provider, mcpTokenFor: () => FAKE_MCP });
-      const failingCalls = recordCalls(failing);
-      failing.api.resumeActor = async () => {
-        throw new SubstrateUnavailableError("substrate_unavailable");
-      };
-      await expect(failing.launcher.launch({ ...failing.spec, mcpTools: true })).rejects.toThrow();
-      expect(failing.callFailures.length).toBeGreaterThan(0);
-      const outputs = [
-        JSON.stringify(calls),
-        JSON.stringify(failingCalls),
-        JSON.stringify(h.callFailures),
-        JSON.stringify(failing.callFailures),
-        JSON.stringify([...h.api.templates.values(), ...h.api.egressPolicies.values()]),
-        JSON.stringify(await h.runs.get(h.spec.runId)),
-      ];
-      for (const harness of [h, failing]) for (const body of (await allBlobs(harness)).values()) outputs.push(body);
-      for (const output of outputs) expect(output).not.toContain(FAKE_MCP);
-      // It is in the Secret (the only place).
-      expect(JSON.stringify(secretOf(h))).toContain(FAKE_MCP);
+  it("keeps the MCP token out of templates, policies, blobs, failure reports, events and logs", async () => {
+    const logs: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    const writeOut = process.stdout.write.bind(process.stdout);
+    process.stderr.write = (chunk: string | Uint8Array) => (logs.push(String(chunk)), true);
+    process.stdout.write = (chunk: string | Uint8Array) => (logs.push(String(chunk)), true);
+    const outputs: string[] = [];
+    try {
+      for (const provider of ["claude-code", "codex"] as const) {
+        const h = await makeHarness({ provider, mcpTokenFor: () => FAKE_MCP });
+        const calls = recordCalls(h);
+        const spec = { ...h.spec, mcpTools: true as const };
+        const handle = await h.launcher.launch(spec);
+        expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+        // A failing Substrate call is reported too: its record carries no token.
+        const failing = await makeHarness({ provider, mcpTokenFor: () => FAKE_MCP });
+        const failingCalls = recordCalls(failing);
+        failing.api.resumeActor = async () => {
+          throw new SubstrateUnavailableError("substrate_unavailable");
+        };
+        await expect(failing.launcher.launch({ ...failing.spec, mcpTools: true })).rejects.toThrow();
+        expect(failing.callFailures.length).toBeGreaterThan(0);
+        outputs.push(
+          JSON.stringify(calls),
+          JSON.stringify(failingCalls),
+          JSON.stringify(h.callFailures),
+          JSON.stringify(failing.callFailures),
+          JSON.stringify(h.warmEvents),
+          JSON.stringify(failing.warmEvents),
+          JSON.stringify([...h.api.templates.values(), ...h.api.egressPolicies.values()]),
+          JSON.stringify(await h.runs.get(h.spec.runId)),
+        );
+        for (const harness of [h, failing]) for (const body of (await allBlobs(harness)).values()) outputs.push(body);
+        // It is in the Secret (the only place).
+        expect(JSON.stringify(secretOf(h))).toContain(FAKE_MCP);
+      }
+    } finally {
+      process.stderr.write = write;
+      process.stdout.write = writeOut;
     }
+    outputs.push(logs.join(""));
+    for (const output of outputs) expect(output).not.toContain(FAKE_MCP);
   });
 
   it("remove() deletes the Secret, MCP token included", async () => {
