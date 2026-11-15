@@ -131,6 +131,53 @@ export function describeSubstrateRunStoreContract(name: string, setup: RunStoreC
       expect((await s.getByToken(substrateRunToken(r1)))?.actorShape).toBe("pair");
     });
 
+    it("records the repositories on claim, names and access only, and keeps them through reclaim and setPhase", async () => {
+      now = NOW;
+      const r = setup.id("repos");
+      const r2 = setup.id("repos-none");
+      const r3 = setup.id("repos-secret");
+      await setup.runs(r, r2, r3);
+      const s = store();
+      const REPOS = [
+        { name: "extra-alpha", access: "write" as const },
+        { name: "extra-beta", access: "read" as const },
+      ];
+      expect((await s.claim(record(r, { repositories: REPOS }))).record.repositories).toEqual(REPOS);
+      expect((await s.get(r))?.repositories).toEqual(REPOS);
+      expect((await s.getByToken(substrateRunToken(r)))?.repositories).toEqual(REPOS);
+      expect((await s.setPhase(r, "requeued", ["provisioning"])).repositories).toEqual(REPOS);
+      expect((await s.reclaim(r, new Date(NOW + HOUR)))?.repositories).toEqual(REPOS);
+      expect((await s.setPhase(r, "running", ["provisioning"])).repositories).toEqual(REPOS);
+
+      await s.claim(record(r2));
+      expect("repositories" in (await s.get(r2))!).toBe(false);
+
+      await s.claim(
+        record(r3, {
+          repositories: [
+            { name: "extra-alpha", access: "write", hostPath: "/runs/r3/repos/extra-alpha/workspace" },
+          ] as never,
+        }),
+      );
+      const stored = JSON.stringify(await s.get(r3));
+      expect(stored).not.toContain('"hostPath"');
+      expect(stored).not.toContain("/runs/");
+    });
+
+    it("gives an adopter no repositories", async () => {
+      now = NOW;
+      const r1 = setup.id("repos-adopt-1");
+      const r2 = setup.id("repos-adopt-2");
+      await setup.runs(r1, r2);
+      const s = store();
+      await s.claim(record(r1));
+      await s.setPhase(r1, "running", ["provisioning"]);
+      await park(s, r1, NOW);
+      const adopted = await s.adopt(r1, r2, new Date(NOW + HOUR), { specHash: "h2" });
+      expect(adopted).toBeDefined();
+      expect("repositories" in adopted!).toBe(false);
+    });
+
     it("parks only a running run, with what it was parked with", async () => {
       now = NOW;
       const r1 = setup.id("park");

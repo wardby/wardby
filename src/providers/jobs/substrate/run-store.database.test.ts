@@ -35,9 +35,13 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaSubstrateRunStore (PostgreSQL)
       specHash: "h1",
       phase: "provisioning" as const,
       deadlineAt: new Date(Date.now() + 60_000),
+      repositories: [{ name: "extra-alpha", access: "write" as const }],
     };
     const first = await store.claim(record);
     expect(first.created).toBe(true);
+    expect(
+      (await db.substrateRun.findUnique({ where: { runId }, select: { repositories: true } }))?.repositories,
+    ).toEqual([{ name: "extra-alpha", access: "write" }]);
     const second = await store.claim({ ...record, specHash: "other" });
     expect(second.created).toBe(false);
     expect(second.record).toEqual(first.record);

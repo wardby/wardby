@@ -1,5 +1,6 @@
 import type { PrismaClient } from "#prisma";
 import type { WarmColdReason } from "../types.js";
+import { isCodingRepositoryName, MAX_RUN_REPOSITORIES_IN_INPUT } from "../../../coding/protocol.js";
 import { retiredRunToken } from "./names.js";
 
 /**
@@ -32,6 +33,39 @@ export type SubstratePhase =
 /** pair = agent + tool actors (Claude Code); single = one agent actor that also holds the workspace (Codex). */
 export type SubstrateActorShape = "pair" | "single";
 
+/** One extra repository of a run, as its row records it: never its host path. */
+export interface SubstrateRunRepository {
+  name: string;
+  access: "read" | "write";
+}
+
+/** A run's actor shape and extra repositories (the proxy's layout lookup). */
+export interface SubstrateRunLayout {
+  shape: SubstrateActorShape;
+  repositories?: SubstrateRunRepository[];
+}
+
+/**
+ * The column's value as records carry it: 1 to MAX_RUN_REPOSITORIES_IN_INPUT entries, each exactly
+ * { name, access } with a valid link name and no name twice; undefined for null or anything else.
+ */
+export function parseRunRepositories(value: unknown): SubstrateRunRepository[] | undefined {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_RUN_REPOSITORIES_IN_INPUT) return undefined;
+  const seen = new Set<string>();
+  const out: SubstrateRunRepository[] = [];
+  for (const entry of value as unknown[]) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return undefined;
+    const keys = Object.keys(entry);
+    if (keys.length !== 2 || !keys.includes("name") || !keys.includes("access")) return undefined;
+    const { name, access } = entry as { name: unknown; access: unknown };
+    if (typeof name !== "string" || !isCodingRepositoryName(name) || seen.has(name)) return undefined;
+    if (access !== "read" && access !== "write") return undefined;
+    seen.add(name);
+    out.push({ name, access });
+  }
+  return out;
+}
+
 export interface SubstrateRunRecord {
   runId: string;
   token: string;
@@ -54,6 +88,8 @@ export interface SubstrateRunRecord {
   coldReason?: WarmColdReason;
   /** Set on claim (absent = pair); always present on a record the store returns. An adopter is always pair. */
   actorShape?: SubstrateActorShape;
+  /** Set on claim (spec order) for a run with extra repositories; absent otherwise. Names and access only. */
+  repositories?: SubstrateRunRepository[];
   /**
    * Set by the store (ignored on claim): when the row last changed. While a run is `running` and
    * neither actor has reached the proxy, that is when it became running: the relay's own writes to
@@ -146,10 +182,12 @@ interface Row {
   parkedAt: Date | null;
   coldReason: string | null;
   actorShape: string;
+  repositories: unknown;
   updatedAt: Date;
 }
 
 function toRecord(row: Row): SubstrateRunRecord {
+  const repositories = parseRunRepositories(row.repositories);
   return {
     runId: row.runId,
     token: row.token,
@@ -163,6 +201,7 @@ function toRecord(row: Row): SubstrateRunRecord {
     ...(row.parkedAt !== null ? { parkedAt: row.parkedAt } : {}),
     ...(row.coldReason !== null ? { coldReason: row.coldReason as WarmColdReason } : {}),
     actorShape: row.actorShape === "single" ? "single" : "pair",
+    ...(repositories ? { repositories } : {}),
     updatedAt: row.updatedAt,
   };
 }
@@ -193,6 +232,9 @@ export class PrismaSubstrateRunStore implements SubstrateRunStore {
           agentId: record.agentId ?? null,
           coldReason: record.coldReason ?? null,
           actorShape: record.actorShape ?? "pair",
+          ...(record.repositories
+            ? { repositories: record.repositories.map(({ name, access }) => ({ name, access })) }
+            : {}),
         },
       });
       return { created: true, record: toRecord(row) };
@@ -339,6 +381,9 @@ export class MemorySubstrateRunStore implements SubstrateRunStore {
       ...(record.agentId !== undefined ? { agentId: record.agentId } : {}),
       ...(record.coldReason !== undefined ? { coldReason: record.coldReason } : {}),
       actorShape: record.actorShape ?? "pair",
+      ...(record.repositories
+        ? { repositories: record.repositories.map(({ name, access }) => ({ name, access })) }
+        : {}),
       updatedAt: new Date(this.now()),
     };
     this.rows.set(record.runId, row);

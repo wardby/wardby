@@ -2355,41 +2355,44 @@ model ToolConnectionGrant {
 /// A coding run launched on Agent Substrate (JOB_LAUNCHER=substrate): the launch fence, its phase,
 /// and the counters of its tool relay. Holds no credentials and no task content.
 model SubstrateRun {
-  runId       String                  @id
-  codingRun   CodingRun               @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  runId        String                  @id
+  codingRun    CodingRun               @relation(fields: [runId], references: [runId], onDelete: Cascade)
   /// substrateRunToken(runId): names the run's actors, blobs and relay.
-  token       String                  @unique
-  specHash    String
+  token        String                  @unique
+  specHash     String
   /// provisioning | running | requeued (active); stopped | removed | timed_out | lost | crashed |
   /// tool_failed | provisioning_failed | collect_timeout | startup_timeout (terminal; see
   /// SubstratePhase in run-store.ts)
-  phase       String
-  deadlineAt  DateTime
+  phase        String
+  deadlineAt   DateTime
   /// Last seq assigned on the tool-bound queue.
-  toolSeq     Int                     @default(0)
-  nextChannel Int                     @default(1)
+  toolSeq      Int                     @default(0)
+  nextChannel  Int                     @default(1)
   /// Undelivered relay line bytes (back-pressure).
-  relayBytes  Int                     @default(0)
+  relayBytes   Int                     @default(0)
   /// Warm rounds: the round this row's actors are on (1 for a cold launch; an adopter's is the parked run's + 1).
-  round       Int                     @default(1)
+  round        Int                     @default(1)
   /// Warm rounds, set when parked: the commit the round pushed and the agent fingerprint it ran with.
-  headSha     String?
-  fingerprint String?
+  headSha      String?
+  fingerprint  String?
   /// Warm rounds: when the run was parked (null unless it was).
-  parkedAt    DateTime?
+  parkedAt     DateTime?
   /// The run's agent (from the JobSpec); null on rows from before warm rounds.
-  agentId     String?
+  agentId      String?
   /// Warm rounds: why this continuation launched cold (not_parked | expired | actor_missing |
   /// actor_not_suspended | branch_moved | fingerprint_changed | capacity); null when it adopted or
   /// continued nothing.
-  coldReason  String?
+  coldReason   String?
   /// The run's actors: pair (agent + tool: Claude Code) | single (one agent actor that also holds
   /// the workspace: Codex). Read by the launcher and the coding proxy's Substrate routes.
-  actorShape  String                  @default("pair")
-  createdAt   DateTime                @default(now())
-  updatedAt   DateTime                @updatedAt
-  channels    SubstrateRelayChannel[]
-  events      SubstrateRelayEvent[]
+  actorShape   String                  @default("pair")
+  /// The run's extra repositories (#537), set at claim: [{ name, access }] in spec order, never a host
+  /// path; null for a run without any. Read by the launcher and the coding proxy's Substrate routes.
+  repositories Json?
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+  channels     SubstrateRelayChannel[]
+  events       SubstrateRelayEvent[]
 
   @@index([phase, parkedAt])
   @@index([agentId, phase])
