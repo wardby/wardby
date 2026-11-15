@@ -78,7 +78,14 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
 
       await expect(store.load(round2)).resolves.toMatchObject({
         systemPromptSha256: systemPromptSha256("code safely"),
+        warmStart: true,
       });
+
+      // The launch fingerprint: absent until recorded, then loaded as written.
+      expect(await store.load(round3)).not.toHaveProperty("warmFingerprint");
+      const fingerprint = "d".repeat(64);
+      await store.recordWarmFingerprint(round3, fingerprint);
+      await expect(store.load(round3)).resolves.toMatchObject({ warmFingerprint: fingerprint, warmStart: false });
     } finally {
       await db.codingRun.deleteMany({ where: { runId: { in: ids } } });
       await db.run.deleteMany({ where: { id: { in: ids } } });

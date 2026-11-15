@@ -342,6 +342,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   private readonly collectGraceMs: number;
   private readonly startupTimeoutMs: number;
   private readonly warm: WarmRoundsOptions | undefined;
+  /** WorkspaceJobLauncher.warmRounds: set from the configuration (warm rounds on). */
+  readonly warmRounds: boolean;
   private lastSweepAt = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly options: SubstrateJobLauncherOptions) {
@@ -349,6 +351,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     this.runs = options.runs;
     this.blobs = options.blobs;
     this.warm = options.warmRounds;
+    this.warmRounds = this.warm !== undefined;
     // Warm rounds switch the bridges through the templates' env (so they get their own templates).
     this.config = this.warm ? { ...options.config, warmRounds: true } : options.config;
     this.workspaceRoot = resolve(options.workspaceRoot);

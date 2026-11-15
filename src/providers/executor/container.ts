@@ -256,6 +256,9 @@ function errorName(error: unknown): string {
   return error instanceof Error ? error.name : typeof error;
 }
 
+/** Warm rounds: the round a continuation follows and the commit it pushed (null when none). */
+type PreviousRound = { runId: string; commitSha: string | null };
+
 /** The last step of a merge order: every writer keeps CodingRun.mergeOrder within 1-99. */
 const MAX_MERGE_ORDER = 99;
 
@@ -773,6 +776,14 @@ export interface ContainerRunSnapshot {
    * and the run is then never retained and never asks to resume a retained round.
    */
   systemPromptSha256?: string;
+  /**
+   * Warm rounds: the agent fingerprint computed once when the run launched (CodingRun.warmFingerprint),
+   * the value a delivered round is retained under. Absent = not computed (warm rounds off, or a run
+   * launched without one): never retained.
+   */
+  warmFingerprint?: string;
+  /** Warm rounds: CodingRun.warmStart (null until a continuation's outcome is recorded). */
+  warmStart?: boolean | null;
 }
 
 /**
@@ -908,6 +919,12 @@ export interface ContainerExecutionStore {
   previousRound?(runId: string, rootRunId: string): Promise<{ runId: string; commitSha: string | null } | null>;
   /** Warm rounds: records CodingRun.warmStart (whether the continuation resumed the retained round). */
   recordWarmStart?(runId: string, warmStart: boolean): Promise<void>;
+  /**
+   * Warm rounds: records CodingRun.warmFingerprint, the fingerprint the run launches with, so the
+   * round is retained under that value even after a restart. Optional: without it only the process
+   * that launched the run knows the value.
+   */
+  recordWarmFingerprint?(runId: string, fingerprint: string): Promise<void>;
 }
 
 export interface CodingFailureAudit {
@@ -1023,6 +1040,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       pricingVersion: row.pricingVersion,
       pricingSnapshot: row.pricingSnapshot,
       systemPromptSha256: systemPromptSha256(row.agent.systemPrompt),
+      ...(row.codingRun.warmFingerprint ? { warmFingerprint: row.codingRun.warmFingerprint } : {}),
+      warmStart: row.codingRun.warmStart,
     };
   }
 
@@ -1045,6 +1064,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
 
   async recordWarmStart(runId: string, warmStart: boolean): Promise<void> {
     await this.db.codingRun.update({ where: { runId }, data: { warmStart } });
+  }
+
+  async recordWarmFingerprint(runId: string, fingerprint: string): Promise<void> {
+    await this.db.codingRun.update({ where: { runId }, data: { warmFingerprint: fingerprint } });
   }
 
   /**
@@ -1914,6 +1937,8 @@ export class ContainerExecutor implements Executor {
     if (status.state === "pending" && status.capacityRefused && this.options.store.requeueAfterCapacityRefusal) {
       return this.finishCapacityRequeue(run, run.jobHandle);
     }
+    // A continuation whose launching process died before it reported the warm outcome reports it now.
+    await this.reportMissingWarmStart(run, run.jobHandle);
     if (status.state === "pending" || status.state === "running") {
       await this.options.store.heartbeat(run.runId);
       return { state: "active" };
@@ -1937,8 +1962,14 @@ export class ContainerExecutor implements Executor {
     let claimId: string | null = null;
     let planned: JobHandle | undefined;
     let spendEnabled = Boolean(sessionId);
-    // Warm rounds: the round this continuation follows (only on a launcher that retains sandboxes).
-    const previous = handle ? null : await this.previousRoundOf(run);
+    const resumed = Boolean(handle);
+    // Warm rounds: the round this continuation follows (only with warm rounds on), read once and only
+    // when needed: by the capacity probe or the launch.
+    const launchRun = run;
+    let previousRead: Promise<PreviousRound | null> | undefined;
+    const previousRound = (): Promise<PreviousRound | null> => (previousRead ??= this.previousRoundOf(launchRun));
+    // Warm rounds: the fingerprint the run launched with; a delivered round is retained under it.
+    let launchFingerprint = run.warmFingerprint;
     try {
       // A launched run resumed after a restart is checked the way recover() checks it: its cost so
       // far may be past the limit (a reply can cost more than its hold), and it is still delivered.
@@ -1947,7 +1978,7 @@ export class ContainerExecutor implements Executor {
         if (run.provisioningClaim) return;
         // No room in the cluster yet (the namespace quota): wait in the queue rather than claim a
         // slot and then fail when the API server refuses the job.
-        if (!(await this.fitsCluster(run, previous))) return;
+        if (!(await this.fitsCluster(run, previousRound))) return;
         claimId = randomUUID();
         // "queued": every slot is taken; the run stays pending and
         // drainCodingQueue starts it when one frees. "unavailable": another
@@ -2032,7 +2063,11 @@ export class ContainerExecutor implements Executor {
         );
         const beforeLaunch = await this.requireCurrent(runId);
         if (TERMINAL_STATUSES.has(beforeLaunch.status)) throw new Error("coding_run_no_longer_active");
-        const warm = this.warmStartFor(run, previous, warmHeadOf(workspace));
+        // Computed once, here, from the values the run launches with (an agent edited mid-run does not
+        // change it), and recorded before the launch so a restarted control plane retains under it too.
+        launchFingerprint = this.warmFingerprintOf(run);
+        if (launchFingerprint) await this.recordLaunchFingerprint(runId, launchFingerprint);
+        const warm = this.warmStartFor(await previousRound(), warmHeadOf(workspace), launchFingerprint);
         const spec = {
           ...this.jobSpec(run, inputArtifact, workspaces, { mcpTools: Boolean(mcpToken) }),
           ...(warm ? { warm } : {}),
@@ -2051,6 +2086,7 @@ export class ContainerExecutor implements Executor {
         this.emit({ stage: "launched", runId, jobId: handle.id, budgetReservedUsd: run.budgetUsd });
         if (warm) await this.reportWarmStart(run, handle);
       }
+      if (resumed) await this.reportMissingWarmStart(run, handle);
 
       let delay = this.options.pollMinMs ?? 250;
       const maximumDelay = this.options.pollMaxMs ?? 5_000;
@@ -2060,7 +2096,8 @@ export class ContainerExecutor implements Executor {
       for (;;) {
         const status = await this.options.jobs.status(handle);
         if (status.state !== "pending" && status.state !== "running") {
-          await this.finishTerminal(run, handle, status.state, workspaces ?? workspace, sessionId);
+          const finishing = launchFingerprint ? { ...run, warmFingerprint: launchFingerprint } : run;
+          await this.finishTerminal(finishing, handle, status.state, workspaces ?? workspace, sessionId);
           return;
         }
         if (status.state === "running" && !observedRunning) {
@@ -2738,9 +2775,11 @@ export class ContainerExecutor implements Executor {
    * fingerprint), or undefined (the job is removed): only on a launcher that retains, for Claude Code.
    */
   private retentionFor(run: ContainerRunSnapshot, headSha: string): JobRetention | undefined {
-    if (!this.options.jobs.retain || run.provider !== "claude-code" || !WARM_HEAD_SHA.test(headSha)) return undefined;
-    const fingerprint = this.warmFingerprintOf(run);
-    return fingerprint ? { headSha, fingerprint } : undefined;
+    if (!this.warmRounds || !this.options.jobs.retain || run.provider !== "claude-code") return undefined;
+    // The fingerprint the run launched with (never one recomputed now: the agent may have changed).
+    const fingerprint = run.warmFingerprint;
+    if (!WARM_HEAD_SHA.test(headSha) || !fingerprint || !WARM_FINGERPRINT.test(fingerprint)) return undefined;
+    return { headSha, fingerprint };
   }
 
   /**
@@ -2749,7 +2788,7 @@ export class ContainerExecutor implements Executor {
    */
   private async releaseJob(handle: JobHandle, retention: JobRetention | undefined): Promise<void> {
     const { jobs } = this.options;
-    if (retention && jobs.retain) {
+    if (retention && this.warmRounds && jobs.retain) {
       await jobs.retain(handle, retention).catch(() => jobs.remove(handle).catch(() => undefined));
       return;
     }
@@ -3997,7 +4036,7 @@ export class ContainerExecutor implements Executor {
    */
   async removeRetainedRounds(agentId: string): Promise<number> {
     const removeParked = this.options.jobs.removeParked?.bind(this.options.jobs);
-    if (!removeParked) return 0;
+    if (!this.warmRounds || !removeParked) return 0;
     try {
       return await removeParked({ agentId });
     } catch (error) {
@@ -4041,14 +4080,13 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
-   * Warm rounds (a launcher that retains sandboxes: WorkspaceJobLauncher.retain): the round a Claude
-   * Code continuation follows, or null. Never throws; a failed read is a fresh round.
+   * Warm rounds (on: WorkspaceJobLauncher.warmRounds): the round a Claude Code continuation follows,
+   * or null. Never throws; a failed read is a fresh round.
    */
-  private async previousRoundOf(
-    run: ContainerRunSnapshot,
-  ): Promise<{ runId: string; commitSha: string | null } | null> {
+  private async previousRoundOf(run: ContainerRunSnapshot): Promise<PreviousRound | null> {
     const { jobs, store } = this.options;
-    if (!jobs.retain || !store.previousRound || run.provider !== "claude-code" || !run.rootCodingRunId) return null;
+    if (!this.warmRounds || !jobs.retain || !store.previousRound || run.provider !== "claude-code") return null;
+    if (!run.rootCodingRunId) return null;
     try {
       return await store.previousRound(run.runId, run.rootCodingRunId);
     } catch (error) {
@@ -4066,7 +4104,7 @@ export class ContainerExecutor implements Executor {
    * (then nothing is retained or resumed).
    */
   private warmFingerprintOf(run: ContainerRunSnapshot): string | undefined {
-    if (run.provider !== "claude-code" || !run.systemPromptSha256) return undefined;
+    if (!this.warmRounds || run.provider !== "claude-code" || !run.systemPromptSha256) return undefined;
     try {
       const spec = this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true });
       if (!spec.toolImage) return undefined;
@@ -4088,15 +4126,43 @@ export class ContainerExecutor implements Executor {
     }
   }
 
-  /** JobSpec.warm for a continuation that follows `previous` from the commit `headSha`, or undefined. */
+  /**
+   * JobSpec.warm for a continuation that follows `previous` from the commit `headSha` with the
+   * agent `fingerprint`, or undefined.
+   */
   private warmStartFor(
-    run: ContainerRunSnapshot,
     previous: { runId: string } | null,
     headSha: string | undefined,
+    fingerprint: string | undefined,
   ): JobWarmStart | undefined {
     if (!previous || !RUN_ID.test(previous.runId) || !headSha || !WARM_HEAD_SHA.test(headSha)) return undefined;
-    const fingerprint = this.warmFingerprintOf(run);
     return fingerprint ? { fromRunId: previous.runId, headSha, fingerprint } : undefined;
+  }
+
+  /** Warm rounds are on (WorkspaceJobLauncher.warmRounds); off, every run takes the plain path. */
+  private get warmRounds(): boolean {
+    return this.options.jobs.warmRounds === true;
+  }
+
+  /** Records the run's launch fingerprint (CodingRun.warmFingerprint). Best effort: never fails the launch. */
+  private async recordLaunchFingerprint(runId: string, fingerprint: string): Promise<void> {
+    await this.options.store.recordWarmFingerprint?.(runId, fingerprint).catch((error: unknown) => {
+      containerLog.warn(
+        { runId, event: "coding.warm_fingerprint_unrecorded", errorName: errorName(error) },
+        "could not record a run's launch fingerprint; only this process can retain its round",
+      );
+    });
+  }
+
+  /**
+   * A launched continuation whose warm outcome was never recorded (its launching process stopped
+   * before reportWarmStart): reports it now. The step line has a fixed id, so a second report
+   * writes no second line (RunStepWriter keeps one step per callId).
+   */
+  private async reportMissingWarmStart(run: ContainerRunSnapshot, handle: JobHandle): Promise<void> {
+    if (!this.warmRounds || run.provider !== "claude-code" || !run.rootCodingRunId) return;
+    if (run.warmStart !== null && run.warmStart !== undefined) return;
+    await this.reportWarmStart(run, handle);
   }
 
   /**
@@ -4106,7 +4172,7 @@ export class ContainerExecutor implements Executor {
    */
   private async reportWarmStart(run: ContainerRunSnapshot, handle: JobHandle): Promise<void> {
     const { jobs, store, runSteps } = this.options;
-    if (!jobs.warmOutcome) return;
+    if (!this.warmRounds || !jobs.warmOutcome) return;
     let outcome: Awaited<ReturnType<NonNullable<WorkspaceJobLauncher["warmOutcome"]>>>;
     try {
       outcome = await jobs.warmOutcome(handle);
@@ -4141,7 +4207,7 @@ export class ContainerExecutor implements Executor {
    */
   private async fitsCluster(
     run: ContainerRunSnapshot,
-    previous: { runId: string; commitSha: string | null } | null,
+    previousRound: () => Promise<PreviousRound | null>,
   ): Promise<boolean> {
     const { jobs, store } = this.options;
     if (!jobs.hasCapacityFor || !store.markQueued) return true;
@@ -4149,7 +4215,8 @@ export class ContainerExecutor implements Executor {
     // A continuation's probe names the round it follows (warm rounds), so making room never removes
     // the retained sandbox it is about to resume; the branch is not fetched yet, so the probe carries
     // the commit that round pushed.
-    const warm = this.warmStartFor(run, previous, previous?.commitSha ?? undefined);
+    const previous = await previousRound();
+    const warm = this.warmStartFor(previous, previous?.commitSha ?? undefined, this.warmFingerprintOf(run));
     const probe = {
       ...this.jobSpec(run, CAPACITY_PROBE_INPUT, null, { capacityProbe: true }),
       ...(warm ? { warm } : {}),
@@ -4495,10 +4562,10 @@ export class ContainerExecutor implements Executor {
       if (status?.state === "pending" || status?.state === "running") {
         await this.options.jobs.stop(run.jobHandle, "terminal_cleanup").catch(() => undefined);
       }
-      // A launcher that retains sandboxes may have handed this ended run's sandbox to a later round:
-      // its handle then reads succeeded with nothing to collect, so it is never collected here (what
-      // collect returns is discarded anyway). Every other launcher is collected, as before.
-      if (!this.options.jobs.retain) await this.options.jobs.collect(run.jobHandle).catch(() => undefined);
+      // With warm rounds on, this ended run's sandbox may have gone to a later round: its handle then
+      // reads succeeded with nothing to collect, so it is never collected here (what collect returns
+      // is discarded anyway). With warm rounds off every launcher is collected, as before.
+      if (!this.warmRounds) await this.options.jobs.collect(run.jobHandle).catch(() => undefined);
       await this.options.jobs.remove(run.jobHandle).catch(() => undefined);
     }
     const input = this.preflightForCleanup(run);

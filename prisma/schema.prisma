@@ -642,6 +642,9 @@ model CodingRun {
   /// Substrate warm rounds only: true when this round resumed the previous round's parked workspace
   /// and session, false when it started fresh. Null = not a continuation on Substrate with warm rounds.
   warmStart             Boolean?
+  /// Substrate warm rounds only: the agent fingerprint (SHA-256 hex) computed once when the run
+  /// launched; a delivered round is retained under it. Null = warm rounds off or not computed.
+  warmFingerprint       String?
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
   proxySession          CodingProxySession?

@@ -104,8 +104,8 @@ async function parkedRoundOne(h: Harness, retention: JobRetention = RETAIN): Pro
   return handle;
 }
 
-/** A launcher on the same store, blobs, API and Secrets: the control plane after a restart. */
-function restartedLauncher(h: Harness, warmRounds: WarmRoundsOptions | undefined = WARM): SubstrateJobLauncher {
+/** A launcher on the same store, blobs, API and Secrets: the control plane after a restart (null: warm rounds off). */
+function restartedLauncher(h: Harness, warmRounds: WarmRoundsOptions | null | undefined = WARM): SubstrateJobLauncher {
   return new SubstrateJobLauncher({
     api: h.api,
     runs: h.runs,
@@ -164,6 +164,15 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(toolTemplate(h.spec, CONFIG).name).not.toBe(toolTemplate(h.spec, { ...CONFIG, warmRounds: true }).name);
     // A run that continues nothing has no warm outcome.
     expect(await h.launcher.warmOutcome(handle)).toBeUndefined();
+  });
+
+  it("says whether warm rounds are on (WorkspaceJobLauncher.warmRounds), from its configuration", async () => {
+    const h = await warmHarness();
+    expect(h.launcher.warmRounds).toBe(true);
+    expect(restartedLauncher(h).warmRounds).toBe(true);
+    // Off: the launcher still implements retain, but the executor must take the plain path.
+    expect(restartedLauncher(h, null).warmRounds).toBe(false);
+    expect(typeof restartedLauncher(h, null).retain).toBe("function");
   });
 
   it("refuses a malformed warm hint (no planned handle, the launch rejects)", async () => {

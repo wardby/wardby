@@ -255,6 +255,13 @@ export interface WorkspaceJobLauncher extends JobLauncher {
    */
   supportsServicesFor?(provider: CodingProvider): boolean;
   /**
+   * Whether this launcher has warm rounds on (Substrate, SUBSTRATE_WARM_ROUNDS): only then does the
+   * executor ask for a previous round, set JobSpec.warm, retain, read warmOutcome or remove parks.
+   * Absent or false: every run takes the plain path (launch, collect, remove), even on a launcher
+   * that implements retain.
+   */
+  readonly warmRounds?: boolean;
+  /**
    * Keeps a succeeded job's sandbox for the next round; false = it was removed instead. Called in
    * place of `remove` only for a run that finished successfully and whose branch push succeeded,
    * with the pushed commit and the agent's fingerprint (a continuation adopts the sandbox only when
