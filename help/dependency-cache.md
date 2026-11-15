@@ -3,7 +3,7 @@ id: dependency-cache
 title: Dependency cache for coding runs
 summary: Restore npm node_modules from a verified snapshot before a coding agent starts, so runs skip the install.
 audience: operator
-tags: [coding-agents, packages, npm, node_modules, dependency-cache, cache, npm-ci, lockfile, snapshot, restore, blob-store, workspaces, tool_unavailable, budget_too_small, snapshot_skipped, timeout, CODING_CPUS, CODING_MEMORY_MB, disk, sha_mismatch, unsafe_archive, dependencyCache, worker_input_failed, workerImageRef]
+tags: [coding-agents, packages, npm, node_modules, dependency-cache, cache, npm-ci, lockfile, snapshot, restore, blob-store, workspaces, tool_unavailable, budget_too_small, snapshot_skipped, timeout, CODING_CPUS, CODING_MEMORY_MB, disk, sha_mismatch, unsafe_archive, dependencyCache, worker_input_failed, workerImageRef, substrate, reused_workspace, digest_mismatch, warm rounds]
 appliesTo: >=0.7.0
 ---
 
@@ -51,6 +51,12 @@ for folders restored from a snapshot.
   A restore skips re-scanning an archive whose scan result was recorded at
   upload and whose digest matches; extraction still enforces every archive
   rule.
+- Uploads carry the archive's SHA-256 (`x-wardby-archive-sha256`); the proxy
+  refuses bytes that differ (`digest_mismatch`) and keeps nothing. Older
+  workers without the header are still accepted.
+- A workspace resumed from an earlier round never uses the cache (`409
+reused_workspace`): the earlier round's agent controlled it, so a snapshot
+  taken from it can't be trusted for other runs.
 - The packages are the ones the agent's policy approves; the cache doesn't vet
   their contents beyond what a normal install through the registry does.
 - Install scripts are not cached. Snapshots are built with `--ignore-scripts`;
@@ -126,6 +132,7 @@ or `nearest` snapshot is not a reason: the project shows `cold`.
 | `install_failed`, `timeout`, `cancelled`, `internal_error`, `worker_error`, `report_invalid` | The agent installs for itself; check the worker log. The preparation gets at most 20 minutes or half the time left before the run's deadline. On Docker a huge restore can exhaust the tmpfs inode limit before its bytes.                         |
 | `tool_unavailable`                                                                           | Claude Code tool-runner image predates the cache or is custom; rebuild it from the current tool-runner image. The proxy still seals on the run's first model request.                                                                              |
 | `already_started`, `invalid_deadline`                                                        | Not expected: a command ran before preparation, or the worker and tool runner images are from different releases.                                                                                                                                  |
+| `reused_workspace`                                                                           | A resumed Substrate warm round: its workspace already has `node_modules`. No action.                                                                                                                                                               |
 | `worker_input_failed` (the run fails)                                                        | A Codex or Claude Code worker image, or a `workerImageRef` image, older than the cache. Update the images, or rebuild the custom image `FROM` the current release, before turning the cache on.                                                    |
 
 Every run of a large project installing `cold` again usually means its
@@ -144,6 +151,10 @@ The full reference, with every limit, is
 
 ## Substrate launcher
 
-The experimental `JOB_LAUNCHER=substrate` does not support this feature yet; a
-run that needs it fails with `substrate_feature_unsupported`. Use the Docker or
-Kubernetes launcher. See the `job-launcher-substrate` help article.
+On the experimental `JOB_LAUNCHER=substrate` (0.9.15 and later) the cache works
+for Claude Code and Codex, using the coding proxy's `BLOB_STORE` under
+`dependency-cache/`. Scope any bucket lifecycle rule for Substrate's run files
+to `substrate/runs/`, so it never deletes snapshots. The coding proxy, tool
+runner and worker images must be 0.9.15 or later. A warm round that resumes the
+previous round's workspace reports `reused_workspace` and uses no snapshot. See
+the `job-launcher-substrate` help article.

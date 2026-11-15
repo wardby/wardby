@@ -862,6 +862,12 @@ before the agent starts.
   seal are discarded. A proxy-side deadline
   (`WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS` after the run's proxy session
   starts) is the last backstop. A run uploads at most once per project.
+- **A resumed workspace never uses the cache.** A run that continues on an
+  earlier round's execution environment (warm rounds on the Substrate
+  launcher) gets `409 reused_workspace` from the proxy on every cache route but
+  the seal: its workspace was controlled by the earlier round's agent, so
+  nothing it builds can become a snapshot other runs trust, and it already has
+  its `node_modules`.
 - **A restore needs the plan first.** The worker sends the committed lockfile
   to the proxy's lockfile plan (see
   [Lockfile installs: verified, then approved exactly](#lockfile-installs-verified-then-approved-exactly)).
@@ -890,7 +896,11 @@ before the agent starts.
   run's disk). The worker records that scan's result with each snapshot it
   uploads; a restore whose downloaded bytes match the recorded digest skips
   the separate scan, and extraction still enforces every archive rule above
-  and the disk budget.
+  and the disk budget. Uploads are checked end to end too: the worker sends the
+  SHA-256 of the archive it scanned (`x-wardby-archive-sha256`) on every
+  launcher, and the proxy refuses an upload whose received bytes differ
+  (`400 digest_mismatch`) and keeps nothing of it. Uploads from older workers
+  without the header are still accepted.
 - **Install scripts are not cached.** Every preparation step runs npm with
   `--ignore-scripts`. After the upload window is sealed, and only for a project
   whose committed lockfile lists a package with an install script, the worker
@@ -914,8 +924,8 @@ before the agent starts.
 - A folder that already has a `node_modules` is left alone.
 - The agent needs a package allowlist (registry mode): the restore is approved
   by the lockfile plan.
-- Codex and Claude Code runs on the `node` and `node-python` toolchains, with
-  worker images from a Wardby release that includes the cache. See
+- Codex and Claude Code runs on the `node` and `node-python` toolchains, on the
+  Docker, Kubernetes and Substrate launchers, with worker images from a Wardby release that includes the cache. See
   [Worker images](#worker-images) before you turn it on.
 
 ### Worker images
@@ -1141,10 +1151,17 @@ Codex run's worker log records the code as `hit_rejected` or
 | `report_invalid`                                              | The worker's report was malformed and was replaced by this code.                                                                                                                                                 |
 | `already_started`                                             | A command ran before preparation finished. Not expected in normal operation.                                                                                                                                     |
 | `invalid_deadline`                                            | Claude Code only: the worker passed the tool runner a deadline it couldn't read. Not expected; the worker and tool runner images are from different releases.                                                    |
+| `reused_workspace`                                            | A Substrate warm round resumed the previous round's workspace, which already has its `node_modules`. Nothing is restored or stored. Expected; no action.                                                         |
 | `worker_input_failed` (the run's error, not a project reason) | The run failed before the agent started: a Codex or Claude Code worker image older than the cache, or a `workerImageRef` image not rebuilt from a release that includes it. See [Worker images](#worker-images). |
 
 For `rebuild`, `failed`, `timeout` and `unsealed` mean native add-ons may be
 unbuilt; the agent can run `npm rebuild` itself.
+
+An upload refused `digest_mismatch` (the bytes the proxy received differ from
+the digest the worker sent) is not a project reason: the project keeps its
+`cold` or `nearest` result and no snapshot is stored; the proxy logs
+`dependency_cache.refused` with that code. Repeats point at something between
+the worker and the proxy altering request bodies.
 
 The proxy answers its `/cache/npm/` routes with `{"error": "<code>"}` and a
 `404 not_found` when the cache is off; those codes show up as the reasons
