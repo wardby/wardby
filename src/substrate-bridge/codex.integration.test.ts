@@ -328,6 +328,7 @@ describe("Codex bridge, end to end without Substrate", () => {
       expect(tail).toContain("mcp header [redacted]");
       expect(tail).not.toContain(INJECTED_MCP_TOKEN_PLACEHOLDER);
       await waitFor(() => (passedOn.includes("mcp header") ? true : undefined));
+      expect(passedOn).toContain("mcp header [redacted]");
       expect(passedOn).not.toContain(INJECTED_MCP_TOKEN_PLACEHOLDER);
       expect(logs.join("\n")).not.toContain(INJECTED_MCP_TOKEN_PLACEHOLDER);
     });

@@ -27,6 +27,7 @@ import {
   waitForRound,
   waitForRunToken,
   withRound,
+  withoutMcpEnv,
   type Logger,
 } from "./common.js";
 import {
@@ -119,7 +120,8 @@ export interface ToolHandle {
 
 export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: string = RUNNER_ENTRY): RunnerHandle => {
   const child = spawn(process.execPath, [entry], {
-    env: { ...env, WARDBY_TOOL_SETUP: toolSetup },
+    // Nothing MCP-related ever reaches the tool runner (only the agent's worker gets the MCP env).
+    env: { ...withoutMcpEnv(env), WARDBY_TOOL_SETUP: toolSetup },
     stdio: ["ignore", "pipe", "pipe"],
     // Its own process group, so stop and kill reach every process the runner's tools started.
     detached: true,
