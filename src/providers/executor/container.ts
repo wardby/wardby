@@ -4179,17 +4179,34 @@ export class ContainerExecutor implements Executor {
   private async reportMissingWarmStart(run: ContainerRunSnapshot, handle: JobHandle): Promise<void> {
     if (!this.warmRounds || run.provider !== "claude-code" || !run.rootCodingRunId) return;
     if (run.warmStart !== null && run.warmStart !== undefined) return;
-    await this.reportWarmStart(run, handle);
+    // A continuation launched cold with no round to follow has no warm outcome (and no step line):
+    // it is recorded as not resumed, once, so later recover passes stop asking the launcher.
+    if ((await this.reportWarmStart(run, handle)) === "none") await this.recordWarmStart(run.runId, false);
+  }
+
+  /** Records CodingRun.warmStart. Best effort: never fails the run. */
+  private async recordWarmStart(runId: string, warmStart: boolean): Promise<void> {
+    await this.options.store.recordWarmStart?.(runId, warmStart).catch((error: unknown) => {
+      containerLog.warn(
+        { runId, event: "coding.warm_start_unrecorded", errorName: errorName(error) },
+        "could not record whether a continuation resumed the previous round",
+      );
+    });
   }
 
   /**
    * After a continuation launched with JobSpec.warm: records whether it resumed the retained round
    * (CodingRun.warmStart) and writes the run's fixed step line saying so (warm-start-wording.ts).
-   * Best effort: never fails the run. Only fixed text and a boolean leave here.
+   * Best effort: never fails the run. Only fixed text and a boolean leave here. Says what it found:
+   * `reported`, `none` (the launcher has no warm outcome for the job) or `unknown` (not read, or not
+   * reportable).
    */
-  private async reportWarmStart(run: ContainerRunSnapshot, handle: JobHandle): Promise<void> {
-    const { jobs, store, runSteps } = this.options;
-    if (!this.warmRounds || !jobs.warmOutcome) return;
+  private async reportWarmStart(
+    run: ContainerRunSnapshot,
+    handle: JobHandle,
+  ): Promise<"reported" | "none" | "unknown"> {
+    const { jobs, runSteps } = this.options;
+    if (!this.warmRounds || !jobs.warmOutcome) return "unknown";
     let outcome: Awaited<ReturnType<NonNullable<WorkspaceJobLauncher["warmOutcome"]>>>;
     try {
       outcome = await jobs.warmOutcome(handle);
@@ -4198,23 +4215,19 @@ export class ContainerExecutor implements Executor {
         { runId: run.runId, event: "coding.warm_start_unknown", errorName: errorName(error) },
         "could not read whether a continuation resumed the previous round",
       );
-      return;
+      return "unknown";
     }
-    if (!outcome) return;
+    if (!outcome) return "none";
     const line = warmStartLine(outcome);
-    if (!line) return;
-    await store.recordWarmStart?.(run.runId, outcome.adopted).catch((error: unknown) => {
-      containerLog.warn(
-        { runId: run.runId, event: "coding.warm_start_unrecorded", errorName: errorName(error) },
-        "could not record whether a continuation resumed the previous round",
-      );
-    });
+    if (!line) return "unknown";
+    await this.recordWarmStart(run.runId, outcome.adopted);
     await runSteps
       ?.record(run.runId, {
         steps: [{ kind: "said", callId: WARM_START_STEP_ID, text: line, truncated: false }],
         results: [],
       })
       .catch(() => undefined);
+    return "reported";
   }
 
   /**

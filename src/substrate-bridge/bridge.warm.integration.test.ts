@@ -7,6 +7,7 @@ import { createServer as createHttpServer, type Server } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 import { getHeapSnapshot } from "node:v8";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -191,13 +192,24 @@ describe("substrate bridges, warm rounds", () => {
     await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
   }
 
-  async function startBridges(warm: boolean): Promise<{
+  async function startBridges(
+    warm: boolean,
+    options: {
+      /** The round whose worker exits 1 without a result. */
+      failRound?: number;
+      /** Called before staging round one (a cold continuation names its own run). */
+      beforeStage?: () => void;
+    } = {},
+  ): Promise<{
     workspace: string;
     inputs: unknown[];
     setups: string[];
     toolLists: string[][];
     stops: number[];
+    /** Ends the n-th runner with a code, as if it exited on its own. */
+    exits: Array<(code: number) => void>;
   }> {
+    options.beforeStage?.();
     const workspace = await stageRoundOne();
     const env = { PATH: "/usr/bin", ...(warm ? { [WARM_ROUNDS_ENV]: "1" } : {}) };
     const socketPath = join(dir, "tool", "runner.sock");
@@ -211,6 +223,7 @@ describe("substrate bridges, warm rounds", () => {
     };
     const setups: string[] = [];
     const stops: number[] = [];
+    const exits: Array<(code: number) => void> = [];
     tool = await runTool({
       proxyUrl,
       env,
@@ -228,6 +241,7 @@ describe("substrate bridges, warm rounds", () => {
         const server = runner.startToolRunner(socketPath, parseToolSetup(setupText), { workspacePath: workspace });
         let exit!: (code: number) => void;
         const exited = new Promise<number>((resolve) => (exit = resolve));
+        exits.push((code) => void server.then((s) => s.close(() => exit(code))));
         return {
           ready: server.then(() => undefined),
           exited,
@@ -257,57 +271,64 @@ describe("substrate bridges, warm rounds", () => {
       log,
       contextRoot: join(dir, "context"),
       nextRoundPollMs: 20,
-      launchWorker: () => ({
-        exited: (async () => {
-          const input = JSON.parse(await readFile(inputPath, "utf8")) as { runId: string };
-          inputs.push(input);
-          // A previous round's output must be gone before this one starts.
-          await expect(readFile(resultPath)).rejects.toThrow();
-          const socket = connect(agentSocket);
-          socket.setEncoding("utf8");
-          let pending = "";
-          const replies = new Map<number, (message: { result?: { tools?: { name: string }[] } }) => void>();
-          socket.on("data", (chunk: string) => {
-            pending += chunk;
-            let end: number;
-            while ((end = pending.indexOf("\n")) >= 0) {
-              const message = JSON.parse(pending.slice(0, end)) as {
-                id?: number;
-                result?: { tools?: { name: string }[] };
-              };
-              pending = pending.slice(end + 1);
-              if (message.id !== undefined) replies.get(message.id)?.(message);
-            }
-          });
-          const call = (id: number, method: string, params: unknown) =>
-            new Promise<{ result?: { tools?: { name: string }[] } }>((resolve) => {
-              replies.set(id, resolve);
-              socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      launchWorker: () => {
+        const stderr = new PassThrough();
+        return {
+          stderr,
+          exited: (async () => {
+            const input = JSON.parse(await readFile(inputPath, "utf8")) as { runId: string };
+            inputs.push(input);
+            const round = inputs.length;
+            stderr.end(`worker stderr of round ${round}\n`);
+            // A previous round's output must be gone before this one starts.
+            await expect(readFile(resultPath)).rejects.toThrow();
+            const socket = connect(agentSocket);
+            socket.setEncoding("utf8");
+            let pending = "";
+            const replies = new Map<number, (message: { result?: { tools?: { name: string }[] } }) => void>();
+            socket.on("data", (chunk: string) => {
+              pending += chunk;
+              let end: number;
+              while ((end = pending.indexOf("\n")) >= 0) {
+                const message = JSON.parse(pending.slice(0, end)) as {
+                  id?: number;
+                  result?: { tools?: { name: string }[] };
+                };
+                pending = pending.slice(end + 1);
+                if (message.id !== undefined) replies.get(message.id)?.(message);
+              }
             });
-          await new Promise<void>((resolve, reject) => socket.once("connect", resolve).once("error", reject));
-          await call(1, "initialize", {
-            protocolVersion: "2025-06-18",
-            capabilities: {},
-            clientInfo: { name: "stub", version: "1" },
-          });
-          const listed = (await call(2, "tools/list", {})).result?.tools?.map((t) => t.name) ?? [];
-          toolLists.push(listed);
-          socket.end();
-          await mkdir(join(dir, "out"), { recursive: true });
-          await writeFile(resultPath, JSON.stringify({ runId: input.runId }));
-          const header = {
-            type: "wardby-transcript",
-            version: 1,
-            provider: "claude-code",
-            sessionId: SESSION,
-            status: "ok",
-          };
-          await writeFile(transcriptPath, `${JSON.stringify(header)}\n`);
-          return 0;
-        })(),
-      }),
+            const call = (id: number, method: string, params: unknown) =>
+              new Promise<{ result?: { tools?: { name: string }[] } }>((resolve) => {
+                replies.set(id, resolve);
+                socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+              });
+            await new Promise<void>((resolve, reject) => socket.once("connect", resolve).once("error", reject));
+            await call(1, "initialize", {
+              protocolVersion: "2025-06-18",
+              capabilities: {},
+              clientInfo: { name: "stub", version: "1" },
+            });
+            const listed = (await call(2, "tools/list", {})).result?.tools?.map((t) => t.name) ?? [];
+            toolLists.push(listed);
+            socket.end();
+            await mkdir(join(dir, "out"), { recursive: true });
+            if (round === options.failRound) return 1;
+            await writeFile(resultPath, JSON.stringify({ runId: input.runId }));
+            const header = {
+              type: "wardby-transcript",
+              version: 1,
+              provider: "claude-code",
+              sessionId: SESSION,
+              status: "ok",
+            };
+            await writeFile(transcriptPath, `${JSON.stringify(header)}\n`);
+            return 0;
+          })(),
+        };
+      },
     });
-    return { workspace, inputs, setups, toolLists, stops };
+    return { workspace, inputs, setups, toolLists, stops, exits };
   }
 
   it("runs round 2 on the same bridges: next input, resumed session, fresh tool runner, same workspace", async () => {
@@ -358,6 +379,53 @@ describe("substrate bridges, warm rounds", () => {
     expect(requests.some((r) => r.includes("round="))).toBe(false);
     expect(await blobs.head(BLOB.result(TOKEN, 2))).toBeNull();
     expect(stops).toEqual([]);
+  });
+
+  it("without the warm-rounds env, a runner exit after the collect still ends the tool bridge, as before", async () => {
+    const { exits } = await startBridges(false);
+    expect(await tool!.collected).toBe("ok");
+    exits[0](7);
+    expect(await tool!.runnerExited).toBe(7);
+    // Logged only while the bridge was still relaying (Phase A): not after its collect.
+    expect(logs.some((line) => line.includes("substrate_bridge_runner_exited"))).toBe(false);
+  });
+
+  it("with warm rounds, the runner the bridge ends between rounds does not end the tool bridge", async () => {
+    const { stops } = await startBridges(true);
+    expect(await tool!.collected).toBe("ok");
+    await waitFor(() => (stops.length === 1 ? true : undefined));
+    const settled = await Promise.race([
+      tool!.runnerExited.then(() => "exited"),
+      new Promise((resolve) => setTimeout(() => resolve("waiting"), 200)),
+    ]);
+    expect(settled).toBe("waiting");
+  });
+
+  it("a continuation launched cold with warm rounds on (branch_moved) runs exactly like round 1 before rounds existed", async () => {
+    // The launcher did not adopt: the continuation (run-2) has fresh actors of its own, staged under
+    // round 1's names with no round record.
+    const { inputs } = await startBridges(true, { beforeStage: () => (currentRun = "run-2") });
+    await agent!.uploaded;
+    expect(await tool!.collected).toBe("ok");
+    await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN))) ? true : undefined));
+    // The seed was fetched, and every request of the round named round 1's files: the only round
+    // queries are the bridges' waits for a next round (as after any warm round 1).
+    const waits = [`GET /substrate/runs/${TOKEN}/input?round=2`, `GET /substrate/runs/${TOKEN}/tool-setup?round=2`];
+    expect(requests.filter((r) => r.includes("round=") && !waits.includes(r))).toEqual([]);
+    expect(requests.filter((r) => r === `GET /substrate/runs/${TOKEN}/seed`)).toHaveLength(1);
+    const paths = new Set(
+      requests
+        .filter((r) => !waits.includes(r))
+        .map((r) => r.replace(/\?.*$/, "").replace(`/substrate/runs/${TOKEN}/`, "")),
+    );
+    for (const path of ["GET input", "GET tool-setup", "GET seed", "POST transcript", "POST result", "POST workspace"])
+      expect(paths).toContain(path);
+    for (const key of [BLOB.started(TOKEN), BLOB.result(TOKEN), BLOB.transcript(TOKEN), BLOB.workspace(TOKEN)])
+      expect(await blobs.head(key)).not.toBeNull();
+    for (const key of [BLOB.started(TOKEN, 2), BLOB.result(TOKEN, 2), BLOB.done(TOKEN, 2)])
+      expect(await blobs.head(key)).toBeNull();
+    // Its first worker starts no session of its own to resume.
+    expect(inputs).toEqual([{ runId: "run-1", task: "round one", sessionResume: true }]);
   });
 
   it.each(["a runner that keeps its setup", "the real runner process"])(
@@ -420,4 +488,26 @@ describe("substrate bridges, warm rounds", () => {
       expect(await heapHolds(token1)).toBe(false);
     },
   );
+
+  it("each round's operator-diagnostics tail is that round's alone (warm rounds)", async () => {
+    const { stops } = await startBridges(true, { failRound: 2 });
+    await agent!.uploaded;
+    await waitFor(() => (requests.some((r) => r.includes("/input?round=2")) ? true : undefined));
+    expect(await tool!.collected).toBe("ok");
+    await waitFor(() => (stops.length === 1 ? true : undefined));
+    await stageRoundTwo();
+    await waitFor(async () => ((await blobs.head(BLOB.exit(TOKEN, 2))) ? true : undefined));
+    const tails = routeLogs
+      .map((entry) => (entry as [{ event?: string; tail?: string; round?: number }])[0])
+      .filter((fields) => fields.event === "substrate.diagnostics");
+    expect(tails).toHaveLength(1);
+    expect(tails[0].round).toBe(2);
+    expect(tails[0].tail).toContain("worker stderr of round 2");
+    expect(tails[0].tail).not.toContain("worker stderr of round 1");
+    // Round 2's tail carries round 2's bridge events only (round 1 logged its input without a round).
+    expect(tails[0].tail).not.toMatch(/"event":"substrate_bridge_input_ready","runToken":"[^"]+"}/);
+    expect(requests).toContain(`POST /substrate/runs/${TOKEN}/diagnostics?round=2`);
+    // The exit report asks the tool for round 2's workspace: let that collect finish before teardown.
+    await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN, 2))) ? true : undefined));
+  });
 });

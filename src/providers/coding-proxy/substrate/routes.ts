@@ -249,7 +249,9 @@ export function createSubstrateRoutes(
   /** Runs whose tool setup this replica already deleted (saves a blob call on every later poll). */
   const setupDeleted = new Set<string>();
   const SETUP_DELETED_MAX = 10_000;
-  /** `<run token>/<side>` whose diagnostics were logged: a repeat is answered but not logged again. */
+  /** The setupDeleted key: the run token, and with warm rounds its round. */
+  const setupKeyFor = (token: string, round: number): string => (options.warmRounds ? `${token}/${round}` : token);
+  /** `<run token>/<round>/<side>` whose diagnostics were logged: a repeat is answered but not logged again. */
   const diagnosticsSeen = new Set<string>();
 
   /**
@@ -288,8 +290,10 @@ export function createSubstrateRoutes(
   /**
    * The round a request is for (`?round=n`, absent = 1), which must be the token's current round:
    * a download for another round is not there yet (404, the bridge waits); an upload is refused (409).
+   * Without warm rounds `?round` is ignored entirely: every request is round 1, as before rounds existed.
    */
   async function roundFor(url: URL, token: string, kind: "download" | "upload"): Promise<number> {
+    if (!options.warmRounds) return 1;
     const raw = url.searchParams.get("round");
     if (raw !== null && !/^[1-9][0-9]{0,3}$/.test(raw)) throw new RouteError(400, "bad_request");
     const requested = raw === null ? 1 : Number(raw);
@@ -509,12 +513,17 @@ export function createSubstrateRoutes(
           return;
         }
         case "events": {
-          // Per round: a later round stages a new tool setup under the same key.
-          const setupKey = `${token}/${await currentRound(token)}`;
+          // Warm rounds: per round (a later round stages a new tool setup under the same key), and a
+          // tool setup already gone is fine. Without them, exactly as before: one key per run, and a
+          // failed delete answers its error.
+          const setupKey = setupKeyFor(token, await currentRound(token));
           if (!setupDeleted.has(setupKey)) {
-            await blobs.delete(BLOB.toolSetup(token)).catch((error: unknown) => {
-              if (!(error instanceof BlobStoreError && error.code === "not_found")) throw error;
-            });
+            const deleted = blobs.delete(BLOB.toolSetup(token));
+            await (options.warmRounds
+              ? deleted.catch((error: unknown) => {
+                  if (!(error instanceof BlobStoreError && error.code === "not_found")) throw error;
+                })
+              : deleted);
             setupDeleted.add(setupKey);
             if (setupDeleted.size > SETUP_DELETED_MAX) {
               const oldest = setupDeleted.values().next().value;
@@ -556,7 +565,7 @@ export function createSubstrateRoutes(
           );
           await writeDoneOnce(token, round, "ok");
           await relay.dropRelay(token);
-          setupDeleted.delete(`${token}/${round}`);
+          setupDeleted.delete(setupKeyFor(token, round));
           sendJson(response, 200, {});
           return;
         }
@@ -583,6 +592,8 @@ export function createSubstrateRoutes(
           // Operator diagnostics (CLAUDE.md's exception): the agent bridge's bounded stderr tail after
           // a failure, redacted here by exact value whatever the bridge did. It goes to the operator
           // log only: never a blob, the database, an answer, MCP, the viewer or a run record.
+          // Per round (warm rounds): each round's tail is its own; another round's post is refused (409).
+          const round = await roundFor(url, token, "upload");
           const raw = await readDiagnostics(request);
           counters.bytes = Buffer.byteLength(raw);
           const tail = redactExactSecretValues(raw, withEscapedForms(agentSecretValues(request)));
@@ -593,14 +604,17 @@ export function createSubstrateRoutes(
             );
             throw new RouteError(400, "bad_request");
           }
-          const seenKey = `${token}/${side}`;
+          const seenKey = `${token}/${round}/${side}`;
           if (!diagnosticsSeen.has(seenKey)) {
             diagnosticsSeen.add(seenKey);
             if (diagnosticsSeen.size > DIAGNOSTICS_SEEN_MAX) {
               const oldest = diagnosticsSeen.values().next().value;
               if (oldest !== undefined) diagnosticsSeen.delete(oldest);
             }
-            log.warn({ event: "substrate.diagnostics", runToken: token, side, tail }, "substrate actor diagnostics");
+            log.warn(
+              { event: "substrate.diagnostics", runToken: token, side, ...(round > 1 ? { round } : {}), tail },
+              "substrate actor diagnostics",
+            );
           }
           sendJson(response, 200, {});
           return;
@@ -611,7 +625,7 @@ export function createSubstrateRoutes(
           await refuseOnceCollected(token, round);
           await writeDoneOnce(token, round, "failed");
           await relay.dropRelay(token);
-          setupDeleted.delete(`${token}/${round}`);
+          setupDeleted.delete(setupKeyFor(token, round));
           sendJson(response, 200, {});
           return;
         }

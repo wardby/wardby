@@ -162,9 +162,13 @@ async function writeRoundInput(path: string, body: Buffer, resumeSessionId: stri
 
 export async function run(options: AgentOptions): Promise<AgentHandle> {
   // The operator-diagnostics tail: the worker's stderr and this bridge's events. The worker holds no
-  // real secret (the gateway injects the capability on the wire), only the placeholder.
-  const diagnostics = new DiagnosticsTail(() => [PLACEHOLDER_CAPABILITY]);
-  const log = diagnostics.logger(options.log ?? stderrLogger);
+  // real secret (the gateway injects the capability on the wire), only the placeholder. Warm rounds:
+  // each round gets a fresh tail, so a round's post carries only that round's worker and events.
+  const newTail = (): DiagnosticsTail => new DiagnosticsTail(() => [PLACEHOLDER_CAPABILITY]);
+  const baseLog = options.log ?? stderrLogger;
+  let diagnostics = newTail();
+  let roundLog = diagnostics.logger(baseLog);
+  const log: Logger = (event, fields) => roundLog(event, fields);
   const policy = options.policy ?? DEFAULT_POLICY;
   const giveUpMs = options.giveUpMs ?? 60_000;
   const env = options.env ?? process.env;
@@ -365,6 +369,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
   // 3. The worker, and 4. its transcript and result once it has exited (per round).
   const transcriptDeadlineMs = options.transcriptDeadlineMs ?? TRANSCRIPT_DEADLINE_MS;
   const startRound = (round: number): { exited: Promise<number>; uploaded: Promise<void> } => {
+    const tail = diagnostics;
     const worker = (options.launchWorker ?? spawnWorker)({
       ...env,
       WARDBY_PROXY_URL: options.proxyUrl,
@@ -376,7 +381,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
     const output = new LineTail(WORKER_OUTPUT_TAIL.lines, WORKER_OUTPUT_TAIL.bytes);
     const drained = Promise.all([
       ...[worker.stdout, worker.stderr].flatMap((stream) => (stream ? [output.follow(stream)] : [])),
-      ...(worker.stderr ? [diagnostics.tail.follow(worker.stderr)] : []),
+      ...(worker.stderr ? [tail.tail.follow(worker.stderr)] : []),
     ]);
     // The transcript, then the result, once the worker has exited. The result (or the exit report)
     // ends the round: the control plane may read the transcript and remove the run's blobs as soon as
@@ -409,7 +414,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
         const diagnostic = findWorkerDiagnostic(output.lines());
         // A failure: the operator gets the worker's stderr tail (redacted) in the proxy's log, before the
         // exit report that ends the round.
-        await diagnostics.post(`${base}/diagnostics`, headers, policy, log, shutdown.signal);
+        await tail.post(withRound(`${base}/diagnostics`, round), headers, policy, log, shutdown.signal);
         await postCapped(
           withRound(`${base}/exit`, round),
           headers,
@@ -450,6 +455,8 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
           }),
         { pollMs: options.nextRoundPollMs ?? NEXT_ROUND_POLL_MS, signal: shutdown.signal },
       );
+      diagnostics = newTail();
+      roundLog = diagnostics.logger(baseLog);
       await Promise.all([resultPath, transcriptPath].map((path) => rm(path, { force: true })));
       await rm(options.contextRoot ?? WORKER_CONTEXT_ROOT, { recursive: true, force: true });
       await writeRoundInput(inputPath, answer.body, sessionId);

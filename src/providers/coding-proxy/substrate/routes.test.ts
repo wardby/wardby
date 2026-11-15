@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BLOB, roundBlob, substrateRunToken, toolActorSubject } from "../../jobs/substrate/names.js";
 import { LocalBlobStore } from "../../storage/local.js";
+import { BlobStoreError } from "../../storage/types.js";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import { capabilityHash } from "../capability-hash.js";
 import type { ProxySession } from "../types.js";
@@ -440,6 +441,26 @@ describe("substrate routes", () => {
       expect(await allFiles()).toEqual([]);
     });
 
+    it("with warm rounds: logs each round's tail once (the seen key includes the round), and refuses another round's", async () => {
+      overrides = { warmRounds: true, tokenForRun: async () => TOKEN };
+      await start();
+      expect((await fetch(`${base}/diagnostics`, agent(text("round one tail")))).status).toBe(200);
+      expect((await fetch(`${base}/diagnostics?round=2`, agent(text("early")))).status).toBe(409);
+      await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
+      expect((await fetch(`${base}/diagnostics?round=2`, agent(text("round two tail")))).status).toBe(200);
+      expect((await fetch(`${base}/diagnostics?round=2`, agent(text("again")))).status).toBe(200);
+      expect(warnCalls).toEqual([
+        [
+          { event: "substrate.diagnostics", runToken: TOKEN, side: "agent", tail: "round one tail" },
+          "substrate actor diagnostics",
+        ],
+        [
+          { event: "substrate.diagnostics", runToken: TOKEN, side: "agent", round: 2, tail: "round two tail" },
+          "substrate actor diagnostics",
+        ],
+      ]);
+    });
+
     it("requires auth and a Content-Length within 8 KiB", async () => {
       await start();
       expect((await fetch(`${base}/diagnostics`, text("x"))).status).toBe(401);
@@ -549,17 +570,46 @@ describe("substrate routes", () => {
     // fetch sends Content-Length for a string body.
     const upload = (body: string) => ({ method: "POST", body });
 
-    it("without warm rounds: a round query is never the current round, and round.json is not read", async () => {
+    it("without warm rounds: a round query is ignored entirely (round 1's files), and round.json is not read", async () => {
       await start();
       await blobs.put(BLOB.input(TOKEN), Buffer.from('{"round":1}'));
       await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
       await blobs.put(BLOB.input(TOKEN, 2), Buffer.from('{"round":2}'));
-      expect((await fetch(`${base}/input?round=2`, agent())).status).toBe(404);
-      const first = await fetch(`${base}/input`, agent());
-      expect(first.status).toBe(200);
-      expect(await first.text()).toBe('{"round":1}');
-      expect((await fetch(`${base}/result?round=2`, agent(upload("{}")))).status).toBe(409);
-      expect((await fetch(`${base}/input?round=x`, agent())).status).toBe(400);
+      for (const query of ["", "?round=2", "?round=x", "?round=99999"]) {
+        const answer = await fetch(`${base}/input${query}`, agent());
+        expect(answer.status).toBe(200);
+        expect(await answer.text()).toBe('{"round":1}');
+      }
+      expect((await fetch(`${base}/result?round=2`, agent(upload('{"r":1}')))).status).toBe(200);
+      expect((await blobs.get(BLOB.result(TOKEN))).toString()).toBe('{"r":1}');
+      expect(await blobs.head(BLOB.result(TOKEN, 2))).toBeNull();
+      expect((await fetch(`${base}/transcript?round=x`, agent(upload("t")))).status).toBe(200);
+      expect(await blobs.head(BLOB.transcript(TOKEN))).not.toBeNull();
+      await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from('{"toolSetup":"{}"}'));
+      expect((await fetch(`${base}/tool-setup?round=3`, tool())).status).toBe(200);
+      expect((await fetch(`${base}/workspace?round=2`, tool(upload("w")))).status).toBe(200);
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+      expect(await blobs.head(BLOB.done(TOKEN, 2))).toBeNull();
+    });
+
+    it("without warm rounds, a failed tool-setup delete on the first events poll answers its error, as before", async () => {
+      const failing = (code: "not_found" | "blob_too_large") =>
+        Object.assign(Object.create(blobs) as LocalBlobStore, {
+          delete: async () => {
+            throw new BlobStoreError(code, code);
+          },
+        });
+      overrides = { blobs: failing("not_found") };
+      await start();
+      const answer = await fetch(`${base}/events?after=0`, tool());
+      expect(answer.status).toBe(404);
+      expect(await answer.json()).toEqual({ error: { type: "not_found" } });
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeAllConnections();
+      // With warm rounds a tool setup already gone is fine (a later round stages it again).
+      overrides = { blobs: failing("not_found"), warmRounds: true, tokenForRun: async () => TOKEN };
+      await start();
+      expect((await fetch(`${base}/events?after=0`, tool())).status).toBe(200);
     });
 
     it("refuses a finished round's capability (its session was cancelled) on every agent route, the next round's input included", async () => {

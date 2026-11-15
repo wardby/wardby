@@ -105,7 +105,7 @@ async function parkedRoundOne(h: Harness, retention: JobRetention = RETAIN): Pro
 }
 
 /** A launcher on the same store, blobs, API and Secrets: the control plane after a restart (null: warm rounds off). */
-function restartedLauncher(h: Harness, warmRounds: WarmRoundsOptions | null | undefined = WARM): SubstrateJobLauncher {
+function restartedLauncher(h: Harness, warmRounds: WarmRoundsOptions | null = WARM): SubstrateJobLauncher {
   return new SubstrateJobLauncher({
     api: h.api,
     runs: h.runs,
@@ -556,7 +556,7 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect((await s.runs.get("run-1"))!.phase).toBe("removed");
     expect(s.api.actors.size).toBe(0);
     // Without warm rounds, warm-up does nothing.
-    await expect(restartedLauncher(s, undefined).warmUp()).resolves.toBeUndefined();
+    await expect(restartedLauncher(s, null).warmUp()).resolves.toBeUndefined();
   });
 
   it("does not adopt an expired park (launch's own sweep removes it first)", async () => {
@@ -897,7 +897,7 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     // A run launched with them on, read by a launcher with them off.
     const h = await warmHarness();
     const warmHandle = await h.launcher.launch(h.spec);
-    expect((await restartedLauncher(h, undefined).status(warmHandle)).state).toBe("running");
+    expect((await restartedLauncher(h, null).status(warmHandle)).state).toBe("running");
     // Neither form names another atespace's run, or a malformed one.
     await expect(h.launcher.status({ backend: "substrate", id: "other/run-1" })).rejects.toThrow("job_not_found");
     await expect(h.launcher.status({ backend: "substrate", id: "wardby-runs/run-1/x" })).rejects.toThrow(

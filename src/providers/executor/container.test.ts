@@ -7274,6 +7274,31 @@ describe("ContainerExecutor warm rounds", () => {
       expect(created.steps).toEqual([]);
     });
 
+    it("records a cold continuation with no round to follow as not resumed, once, so recover stops asking", async () => {
+      const created = await warmHarness({ ...launched, warmStart: null });
+      created.jobs.statusValue = { state: "running" };
+      created.warm!.setOutcome(undefined);
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warmStarts).toEqual([["run-1", false]]);
+      // No step line: nothing was attempted.
+      expect(created.steps).toEqual([]);
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warm!.calls.outcomes).toEqual([created.jobs.handle]);
+      expect(created.warmStarts).toEqual([["run-1", false]]);
+    });
+
+    it("asks again on the next pass when the warm outcome could not be read", async () => {
+      const created = await warmHarness({ ...launched, warmStart: null });
+      created.jobs.statusValue = { state: "running" };
+      created.warm!.setOutcome(new Error("substrate_down"));
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warmStarts).toEqual([]);
+      created.warm!.setOutcome({ adopted: true });
+      await created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" });
+      expect(created.warmStarts).toEqual([["run-1", true]]);
+    });
+
     it("asks nothing for a run that continues nothing", async () => {
       const created = await warmHarness({ status: "running", jobHandle: { backend: "fake", id: "job-1" } });
       created.jobs.statusValue = { state: "running" };

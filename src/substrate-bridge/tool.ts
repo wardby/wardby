@@ -280,10 +280,11 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     } catch {
       return false;
     }
-    // A runner that exits mid-run is a failure; its stderr is in the actor's log.
+    // A runner that exits mid-run is a failure; its stderr is in the actor's log. Without warm rounds,
+    // every exit resolves runnerExited (main() then ends the actor), as before rounds existed.
     void runner.exited.then((code) => {
-      if (stopped || entry.retiring) return;
-      log("substrate_bridge_runner_exited", { runToken: token, code });
+      if (warmRounds && (stopped || entry.retiring)) return;
+      if (!stopped) log("substrate_bridge_runner_exited", { runToken: token, code });
       resolveRunnerExited(code);
     });
     return true;
