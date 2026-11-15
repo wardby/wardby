@@ -57,6 +57,12 @@
  *   the template; a second in SUBSTRATE_TEMPLATE_RETRY_SEC, or a never-ready template past
  *   SUBSTRATE_TEMPLATE_READY_SEC with room on the workers, fails the run as substrate_image_unready
  *   instead of requeueing it.
+ * - Template cleanup (every template wardby recorded, standard and custom): at most once an hour a
+ *   launch (and warmUp) removes the templates no launch, park or adoption used for
+ *   SUBSTRATE_TEMPLATE_TTL_SEC (default 7 days, never under the longest coding run plus the park TTL
+ *   plus an hour): the row first, only while still unused, then the Substrate template; a failed
+ *   Substrate delete puts the row back. A launch whose template was removed between its ensure and
+ *   its createActor ensures it once more and retries.
  */
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
@@ -64,6 +70,7 @@ import { resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { collectExclusions } from "../../../coding/collect-exclude.js";
 import { isMcpToken } from "../../../coding/mcp-token.js";
+import { MAX_CODING_TIMEOUT_SEC } from "../../../coding/profile.js";
 import {
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
@@ -210,6 +217,21 @@ export const DEFAULT_TEMPLATE_RETRY_MS = 600_000;
  * rebuild takes a fresh golden snapshot build, so a distinct build's failure comes later).
  */
 export const TEMPLATE_SAME_BUILD_MS = 60_000;
+
+/** How often launch() may sweep unused templates. */
+const TEMPLATE_SWEEP_INTERVAL_MS = 3_600_000;
+/** At most this many templates are removed per sweep. */
+const TEMPLATE_SWEEP_BATCH = 50;
+export const DEFAULT_TEMPLATE_TTL_MS = 7 * 24 * 3_600_000;
+
+/**
+ * The shortest template TTL the launcher uses: the longest coding run (MAX_CODING_TIMEOUT_SEC,
+ * src/coding/profile.ts), plus the park TTL with warm rounds on, plus an hour. Launch, park and
+ * adoption all bump a template, so none is removed while a run or a park from it can exist.
+ */
+export function templateTtlFloorMs(parkTtlMs: number | undefined): number {
+  return MAX_CODING_TIMEOUT_SEC * 1000 + (parkTtlMs ?? 0) + 3_600_000;
+}
 
 /** A run's template cannot start an actor (see ensureTemplate and neverReady): the run fails, never requeues. */
 class TemplateUnreadyError extends Error {
@@ -537,10 +559,12 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   private readonly templates: SubstrateTemplateStore;
   private readonly templateReadyMs: number;
   private readonly templateRetryMs: number;
+  private readonly templateTtlMs: number;
   private readonly warm: WarmRoundsOptions | undefined;
   /** WorkspaceJobLauncher.warmRounds: set from the configuration (warm rounds on). */
   readonly warmRounds: boolean;
   private lastSweepAt = Number.NEGATIVE_INFINITY;
+  private lastTemplateSweepAt = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly options: SubstrateJobLauncherOptions) {
     this.api = options.api;
@@ -558,6 +582,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     this.templates = options.templates;
     this.templateReadyMs = options.templateReadyMs ?? DEFAULT_TEMPLATE_READY_MS;
     this.templateRetryMs = options.templateRetryMs ?? DEFAULT_TEMPLATE_RETRY_MS;
+    this.templateTtlMs = Math.max(
+      options.templateTtlMs ?? DEFAULT_TEMPLATE_TTL_MS,
+      templateTtlFloorMs(this.warm?.parkTtlMs),
+    );
   }
 
   /** Phase A: no coding-run services on Substrate. */
@@ -605,6 +633,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     let coldReason: WarmColdReason | undefined;
     // Removal of kept rounds never depends on the switch (warm rounds off: every one goes).
     await this.sweepParkedSometimes();
+    await this.sweepTemplatesSometimes();
     // A single-shape (Codex) run never adopts: it always launches cold, with no cold reason. Nor does
     // a run with extra repositories (W1; the executor never asks one to): cold, no cold reason, and
     // the park it names is left alone.
@@ -866,13 +895,12 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       // cleanup failed (a refused adopter's may hold a used workspace). It is deleted, with its
       // egress policy, and created again. If it cannot be deleted, or is still there after, the
       // launch fails (substrate_already_exists) and nothing ever resumes it.
-      const templateOf = (name: string) =>
-        name !== agent && templates.shape === "pair" ? templates.tool.name : templates.agent.name;
-      for (const name of actorNamesFor(token, shape)) {
-        const template = templateOf(name);
-        await call("createActor", async () => {
+      const templateOf = (name: string): ActorTemplateSpec =>
+        name !== agent && templates.shape === "pair" ? templates.tool : templates.agent;
+      const createActor = (name: string, template: ActorTemplateSpec) =>
+        call("createActor", async () => {
           try {
-            await this.api.createActor(atespace, name, template);
+            await this.api.createActor(atespace, name, template.name);
           } catch (error) {
             if (!(error instanceof SubstrateAlreadyExistsError)) throw error;
             try {
@@ -881,9 +909,21 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
             } catch {
               throw error;
             }
-            await this.api.createActor(atespace, name, template);
+            await this.api.createActor(atespace, name, template.name);
           }
         });
+      for (const name of actorNamesFor(token, shape)) {
+        const template = templateOf(name);
+        try {
+          await createActor(name, template);
+        } catch (error) {
+          // The cleanup sweep removed the template between its ensure and here (its row went just
+          // before a concurrent bump): ensure it once more (recorded again) and retry, once. A second
+          // NotFound fails the launch.
+          if (!(error instanceof SubstrateNotFoundError)) throw error;
+          await this.ensureTemplate(template, call);
+          await createActor(name, template);
+        }
       }
       // After the actors: an egress policy belongs to its actor (a foreign key in Substrate). Every
       // policy is in place before any actor resumes, so none ever runs without one. A single-shape
@@ -1017,7 +1057,14 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       this.templateEvent({ event: "substrate_template_unready", name, role, reason: "golden_failed" });
       throw new TemplateUnreadyError();
     }
-    await call("deleteActorTemplate", () => this.api.deleteActorTemplate(atespace, name));
+    try {
+      await call("deleteActorTemplate", () => this.api.deleteActorTemplate(atespace, name));
+    } catch (error) {
+      // No rebuild was tried, so this launch's count must not make a later one fail as unready for a
+      // build that never happened: take it back (best effort; the window's anchor stays).
+      if (count) await this.templates.withdrawGoldenFailure(name, count.failures).catch(() => undefined);
+      throw error;
+    }
     await call("ensureActorTemplate", () => this.api.ensureActorTemplate(template));
   }
 
@@ -1464,11 +1511,14 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
 
   /**
    * Start-up: removes the parks that expired while no control plane was sweeping, and with warm
-   * rounds off every park left from when they were on. Never throws.
+   * rounds off every park left from when they were on; then the templates no run used for the TTL
+   * (sweepTemplates). Never throws.
    */
   async warmUp(): Promise<void> {
     this.lastSweepAt = this.now();
     await this.sweepParked().catch(() => undefined);
+    this.lastTemplateSweepAt = this.now();
+    await this.sweepTemplates().catch(() => undefined);
   }
 
   private warmEvent(event: WarmEvent): void {
@@ -1646,6 +1696,48 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (!isPhaseConflict(error) || (await this.runs.get(record.runId))?.phase !== "removed") throw error;
     }
     return true;
+  }
+
+  private async sweepTemplatesSometimes(): Promise<void> {
+    if (this.now() - this.lastTemplateSweepAt < TEMPLATE_SWEEP_INTERVAL_MS) return;
+    this.lastTemplateSweepAt = this.now();
+    await this.sweepTemplates().catch(() => undefined);
+  }
+
+  /**
+   * Removes templates no launch, park or adoption used for the TTL: the row first (only while still
+   * unused), then the Substrate template (a missing one is success). A failed Substrate delete puts the
+   * row back (restore: only if no launch re-created it meanwhile), so the next sweep tries again.
+   * Never throws; at most TEMPLATE_SWEEP_BATCH per call. A launch that bumped the row just after its
+   * delete and finds the template gone at createActor ensures it again (provision).
+   */
+  async sweepTemplates(): Promise<void> {
+    try {
+      const now = this.now();
+      const cutoff = new Date(now - this.templateTtlMs);
+      for (const row of await this.templates.listUnusedBefore(cutoff, TEMPLATE_SWEEP_BATCH)) {
+        try {
+          if (!(await this.templates.deleteIfUnusedBefore(row.name, cutoff))) continue;
+        } catch {
+          continue;
+        }
+        try {
+          await this.api.deleteActorTemplate(row.atespace, row.name);
+        } catch {
+          await this.templates.restore(row).catch(() => undefined);
+          this.templateEvent({ event: "substrate_template_remove_failed", name: row.name, role: row.role });
+          continue;
+        }
+        this.templateEvent({
+          event: "substrate_template_removed",
+          name: row.name,
+          role: row.role,
+          ageSec: Math.round((now - row.lastUsedAt.getTime()) / 1000),
+        });
+      }
+    } catch {
+      // Tried again on the next sweep; a sweep never fails a launch.
+    }
   }
 
   private async sweepParkedSometimes(): Promise<void> {

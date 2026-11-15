@@ -138,6 +138,7 @@ export async function makeHarness(
     templates?: SubstrateTemplateStore;
     templateReadyMs?: number;
     templateRetryMs?: number;
+    templateTtlMs?: number;
     collectGraceMs?: number;
     startupTimeoutMs?: number;
     warmRounds?: WarmRoundsOptions;
@@ -200,6 +201,7 @@ export async function makeHarness(
     onTemplateEvent: (event) => templateEvents.push(event),
     ...(options.templateReadyMs !== undefined ? { templateReadyMs: options.templateReadyMs } : {}),
     ...(options.templateRetryMs !== undefined ? { templateRetryMs: options.templateRetryMs } : {}),
+    ...(options.templateTtlMs !== undefined ? { templateTtlMs: options.templateTtlMs } : {}),
     ...(options.collectGraceMs !== undefined ? { collectGraceMs: options.collectGraceMs } : {}),
     ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
     ...(options.warmRounds ? { warmRounds: options.warmRounds, onWarmEvent: (event) => warmEvents.push(event) } : {}),

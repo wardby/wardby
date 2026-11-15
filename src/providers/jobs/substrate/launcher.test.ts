@@ -14,8 +14,8 @@ import { collectExclusions } from "../../../coding/collect-exclude.js";
 import { codexWorkerSetup, type CodexWorkerSetup } from "../codex-worker-setup.js";
 import { deriveSnapshotKey, newBlobKey } from "../../coding-proxy/dependency-cache/key.js";
 import { JobCapacityError, type JobSpec } from "../types.js";
-import { SubstrateExhaustedError, SubstrateUnavailableError, type WorkerInfo } from "./api.js";
-import { inputGitHistory } from "./launcher.js";
+import { SubstrateExhaustedError, SubstrateNotFoundError, SubstrateUnavailableError, type WorkerInfo } from "./api.js";
+import { DEFAULT_TEMPLATE_TTL_MS, inputGitHistory, templateTtlFloorMs } from "./launcher.js";
 import { agentEgress, agentTemplate, BRIDGE_COMMANDS, codexTemplate, toolEgress, toolTemplate } from "./specs.js";
 import {
   allBlobs,
@@ -2683,5 +2683,302 @@ describe("template record and readiness", () => {
       expect(recorded).not.toContain(FAKE_CAP);
       expect(recorded).not.toContain(FAKE_MCP);
     }
+  });
+
+  it("takes back the count of a failure whose rebuild could not start, so a later run rebuilds", async () => {
+    const h = await makeHarness();
+    const agent = agentTemplate(h.spec, CONFIG);
+    await h.api.ensureActorTemplate(agent);
+    h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
+    const deleteActorTemplate = h.api.deleteActorTemplate.bind(h.api);
+    h.api.deleteActorTemplate = async () => {
+      throw new SubstrateUnavailableError("substrate_unavailable");
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(SubstrateUnavailableError);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("provisioning_failed");
+    // No build was tried: the count is back to none, the window's anchor kept.
+    expect(await h.templates.get(agent.name)).toMatchObject({ goldenFailures: 0, lastFailureAt: new Date(T0) });
+    h.api.deleteActorTemplate = deleteActorTemplate;
+    // A later run on the same (still failed) build rebuilds it instead of failing as image_unready.
+    h.setNow(T0 + 2 * MINUTE);
+    await h.launcher.launch(await secondRun(h, "run-2"));
+    expect((await h.runs.get("run-2"))?.phase).toBe("running");
+    expect(await h.templates.get(agent.name)).toMatchObject({ goldenFailures: 1, lastFailureAt: new Date(T0) });
+  });
+
+  describe("template cleanup", () => {
+    const HOUR = 60 * MINUTE;
+    const DAY = 24 * HOUR;
+    const customTool = (spec: JobSpec, image = CUSTOM_TOOL_IMAGE) =>
+      toolTemplate({ ...spec, toolImage: image }, CONFIG);
+    const standardNames = (h: Harness) => [agentTemplate(h.spec, CONFIG).name, toolTemplate(h.spec, CONFIG).name];
+    const inSubstrate = (h: Harness, name: string) => h.api.templates.has(`${ATESPACE}/${name}`);
+    /** Moves the clock on; the earlier runs ended and were removed long before (their actors are gone). */
+    const later = (h: Harness, ms: number) => {
+      for (const key of [...h.api.actors.keys()]) void h.api.deleteActor(ATESPACE, key.slice(key.indexOf("/") + 1));
+      h.setNow(ms);
+    };
+
+    it("removes a template unused for the TTL, and keeps one used since", async () => {
+      const h = await makeHarness();
+      await h.launcher.launch(h.spec);
+      const custom = customTool(h.spec);
+      await h.launcher.launch({ ...(await secondRun(h, "run-2")), toolImage: CUSTOM_TOOL_IMAGE });
+      expect(inSubstrate(h, custom.name)).toBe(true);
+      const then = T0 + 7 * DAY + HOUR;
+      later(h, then);
+      // Its launch sweeps first, then ensures and bumps its own (standard) templates.
+      await h.launcher.launch(await secondRun(h, "run-3"));
+      expect((await h.runs.get("run-3"))?.phase).toBe("running");
+      expect(inSubstrate(h, custom.name)).toBe(false);
+      expect(await h.templates.get(custom.name)).toBeUndefined();
+      for (const name of standardNames(h)) {
+        expect(inSubstrate(h, name)).toBe(true);
+        expect(await h.templates.get(name)).toMatchObject({ lastUsedAt: new Date(then) });
+      }
+      expect(h.templateEvents).toContainEqual({
+        event: "substrate_template_removed",
+        name: custom.name,
+        role: "tool",
+        ageSec: (7 * DAY + HOUR) / 1000,
+      });
+    });
+
+    it("never goes below the floor", async () => {
+      expect(templateTtlFloorMs(undefined)).toBe(3 * HOUR);
+      expect(templateTtlFloorMs(HOUR)).toBe(4 * HOUR);
+      expect(DEFAULT_TEMPLATE_TTL_MS).toBe(7 * DAY);
+      for (const [warmRounds, floor] of [
+        [undefined, 3 * HOUR],
+        [{ parkTtlMs: HOUR, parkMax: 10 }, 4 * HOUR],
+      ] as const) {
+        const h = await makeHarness({ templateTtlMs: 60_000, ...(warmRounds ? { warmRounds } : {}) });
+        const config = warmRounds ? { ...CONFIG, warmRounds: true } : CONFIG;
+        const custom = toolTemplate({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE }, config);
+        await h.launcher.launch({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE });
+        expect(inSubstrate(h, custom.name)).toBe(true);
+        later(h, T0 + 2 * HOUR);
+        await h.launcher.launch(await secondRun(h, "run-2"));
+        later(h, T0 + floor);
+        await h.launcher.launch(await secondRun(h, "run-3"));
+        expect(inSubstrate(h, custom.name)).toBe(true);
+        expect(await h.templates.get(custom.name)).toBeDefined();
+        later(h, T0 + floor + HOUR + 1000);
+        await h.launcher.launch(await secondRun(h, "run-4"));
+        expect(inSubstrate(h, custom.name)).toBe(false);
+        expect(await h.templates.get(custom.name)).toBeUndefined();
+      }
+      // Without warm rounds, exactly past the 3 h floor (7200 s + 3600 s).
+      const h = await makeHarness({ templateTtlMs: 60_000 });
+      const custom = customTool(h.spec);
+      await h.launcher.launch({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE });
+      later(h, T0 + 3 * HOUR);
+      await h.launcher.launch(await secondRun(h, "run-2"));
+      expect(inSubstrate(h, custom.name)).toBe(true);
+      later(h, T0 + 4 * HOUR);
+      await h.launcher.launch(await secondRun(h, "run-3"));
+      expect(inSubstrate(h, custom.name)).toBe(false);
+      // A TTL above the floor is used as configured.
+      const day = await makeHarness({ templateTtlMs: DAY });
+      const dayCustom = customTool(day.spec);
+      await day.launcher.launch({ ...day.spec, toolImage: CUSTOM_TOOL_IMAGE });
+      later(day, T0 + DAY);
+      await day.launcher.launch(await secondRun(day, "run-2"));
+      expect(inSubstrate(day, dayCustom.name)).toBe(true);
+      later(day, T0 + DAY + HOUR);
+      await day.launcher.launch(await secondRun(day, "run-3"));
+      expect(inSubstrate(day, dayCustom.name)).toBe(false);
+    });
+
+    it("removes a template exactly once its last use is past the floor", async () => {
+      const h = await makeHarness({ templateTtlMs: 60_000 });
+      const custom = customTool(h.spec);
+      await h.launcher.launch({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE });
+      later(h, T0 + 2 * HOUR);
+      await h.launcher.launch(await secondRun(h, "run-2"));
+      expect(inSubstrate(h, custom.name)).toBe(true);
+      later(h, T0 + 3 * HOUR + 1000);
+      await h.launcher.launch(await secondRun(h, "run-3"));
+      expect(inSubstrate(h, custom.name)).toBe(false);
+    });
+
+    it("sweeps at most once an hour", async () => {
+      const h = await makeHarness();
+      await h.launcher.launch({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE });
+      // Used an hour later: unused for the TTL only after the first sweep below.
+      later(h, T0 + HOUR);
+      const python = customTool(h.spec, PYTHON_TOOL_IMAGE);
+      await h.launcher.launch({ ...(await secondRun(h, "run-2")), toolImage: PYTHON_TOOL_IMAGE });
+      const deletes = countTemplateDeletes(h);
+      later(h, T0 + 7 * DAY + HOUR);
+      await h.launcher.launch(await secondRun(h, "run-3"));
+      expect(deletes.names).toContain(customTool(h.spec).name);
+      expect(deletes.names).not.toContain(python.name);
+      const first = deletes.names.length;
+      later(h, T0 + 7 * DAY + HOUR + 30 * MINUTE);
+      await h.launcher.launch(await secondRun(h, "run-4"));
+      expect(deletes.names).toHaveLength(first);
+      expect(inSubstrate(h, python.name)).toBe(true);
+      later(h, T0 + 7 * DAY + 2 * HOUR);
+      await h.launcher.launch(await secondRun(h, "run-5"));
+      expect(deletes.names.slice(first)).toEqual([python.name]);
+    });
+
+    it("a failed Substrate delete puts the row back", async () => {
+      const h = await makeHarness();
+      const custom = customTool(h.spec);
+      await h.launcher.launch({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE });
+      const before = await h.templates.get(custom.name);
+      const deleteActorTemplate = h.api.deleteActorTemplate.bind(h.api);
+      h.api.deleteActorTemplate = async () => {
+        throw new SubstrateUnavailableError("substrate_unavailable");
+      };
+      later(h, T0 + 7 * DAY + HOUR);
+      await h.launcher.launch(await secondRun(h, "run-2"));
+      expect((await h.runs.get("run-2"))?.phase).toBe("running");
+      expect(await h.templates.get(custom.name)).toEqual(before);
+      expect(inSubstrate(h, custom.name)).toBe(true);
+      expect(h.templateEvents).toContainEqual({
+        event: "substrate_template_remove_failed",
+        name: custom.name,
+        role: "tool",
+      });
+      expect(h.templateEvents.filter((e) => e.event === "substrate_template_removed")).toEqual([]);
+      h.api.deleteActorTemplate = deleteActorTemplate;
+      later(h, T0 + 7 * DAY + 2 * HOUR);
+      await h.launcher.launch(await secondRun(h, "run-3"));
+      expect(inSubstrate(h, custom.name)).toBe(false);
+      expect(await h.templates.get(custom.name)).toBeUndefined();
+      expect(h.templateEvents).toContainEqual({
+        event: "substrate_template_removed",
+        name: custom.name,
+        role: "tool",
+        ageSec: (7 * DAY + 2 * HOUR) / 1000,
+      });
+    });
+
+    it("leaves a template a launch used between the listing and the row delete", async () => {
+      const h = await makeHarness();
+      const custom = customTool(h.spec);
+      await h.launcher.launch({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE });
+      const list = h.templates.listUnusedBefore.bind(h.templates);
+      h.templates.listUnusedBefore = async (cutoff, limit) => {
+        const rows = await list(cutoff, limit);
+        // A concurrent launch bumps the custom template after the sweep listed it.
+        await h.templates.touchNames([custom.name], new Date(T0 + 7 * DAY + HOUR));
+        return rows;
+      };
+      const deletes = countTemplateDeletes(h);
+      later(h, T0 + 7 * DAY + HOUR);
+      await h.launcher.launch(await secondRun(h, "run-2"));
+      expect(deletes.names).not.toContain(custom.name);
+      expect(inSubstrate(h, custom.name)).toBe(true);
+      expect(await h.templates.get(custom.name)).toMatchObject({ lastUsedAt: new Date(T0 + 7 * DAY + HOUR) });
+    });
+
+    it("a sweep that cannot read or write the record never fails a launch", async () => {
+      const templates = new MemorySubstrateTemplateStore();
+      const h = await makeHarness({ templates });
+      await h.launcher.launch(h.spec);
+      templates.listUnusedBefore = async () => {
+        throw new Error("database down");
+      };
+      later(h, T0 + 7 * DAY + HOUR);
+      await h.launcher.launch(await secondRun(h, "run-2"));
+      expect((await h.runs.get("run-2"))?.phase).toBe("running");
+      const d = await makeHarness();
+      await d.launcher.launch(d.spec);
+      d.templates.deleteIfUnusedBefore = async () => {
+        throw new Error("database down");
+      };
+      const deletes = countTemplateDeletes(d);
+      later(d, T0 + 7 * DAY + HOUR);
+      await d.launcher.launch(await secondRun(d, "run-2"));
+      expect((await d.runs.get("run-2"))?.phase).toBe("running");
+      // The row was never deleted, so neither was the template.
+      expect(deletes.names).toEqual([]);
+    });
+
+    it("warmUp sweeps once at start-up", async () => {
+      const h = await makeHarness();
+      const custom = customTool(h.spec);
+      const python = customTool(h.spec, PYTHON_TOOL_IMAGE);
+      await h.launcher.launch({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE });
+      h.setNow(T0 + 30 * MINUTE);
+      await h.launcher.launch({ ...(await secondRun(h, "run-2")), toolImage: PYTHON_TOOL_IMAGE });
+      later(h, T0 + 7 * DAY + 15 * MINUTE);
+      await h.launcher.warmUp();
+      expect(inSubstrate(h, custom.name)).toBe(false);
+      expect(inSubstrate(h, python.name)).toBe(true);
+      // Within the hour of warmUp's sweep a launch does not sweep again, though python is now past the TTL.
+      const deletes = countTemplateDeletes(h);
+      later(h, T0 + 7 * DAY + 45 * MINUTE);
+      await h.launcher.launch(await secondRun(h, "run-3"));
+      expect(deletes.names).toEqual([]);
+      expect(inSubstrate(h, python.name)).toBe(true);
+    });
+
+    it("re-ensures a template removed between ensure and createActor", async () => {
+      const h = await makeHarness();
+      const tool = toolTemplate(h.spec, CONFIG);
+      const ensured: string[] = [];
+      const ensure = h.api.ensureActorTemplate.bind(h.api);
+      h.api.ensureActorTemplate = async (template) => {
+        ensured.push(template.name);
+        return ensure(template);
+      };
+      const createActor = h.api.createActor.bind(h.api);
+      let first = true;
+      h.api.createActor = async (atespace, name, template) => {
+        // The sweep's delete lands just after this launch's ensure.
+        if (first) h.api.templates.delete(`${ATESPACE}/${tool.name}`);
+        first = false;
+        return createActor(atespace, name, template);
+      };
+      await h.launcher.launch(h.spec);
+      expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
+      expect(inSubstrate(h, tool.name)).toBe(true);
+      expect(ensured.filter((name) => name === tool.name)).toHaveLength(2);
+      expect(await h.templates.get(tool.name)).toBeDefined();
+
+      // Gone again before the retry: the launch fails, with nothing left behind.
+      const g = await makeHarness();
+      const gTool = toolTemplate(g.spec, CONFIG);
+      const gCreate = g.api.createActor.bind(g.api);
+      let creates = 0;
+      g.api.createActor = async (atespace, name, template) => {
+        creates++;
+        g.api.templates.delete(`${ATESPACE}/${gTool.name}`);
+        return gCreate(atespace, name, template);
+      };
+      await expect(g.launcher.launch(g.spec)).rejects.toBeInstanceOf(SubstrateNotFoundError);
+      // The agent's, the tool's, and the tool's one retry.
+      expect(creates).toBe(3);
+      expect((await g.runs.get(g.spec.runId))?.phase).toBe("provisioning_failed");
+      await noTraceOf(g, g.spec.runId);
+    });
+
+    it("logs fixed fields only", async () => {
+      const h = await makeHarness({ capabilityFor: () => FAKE_CAP, mcpTokenFor: () => FAKE_MCP });
+      h.spec = { ...h.spec, mcpTools: true };
+      await h.launcher.launch({ ...h.spec, toolImage: CUSTOM_TOOL_IMAGE });
+      const deleteActorTemplate = h.api.deleteActorTemplate.bind(h.api);
+      h.api.deleteActorTemplate = async () => {
+        throw new SubstrateUnavailableError(`substrate_unavailable ${FAKE_CAP}`);
+      };
+      later(h, T0 + 7 * DAY + HOUR);
+      await h.launcher.launch({ ...(await secondRun(h, "run-2")), mcpTools: true });
+      h.api.deleteActorTemplate = deleteActorTemplate;
+      later(h, T0 + 7 * DAY + 2 * HOUR);
+      await h.launcher.launch({ ...(await secondRun(h, "run-3")), mcpTools: true });
+      const kinds = new Set(h.templateEvents.map((e) => e.event));
+      expect(kinds).toEqual(new Set(["substrate_template_remove_failed", "substrate_template_removed"]));
+      for (const event of h.templateEvents) {
+        for (const key of Object.keys(event)) expect(EVENT_FIELDS).toContain(key);
+      }
+      const recorded = JSON.stringify(h.templateEvents);
+      expect(recorded).not.toContain(FAKE_CAP);
+      expect(recorded).not.toContain(FAKE_MCP);
+    });
   });
 });

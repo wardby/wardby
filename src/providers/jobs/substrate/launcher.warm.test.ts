@@ -494,6 +494,41 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect((await b.runs.get("run-1"))!.phase).toBe("parked");
   });
 
+  it("never removes the template of a parked run", async () => {
+    const T0 = 1_000_000;
+    const MINUTE = 60_000;
+    const DAY = 24 * 60 * MINUTE;
+    const h = await warmHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await finishRound(h, h.token, "run-1", 1);
+    const names = [agentActorName(h.token), toolActorName(h.token)].map(
+      (name) => h.api.actors.get(`${CONFIG.atespace}/${name}`)!.templateName,
+    );
+    // Parked just before the TTL from its launch: park bumps its templates.
+    h.setNow(T0 + 7 * DAY - MINUTE);
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    const deleted: string[] = [];
+    const deleteActorTemplate = h.api.deleteActorTemplate.bind(h.api);
+    h.api.deleteActorTemplate = async (atespace, name) => {
+      deleted.push(name);
+      return deleteActorTemplate(atespace, name);
+    };
+    // Another run on a custom tool image: its launch sweeps, past the TTL from run-1's launch.
+    h.setNow(T0 + 7 * DAY + 30 * MINUTE);
+    const other = { ...(await otherRun(h, "run-2")), toolImage: CUSTOM_TOOL_IMAGE };
+    await h.launcher.launch(other);
+    expect(deleted.filter((name) => names.includes(name))).toEqual([]);
+    for (const name of names) {
+      expect(h.api.templates.has(`${CONFIG.atespace}/${name}`)).toBe(true);
+      expect(await h.templates.get(name)).toBeDefined();
+    }
+    // The follow-up adopts the parked actors.
+    h.setNow(T0 + 7 * DAY + 40 * MINUTE);
+    const second = await h.launcher.launch(await followUp(h, "run-3"));
+    expect(await h.launcher.warmOutcome(second)).toEqual({ adopted: true });
+    expect(await h.runs.get("run-3")).toMatchObject({ token: h.token, phase: "running", round: 2 });
+  });
+
   it("adopts on the same custom digest and starts fresh on a new one", async () => {
     const h = await warmHarness();
     h.spec.toolImage = CUSTOM_TOOL_IMAGE;

@@ -121,6 +121,36 @@ export function describeSubstrateTemplateStoreContract(name: string, setup: Temp
       expect(await store.get(n)).toMatchObject({ goldenFailures: 2, lastFailureAt: at(T0) });
     });
 
+    it("withdraws a failure only while no later one was counted", async () => {
+      const store = setup.store();
+      const n = setup.id("withdraw");
+      const window = 10 * MINUTE;
+      await store.touch(template(n), at(T0));
+      expect(await store.recordGoldenFailure(n, at(T0), window, SAME)).toEqual({ failures: 1, sameBuild: false });
+      await store.withdrawGoldenFailure(n, 1);
+      // The anchor stays: the same failed build soon after still requeues, a later sighting counts once.
+      expect(await store.get(n)).toMatchObject({ goldenFailures: 0, lastFailureAt: at(T0) });
+      expect(await store.recordGoldenFailure(n, at(T0 + SAME - 1), window, SAME)).toEqual({
+        failures: 0,
+        sameBuild: true,
+      });
+      expect(await store.recordGoldenFailure(n, at(T0 + 2 * MINUTE), window, SAME)).toEqual({
+        failures: 1,
+        sameBuild: false,
+      });
+      expect(await store.recordGoldenFailure(n, at(T0 + 4 * MINUTE), window, SAME)).toEqual({
+        failures: 2,
+        sameBuild: false,
+      });
+      // Another failure was counted since: the stale withdrawal changes nothing.
+      await store.withdrawGoldenFailure(n, 1);
+      expect((await store.get(n))?.goldenFailures).toBe(2);
+      await store.withdrawGoldenFailure(n, 0);
+      expect((await store.get(n))?.goldenFailures).toBe(2);
+      await store.withdrawGoldenFailure(setup.id("withdraw-unknown"), 1);
+      expect(await store.get(setup.id("withdraw-unknown"))).toBeUndefined();
+    });
+
     it("a new window clears readyAt", async () => {
       const store = setup.store();
       const n = setup.id("clears");

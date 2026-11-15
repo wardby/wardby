@@ -42,6 +42,13 @@ export interface SubstrateTemplateStore {
    * the row does not exist.
    */
   recordGoldenFailure(name: string, at: Date, windowMs: number, sameBuildMs: number): Promise<GoldenFailureCount>;
+  /**
+   * Takes back a failure recordGoldenFailure counted (its `failures`) for a launch that then could not
+   * rebuild the template, so no build was tried: goldenFailures - 1, only while it is still `failures`
+   * (no later failure was counted). The window's anchor stays, so a launch that sees the same failed
+   * build within sameBuildMs still requeues. Nothing for a missing row or failures < 1.
+   */
+  withdrawGoldenFailure(name: string, failures: number): Promise<void>;
   /** Sets readyAt = at on each named row whose readyAt is null. */
   markReady(names: readonly string[], at: Date): Promise<void>;
   /** Rows with lastUsedAt < cutoff, least recently used first, at most `limit`. */
@@ -127,16 +134,26 @@ export class PrismaSubstrateTemplateStore implements SubstrateTemplateStore {
 
   async touch(template: SubstrateTemplateRef, at: Date): Promise<void> {
     const { name, atespace, role, image } = template;
-    try {
-      await this.db.substrateTemplate.upsert({
+    const upsert = () =>
+      this.db.substrateTemplate.upsert({
         where: { name },
         create: { name, atespace, role, image, createdAt: at, lastUsedAt: at },
         update: { lastUsedAt: at },
       });
+    try {
+      await upsert();
     } catch (error) {
       // Two launches created the row at once: the other's insert won, so this one is an update.
       if (!isUniqueViolation(error)) throw error;
-      await this.db.substrateTemplate.update({ where: { name }, data: { lastUsedAt: at } });
+      const { count } = await this.db.substrateTemplate.updateMany({ where: { name }, data: { lastUsedAt: at } });
+      if (count === 1) return;
+      // The cleanup sweep deleted that row in between: create it again. Another concurrent create
+      // winning that too touched it just now, which is as good.
+      try {
+        await upsert();
+      } catch (again) {
+        if (!isUniqueViolation(again)) throw again;
+      }
     }
   }
 
@@ -171,6 +188,14 @@ export class PrismaSubstrateTemplateStore implements SubstrateTemplateStore {
       );
       if (next.data) await tx.substrateTemplate.update({ where: { name }, data: next.data });
       return next.result;
+    });
+  }
+
+  async withdrawGoldenFailure(name: string, failures: number): Promise<void> {
+    if (failures < 1) return;
+    await this.db.substrateTemplate.updateMany({
+      where: { name, goldenFailures: failures },
+      data: { goldenFailures: failures - 1 },
     });
   }
 
@@ -265,6 +290,11 @@ export class MemorySubstrateTemplateStore implements SubstrateTemplateStore {
       if (next.data.readyAt === null) delete row.readyAt;
     }
     return next.result;
+  }
+
+  async withdrawGoldenFailure(name: string, failures: number): Promise<void> {
+    const row = this.rows.get(name);
+    if (row && failures >= 1 && row.goldenFailures === failures) row.goldenFailures = failures - 1;
   }
 
   async markReady(names: readonly string[], at: Date): Promise<void> {

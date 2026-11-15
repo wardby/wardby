@@ -749,7 +749,7 @@ export interface SubstrateJobConfig {
    */
   templateReadySec?: number;
   /**
-   * SUBSTRATE_TEMPLATE_RETRY_SEC (60..86400): the window after a golden-snapshot failure within which
+   * SUBSTRATE_TEMPLATE_RETRY_SEC (120..86400): the window after a golden-snapshot failure within which
    * another one fails runs instead of rebuilding the template (launcher default 600 s).
    */
   templateRetrySec?: number;
@@ -855,7 +855,9 @@ export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): Su
   const templateRetrySec = optionalBoundedInteger(
     env.SUBSTRATE_TEMPLATE_RETRY_SEC?.trim() || undefined,
     "SUBSTRATE_TEMPLATE_RETRY_SEC",
-    60,
+    // Above the launcher's 60 s same-build interval (TEMPLATE_SAME_BUILD_MS), so a window always
+    // outlasts it and a rebuilt template's next failure can be counted.
+    120,
     86_400,
   );
   if (templateRetrySec !== undefined) config.templateRetrySec = templateRetrySec;
