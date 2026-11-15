@@ -6985,6 +6985,61 @@ describe("ContainerExecutor warm rounds", () => {
     });
   });
 
+  describe("rounds with extra repositories (always fresh)", () => {
+    function folderRow(name: string, access: "read" | "write"): RunRepositorySnapshot {
+      return {
+        id: `row-${name}`,
+        name,
+        position: 1,
+        access,
+        asRemote: false,
+        accessKnown: true,
+        provider: "github",
+        repository: `openai/${name}`,
+        requestedRef: "main",
+        resolvedSha: "a".repeat(40),
+        baseRef: access === "write" ? "develop" : null,
+        headRef: access === "write" ? "wardby/run-run-1" : null,
+        linkId: `link-${name}`,
+        linkExists: true,
+        linkAuthorizedVia: "admin",
+        continuesBranch: false,
+        pullRequestNumber: null,
+        mergeOrder: null,
+        result: null,
+      };
+    }
+    const extra = {
+      repoAccess: { authorizeUse: vi.fn(async () => ({ ok: true })) } as never,
+      countEntries: async () => undefined,
+    };
+
+    it("never retains a delivered round whose extras are all read-only", async () => {
+      const created = await warmHarness({ repositories: [folderRow("docs", "read")] }, { extra });
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("never retains one with a writable extra", async () => {
+      const created = await warmHarness({ repositories: [folderRow("tools", "write")] }, { extra });
+      await created.executor.start("run-1");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.fingerprints).toEqual([]);
+    });
+
+    it("launches and probes a continuation of one without warm", async () => {
+      const created = await warmHarness({ ...continuation, repositories: [folderRow("docs", "read")] }, { extra });
+      created.jobs.capacity = true;
+      await created.executor.start("run-1");
+      expect(created.jobs.specs[0]).not.toHaveProperty("warm");
+      expect(created.jobs.capacityChecks[0]).not.toHaveProperty("warm");
+      expect(created.fingerprints).toEqual([]);
+      expect(created.steps).toEqual([]);
+    });
+  });
+
   describe("launchers without retain (Docker, Kubernetes)", () => {
     it("removes as before, asks for no previous round, and launches and probes without warm", async () => {
       const created = await warmHarness(continuation, { warm: false });
