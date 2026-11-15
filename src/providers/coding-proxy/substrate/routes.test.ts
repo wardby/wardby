@@ -570,26 +570,32 @@ describe("substrate routes", () => {
     // fetch sends Content-Length for a string body.
     const upload = (body: string) => ({ method: "POST", body });
 
-    it("without warm rounds: a round query is ignored entirely (round 1's files), and round.json is not read", async () => {
+    it("without warm rounds: round 1 as before; a round above 1 is refused (input 404, uploads 409), nothing read or written", async () => {
       await start();
       await blobs.put(BLOB.input(TOKEN), Buffer.from('{"round":1}'));
       await blobs.put(roundBlob(TOKEN), Buffer.from('{"round":2}'));
       await blobs.put(BLOB.input(TOKEN, 2), Buffer.from('{"round":2}'));
-      for (const query of ["", "?round=2", "?round=x", "?round=99999"]) {
+      for (const query of ["", "?round=1"]) {
         const answer = await fetch(`${base}/input${query}`, agent());
         expect(answer.status).toBe(200);
         expect(await answer.text()).toBe('{"round":1}');
       }
-      expect((await fetch(`${base}/result?round=2`, agent(upload('{"r":1}')))).status).toBe(200);
-      expect((await blobs.get(BLOB.result(TOKEN))).toString()).toBe('{"r":1}');
+      expect((await fetch(`${base}/input?round=2`, agent())).status).toBe(404);
+      expect(await blobs.head(BLOB.started(TOKEN, 2))).toBeNull();
+      expect((await fetch(`${base}/result?round=2`, agent(upload('{"r":2}')))).status).toBe(409);
       expect(await blobs.head(BLOB.result(TOKEN, 2))).toBeNull();
-      expect((await fetch(`${base}/transcript?round=x`, agent(upload("t")))).status).toBe(200);
-      expect(await blobs.head(BLOB.transcript(TOKEN))).not.toBeNull();
+      expect(await blobs.head(BLOB.result(TOKEN))).toBeNull();
+      expect((await fetch(`${base}/result`, agent(upload('{"r":1}')))).status).toBe(200);
+      expect((await blobs.get(BLOB.result(TOKEN))).toString()).toBe('{"r":1}');
+      expect((await fetch(`${base}/transcript?round=x`, agent(upload("t")))).status).toBe(400);
       await blobs.put(BLOB.toolSetup(TOKEN), Buffer.from('{"toolSetup":"{}"}'));
-      expect((await fetch(`${base}/tool-setup?round=3`, tool())).status).toBe(200);
-      expect((await fetch(`${base}/workspace?round=2`, tool(upload("w")))).status).toBe(200);
-      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
+      expect((await fetch(`${base}/tool-setup?round=3`, tool())).status).toBe(404);
+      expect((await fetch(`${base}/tool-setup`, tool())).status).toBe(200);
+      expect((await fetch(`${base}/workspace?round=2`, tool(upload("w")))).status).toBe(409);
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
       expect(await blobs.head(BLOB.done(TOKEN, 2))).toBeNull();
+      expect((await fetch(`${base}/workspace`, tool(upload("w")))).status).toBe(200);
+      expect(JSON.parse((await blobs.get(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "ok" });
     });
 
     it("without warm rounds, a failed tool-setup delete on the first events poll answers its error, as before", async () => {

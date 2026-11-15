@@ -297,14 +297,19 @@ export function createSubstrateRoutes(
   /**
    * The round a request is for (`?round=n`, absent = 1), which must be the token's current round:
    * a download for another round is not there yet (404, the bridge waits); an upload is refused (409).
-   * Without warm rounds `?round` is ignored entirely: every request is round 1, as before rounds existed.
+   * Without warm rounds every request is round 1 (as before rounds existed), and a request for a round
+   * above 1 is refused the same way (a control plane with warm rounds behind a proxy without them must
+   * stall a follow-up round, never re-serve round 1's input).
    */
   async function roundFor(url: URL, token: string, kind: "download" | "upload"): Promise<number> {
-    if (!options.warmRounds) return 1;
     const raw = url.searchParams.get("round");
     if (raw !== null && !/^[1-9][0-9]{0,3}$/.test(raw)) throw new RouteError(400, "bad_request");
     const requested = raw === null ? 1 : Number(raw);
     if (requested > MAX_ROUND) throw new RouteError(400, "bad_request");
+    if (!options.warmRounds) {
+      if (requested === 1) return 1;
+      throw kind === "download" ? new RouteError(404, "not_found") : new RouteError(409, "round_mismatch");
+    }
     if (requested !== (await currentRound(token))) {
       throw kind === "download" ? new RouteError(404, "not_found") : new RouteError(409, "round_mismatch");
     }
