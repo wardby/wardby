@@ -2361,8 +2361,8 @@ model SubstrateRun {
   token        String                  @unique
   specHash     String
   /// provisioning | running | requeued (active); stopped | removed | timed_out | lost | crashed |
-  /// tool_failed | provisioning_failed | collect_timeout | startup_timeout | bridge_incompatible
-  /// (terminal; see SubstratePhase in run-store.ts)
+  /// tool_failed | provisioning_failed | collect_timeout | startup_timeout | bridge_incompatible |
+  /// image_incomplete (terminal; see SubstratePhase in run-store.ts)
   phase        String
   deadlineAt   DateTime
   /// Last seq assigned on the tool-bound queue.

@@ -252,6 +252,7 @@ describe("substrate bridges, warm rounds", () => {
     const kills: number[] = [];
     const exits: Array<(code: number) => void> = [];
     tool = await runTool({
+      imageCheck: false,
       proxyUrl,
       env,
       metadataDir: await names("tool"),
@@ -572,6 +573,7 @@ describe("substrate bridges, warm rounds", () => {
       await writeFile(runnerEntry, 'console.log("wardby_tool_runner_ready"); setInterval(() => {}, 1000);\n');
       const started: number[] = [];
       tool = await runTool({
+        imageCheck: false,
         proxyUrl,
         env: { PATH: process.env.PATH ?? "/usr/bin", [WARM_ROUNDS_ENV]: "1" },
         metadataDir: await names("tool"),

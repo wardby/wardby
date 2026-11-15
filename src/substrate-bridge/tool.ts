@@ -5,6 +5,12 @@
  * proxy, starts the tool runner, relays each channel the agent opens into the runner's socket, and
  * uploads the workspace when the proxy asks for it.
  *
+ * Image self-check (image-check.ts): once the actor has a run actor's name, and before anything is
+ * fetched, the bridge checks that its image has the tool runner, GNU tar, a writable /workspace and
+ * /run/wardby/tool. It runs after the run token, so the golden actor never runs it. The first missing
+ * one is posted as `image-incomplete` (an enum item, never free text), and the bridge then idles with
+ * its probe answering; it posts neither workspace-failed nor anything else.
+ *
  * Extra repositories (the setup's `repositories`): each one's seed is extracted into /repos/<name>
  * after the /workspace seed and before the runner starts, a read one made read-only (the boundary is
  * the proxy and the launcher, which never let a read repository's content out). At the collect, each
@@ -21,7 +27,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 import {
@@ -49,6 +55,7 @@ import {
   WARM_ROUNDS_ENV,
 } from "./constants.js";
 import { waitAtMost } from "./diagnostics.js";
+import { checkImage, ImageIncompleteError, type ImageCheck } from "./image-check.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
 import { parseCollectExclusions, type CollectExclusions } from "./tar.js";
@@ -107,8 +114,15 @@ export interface ToolOptions {
   identityPollMs?: number;
   /** Ends a wait for the actor's identity (substrate_bridge_stopped). */
   signal?: AbortSignal;
-  /** Starts the tool runner with this tool setup. The default spawns `node /opt/wardby/claude-tool-runner/main.mjs`. */
+  /** Starts the tool runner with this tool setup. The default spawns `node <runnerEntry>`. */
   launchRunner?: (toolSetup: string, env: NodeJS.ProcessEnv) => RunnerHandle;
+  /** The tool runner's entry point (default /opt/wardby/claude-tool-runner/main.mjs): the default launch and the image check use it. */
+  runnerEntry?: string;
+  /**
+   * The image self-check, over the production values (the runner entry, the tar, the workspace and
+   * the socket's directory). `false` skips it (tests only).
+   */
+  imageCheck?: Partial<ImageCheck> | false;
   log?: Logger;
   policy?: RetryPolicy;
   giveUpMs?: number;
@@ -246,6 +260,32 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     throw new BridgeError(code);
   };
 
+  // 0. The image self-check: after the run token (the golden actor never runs it), before any fetch.
+  const runnerEntry = options.runnerEntry ?? RUNNER_ENTRY;
+  const imageCheck = options.imageCheck ?? {};
+  const missing =
+    imageCheck === false
+      ? undefined
+      : await checkImage({ runnerEntry, tar, workspace, runDirs: [dirname(socketPath)], ...imageCheck });
+  if (missing) {
+    log("substrate_bridge_image_incomplete", { runToken: token, item: missing });
+    await postCapped(
+      `${base}/image-incomplete`,
+      headers,
+      { item: missing },
+      policy,
+      log,
+      "image-incomplete",
+      shutdown.signal,
+    ).catch(() => undefined);
+    await cleanup();
+    // The readiness server stays open: the actor keeps answering its probe and idles.
+    throw new ImageIncompleteError(missing, async () => {
+      await new Promise<void>((resolve) => ready.server.close(() => resolve()));
+      ready.server.closeAllConnections();
+    });
+  }
+
   // 1. The tool setup (before the first events poll, which deletes it on the proxy). It carries the
   // run's registry-only token; once the runner has started, the runner is its only holder (`current`).
   let toolSetup: string;
@@ -310,7 +350,7 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
    */
   let current: { runner: RunnerHandle; retiring: boolean } | undefined;
   const startRunner = async (setup: string): Promise<boolean> => {
-    const runner = (options.launchRunner ?? spawnRunner)(setup, env);
+    const runner = options.launchRunner ? options.launchRunner(setup, env) : spawnRunner(setup, env, runnerEntry);
     const entry = { runner, retiring: false };
     current = entry;
     try {
@@ -628,6 +668,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     const handle = await run({ proxyUrl: requireProxyUrl(env), env });
     void handle.runnerExited.then(() => process.exit(1));
   } catch (error) {
+    if (error instanceof ImageIncompleteError) {
+      // Reported to the proxy; idle with the probe answering (the readiness server holds the event loop open).
+      stderrLogger(error.code);
+      return;
+    }
     stderrLogger(error instanceof BridgeError ? error.code : "substrate_bridge_start_failed");
     process.exit(1);
   }

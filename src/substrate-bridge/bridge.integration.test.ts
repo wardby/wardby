@@ -23,6 +23,7 @@ import type { ProxySession } from "../providers/coding-proxy/types.js";
 import { run as runAgent, spawnWorker, type AgentHandle } from "./agent.js";
 import { INJECTED_MCP_TOKEN_PLACEHOLDER, PLACEHOLDER_CAPABILITY } from "./constants.js";
 import { DEFAULT_POLICY } from "./http.js";
+import { ImageIncompleteError } from "./image-check.js";
 import { run as runTool, type ToolHandle } from "./tool.js";
 
 /**
@@ -299,6 +300,7 @@ describe("substrate bridges, end to end without Substrate", () => {
           ...(onStop ? { stop: () => onStop("stop"), kill: () => onStop("kill") } : {}),
         };
       },
+      imageCheck: false,
       ...overrides,
     });
   }
@@ -350,6 +352,101 @@ describe("substrate bridges, end to end without Substrate", () => {
     for (const [fields] of refusals) {
       expect(Object.keys(fields as object).sort()).toEqual(["event", "protocol", "route", "runToken"]);
     }
+  });
+
+  describe("image self-check", () => {
+    /** A `tar` whose --version prints `version`. */
+    const tarScript = async (name: string, version: string): Promise<string> => {
+      const path = join(dir, name);
+      await writeFile(path, `#!/bin/sh\necho "${version}"\n`, { mode: 0o755 });
+      return path;
+    };
+    const imageCheckFor = async (workspace: string, extra: { runnerEntry?: string; tar?: string } = {}) => ({
+      runnerEntry: extra.runnerEntry ?? join(dir, "missing.mjs"),
+      tar: extra.tar ?? (await tarScript("gnu-tar", "tar (GNU tar) 1.35")),
+      workspace,
+      runDirs: [join(dir, "tool")],
+    });
+    const routesSeen = (): { route: string; status: number }[] =>
+      routeLogs.map((call) => (call as [{ route: string; status: number }])[0]);
+
+    it("reports a missing tool runner and idles: no setup fetch, no workspace-failed", async () => {
+      const { workspace } = await stage();
+      let port: number | undefined;
+      const error = (await startTool(workspace, "", {
+        imageCheck: await imageCheckFor(workspace),
+        onReady: (p) => {
+          port = p;
+        },
+      }).catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.code).toBe("substrate_bridge_image_incomplete");
+      expect(error.item).toBe("runner");
+      expect(JSON.parse((await blobs.get(BLOB.imageIncomplete(TOKEN))).toString())).toEqual({ item: "runner" });
+      await waitFor(() => (routesSeen().length > 0 ? true : undefined));
+      expect(routesSeen()).toContainEqual(expect.objectContaining({ route: "image-incomplete", status: 200 }));
+      for (const route of ["tool-setup", "seed", "workspace-failed"]) {
+        expect(routesSeen().map((r) => r.route)).not.toContain(route);
+      }
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      expect(await blobs.head(BLOB.toolSetup(TOKEN))).not.toBeNull();
+      // The bridge idles: its probe still answers until close().
+      expect((await fetch(`http://127.0.0.1:${port}/readyz`)).status).toBe(200);
+      await error.close();
+      await expect(fetch(`http://127.0.0.1:${port}/readyz`)).rejects.toThrow();
+    });
+
+    it("reports a tar that is not GNU tar", async () => {
+      const { workspace } = await stage();
+      const runnerEntry = join(dir, "main.mjs");
+      await writeFile(runnerEntry, "export {};\n");
+      const error = (await startTool(workspace, "", {
+        imageCheck: await imageCheckFor(workspace, {
+          runnerEntry,
+          tar: await tarScript("bsd-tar", "bsdtar 3.5.3 - libarchive 3.5.3"),
+        }),
+      }).catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.item).toBe("tar");
+      expect(JSON.parse((await blobs.get(BLOB.imageIncomplete(TOKEN))).toString())).toEqual({ item: "tar" });
+      await error.close();
+    });
+
+    it("never checks before the run token", async () => {
+      const { workspace } = await stage();
+      const metadata = join(dir, "golden-meta");
+      await mkdir(metadata, { recursive: true });
+      await writeFile(join(metadata, "name"), "wardby-tool-golden\n");
+      const started = startTool(workspace, "", {
+        metadataDir: metadata,
+        identityPollMs: 10,
+        imageCheck: await imageCheckFor(workspace),
+      }).catch((e: unknown) => e);
+      await delay(300);
+      expect(routeLogs).toEqual([]);
+      expect(await blobs.head(BLOB.imageIncomplete(TOKEN))).toBeNull();
+      await writeFile(join(metadata, "name"), `${TOKEN}-tool\n`);
+      const error = (await started) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(JSON.parse((await blobs.get(BLOB.imageIncomplete(TOKEN))).toString())).toEqual({ item: "runner" });
+      await error.close();
+    });
+
+    it("logs fixed fields only", async () => {
+      const { workspace } = await stage();
+      const error = (await startTool(workspace, "", { imageCheck: await imageCheckFor(workspace) }).catch(
+        (e: unknown) => e,
+      )) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      await error.close();
+      const withItem = logs.map((line) => JSON.parse(line) as Record<string, unknown>).filter((f) => "item" in f);
+      expect(withItem.length).toBeGreaterThan(0);
+      for (const fields of withItem) {
+        for (const key of Object.keys(fields)) expect(["event", "runToken", "item"]).toContain(key);
+      }
+      expect(logs.join("\n")).not.toContain(REGISTRY_TOKEN);
+      expect(logs.join("\n")).not.toContain(CAPABILITY);
+    });
   });
 
   it("relays an MCP round trip, then collects the workspace", async () => {
@@ -1119,6 +1216,7 @@ describe("substrate bridges, end to end without Substrate", () => {
     proxyDelay = (request) => (posts.push(request), 0);
     await expect(
       runTool({
+        imageCheck: false,
         proxyUrl,
         metadataDir: await names("tool"),
         workspace,
@@ -1152,6 +1250,7 @@ describe("substrate bridges, end to end without Substrate", () => {
     const posts: string[] = [];
     proxyDelay = (request) => (posts.push(request), 0);
     tool = await runTool({
+      imageCheck: false,
       proxyUrl,
       metadataDir: await names("tool"),
       workspace,
@@ -1225,6 +1324,7 @@ process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
     );
     const socketPath = join(dir, "tool", "runner.sock");
     tool = await runTool({
+      imageCheck: false,
       proxyUrl,
       metadataDir: await names("tool"),
       workspace,
@@ -1325,6 +1425,7 @@ process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
     await writeFile(join(metadata, "name"), `${TOKEN}-agent\n`);
     await expect(
       runTool({
+        imageCheck: false,
         proxyUrl,
         metadataDir: metadata,
         readyPort: 0,
@@ -1382,6 +1483,7 @@ process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
               launchWorker: () => ({ exited: new Promise<number>(() => undefined) }),
             })
           : runTool({
+              imageCheck: false,
               ...common,
               workspace,
               socketPath: join(dir, "tool", "runner.sock"),
@@ -1416,6 +1518,7 @@ process.exit(spawnSync("tar", args, { stdio: "inherit" }).status ?? 1);
     await blobs.put(BLOB.seed(TOKEN), seed);
     await expect(
       runTool({
+        imageCheck: false,
         proxyUrl,
         metadataDir: await names("tool"),
         workspace: join(dir, "workspace"),
@@ -1446,6 +1549,7 @@ process.exit(2);
     );
     await expect(
       runTool({
+        imageCheck: false,
         proxyUrl,
         metadataDir: await names("tool"),
         workspace,

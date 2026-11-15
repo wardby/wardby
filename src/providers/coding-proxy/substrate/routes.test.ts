@@ -742,6 +742,100 @@ describe("substrate routes", () => {
     expect(serialized).toContain(TOKEN);
   });
 
+  describe("image-incomplete", () => {
+    const reportBlob = async (): Promise<unknown> =>
+      JSON.parse((await blobs.get(BLOB.imageIncomplete(TOKEN))).toString());
+    /** The route log lines of image-incomplete, once the answers closed. */
+    const routeLines = async (): Promise<Record<string, unknown>[]> => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return logCalls
+        .map((call) => call[0] as Record<string, unknown>)
+        .filter((fields) => fields.event === "substrate.route" && fields.route === "image-incomplete");
+    };
+
+    it.each(["runner", "tar", "workspace", "run_dir"])("stores the holder's %s report once", async (item) => {
+      await start();
+      const answer = await fetch(`${base}/image-incomplete`, tool(json({ item })));
+      expect(answer.status).toBe(200);
+      expect(await answer.json()).toEqual({});
+      expect(await reportBlob()).toEqual({ item });
+      const other = item === "tar" ? "runner" : "tar";
+      expect((await fetch(`${base}/image-incomplete`, tool(json({ item: other })))).status).toBe(200);
+      expect(await reportBlob()).toEqual({ item });
+      const lines = await routeLines();
+      expect(lines[0]).toMatchObject({ status: 200, item });
+    });
+
+    it.each([
+      ["another word", JSON.stringify({ item: "other" }), 400],
+      ["a capability", JSON.stringify({ item: CAPABILITY }), 400],
+      ["an extra key", JSON.stringify({ item: "tar", extra: 1 }), 400],
+      ["a bare string", JSON.stringify("tar"), 400],
+      ["an array", JSON.stringify([]), 400],
+      ["not JSON", "tar", 400],
+      ["a 65-byte body", JSON.stringify({ item: "x".repeat(54) }), 413],
+    ] as const)("refuses %s, and stores nothing", async (_label, body, status) => {
+      if (status === 413) expect(Buffer.byteLength(body)).toBe(65);
+      await start();
+      const answer = await fetch(`${base}/image-incomplete`, tool({ method: "POST", body }));
+      expect(answer.status).toBe(status);
+      expect(await answer.json()).toEqual({ error: { type: status === 413 ? "too_large" : "bad_request" } });
+      expect(await blobs.head(BLOB.imageIncomplete(TOKEN))).toBeNull();
+      const lines = await routeLines();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).not.toHaveProperty("item");
+      expect(JSON.stringify(logCalls)).not.toContain(CAPABILITY);
+      expect(JSON.stringify(warnCalls)).not.toContain(CAPABILITY);
+    });
+
+    it("requires a Content-Length", async () => {
+      await start();
+      const { port } = server.address() as { port: number };
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port,
+            method: "POST",
+            path: `/substrate/runs/${TOKEN}/image-incomplete`,
+            headers: { ...AUTH, [BRIDGE_PROTOCOL_HEADER]: "1", "transfer-encoding": "chunked" },
+          },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end('{"item":"tar"}');
+      });
+      expect(status).toBe(411);
+      expect(await blobs.head(BLOB.imageIncomplete(TOKEN))).toBeNull();
+    });
+
+    it("is holder-only", async () => {
+      await start();
+      expect((await fetch(`${base}/image-incomplete`, agent(json({ item: "tar" })))).status).toBe(401);
+      expect(await blobs.head(BLOB.imageIncomplete(TOKEN))).toBeNull();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+      overrides = { runLayoutForToken: async () => ({ shape: "single" }) };
+      await start();
+      expect((await fetch(`${base}/image-incomplete`, tool(json({ item: "tar" })))).status).toBe(401);
+      expect(await blobs.head(BLOB.imageIncomplete(TOKEN))).toBeNull();
+      expect((await fetch(`${base}/image-incomplete`, agent(json({ item: "tar" })))).status).toBe(200);
+      expect(await reportBlob()).toEqual({ item: "tar" });
+    });
+
+    it("never ends the run", async () => {
+      await start();
+      expect((await fetch(`${base}/image-incomplete`, tool(json({ item: "workspace" })))).status).toBe(200);
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      expect((await fetch(`${base}/events?after=0`, tool())).status).toBe(200);
+    });
+  });
+
   describe("single actor shape", () => {
     // fetch sends Content-Length for a string body.
     const upload = (body: string) => ({ method: "POST", body });

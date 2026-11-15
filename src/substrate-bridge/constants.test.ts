@@ -12,6 +12,7 @@ import {
   SAFE_CODING_OUTPUT_ISSUE as BRIDGE_SAFE_CODING_OUTPUT_ISSUE,
   SAFE_WORKER_DIAGNOSTIC as BRIDGE_SAFE_WORKER_DIAGNOSTIC,
   GATEWAY_ACTOR_JWT_PLACEHOLDER,
+  IMAGE_ITEMS,
   PLACEHOLDER_CAPABILITY,
   RESULT_BUNDLE_FILE as BRIDGE_RESULT_BUNDLE_FILE,
   RUN_TOKEN_PATTERN,
@@ -21,6 +22,7 @@ import { RESULT_BUNDLE_FILE } from "../providers/jobs/workspace-swap.js";
 import {
   agentActorName,
   PLACEHOLDER_CAPABILITY as LAUNCHER_CAPABILITY,
+  SUBSTRATE_IMAGE_ITEMS,
   TOOL_ACTOR_JWT_HEADER,
   substrateRunToken,
   toolActorName,
@@ -46,6 +48,10 @@ import {
   MCP_TOOLS_INPUT_HEADER as PROXY_MCP_TOOLS_INPUT_HEADER,
 } from "../providers/coding-proxy/substrate/routes.js";
 import { parseWorkerDiagnosticLine as bridgeParseWorkerDiagnosticLine } from "./diagnostics.js";
+
+it("names the image check's items as the launcher does", () => {
+  expect([...IMAGE_ITEMS]).toEqual([...SUBSTRATE_IMAGE_ITEMS]);
+});
 
 it("matches the launcher's names", () => {
   expect(PLACEHOLDER_CAPABILITY).toBe(LAUNCHER_CAPABILITY);

@@ -3,6 +3,7 @@ import { MCP_TOKEN_HEADER } from "../../../coding/mcp-token.js";
 import { assertValidBlobKey } from "../../storage/types.js";
 import {
   BLOB,
+  isSubstrateImageItem,
   MCP_TOKEN_EGRESS_HEADER,
   REPO_BLOB,
   actorNamesFor,
@@ -49,6 +50,18 @@ describe("substrate names", () => {
     );
     assertValidBlobKey(BLOB.bridgeRefused("wr-00000000000000000000"));
   });
+  it("keys the image report once per run", () => {
+    expect(BLOB.imageIncomplete("wr-00000000000000000000")).toBe(
+      "substrate/runs/wr-00000000000000000000/image-incomplete.json",
+    );
+    assertValidBlobKey(BLOB.imageIncomplete("wr-00000000000000000000"));
+  });
+  it("accepts only the image check's items", () => {
+    for (const item of ["runner", "tar", "workspace", "run_dir"]) expect(isSubstrateImageItem(item)).toBe(true);
+    for (const value of ["other", "", "Runner", 1, null, undefined, {}, ["tar"]]) {
+      expect(isSubstrateImageItem(value)).toBe(false);
+    }
+  });
   it("produces valid blob keys", () => {
     const t = substrateRunToken("x");
     for (const key of Object.values(BLOB)) assertValidBlobKey(key(t));
@@ -85,6 +98,7 @@ describe("substrate names", () => {
         "done",
         "started",
         "bridgeRefused",
+        "imageIncomplete",
       ]);
     });
   });

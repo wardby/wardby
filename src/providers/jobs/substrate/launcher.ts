@@ -42,6 +42,11 @@
  *   another release is refused by the proxy, which records it once (BLOB.bridgeRefused), and the run
  *   fails as substrate_bridge_incompatible (phase bridge_incompatible, actors deleted) before the
  *   startup timeout.
+ * - Image self-check: the workspace holder's bridge checks its image (runner, GNU tar, /workspace,
+ *   its /run/wardby directories) once it has its run name, and reports the first missing one as an
+ *   enum item, recorded once by the proxy (BLOB.imageIncomplete). The run fails as
+ *   substrate_image_incomplete:<item> (phase image_incomplete, actors deleted); the item is re-checked
+ *   here, so nothing but a SUBSTRATE_IMAGE_ITEMS value reaches the run's result.
  */
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
@@ -97,7 +102,9 @@ import {
   ROUND_BLOBS,
   actorNamesFor,
   agentActorName,
+  isSubstrateImageItem,
   roundBlob,
+  type SubstrateImageItem,
   substrateRunToken,
   toolActorName,
 } from "./names.js";
@@ -307,6 +314,7 @@ const RECORDED: Partial<Record<SubstratePhase, Observation>> = {
     result: { exitCode: 1, reason: "failed", diagnostic: "substrate_bridge_incompatible" },
   },
   // collect_timeout: its result carries the worker's exit report (see observe).
+  // image_incomplete: its diagnostic carries the reported item (see observe).
   // Warm rounds: a run whose parked actors another run took over had succeeded.
   adopted: { status: { state: "succeeded" }, result: { exitCode: 0, reason: "completed" } },
 };
@@ -322,6 +330,7 @@ const STOP_ACTORS_ON: readonly SubstratePhase[] = [
   "collect_timeout",
   "startup_timeout",
   "bridge_incompatible",
+  "image_incomplete",
 ];
 
 /** The fixed code of a failed Substrate call; any other error is "unexpected" (its message is never read). */
@@ -1001,7 +1010,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * `done` is a collect still in flight, so the run stays running until `done`, collectGraceMs after
    * `exit` (collect_timeout) or the deadline; a run whose actors never reached the proxy fails after
    * startupTimeoutMs (startup_timeout). A run whose bridge the proxy refused (BLOB.bridgeRefused)
-   * fails as bridge_incompatible, checked before the actors and the startup timeout.
+   * fails as bridge_incompatible, checked before the actors and the startup timeout; one whose holder
+   * reported its image incomplete (BLOB.imageIncomplete) fails as image_incomplete, right after.
    */
   private async observe(record: SubstrateRunRecord): Promise<Observation> {
     if (record.phase === "removed") throw new Error("job_removed");
@@ -1035,6 +1045,18 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
         },
       };
     }
+    if (record.phase === "image_incomplete") {
+      // The holder's image lacks the item: an enum value, re-checked (never free text from the blob).
+      const item = await this.imageIncompleteItem(record.token);
+      return {
+        status: { state: "failed" },
+        result: {
+          exitCode: 1,
+          reason: "failed",
+          diagnostic: item ? `substrate_image_incomplete:${item}` : "substrate_image_incomplete",
+        },
+      };
+    }
     if (record.phase === "requeued") return { status: { state: "pending", capacityRefused: true } };
     const reported = await this.reported(record, round);
     if (reported) return reported;
@@ -1044,6 +1066,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     // The proxy refused a bridge of another protocol: before the startup timeout, and before the
     // actors (a refused bridge may exit, which would read as lost or crashed).
     if (await this.blobs.head(BLOB.bridgeRefused(record.token))) return this.settle(record, "bridge_incompatible");
+    // The holder's image check found a prerequisite missing: the bridge idles, so its actor never ends.
+    if (await this.blobs.head(BLOB.imageIncomplete(record.token))) return this.settle(record, "image_incomplete");
     const { atespace } = this.config;
     const shape = shapeOf(record);
     const [agent, tool] = await Promise.all(
@@ -1162,6 +1186,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     const diagnostic =
       exit && typeof exit === "object" ? workerDiagnosticOf(exit.diagnostic, exit.diagnosticIssues) : undefined;
     return diagnostic ? { code, diagnostic } : { code };
+  }
+
+  /** The item of the holder's image report, when it is one of SUBSTRATE_IMAGE_ITEMS. */
+  private async imageIncompleteItem(token: string): Promise<SubstrateImageItem | undefined> {
+    const report = await this.readJson(BLOB.imageIncomplete(token), MAX_MARKER_BYTES);
+    const item = report && typeof report === "object" ? (report as { item?: unknown }).item : undefined;
+    return isSubstrateImageItem(item) ? item : undefined;
   }
 
   /** A blob of at most maxBytes; undefined when missing or larger. */

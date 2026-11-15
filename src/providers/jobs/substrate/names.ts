@@ -86,7 +86,21 @@ export const BLOB = {
    * substrate_bridge_incompatible. Once per run (not per round).
    */
   bridgeRefused: (t: string) => `substrate/runs/${t}/bridge-refused.json`,
+  /**
+   * Written by the proxy (if absent) from the holder's image check: `{"item": <SubstrateImageItem>}`.
+   * The launcher fails the run with substrate_image_incomplete:<item>. Once per run.
+   */
+  imageIncomplete: (t: string) => `substrate/runs/${t}/image-incomplete.json`,
 };
+
+/** The fixed items a bridge's image check may report (substrate-bridge/constants.ts IMAGE_ITEMS). */
+export const SUBSTRATE_IMAGE_ITEMS = ["runner", "tar", "workspace", "run_dir"] as const;
+export type SubstrateImageItem = (typeof SUBSTRATE_IMAGE_ITEMS)[number];
+
+/** Whether `value` is one of SUBSTRATE_IMAGE_ITEMS (never any other string: the report carries no free text). */
+export function isSubstrateImageItem(value: unknown): value is SubstrateImageItem {
+  return typeof value === "string" && (SUBSTRATE_IMAGE_ITEMS as readonly string[]).includes(value);
+}
 
 /** An extra repository's name, refused unless it is a link name (never `workspace`, never a path). */
 function repositoryName(name: string): string {

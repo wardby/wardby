@@ -18,6 +18,8 @@ export const GATEWAY_ACTOR_JWT_PLACEHOLDER = "placeholder";
 export const BRIDGE_PROTOCOL = 1;
 /** The header every bridge request to the proxy carries (names.ts BRIDGE_PROTOCOL_HEADER). */
 export const BRIDGE_PROTOCOL_HEADER = "x-wardby-bridge-protocol";
+/** What a bridge's image check reports missing (names.ts SUBSTRATE_IMAGE_ITEMS; constants.test.ts keeps them equal). */
+export const IMAGE_ITEMS = ["runner", "tar", "workspace", "run_dir"] as const;
 export const AGENT_SUFFIX = "-agent";
 export const TOOL_SUFFIX = "-tool";
 /** substrateRunToken: "wr-" + 20 hex chars. */

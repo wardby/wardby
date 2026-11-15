@@ -43,6 +43,7 @@ const BLOB_KINDS = [
   "done",
   "started",
   "bridgeRefused",
+  "imageIncomplete",
 ] as const;
 
 async function blobKeys(h: Harness): Promise<string[]> {
@@ -2129,5 +2130,77 @@ describe("bridge protocol", () => {
     expect(await h.launcher.collect(handle)).toEqual(INCOMPATIBLE);
     expect((await h.runs.get(h.spec.runId))?.phase).toBe("bridge_incompatible");
     expect(h.api.actors.size).toBe(0);
+  });
+});
+
+describe("image self-check", () => {
+  const report = (h: Harness, item: string) =>
+    h.blobs.put(BLOB.imageIncomplete(h.token), Buffer.from(JSON.stringify({ item })));
+
+  it.each(["runner", "tar", "workspace", "run_dir"])(
+    "fails a %s report with its item, and deletes the actors",
+    async (item) => {
+      const h = await makeHarness();
+      const handle = await h.launcher.launch(h.spec);
+      expect(h.api.actors.size).toBe(2);
+      await report(h, item);
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect(await h.launcher.collect(handle)).toEqual({
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: `substrate_image_incomplete:${item}`,
+      });
+      expect((await h.runs.get("run-1"))?.phase).toBe("image_incomplete");
+      expect(h.api.actors.size).toBe(0);
+    },
+  );
+
+  it("never puts free text in the run's result", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    // Written straight to the store, past the proxy's check.
+    await report(h, FAKE_CAP);
+    const result = await h.launcher.collect(handle);
+    expect(result).toEqual({ exitCode: 1, reason: "failed", diagnostic: "substrate_image_incomplete" });
+    expect(JSON.stringify(await h.launcher.collect(handle))).not.toContain(FAKE_CAP);
+  });
+
+  it("ignores an unreadable report's content", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await h.blobs.put(BLOB.imageIncomplete(h.token), Buffer.from("not json"));
+    expect((await h.launcher.collect(handle)).diagnostic).toBe("substrate_image_incomplete");
+  });
+
+  it("decides before the startup timeout", async () => {
+    const h = await makeHarness({ startupTimeoutMs: 1_000 });
+    const handle = await h.launcher.launch(h.spec);
+    h.setNow(1_000_000 + 5_000);
+    await report(h, "tar");
+    expect((await h.launcher.collect(handle)).diagnostic).toBe("substrate_image_incomplete:tar");
+  });
+
+  it("Codex: the same", async () => {
+    const h = await makeHarness({ provider: "codex" });
+    const handle = await h.launcher.launch(h.spec);
+    expect(h.api.actors.size).toBe(1);
+    await report(h, "runner");
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    expect(await h.launcher.collect(handle)).toEqual({
+      exitCode: 1,
+      reason: "failed",
+      diagnostic: "substrate_image_incomplete:runner",
+    });
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("image_incomplete");
+    expect(h.api.actors.size).toBe(0);
+  });
+
+  it("remove deletes the report", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await report(h, "workspace");
+    expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+    await h.launcher.remove(handle);
+    expect([...(await allBlobs(h)).keys()].filter((key) => key.startsWith(`substrate/runs/${h.token}/`))).toEqual([]);
   });
 });

@@ -25,6 +25,7 @@ import { LocalBlobStore } from "../providers/storage/local.js";
 import { run as runCodex, spawnCodexWorker, type CodexHandle } from "./codex.js";
 import { INJECTED_MCP_TOKEN_PLACEHOLDER, PLACEHOLDER_CAPABILITY, WARM_ROUNDS_ENV } from "./constants.js";
 import { DEFAULT_POLICY } from "./http.js";
+import { ImageIncompleteError, type ImageCheck } from "./image-check.js";
 import type { WorkerHandle } from "./worker-run.js";
 
 const exec = promisify(execFile);
@@ -156,7 +157,10 @@ describe("Codex bridge, end to end without Substrate", () => {
           if (path === "input") files.delete("tool-setup");
           return response.writeHead(200, path === "input" ? inputHeaders : {}).end(file);
         }
-        if (method === "POST" && ["result", "workspace", "workspace-failed", "exit", "diagnostics"].includes(path)) {
+        if (
+          method === "POST" &&
+          ["result", "workspace", "workspace-failed", "exit", "diagnostics", "image-incomplete"].includes(path)
+        ) {
           return response.writeHead(200, { "content-type": "application/json" }).end("{}");
         }
         response.writeHead(404).end();
@@ -209,6 +213,7 @@ describe("Codex bridge, end to end without Substrate", () => {
     launchWorker: (env: NodeJS.ProcessEnv, secrets: () => readonly string[]) => WorkerHandle,
     metadataDir?: string,
     extraEnv: NodeJS.ProcessEnv = {},
+    imageCheck: Partial<ImageCheck> | false = false,
   ) {
     await mkdir(join(dir, "out"), { recursive: true });
     return runCodex({
@@ -225,6 +230,7 @@ describe("Codex bridge, end to end without Substrate", () => {
       policy: FAST,
       log,
       launchWorker,
+      imageCheck,
     });
   }
 
@@ -411,6 +417,67 @@ describe("Codex bridge, end to end without Substrate", () => {
     expect(order()).toContain("POST diagnostics");
     expect(order()).toContain("POST exit");
     for (const request of requests) expect(request.headers["x-wardby-bridge-protocol"]).toBe("1");
+  });
+
+  describe("image self-check", () => {
+    const gnuTar = async (): Promise<string> => {
+      const path = join(dir, "gnu-tar");
+      await writeFile(path, '#!/bin/sh\necho "tar (GNU tar) 1.35"\n', { mode: 0o755 });
+      return path;
+    };
+
+    it("reports a missing worker entry and starts nothing", async () => {
+      await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+      let launched = false;
+      const error = (await start(
+        () => {
+          launched = true;
+          return { exited: Promise.resolve(0) };
+        },
+        undefined,
+        {},
+        {
+          runnerEntry: join(dir, "missing.js"),
+          tar: await gnuTar(),
+          workspace,
+          runDirs: [join(dir, "in"), join(dir, "out")],
+        },
+      ).catch((e: unknown) => e)) as ImageIncompleteError;
+      expect(error).toBeInstanceOf(ImageIncompleteError);
+      expect(error.item).toBe("runner");
+      await error.close();
+      expect(order()).toEqual(["POST image-incomplete"]);
+      expect(JSON.parse(posted("image-incomplete")[0].body.toString())).toEqual({ item: "runner" });
+      expect(posted("image-incomplete")[0].headers["x-wardby-bridge-protocol"]).toBe("1");
+      expect(launched).toBe(false);
+    });
+
+    it.skipIf(process.getuid?.() === 0)("reports an unwritable workspace", async () => {
+      await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+      const entry = join(dir, "main.js");
+      await writeFile(entry, "\n");
+      await mkdir(workspace, { recursive: true });
+      await chmod(workspace, 0o555);
+      try {
+        const error = (await start(
+          () => ({ exited: Promise.resolve(0) }),
+          undefined,
+          {},
+          {
+            runnerEntry: entry,
+            tar: await gnuTar(),
+            workspace,
+            runDirs: [join(dir, "in"), join(dir, "out")],
+          },
+        ).catch((e: unknown) => e)) as ImageIncompleteError;
+        expect(error).toBeInstanceOf(ImageIncompleteError);
+        await error.close();
+        expect(order()).toEqual(["POST image-incomplete"]);
+        expect(JSON.parse(posted("image-incomplete")[0].body.toString())).toEqual({ item: "workspace" });
+      } finally {
+        await chmod(workspace, 0o755);
+      }
+    });
   });
 
   it("passes a cache run's input and registry token through unchanged", async () => {
@@ -681,6 +748,7 @@ setTimeout(() => {
     let readyPort: number | undefined;
     await mkdir(join(dir, "out"), { recursive: true });
     const started = runCodex({
+      imageCheck: false,
       proxyUrl,
       metadataDir: metadata,
       workspace,

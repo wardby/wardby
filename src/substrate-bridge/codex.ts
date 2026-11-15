@@ -18,6 +18,12 @@
  *
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
  * There are no warm rounds here.
+ *
+ * Image self-check (image-check.ts): once the actor has a run actor's name, and before anything is
+ * fetched, the bridge checks that its image has the worker entry, GNU tar, a writable /workspace and
+ * /run/wardby/input and /run/wardby/output. It runs after the run token, so the golden actor never
+ * runs it. The first missing one is posted as `image-incomplete` (an enum item, never free text), and
+ * the bridge then idles with its probe answering; it posts neither workspace-failed nor exit.
  */
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -48,6 +54,7 @@ import {
   WORKER_PLACEHOLDERS,
 } from "./constants.js";
 import { pipeRedacted, type LineSink } from "./diagnostics.js";
+import { checkImage, ImageIncompleteError, type ImageCheck } from "./image-check.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { parseCollectExclusions, type CollectExclusions } from "./tar.js";
 import { superviseWorker, type WorkerHandle } from "./worker-run.js";
@@ -95,6 +102,13 @@ export interface CodexOptions {
    * in its own process group, its output redacted against `secrets` (the bridge's live list).
    */
   launchWorker?: (env: NodeJS.ProcessEnv, secrets: () => readonly string[]) => WorkerHandle;
+  /** The worker's entry point (default CODEX_WORKER_ENTRY): the default launch and the image check use it. */
+  workerEntry?: string;
+  /**
+   * The image self-check, over the production values (the worker entry, the tar, the workspace and the
+   * input and result directories). `false` skips it (tests only).
+   */
+  imageCheck?: Partial<ImageCheck> | false;
   policy?: RetryPolicy;
   log?: Logger;
   /** Tests only: runs after the result bundle is opened and checked, before `.git` is checked again. */
@@ -231,6 +245,38 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
     throw new BridgeError(code);
   };
 
+  // The image self-check: after the run token (the golden actor never runs it), before any fetch.
+  const workerEntry = options.workerEntry ?? CODEX_WORKER_ENTRY;
+  const imageCheck = options.imageCheck ?? {};
+  const missing =
+    imageCheck === false
+      ? undefined
+      : await checkImage({
+          runnerEntry: workerEntry,
+          tar,
+          workspace,
+          runDirs: [dirname(inputPath), dirname(resultPath)],
+          ...imageCheck,
+        });
+  if (missing) {
+    log("substrate_bridge_image_incomplete", { runToken: token, item: missing });
+    await postCapped(
+      `${base}/image-incomplete`,
+      headers,
+      { item: missing },
+      policy,
+      log,
+      "image-incomplete",
+      shutdown.signal,
+    ).catch(() => undefined);
+    await cleanup();
+    // The readiness server stays open: the actor keeps answering its probe and idles.
+    throw new ImageIncompleteError(missing, async () => {
+      await new Promise<void>((resolve) => ready.server.close(() => resolve()));
+      ready.server.closeAllConnections();
+    });
+  }
+
   // 3. The setup (before the input, whose first download deletes it on the proxy).
   let setup: CodexSetup | undefined;
   try {
@@ -286,7 +332,10 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
   log("substrate_bridge_input_ready", { runToken: token });
 
   // 6. The worker, in header mode.
-  const launch = options.launchWorker ?? spawnCodexWorker;
+  const launch =
+    options.launchWorker ??
+    ((workerEnv: NodeJS.ProcessEnv, workerSecrets: () => readonly string[]) =>
+      spawnCodexWorker(workerEnv, workerSecrets, workerEntry));
   const worker = launch(
     {
       ...withoutMcpEnv(env),
@@ -382,6 +431,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   try {
     handle = await run({ proxyUrl: requireProxyUrl(env), env });
   } catch (error) {
+    if (error instanceof ImageIncompleteError) {
+      // Reported to the proxy; idle with the probe answering (the readiness server holds the event loop open).
+      stderrLogger(error.code);
+      return;
+    }
     stderrLogger(error instanceof BridgeError ? error.code : "substrate_bridge_start_failed");
     process.exit(1);
   }
