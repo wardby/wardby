@@ -428,6 +428,7 @@ describe("Substrate dependency cache help", () => {
     for (const query of ["substrate dependency cache", "reused_workspace", "digest_mismatch"]) {
       expect(top3(query), query).toContain("dependency-cache");
     }
+    expect(top3("job launcher")).toContain("job-launcher-substrate");
     for (const query of ["dependency cache warm rounds", "dependency cache warm round"]) {
       expect(top3(query), query).toContain("substrate-warm-rounds");
     }

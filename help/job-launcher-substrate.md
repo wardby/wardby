@@ -3,7 +3,7 @@ id: job-launcher-substrate
 title: Run coding agents on Substrate (experimental)
 summary: JOB_LAUNCHER=substrate runs Claude Code coding runs as two gVisor-sandboxed Agent Substrate actors, and Codex runs as one, with no Wardby secret inside; requirements, variables, limits and how it compares with the Docker and Kubernetes launchers.
 audience: operator
-tags: [substrate, dependency-cache, JOB_LAUNCHER, gVisor, experimental, codex, mcp, repositories, multi repository]
+tags: [substrate, job launcher, dependency-cache, JOB_LAUNCHER, experimental, codex, repositories, multi repository]
 appliesTo: ">=0.9.15"
 ---
 

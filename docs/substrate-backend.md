@@ -305,8 +305,8 @@ in that store, next to the run files under `substrate/runs/`.
   images, so a deployment that moves from Kubernetes starts cold.
 - **Warm rounds.** An adopted warm round skips the cache and reports
   `reused_workspace`: its workspace already has the previous round's
-  `node_modules`, and the proxy refuses it cache restore and upload (`409
-reused_workspace`; sealing still works). The reason is trust: a reused
+  `node_modules`, and the proxy answers cache restore and upload with
+  `409 reused_workspace` (sealing still works). The reason is trust: a reused
   workspace was controlled by the previous round's agent, so a snapshot taken
   from it can't be trusted for other runs.
 - **Upload digest.** Uploads carry an end-to-end SHA-256 on every launcher; see

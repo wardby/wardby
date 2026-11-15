@@ -54,9 +54,9 @@ for folders restored from a snapshot.
 - Uploads carry the archive's SHA-256 (`x-wardby-archive-sha256`); the proxy
   refuses bytes that differ (`digest_mismatch`) and keeps nothing. Older
   workers without the header are still accepted.
-- A workspace resumed from an earlier round never uses the cache (`409
-reused_workspace`): the earlier round's agent controlled it, so a snapshot
-  taken from it can't be trusted for other runs.
+- A workspace resumed from an earlier round never uses the cache; the proxy
+  answers with `409 reused_workspace`. The earlier round's agent controlled it,
+  so a snapshot taken from it can't be trusted for other runs.
 - The packages are the ones the agent's policy approves; the cache doesn't vet
   their contents beyond what a normal install through the registry does.
 - Install scripts are not cached. Snapshots are built with `--ignore-scripts`;
@@ -155,6 +155,7 @@ On the experimental `JOB_LAUNCHER=substrate` (0.9.15 and later) the cache works
 for Claude Code and Codex, using the coding proxy's `BLOB_STORE` under
 `dependency-cache/`. Scope any bucket lifecycle rule for Substrate's run files
 to `substrate/runs/`, so it never deletes snapshots. The coding proxy, tool
-runner and worker images must be 0.9.15 or later. A warm round that resumes the
-previous round's workspace reports `reused_workspace` and uses no snapshot. See
-the `job-launcher-substrate` help article.
+runner and Substrate bridge images must be 0.9.15 or later. Older worker
+images still work; their uploads are accepted without the digest header. A warm
+round that resumes the previous round's workspace reports `reused_workspace`
+and uses no snapshot. See the `job-launcher-substrate` help article.

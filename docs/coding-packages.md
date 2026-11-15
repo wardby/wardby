@@ -925,8 +925,8 @@ before the agent starts.
 - The agent needs a package allowlist (registry mode): the restore is approved
   by the lockfile plan.
 - Codex and Claude Code runs on the `node` and `node-python` toolchains, on the
-  Docker, Kubernetes and Substrate launchers, with worker images from a Wardby release that includes the cache. See
-  [Worker images](#worker-images) before you turn it on.
+  Docker, Kubernetes and Substrate launchers, with worker images from a Wardby
+  release that includes the cache. See [Worker images](#worker-images) before you turn it on.
 
 ### Worker images
 
