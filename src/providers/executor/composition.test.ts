@@ -12,6 +12,7 @@ import {
   buildConfiguredExecutor,
   buildSubstrateJobLauncher,
   configuredClaudeToolImages,
+  configuredCodexWorkerImages,
   reReviewOnCodingRunTerminal,
 } from "./composition.js";
 import { RoutingExecutor } from "./routing.js";
@@ -100,6 +101,24 @@ describe("JOB_LAUNCHER=substrate", () => {
     expect(configuredClaudeToolImages({ claudeToolRunnerImage: undefined, claudeToolRunnerImages: {} })).toEqual([]);
   });
 
+  it("lists every configured Codex worker image as a Codex bridge image, and nothing else", () => {
+    const python = `registry.example/worker-python@sha256:${"c".repeat(64)}`;
+    expect(
+      configuredCodexWorkerImages({
+        workerImage: REGISTRY_IMAGE,
+        additionalWorkerImages: { "node-python": { "3.12": python } },
+      }),
+    ).toEqual([REGISTRY_IMAGE, python]);
+    expect(configuredCodexWorkerImages({ workerImage: undefined, additionalWorkerImages: {} })).toEqual([]);
+  });
+
+  it("refuses a Codex node-python worker image that isn't a registry digest", () => {
+    expect(() => build({ CODING_WORKER_IMAGE_NODE_PYTHON_3_12: LOCAL_IMAGE })).toThrow(
+      "CODING_WORKER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=substrate.",
+    );
+    expect(build({ CODING_WORKER_IMAGE_NODE_PYTHON_3_12: REGISTRY_IMAGE })).toBeInstanceOf(RoutingExecutor);
+  });
+
   it("builds a SubstrateJobLauncher", () => {
     const launcher = buildSubstrateJobLauncher({
       env,
@@ -109,6 +128,7 @@ describe("JOB_LAUNCHER=substrate", () => {
       substrateApi: new FakeSubstrateApi({ workers: 1 }),
       kubernetesApi: new FakeKubernetesApi(),
       bridgeToolImages: [],
+      bridgeCodexImages: [],
     });
     expect(launcher).toBeInstanceOf(SubstrateJobLauncher);
   });
@@ -122,6 +142,7 @@ describe("JOB_LAUNCHER=substrate", () => {
       substrateApi: new FakeSubstrateApi({ workers: 1 }),
       kubernetesApi: new FakeKubernetesApi(),
       bridgeToolImages: [],
+      bridgeCodexImages: [],
     });
     const options = (launcher as unknown as { options: { collectGraceMs?: number; startupTimeoutMs?: number } })
       .options;
@@ -140,6 +161,7 @@ describe("JOB_LAUNCHER=substrate", () => {
           substrateApi: new FakeSubstrateApi({ workers: 1 }),
           kubernetesApi: new FakeKubernetesApi(),
           bridgeToolImages: [],
+          bridgeCodexImages: [],
         }) as unknown as { options: { warmRounds?: unknown } }
       ).options;
     expect(build({})).not.toHaveProperty("warmRounds");
@@ -315,6 +337,23 @@ describe("buildConfiguredExecutor", () => {
     ).toThrow(
       "CODING_CLAUDE_WORKER_IMAGE and CODING_CLAUDE_TOOL_RUNNER_IMAGE must be registry digests (repo@sha256:...) when JOB_LAUNCHER=kubernetes.",
     );
+  });
+
+  it("leaves the Codex node-python worker image to the Kubernetes launcher's own checks (no new one)", () => {
+    const REGISTRY_IMAGE = `registry.example/wardby-coding-worker@sha256:${"a".repeat(64)}`;
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: {
+          ...baseEnv,
+          JOB_LAUNCHER: "kubernetes",
+          CODING_WORKER_IMAGE: REGISTRY_IMAGE,
+          CODING_WORKER_IMAGE_NODE_PYTHON_3_12: LOCAL_IMAGE,
+        },
+        kubernetesApi: new FakeKubernetesApi(),
+      }),
+    ).not.toThrow();
   });
 
   it("rejects a Claude node-python tool-runner image that isn't a registry digest on Kubernetes", () => {

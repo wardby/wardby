@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { SubstrateActorShape } from "./run-store.js";
 
 const hex = (input: string, length: number): string =>
   createHash("sha256").update(input).digest("hex").slice(0, length);
@@ -14,6 +15,14 @@ export function agentActorName(token: string): string {
 
 export function toolActorName(token: string): string {
   return `${token}-tool`;
+}
+
+/**
+ * The actors of one run, by its shape: the paired shape (Claude Code) has the agent and the tool,
+ * the single shape (Codex) the agent only.
+ */
+export function actorNamesFor(token: string, shape: SubstrateActorShape): string[] {
+  return shape === "single" ? [agentActorName(token)] : [agentActorName(token), toolActorName(token)];
 }
 
 /**
@@ -33,7 +42,7 @@ export function toolActorSubject(atespace: string, token: string): string {
  * in any field never share a name.
  */
 export function templateName(
-  role: "agent" | "tool",
+  role: "agent" | "tool" | "codex",
   image: string,
   cpuMillicores: number,
   memoryBytes: number,

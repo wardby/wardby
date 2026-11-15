@@ -11,6 +11,7 @@ import {
   loadKubernetesJobConfig,
   loadSubstrateJobConfig,
   loadProviderConfig,
+  type ContainerExecutorConfig,
   type ProviderConfig,
 } from "../../config/providers.js";
 import { summarizePackageAudit } from "../../coding/registry/audit-mode.js";
@@ -147,6 +148,32 @@ export function configuredClaudeToolImages(
   ];
 }
 
+/**
+ * Every Codex worker image the deployment configures (CODING_WORKER_IMAGE and the per-toolchain
+ * ones): on Substrate, the images that carry the Codex bridge. An agent's workerImageRef is not among them.
+ */
+export function configuredCodexWorkerImages(
+  config: Pick<ContainerExecutorConfig, "workerImage" | "additionalWorkerImages">,
+): string[] {
+  return [
+    ...(config.workerImage !== undefined ? [config.workerImage] : []),
+    ...Object.values(config.additionalWorkerImages).flatMap((versions) => Object.values(versions)),
+  ];
+}
+
+/**
+ * Substrate only: the Codex node-python worker image is pulled by the Substrate Codex bridge too,
+ * so it must be a digest (the Kubernetes launcher checks only the images it pulls itself).
+ */
+function assertSubstrateDigestImages(config: Pick<ContainerExecutorConfig, "additionalWorkerImages">): void {
+  const codexPython = config.additionalWorkerImages["node-python"]?.["3.12"];
+  if (codexPython !== undefined && !isRegistryDigest(codexPython)) {
+    throw new Error(
+      "CODING_WORKER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=substrate.",
+    );
+  }
+}
+
 /** The worker images a registry-pulling launcher (Kubernetes, Substrate) will run must be digests. */
 function assertDigestImages(
   config: Pick<
@@ -186,6 +213,8 @@ export function buildSubstrateJobLauncher(options: {
   kubernetesApi?: KubernetesApi;
   /** The configured Claude tool-runner images (they carry the Substrate tool bridge). */
   bridgeToolImages: readonly string[];
+  /** The configured Codex worker images (they carry the Substrate Codex bridge). */
+  bridgeCodexImages: readonly string[];
 }): SubstrateJobLauncher {
   const substrate = loadSubstrateJobConfig(options.env);
   const blobStoreConfig = loadBlobStoreConfig(options.env);
@@ -202,6 +231,7 @@ export function buildSubstrateJobLauncher(options: {
     runs: new PrismaSubstrateRunStore(options.db),
     relay: new PrismaRelayStore(options.db),
     bridgeToolImages: options.bridgeToolImages,
+    bridgeCodexImages: options.bridgeCodexImages,
     blobs: createBlobStore(blobStoreConfig),
     secrets: options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: substrate.kubeContext }),
     config: {
@@ -300,6 +330,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     });
   } else if (providerConfig.jobs === "substrate") {
     assertDigestImages(config, "substrate");
+    assertSubstrateDigestImages(config);
     jobs = buildSubstrateJobLauncher({
       env,
       db: options.db,
@@ -308,6 +339,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       substrateApi: options.substrateApi,
       kubernetesApi: options.kubernetesApi,
       bridgeToolImages: configuredClaudeToolImages(config),
+      bridgeCodexImages: configuredCodexWorkerImages(config),
     });
   } else {
     const stateRoot = resolve(config.stateRoot ?? resolve(tmpdir(), "wardby-docker-jobs"));

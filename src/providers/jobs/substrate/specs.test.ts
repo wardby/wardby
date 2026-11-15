@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import type { JobSpec } from "../types.js";
+import { templateName } from "./names.js";
 import {
   agentEgress,
   agentTemplate,
+  codexTemplate,
   runSecret,
   toolEgress,
   toolTemplate,
@@ -180,5 +183,71 @@ describe("substrate spec builders", () => {
     const spec = fakeClaudeSpec();
     delete spec.toolImage;
     expect(() => toolTemplate(spec, CONFIG)).toThrow("substrate_tool_image_missing");
+  });
+
+  describe("codexTemplate", () => {
+    const fakeCodexSpec = (): JobSpec => {
+      const { toolImage: _tool, ...spec } = fakeClaudeSpec();
+      return { ...spec, provider: "codex", image: `registry.example/substrate-codex@sha256:${"d".repeat(64)}` };
+    };
+
+    it("builds one container with the run's whole size, the workspace and the actor metadata", () => {
+      const spec = fakeCodexSpec();
+      const t = codexTemplate(spec, { ...CONFIG, workerSelector: { pool: "x" } });
+      expect(t.atespace).toBe("wardby-runs");
+      expect(t.workerSelector).toEqual({ pool: "x" });
+      expect(t.snapshotFidelity).toBe("MEMORY");
+      expect(t.cpuMillicores).toBe(2000);
+      expect(t.memoryBytes).toBe(1536 * 2 ** 20);
+      expect(t.name).toMatch(/^wardby-codex-[0-9a-f]{16}$/);
+      expect(t.containers).toEqual([
+        {
+          name: "agent",
+          image: spec.image,
+          env: [{ name: "WARDBY_PROXY_URL", value: `http://${CONFIG.proxyHost}:${CONFIG.proxyPort}` }],
+          wakeupProbe: { path: "/readyz", port: 8080 },
+          volumeMounts: [
+            { name: "run", mountPath: "/run/wardby" },
+            { name: "workspace", mountPath: "/workspace" },
+            { name: "actor", mountPath: "/run/ate/actor" },
+          ],
+        },
+      ]);
+      expect(t.volumes).toEqual([
+        { name: "run", durableDir: true },
+        { name: "workspace", durableDir: true },
+        { name: "actor", actorMetadata: { path: "" } },
+      ]);
+      expect(t.name).not.toBe(agentTemplate({ ...spec, toolImage: fakeClaudeSpec().toolImage! }, CONFIG).name);
+    });
+
+    it("names the template from its content with the codex role", () => {
+      const spec = fakeCodexSpec();
+      const t = codexTemplate(spec, CONFIG);
+      // The variant is everything else in the template: here the env and an empty selector.
+      expect(t.name).toMatch(/^wardby-codex-/);
+      expect(t.name).not.toBe(templateName("agent", spec.image, t.cpuMillicores, t.memoryBytes, ""));
+      expect(codexTemplate({ ...spec, runId: "run-2", labels: { a: "b" } }, CONFIG).name).toBe(t.name);
+      expect(codexTemplate(spec, { ...CONFIG, proxyPort: 9999 }).name).not.toBe(t.name);
+    });
+
+    it("never takes the warm-rounds env: the same env and name with warm rounds on", () => {
+      const spec = fakeCodexSpec();
+      const off = codexTemplate(spec, CONFIG);
+      const on = codexTemplate(spec, { ...CONFIG, warmRounds: true });
+      expect(on).toEqual(off);
+      expect(JSON.stringify(on)).not.toContain("WARDBY_SUBSTRATE_WARM_ROUNDS");
+    });
+
+    it("never carries the capability, the registry token, a run id or a run token", () => {
+      const spec = fakeCodexSpec();
+      const json = JSON.stringify(codexTemplate(spec, CONFIG));
+      expect(json).not.toContain(FAKE_CAP);
+      expect(json).not.toContain(deriveRegistryToken(FAKE_CAP));
+      expect(json).not.toContain("rrg_");
+      expect(json).not.toContain("rrp_");
+      expect(json).not.toContain(spec.runId);
+      expect(json).not.toContain("wr-");
+    });
   });
 });
