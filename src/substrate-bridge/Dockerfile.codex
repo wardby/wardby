@@ -1,0 +1,12 @@
+# The Codex worker image plus the Substrate bridge as entrypoint (build context: the repository root,
+# after `npm run build`). BASE is the worker image (src/coding-worker/Dockerfile or Dockerfile.node-python).
+ARG BASE
+FROM ${BASE}
+USER root
+# The paths the worker reads and writes; the bridge (PID 1, same user as the worker) extracts the seed.
+RUN mkdir -p /run/wardby/input /run/wardby/output /workspace \
+    && chown -R 10001:10001 /run/wardby /workspace
+COPY dist/substrate-bridge/ /opt/wardby/substrate-bridge/
+RUN printf '{"type":"module"}\n' > /opt/wardby/substrate-bridge/package.json
+USER 10001:10001
+ENTRYPOINT ["node", "/opt/wardby/substrate-bridge/codex.js"]

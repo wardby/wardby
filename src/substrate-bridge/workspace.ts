@@ -65,6 +65,43 @@ export function signalGroup(
   }
 }
 
+/** Whether anything of ours is left in the child's process group (false once ESRCH or EPERM, or with no pid). */
+function groupAlive(child: GroupSignalTarget): boolean {
+  if (child.pid === undefined) return false;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (err) {
+    const code = errnoOf(err);
+    return code !== "ESRCH" && code !== "EPERM";
+  }
+}
+
+const GROUP_POLL_MS = 20;
+/** How long after the SIGKILL the group is waited for (it goes at once; this only bounds a stuck one). */
+const GROUP_KILL_WAIT_MS = 2_000;
+
+async function waitGroupGone(child: GroupSignalTarget, ms: number): Promise<boolean> {
+  const until = Date.now() + ms;
+  for (;;) {
+    if (!groupAlive(child)) return true;
+    if (Date.now() >= until) return false;
+    await new Promise((resolve) => setTimeout(resolve, GROUP_POLL_MS));
+  }
+}
+
+/**
+ * Ends a child and every process it started (its process group): SIGTERM, up to `graceMs` for the
+ * group to go, then SIGKILL to whatever is left, and a bounded wait for it to be gone.
+ */
+export async function endGroup(child: GroupSignalTarget, graceMs: number, log: Logger): Promise<void> {
+  if (child.pid === undefined) return;
+  signalGroup(child, "SIGTERM", undefined, log);
+  if (await waitGroupGone(child, graceMs)) return;
+  signalGroup(child, "SIGKILL", undefined, log);
+  if (!(await waitGroupGone(child, GROUP_KILL_WAIT_MS))) log("substrate_bridge_group_still_running");
+}
+
 /**
  * Runs a subprocess to completion with no shell; resolves with its exit code once its stderr ended.
  * Its stderr is passed on to the bridge's.

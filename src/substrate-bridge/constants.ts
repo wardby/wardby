@@ -56,3 +56,14 @@ export const NEXT_ROUND_POLL_MS = 1_000;
  * (providers/jobs/workspace-swap.ts RESULT_BUNDLE_FILE): the only `.git` file the tool bridge uploads.
  */
 export const RESULT_BUNDLE_FILE = "wardby-result.bundle";
+
+/**
+ * The Codex worker's entry point in its image (src/coding-worker/Dockerfile ENTRYPOINT), and the
+ * environment it reads in header mode (coding-worker/credentials.ts); constants.test.ts asserts they
+ * stay equal.
+ */
+export const CODEX_WORKER_ENTRY = "/opt/wardby/coding-worker/main.js";
+export const CAPABILITY_HEADER_ENV = "WARDBY_CAPABILITY_HEADER";
+export const REGISTRY_TOKEN_ENV = "WARDBY_REGISTRY_TOKEN";
+/** A run's registry-only token (coding-worker/credentials.ts REGISTRY_TOKEN_SHAPE). */
+export const REGISTRY_TOKEN_SHAPE = /^rrg_[A-Za-z0-9_-]{43}$/;
