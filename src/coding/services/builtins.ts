@@ -17,6 +17,11 @@
  * socket: both database entrypoints first run a temporary socket-only server to
  * initialize, and only the final server listens on TCP. Variables use
  * 127.0.0.1 rather than localhost so no client tries the IPv6 loopback first.
+ *
+ * `startCommand` is each image's ENTRYPOINT + CMD as its pinned digest's config
+ * defines them (checked with
+ * `docker buildx imagetools inspect --format '{{json .Image}}'`); only the
+ * Substrate launcher uses it.
  */
 import type { CodingServiceDefinition } from "./catalog.js";
 
@@ -47,6 +52,7 @@ function postgres(version: string, digest: string): CodingServiceDefinition {
       timeoutSeconds: 2,
       failureThreshold: 30,
     },
+    startCommand: ["docker-entrypoint.sh", "postgres"],
     resources: { cpuMillicores: 500, memoryMib: 512, diskMib: 1024 },
     dataPath: "/var/lib/postgresql/data",
     writablePaths: ["/var/run/postgresql", "/tmp"],
@@ -71,6 +77,7 @@ export const BUILTIN_CODING_SERVICES: readonly CodingServiceDefinition[] = Objec
       timeoutSeconds: 2,
       failureThreshold: 30,
     },
+    startCommand: ["docker-entrypoint.sh", "redis-server"],
     resources: { cpuMillicores: 250, memoryMib: 256, diskMib: 256 },
     dataPath: "/data",
     writablePaths: [],
@@ -101,6 +108,7 @@ export const BUILTIN_CODING_SERVICES: readonly CodingServiceDefinition[] = Objec
       timeoutSeconds: 3,
       failureThreshold: 45,
     },
+    startCommand: ["docker-entrypoint.sh", "mysqld"],
     resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 2048 },
     dataPath: "/var/lib/mysql",
     writablePaths: ["/var/run/mysqld", "/tmp"],

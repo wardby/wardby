@@ -208,8 +208,12 @@ describe("coding service catalog tools", () => {
   it("creates, updates and deletes an entry, auditing each change", async () => {
     logged.length = 0;
     const { client, rows } = await connect(ADMIN);
-    const created = await client.callTool({ name: "create_service", arguments: CUSTOM });
+    const created = await client.callTool({
+      name: "create_service",
+      arguments: { ...CUSTOM, startCommand: ["fakedb-serve"] },
+    });
     expect(created.isError).toBeFalsy();
+    expect(JSON.parse(text(created))).toMatchObject({ startCommand: ["fakedb-serve"] });
     expect(rows.get("postgres-postgis 16")).toMatchObject({ builtin: false, createdById: "p-admin", kind: "sidecar" });
 
     const updated = await client.callTool({
@@ -254,6 +258,41 @@ describe("coding service catalog tools", () => {
       },
       { event: "coding.service_catalog.delete", name: "postgres-postgis", version: "16", by: "p-admin" },
     ]);
+    await client.close();
+  });
+
+  it("sets and changes a start command with update_service, and validates it", async () => {
+    const { client, rows } = await connect(ADMIN);
+    const created = await client.callTool({ name: "create_service", arguments: CUSTOM });
+    expect(created.isError).toBeFalsy();
+    expect(JSON.parse(text(created))).not.toHaveProperty("startCommand");
+
+    const updated = await client.callTool({
+      name: "update_service",
+      arguments: { name: "postgres-postgis", version: "16", startCommand: ["serve", "--port", "1"] },
+    });
+    expect(updated.isError).toBeFalsy();
+    expect(JSON.parse(text(updated))).toMatchObject({ startCommand: ["serve", "--port", "1"] });
+    expect(rows.get("postgres-postgis 16")?.startCommand).toEqual(["serve", "--port", "1"]);
+
+    const refused = await client.callTool({
+      name: "update_service",
+      arguments: { name: "postgres-postgis", version: "16", startCommand: ["a\nb"] },
+    });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain("startCommand.0: must be one line of at most 256 bytes");
+    expect(rows.get("postgres-postgis 16")?.startCommand).toEqual(["serve", "--port", "1"]);
+    await client.close();
+  });
+
+  it("describes startCommand in both input schemas", async () => {
+    const { client } = await connect(ADMIN);
+    const { tools } = await client.listTools();
+    for (const name of ["create_service", "update_service"]) {
+      const tool = tools.find((candidate) => candidate.name === name);
+      const properties = tool?.inputSchema.properties as Record<string, { description?: string }> | undefined;
+      expect(properties?.startCommand?.description).toContain("Substrate");
+    }
     await client.close();
   });
 

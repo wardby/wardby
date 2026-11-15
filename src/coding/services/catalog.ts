@@ -93,6 +93,16 @@ const serviceFields = {
   serviceEnv: serviceEnvSchema.default({}),
   testEnv: CodingServiceTestEnvSchema.default({}),
   readiness: CodingServiceReadinessSchema,
+  /**
+   * The argv that starts the service (its image's ENTRYPOINT + CMD). Used only by the Substrate
+   * launcher, which overrides the container's command; Docker and Kubernetes run the image's own
+   * entrypoint and ignore it. Same rules as readiness.command.
+   */
+  startCommand: z
+    .array(singleLine(256).refine((value) => value.length > 0, "must not be empty"))
+    .min(1)
+    .max(16)
+    .optional(),
   resources: CodingServiceResourcesSchema,
   dataPath: pathSchema,
   writablePaths: z.array(pathSchema).max(MAX_WRITABLE_PATHS).default([]),
@@ -134,6 +144,7 @@ export interface CodingServiceRow {
   serviceEnv: unknown;
   testEnv: unknown;
   readiness: unknown;
+  startCommand: unknown;
   resources: unknown;
   dataPath: string;
   writablePaths: unknown;
@@ -150,6 +161,7 @@ export function catalogEntryFromRow(row: CodingServiceRow): CodingServiceDefinit
     serviceEnv: row.serviceEnv,
     testEnv: row.testEnv,
     readiness: row.readiness,
+    ...(row.startCommand === null || row.startCommand === undefined ? {} : { startCommand: row.startCommand }),
     resources: row.resources,
     dataPath: row.dataPath,
     writablePaths: row.writablePaths,

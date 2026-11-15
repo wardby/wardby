@@ -752,6 +752,9 @@ model CodingService {
   testEnv       Json     @default("{}")
   /// { command, periodSeconds, timeoutSeconds, failureThreshold }: the sidecar's startup probe.
   readiness     Json
+  /// The argv that starts the service (its image's ENTRYPOINT + CMD). Used only by the Substrate job
+  /// launcher, which overrides the container command; null: the entry cannot run there.
+  startCommand  Json?
   /// { cpuMillicores, memoryMib, diskMib }: requests equal limits.
   resources     Json
   /// Where the service writes its data: an emptyDir in the run pod.
@@ -2389,6 +2392,9 @@ model SubstrateRun {
   /// The run's extra repositories (#537), set at claim: [{ name, access }] in spec order, never a host
   /// path; null for a run without any. Read by the launcher and the coding proxy's Substrate routes.
   repositories Json?
+  /// The run's coding services, by catalog name (sorted), set at claim; null for a run without any.
+  /// Read by the launcher (a run with services never parks) and the coding proxy's services route.
+  services     Json?
   createdAt    DateTime                @default(now())
   updatedAt    DateTime                @updatedAt
   channels     SubstrateRelayChannel[]

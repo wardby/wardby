@@ -36,6 +36,7 @@ const UpdateSchema = z
     serviceEnv: z.unknown().optional(),
     testEnv: z.unknown().optional(),
     readiness: z.unknown().optional(),
+    startCommand: z.unknown().optional(),
     resources: z.unknown().optional(),
     dataPath: z.unknown().optional(),
     writablePaths: z.unknown().optional(),
@@ -124,6 +125,14 @@ const definitionProperties = {
     description:
       "Startup probe: a command in the service's image that succeeds once it accepts connections on 127.0.0.1.",
   },
+  startCommand: {
+    type: "array",
+    minItems: 1,
+    maxItems: 16,
+    items: { type: "string" },
+    description:
+      'The argv that starts the service: its image\'s ENTRYPOINT + CMD (e.g. ["docker-entrypoint.sh", "postgres"]). Required on the Substrate job launcher, which refuses an entry without it at dispatch; Docker and Kubernetes run the image\'s own entrypoint and ignore it. Each argument is one line of at most 256 bytes. To remove it, delete and re-create the entry.',
+  },
   resources: {
     type: "object",
     additionalProperties: false,
@@ -174,7 +183,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "get_service",
     scope: "agents:read",
     description:
-      "One catalog entry in full, including the variables (testEnv) a run's shells receive — the contract a repository's tests rely on.",
+      "One catalog entry in full, including the variables (testEnv) a run's shells receive — the contract a repository's tests rely on — and its startCommand, if set (used only on the Substrate job launcher).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -191,7 +200,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "create_service",
     scope: "services:manage",
     description:
-      "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest; kind is sidecar (a fresh instance in each run's pod).",
+      "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest; kind is sidecar (a fresh instance in each run's pod). Set startCommand for deployments on the Substrate job launcher.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -220,7 +229,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "update_service",
     scope: "services:manage",
     description:
-      "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it and never change). Runs already dispatched keep the entry they started with.",
+      "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it and never change). Runs already dispatched keep the entry they started with. Set startCommand for deployments on the Substrate job launcher.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

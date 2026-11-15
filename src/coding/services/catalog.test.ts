@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { BUILTIN_CODING_SERVICES } from "./builtins.js";
 import {
   CodingServiceDefinitionSchema,
+  StoredCodingServicesSchema,
   catalogEntryFromRow,
   parseAllowedServiceNames,
   parseStoredServices,
@@ -39,6 +40,13 @@ describe("built-in coding services", () => {
     expect(postgres16.writablePaths).toEqual(["/var/run/postgresql", "/tmp"]);
     expect(postgres16.testEnv.DATABASE_URL).toBe("postgres://test:test@127.0.0.1:5432/test");
   });
+
+  it("start each image the way its digest's config does", () => {
+    const cmd: Record<string, string> = { postgres: "postgres", redis: "redis-server", mysql: "mysqld" };
+    for (const service of BUILTIN_CODING_SERVICES) {
+      expect(service.startCommand).toEqual(["docker-entrypoint.sh", cmd[service.name]]);
+    }
+  });
 });
 
 describe("CodingServiceDefinitionSchema", () => {
@@ -70,6 +78,37 @@ describe("CodingServiceDefinitionSchema", () => {
       writablePaths: [],
     });
   });
+
+  it("accepts a start command and leaves it out when absent", () => {
+    const { startCommand: _startCommand, ...withoutStart } = postgres16;
+    const withStart = CodingServiceDefinitionSchema.parse({
+      ...withoutStart,
+      startCommand: ["docker-entrypoint.sh", "postgres"],
+    });
+    expect(withStart.startCommand).toEqual(["docker-entrypoint.sh", "postgres"]);
+    const parsed = CodingServiceDefinitionSchema.parse(withoutStart);
+    expect("startCommand" in parsed).toBe(false);
+  });
+
+  it.each([
+    ["empty", []],
+    ["17 arguments", Array.from({ length: 17 }, () => "a")],
+    ["an empty argument", [""]],
+    ["a multi-line argument", ["a\nb"]],
+    ["an argument over 256 bytes", ["x".repeat(257)]],
+    ["a string", "docker-entrypoint.sh"],
+    ["not strings", [1]],
+  ])("refuses a start command that is %s", (_label, startCommand) => {
+    expect(CodingServiceDefinitionSchema.safeParse({ ...postgres16, startCommand }).success).toBe(false);
+  });
+
+  it("names the argument of a multi-line start command", () => {
+    const result = CodingServiceDefinitionSchema.safeParse({ ...postgres16, startCommand: ["a\nb"] });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toContainEqual(
+      expect.objectContaining({ path: ["startCommand", 0], message: "must be one line of at most 256 bytes" }),
+    );
+  });
 });
 
 describe("stored services", () => {
@@ -87,6 +126,15 @@ describe("stored services", () => {
     expect(storedServiceNames([resolved, { name: "Bad Name" }, 3])).toEqual(["postgres"]);
     expect(storedServiceLabels([resolved, { name: "redis" }])).toEqual(["postgres 16"]);
     expect(storedServiceNames("nonsense")).toEqual([]);
+  });
+
+  it("parses a snapshot from before startCommand existed", () => {
+    const { startCommand: _startCommand, ...before } = resolved;
+    const [parsed] = StoredCodingServicesSchema.parse([before]);
+    expect(parsed).toBeDefined();
+    expect("startCommand" in parsed).toBe(false);
+    const fromRow = catalogEntryFromRow({ ...postgres16, startCommand: null });
+    expect("startCommand" in fromRow).toBe(false);
   });
 
   it("hands the worker only name, version and test variables", () => {
@@ -107,12 +155,12 @@ describe("parseAllowedServiceNames", () => {
 
 describe("catalogEntryFromRow", () => {
   it("maps a row to its definition", () => {
-    expect(catalogEntryFromRow({ ...postgres16 })).toEqual(postgres16);
+    expect(catalogEntryFromRow({ startCommand: null, ...postgres16 })).toEqual(postgres16);
   });
 
   it("refuses a row edited out of shape, naming only the entry", () => {
-    expect(() => catalogEntryFromRow({ ...postgres16, readiness: { command: "pg_isready" } })).toThrow(
-      "coding_service_catalog_invalid:postgres 16",
-    );
+    expect(() =>
+      catalogEntryFromRow({ startCommand: null, ...postgres16, readiness: { command: "pg_isready" } }),
+    ).toThrow("coding_service_catalog_invalid:postgres 16");
   });
 });
