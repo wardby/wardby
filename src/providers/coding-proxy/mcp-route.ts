@@ -11,7 +11,8 @@
  * Secrets: the token is only hashed and forwarded, never logged or echoed. The route's log line
  * carries the session id, a sanitized JSON-RPC method, the status and a fixed reason code only:
  * never the body, the token or an error's text. Every body this route writes is fixed text or the
- * gateway's answer, unchanged. */
+ * gateway's answer, unchanged.
+ */
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import { isMcpToken, mcpTokenHash, MCP_TOKEN_HEADER, MCP_TOKEN_REQUIRED_MESSAGE } from "../../coding/mcp-token.js";
 import { logger } from "../../core/logger.js";

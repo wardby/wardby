@@ -431,8 +431,22 @@ describe("coding proxy /mcp route", () => {
       [{ authorization: "Bearer abc" }, "abc"],
       [{ "x-wardby-mcp-token": "abc" }, "abc"],
       [{ authorization: "Basic x", "x-wardby-mcp-token": "abc" }, undefined],
+      [{ "x-wardby-mcp-token": ["abc", "abc"] }, undefined],
     ])("mcpTokenOf(%j) is %j", (headers, expected) => {
       expect(mcpTokenOf(headers)).toBe(expected);
+    });
+
+    it.each([
+      ["a repeated header (an array)", (token: string) => [token, token]],
+      ["a repeated header (as Node joins it)", (token: string) => `${token}, ${token}`],
+    ])("refuses %s with the fixed 401, without calling the gateway", async (_label, valueOf) => {
+      const h = await setup();
+      const headers = { "x-wardby-mcp-token": valueOf(h.token) } as unknown as Record<string, string>;
+      const res = await h.call({ body: TOOLS_LIST, headers });
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual(REFUSAL);
+      expect(h.gateway).not.toHaveBeenCalled();
+      expect(JSON.stringify(h.logs)).not.toContain(h.token);
     });
   });
 
