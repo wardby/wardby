@@ -30,7 +30,7 @@ await rm("build/substrate-proto", { recursive: true, force: true });
 await mkdir(dir, { recursive: true });
 await writeFile(`${dir}/ateapi.proto`, body);
 await rm(OUT, { recursive: true, force: true });
-execFileSync("npx", ["buf", "generate", "build/substrate-proto", "--template", "buf.gen.substrate.yaml"], {
+execFileSync("npx", ["buf", "generate", "build/substrate-proto", "--template", "scripts/buf.gen.substrate.yaml"], {
   stdio: "inherit",
 });
 await writeFile(MARKER, `${SHA256}\n`);
