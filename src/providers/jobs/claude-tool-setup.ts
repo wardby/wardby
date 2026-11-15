@@ -8,6 +8,7 @@
  * with the value in the CLI's own environment.
  */
 import { serviceEnvironment } from "../../coding-worker/driver.js";
+import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT } from "./docker-isolation.js";
 import type { JobSpec } from "./types.js";
@@ -52,7 +53,7 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
   if (spec.provider !== "claude-code") throw new Error("claude_tool_setup_provider");
   const registry = registryWorkerSetup({
     proxyBaseUrl: options.proxyBaseUrl ?? `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
-    capability,
+    token: deriveRegistryToken(capability),
     cacheRoot: `${TOOL_WORKSPACE}/.cache`,
   });
   const setup: ClaudeToolSetup = {

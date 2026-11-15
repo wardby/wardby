@@ -1,7 +1,10 @@
 /**
  * SubstrateJobLauncher (JOB_LAUNCHER=substrate, experimental): runs one Claude Code coding job as
  * two Agent Substrate actors — the agent (the worker) and the tool (the credential-free tool
- * runner, which holds the workspace) — built from shared, secret-free templates.
+ * runner, which holds the workspace) — built from shared, secret-free templates. A Codex job runs
+ * as one actor (the single shape, recorded on the row as actorShape): the agent, whose Codex bridge
+ * runs the unchanged Codex worker and holds the workspace, with the agent's egress rule only. Codex
+ * runs never park or adopt (warm rounds are Claude Code only).
  *
  * - The capability lives only in a per-run Kubernetes Secret, which Substrate's egress gateway reads
  *   to inject the agent's X-Api-Key on its way to the coding proxy. The tool actor authenticates with
@@ -41,6 +44,7 @@ import type { RelayStore } from "../../coding-proxy/substrate/relay-store.js";
 import { logger } from "../../../core/logger.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { claudeToolSetup } from "../claude-tool-setup.js";
+import { codexWorkerSetup } from "../codex-worker-setup.js";
 import { isRepositoryDigest } from "../docker-isolation.js";
 import { KubernetesAlreadyExistsError, KubernetesNotFoundError, type KubernetesApi } from "../kubernetes-api.js";
 import { RUN_ID } from "../kubernetes-isolation.js";
@@ -71,12 +75,21 @@ import {
   type ActorTemplateSpec,
   type SubstrateApi,
 } from "./api.js";
-import { BLOB, ROUND_BLOBS, agentActorName, roundBlob, substrateRunToken, toolActorName } from "./names.js";
+import {
+  BLOB,
+  ROUND_BLOBS,
+  actorNamesFor,
+  agentActorName,
+  roundBlob,
+  substrateRunToken,
+  toolActorName,
+} from "./names.js";
 import { canPlaceAll, type Room } from "./placement.js";
-import type { SubstratePhase, SubstrateRunRecord, SubstrateRunStore } from "./run-store.js";
+import type { SubstrateActorShape, SubstratePhase, SubstrateRunRecord, SubstrateRunStore } from "./run-store.js";
 import {
   agentEgress,
   agentTemplate,
+  codexTemplate,
   runSecret,
   toolEgress,
   toolTemplate,
@@ -97,6 +110,12 @@ export interface SubstrateJobLauncherOptions {
    * agent's custom image (workerImageRef), which has no bridge: refused.
    */
   bridgeToolImages: readonly string[];
+  /**
+   * The Codex images the deployment configures (CODING_WORKER_IMAGE and its per-toolchain variants),
+   * built on the Substrate Codex bridge. Any other Codex image is an agent's custom image
+   * (workerImageRef), which has no bridge: refused. Absent: none, so every Codex run is refused.
+   */
+  bridgeCodexImages?: readonly string[];
   /** Same root the VCS provider prepares workspaces under (as the Kubernetes launcher's). */
   workspaceRoot: string;
   resolveCapability: (runId: string) => Promise<string>;
@@ -218,6 +237,11 @@ function roundOf(record: SubstrateRunRecord): number {
   return record.round ?? 1;
 }
 
+/** The row's actor shape; a row from before the shape was recorded is a pair. */
+function shapeOf(record: SubstrateRunRecord): SubstrateActorShape {
+  return record.actorShape ?? "pair";
+}
+
 interface Observation {
   status: JobStatus;
   /** Present exactly when the job is terminal. */
@@ -284,20 +308,40 @@ function isBlobNotFound(error: unknown): boolean {
   return error instanceof BlobStoreError && error.code === "not_found";
 }
 
-/**
- * Phase A runs Claude Code only, without the features that need more than two actors or extra
- * secrets, and only on the configured bridge tool images (a custom tool image has no bridge).
- */
-function validateSpec(spec: JobSpec, bridgeToolImages: readonly string[]): void {
-  if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw new Error("substrate_spec_invalid");
-  if (spec.provider !== "claude-code") throw new Error("substrate_provider_unsupported");
-  if (!isRepositoryDigest(spec.image) || spec.toolImage === undefined || !isRepositoryDigest(spec.toolImage)) {
-    throw new Error("substrate_image_not_digest");
-  }
-  for (const feature of ["services", "mcpTools", "dependencyCache", "repositories"] as const) {
+const UNSUPPORTED_FEATURES = ["services", "mcpTools", "dependencyCache", "repositories"] as const;
+
+function refuseUnsupportedFeatures(spec: JobSpec): void {
+  for (const feature of UNSUPPORTED_FEATURES) {
     if (spec[feature] !== undefined) throw new Error(`substrate_feature_unsupported:${feature}`);
   }
-  if (!bridgeToolImages.includes(spec.toolImage)) throw new Error("substrate_feature_unsupported:workerImage");
+}
+
+/**
+ * Substrate runs Claude Code (two actors) and Codex (one), without the features that need more
+ * actors or extra secrets, and only on the configured bridge images (a custom image has no bridge):
+ * Claude Code's tool image among the tool images, Codex's image among the Codex images.
+ */
+function validateSpec(spec: JobSpec, images: { tool: readonly string[]; codex: readonly string[] }): void {
+  if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw new Error("substrate_spec_invalid");
+  validateWarm(spec);
+  if (spec.provider === "claude-code") {
+    if (!isRepositoryDigest(spec.image) || spec.toolImage === undefined || !isRepositoryDigest(spec.toolImage)) {
+      throw new Error("substrate_image_not_digest");
+    }
+    refuseUnsupportedFeatures(spec);
+    if (!images.tool.includes(spec.toolImage)) throw new Error("substrate_feature_unsupported:workerImage");
+  } else if (spec.provider === "codex") {
+    if (!isRepositoryDigest(spec.image)) throw new Error("substrate_image_not_digest");
+    // One actor: a tool image has nowhere to run.
+    if (spec.toolImage !== undefined) throw new Error("substrate_spec_invalid");
+    refuseUnsupportedFeatures(spec);
+    if (!images.codex.includes(spec.image)) throw new Error("substrate_feature_unsupported:workerImage");
+  } else {
+    throw new Error("substrate_provider_unsupported");
+  }
+}
+
+function validateWarm(spec: JobSpec): void {
   const warm = spec.warm;
   if (
     warm !== undefined &&
@@ -330,14 +374,20 @@ function oldestFirst(parks: SubstrateRunRecord[]): SubstrateRunRecord[] {
   return [...parks.filter((park) => !park.parkedAt), ...parks.filter((park) => park.parkedAt)];
 }
 
-/** Whether both actors can be placed in `free`; true when the room is unknown (the launch decides). */
-function placeable(
-  free: Room[] | undefined,
-  templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec },
-): boolean {
+/** A run's templates: the agent's and the tool's (pair), or the one agent actor's (single). */
+type RunTemplates =
+  { shape: "pair"; agent: ActorTemplateSpec; tool: ActorTemplateSpec } | { shape: "single"; agent: ActorTemplateSpec };
+
+/** The templates of every actor of the run. */
+function actorTemplates(templates: RunTemplates): ActorTemplateSpec[] {
+  return templates.shape === "pair" ? [templates.agent, templates.tool] : [templates.agent];
+}
+
+/** Whether every actor of the run can be placed in `free`; true when the room is unknown (the launch decides). */
+function placeable(free: Room[] | undefined, templates: RunTemplates): boolean {
   if (!free) return true;
   const size = (t: ActorTemplateSpec) => ({ cpuMillicores: t.cpuMillicores, memoryBytes: t.memoryBytes });
-  return canPlaceAll(free, [size(templates.agent), size(templates.tool)]);
+  return canPlaceAll(free, actorTemplates(templates).map(size));
 }
 
 /** Whether the workers' total free CPU or memory went up from `before` to `after`. */
@@ -394,15 +444,15 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * Whether both actors can be placed now on the workers the configured selector matches, by free
-   * CPU and memory (Substrate packs many actors per worker): the larger first on the worker with
-   * the most free room, then the other, on the same worker or another. No workers: false. Any
-   * error (an unbuildable spec, an unreachable API): true, so the launch itself decides (a refusal
-   * there is a JobCapacityError).
+   * Whether the run's actors (both, or a Codex run's one) can be placed now on the workers the
+   * configured selector matches, by free CPU and memory (Substrate packs many actors per worker):
+   * the larger first on the worker with the most free room, then the other, on the same worker or
+   * another. No workers: false. Any error (an unbuildable spec, an unreachable API): true, so the
+   * launch itself decides (a refusal there is a JobCapacityError).
    */
   async hasCapacityFor(spec: JobSpec): Promise<boolean> {
     await this.sweepParkedSometimes();
-    let templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec };
+    let templates: RunTemplates;
     try {
       templates = this.templatesFor(spec);
     } catch {
@@ -421,7 +471,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     let coldReason: WarmColdReason | undefined;
     // Removal of kept rounds never depends on the switch (warm rounds off: every one goes).
     await this.sweepParkedSometimes();
-    if (this.warm) {
+    // A single-shape (Codex) run never adopts: it always launches cold, with no cold reason.
+    if (this.warm && templates.shape === "pair") {
       // A relaunch of a run that has a row keeps whatever that row says.
       if (!(await this.runs.get(spec.runId))) {
         if (!(await this.fits(templates))) await this.evictUntilFits(templates, spec.warm?.fromRunId);
@@ -436,6 +487,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       specHash,
       phase: "provisioning",
       deadlineAt: deadline(),
+      actorShape: templates.shape,
       ...(spec.agentId !== undefined ? { agentId: spec.agentId } : {}),
       ...(coldReason !== undefined ? { coldReason } : {}),
     });
@@ -551,7 +603,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (isPhaseConflict(error)) return;
       throw error;
     }
-    await this.deleteActors(record.token);
+    await this.deleteActors(record.token, shapeOf(record));
   }
 
   async remove(handle: JobHandle): Promise<void> {
@@ -571,7 +623,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     if (!observed.result) throw new Error("job_not_terminal");
     // Every deletion is tried even when one fails; the first failure is reported and the run is
     // not marked removed, so a later remove() tries again.
-    await this.removeInFull(record.token, roundOf(record));
+    await this.removeInFull(record.token, roundOf(record), shapeOf(record));
     // The row stays as the tombstone, so the run is never relaunched.
     await this.runs.setPhase(record.runId, "removed");
   }
@@ -579,9 +631,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   // -------------------------------------------------------------------------
   // Launch
 
-  private templatesFor(spec: JobSpec): { agent: ActorTemplateSpec; tool: ActorTemplateSpec } {
-    validateSpec(spec, this.options.bridgeToolImages);
-    return { agent: agentTemplate(spec, this.config), tool: toolTemplate(spec, this.config) };
+  private templatesFor(spec: JobSpec): RunTemplates {
+    validateSpec(spec, { tool: this.options.bridgeToolImages, codex: this.options.bridgeCodexImages ?? [] });
+    if (spec.provider === "codex") return { shape: "single", agent: codexTemplate(spec, this.config) };
+    return { shape: "pair", agent: agentTemplate(spec, this.config), tool: toolTemplate(spec, this.config) };
   }
 
   /**
@@ -595,12 +648,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     };
   }
 
-  private async provision(
-    spec: JobSpec,
-    token: string,
-    templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec },
-  ): Promise<void> {
+  private async provision(spec: JobSpec, token: string, templates: RunTemplates): Promise<void> {
     const { atespace } = this.config;
+    const { shape } = templates;
     const agent = agentActorName(token);
     const tool = toolActorName(token);
     // Each Substrate call is named when it fails, so a refusal is diagnosable from wardby's log.
@@ -615,10 +665,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     try {
       const capability = await this.options.resolveCapability(spec.runId);
       if (!CAPABILITY.test(capability)) throw new Error("substrate_capability_invalid");
-      await this.ensureTemplate(templates.agent, call);
-      await this.ensureTemplate(templates.tool, call);
+      for (const template of actorTemplates(templates)) await this.ensureTemplate(template, call);
       const input = await this.stageInput(spec.inputArtifact, token);
-      await this.stageToolSetup(spec, capability, token, inputHasGitHistory(input));
+      await this.stageSetup(spec, capability, token, inputHasGitHistory(input));
       await this.stageSeed(spec, token);
       try {
         await this.options.secrets.createSecret(
@@ -629,10 +678,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
         if (!(error instanceof KubernetesAlreadyExistsError)) throw error;
       }
       // The fence already serialized launches of this run, so an existing actor is our own.
-      for (const [name, template] of [
-        [agent, templates.agent.name],
-        [tool, templates.tool.name],
-      ] as const) {
+      const templateOf = (name: string) =>
+        name !== agent && templates.shape === "pair" ? templates.tool.name : templates.agent.name;
+      for (const name of actorNamesFor(token, shape)) {
+        const template = templateOf(name);
         await call("createActor", async () => {
           try {
             await this.api.createActor(atespace, name, template);
@@ -641,16 +690,19 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
           }
         });
       }
-      // After the actors: an egress policy belongs to its actor (a foreign key in Substrate). Both
-      // policies are in place before either actor resumes, so neither ever runs without one.
+      // After the actors: an egress policy belongs to its actor (a foreign key in Substrate). Every
+      // policy is in place before any actor resumes, so none ever runs without one. A single-shape
+      // run's one actor gets the agent's rule only (no tool rule, no actor JWT).
       await call("putEgressPolicy", () => this.api.putEgressPolicy(atespace, agent, agentEgress(token, this.config)));
-      await call("putEgressPolicy", () => this.api.putEgressPolicy(atespace, tool, toolEgress(this.config)));
-      // The tool first: the agent's first tool call needs it.
-      await call("resumeActor", () => this.api.resumeActor(atespace, tool));
+      if (shape === "pair") {
+        await call("putEgressPolicy", () => this.api.putEgressPolicy(atespace, tool, toolEgress(this.config)));
+        // The tool first: the agent's first tool call needs it.
+        await call("resumeActor", () => this.api.resumeActor(atespace, tool));
+      }
       await call("resumeActor", () => this.api.resumeActor(atespace, agent));
     } catch (error) {
       // Clean up before recording requeued, so a relaunch never races this cleanup.
-      await this.cleanup(token);
+      await this.cleanup(token, 1, shape);
       if (error instanceof SubstrateExhaustedError) {
         await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
         throw new JobCapacityError("substrate_capacity: no worker has room", { cause: error });
@@ -662,13 +714,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await this.runs.setPhase(spec.runId, "running", ["provisioning"]);
     } catch (error) {
       if (!isPhaseConflict(error)) {
-        await this.cleanup(token);
+        await this.cleanup(token, 1, shape);
         await this.runs.setPhase(spec.runId, "provisioning_failed", ["provisioning"]).catch(() => undefined);
         throw error;
       }
       // Stopped or timed out while provisioning: whoever moved it may have deleted the actors
       // before they existed, so delete them again.
-      await this.deleteActors(token);
+      await this.deleteActors(token, shape);
     }
   }
 
@@ -690,28 +742,30 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * The tool setup blob: the run's registry-only token lives here (and in the tool runner) only.
-   * `collectResultBundle` (a run with git history, #536): the tool bridge's workspace upload then
-   * carries, from the root `.git`, only the result bundle (materializeWorkspace takes it); set only
-   * then, so a bridge without history uploads as before.
+   * The setup blob, for the workspace holder (the tool actor, or a Codex run's one actor): the
+   * run's registry-only token lives here (and in the holder) only. Claude Code: the tool setup with
+   * the exclusions; Codex: codexWorkerSetup. `collectResultBundle` (a run with git history, #536):
+   * the holder's workspace upload then carries, from the root `.git`, only the result bundle
+   * (materializeWorkspace takes it); set only then, so a bridge without history uploads as before.
    */
-  private async stageToolSetup(
+  private async stageSetup(
     spec: JobSpec,
     capability: string,
     token: string,
     collectResultBundle: boolean,
   ): Promise<void> {
-    const setup = {
-      toolSetup: claudeToolSetup(spec, capability, {
-        proxyBaseUrl: `http://${this.config.proxyHost}:${this.config.proxyPort}`,
-      }),
-      // The Kubernetes launcher's default for a spec without exclusions: the built-in names.
-      collectExclude: spec.collectExclude ?? collectExclusions([]),
-      ...(collectResultBundle ? { collectResultBundle: true } : {}),
-    };
-    await this.blobs.put(BLOB.toolSetup(token), Buffer.from(JSON.stringify(setup)), {
-      contentType: "application/json",
-    });
+    const body =
+      spec.provider === "codex"
+        ? codexWorkerSetup(spec, capability, { collectResultBundle })
+        : JSON.stringify({
+            toolSetup: claudeToolSetup(spec, capability, {
+              proxyBaseUrl: `http://${this.config.proxyHost}:${this.config.proxyPort}`,
+            }),
+            // The Kubernetes launcher's default for a spec without exclusions: the built-in names.
+            collectExclude: spec.collectExclude ?? collectExclusions([]),
+            ...(collectResultBundle ? { collectResultBundle: true } : {}),
+          });
+    await this.blobs.put(BLOB.toolSetup(token), Buffer.from(body), { contentType: "application/json" });
   }
 
   private reportCallFailure(failure: SubstrateCallFailure): void {
@@ -723,7 +777,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     }
   }
 
-  /** Stages the worker input and returns what was staged (stageToolSetup reads its git history). */
+  /** Stages the worker input and returns what was staged (stageSetup reads its git history). */
   private async stageInput(inputArtifact: string, token: string, round = 1): Promise<Buffer> {
     let body: Buffer;
     // One descriptor for the check and the read (never a symlink), so the file checked is the file read.
@@ -842,13 +896,14 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     // Actors may not exist yet while a launch provisions them.
     if (record.phase === "provisioning") return { status: { state: "pending" } };
     const { atespace } = this.config;
-    const [agent, tool] = await Promise.all([
-      this.api.getActor(atespace, agentActorName(record.token)),
-      this.api.getActor(atespace, toolActorName(record.token)),
-    ]);
-    if (!agent || !tool) return this.settle(record, "lost");
+    const shape = shapeOf(record);
+    const [agent, tool] = await Promise.all(
+      actorNamesFor(record.token, shape).map((name) => this.api.getActor(atespace, name)),
+    );
+    // A single-shape run has no tool actor to lose or crash.
+    if (!agent || (shape === "pair" && !tool)) return this.settle(record, "lost");
     if (agent.state === "CRASHED") return this.settle(record, "crashed");
-    if (tool.state === "CRASHED") return this.settle(record, "tool_failed");
+    if (tool?.state === "CRASHED") return this.settle(record, "tool_failed");
     // The worker exited (exit) but the workspace (done) never came: the tool side is gone.
     const exited = await this.blobs.head(BLOB.exit(record.token, round));
     if (exited && this.now() - exited.updatedAt.getTime() > this.collectGraceMs) {
@@ -884,7 +939,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       return this.observe(current);
     }
     // A timed-out run must not keep running; the others are left for remove().
-    if (STOP_ACTORS_ON.includes(phase)) await this.deleteActors(record.token).catch(() => undefined);
+    if (STOP_ACTORS_ON.includes(phase)) {
+      await this.deleteActors(record.token, shapeOf(record)).catch(() => undefined);
+    }
     return this.observe(stored);
   }
 
@@ -998,6 +1055,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   async retain(handle: JobHandle, retention: JobRetention): Promise<boolean> {
     const record = await this.recordFor(handle);
     if (!record || record.phase === "removed") return false;
+    // A single-shape (Codex) run is never parked: warm rounds are Claude Code only.
+    if (record.actorShape === "single") {
+      await this.remove(handle);
+      return false;
+    }
     if (
       record.phase === "parked" &&
       validRetention(retention) &&
@@ -1072,12 +1134,13 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * Whether both actors can be placed now on the workers the configured selector matches, by free
-   * CPU and memory (Substrate packs many actors per worker): the larger first on the worker with the
-   * most free room, then the other, on the same worker or another. No workers: false. Any error (an
-   * unreachable API): true, so the launch itself decides (a refusal there is a JobCapacityError).
+   * Whether the run's actors (both, or a Codex run's one) can be placed now on the workers the
+   * configured selector matches, by free CPU and memory (Substrate packs many actors per worker): the
+   * larger first on the worker with the most free room, then the other, on the same worker or
+   * another. No workers: false. Any error (an unreachable API): true, so the launch itself decides
+   * (a refusal there is a JobCapacityError).
    */
-  private async fits(templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec }): Promise<boolean> {
+  private async fits(templates: RunTemplates): Promise<boolean> {
     return placeable(await this.freeRoom(), templates);
   }
 
@@ -1104,10 +1167,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * as one did not add to it: where a suspended actor already gives back its room, removing parks
    * cannot make room, so at most one goes per call.
    */
-  private async evictUntilFits(
-    templates: { agent: ActorTemplateSpec; tool: ActorTemplateSpec },
-    keep: string | undefined,
-  ): Promise<boolean> {
+  private async evictUntilFits(templates: RunTemplates, keep: string | undefined): Promise<boolean> {
     let before = await this.freeRoom();
     if (placeable(before, templates)) return true;
     for (const park of await this.parks()) {
@@ -1210,7 +1270,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (isPhaseConflict(error)) return false;
       throw error;
     }
-    await this.removeInFull(record.token, roundOf(record));
+    // Only paired runs are ever parked.
+    await this.removeInFull(record.token, roundOf(record), "pair");
     try {
       await this.runs.setPhase(record.runId, "removed", ["parked"]);
     } catch (error) {
@@ -1334,7 +1395,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (!CAPABILITY.test(capability)) throw new Error("substrate_capability_invalid");
       await timed("stage", async () => {
         const input = await this.stageInput(spec.inputArtifact, token, round);
-        await this.stageToolSetup(spec, capability, token, inputHasGitHistory(input));
+        await this.stageSetup(spec, capability, token, inputHasGitHistory(input));
         await this.blobs.put(roundBlob(token), Buffer.from(JSON.stringify({ round })), {
           contentType: "application/json",
         });
@@ -1351,7 +1412,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await timed("resumeTool", () => call("resumeActor", () => this.api.resumeActor(atespace, tool)));
       await timed("resumeAgent", () => call("resumeActor", () => this.api.resumeActor(atespace, agent)));
     } catch (error) {
-      await this.cleanup(token, round);
+      // Only paired runs are ever adopted.
+      await this.cleanup(token, round, "pair");
       if (error instanceof SubstrateExhaustedError) {
         await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
         throw new JobCapacityError("substrate_capacity: no worker has room", { cause: error });
@@ -1363,11 +1425,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       await this.runs.setPhase(spec.runId, "running", ["provisioning"]);
     } catch (error) {
       if (!isPhaseConflict(error)) {
-        await this.cleanup(token, round);
+        await this.cleanup(token, round, "pair");
         await this.runs.setPhase(spec.runId, "provisioning_failed", ["provisioning"]).catch(() => undefined);
         throw error;
       }
-      await this.deleteActors(token);
+      await this.deleteActors(token, "pair");
     }
     this.warmEvent({
       event: "substrate_warm_adopted",
@@ -1383,12 +1445,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   // -------------------------------------------------------------------------
   // Cleanup (each step: missing is success)
 
-  /** Deletes both actors, each tried even if the other fails. */
-  private async deleteActors(token: string): Promise<void> {
+  /** Deletes the run's actors (both, or a single-shape run's one), each tried even if another fails. */
+  private async deleteActors(token: string, shape: SubstrateActorShape): Promise<void> {
     const { atespace } = this.config;
-    await settleAll(
-      [agentActorName(token), toolActorName(token)].map((name) => () => this.api.deleteActor(atespace, name)),
-    );
+    await settleAll(actorNamesFor(token, shape).map((name) => () => this.api.deleteActor(atespace, name)));
   }
 
   /**
@@ -1400,10 +1460,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   private deletions(
     token: string,
     rounds: number,
-    { outcome = true }: { outcome?: boolean } = {},
+    { outcome = true, shape }: { outcome?: boolean; shape: SubstrateActorShape },
   ): (() => Promise<void>)[] {
     const { atespace } = this.config;
-    const actors = [agentActorName(token), toolActorName(token)];
+    const actors = actorNamesFor(token, shape);
     const blobs = Object.values(BLOB).filter(
       (blob) => outcome || (blob !== BLOB.done && !OUTCOME_BLOBS.includes(blob)),
     );
@@ -1430,8 +1490,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * round record after that: until every other deletion has succeeded, a later status() still reads
    * the run's real outcome rather than a lost run.
    */
-  private async removeInFull(token: string, rounds: number): Promise<void> {
-    await settleAll(this.deletions(token, rounds, { outcome: false }));
+  private async removeInFull(token: string, rounds: number, shape: SubstrateActorShape): Promise<void> {
+    await settleAll(this.deletions(token, rounds, { outcome: false, shape }));
     await this.options.relay.purgeRelay(token);
     const outcome: (() => Promise<void>)[] = [];
     for (let round = 1; round <= rounds; round += 1) {
@@ -1460,8 +1520,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /** Best effort after a failed launch: nothing of the attempt (every round up to `rounds`) is left behind. */
-  private async cleanup(token: string, rounds = 1): Promise<void> {
-    await settleAll(this.deletions(token, rounds)).catch(() => undefined);
+  private async cleanup(token: string, rounds: number, shape: SubstrateActorShape): Promise<void> {
+    await settleAll(this.deletions(token, rounds, { shape })).catch(() => undefined);
     await this.options.relay.purgeRelay(token).catch(() => undefined);
   }
 }

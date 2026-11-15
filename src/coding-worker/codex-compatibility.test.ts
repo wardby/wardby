@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -24,6 +24,7 @@ import { WARDBY_MCP_INSTRUCTIONS } from "./mcp-config.js";
 import { recordCodexRequests } from "./codex-recorder.test-support.js";
 import { createCodexSdkClient } from "./sdk.js";
 import { CODEX_BUILTIN_SKILLS } from "./skills.js";
+import { PLACEHOLDER_CAPABILITY } from "../providers/jobs/substrate/names.js";
 
 const require = createRequire(import.meta.url);
 const RECORD = process.env.CODEX_RECORD === "1";
@@ -186,6 +187,51 @@ describe.runIf(RECORD)("record the pinned Codex CLI's Responses requests", () =>
   }, 900_000);
 });
 
+/** What the gateway simulator saw on one request: booleans only, never a header value. */
+interface GatewayObservation {
+  url: string;
+  hasAuthorization: boolean;
+  authorizationIsPlaceholderBearer: boolean;
+  apiKeyIsPlaceholder: boolean;
+}
+
+/**
+ * A stand-in for the Substrate egress gateway in front of the proxy: it replaces the worker's
+ * placeholder `x-api-key` with the run's real capability (as the gateway's replaceHeaders does)
+ * and pipes the request on. Every other header passes through unchanged.
+ */
+async function startGatewaySimulator(proxyPort: number, capability: string) {
+  const observed: GatewayObservation[] = [];
+  const server = createServer((request, response) => {
+    observed.push({
+      url: request.url ?? "",
+      hasAuthorization: request.headers.authorization !== undefined,
+      authorizationIsPlaceholderBearer: request.headers.authorization === `Bearer ${PLACEHOLDER_CAPABILITY}`,
+      apiKeyIsPlaceholder: request.headers["x-api-key"] === PLACEHOLDER_CAPABILITY,
+    });
+    const headers = { ...request.headers, "x-api-key": capability, host: `127.0.0.1:${proxyPort}` };
+    const upstream = httpRequest(
+      { host: "127.0.0.1", port: proxyPort, method: request.method, path: request.url, headers },
+      (proxied) => {
+        response.writeHead(proxied.statusCode ?? 502, proxied.headers);
+        proxied.pipe(response);
+      },
+    );
+    upstream.on("error", () => response.destroy());
+    request.pipe(upstream);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    observed,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}
+
 describe.skipIf(RECORD || !codexBinaryInstalled())("pinned Codex CLI against the coding proxy allowlist", () => {
   const cleanup: Array<() => Promise<void>> = [];
   afterEach(async () => {
@@ -296,6 +342,123 @@ describe.skipIf(RECORD || !codexBinaryInstalled())("pinned Codex CLI against the
     },
     120_000,
   );
+
+  it("header mode: Codex sends no Authorization and the proxy accepts the injected x-api-key", async () => {
+    const model = "gpt-5.6-terra";
+    const forwarded: Record<string, unknown>[] = [];
+    const audit: ProxyAuditEvent[] = [];
+    const proxy = new CodingProxy({
+      ledger: new MemoryProxyLedger(),
+      credentials: { resolve: async () => "UPSTREAM_SECRET_NOT_REAL" },
+      pricing: () => ({
+        encoding: "o200k_base",
+        inputPerMTok: 1,
+        cachedInputPerMTok: 0.1,
+        cacheWritePerMTok: 1,
+        outputPerMTok: 1,
+      }),
+      audit: (event) => audit.push(event),
+      fetch: async (_input, init) => {
+        const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+        forwarded.push(body);
+        return new Response(scriptedTurn(forwarded.length, body), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      },
+    });
+    const session = await proxy.createSession({
+      runId: "codex-compat-header-mode",
+      credentialRef: "openai/compatibility",
+      protocol: "openai-responses",
+      allowedModels: [model],
+      deadlineAt: new Date(Date.now() + 120_000),
+      budgetUsd: 10,
+    });
+    const rejected: string[] = [];
+    let server: CodingProxyServerHandle | undefined = await startCodingProxyServer(proxy, {
+      host: "127.0.0.1",
+      port: 0,
+      onRequest: (event) => {
+        if (event.status >= 400) rejected.push(`${event.protocol}:${event.status}`);
+      },
+    });
+    cleanup.push(async () => {
+      await server?.close();
+      server = undefined;
+    });
+    const gateway = await startGatewaySimulator(server.port, session.capability);
+    cleanup.push(gateway.close);
+    const root = await mkdtemp(join(tmpdir(), "wardby-codex-compat-header-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const home = join(root, "home");
+    const workspace = join(root, "workspace");
+    await mkdir(home, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    await writeFile(join(workspace, "pixel.png"), Buffer.from(PNG_BASE64, "base64"));
+
+    const blocked = "http://127.0.0.1:9";
+    const client = createCodexSdkClient({
+      proxyBaseUrl: gateway.url,
+      capability: PLACEHOLDER_CAPABILITY,
+      capabilityHeader: "x-api-key",
+      developerInstructions: WORKER_SECURITY_INSTRUCTIONS,
+      environment: {
+        HOME: home,
+        LANG: "C.UTF-8",
+        PATH: "/usr/local/bin:/usr/bin:/bin",
+        TMPDIR: root,
+        HTTPS_PROXY: blocked,
+        HTTP_PROXY: blocked,
+        ALL_PROXY: blocked,
+        NO_PROXY: "127.0.0.1,localhost",
+      },
+      disabledSkills: [...CODEX_BUILTIN_SKILLS],
+    });
+    const thread = client.startThread({
+      model,
+      sandboxMode: "danger-full-access",
+      workingDirectory: workspace,
+      skipGitRepoCheck: true,
+      networkAccessEnabled: false,
+      webSearchMode: "disabled",
+      approvalPolicy: "never",
+    });
+    const streamed = await thread.runStreamed("Add hello.txt containing hello.", {
+      outputSchema: CODING_OUTPUT_JSON_SCHEMA,
+      signal: AbortSignal.timeout(90_000),
+    });
+    const events: Array<{ type: string; item?: { type: string } }> = [];
+    let failure: unknown;
+    try {
+      for await (const event of streamed.events) events.push(event);
+    } catch (error) {
+      failure = error;
+    }
+
+    const responses = gateway.observed.filter((entry) => entry.url.startsWith("/v1/responses"));
+    // Printed so the recorded outcome is evidence, not assertion (booleans only).
+    process.stderr.write(`[codex-header-mode] ${JSON.stringify(gateway.observed)}\n`);
+    expect(responses.length).toBeGreaterThanOrEqual(1);
+    expect(responses.every((entry) => entry.apiKeyIsPlaceholder)).toBe(true);
+    // Outcome A: Codex sets no Authorization at all in header mode.
+    expect(responses.every((entry) => !entry.hasAuthorization)).toBe(true);
+    expect(failure).toBeUndefined();
+    expect(responses.length).toBeGreaterThanOrEqual(3);
+    expect(rejected).toEqual([]);
+    expect(audit.filter((event) => event.type === "request.rejected")).toEqual([]);
+    expect(events.map((event) => event.type)).toContain("turn.completed");
+    expect(events.map((event) => event.type)).not.toContain("turn.failed");
+    expect(events.some((event) => event.item?.type === "command_execution")).toBe(true);
+    const sent = JSON.stringify(forwarded);
+    expect(sent).not.toContain(PLACEHOLDER_CAPABILITY);
+    expect(sent).not.toContain(session.capability);
+    const itemTypes = new Set(
+      forwarded.flatMap((body) => (body.input as Array<{ type: string }>).map((item) => item.type)),
+    );
+    expect(itemTypes).toContain("custom_tool_call_output");
+    expect(sent).toContain("data:image/png;base64,");
+  }, 120_000);
 });
 
 /**

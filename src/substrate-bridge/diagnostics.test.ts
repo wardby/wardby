@@ -1,5 +1,14 @@
+import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { LineTail, findWorkerDiagnostic, parseWorkerDiagnosticLine, redactExact } from "./diagnostics.js";
+import { PLACEHOLDER_CAPABILITY, REDACTED } from "./constants.js";
+import {
+  LINE_OMITTED,
+  LineTail,
+  findWorkerDiagnostic,
+  parseWorkerDiagnosticLine,
+  pipeRedacted,
+  redactExact,
+} from "./diagnostics.js";
 
 const REGISTRY_TOKEN = "rrg_fake_registry_token_0000001";
 
@@ -69,5 +78,57 @@ describe("findWorkerDiagnostic", () => {
     expect(parseWorkerDiagnosticLine('{"error":"coding_output_invalid","issues":["ok:fine","sk-SECRET"]}')).toEqual({
       diagnostic: "coding_output_invalid",
     });
+  });
+});
+
+describe("pipeRedacted", () => {
+  const capture = (): { write(text: string): void; text(): string } => {
+    let text = "";
+    return { write: (piece) => void (text += piece), text: () => text };
+  };
+
+  it("passes lines on redacted by exact value, a value split across chunks included", async () => {
+    const stream = new PassThrough();
+    const out = capture();
+    const done = pipeRedacted(stream, out, () => [PLACEHOLDER_CAPABILITY, REGISTRY_TOKEN]);
+    stream.write(`cap=${PLACEHOLDER_CAPABILITY} tok=${REGISTRY_TOKEN.slice(0, 9)}`);
+    stream.write(`${REGISTRY_TOKEN.slice(9)} end\nplain line\r\n`);
+    stream.end(`{"registryToken":"${REGISTRY_TOKEN}"}`);
+    await done;
+    expect(out.text()).toBe(`cap=${REDACTED} tok=${REDACTED} end\nplain line\n{"registryToken":"${REDACTED}"}\n`);
+    expect(out.text()).not.toContain(REGISTRY_TOKEN);
+    expect(out.text()).not.toContain(PLACEHOLDER_CAPABILITY);
+  });
+
+  it("reads the secret list for every line, so a value learned later is covered from then on", async () => {
+    const stream = new PassThrough();
+    const out = capture();
+    const secrets: string[] = [];
+    const done = pipeRedacted(stream, out, () => secrets);
+    secrets.push(REGISTRY_TOKEN);
+    stream.end(`${REGISTRY_TOKEN}\n`);
+    await done;
+    expect(out.text()).toBe(`${REDACTED}\n`);
+  });
+
+  it("writes an over-long line as the fixed marker, never a piece of it", async () => {
+    const stream = new PassThrough();
+    const out = capture();
+    const done = pipeRedacted(stream, out, () => [REGISTRY_TOKEN], 32);
+    stream.write(`${"x".repeat(20)}${REGISTRY_TOKEN.slice(0, 10)}`);
+    stream.end(`${REGISTRY_TOKEN.slice(10)}\nshort\n`);
+    await done;
+    expect(out.text()).toBe(`${LINE_OMITTED}\nshort\n`);
+  });
+
+  it("decodes a multi-byte character split across chunks whole", async () => {
+    const stream = new PassThrough();
+    const out = capture();
+    const done = pipeRedacted(stream, out, () => []);
+    const bytes = Buffer.from("caf\u00e9\n");
+    stream.write(bytes.subarray(0, 4));
+    stream.end(bytes.subarray(4));
+    await done;
+    expect(out.text()).toBe("caf\u00e9\n");
   });
 });

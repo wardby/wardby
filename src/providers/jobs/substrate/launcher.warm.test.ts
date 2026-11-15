@@ -1023,3 +1023,24 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     if (logger.isLevelEnabled("info")) expect(stdout.join("")).toContain("substrate_warm_not_adopted");
   });
 });
+
+describe("warm rounds and Codex (single actor)", () => {
+  it("never parks a succeeded Codex run: retain removes it and answers false", async () => {
+    const h = await makeHarness({ provider: "codex", warmRounds: WARM });
+    const handle = await h.launcher.launch(h.spec);
+    await h.blobs.put(BLOB.result(h.token), Buffer.from(JSON.stringify(h.output)));
+    await h.blobs.put(BLOB.done(h.token), Buffer.from('{"workspace":"ok"}'));
+    expect(await h.launcher.status(handle)).toEqual({ state: "succeeded" });
+    const suspended: string[] = [];
+    h.api.suspendActor = async (_atespace, name) => {
+      suspended.push(name);
+    };
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(false);
+    expect(suspended).toEqual([]);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("removed");
+    expect(await h.runs.countParked()).toBe(0);
+    expect(h.api.actors.size).toBe(0);
+    expect(h.secrets.secrets.size).toBe(0);
+    expect(h.warmEvents).toEqual([]);
+  });
+});

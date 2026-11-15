@@ -30,6 +30,7 @@ import {
   dependencyCacheTimeLimit,
 } from "./dependency-cache.mjs";
 import { createDebugTracer } from "./debug-trace.js";
+import { INJECTED_CAPABILITY_PLACEHOLDER } from "./credentials.js";
 
 async function tempWorkspace(): Promise<string> {
   return mkdtemp(join(tmpdir(), "wardby-driver-"));
@@ -209,6 +210,61 @@ describe("runCodingWorker", () => {
     expect(env.PIP_INDEX_URL).toContain(deriveRegistryToken(capability));
     expect(JSON.stringify(env)).not.toContain(capability);
     expect(await readFile(join(workspace, ".cache", "npm", "npmrc"), "utf8")).toContain("_authToken=rrg_");
+  });
+
+  it("Substrate header mode: npm and pip get the given registry token, and the client the header", async () => {
+    const workspace = await tempWorkspace();
+    const registryToken = `rrg_${"F".repeat(43)}`;
+    const capture: { config?: WorkerClientConfig } = {};
+    const output = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "None.",
+      tests: [],
+    });
+    await runCodingWorker({
+      input,
+      workspace,
+      proxyBaseUrl: "http://proxy:8080",
+      capability: INJECTED_CAPABILITY_PLACEHOLDER,
+      registryToken,
+      capabilityHeader: "x-api-key",
+      signal: new AbortController().signal,
+      createClient: clientFor([{ type: "item.completed", item: { type: "agent_message", text: output } }], capture),
+    });
+    const derived = deriveRegistryToken(INJECTED_CAPABILITY_PLACEHOLDER);
+    const npmrc = await readFile(join(workspace, ".cache", "npm", "npmrc"), "utf8");
+    expect(npmrc).toContain(`_authToken=${registryToken}`);
+    expect(npmrc).not.toContain(derived);
+    const env = capture.config!.environment;
+    expect(env.PIP_INDEX_URL).toContain(registryToken);
+    expect(JSON.stringify(env)).not.toContain(derived);
+    expect(JSON.stringify(env)).not.toContain(INJECTED_CAPABILITY_PLACEHOLDER);
+    expect(capture.config).toMatchObject({
+      capability: INJECTED_CAPABILITY_PLACEHOLDER,
+      capabilityHeader: "x-api-key",
+    });
+  });
+
+  it("without header mode the client config has no capabilityHeader at all", async () => {
+    const capture: { config?: WorkerClientConfig } = {};
+    const output = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "None.",
+      tests: [],
+    });
+    await runCodingWorker({
+      input,
+      workspace: await tempWorkspace(),
+      proxyBaseUrl: "http://proxy:8080",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      createClient: clientFor([{ type: "item.completed", item: { type: "agent_message", text: output } }], capture),
+    });
+    expect("capabilityHeader" in capture.config!).toBe(false);
   });
 
   it("hands the run's service variables to the agent's shells, never over its own", async () => {
@@ -603,7 +659,13 @@ describe("runCodingWorker dependency cache", () => {
     loadDependencyCache: () => Promise<DependencyCacheModule>,
     capture: { config?: WorkerClientConfig; thread?: unknown; prompt?: string } = {},
     order: string[] = [],
-    extra: { proxyBaseUrl?: string; signal?: AbortSignal; workspace?: string } = {},
+    extra: {
+      proxyBaseUrl?: string;
+      signal?: AbortSignal;
+      workspace?: string;
+      capability?: string;
+      registryToken?: string;
+    } = {},
   ) {
     const workspace = extra.workspace ?? (await tempWorkspace());
     const createClient = clientFor(
@@ -614,7 +676,8 @@ describe("runCodingWorker dependency cache", () => {
       input: runInput,
       workspace,
       proxyBaseUrl: extra.proxyBaseUrl ?? "http://proxy:8080",
-      capability: "rrp_worker_capability",
+      capability: extra.capability ?? "rrp_worker_capability",
+      ...(extra.registryToken ? { registryToken: extra.registryToken } : {}),
       signal: extra.signal ?? new AbortController().signal,
       createClient: (config) => {
         order.push("client");
@@ -782,6 +845,31 @@ describe("runCodingWorker dependency cache", () => {
         },
       ]);
       expect(output.dependencyCache).toEqual({ projects: [], reason: "worker_error" });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("a module that won't load on Substrate: the driver seals with the given registry token", async () => {
+    const registryToken = `rrg_${"F".repeat(43)}`;
+    const authorizations: (string | undefined)[] = [];
+    const server = createServer((request, response) => {
+      authorizations.push(request.headers.authorization);
+      response.writeHead(200, { "content-type": "application/json" }).end('{"sealed":true}');
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      await run(
+        cacheInput,
+        async () => {
+          throw new Error("ERR_MODULE_NOT_FOUND");
+        },
+        {},
+        [],
+        { proxyBaseUrl: `http://127.0.0.1:${port}`, capability: INJECTED_CAPABILITY_PLACEHOLDER, registryToken },
+      );
+      expect(authorizations).toEqual([`Bearer ${registryToken}`]);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

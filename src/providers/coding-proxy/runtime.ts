@@ -13,6 +13,7 @@ import type { UpstreamFetch } from "../../coding/registry/types.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
 import { loadBlobStoreConfig, substrateProxyPort } from "../../config/providers.js";
 import { substrateRunToken } from "../jobs/substrate/names.js";
+import type { SubstrateActorShape } from "../jobs/substrate/run-store.js";
 import { createBlobStore, type BlobStoreConfig } from "../storage/index.js";
 import type { BlobStore } from "../storage/types.js";
 import { startEviction } from "./dependency-cache/eviction.js";
@@ -152,6 +153,21 @@ export interface SubstrateProxyConfig {
  * The Host values actor requests carry: `<SUBSTRATE_PROXY_HOST>:<SUBSTRATE_PROXY_PORT>`, and the bare
  * host on port 80, which HTTP clients leave out of the Host header.
  */
+/**
+ * A run's actor shape by its token, from its SubstrateRun row (wardby_proxy has SELECT on it): `single`
+ * only when the row says so, any other value `pair` (today's behaviour), and undefined when there is
+ * no row (the routes treat it as `pair` without remembering it).
+ */
+export function substrateActorShapeLookup(
+  db: Pick<PrismaClient, "substrateRun">,
+): (token: string) => Promise<SubstrateActorShape | undefined> {
+  return async (token) => {
+    const row = await db.substrateRun.findUnique({ where: { token }, select: { actorShape: true } });
+    if (!row) return undefined;
+    return row.actorShape === "single" ? "single" : "pair";
+  };
+}
+
 export function substrateExpectedHosts(config: Pick<SubstrateProxyConfig, "proxyHost" | "proxyPort">): string[] {
   const withPort = `${config.proxyHost}:${config.proxyPort}`;
   return config.proxyPort === 80 ? [withPort, config.proxyHost] : [withPort];
@@ -334,6 +350,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
               (await options.db.substrateRun.findUnique({ where: { runId }, select: { token: true } }))?.token ??
               substrateRunToken(runId)
           : substrateRunToken,
+        actorShapeForToken: substrateActorShapeLookup(options.db),
         ...(substrateConfig.warmRounds ? { warmRounds: true } : {}),
         limits: substrateConfig.limits,
       })

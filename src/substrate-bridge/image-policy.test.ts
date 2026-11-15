@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 describe.each([
   { file: "Dockerfile.agent", entrypoint: "/opt/wardby/substrate-bridge/agent.js" },
   { file: "Dockerfile.tool", entrypoint: "/opt/wardby/substrate-bridge/tool.js" },
+  { file: "Dockerfile.codex", entrypoint: "/opt/wardby/substrate-bridge/codex.js" },
 ])("Substrate bridge image policy: $file", ({ file, entrypoint }) => {
   it("builds only on a required BASE, runs as non-root and carries no secrets", async () => {
     const dockerfile = await readFile(new URL(`./${file}`, import.meta.url), "utf8");
@@ -28,4 +29,15 @@ describe.each([
       "COPY dist/substrate-bridge/ /opt/wardby/substrate-bridge/",
     ]);
   });
+});
+
+it("adds no package manager, downloader or remote shell on top of the Codex worker image", async () => {
+  const dockerfile = await readFile(new URL("./Dockerfile.codex", import.meta.url), "utf8");
+  const commands = dockerfile
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("#"));
+  for (const word of ["apt-get", "apt", "apk", "curl", "wget", "ssh", "npm", "pip"]) {
+    expect(commands.some((line) => new RegExp(`\\b${word}\\b`).test(line))).toBe(false);
+  }
 });

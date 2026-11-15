@@ -212,6 +212,14 @@ async function bundleResults(options: WorkerRunOptions, module: ResultBundleModu
   }
 }
 
+/**
+ * The run's registry-only token: the one the worker was handed (Substrate, where the capability is
+ * the gateway's placeholder), else derived from the capability as on Docker/Kubernetes.
+ */
+function runRegistryToken(options: WorkerRunOptions): string {
+  return options.registryToken ?? deriveRegistryToken(options.capability);
+}
+
 /** How long the driver's own fallback seal may take (the module's is bounded the same way). */
 const FALLBACK_SEAL_TIMEOUT_MS = 10_000;
 
@@ -224,7 +232,7 @@ async function fallbackSeal(options: WorkerRunOptions): Promise<void> {
   try {
     await fetch(new URL("/cache/npm/seal", options.proxyBaseUrl), {
       method: "POST",
-      headers: { authorization: `Bearer ${deriveRegistryToken(options.capability)}` },
+      headers: { authorization: `Bearer ${runRegistryToken(options)}` },
       signal: AbortSignal.timeout(FALLBACK_SEAL_TIMEOUT_MS),
     });
   } catch {
@@ -361,7 +369,7 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
   }
   const registry = registryWorkerSetup({
     proxyBaseUrl: options.proxyBaseUrl,
-    capability: options.capability,
+    token: runRegistryToken(options),
     cacheRoot: workspaceCacheRoot(options.workspace),
   });
   for (const file of registry.files) {
@@ -400,6 +408,7 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     // but a shell command can still read it from /proc (same uid): treat it as readable by the
     // repository's code.
     ...(options.mcpToken ? { mcpToken: options.mcpToken } : {}),
+    ...(options.capabilityHeader ? { capabilityHeader: options.capabilityHeader } : {}),
   });
   const thread = client.startThread({
     model: options.input.model,

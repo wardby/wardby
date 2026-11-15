@@ -14,6 +14,7 @@ import {
   loadRunStepsUrl,
   loadSubstrateProxyConfig,
   startConfiguredCodingProxy,
+  substrateActorShapeLookup,
 } from "./runtime.js";
 import type { CodingProxyServerHandle } from "./server.js";
 import type { ProxyAuditEvent } from "./types.js";
@@ -135,6 +136,21 @@ describe("configured coding proxy runtime", () => {
     expect(on.dependencyCache).toBeInstanceOf(DependencyCacheService);
     expect(on.sealsOnModelRequest).toBe(true);
     expect((on.dependencyCache as DependencyCacheService).uploadMs).toBe(900_000);
+  });
+
+  it("reads a Substrate run's actor shape from its row by token: single only when the row says so", async () => {
+    const rows: Record<string, { actorShape: string }> = {
+      "wr-single": { actorShape: "single" },
+      "wr-pair": { actorShape: "pair" },
+      "wr-odd": { actorShape: "other" },
+    };
+    const findUnique = vi.fn(async ({ where }: { where: { token: string } }) => rows[where.token] ?? null);
+    const lookup = substrateActorShapeLookup({ substrateRun: { findUnique } } as unknown as PrismaClient);
+    expect(await lookup("wr-single")).toBe("single");
+    expect(await lookup("wr-pair")).toBe("pair");
+    expect(await lookup("wr-odd")).toBe("pair");
+    expect(await lookup("wr-missing")).toBeUndefined();
+    expect(findUnique).toHaveBeenCalledWith({ where: { token: "wr-single" }, select: { actorShape: true } });
   });
 
   it("mounts the Substrate routes only when SUBSTRATE_ATESPACE is set, and names what is missing", async () => {

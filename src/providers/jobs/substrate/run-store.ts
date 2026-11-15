@@ -29,6 +29,9 @@ export type SubstratePhase =
   | "parked"
   | "adopted";
 
+/** pair = agent + tool actors (Claude Code); single = one agent actor that also holds the workspace (Codex). */
+export type SubstrateActorShape = "pair" | "single";
+
 export interface SubstrateRunRecord {
   runId: string;
   token: string;
@@ -49,6 +52,8 @@ export interface SubstrateRunRecord {
   parkedAt?: Date;
   /** Warm rounds: why this continuation launched cold (set on claim, or on reclaim of a refused adopter). */
   coldReason?: WarmColdReason;
+  /** Set on claim (absent = pair); always present on a record the store returns. An adopter is always pair. */
+  actorShape?: SubstrateActorShape;
   /**
    * Set by the store (ignored on claim): when the row last changed. While a run is `running` and
    * neither actor has reached the proxy, that is when it became running: the relay's own writes to
@@ -140,6 +145,7 @@ interface Row {
   fingerprint: string | null;
   parkedAt: Date | null;
   coldReason: string | null;
+  actorShape: string;
   updatedAt: Date;
 }
 
@@ -156,6 +162,7 @@ function toRecord(row: Row): SubstrateRunRecord {
     ...(row.fingerprint !== null ? { fingerprint: row.fingerprint } : {}),
     ...(row.parkedAt !== null ? { parkedAt: row.parkedAt } : {}),
     ...(row.coldReason !== null ? { coldReason: row.coldReason as WarmColdReason } : {}),
+    actorShape: row.actorShape === "single" ? "single" : "pair",
     updatedAt: row.updatedAt,
   };
 }
@@ -185,6 +192,7 @@ export class PrismaSubstrateRunStore implements SubstrateRunStore {
           round: record.round ?? 1,
           agentId: record.agentId ?? null,
           coldReason: record.coldReason ?? null,
+          actorShape: record.actorShape ?? "pair",
         },
       });
       return { created: true, record: toRecord(row) };
@@ -285,6 +293,7 @@ export class PrismaSubstrateRunStore implements SubstrateRunStore {
             deadlineAt: newDeadline,
             round: parked.round + 1,
             agentId: fields.agentId ?? null,
+            actorShape: "pair",
           },
         });
         return toRecord(row);
@@ -329,6 +338,7 @@ export class MemorySubstrateRunStore implements SubstrateRunStore {
       round: record.round ?? 1,
       ...(record.agentId !== undefined ? { agentId: record.agentId } : {}),
       ...(record.coldReason !== undefined ? { coldReason: record.coldReason } : {}),
+      actorShape: record.actorShape ?? "pair",
       updatedAt: new Date(this.now()),
     };
     this.rows.set(record.runId, row);
@@ -411,6 +421,7 @@ export class MemorySubstrateRunStore implements SubstrateRunStore {
       deadlineAt: newDeadline,
       round: (parked.round ?? 1) + 1,
       ...(fields.agentId !== undefined ? { agentId: fields.agentId } : {}),
+      actorShape: "pair",
       updatedAt: new Date(this.now()),
     };
     this.rows.set(newRunId, row);

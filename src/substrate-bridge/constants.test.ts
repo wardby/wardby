@@ -1,5 +1,10 @@
+import { readFile } from "node:fs/promises";
 import { expect, it } from "vitest";
 import {
+  CAPABILITY_HEADER_ENV,
+  CODEX_WORKER_ENTRY,
+  REGISTRY_TOKEN_ENV,
+  REGISTRY_TOKEN_SHAPE,
   AGENT_SUFFIX,
   ACTOR_JWT_HEADER,
   DIAGNOSTICS_TAIL,
@@ -21,6 +26,12 @@ import {
   toolActorName,
 } from "../providers/jobs/substrate/names.js";
 import { tarExcludeArgs as bridgeTarExcludeArgs } from "./tar.js";
+import {
+  CAPABILITY_HEADER_ENV as WORKER_CAPABILITY_HEADER_ENV,
+  INJECTED_CAPABILITY_PLACEHOLDER,
+  REGISTRY_TOKEN_ENV as WORKER_REGISTRY_TOKEN_ENV,
+  REGISTRY_TOKEN_SHAPE as WORKER_REGISTRY_TOKEN_SHAPE,
+} from "../coding-worker/credentials.js";
 import { collectExclusions, tarExcludeArgs } from "../coding/collect-exclude.js";
 import {
   MAX_CODING_OUTPUT_ISSUES as PROTOCOL_MAX_CODING_OUTPUT_ISSUES,
@@ -35,6 +46,8 @@ import { parseWorkerDiagnosticLine as bridgeParseWorkerDiagnosticLine } from "./
 
 it("matches the launcher's names", () => {
   expect(PLACEHOLDER_CAPABILITY).toBe(LAUNCHER_CAPABILITY);
+  // The Codex worker checks for this exact placeholder before it goes into header mode.
+  expect(INJECTED_CAPABILITY_PLACEHOLDER).toBe(PLACEHOLDER_CAPABILITY);
   const token = substrateRunToken("run-1");
   expect(RUN_TOKEN_PATTERN.test(token)).toBe(true);
   expect(agentActorName(token)).toBe(`${token}${AGENT_SUFFIX}`);
@@ -93,4 +106,17 @@ it("matches the warm-rounds values of the launcher, the names and the worker", a
 
 it("names the same result bundle as the launcher", () => {
   expect(BRIDGE_RESULT_BUNDLE_FILE).toBe(RESULT_BUNDLE_FILE);
+});
+
+it("matches the Codex worker's header-mode environment and entry point", async () => {
+  expect(CAPABILITY_HEADER_ENV).toBe(WORKER_CAPABILITY_HEADER_ENV);
+  expect(REGISTRY_TOKEN_ENV).toBe(WORKER_REGISTRY_TOKEN_ENV);
+  expect(REGISTRY_TOKEN_SHAPE.source).toBe(WORKER_REGISTRY_TOKEN_SHAPE.source);
+  expect(REGISTRY_TOKEN_SHAPE.flags).toBe(WORKER_REGISTRY_TOKEN_SHAPE.flags);
+  // Both bases Dockerfile.codex is built on.
+  for (const file of ["Dockerfile", "Dockerfile.node-python"]) {
+    const dockerfile = await readFile(new URL(`../coding-worker/${file}`, import.meta.url), "utf8");
+    const entrypoint = /^ENTRYPOINT\s+\["node",\s*"([^"]+)"\]/m.exec(dockerfile);
+    expect(entrypoint?.[1]).toBe(CODEX_WORKER_ENTRY);
+  }
 });

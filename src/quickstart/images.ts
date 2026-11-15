@@ -24,6 +24,9 @@ export interface QuickstartImages {
   substrateAgent?: string;
   substrateTool?: string;
   substrateToolNodePython?: string;
+  /** The Codex worker images with the bridge as entrypoint (one actor per run); optional and pinned, as above. */
+  substrateCodex?: string;
+  substrateCodexNodePython?: string;
   source: "env" | "package" | "build";
 }
 
@@ -42,9 +45,18 @@ type PackageImages = Pick<
   | "substrateAgent"
   | "substrateTool"
   | "substrateToolNodePython"
+  | "substrateCodex"
+  | "substrateCodexNodePython"
 >;
 
-const OPTIONAL_PINNED = ["nativeWorker", "substrateAgent", "substrateTool", "substrateToolNodePython"] as const;
+const OPTIONAL_PINNED = [
+  "nativeWorker",
+  "substrateAgent",
+  "substrateTool",
+  "substrateToolNodePython",
+  "substrateCodex",
+  "substrateCodexNodePython",
+] as const;
 
 function readPackageImages(packageRoot: string): PackageImages | undefined {
   try {

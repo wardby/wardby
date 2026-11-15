@@ -101,6 +101,37 @@ export function agentTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Act
   };
 }
 
+/**
+ * The Codex run's one actor (the single shape): the Codex bridge and worker in one container, with
+ * the run's whole size (as Kubernetes gives Codex), and the workspace on its own durable volume.
+ * Never the warm-rounds env: Codex rounds always start cold, so the bridge never stays for one.
+ */
+export function codexTemplate(spec: JobSpec, config: SubstrateLaunchConfig): ActorTemplateSpec {
+  const size = toSize(spec.limits.cpus, spec.limits.memoryMb);
+  const cold = { ...config, warmRounds: false };
+  return {
+    atespace: config.atespace,
+    name: templateName("codex", spec.image, size.cpuMillicores, size.memoryBytes, templateVariant(cold)),
+    ...(config.workerSelector ? { workerSelector: config.workerSelector } : {}),
+    containers: [
+      {
+        name: "agent",
+        image: spec.image,
+        env: workerEnv(cold),
+        wakeupProbe: { path: "/readyz", port: READY_PORT },
+        volumeMounts: [
+          { name: "run", mountPath: "/run/wardby" },
+          { name: "workspace", mountPath: "/workspace" },
+          actorMount,
+        ],
+      },
+    ],
+    volumes: [{ name: "run", durableDir: true }, { name: "workspace", durableDir: true }, actorVolume],
+    ...size,
+    snapshotFidelity: "MEMORY",
+  };
+}
+
 export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): ActorTemplateSpec {
   if (!spec.toolImage) throw new Error("substrate_tool_image_missing");
   const size = toolSize(spec);

@@ -1,9 +1,9 @@
 ---
 id: job-launcher-substrate
 title: Run coding agents on Substrate (experimental)
-summary: JOB_LAUNCHER=substrate runs Claude Code coding runs as two gVisor-sandboxed Agent Substrate actors with no Wardby secret inside; requirements, variables, limits and how it compares with the Docker and Kubernetes launchers.
+summary: JOB_LAUNCHER=substrate runs Claude Code coding runs as two gVisor-sandboxed Agent Substrate actors, and Codex runs as one, with no Wardby secret inside; requirements, variables, limits and how it compares with the Docker and Kubernetes launchers.
 audience: operator
-tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, SUBSTRATE_ATESPACE, SUBSTRATE_PROXY_PORT, images]
+tags: [substrate, job launcher, JOB_LAUNCHER, gVisor, experimental, codex, images]
 appliesTo: ">=0.9.15"
 ---
 
@@ -12,21 +12,22 @@ appliesTo: ">=0.9.15"
 `JOB_LAUNCHER=substrate` is an experimental job launcher, next to `docker` and
 `kubernetes`. It runs each Claude Code coding run as two
 [Agent Substrate](https://github.com/agent-substrate) actors under gVisor: an
-agent actor (the worker) and a tool actor (the commands). Neither holds a
-Wardby secret; Substrate's egress gateway adds the run capability to the
-agent's requests, and the only destination either actor may reach is the coding
-proxy.
+agent actor (the worker) and a tool actor (the commands). A Codex coding run is
+one actor, which runs the worker and its commands and holds the workspace.
+Neither shape holds a Wardby secret; Substrate's egress gateway adds the run
+capability to the agent's requests, and the only destination either actor may
+reach is the coding proxy.
 
 ## Choose it when
 
 - your cluster already runs Substrate 1.0 or later (GKE Standard, not
   Autopilot) and you want its isolation and credential-free actors;
-- your coding agents are Claude Code, without coding services, MCP tools, the
-  dependency cache, extra repositories or a custom worker image
+- your coding agents are Claude Code or Codex, without coding services, MCP
+  tools, the dependency cache, extra repositories or a custom worker image
   (`workerImageRef`).
 
-Otherwise use `kubernetes` (or `docker`): they support Codex and every coding
-feature. A run that needs a feature the Substrate backend lacks fails with
+Otherwise use `kubernetes` (or `docker`): they support every coding feature. A
+run that needs a feature the Substrate backend lacks fails with
 [substrate_feature_unsupported](errors/substrate-feature-unsupported.md).
 
 ## Set up
@@ -40,8 +41,10 @@ feature. A run that needs a feature the Substrate backend lacks fails with
    for the Node + Python toolchain,
    `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` to
    `substrateToolNodePython`, each from `dist/quickstart-images.json` in the
-   installed npm package. For your own images, build the bridge onto them from
-   a checkout (see Images in the
+   installed npm package. For Codex agents set `CODING_WORKER_IMAGE` to
+   `substrateCodex` and, for the Node + Python toolchain,
+   `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` to `substrateCodexNodePython`. For
+   your own images, build the bridge onto them from a checkout (see Images in the
    [Substrate backend guide](../docs/substrate-backend.md#images)).
 3. Set one blob store (`BLOB_STORE`) on both the control plane and the coding
    proxy.
@@ -59,6 +62,16 @@ feature. A run that needs a feature the Substrate backend lacks fails with
    `NODE_EXTRA_CA_CERTS` on the proxy to the CA bundle from the
    `servicedns.podcert.ate.dev` ClusterTrustBundle.
 
+Run the coding proxy of the same release before sending Codex runs, and apply
+the `20261121000000_substrate_codex_shape` migration (`prisma migrate deploy`)
+before the new control plane and proxy start.
+
+## Worker images
+
+The agent actor runs a Substrate bridge image, not the plain worker image: set
+`CODING_CLAUDE_WORKER_IMAGE` for Claude Code and `CODING_WORKER_IMAGE` for
+Codex to the bridge images by digest (step 2 above).
+
 Every variable, default and limit is in the
 [Substrate backend guide](../docs/substrate-backend.md).
 
@@ -66,6 +79,7 @@ Every variable, default and limit is in the
 
 With `SUBSTRATE_WARM_ROUNDS=true` a finished round is kept suspended and the
 next round of the same run chain resumes it, workspace and session included.
+This is Claude Code only; Codex rounds always start fresh.
 See [Warm rounds on Substrate](substrate-warm-rounds.md).
 
 ## When a run fails
@@ -86,8 +100,8 @@ See [Warm rounds on Substrate](substrate-warm-rounds.md).
 - [substrate_result_missing](errors/substrate-result-missing.md): the run ended
   without a usable result.
 - [substrate_feature_unsupported](errors/substrate-feature-unsupported.md): the
-  run needs Codex, services, MCP tools, the dependency cache, extra repositories
-  or a custom worker image.
+  run needs services, MCP tools, the dependency cache, extra repositories or a
+  custom worker image.
 - At launch, from the deployment's settings:
   [substrate_image_not_digest](errors/substrate-image-not-digest.md),
   [substrate_seed_too_large](errors/substrate-seed-too-large.md) and

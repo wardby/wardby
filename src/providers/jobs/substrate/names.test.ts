@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { assertValidBlobKey } from "../../storage/types.js";
-import { BLOB, agentActorName, substrateRunToken, templateName, toolActorSubject } from "./names.js";
+import {
+  BLOB,
+  actorNamesFor,
+  agentActorName,
+  substrateRunToken,
+  templateName,
+  toolActorName,
+  toolActorSubject,
+} from "./names.js";
 
 describe("substrate names", () => {
   it("derives stable, label-safe names from the run id", () => {
@@ -16,6 +24,18 @@ describe("substrate names", () => {
     expect(templateName("agent", "r@sha256:bb", 1000, 2 ** 30, "v1")).not.toBe(a);
     expect(templateName("agent", "r@sha256:aa", 1000, 2 ** 30, "v2")).not.toBe(a);
     expect(templateName("agent", "r@sha256:aa", 1000, 2 ** 30, "v1")).toBe(a);
+  });
+  it("names a Codex template with its own role, never an agent template's name", () => {
+    const codex = templateName("codex", "r@sha256:aa", 1000, 2 ** 30, "v1");
+    expect(codex).toMatch(/^wardby-codex-[0-9a-f]{16}$/);
+    expect(codex.slice("wardby-codex-".length)).not.toBe(
+      templateName("agent", "r@sha256:aa", 1000, 2 ** 30, "v1").slice("wardby-agent-".length),
+    );
+  });
+  it("lists a run's actors by shape", () => {
+    const t = substrateRunToken("x");
+    expect(actorNamesFor(t, "pair")).toEqual([agentActorName(t), toolActorName(t)]);
+    expect(actorNamesFor(t, "single")).toEqual([agentActorName(t)]);
   });
   it("produces valid blob keys", () => {
     const t = substrateRunToken("x");

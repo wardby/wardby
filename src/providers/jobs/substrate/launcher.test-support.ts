@@ -18,6 +18,8 @@ export const FAKE_CAP = "rrp_fake_capability_value_000001";
 /** The configured bridge tool images (the default toolchain's and a per-toolchain one). */
 export const TOOL_IMAGE = `registry.example/tool@sha256:${"b".repeat(64)}`;
 export const PYTHON_TOOL_IMAGE = `registry.example/tool-python@sha256:${"c".repeat(64)}`;
+/** The configured Codex bridge image (the Codex worker built on the Substrate Codex bridge). */
+export const CODEX_IMAGE = `registry.example/substrate-codex@sha256:${"d".repeat(64)}`;
 export const ATESPACE = "wardby-runs";
 export const CONFIG: SubstrateLaunchConfig = {
   atespace: ATESPACE,
@@ -118,6 +120,8 @@ export async function makeHarness(
     warmRounds?: WarmRoundsOptions;
     /** The capability per run (default FAKE_CAP for every run). */
     capabilityFor?: (runId: string) => string;
+    /** "codex": the spec is a Codex run (one actor) on CODEX_IMAGE, with no tool image. */
+    provider?: "claude-code" | "codex";
   } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "wardby-substrate-launcher-"));
@@ -148,6 +152,7 @@ export async function makeHarness(
     secrets,
     relay,
     bridgeToolImages: [TOOL_IMAGE, PYTHON_TOOL_IMAGE],
+    bridgeCodexImages: [CODEX_IMAGE],
     config: { ...CONFIG, ...options.config },
     workspaceRoot,
     resolveCapability: async (id) => options.capabilityFor?.(id) ?? FAKE_CAP,
@@ -160,9 +165,13 @@ export async function makeHarness(
   const spec: JobSpec = {
     kind: "coding-agent",
     runId,
-    provider: "claude-code",
-    image: `registry.example/agent@sha256:${"a".repeat(64)}`,
-    toolImage: TOOL_IMAGE,
+    ...(options.provider === "codex"
+      ? { provider: "codex" as const, image: CODEX_IMAGE }
+      : {
+          provider: "claude-code" as const,
+          image: `registry.example/agent@sha256:${"a".repeat(64)}`,
+          toolImage: TOOL_IMAGE,
+        }),
     inputArtifact,
     timeoutSec: 600,
     limits: { cpus: 1, memoryMb: 1024, pids: 256, diskMb: 64 },

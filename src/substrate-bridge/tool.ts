@@ -12,8 +12,7 @@
  * (the proxy refuses a tool-side one; see routes.ts). Its children's stderr goes to the actor's log.
  */
 import { spawn } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +24,6 @@ import {
   requireProxyUrl,
   startReadyServer,
   stderrLogger,
-  uploadFile,
   waitForRound,
   waitForRunToken,
   withRound,
@@ -39,13 +37,15 @@ import {
   GATEWAY_ACTOR_JWT_PLACEHOLDER,
   MAX_ROUND,
   NEXT_ROUND_POLL_MS,
-  RESULT_BUNDLE_FILE,
   WARM_ROUNDS_ENV,
 } from "./constants.js";
 import { waitAtMost } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
-import { checkTarFile, parseCollectExclusions, tarExcludeArgs, type CollectExclusions } from "./tar.js";
+import { parseCollectExclusions, type CollectExclusions } from "./tar.js";
+import { collectWorkspace, extractSeed, fetchSetup, signalGroup } from "./workspace.js";
+
+export { signalGroup as signalRunnerGroup, type GroupSignalTarget } from "./workspace.js";
 
 const MAX_LINE_CHARS = 4 * 1024 * 1024;
 const EVENTS_TIMEOUT_MS = 30_000;
@@ -117,54 +117,6 @@ export interface ToolHandle {
   close(): Promise<void>;
 }
 
-/** The part of a child process the group signalling needs (a seam for tests). */
-export interface GroupSignalTarget {
-  pid?: number | undefined;
-  exitCode: number | null;
-  signalCode: NodeJS.Signals | null;
-  kill(signal: NodeJS.Signals): boolean;
-}
-
-const errnoOf = (err: unknown): string | undefined => (err as NodeJS.ErrnoException | null)?.code;
-
-/**
- * Signals a runner's process group. ESRCH means nothing is left in the group; EPERM falls back to
- * the runner process alone; anything else is logged as a fixed-field event, never thrown. A SIGKILL
- * after the runner already exited is skipped once the group is gone, so a recycled pid is never hit.
- */
-export function signalRunnerGroup(
-  child: GroupSignalTarget,
-  signal: NodeJS.Signals,
-  killFn: (pid: number, signal: NodeJS.Signals | 0) => unknown = (pid, sig) => process.kill(pid, sig),
-  log: Logger = stderrLogger,
-): void {
-  const pid = child.pid;
-  if (pid === undefined) return;
-  const runnerExited = child.exitCode !== null || child.signalCode !== null;
-  if (signal === "SIGKILL" && runnerExited) {
-    try {
-      killFn(-pid, 0);
-    } catch (err) {
-      if (errnoOf(err) === "ESRCH") return;
-    }
-  }
-  try {
-    killFn(-pid, signal);
-  } catch (err) {
-    const code = errnoOf(err);
-    if (code === "ESRCH") return;
-    if (code === "EPERM") {
-      try {
-        child.kill(signal);
-      } catch {
-        // The runner itself is gone or not ours; nothing more to signal.
-      }
-      return;
-    }
-    log("substrate_bridge_runner_signal_failed", { signal, errno: code ?? "unknown" });
-  }
-}
-
 export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: string = RUNNER_ENTRY): RunnerHandle => {
   const child = spawn(process.execPath, [entry], {
     env: { ...env, WARDBY_TOOL_SETUP: toolSetup },
@@ -172,8 +124,8 @@ export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: st
     // Its own process group, so stop and kill reach every process the runner's tools started.
     detached: true,
   });
-  const signalGroup = (signal: NodeJS.Signals): void => {
-    signalRunnerGroup(child, signal);
+  const signalChildGroup = (signal: NodeJS.Signals): void => {
+    signalGroup(child, signal);
   };
   // Passed on unchanged to the actor's log.
   child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
@@ -192,15 +144,11 @@ export const spawnRunner = (toolSetup: string, env: NodeJS.ProcessEnv, entry: st
     ready,
     exited,
     stderr: child.stderr,
-    stop: () => signalGroup("SIGTERM"),
-    kill: () => signalGroup("SIGKILL"),
+    stop: () => signalChildGroup("SIGTERM"),
+    kill: () => signalChildGroup("SIGKILL"),
   };
 };
 
-/**
- * Runs a subprocess to completion with no shell; resolves with its exit code once its stderr ended.
- * Its stderr is passed on to the bridge's.
- */
 /** The tool-setup file the proxy serves: the runner's setup plus what the bridge itself needs. */
 interface SetupFile {
   toolSetup?: unknown;
@@ -208,90 +156,6 @@ interface SetupFile {
   /** Set (true) only on a git-history run. */
   collectResultBundle?: unknown;
 }
-
-/** Why a git-history run's upload carries no result bundle (a fixed value, logged as is). */
-type BundleSkip =
-  "git_not_directory" | "absent" | "bundle_symlink" | "not_regular_file" | "git_changed" | "short_read" | "copy_failed";
-
-/**
- * The skips that mean something changed the workspace's `.git` or the bundle under the bridge: the run
- * fails (workspace-failed) instead of carrying on without the agent's commits. A missing `.git` or
- * bundle is not one of them: it is the same outcome as on Docker and Kubernetes.
- */
-const TAMPERING_SKIPS: ReadonlySet<BundleSkip> = new Set([
-  "git_not_directory",
-  "bundle_symlink",
-  "not_regular_file",
-  "git_changed",
-]);
-
-/** The collect code for a tampering skip (no real exit status of tar or the shell). */
-const TAMPERED_CODE = -1;
-
-const BUNDLE_COPY_CHUNK = 1024 * 1024;
-
-/**
- * Copies the workspace's result bundle into `staging/.git/` through one file descriptor, so what is
- * uploaded is a file the bridge read itself, never a path a tool process could still swap: `.git`
- * must be a real directory (lstat), the bundle is opened without following a symlink and without
- * blocking (a FIFO), must be a regular file, and `.git` must still be the same
- * directory (dev/ino) afterwards. Only the size fstat reported is copied. Returns the reason when
- * there is no bundle; nothing it reads is logged.
- */
-async function stageResultBundle(
-  workspace: string,
-  staging: string,
-  beforeRecheck?: () => Promise<void> | void,
-): Promise<BundleSkip | undefined> {
-  const gitPath = join(workspace, ".git");
-  const git = await lstat(gitPath).catch(() => undefined);
-  if (!git) return "absent";
-  if (!git.isDirectory()) return "git_not_directory";
-  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
-  let openError: unknown;
-  const source = await open(join(gitPath, RESULT_BUNDLE_FILE), flags).catch((error: unknown) => {
-    openError = error;
-    return undefined;
-  });
-  // O_NOFOLLOW on a symlinked bundle fails with ELOOP: something replaced the agent's bundle.
-  if (!source) return (openError as NodeJS.ErrnoException | undefined)?.code === "ELOOP" ? "bundle_symlink" : "absent";
-  try {
-    const metadata = await source.stat();
-    if (!metadata.isFile()) return "not_regular_file";
-    await beforeRecheck?.();
-    const again = await lstat(gitPath).catch(() => undefined);
-    if (!again?.isDirectory() || again.dev !== git.dev || again.ino !== git.ino) return "git_changed";
-    try {
-      await mkdir(join(staging, ".git"), { mode: 0o700 });
-      const target = await open(join(staging, ".git", RESULT_BUNDLE_FILE), "wx", 0o600);
-      try {
-        const buffer = Buffer.alloc(Math.min(BUNDLE_COPY_CHUNK, Math.max(metadata.size, 1)));
-        let copied = 0;
-        while (copied < metadata.size) {
-          const { bytesRead } = await source.read(buffer, 0, Math.min(buffer.length, metadata.size - copied), copied);
-          if (bytesRead === 0) return "short_read";
-          await target.write(buffer, 0, bytesRead);
-          copied += bytesRead;
-        }
-      } finally {
-        await target.close();
-      }
-    } catch {
-      return "copy_failed";
-    }
-    return undefined;
-  } finally {
-    await source.close();
-  }
-}
-
-const exec = (command: string, args: string[]): Promise<number> =>
-  new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
-    child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
-    child.once("error", () => resolve(127));
-    child.once("close", (code) => resolve(code ?? 1));
-  });
 
 /** The events of a 200 answer; undefined (a transient error to the caller) unless every event is an object with an integer seq. */
 function parseEvents(body: Buffer): { seq: number; type: string; channel?: string; line?: string }[] | undefined {
@@ -364,12 +228,8 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   // A git-history run (#536): the upload carries only the root .git's result bundle (see collect).
   let collectResultBundle = false;
   try {
-    const result = await withRetry(
-      () => send(`${base}/tool-setup`, { method: "GET", headers, timeoutMs: REQUEST_TIMEOUT_MS }),
-      { policy, deadlineMs: SETUP_DEADLINE_MS, signal: shutdown.signal },
-    );
-    if (result.status !== 200) return await abortStart("substrate_bridge_setup_failed");
-    const parsed = JSON.parse(result.body.toString("utf8")) as SetupFile;
+    const body = await fetchSetup(`${base}/tool-setup`, headers, policy, log, SETUP_DEADLINE_MS);
+    const parsed = JSON.parse(body.toString("utf8")) as SetupFile;
     if (typeof parsed.toolSetup !== "string") return await abortStart("substrate_bridge_setup_invalid");
     const parsedExclusions = parseCollectExclusions(parsed.collectExclude);
     if (!parsedExclusions) return await abortStart("substrate_bridge_exclude_invalid");
@@ -377,46 +237,26 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     exclusions = parsedExclusions;
     collectResultBundle = parsed.collectResultBundle === true;
   } catch (error) {
-    if (error instanceof BridgeError && error.code !== "substrate_bridge_retry_exhausted") throw error;
+    if (
+      error instanceof BridgeError &&
+      error.code !== "substrate_bridge_retry_exhausted" &&
+      error.code !== "substrate_bridge_setup_failed"
+    )
+      throw error;
     return abortStart("substrate_bridge_setup_failed");
   }
   log("substrate_bridge_setup_ready", { runToken: token });
 
   // 2. The seed, checked and extracted into the workspace.
-  const seedPath = join(stage, "seed.tar");
   try {
-    const seed = await withRetry(
-      () => send(`${base}/seed`, { method: "GET", headers, downloadTo: seedPath, timeoutMs: 10 * 60_000 }),
-      { policy, deadlineMs: SETUP_DEADLINE_MS, signal: shutdown.signal },
-    );
-    if (seed.status !== 200) return await abortStart("substrate_bridge_seed_failed");
-    const checked = await checkTarFile(seedPath, true);
-    if (!checked.ok) {
-      log("substrate_bridge_seed_unsafe", { reason: checked.reason });
-      return await abortStart("substrate_bridge_seed_unsafe");
-    }
-    await mkdir(workspace, { recursive: true });
-    const code = await exec(tar, [
-      "-x",
-      "-C",
-      workspace,
-      "-f",
-      seedPath,
-      "--no-same-owner",
-      "--delay-directory-restore",
-      // /workspace is a root-owned mount point the bridge (uid 10001) cannot chmod or utime, so the
-      // seed's "." entry must not be applied to it: drop the leading "./" (tar.ts refuses any seed whose
-      // entries are not under "./"). Existing directories keep their metadata.
-      "--strip-components=1",
-      "--no-overwrite-dir",
-    ]);
-    if (code !== 0) return await abortStart("substrate_bridge_seed_failed");
-    log("substrate_bridge_seed_extracted", { entries: checked.entries });
+    await extractSeed({ url: `${base}/seed`, headers, workspace, stage, tar, policy, log });
   } catch (error) {
-    if (error instanceof BridgeError && error.code !== "substrate_bridge_retry_exhausted") throw error;
-    return abortStart("substrate_bridge_seed_failed");
-  } finally {
-    await rm(seedPath, { force: true }).catch(() => undefined);
+    if (
+      error instanceof BridgeError &&
+      (error.code === "substrate_bridge_seed_failed" || error.code === "substrate_bridge_seed_unsafe")
+    )
+      return abortStart(error.code);
+    throw error;
   }
 
   // 3. The tool runner (warm rounds: one per round, each with its round's tool setup).
@@ -526,75 +366,24 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
 
   let round = 1;
   const collect = async (): Promise<"ok" | "rejected" | "failed"> => {
-    const tarPath = join(stage, "workspace.tar");
     // A history run first ends the runner's whole process group, so no tool process is left to change
-    // the workspace while it is read. It leaves the root .git out, then adds back only its result
-    // bundle, copied through one file descriptor into a private staging folder (stageResultBundle).
+    // the workspace while it is read (collectWorkspace then adds back only its result bundle).
     if (collectResultBundle) await retireRunner();
-    const createExclusions = collectResultBundle
-      ? { names: exclusions.names, paths: [...exclusions.paths, ".git"] }
-      : exclusions;
-    let code = await exec(tar, ["-c", "-C", workspace, ...tarExcludeArgs(createExclusions), "-f", tarPath, "."]);
-    if ((code === 0 || code === 1) && collectResultBundle) {
-      const bundleStage = await mkdtemp(join(stage, "bundle-"));
-      try {
-        const skipped = await stageResultBundle(workspace, bundleStage, options.beforeResultBundleRecheck);
-        if (skipped) {
-          log("substrate_bridge_result_bundle_skipped", { runToken: token, round, reason: skipped });
-          if (TAMPERING_SKIPS.has(skipped)) code = TAMPERED_CODE;
-        } else {
-          const appended = await exec(tar, [
-            "-r",
-            "-f",
-            tarPath,
-            "-C",
-            bundleStage,
-            "--no-recursion",
-            `./.git/${RESULT_BUNDLE_FILE}`,
-          ]);
-          if (appended !== 0 && appended !== 1) code = appended;
-        }
-      } finally {
-        await rm(bundleStage, { recursive: true, force: true }).catch(() => undefined);
-      }
-    }
-    // 1: some files changed while being read; the tar is still usable.
-    if (code !== 0 && code !== 1) {
-      log("substrate_bridge_collect_failed", { code: code === TAMPERED_CODE ? "result_bundle_tampered" : code });
-      await rm(tarPath, { force: true }).catch(() => undefined);
-      await postCapped(
-        withRound(`${base}/workspace-failed`, round),
-        headers,
-        undefined,
-        policy,
-        log,
-        "workspace-failed",
-        shutdown.signal,
-      );
-      return "failed";
-    }
-    const outcome = await uploadFile(
-      withRound(`${base}/workspace`, round),
+    return collectWorkspace({
+      base,
+      round,
+      token,
       headers,
-      tarPath,
+      workspace,
+      stage,
+      tar,
+      exclusions,
+      collectResultBundle,
+      beforeResultBundleRecheck: options.beforeResultBundleRecheck,
       policy,
       log,
-      "workspace",
-      shutdown.signal,
-    );
-    await rm(tarPath, { force: true }).catch(() => undefined);
-    // A workspace that could not be stored: say so, so the launcher does not wait for it.
-    if (outcome !== "ok")
-      await postCapped(
-        withRound(`${base}/workspace-failed`, round),
-        headers,
-        undefined,
-        policy,
-        log,
-        "workspace-failed",
-        shutdown.signal,
-      );
-    return outcome === "ok" ? "ok" : outcome === "rejected" ? "rejected" : "failed";
+      signal: shutdown.signal,
+    });
   };
 
   /** One round's relay: polls events from 0 (the relay starts afresh each round) until the collect. */
