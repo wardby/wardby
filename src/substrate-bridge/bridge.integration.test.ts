@@ -326,6 +326,32 @@ describe("substrate bridges, end to end without Substrate", () => {
     }
   });
 
+  it("the agent bridge is refused by a proxy that serves another protocol, and starts no worker", async () => {
+    await stage();
+    servedProtocol = "9";
+    let launched = false;
+    await expect(
+      runAgent(
+        await workerOptions({
+          launchWorker: () => {
+            launched = true;
+            return { exited: new Promise<number>(() => undefined) };
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "substrate_bridge_input_failed" });
+    expect(launched).toBe(false);
+    expect(JSON.parse((await blobs.get(BLOB.bridgeRefused(TOKEN))).toString())).toEqual({ protocol: 9 });
+    // The refused input download never counted as the run reaching the proxy.
+    expect(await blobs.head(BLOB.started(TOKEN))).toBeNull();
+    expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+    const refusals = routeWarns.filter((call) => (call[0] as { event?: string }).event === "substrate.bridge_refused");
+    expect(refusals.map(([fields]) => (fields as { route: string }).route)).toContain("input");
+    for (const [fields] of refusals) {
+      expect(Object.keys(fields as object).sort()).toEqual(["event", "protocol", "route", "runToken"]);
+    }
+  });
+
   it("relays an MCP round trip, then collects the workspace", async () => {
     const { workspace, toolSetup } = await stage();
     tool = await startTool(workspace, toolSetup);

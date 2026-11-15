@@ -395,8 +395,20 @@ describe("Codex bridge, end to end without Substrate", () => {
 
   it("names protocol 1 on every request of a failed run (diagnostics and exit)", async () => {
     await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
-    handle = await start(() => ({ exited: Promise.resolve(3) }));
+    handle = await start(() => {
+      // A stderr line, so the bridge really posts a diagnostics tail.
+      const stderr = new PassThrough();
+      return {
+        stderr,
+        exited: (async () => {
+          stderr.write("worker failed\n");
+          stderr.end();
+          return 3;
+        })(),
+      };
+    });
     await handle.collected;
+    expect(order()).toContain("POST diagnostics");
     expect(order()).toContain("POST exit");
     for (const request of requests) expect(request.headers["x-wardby-bridge-protocol"]).toBe("1");
   });

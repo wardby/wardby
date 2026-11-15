@@ -608,7 +608,8 @@ export function createSubstrateRoutes(
       const raw = request.headers[BRIDGE_PROTOCOL_HEADER];
       const protocol = typeof raw === "string" && /^[0-9]{1,6}$/.test(raw) ? Number(raw) : null;
       if (protocol === null || protocol < BRIDGE_PROTOCOL_RANGE.min || protocol > BRIDGE_PROTOCOL_RANGE.max) {
-        // Written only when absent; never the request's headers or body.
+        // Written only when absent; never the request's headers or body. A failed write answers 500 (no
+        // warn: it throws before the log line), which the bridge retries, so a later attempt records and warns.
         if (!(await options.blobs.head(BLOB.bridgeRefused(token)))) {
           await options.blobs.put(BLOB.bridgeRefused(token), Buffer.from(JSON.stringify({ protocol })), {
             contentType: "application/json",
