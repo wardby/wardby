@@ -58,6 +58,12 @@ Every variable, default and limit (`SUBSTRATE_WORKSPACE_MAX_MB` matters for
 `gitHistory` runs, which upload the whole `.git`) is in the
 [Substrate backend guide](../docs/substrate-backend.md).
 
+## Warm rounds
+
+With `SUBSTRATE_WARM_ROUNDS=true` a finished round is kept suspended and the
+next round of the same run chain resumes it, workspace and session included.
+See [Warm rounds on Substrate](substrate-warm-rounds.md).
+
 ## When a run fails
 
 - [substrate_unavailable](errors/substrate-unavailable.md): the Substrate API

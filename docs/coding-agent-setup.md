@@ -123,7 +123,9 @@ changes during it:
   `repositories` out. A refusal starts with a fixed code (`unknown_run`,
   `other_agent_run`, `not_a_coding_run`, `run_not_finished`,
   `other_repository`, `no_pull_request`, `no_pushed_branch`, `other_owner`);
-  see the help article `errors/continuation-refused`.
+  see the help article `errors/continuation-refused`. On the Substrate
+  launcher with warm rounds on, the round can resume the previous round's
+  workspace and session; see `substrate-warm-rounds`.
 - `trigger_agent` also takes `repositories`, and a webhook body
   `wardbyRepositories`, to choose the extra repositories of one run; see
   [Several repositories in one run](#several-repositories-in-one-run).

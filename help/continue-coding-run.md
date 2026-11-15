@@ -25,6 +25,11 @@ The run id can be the first run or any later continuation of it: every
 continuation works on the first run's branch. It behaves the same on every job
 launcher (Docker, Kubernetes, Substrate).
 
+On the Substrate launcher with warm rounds on, a continuation can resume the
+previous round's workspace and session instead of rebuilding them; `get_run`
+shows `warmStart` and the run's steps say whether it did and why not. See
+[Warm rounds on Substrate](substrate-warm-rounds.md).
+
 Rules:
 
 - Only the agent's **owner** can pass `continuePriorRun`, and only for a

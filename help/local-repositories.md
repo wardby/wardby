@@ -90,7 +90,9 @@ Things to know:
   `trigger_agent {"agentId", "continuePriorRun": "<run id>", "task"}`. The
   run continues on the first run's `wardby/run-<id>` branch. It is refused with
   `no_pushed_branch` when that branch was never pushed (help article
-  `continue-coding-run`).
+  `continue-coding-run`). On the Substrate launcher with warm rounds on, the
+  continuation can also resume the previous round's workspace (help article
+  `substrate-warm-rounds`); the pushed branch is still what it continues.
 - Wardby never deletes result branches. Remove one you no longer need with
   `git branch -D wardby/run-<run id>`.
 - `.wardby/services.yaml` works for local runs. It is read from the committed

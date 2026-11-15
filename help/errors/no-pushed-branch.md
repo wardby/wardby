@@ -28,6 +28,9 @@ nothing was spent.
   `baseRef` instead (for example `baseRef: "wardby/run-<run id>"`). That run
   pushes its own new branch.
 
+Warm rounds on Substrate do not change this: the check runs before any round,
+warm or fresh, and a kept workspace does not stand in for a pushed branch.
+
 A continuation that is accepted can still fail later with
 [`local_branch_conflict`](local-branch-conflict.md) when the branch moved or is
 checked out in your repository. See

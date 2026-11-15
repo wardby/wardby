@@ -138,6 +138,90 @@ collected archive's entries count toward the extraction limit of 100,000
 entries, the `.git` ones included. See
 [Git history in coding runs](../help/git-history.md).
 
+## Warm rounds
+
+By default every round of a coding run (a continuation made with
+`trigger_agent`'s `continuePriorRun`, a lead's follow-up, a review fix round)
+starts new actors and a new workspace. With `SUBSTRATE_WARM_ROUNDS=true`, a
+finished round's two actors are suspended and kept, and the next round of the
+same chain resumes them: the workspace (including installed packages and build
+output) and the Claude session are still there, so the round skips the checkout
+and install and continues the conversation. See
+[Warm rounds on Substrate](../help/substrate-warm-rounds.md).
+
+A round is kept only when it is a Claude Code run that succeeded, its push
+succeeded, and its session was cancelled (its credentials revoked). Any other
+round is removed, as without warm rounds.
+
+### Turn it on
+
+Set `SUBSTRATE_WARM_ROUNDS=true` on **both** the control plane and the coding
+proxy. Startup is refused when only one of them has it, so set both and restart
+both.
+
+| Variable                 | Where                   | Default | Purpose                                                                                      |
+| ------------------------ | ----------------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `SUBSTRATE_WARM_ROUNDS`  | Control plane and proxy | `false` | `true` keeps a succeeded round's actors for the next round. Must match on both.              |
+| `SUBSTRATE_PARK_TTL_SEC` | Control plane           | `3600`  | How long a kept round may wait for its next round (60 to 86400 seconds), then it is removed. |
+| `SUBSTRATE_PARK_MAX`     | Control plane           | `10`    | The most rounds kept at once (0 to 1000). `0` keeps none, so every round starts fresh.       |
+
+Also:
+
+- The **Substrate ServiceAccount** Wardby's API token belongs to needs
+  permission for `SuspendActor` (besides the calls it already needs). Without
+  it, a finished round cannot be kept and the next round starts fresh.
+- The actor **templates change name** when warm rounds are on, so the first run
+  after you turn it on rebuilds the golden snapshots, as after any template
+  change. Turning it off again changes them back.
+
+### When a round starts fresh
+
+A continuation that cannot resume the kept round starts a normal fresh round
+and writes one run step line saying why (`get_run` shows `warmStart: true` or
+`false` on the round):
+
+| Step line                                                                        | Meaning                                                            |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Resumed the previous round's workspace and session                               | The round resumed warm.                                            |
+| Started a fresh workspace: the previous round was not kept                       | It did not qualify, or was removed (see below).                    |
+| Started a fresh workspace: the previous round's sandbox expired                  | `SUBSTRATE_PARK_TTL_SEC` passed.                                   |
+| Started a fresh workspace: the branch changed since the previous round           | The branch has commits the kept workspace lacks.                   |
+| Started a fresh workspace: the agent's settings changed since the previous round | The agent's model, prompt, images or limits changed.               |
+| Started a fresh workspace: the previous round's sandbox was no longer available  | The actors were gone from Substrate or not in the suspended state. |
+| Started a fresh workspace: there was no room to resume the previous round        | The WorkerPool had no capacity to resume it.                       |
+
+A round whose branch preparation merged the target branch into the working
+branch (a pull request whose base moved) also starts fresh, because the kept
+workspace lacks that merge; it writes no step line.
+
+### What is kept and what is removed
+
+- **Kept:** the workspace, including installed packages, and the Claude
+  session.
+- **Not kept:** background processes (the tool runner restarts for each round,
+  so a dev server or watcher started by one round is gone in the next) and
+  credentials (the round's run capability is revoked when it ends; the next
+  round gets a new one).
+- `stop_run` removes all of that agent's kept rounds.
+- `update_agent` removes them when it changes the model, prompt, images or
+  limits.
+- A kept round is removed when `SUBSTRATE_PARK_TTL_SEC` passes.
+- When more than `SUBSTRATE_PARK_MAX` rounds are kept, the oldest is removed.
+- When the WorkerPool is short of room, at most one kept round is removed per
+  check, and never the one being continued.
+
+### Memory cost
+
+A suspended actor may still hold worker capacity (memory) until it expires or
+is removed, so size `SUBSTRATE_PARK_MAX` and `SUBSTRATE_PARK_TTL_SEC` against
+your WorkerPool. Keep the TTL short if rounds rarely follow each other, and
+use `SUBSTRATE_PARK_MAX=0` to turn keeping off without turning warm rounds off.
+
+### Diagnostics
+
+The proxy's `substrate.diagnostics` warn line carries a `round` field on rounds
+after the first, so a tail can be matched to its round.
+
 ## What is not supported
 
 A run that needs one of these fails at launch with
@@ -152,8 +236,9 @@ Use the Docker or Kubernetes launcher for them.
 - A custom worker image (`codingProfile.workerImageRef`): it has no Substrate
   bridge. Only the configured tool-runner images run, so a run dispatched with
   a tool-runner image you have since replaced is refused the same way.
-- Suspend and resume between rounds: every round starts new actors, as on the
-  other launchers.
+- Suspend and resume between rounds is off by default: every round starts new
+  actors, as on the other launchers. Turn it on with
+  [warm rounds](#warm-rounds).
 
 ## Troubleshooting
 
@@ -190,6 +275,9 @@ Known recovery steps:
   Substrate's identity provider, or the proxy cannot fetch its signing keys
   because it does not trust Substrate's CA (`NODE_EXTRA_CA_CERTS`). Runs then
   fail with `substrate_startup_timeout`.
+- **Every continuation starts fresh with warm rounds on.** Check that the
+  Substrate ServiceAccount may call `SuspendActor`, that
+  `SUBSTRATE_PARK_MAX` is above 0, and the step line's reason.
 - **Every actor request answers `invalid_host`.** `SUBSTRATE_PROXY_HOST` or
   `SUBSTRATE_PROXY_PORT` differs between the control plane and the proxy.
 
