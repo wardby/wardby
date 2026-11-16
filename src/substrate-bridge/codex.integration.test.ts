@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import {
@@ -21,11 +21,15 @@ import type { ProxySession } from "../providers/coding-proxy/types.js";
 import { codexWorkerSetup } from "../providers/jobs/codex-worker-setup.js";
 import { BLOB, REPO_BLOB, substrateRunToken } from "../providers/jobs/substrate/names.js";
 import type { JobSpec } from "../providers/jobs/types.js";
+import { serviceStartScript } from "../providers/jobs/substrate/service-script.js";
+import { SERVICE_WAIT_SCRIPT } from "../providers/jobs/substrate/specs.js";
+import type { ResolvedCodingService } from "../coding/services/catalog.js";
 import { LocalBlobStore } from "../providers/storage/local.js";
 import { run as runCodex, spawnCodexWorker, type CodexHandle, type CodexOptions } from "./codex.js";
 import { INJECTED_MCP_TOKEN_PLACEHOLDER, PLACEHOLDER_CAPABILITY, WARM_ROUNDS_ENV } from "./constants.js";
 import { DEFAULT_POLICY } from "./http.js";
 import { ImageIncompleteError, type ImageCheck } from "./image-check.js";
+import { ServicesUnreadyError } from "./services.js";
 import type { WorkerHandle } from "./worker-run.js";
 
 const exec = promisify(execFile);
@@ -106,6 +110,8 @@ describe("Codex bridge, end to end without Substrate", () => {
   let workspace: string;
   /** Extra headers on the fake proxy's `input` answer (harness parameter): the MCP flag. */
   let inputHeaders: Record<string, string>;
+  /** The fake service containers' shells, killed after each test. */
+  let serviceShells: ChildProcess[];
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "codex-bridge-it-"));
@@ -115,6 +121,7 @@ describe("Codex bridge, end to end without Substrate", () => {
     onRequest = undefined;
     logs = [];
     inputHeaders = {};
+    serviceShells = [];
     proxy = createHttpServer((request, response) => {
       void (async () => {
         const url = new URL(request.url ?? "/", "http://fake.invalid");
@@ -159,7 +166,9 @@ describe("Codex bridge, end to end without Substrate", () => {
         }
         if (
           method === "POST" &&
-          ["result", "workspace", "workspace-failed", "exit", "diagnostics", "image-incomplete"].includes(path)
+          ["result", "workspace", "workspace-failed", "exit", "diagnostics", "image-incomplete", "services"].includes(
+            path,
+          )
         ) {
           return response.writeHead(200, { "content-type": "application/json" }).end("{}");
         }
@@ -171,6 +180,13 @@ describe("Codex bridge, end to end without Substrate", () => {
   });
 
   afterEach(async () => {
+    for (const child of serviceShells.splice(0)) {
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
     await handle?.close();
     handle = undefined;
     proxy.closeAllConnections();
@@ -223,6 +239,8 @@ describe("Codex bridge, end to end without Substrate", () => {
       metadataDir: metadataDir ?? (await names()),
       workspace,
       reposRoot: join(dir, "repos"),
+      servicesRoot: join(dir, "services"),
+      servicesPollMs: 20,
       tempRoot: dir,
       tarCommand: await tarForTests(dir),
       readyPort: 0,
@@ -346,6 +364,96 @@ describe("Codex bridge, end to end without Substrate", () => {
       ).rejects.toMatchObject({ code: "substrate_bridge_seed_failed" });
       expect(launched).toBe(false);
       expect(order().slice(-2)).toEqual(["POST workspace-failed", "POST exit"]);
+      expect(order()).not.toContain("GET input");
+    });
+  });
+
+  describe.skipIf(!existsSync("/bin/sh"))("services", () => {
+    const FAKE_SERVICE: ResolvedCodingService = {
+      name: "fakedb",
+      version: "1",
+      image: `registry.example/fakedb@sha256:${"c".repeat(64)}`,
+      port: 5999,
+      serviceEnv: { FAKEDB_PASSWORD: "FAKE_SERVICE_ENV_VALUE_0001" },
+      testEnv: {},
+      readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 3 },
+      startCommand: ["sleep", "30"],
+      resources: { cpuMillicores: 100, memoryMib: 64, diskMib: 64 },
+      dataPath: "/var/lib/fakedb",
+      writablePaths: [],
+    };
+    const serviceDir = (i: number): string => join(dir, "services", String(i));
+    /** One service's setup entry and its container (the template's wait script on a simulated volume). */
+    const service = async (entry: ResolvedCodingService) => {
+      await mkdir(serviceDir(0), { recursive: true });
+      const child = spawn("/bin/sh", ["-c", SERVICE_WAIT_SCRIPT.replaceAll("/run/wardby-svc", serviceDir(0))], {
+        detached: true,
+        stdio: "ignore",
+      });
+      serviceShells.push(child);
+      return [{ name: entry.name, script: serviceStartScript(entry, { stateDir: serviceDir(0) }) }];
+    };
+
+    it("gates the input on the services", async () => {
+      const entries = await service(FAKE_SERVICE);
+      await stage(
+        codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false, services: { entries, waitMs: 10_000 } }),
+      );
+      let workerEnv: NodeJS.ProcessEnv | undefined;
+      handle = await start((env) => {
+        workerEnv = env;
+        return { exited: Promise.resolve(0) };
+      });
+      await handle.collected;
+      const seen = order();
+      const firstService = seen.indexOf("POST services");
+      expect(firstService).toBeGreaterThan(seen.indexOf("GET seed"));
+      expect(seen.lastIndexOf("POST services")).toBeLessThan(seen.indexOf("GET input"));
+      expect(JSON.parse(posted("services").at(-1)!.body.toString())).toEqual({
+        services: [{ name: "fakedb", state: "ready" }],
+      });
+      expect(workerEnv).toMatchObject({
+        WARDBY_RUN_CAPABILITY: PLACEHOLDER_CAPABILITY,
+        WARDBY_CAPABILITY_HEADER: "x-api-key",
+        WARDBY_REGISTRY_TOKEN: REGISTRY_TOKEN,
+        WARDBY_PROXY_URL: proxyUrl,
+      });
+      expect(workerEnv).not.toHaveProperty("FAKEDB_PASSWORD");
+      expect(JSON.stringify(workerEnv)).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
+      expect(existsSync(join(serviceDir(0), "start.sh"))).toBe(false);
+      expect(logs.join("\n")).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
+    });
+
+    it("a failed service starts nothing", async () => {
+      const entries = await service({
+        ...FAKE_SERVICE,
+        readiness: { command: ["false"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 2 },
+      });
+      await stage(
+        codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false, services: { entries, waitMs: 10_000 } }),
+      );
+      let launched = false;
+      const error = (await start(() => {
+        launched = true;
+        return { exited: Promise.resolve(0) };
+      }).catch((e: unknown) => e)) as ServicesUnreadyError;
+      expect(error).toBeInstanceOf(ServicesUnreadyError);
+      expect(error.reason).toBe("probe_failed");
+      expect(launched).toBe(false);
+      for (const request of ["GET input", "POST workspace-failed", "POST exit"]) expect(order()).not.toContain(request);
+      expect(JSON.parse(posted("services").at(-1)!.body.toString())).toEqual({
+        services: [{ name: "fakedb", state: "failed", reason: "probe_failed" }],
+      });
+      await error.close();
+      expect(logs.join("\n")).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
+    }, 15_000);
+
+    it("refuses services without their wait, as an invalid setup", async () => {
+      const setup = JSON.parse(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false })) as object;
+      await stage(JSON.stringify({ ...setup, services: [{ name: "fakedb", script: "S" }] }));
+      await expect(start(() => ({ exited: Promise.resolve(0) }))).rejects.toMatchObject({
+        code: "substrate_bridge_setup_invalid",
+      });
       expect(order()).not.toContain("GET input");
     });
   });

@@ -163,3 +163,15 @@ it("matches the proxy's bridge protocol header and range", async () => {
   expect(bridge.BRIDGE_PROTOCOL).toBe(names.BRIDGE_PROTOCOL_RANGE.max);
   expect(bridge.BRIDGE_PROTOCOL).toBeGreaterThanOrEqual(names.BRIDGE_PROTOCOL_RANGE.min);
 });
+
+it("matches the launcher's service paths and bounds", async () => {
+  const bridge = await import("./constants.js");
+  const script = await import("../providers/jobs/substrate/service-script.js");
+  const protocol = await import("../coding/protocol.js");
+  expect(bridge.SERVICES_ROOT).toBe(script.SERVICES_ROOT);
+  expect(bridge.SERVICE_START_MARKER_MS).toBe(script.SERVICE_START_MARKER_MS);
+  expect(bridge.MAX_SERVICE_SCRIPT_BYTES).toBe(script.MAX_SERVICE_SCRIPT_BYTES);
+  expect(bridge.MAX_SETUP_SERVICES).toBe(protocol.MAX_CODING_SERVICES);
+  expect(bridge.SERVICE_NAME.source).toBe(protocol.CODING_SERVICE_NAME.source);
+  expect(bridge.SERVICE_NAME.flags).toBe(protocol.CODING_SERVICE_NAME.flags);
+});

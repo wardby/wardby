@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { connect } from "node:net";
@@ -15,6 +15,9 @@ import { deriveRegistryToken } from "../coding/registry/token.js";
 import type { JobSpec } from "../providers/jobs/types.js";
 import { BLOB, REPO_BLOB, substrateRunToken, toolActorSubject } from "../providers/jobs/substrate/names.js";
 import type { SubstrateRunLayout } from "../providers/jobs/substrate/run-store.js";
+import { serviceStartScript } from "../providers/jobs/substrate/service-script.js";
+import { SERVICE_WAIT_SCRIPT } from "../providers/jobs/substrate/specs.js";
+import type { ResolvedCodingService } from "../coding/services/catalog.js";
 import { capabilityHash } from "../providers/coding-proxy/capability-hash.js";
 import { MemoryRelayStore } from "../providers/coding-proxy/substrate/memory-relay-store.js";
 import { createSubstrateRoutes } from "../providers/coding-proxy/substrate/routes.js";
@@ -24,6 +27,7 @@ import { run as runAgent, spawnWorker, type AgentHandle } from "./agent.js";
 import { INJECTED_MCP_TOKEN_PLACEHOLDER, PLACEHOLDER_CAPABILITY } from "./constants.js";
 import { DEFAULT_POLICY } from "./http.js";
 import { ImageIncompleteError } from "./image-check.js";
+import { ServicesUnreadyError } from "./services.js";
 import { run as runTool, type ToolHandle } from "./tool.js";
 
 /**
@@ -98,6 +102,8 @@ describe("substrate bridges, end to end without Substrate", () => {
   let layout: SubstrateRunLayout | undefined;
   /** The bridge protocol the test server passes the routes in place of the one received (harness parameter). */
   let servedProtocol: string | undefined;
+  /** The fake service containers' shells (fakeServiceShell), killed after each test. */
+  let serviceShells: ChildProcess[];
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "bridge-it-"));
@@ -113,6 +119,7 @@ describe("substrate bridges, end to end without Substrate", () => {
     mcpTools = undefined;
     layout = undefined;
     servedProtocol = undefined;
+    serviceShells = [];
     const routes = createSubstrateRoutes({
       atespace: ATESPACE,
       relay,
@@ -155,6 +162,13 @@ describe("substrate bridges, end to end without Substrate", () => {
   });
 
   afterEach(async () => {
+    for (const child of serviceShells.splice(0)) {
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
     await agent?.close();
     await tool?.close();
     agent = tool = undefined;
@@ -186,6 +200,11 @@ describe("substrate bridges, end to end without Substrate", () => {
       setupRepositories?: unknown;
       /** A dependency-cache run: the tool setup carries dependencyCache and diskMb. */
       dependencyCache?: true;
+      /** The setup's services (each script volume made at services/<i>); the row lists their names. */
+      services?: { name: string; script: string }[];
+      servicesWaitMs?: number;
+      /** Written as the setup's `services` as is, in place of `services` (a malformed one). */
+      setupServices?: unknown;
     } = {},
   ): Promise<{ workspace: string; toolSetup: string; setupText: string }> {
     const seedDir = join(dir, "seed");
@@ -221,8 +240,14 @@ describe("substrate bridges, end to end without Substrate", () => {
               })),
             }
           : {}),
+      ...(options.setupServices !== undefined
+        ? { services: options.setupServices }
+        : options.services
+          ? { services: options.services, servicesWaitMs: options.servicesWaitMs }
+          : {}),
     });
     await put(BLOB.toolSetup(TOKEN), Buffer.from(setupText));
+    for (const i of (options.services ?? []).keys()) await mkdir(join(dir, "services", String(i)), { recursive: true });
     await put(BLOB.seed(TOKEN), await readFile(join(dir, "seed.tar")));
     for (const repository of options.repositories ?? []) {
       await put(
@@ -230,10 +255,13 @@ describe("substrate bridges, end to end without Substrate", () => {
         await tarOf(join(dir, `seed-${repository.name}`), repository.files),
       );
     }
-    if (options.repositories) {
+    if (options.repositories || options.services) {
       layout = {
         shape: "pair",
-        repositories: options.repositories.map(({ name, access }) => ({ name, access })),
+        ...(options.repositories
+          ? { repositories: options.repositories.map(({ name, access }) => ({ name, access })) }
+          : {}),
+        ...(options.services ? { services: options.services.map(({ name }) => name) } : {}),
       };
     }
     return { workspace: join(dir, "workspace"), toolSetup, setupText };
@@ -282,6 +310,8 @@ describe("substrate bridges, end to end without Substrate", () => {
       metadataDir: await names("tool"),
       workspace,
       reposRoot: join(dir, "repos"),
+      servicesRoot: join(dir, "services"),
+      servicesPollMs: 20,
       socketPath,
       readyPort: 0,
       tempRoot: dir,
@@ -1939,6 +1969,127 @@ process.exit(status);
       // Raw and as a JSON string (each log line is JSON).
       for (const value of [REGISTRY_TOKEN, CAPABILITY, "alpha\n", toolSetup, setupText])
         for (const form of [value, JSON.stringify(value).slice(1, -1)]) expect(everything).not.toContain(form);
+    });
+  });
+
+  describe.skipIf(!existsSync("/bin/sh"))("services", () => {
+    const FAKE_SERVICE: ResolvedCodingService = {
+      name: "fakedb",
+      version: "1",
+      image: `registry.example/fakedb@sha256:${"c".repeat(64)}`,
+      port: 5999,
+      serviceEnv: { FAKEDB_PASSWORD: "FAKE_SERVICE_ENV_VALUE_0001" },
+      testEnv: {},
+      readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 3 },
+      startCommand: ["sleep", "30"],
+      resources: { cpuMillicores: 100, memoryMib: 64, diskMib: 64 },
+      dataPath: "/var/lib/fakedb",
+      writablePaths: [],
+    };
+    const failing: ResolvedCodingService = {
+      ...FAKE_SERVICE,
+      readiness: { command: ["false"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 2 },
+    };
+    const serviceDir = (i: number): string => join(dir, "services", String(i));
+    /** Service i's start script, with its state in its simulated script volume. */
+    const scriptFor = (entry: ResolvedCodingService, i: number) => ({
+      name: entry.name,
+      script: serviceStartScript(entry, { stateDir: serviceDir(i) }),
+    });
+    /** Service i's container: the template's wait script on its simulated script volume. */
+    const fakeServiceShell = (i: number): void => {
+      const child = spawn("/bin/sh", ["-c", SERVICE_WAIT_SCRIPT.replaceAll("/run/wardby-svc", serviceDir(i))], {
+        detached: true,
+        stdio: "ignore",
+      });
+      serviceShells.push(child);
+    };
+    const reported = async (): Promise<unknown> => JSON.parse((await blobs.get(BLOB.services(TOKEN))).toString());
+
+    it("starts the runner only after every service is ready", async () => {
+      const kv = { ...FAKE_SERVICE, name: "fakekv" };
+      const { workspace, toolSetup } = await stage({
+        services: [scriptFor(FAKE_SERVICE, 0), scriptFor(kv, 1)],
+        servicesWaitMs: 30_000,
+      });
+      fakeServiceShell(0);
+      fakeServiceShell(1);
+      let atLaunch: { state: string; env: string } | undefined;
+      tool = await startTool(workspace, toolSetup, {
+        launchRunner: (setup, env) => {
+          atLaunch = {
+            state: readFileSync(join(serviceDir(0), "state"), "utf8"),
+            env: JSON.stringify({ ...env, WARDBY_TOOL_SETUP: setup }),
+          };
+          return { ready: Promise.resolve(), exited: new Promise<number>(() => undefined) };
+        },
+      });
+      expect(atLaunch?.state).toBe("state=ready\n");
+      expect(atLaunch?.env).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
+      expect(await reported()).toEqual({
+        services: [
+          { name: "fakedb", state: "ready" },
+          { name: "fakekv", state: "ready" },
+        ],
+      });
+      for (const i of [0, 1]) expect(existsSync(join(serviceDir(i), "start.sh"))).toBe(false);
+      expect(logs.join("\n")).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
+    });
+
+    it("never starts the runner when a service fails, and idles", async () => {
+      const { workspace, toolSetup } = await stage({ services: [scriptFor(failing, 0)], servicesWaitMs: 30_000 });
+      fakeServiceShell(0);
+      let launched = false;
+      let port: number | undefined;
+      const error = (await startTool(workspace, toolSetup, {
+        onReady: (p) => {
+          port = p;
+        },
+        launchRunner: () => {
+          launched = true;
+          return { ready: Promise.resolve(), exited: new Promise<number>(() => undefined) };
+        },
+      }).catch((e: unknown) => e)) as ServicesUnreadyError;
+      expect(error).toBeInstanceOf(ServicesUnreadyError);
+      expect(error.code).toBe("substrate_bridge_service_unready");
+      expect(error.service).toBe("fakedb");
+      expect(error.reason).toBe("probe_failed");
+      expect(launched).toBe(false);
+      expect(await reported()).toEqual({ services: [{ name: "fakedb", state: "failed", reason: "probe_failed" }] });
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      expect((await fetch(`http://127.0.0.1:${port}/readyz`)).status).toBe(200);
+      await error.close();
+      await expect(fetch(`http://127.0.0.1:${port}/readyz`)).rejects.toThrow();
+      expect(logs.join("\n")).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
+    }, 15_000);
+
+    it("fails a service that never starts", async () => {
+      const { workspace, toolSetup } = await stage({
+        services: [scriptFor(FAKE_SERVICE, 0)],
+        servicesWaitMs: 3_600_000,
+      });
+      // No container for service 0; a clock 1000x fast reaches the start-marker bound in 30 ms.
+      const t0 = Date.now();
+      const error = (await startTool(workspace, toolSetup, {
+        servicesNow: () => (Date.now() - t0) * 1000,
+      }).catch((e: unknown) => e)) as ServicesUnreadyError;
+      expect(error).toBeInstanceOf(ServicesUnreadyError);
+      expect(error.reason).toBe("start_failed");
+      expect(await reported()).toEqual({ services: [{ name: "fakedb", state: "failed", reason: "start_failed" }] });
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      await error.close();
+    });
+
+    it("refuses a malformed services setup", async () => {
+      const { workspace, toolSetup } = await stage({ setupServices: "nope" });
+      await expect(startTool(workspace, toolSetup)).rejects.toMatchObject({ code: "substrate_bridge_setup_invalid" });
+      expect(JSON.parse((await readBlob(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "failed" });
+    });
+
+    it("refuses services without their wait", async () => {
+      const { workspace, toolSetup } = await stage({ services: [scriptFor(FAKE_SERVICE, 0)] });
+      await expect(startTool(workspace, toolSetup)).rejects.toMatchObject({ code: "substrate_bridge_setup_invalid" });
+      expect(JSON.parse((await readBlob(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "failed" });
     });
   });
 
