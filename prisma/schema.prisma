@@ -884,6 +884,10 @@ model NativeGatewaySession {
   /// probe; a Docker run's network exists before its container). The gateway
   /// serves nothing before this is set.
   networkReadyAt    DateTime?
+  /// When the run's worker was removed (the executor sets it after a successful remove, on every
+  /// launcher). A launcher that cannot list its workers (Substrate) is swept from the sessions where
+  /// this is null and the run ended or the deadline passed.
+  workerRemovedAt   DateTime?
   /// What the run's review tools have read (ReviewReadsState), saved between gateway requests
   /// for repo_publish_review's unread_files check. Null until the run reads a pull request.
   reviewReads       Json?
