@@ -438,11 +438,12 @@ at its catalog entry's memory plus disk plus 64 MiB. A custom catalog entry's
 `resources` (`create_service`/`update_service`) is what sets those numbers, so
 review them before allowing a repository to declare more or larger services.
 
-On Substrate a run's services are sized into its workspace actor with the same
-memory formula as on Docker (catalog memory, plus disk, plus 64 MiB for each
-writable path, plus 64 MiB), on top of the run's own share, so size the
-WorkerPool for the worst case a repository could declare. The built-in `mysql`
-8 entry, for example, adds 3264 MiB.
+On Substrate a run's services are sized into its workspace actor on top of the
+run's own share: each service's catalog memory, plus 64 MiB for each writable
+path, plus 64 MiB. The data disk is not counted, because writes to the data
+path do not count against the actor's memory; writes anywhere else (such as
+`/tmp`) do. Size the WorkerPool for the worst case a repository could declare.
+The built-in `mysql` 8 entry, for example, adds 1216 MiB.
 
 ## Upgrading an existing deployment
 

@@ -19,7 +19,8 @@ import { createHash } from "node:crypto";
 import type { V1Secret } from "@kubernetes/client-node";
 import { substrateServiceImage, type ResolvedCodingService } from "../../../coding/services/catalog.js";
 import { claudeToolLimits } from "../docker-isolation.js";
-import { serviceMemoryMib } from "../docker-services.js";
+import { SERVICE_SHM_MIB } from "../docker-services.js";
+import { SERVICE_SCRATCH_MIB } from "../kubernetes-isolation.js";
 import type { JobSpec } from "../types.js";
 import { REPOSITORY_MOUNT_ROOT } from "../storage-init.js";
 import type { ActorTemplateSpec, ContainerSpec, EgressRule } from "./api.js";
@@ -109,11 +110,12 @@ function add(a: Size, b: Size): Size {
   return { cpuMillicores: a.cpuMillicores + b.cpuMillicores, memoryBytes: a.memoryBytes + b.memoryBytes };
 }
 
-// Docker's serviceMemoryMib (catalog memory, its disk, SERVICE_SCRATCH_MIB per writable path and
-// /dev/shm): rootfs writes count against the actor's memory under gVisor (durableDir writes do not),
-// so the service's share includes its disk and writable paths as on Docker.
-function substrateServiceMemoryMib(service: ResolvedCodingService): number {
-  return serviceMemoryMib(service);
+// A service's memory share on Substrate: its catalog memory, SERVICE_SCRATCH_MIB per writable path and
+// SERVICE_SHM_MIB. Unlike Docker's serviceMemoryMib it leaves out the data disk: the data path is a
+// durableDir volume, whose writes do not count against the actor's memory under gVisor, while
+// rootfs writes (the writable paths, /tmp) do.
+export function substrateServiceMemoryMib(service: ResolvedCodingService): number {
+  return service.resources.memoryMib + service.writablePaths.length * SERVICE_SCRATCH_MIB + SERVICE_SHM_MIB;
 }
 
 /** What the run's services add to the workspace holder's size (zero without services). */

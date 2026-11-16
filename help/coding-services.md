@@ -121,9 +121,9 @@ launchers.
   `redis` 7 starts the catalog's redis image directly. Docker and Kubernetes
   keep the official images.
 - **Sizing.** The workspace actor is sized with its services: their CPU, and
-  as memory each one's memory, disk and writable paths, the same formula as on
-  Docker, because what a service writes outside its data volume counts
-  against memory. `diskMib` is not enforced as a disk limit. MySQL needs about
+  as memory each one's memory plus 64 MiB per writable path plus 64 MiB.
+  Writes to the data path don't count against memory; writes anywhere else
+  do. `diskMib` is not enforced as a disk limit. MySQL needs about
   730 MiB idle.
 - **No restart, no warm rounds.** A service that exits is not restarted, and a
   run with services is never kept between warm rounds (the

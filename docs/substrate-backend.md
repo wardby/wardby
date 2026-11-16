@@ -368,8 +368,9 @@ The agent's shells receive the same variables as on the other launchers.
   [Custom entries on Substrate](coding-services.md#custom-entries-on-substrate).
 - **Sizing.** The workspace actor is sized with its services on top of the
   run's own share: each service's catalog CPU, and as memory its catalog
-  memory, disk and writable paths, the same formula as on Docker, because files
-  a service writes outside its data volume count against the actor's memory.
+  memory plus 64 MiB for each writable path plus 64 MiB. Writes to the data
+  path do not count against the actor's memory; files a service writes
+  anywhere else do.
   Each new combination of workspace image and services is its own template,
   so its first run waits for a golden snapshot.
 - **Start-up bound.** The services' readiness is bounded by their readiness

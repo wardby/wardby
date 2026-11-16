@@ -17,6 +17,7 @@ import {
   toolTemplate,
   workerEnv,
   type SubstrateLaunchConfig,
+  substrateServiceMemoryMib,
 } from "./specs.js";
 
 const FAKE_CAP = "rrp_fake_capability_value_000001";
@@ -304,17 +305,18 @@ describe("substrate spec builders", () => {
     });
 
     it("sizes the holder with its services", () => {
-      // serviceMemoryMib: catalog memory + disk + 64 MiB per writable path + 64 MiB /dev/shm.
-      expect(serviceMemoryMib(POSTGRES_16_SERVICE)).toBe(1728);
-      expect(serviceMemoryMib(FAKE_SERVICE)).toBe(512);
+      // catalog memory + 64 MiB per writable path + 64 MiB /dev/shm; the data disk is left out.
+      expect(substrateServiceMemoryMib(POSTGRES_16_SERVICE)).toBe(704);
+      expect(substrateServiceMemoryMib(FAKE_SERVICE)).toBe(384);
+      expect(substrateServiceMemoryMib(POSTGRES_16_SERVICE)).toBeLessThan(serviceMemoryMib(POSTGRES_16_SERVICE));
       const plain = toolTemplate(fakeClaudeSpec(), CONFIG);
       const t = toolTemplate(SVC, CONFIG);
       expect(t.cpuMillicores - plain.cpuMillicores).toBe(750);
-      expect(t.memoryBytes - plain.memoryBytes).toBe((1728 + 512) * 2 ** 20);
+      expect(t.memoryBytes - plain.memoryBytes).toBe((704 + 384) * 2 ** 20);
       const codexPlain = codexTemplate(fakeCodexSpec(), CONFIG);
       const codex = codexTemplate(SVC_CODEX, CONFIG);
       expect(codex.cpuMillicores - codexPlain.cpuMillicores).toBe(500);
-      expect(codex.memoryBytes - codexPlain.memoryBytes).toBe(1728 * 2 ** 20);
+      expect(codex.memoryBytes - codexPlain.memoryBytes).toBe(704 * 2 ** 20);
     });
 
     it("names a services template by its set", () => {
