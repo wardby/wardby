@@ -92,6 +92,7 @@ import { logger } from "../../../core/logger.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { claudeToolSetup } from "../claude-tool-setup.js";
 import { codexWorkerSetup, holderSetupRepositories } from "../codex-worker-setup.js";
+import type { ResolvedCodingService } from "../../../coding/services/catalog.js";
 import { isRepositoryDigest } from "../docker-isolation.js";
 import { KubernetesAlreadyExistsError, KubernetesNotFoundError, type KubernetesApi } from "../kubernetes-api.js";
 import { RUN_ID } from "../kubernetes-isolation.js";
@@ -109,6 +110,7 @@ import {
   type JobStatus,
   type MaterializedWorkspace,
   type MaterializeWorkspaceOptions,
+  type UnstartableService,
   type WarmColdReason,
   type WarmOutcome,
   type WorkspaceJobLauncher,
@@ -139,7 +141,7 @@ import {
   toolActorName,
 } from "./names.js";
 import { canPlaceAll, type Room } from "./placement.js";
-import { SERVICE_START_MARKER_MS } from "./service-script.js";
+import { SERVICE_START_MARKER_MS, substrateServiceProblems } from "./service-script.js";
 import type { SubstrateActorShape, SubstratePhase, SubstrateRunRecord, SubstrateRunStore } from "./run-store.js";
 import {
   agentEgress,
@@ -634,6 +636,15 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   /** Phase A: no coding-run services on Substrate. */
   supportsServicesFor(_provider: CodingProvider): boolean {
     return false;
+  }
+
+  /**
+   * substrateServiceProblems: no start command, a reserved data path, or a setup too large (16 KiB per
+   * start script, 64 KiB per run, both measured JSON-escaped, as staged). Dispatch refuses the run
+   * with the first one's sentence, so an oversized script never reaches a launch.
+   */
+  unstartableServices(services: readonly ResolvedCodingService[]): UnstartableService[] {
+    return substrateServiceProblems(services);
   }
 
   plannedHandle(spec: JobSpec): JobHandle | undefined {

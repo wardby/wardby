@@ -448,6 +448,15 @@ describe("Codex bridge, end to end without Substrate", () => {
       expect(logs.join("\n")).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
     }, 15_000);
 
+    it("refuses a wait without services, as an invalid setup", async () => {
+      const setup = JSON.parse(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false })) as object;
+      await stage(JSON.stringify({ ...setup, servicesWaitMs: 10_000 }));
+      await expect(start(() => ({ exited: Promise.resolve(0) }))).rejects.toMatchObject({
+        code: "substrate_bridge_setup_invalid",
+      });
+      expect(order()).not.toContain("GET input");
+    });
+
     it("refuses services without their wait, as an invalid setup", async () => {
       const setup = JSON.parse(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false })) as object;
       await stage(JSON.stringify({ ...setup, services: [{ name: "fakedb", script: "S" }] }));

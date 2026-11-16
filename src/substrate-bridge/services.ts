@@ -38,6 +38,8 @@ interface Report {
 const SETUP_SERVICE_KEYS = new Set(["name", "script"]);
 const MAX_WAIT_MS = 3_600_000;
 const DEFAULT_POLL_MS = 250;
+/** How many times the final (failed) report is posted before the bridge idles without it. */
+const FINAL_REPORT_ATTEMPTS = 5;
 /** The state-file line (service-script.ts SERVICE_STATE_LINE), each state with exactly its own fields. */
 const STATE_LINE = /^state=(?:(starting|ready|exited)|probing attempts=([0-9]{1,5})|failed reason=(probe_failed))\n?$/;
 
@@ -100,9 +102,9 @@ const sameReport = (a: Report, b: Report): boolean =>
 /**
  * Writes each service's start.sh into `<root>/<i>/` (start.sh.tmp, mode 0644, then rename), then
  * polls each `<root>/<i>/state` every `pollMs` (default 250) and posts `services` (all of them,
- * through postCapped) on every change: until all are ready (resolves), one is failed or exited, one
+ * through postCapped) on every change (a body is resent until delivered): until all are ready (resolves), one is failed or exited, one
  * wrote no state within SERVICE_START_MARKER_MS (start_failed), or `waitMs` passed (timed_out for
- * the first not-ready one); then posts once more. On success it deletes every start.sh and stops
+ * the first not-ready one); then posts once more, retrying that final report up to FINAL_REPORT_ATTEMPTS times. On success it deletes every start.sh and stops
  * reading. Logs only `substrate_bridge_services_written` { runToken, count },
  * `substrate_bridge_service_state` { runToken, service, state, attempts?, reason? } and
  * `substrate_bridge_services_ready` { runToken, ms }. Never logs a script or a state file's text.
@@ -128,12 +130,16 @@ export async function startServices(o: {
   const marked = o.services.map(() => false);
   let lastPosted: string | undefined;
 
-  const post = async (): Promise<void> => {
+  /** Posts the reports unless this exact body was already delivered; true once it has been. */
+  const post = async (): Promise<boolean> => {
     const body = { services: reports.map((report) => ({ ...report })) };
     const text = JSON.stringify(body);
-    if (text === lastPosted) return;
-    lastPosted = text;
-    await postCapped(`${o.base}/services`, o.headers, body, o.policy, o.log, "services", o.signal).catch(() => false);
+    if (text === lastPosted) return true;
+    const ok = await postCapped(`${o.base}/services`, o.headers, body, o.policy, o.log, "services", o.signal).catch(
+      () => false,
+    );
+    if (ok) lastPosted = text;
+    return ok;
   };
   const logState = (report: Report): void => {
     o.log("substrate_bridge_service_state", {
@@ -153,7 +159,10 @@ export async function startServices(o: {
       reports[i] = report;
       logState(report);
     }
-    await post();
+    // The final report is what the launcher fails the run with: it is retried, never dropped silently.
+    for (let n = 1; !(await post()) && n < FINAL_REPORT_ATTEMPTS && !o.signal.aborted; n++) {
+      await abortableSleep(pollMs, o.signal).catch(() => undefined);
+    }
     return { ok: false, service: report.name, reason };
   };
 

@@ -2868,7 +2868,8 @@ export class ContainerExecutor implements Executor {
 
   /**
    * Warm rounds: what a delivered run's job is retained with (the commit it pushed and its agent
-   * fingerprint), or undefined (the job is removed): only on a launcher that retains, for Claude Code.
+   * fingerprint), or undefined (the job is removed): only on a launcher that retains, for Claude Code,
+   * and never for a run with git history, extra repositories or services.
    */
   private retentionFor(run: ContainerRunSnapshot, headSha: string): JobRetention | undefined {
     if (!this.warmRounds || !this.options.jobs.retain || run.provider !== "claude-code") return undefined;
@@ -2878,6 +2879,14 @@ export class ContainerExecutor implements Executor {
     // A run with extra repositories (#537) is never kept: a kept read copy would hold the previous
     // round's pinned commit; per-repository warm rounds are a follow-up (W2).
     if (folderRows(run.repositories).length > 0) return undefined;
+    // A run with services is never kept, nor one whose services column cannot be read: its holder's
+    // service containers and their data belong to that round alone (the launcher removes it too).
+    if (
+      run.services !== null &&
+      run.services !== undefined &&
+      !(Array.isArray(run.services) && run.services.length === 0)
+    )
+      return undefined;
     // The fingerprint the run launched with (never one recomputed now: the agent may have changed).
     const fingerprint = run.warmFingerprint;
     if (!WARM_HEAD_SHA.test(headSha) || !fingerprint || !WARM_FINGERPRINT.test(fingerprint)) return undefined;

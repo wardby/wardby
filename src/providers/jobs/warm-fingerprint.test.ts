@@ -160,16 +160,29 @@ describe("warmFingerprint services", () => {
 
   it("pins the hash", () => {
     const hash = servicesFingerprint([postgres16]);
-    expect(hash).toBe("8db7cdb7e55b5fce0e20c597d857e9a04fca8df23f2d3dd1dc88d456ec972e32");
+    expect(hash).toBe("b41a35708596d2ebcffeb8483d705f560320a773652babd0d914417537f62d0b");
     expect(warmFingerprint({ ...INPUT, services: hash })).not.toBe(warmFingerprint(INPUT));
   });
 
   it("leaves the hash of an entry without a Substrate image as it was, and changes with one", () => {
-    const { substrateImage: _substrateImage, ...plain } = postgres16;
+    const { substrateImage: _substrateImage, startCommand: _startCommand, ...bare } = postgres16;
     // The pin from before substrateImage existed: an entry without one keeps its fingerprint.
-    expect(servicesFingerprint([plain])).toBe("c95213a9b147111313beb3227fed1962cf3d5dac68ead609355c5a44006dfd89");
-    expect(servicesFingerprint([postgres16])).not.toBe(servicesFingerprint([plain]));
+    expect(servicesFingerprint([bare])).toBe("c95213a9b147111313beb3227fed1962cf3d5dac68ead609355c5a44006dfd89");
+    expect(servicesFingerprint([{ ...bare, substrateImage: postgres16.substrateImage }])).not.toBe(
+      servicesFingerprint([bare]),
+    );
     expect(servicesFingerprint([{ ...postgres16, substrateImage: `repo@sha256:${"d".repeat(64)}` }])).not.toBe(
+      servicesFingerprint([postgres16]),
+    );
+  });
+
+  it("changes with the start command, and leaves an entry without one as it was", () => {
+    const { substrateImage: _substrateImage, startCommand: _startCommand, ...bare } = postgres16;
+    // The pin from before startCommand existed: an entry with neither keeps its fingerprint.
+    expect(servicesFingerprint([bare])).toBe("c95213a9b147111313beb3227fed1962cf3d5dac68ead609355c5a44006dfd89");
+    const { substrateImage: _image, ...plain } = postgres16;
+    expect(servicesFingerprint([plain])).not.toBe(servicesFingerprint([bare]));
+    expect(servicesFingerprint([{ ...postgres16, startCommand: ["/bin/sh", "-c", "exec fake-start"] }])).not.toBe(
       servicesFingerprint([postgres16]),
     );
   });

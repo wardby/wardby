@@ -187,7 +187,9 @@ function parseSetup(body: Buffer, onSecret: (value: string) => void): CodexSetup
   const services = parseSetupServices(setup.services);
   if (!services) return undefined;
   const servicesWaitMs = parseServicesWaitMs(setup.servicesWaitMs);
-  if (services.length > 0 && servicesWaitMs === undefined) return undefined;
+  // servicesWaitMs comes exactly with a non-empty services list.
+  if (services.length > 0 !== (setup.servicesWaitMs !== undefined) || (services.length > 0 && !servicesWaitMs))
+    return undefined;
   return {
     registryToken: setup.registryToken,
     exclusions,

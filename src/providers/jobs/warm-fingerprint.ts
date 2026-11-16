@@ -15,7 +15,7 @@
  * and only when the run has some, so a fingerprint without them is unchanged.
  *
  * The run's services go in as one hash of their identity and version (name, version, image digest,
- * Substrate image digest when set, port, data path, the env KEY names, the catalog row's id and updatedAt): never an env value, since
+ * Substrate image digest and start command when set, port, data path, the env KEY names, the catalog row's id and updatedAt): never an env value, since
  * catalog env values can be secrets. Only when the run has some, so a fingerprint without them is
  * unchanged.
  *
@@ -98,6 +98,8 @@ export function servicesFingerprint(services: readonly ResolvedCodingService[] |
         image: service.image,
         // Only when set, so an entry without one keeps its fingerprint.
         ...(service.substrateImage === undefined ? {} : { substrateImage: service.substrateImage }),
+        // The start command (catalog, not secret: env goes in by name) changes what the holder runs.
+        ...(service.startCommand === undefined ? {} : { startCommand: service.startCommand }),
         port: service.port,
         dataPath: service.dataPath,
         serviceEnvKeys: Object.keys(service.serviceEnv).sort(),

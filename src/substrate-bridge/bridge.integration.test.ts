@@ -626,6 +626,8 @@ describe("substrate bridges, end to end without Substrate", () => {
     expect(listing).not.toContain("big.bin");
     expect(await readBlob(BLOB.transcript(TOKEN))).toEqual(Buffer.from('{"type":"user"}\n'));
     expect(await readdir(dir)).not.toContain("workspace.tar");
+    // A setup without services takes today's path: the services route is never called.
+    expect(JSON.stringify(routeLogs)).not.toContain('"services"');
   });
 
   async function readBlob(key: string): Promise<Buffer> {
@@ -2084,6 +2086,11 @@ process.exit(status);
       const { workspace, toolSetup } = await stage({ setupServices: "nope" });
       await expect(startTool(workspace, toolSetup)).rejects.toMatchObject({ code: "substrate_bridge_setup_invalid" });
       expect(JSON.parse((await readBlob(BLOB.done(TOKEN))).toString())).toEqual({ workspace: "failed" });
+    });
+
+    it("refuses a wait without services", async () => {
+      const { workspace, toolSetup } = await stage({ services: [], servicesWaitMs: 30_000 });
+      await expect(startTool(workspace, toolSetup)).rejects.toMatchObject({ code: "substrate_bridge_setup_invalid" });
     });
 
     it("refuses services without their wait", async () => {

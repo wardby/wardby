@@ -341,7 +341,11 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     const parsedServices = parseSetupServices(parsed.services);
     if (!parsedServices) return await abortStart("substrate_bridge_setup_invalid");
     const parsedWaitMs = parseServicesWaitMs(parsed.servicesWaitMs);
-    if (parsedServices.length > 0 && parsedWaitMs === undefined)
+    // servicesWaitMs comes exactly with a non-empty services list.
+    if (
+      parsedServices.length > 0 !== (parsed.servicesWaitMs !== undefined) ||
+      (parsedServices.length > 0 && !parsedWaitMs)
+    )
       return await abortStart("substrate_bridge_setup_invalid");
     services = parsedServices;
     servicesWaitMs = parsedWaitMs ?? 0;

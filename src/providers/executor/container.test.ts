@@ -6885,6 +6885,18 @@ describe("ContainerExecutor warm rounds", () => {
       expect(fingerprint(none)).toBe(fingerprint(plain));
     });
 
+    it("never retains a delivered run with services (one with services never parks)", async () => {
+      const postgres = resolvedFromDefinition(
+        BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+      );
+      const created = await warmHarness({ services: [postgres] });
+      (created.jobs as { supportsServicesFor?: (provider: string) => boolean }).supportsServicesFor = () => true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
+    });
+
     it("retains a pushed branch (a local repository) too", async () => {
       const created = await warmHarness();
       created.vcs.pushBranchOnly = true;

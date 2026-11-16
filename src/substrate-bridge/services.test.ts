@@ -269,6 +269,32 @@ describe("startServices", () => {
     });
   });
 
+  it("retries the final failure report until it is delivered", async () => {
+    // The first post carrying a failure is refused (a non-retriable status): the report must still arrive.
+    let refused = 0;
+    server.removeAllListeners("request");
+    server.on("request", (request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        if (text.includes('"failed"') && refused === 0) {
+          refused++;
+          response.writeHead(400).end();
+          return;
+        }
+        bodies.push(JSON.parse(text));
+        response.writeHead(200).end("{}");
+      });
+    });
+    await volumes(1);
+    const result = start(services(["fakedb"]));
+    await setState(0, "state=failed reason=probe_failed");
+    await expect(result).resolves.toEqual({ ok: false, service: "fakedb", reason: "probe_failed" });
+    expect(refused).toBe(1);
+    expect(bodies.at(-1)).toEqual({ services: [{ name: "fakedb", state: "failed", reason: "probe_failed" }] });
+  });
+
   it("stops when its signal aborts", async () => {
     await volumes(1);
     const controller = new AbortController();

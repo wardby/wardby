@@ -31,9 +31,11 @@ import {
   CUSTOM_CODEX_IMAGE,
   CUSTOM_TOOL_IMAGE,
   FAKE_CAP,
+  FAKE_SERVICE,
   FAKE_MCP,
   LOCAL_IMAGE_ID,
   makeHarness,
+  POSTGRES_16_SERVICE,
   PYTHON_TOOL_IMAGE,
   SMALL_WORKER,
   TOOL_IMAGE,
@@ -1034,6 +1036,19 @@ describe("SubstrateJobLauncher", () => {
     };
     expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
     expect(h.launcher.supportsServicesFor("claude-code")).toBe(false);
+  });
+
+  it("refuses at dispatch the services it cannot start, oversized start scripts included", async () => {
+    const h = await makeHarness();
+    expect(h.launcher.unstartableServices([POSTGRES_16_SERVICE, FAKE_SERVICE])).toEqual([]);
+    expect(h.launcher.unstartableServices([{ ...FAKE_SERVICE, startCommand: undefined }, POSTGRES_16_SERVICE])).toEqual(
+      [{ name: "fakedb", reason: "start_command_missing" }],
+    );
+    // Under 16 KiB raw, over it once JSON-escaped (each `"` becomes two bytes): measured as staged.
+    const quoted = '"'.repeat(9 * 1024);
+    expect(h.launcher.unstartableServices([{ ...FAKE_SERVICE, serviceEnv: { FAKEDB_PASSWORD: quoted } }])).toEqual([
+      { name: "fakedb", reason: "setup_too_large" },
+    ]);
   });
 
   it("agrees with the launch: one big worker fits both, one small worker fits neither run", async () => {
