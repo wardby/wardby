@@ -52,6 +52,7 @@ import {
   loadTranscriptMaxBytes,
   loadTranscriptRetentionDays,
 } from "../../coding/transcript/recorder.js";
+import { PlanFilesRecorder } from "../../coding/plan-files/recorder.js";
 import { loadAgentSecretValues } from "../../core/secret-guard.js";
 import { agentSecretVersions } from "../../core/secret-versions.js";
 import { createBlobStore } from "../storage/index.js";
@@ -390,8 +391,18 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     retentionDays: loadTranscriptRetentionDays(env),
     maxBytes: loadTranscriptMaxBytes(env),
   });
+  const planFiles = new PlanFilesRecorder({
+    db: options.db,
+    secretValues: async (agentId) => {
+      if (!cipher) throw new Error("plan_files_secrets_unavailable");
+      const named = await loadAgentSecretValues(options.db, cipher, agentId);
+      return named.flatMap((entry) => entry.values);
+    },
+    secretVersions: (agentId) => agentSecretVersions(options.db, agentId),
+  });
   const coding = new ContainerExecutor({
     transcripts,
+    planFiles,
     ...(options.runSteps ? { runSteps: options.runSteps } : {}),
     store: new PrismaContainerExecutionStore(options.db, {
       maxConcurrent: concurrency.maxConcurrent,

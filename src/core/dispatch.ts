@@ -36,6 +36,8 @@ import {
 import { KNOWLEDGE_CONFIG_MAX_BYTES, KNOWLEDGE_CONFIG_PATH, resolveKnowledgeLocation } from "../knowledge/location.js";
 import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInput } from "../knowledge/note.js";
 import { logger } from "./logger.js";
+import { assertPlanFilesWithinLimits, savePlanInputFiles, type PlanFile } from "../coding/plan-files/store.js";
+import { PlanRefusedError } from "./plans/refusal.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
 import {
   resolveRunPullRequest,
@@ -90,6 +92,7 @@ export type DispatchTx = Pick<
   | "runIssueStatus"
   | "codingRun"
   | "codingRunRepository"
+  | "codingRunPlanFile"
   | "codingService"
   | "task"
   | "webhook"
@@ -206,6 +209,14 @@ export interface DispatchRunOptions {
    * while this one's coding run is still starting or queued.
    */
   onPersisted?: (run: Run) => void;
+  /**
+   * Plan files given to a coding run as input (a revision, a builder's approved design), stored with
+   * the CodingRun in the persist transaction. Bounded before anything is written: over the plan limits
+   * is a PlanRefusedError("plan_too_large"). Coding agents only.
+   */
+  planInputFiles?: PlanFile[];
+  /** The coding run returns its plan folder, stored when it ends. Coding agents only. */
+  collectPlanFiles?: boolean;
 }
 
 export interface DispatchRunResult {
@@ -1037,6 +1048,15 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     options.executor.readCodingRepositoryFile
       ? await readKnowledgeIndex(options, previewTarget, declarationRead?.branch, preview.ownerId ?? null)
       : undefined;
+  // Plan files given as input (a revision, B8): bounded before anything is written.
+  try {
+    assertPlanFilesWithinLimits(options.planInputFiles ?? []);
+  } catch (err) {
+    if (err instanceof Error && err.message === "plan_too_large") {
+      throw new PlanRefusedError("plan_too_large", "the plan's input files exceed the plan limits");
+    }
+    throw err;
+  }
   const persistOnce = () =>
     options.db.$transaction(
       async (tx) => {
@@ -1278,8 +1298,10 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
                 ? packageAuditMode
                 : null,
               services,
+              collectPlanFiles: options.collectPlanFiles === true,
             },
           });
+          await savePlanInputFiles(tx, run.id, options.planInputFiles ?? []);
           // The run's repository set, fixed here with the CodingRun (#537 §2).
           if (rootCodingRunId) {
             await copyRootRepositoryRows(tx, rootCodingRunId, run.id);

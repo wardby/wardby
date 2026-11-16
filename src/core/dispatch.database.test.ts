@@ -11,6 +11,8 @@ import { RepositoryRefUnreadableError, RepositorySetRefusedError } from "./codin
 import { createPrismaClient } from "./db.js";
 import { setLogLineFilter } from "./logger.js";
 import { checkContinuation, ContinuationRefusedError, dispatchRun } from "./dispatch.js";
+import { loadPlanFiles } from "../coding/plan-files/store.js";
+import { PlanRefusedError } from "./plans/refusal.js";
 import { createRepoAccessGate } from "./repo-access.js";
 import { claimDueRun, findDueCandidates } from "./scheduler.js";
 
@@ -144,6 +146,32 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     const result = await dispatchRun({ db, executor, agentId, codingTask: "sync", codingRepositories: [] });
     expect(await rowsOf(result!.run.id)).toEqual([]);
     expect(spies.resolveCodingRepositoryRef).not.toHaveBeenCalled();
+  });
+
+  it("stores a coding run's input plan files and its collectPlanFiles flag", async () => {
+    const { agentId } = await codingAgent();
+    const { executor } = fakeExecutor();
+    const result = await dispatchRun({
+      db,
+      executor,
+      agentId,
+      codingTask: "sync",
+      planInputFiles: [{ path: "plan.md", content: "# P" }],
+      collectPlanFiles: true,
+    });
+    const runId = result!.run.id;
+    expect((await db.codingRun.findUniqueOrThrow({ where: { runId } })).collectPlanFiles).toBe(true);
+    expect(await loadPlanFiles(db, runId, "input")).toEqual([{ path: "plan.md", content: "# P" }]);
+  });
+
+  it("refuses input plan files over the limit before anything is created", async () => {
+    const { agentId } = await codingAgent();
+    const { executor } = fakeExecutor();
+    const files = Array.from({ length: 201 }, (_, i) => ({ path: `f${i}.md`, content: "x" }));
+    const attempt = dispatchRun({ db, executor, agentId, codingTask: "sync", planInputFiles: files });
+    await expect(attempt).rejects.toBeInstanceOf(PlanRefusedError);
+    await expect(attempt).rejects.toThrow("plan_too_large");
+    expect(await runsOf(agentId)).toEqual([]);
   });
 
   it("refuses an unlisted name before any run exists", async () => {

@@ -11,6 +11,8 @@ import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
+import type { PlanFilesRecorder } from "../../coding/plan-files/recorder.js";
+import { loadPlanFiles, type PlanFile } from "../../coding/plan-files/store.js";
 import { withBaseCommit, withExtraRepositories, type GitHistoryWording } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
@@ -797,6 +799,10 @@ export interface ContainerRunSnapshot {
    * versions current then, or when none were recorded.
    */
   launchSecretVersions?: WarmSecretVersion[];
+  /** CodingRun.collectPlanFiles: the run returns its plan folder, stored when it ends. */
+  collectPlanFiles?: boolean;
+  /** The run's input plan files (CodingRunPlanFile, direction "input"); written into input.json only when there are some. */
+  planInputFiles?: PlanFile[];
 }
 
 /**
@@ -1019,10 +1025,13 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     // the versions a Claude Code run with session resume launches with (transcript capture compares
     // them). A failed read leaves them unknown: never warm, and no transcript stored.
     const secretVersions =
-      row.codingRun.provider === "claude-code" && (this.options.warmRounds === true || row.codingRun.sessionResume)
+      (row.codingRun.provider === "claude-code" && (this.options.warmRounds === true || row.codingRun.sessionResume)) ||
+      row.codingRun.collectPlanFiles
         ? await agentSecretVersions(this.db, row.agentId).catch(() => undefined)
         : undefined;
     const launchSecretVersions = parseSecretVersions(row.codingRun.launchSecretVersions);
+    // Every coding run: a builder's approved design files are input rows on a run that collects nothing.
+    const planInputFiles = await loadPlanFiles(this.db, runId, "input");
     return {
       repositories,
       runId: row.id,
@@ -1088,6 +1097,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       warmStart: row.codingRun.warmStart,
       ...(secretVersions ? { secretVersions } : {}),
       ...(launchSecretVersions ? { launchSecretVersions } : {}),
+      collectPlanFiles: row.codingRun.collectPlanFiles,
+      planInputFiles,
     };
   }
 
@@ -1722,6 +1733,8 @@ export class RunCapabilityVault {
 export interface ContainerExecutorOptions {
   /** Session resume: stores a run's transcript before its job is removed. Absent = never captured. */
   transcripts?: Pick<RunTranscriptRecorder, "record">;
+  /** Plan documents: stores a collecting run's returned plan folder before it is made terminal. Absent = never stored. */
+  planFiles?: Pick<PlanFilesRecorder, "record">;
   /**
    * The run-steps writer: a continuation on a launcher with warm rounds gets one fixed step line
    * saying whether it resumed the previous round (warm-start-wording.ts). Absent = no line.
@@ -2124,9 +2137,9 @@ export class ContainerExecutor implements Executor {
         // change it), and recorded before the launch so a restarted control plane retains under it too.
         launchFingerprint = this.warmFingerprintOf(run, mcpTools);
         if (launchFingerprint) await this.recordLaunchFingerprint(runId, launchFingerprint);
-        // The secret versions the run launches with (identity and version only), for transcript
-        // capture; kept on this snapshot too, as a run that ends before the next poll is not reloaded.
-        if (run.provider === "claude-code" && run.sessionResume && run.secretVersions) {
+        // The secret versions the run launches with (identity and version only), for transcript and
+        // plan file capture; kept on this snapshot too, as a run that ends before the next poll is not reloaded.
+        if (((run.provider === "claude-code" && run.sessionResume) || run.collectPlanFiles) && run.secretVersions) {
           const versions = run.secretVersions;
           if (await this.recordLaunchSecretVersions(runId, versions)) run = { ...run, launchSecretVersions: versions };
         }
@@ -2646,6 +2659,10 @@ export class ContainerExecutor implements Executor {
     let changesPushed: { pullRequestNumber?: number; repository?: string } | undefined;
     // Warm rounds: set only once a succeeded run's push succeeded; the job is then retained, not removed.
     let retention: JobRetention | undefined;
+    // Plan documents: stored before any terminal write. store.complete/terminate fire onTerminal,
+    // whose hooks publish the plan (B6) and finish a revision (B8) from these rows; the job and its
+    // output are still present (releaseJob runs in the finally). A lost job has no output to read.
+    if (run.collectPlanFiles && jobState !== "lost") await this.recordPlanFiles(run, handle);
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -4500,7 +4517,7 @@ export class ContainerExecutor implements Executor {
         );
       }
     }
-    const build = (contextFiles: ClaudeContextFile[]) =>
+    const build = (contextFiles: ClaudeContextFile[], withPlan: boolean) =>
       CodingTaskInputSchema.parse({
         schemaVersion: CODING_PROTOCOL_VERSION,
         runId: run.runId,
@@ -4552,6 +4569,17 @@ export class ContainerExecutor implements Executor {
         ...(services.length > 0 ? { services: workerServices(services) } : {}),
         // Only when there is something to load: every other run's input stays exactly what older workers expect.
         ...(contextFiles.length > 0 ? { claudeContext: { files: contextFiles } } : {}),
+        // Only on a run with input plan files (a revision, a builder): every other run's input stays exactly what older workers expect.
+        ...(withPlan && (run.planInputFiles?.length ?? 0) > 0
+          ? {
+              planFiles: {
+                files: run.planInputFiles!.map((f) => ({
+                  path: f.path,
+                  contentBase64: Buffer.from(f.content, "utf8").toString("base64"),
+                })),
+              },
+            }
+          : {}),
       });
     // The content limits bound bytes, but JSON escaping can grow them up to sixfold (a control
     // character becomes \u00XX), so a hostile repository could still push input.json past
@@ -4560,13 +4588,14 @@ export class ContainerExecutor implements Executor {
     const contextFiles = [...(claudeContext?.files ?? [])];
     const skipped = [...(claudeContext?.skipped ?? [])];
     let skippedOverflow = claudeContext?.skippedOverflow ?? 0;
-    let serialized = JSON.stringify(build(contextFiles));
+    let serialized = JSON.stringify(build(contextFiles, false));
     while (contextFiles.length > 0 && Buffer.byteLength(serialized) > MAX_CODING_BASE_INPUT_BYTES) {
       const dropped = contextFiles.pop()!;
       if (skipped.length < MAX_RECORDED_SKIPS) skipped.push({ path: dropped.path, reason: "limit" });
       else skippedOverflow++;
-      serialized = JSON.stringify(build(contextFiles));
+      serialized = JSON.stringify(build(contextFiles, false));
     }
+    serialized = JSON.stringify(build(contextFiles, true));
     for (const skip of skipped) {
       containerLog.warn(
         {
@@ -4609,6 +4638,22 @@ export class ContainerExecutor implements Executor {
       headRef: run.headRef,
       continuation: { rootRunId: run.rootCodingRunId },
     };
+  }
+
+  /** Plan documents: never throws, never changes the run's outcome; only a status code is logged. */
+  private async recordPlanFiles(run: ContainerRunSnapshot, handle: JobHandle): Promise<void> {
+    const recorder = this.options.planFiles;
+    if (!recorder) return;
+    const jobs = this.options.jobs;
+    const status = await recorder
+      .record({
+        runId: run.runId,
+        agentId: run.agentId,
+        ...(run.launchSecretVersions ? { launchSecretVersions: run.launchSecretVersions } : {}),
+        ...(jobs.readPlanFiles ? { read: (maxBytes: number) => jobs.readPlanFiles!(handle, maxBytes) } : {}),
+      })
+      .catch(() => "plan_files_failed" as const);
+    if (status !== "stored") containerLog.info({ runId: run.runId, planFiles: status }, "plan files not stored");
   }
 
   /**

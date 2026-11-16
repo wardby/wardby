@@ -11,7 +11,8 @@ import {
   CONTINUATION_CLOSED_ERROR,
   WORKER_BUDGET_EXHAUSTED_SUMMARY,
 } from "../../coding/continuation-wording.js";
-import { MAX_CODING_INPUT_BYTES, MAX_CODING_TASK_BYTES } from "../../coding/protocol.js";
+import { MAX_CODING_BASE_INPUT_BYTES, MAX_CODING_TASK_BYTES } from "../../coding/protocol.js";
+import type { RecordPlanFilesInput } from "../../coding/plan-files/recorder.js";
 import { mentionTaskText } from "../../core/host-events.js";
 import { mcpTokenHash } from "../../coding/mcp-token.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
@@ -446,6 +447,7 @@ class FakeJobs implements WorkspaceJobLauncher {
   }
   /** Set to give the launcher a transcript reader (it is optional on a real launcher). */
   readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
+  readPlanFiles?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
   /** Every materializeWorkspace call's repository name (undefined for the default workspace). */
   materializedNames: Array<string | undefined> = [];
   /** Every materializeWorkspace call's arguments after the handle, as passed (#536). */
@@ -815,6 +817,89 @@ beforeEach(() => {
 });
 
 describe("ContainerExecutor", () => {
+  describe("plan files", () => {
+    const FAKE_SECRET = "wardby-fake-secret-value-7f3a9c";
+    async function planRun(
+      overrides: Partial<ContainerRunSnapshot>,
+      read?: FakeJobs["readPlanFiles"],
+      jobOutcome?: "failed",
+    ) {
+      const calls: RecordPlanFilesInput[] = [];
+      const terminalWritesAtRecord: number[] = [];
+      const holder: { created?: Awaited<ReturnType<typeof harness>> } = {};
+      const created = await harness(overrides, IMAGE, undefined, undefined, {
+        planFiles: {
+          record: async (input) => {
+            const self = holder.created!;
+            self.events.push("plan");
+            terminalWritesAtRecord.push(self.store.completions.length + self.store.terminations.length);
+            calls.push(input);
+            return "stored";
+          },
+        },
+      });
+      holder.created = created;
+      if (read) created.jobs.readPlanFiles = read;
+      // A failed job, as the file's other failed-job tests make one.
+      if (jobOutcome === "failed") created.jobs.statusValue = { state: "failed" };
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { created, calls, terminalWritesAtRecord, input: input! };
+    }
+
+    it("writes input plan files into input.json as base64", async () => {
+      const { input } = await planRun({
+        collectPlanFiles: true,
+        planInputFiles: [{ path: "plan.md", content: "# Plan v1\n" }],
+      });
+      expect(input.planFiles).toEqual({
+        files: [{ path: "plan.md", contentBase64: Buffer.from("# Plan v1\n").toString("base64") }],
+      });
+    });
+
+    it("an ordinary run's input has no planFiles key and its plan output is never read", async () => {
+      const { input, calls } = await planRun({});
+      expect(input).not.toHaveProperty("planFiles");
+      expect(calls).toHaveLength(0);
+    });
+
+    it("records the plan output before the run is made terminal and before the job is removed", async () => {
+      const { created, calls, terminalWritesAtRecord } = await planRun(
+        { collectPlanFiles: true },
+        async (_h, max) => `plan:${max}`,
+      );
+      expect(calls).toHaveLength(1);
+      expect(await calls[0].read!(7)).toBe("plan:7");
+      expect(created.events.indexOf("plan")).toBeLessThan(created.events.indexOf("remove"));
+      // R3: store.complete/terminate fire onTerminal (the publish hook), so nothing terminal is written yet.
+      expect(terminalWritesAtRecord).toEqual([0]);
+      expect(created.store.completions).toHaveLength(1);
+    });
+
+    it("records the plan output on a failed job too, before terminate", async () => {
+      const { created, calls, terminalWritesAtRecord } = await planRun({ collectPlanFiles: true }, undefined, "failed");
+      expect(calls).toHaveLength(1);
+      expect(terminalWritesAtRecord).toEqual([0]);
+      expect(created.store.terminations).toHaveLength(1);
+    });
+
+    it("a launcher without readPlanFiles gives the recorder no reader", async () => {
+      const { calls } = await planRun({ collectPlanFiles: true });
+      expect(calls[0].read).toBeUndefined();
+    });
+
+    it("never logs plan file content", async () => {
+      await planRun(
+        { collectPlanFiles: true, planInputFiles: [{ path: "plan.md", content: `# ${FAKE_SECRET}` }] },
+        async () => `{"x":"${FAKE_SECRET}"}`,
+      );
+      expect(JSON.stringify(logged)).not.toContain(FAKE_SECRET);
+    });
+  });
+
   describe("session transcripts", () => {
     const CLAUDE_RUN = { sessionResume: true, provider: "claude-code" } as const;
     async function recorded(
@@ -1414,7 +1499,7 @@ describe("ContainerExecutor", () => {
       };
       await created.executor.start("run-1");
       expect(created.jobs.launches).toBe(1);
-      expect(size).toBeLessThanOrEqual(MAX_CODING_INPUT_BYTES);
+      expect(size).toBeLessThanOrEqual(MAX_CODING_BASE_INPUT_BYTES);
       expect(input!.claudeContext!.files.map((file) => file.path)).toEqual(["CLAUDE.md"]);
       expect(
         logged.filter((entry) => entry.payload.event === "coding.claude_context_skipped").map((entry) => entry.payload),
