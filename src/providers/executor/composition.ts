@@ -23,6 +23,8 @@ import { logger } from "../../core/logger.js";
 import { outsideRunContext } from "../../core/async-context.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { onDocumentRunFinished } from "../../core/documents/agent-loop.js";
+import { planRunFinishedHook } from "../../core/plans/hooks.js";
+import { httpOrigin } from "../../mcp/tools/documents.js";
 import type { SelfDefectSink } from "../../core/self-defects.js";
 import { startDeferredForRequest } from "../../core/host-events.js";
 import { syncMergeOrderChecks } from "../../core/merge-order-check.js";
@@ -379,6 +381,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   // `composed` only when a run finishes, which is after this function returns.
   const blobStoreConfig = loadBlobStoreConfig(env);
   const cipher = options.secretCipher;
+  const origin = httpOrigin(env.MCP_CANONICAL_URI);
   const transcripts = new RunTranscriptRecorder({
     db: options.db,
     blobs: blobStoreConfig && cipher ? createBlobStore(blobStoreConfig) : undefined,
@@ -408,16 +411,24 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       maxConcurrent: concurrency.maxConcurrent,
       issueTrackers,
       warmRounds: jobs.warmRounds === true,
-      // Threads sent from a document: publish the run's edit and post its replies (never throws).
-      // Without the cipher the agent's secrets cannot be redacted, so nothing is posted.
+      // Threads sent from a document: publish the run's edit and post its replies; a planner run's
+      // plan files become its plan set (neither throws; postIssueNotice is wired by C2). Without the
+      // cipher the agent's secrets cannot be redacted, so nothing is posted or published.
       ...(cipher
         ? {
-            onTerminal: documentRunFinishedHook(() => ({
-              db: options.db,
-              executor: composed,
-              cipher,
-              selfDefects: { db: options.db, issueTrackers },
-            })),
+            onTerminal: (() => {
+              const documentHook = documentRunFinishedHook(() => ({
+                db: options.db,
+                executor: composed,
+                cipher,
+                selfDefects: { db: options.db, issueTrackers },
+              }));
+              const planHook = planRunFinishedHook(() => ({ db: options.db, cipher, origin }));
+              return (runId: string) => {
+                documentHook(runId);
+                planHook(runId);
+              };
+            })(),
           }
         : {}),
     }),
