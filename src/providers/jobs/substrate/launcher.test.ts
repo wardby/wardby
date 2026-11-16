@@ -3581,7 +3581,6 @@ describe("coding services", () => {
       },
     });
     const seen = watchResumes(h);
-    const startedAt = 1_000_000;
     await expect(h.launcher.launch(h.spec)).rejects.toThrow(`coding_service_unready:${c.service}`);
     expect((await h.runs.get("run-1"))?.phase).toBe("provisioning_failed");
     expect(h.api.actors.size).toBe(0);
@@ -3601,7 +3600,6 @@ describe("coding services", () => {
       expect(h.sleeps() * 1000).toBeLessThanOrEqual(bound + 1000);
     }
     expect(h.sleeps()).toBeGreaterThan(0);
-    void startedAt;
   });
 
   it("Codex: one actor, the same wait", async () => {
@@ -3781,10 +3779,20 @@ describe("coding services", () => {
     expect(await tokenBlobs(h)).toEqual([]);
   });
 
-  it("stop deletes the actors, services included", async () => {
-    const h = await makeHarness({ services: SVC, onSleep: (x) => reportServices(x, READY) });
-    const handle = await h.launcher.launch(h.spec);
-    await h.launcher.stop(handle);
+  it("stopped after the ready report: ends stopped and never resumes the agent", async () => {
+    const h = await makeHarness({
+      services: SVC,
+      onSleep: async (x) => {
+        if (x.sleeps() === 1) {
+          await reportServices(x, READY);
+          await x.launcher.stop(x.launcher.plannedHandle(x.spec)!);
+        }
+      },
+    });
+    const seen = watchResumes(h);
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get("run-1"))?.phase).toBe("stopped");
+    expect(seen.names).toEqual([toolActorName(h.token)]);
     expect(h.api.actors.size).toBe(0);
   });
 

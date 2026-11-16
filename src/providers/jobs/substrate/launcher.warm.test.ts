@@ -1469,7 +1469,9 @@ describe("SubstrateJobLauncher with warm rounds", () => {
       "FAKE_SERVICE_ENV_VALUE_0001",
       "FAKE_READINESS_ARG_0001",
     ];
-    const rows = await Promise.all(["run-1", "run-2", "run-3", "run-4", "run-5", "run-6"].map((id) => h.runs.get(id)));
+    const rows = await Promise.all(
+      ["run-1", "run-2", "run-3", "run-4", "run-5", "run-6", "run-7"].map((id) => h.runs.get(id)),
+    );
     expect(rows[3]?.repositories).toEqual(EXTRAS);
     const outputs = [
       JSON.stringify([...h.api.templates.values()]),

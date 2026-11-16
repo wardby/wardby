@@ -1163,7 +1163,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * attempts and reason ever reach onServiceState, each change once) until all are ready. Throws
    * serviceUnreadyError(name) for a failed one; for the first not-ready one (by name) when the
    * holder is gone or crashed (start_failed) or `boundMs` passed (timed_out), reporting it failed. A
-   * report that does not parse is ignored (the next poll reads it again). True once all are ready;
+   * report that does not parse is ignored (the next poll reads it again). True once all are ready (and the run is still provisioning);
    * false, reporting nothing, when the run left provisioning meanwhile (stopped or timed out: its
    * actors are deleted).
    */
@@ -1200,7 +1200,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
           ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
         });
       }
-      if (names.every((name) => seen.get(name)?.state === "ready")) return true;
+      if (names.every((name) => seen.get(name)?.state === "ready")) {
+        // A stop between the ready report and here deleted the actors: the agent must not resume.
+        return (await this.runs.get(spec.runId))?.phase === "provisioning";
+      }
       const failed = names.find((name) => seen.get(name)?.state === "failed");
       if (failed !== undefined) throw serviceUnreadyError(failed);
       const actor = await this.api.getActor(this.config.atespace, holder).then(
