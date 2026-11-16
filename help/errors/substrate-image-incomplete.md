@@ -4,7 +4,7 @@ title: A Substrate run's image lacks something the bridge runs (substrate_image_
 summary: A coding run on the experimental Substrate launcher failed because its image runs as root, or lacks the runner, GNU tar, or a /workspace or /run/wardby directory its user can write; the code names the missing item.
 audience: operator
 tags: [error, substrate, substrate_image_incomplete, user, root, tar, workspace, run_dir, runner, job launcher]
-appliesTo: ">=0.9.15"
+appliesTo: ">=0.10.1"
 ---
 
 # A Substrate run's image lacks something the bridge runs

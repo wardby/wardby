@@ -4,7 +4,7 @@ title: A Substrate run's actor template is gone (substrate_template_missing)
 summary: A coding run on the experimental Substrate launcher could not create or start an actor because its actor template no longer exists in Substrate, and creating it again did not help.
 audience: operator
 tags: [error, substrate, substrate_template_missing, actor template, warm rounds, job launcher]
-appliesTo: ">=0.9.15"
+appliesTo: ">=0.10.1"
 ---
 
 # A Substrate run's actor template is gone

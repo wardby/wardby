@@ -4,7 +4,7 @@ title: A Substrate run's image never became ready (substrate_image_unready)
 summary: A coding run on the experimental Substrate launcher failed because Substrate could not build its template's golden snapshot twice in a row, or the template never became ready; usually a custom image without the Substrate bridge.
 audience: operator
 tags: [error, substrate, substrate_image_unready, workerImageRef, golden snapshot, job launcher]
-appliesTo: ">=0.9.15"
+appliesTo: ">=0.10.1"
 ---
 
 # A Substrate run's image never became ready
