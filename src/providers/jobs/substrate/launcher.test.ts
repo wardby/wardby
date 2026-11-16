@@ -21,7 +21,13 @@ import {
   SubstrateUnavailableError,
   type WorkerInfo,
 } from "./api.js";
-import { DEFAULT_TEMPLATE_TTL_MS, inputGitHistory, templateTtlFloorMs } from "./launcher.js";
+import {
+  DEFAULT_STARTUP_TIMEOUT_MS,
+  DEFAULT_TEMPLATE_TTL_MS,
+  inputGitHistory,
+  templateTtlFloorMs,
+} from "./launcher.js";
+import { serviceStartScript, servicesWaitMs } from "./service-script.js";
 import { agentEgress, agentTemplate, BRIDGE_COMMANDS, codexTemplate, toolEgress, toolTemplate } from "./specs.js";
 import {
   allBlobs,
@@ -37,6 +43,7 @@ import {
   makeHarness,
   POSTGRES_16_SERVICE,
   PYTHON_TOOL_IMAGE,
+  reportServices,
   SMALL_WORKER,
   TOOL_IMAGE,
   type Harness,
@@ -187,6 +194,45 @@ jobLauncherContract(
       destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
       finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
       // The tool actor's posted workspace: what the bridge tars from /workspace (a root .git included).
+      fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
+    };
+  },
+);
+
+/** A services harness whose holder reports postgres ready on the first poll. */
+const postgresReady = () =>
+  makeHarness({
+    services: [POSTGRES_16_SERVICE],
+    onSleep: (h) => reportServices(h, [{ name: "postgres", state: "ready" }]),
+  });
+
+jobLauncherContract(
+  "substrate with services",
+  async () => {
+    const h = await postgresReady();
+    return {
+      launcher: h.launcher,
+      spec: h.spec,
+      finish: async (handle, result) => {
+        const t = handle.id.split("/")[1];
+        await h.blobs.put(
+          BLOB.result(t),
+          Buffer.from(JSON.stringify(result?.resultArtifact ? JSON.parse(result.resultArtifact) : h.output)),
+        );
+        await h.blobs.put(BLOB.done(t), Buffer.from('{"workspace":"ok"}'));
+      },
+      lose: async (handle) => {
+        await h.api.deleteActor("wardby-runs", `${handle.id.split("/")[1]}-agent`);
+      },
+    };
+  },
+  async () => {
+    const h = await postgresReady();
+    return {
+      launcher: h.launcher,
+      spec: h.spec,
+      destination: join(h.workspaceRoot, h.spec.runId, "workspace"),
+      finish: (handle) => finish({ ...h, token: handle.id.split("/")[1] }),
       fillJobWorkspace: (handle, files) => putWorkspaceTarFor(h, handle.id.split("/")[1], files),
     };
   },
@@ -365,6 +411,12 @@ describe("SubstrateJobLauncher", () => {
     // A run without extra repositories is unchanged.
     expect(setup).not.toHaveProperty("repositories");
     expect(await h.runs.get("run-1")).not.toHaveProperty("repositories");
+    // A run without services is unchanged: no scripts, no states, both resumed with no wait.
+    expect(setup).not.toHaveProperty("services");
+    expect(setup).not.toHaveProperty("servicesWaitMs");
+    expect(h.serviceStates).toEqual([]);
+    expect(h.sleeps()).toBe(0);
+    expect(await h.runs.get("run-1")).not.toHaveProperty("services");
   });
 
   it("is idempotent for the same spec and refuses a different one", async () => {
@@ -708,6 +760,7 @@ describe("SubstrateJobLauncher", () => {
 
   it("never puts the capability in a template, egress policy, seed or input", async () => {
     const h = await makeHarness();
+    let services: Harness | undefined;
     const logs: string[] = [];
     const write = process.stderr.write.bind(process.stderr);
     const writeOut = process.stdout.write.bind(process.stdout);
@@ -719,11 +772,31 @@ describe("SubstrateJobLauncher", () => {
       await h.launcher.remove(handle);
       const failing = await makeHarness({ workers: 1, workerSize: SMALL_WORKER });
       await failing.launcher.launch(failing.spec).catch(() => undefined);
+      // A run with services: their start scripts carry serviceEnv values (the setup blob only).
+      services = await makeHarness({
+        services: [POSTGRES_16_SERVICE, FAKE_SERVICE],
+        onSleep: (x) =>
+          reportServices(x, [
+            { name: "fakedb", state: "ready" },
+            { name: "postgres", state: "ready" },
+          ]),
+      });
+      await services.launcher.launch(services.spec);
     } finally {
       process.stderr.write = write;
       process.stdout.write = writeOut;
     }
     expect(logs.join("")).not.toContain(FAKE_CAP);
+    expect(logs.join("")).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
+    const servicesShared = JSON.stringify([
+      ...services.api.templates.values(),
+      ...services.api.egressPolicies.values(),
+      services.serviceStates,
+      services.callFailures,
+      await services.blobs.get(BLOB.input(services.token)).then(String),
+    ]);
+    expect(servicesShared).not.toContain(FAKE_CAP);
+    expect(servicesShared).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
 
     const fresh = await makeHarness();
     await fresh.launcher.launch(fresh.spec);
@@ -843,7 +916,6 @@ describe("SubstrateJobLauncher", () => {
       [{ provider: undefined }, "substrate_provider_unsupported"],
       [{ image: "registry.example/agent:latest" }, "substrate_image_not_digest"],
       [{ toolImage: "registry.example/tool:latest" }, "substrate_image_not_digest"],
-      [{ services: [] }, "substrate_feature_unsupported:services"],
       [{ toolImage: LOCAL_IMAGE_ID }, "substrate_image_not_digest"],
     ];
     for (const [change, code] of cases) {
@@ -1035,7 +1107,6 @@ describe("SubstrateJobLauncher", () => {
       throw new SubstrateUnavailableError("substrate_unavailable");
     };
     expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
-    expect(h.launcher.supportsServicesFor("claude-code")).toBe(false);
   });
 
   it("refuses at dispatch the services it cannot start, oversized start scripts included", async () => {
@@ -1417,7 +1488,6 @@ describe("Codex (single actor)", () => {
       [{ toolImage: `registry.example/tool@sha256:${"b".repeat(64)}` }, "substrate_spec_invalid"],
       [{ image: "registry.example/substrate-codex:latest" }, "substrate_image_not_digest"],
       [{ image: LOCAL_IMAGE_ID }, "substrate_image_not_digest"],
-      [{ services: [] }, "substrate_feature_unsupported:services"],
       [{ provider: "other" as JobSpec["provider"] }, "substrate_provider_unsupported"],
     ];
     for (const [change, code] of cases) {
@@ -3410,5 +3480,366 @@ describe("template record and readiness", () => {
       expect(recorded).not.toContain(FAKE_CAP);
       expect(recorded).not.toContain(FAKE_MCP);
     });
+  });
+});
+
+describe("coding services", () => {
+  /** FAKE_SERVICE with a test env (what the runner sees), next to the built-in postgres. */
+  const FAKE_SVC = { ...FAKE_SERVICE, testEnv: { FAKEDB_URL: "fakedb://127.0.0.1:5999/test" } };
+  const SVC = [POSTGRES_16_SERVICE, FAKE_SVC];
+  const READY = [
+    { name: "fakedb", state: "ready" as const },
+    { name: "postgres", state: "ready" as const },
+  ];
+  /** Records every resumed actor's name, and the services report at the agent's resume. */
+  const watchResumes = (h: Harness) => {
+    const seen = { names: [] as string[], reportAtAgent: undefined as unknown };
+    const resume = h.api.resumeActor.bind(h.api);
+    h.api.resumeActor = async (atespace, name) => {
+      seen.names.push(name);
+      if (name === agentActorName(h.token) && (await h.blobs.head(BLOB.services(h.token)))) {
+        seen.reportAtAgent = JSON.parse((await h.blobs.get(BLOB.services(h.token))).toString());
+      }
+      return resume(atespace, name);
+    };
+    return seen;
+  };
+  const tokenBlobs = async (h: Harness) => [...(await allBlobs(h)).keys()].filter((key) => key.includes(h.token));
+  const setupOf = async (h: Harness) => JSON.parse((await h.blobs.get(BLOB.toolSetup(h.token))).toString());
+
+  it("resumes the holder first, waits for ready, then the agent", async () => {
+    const h = await makeHarness({
+      services: SVC,
+      onSleep: async (x) => {
+        if (x.sleeps() === 1) await reportServices(x, READY);
+      },
+    });
+    const seen = watchResumes(h);
+    await h.launcher.launch(h.spec);
+    expect(seen.names).toEqual([toolActorName(h.token), agentActorName(h.token)]);
+    expect(seen.reportAtAgent).toEqual({ services: READY });
+    expect((await h.runs.get("run-1"))?.phase).toBe("running");
+    expect(h.serviceStates).toEqual([
+      { runId: "run-1", name: "fakedb", state: "pending" },
+      { runId: "run-1", name: "postgres", state: "pending" },
+      { runId: "run-1", name: "fakedb", state: "ready" },
+      { runId: "run-1", name: "postgres", state: "ready" },
+    ]);
+  });
+
+  it("forwards probing and attempts as they change", async () => {
+    const reports = [
+      [{ name: "fakedb", state: "probing" as const, attempts: 1 }],
+      [{ name: "fakedb", state: "probing" as const, attempts: 1 }],
+      [{ name: "fakedb", state: "probing" as const, attempts: 2 }],
+      [{ name: "fakedb", state: "ready" as const }],
+    ];
+    const h = await makeHarness({
+      services: [FAKE_SVC],
+      onSleep: async (x) => {
+        const next = reports[x.sleeps() - 1];
+        if (next) await reportServices(x, next);
+      },
+    });
+    await h.launcher.launch(h.spec);
+    expect(h.serviceStates.map(({ state, attempts }) => ({ state, attempts }))).toEqual([
+      { state: "pending", attempts: undefined },
+      { state: "probing", attempts: 1 },
+      { state: "probing", attempts: 2 },
+      { state: "ready", attempts: undefined },
+    ]);
+  });
+
+  it.each([
+    {
+      what: "a probe failure",
+      report: [
+        { name: "fakedb", state: "failed" as const, reason: "probe_failed" as const },
+        { name: "postgres", state: "probing" as const, attempts: 1 },
+      ],
+      service: "fakedb",
+      reason: "probe_failed",
+    },
+    {
+      what: "an exit",
+      report: [
+        { name: "fakedb", state: "ready" as const },
+        { name: "postgres", state: "failed" as const, reason: "exited" as const },
+      ],
+      service: "postgres",
+      reason: "exited",
+    },
+    { what: "a crashed holder", crash: true, report: [READY[0]], service: "postgres", reason: "start_failed" },
+    { what: "no report within the wait", service: "fakedb", reason: "timed_out" },
+  ])("fails the launch on $what, removes everything and never resumes the agent", async (c) => {
+    const h = await makeHarness({
+      services: SVC,
+      onSleep: async (x) => {
+        if (x.sleeps() !== 1) return;
+        if (c.report) await reportServices(x, c.report);
+        if (c.crash) x.api.setState(ATESPACE, toolActorName(x.token), "CRASHED");
+      },
+    });
+    const seen = watchResumes(h);
+    const startedAt = 1_000_000;
+    await expect(h.launcher.launch(h.spec)).rejects.toThrow(`coding_service_unready:${c.service}`);
+    expect((await h.runs.get("run-1"))?.phase).toBe("provisioning_failed");
+    expect(h.api.actors.size).toBe(0);
+    expect(h.secrets.secrets.size).toBe(0);
+    expect(await tokenBlobs(h)).toEqual([]);
+    expect(seen.names).not.toContain(agentActorName(h.token));
+    expect(h.serviceStates.filter((u) => u.name === c.service).at(-1)).toEqual({
+      runId: "run-1",
+      name: c.service,
+      state: "failed",
+      reason: c.reason,
+    });
+    if (c.reason === "timed_out") {
+      // Not before the bridge's own bound plus the launcher's 15 s of slack.
+      const bound = servicesWaitMs(SVC, DEFAULT_STARTUP_TIMEOUT_MS) + 15_000;
+      expect(h.sleeps() * 1000).toBeGreaterThan(bound - 1000);
+      expect(h.sleeps() * 1000).toBeLessThanOrEqual(bound + 1000);
+    }
+    expect(h.sleeps()).toBeGreaterThan(0);
+    void startedAt;
+  });
+
+  it("Codex: one actor, the same wait", async () => {
+    const h = await makeHarness({
+      provider: "codex",
+      services: [POSTGRES_16_SERVICE],
+      onSleep: (x) => reportServices(x, [{ name: "postgres", state: "ready" }]),
+    });
+    const seen = watchResumes(h);
+    await h.launcher.launch(h.spec);
+    expect(seen.names).toEqual([agentActorName(h.token)]);
+    expect(h.sleeps()).toBe(1);
+    expect((await h.runs.get("run-1"))?.phase).toBe("running");
+    const setup = (await setupOf(h)) as CodexWorkerSetup;
+    expect(setup.services?.[0].name).toBe("postgres");
+    expect(setup.servicesWaitMs).toBe(servicesWaitMs([POSTGRES_16_SERVICE], DEFAULT_STARTUP_TIMEOUT_MS));
+  });
+
+  it("stages the scripts in the setup, outside toolSetup", async () => {
+    const h = await makeHarness({ services: SVC, onSleep: (x) => reportServices(x, READY) });
+    await h.launcher.launch(h.spec);
+    const text = (await h.blobs.get(BLOB.toolSetup(h.token))).toString();
+    const setup = JSON.parse(text) as { services: { name: string; script: string }[]; toolSetup: string };
+    expect(setup.services.map((s) => s.name)).toEqual(["fakedb", "postgres"]);
+    expect(setup).toHaveProperty("servicesWaitMs", servicesWaitMs(SVC, DEFAULT_STARTUP_TIMEOUT_MS));
+    // Each script sits JSON-escaped once, exactly as substrateServiceProblems measures it.
+    for (const service of [FAKE_SVC, POSTGRES_16_SERVICE]) {
+      expect(text).toContain(JSON.stringify(serviceStartScript(service)));
+    }
+    // The runner's setup gets the test env only: never a start script or a serviceEnv value.
+    const runnerSetup = JSON.parse(setup.toolSetup) as { env: Record<string, string> };
+    expect(setup.toolSetup).not.toContain("FAKE_SERVICE_ENV_VALUE_0001");
+    expect(setup.toolSetup).not.toContain("FAKE_READINESS_ARG_0001");
+    expect(runnerSetup.env.FAKEDB_URL).toBe("fakedb://127.0.0.1:5999/test");
+  });
+
+  it("records the services on the row", async () => {
+    const h = await makeHarness({ services: SVC, onSleep: (x) => reportServices(x, READY) });
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get("run-1"))?.services).toEqual(["fakedb", "postgres"]);
+  });
+
+  it("supports services on both providers", async () => {
+    const h = await makeHarness();
+    expect(h.launcher.supportsServicesFor("claude-code")).toBe(true);
+    expect(h.launcher.supportsServicesFor("codex")).toBe(true);
+  });
+
+  it("says which services it cannot start", async () => {
+    const h = await makeHarness();
+    expect(h.launcher.unstartableServices([{ ...FAKE_SERVICE, startCommand: undefined }, POSTGRES_16_SERVICE])).toEqual(
+      [{ name: "fakedb", reason: "start_command_missing" }],
+    );
+  });
+
+  const six = ["fa", "fb", "fc", "fd", "fe", "ff"].map((name) => ({ ...FAKE_SERVICE, name }));
+  it.each([
+    [
+      "claude-code",
+      "no start command",
+      [{ ...FAKE_SERVICE, startCommand: undefined }],
+      "substrate_feature_unsupported:services",
+    ],
+    [
+      "claude-code",
+      "a reserved data path",
+      [{ ...FAKE_SERVICE, dataPath: "/run/wardby-svc" }],
+      "substrate_feature_unsupported:services",
+    ],
+    ["claude-code", "an empty list", [], "substrate_spec_invalid"],
+    ["claude-code", "six entries", six, "substrate_spec_invalid"],
+    [
+      "codex",
+      "no start command",
+      [{ ...FAKE_SERVICE, startCommand: undefined }],
+      "substrate_feature_unsupported:services",
+    ],
+    [
+      "codex",
+      "a reserved data path",
+      [{ ...FAKE_SERVICE, dataPath: "/run/wardby-svc" }],
+      "substrate_feature_unsupported:services",
+    ],
+    ["codex", "an empty list", [], "substrate_spec_invalid"],
+    ["codex", "six entries", six, "substrate_spec_invalid"],
+  ] as const)(
+    "refuses a spec the dispatch check should have refused, before any side effect: %s, %s",
+    async (provider, _what, services, code) => {
+      const h = await makeHarness({ provider });
+      const spec = { ...h.spec, services: [...services] } as JobSpec;
+      await expect(h.launcher.launch(spec)).rejects.toThrow(code);
+      expect(h.launcher.plannedHandle(spec)).toBeUndefined();
+      expect(await h.runs.get(spec.runId)).toBeUndefined();
+      expect(h.api.templates.size).toBe(0);
+      expect(await h.templates.listUnusedBefore(new Date(8.64e15), 100)).toEqual([]);
+    },
+  );
+
+  describe("blames the first service when the holder's own template is known good", () => {
+    /** The services tool template always reports a failed golden snapshot: a rebuild, then unready. */
+    const failingServices = async (seedPlainReady: boolean) => {
+      const h = await makeHarness({ services: SVC, onSleep: (x) => reportServices(x, READY) });
+      const servicesTool = toolTemplate(h.spec, CONFIG);
+      const plainTool = toolTemplate({ ...h.spec, services: undefined }, CONFIG);
+      expect(servicesTool.name).not.toBe(plainTool.name);
+      if (seedPlainReady) {
+        const at = new Date(1_000_000);
+        await h.templates.touch(
+          { name: plainTool.name, atespace: ATESPACE, role: "tool", image: plainTool.containers[0].image },
+          at,
+        );
+        await h.templates.markReady([plainTool.name], at);
+      }
+      const get = h.api.getActorTemplate.bind(h.api);
+      h.api.getActorTemplate = async (atespace, name) => {
+        const info = await get(atespace, name);
+        return name === servicesTool.name && info ? { ...info, goldenSnapshotFailed: true } : info;
+      };
+      // The first failure rebuilds and requeues; the second, past the same-build window, is unready.
+      await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+      h.setNow(1_000_000 + 120_000);
+      return h;
+    };
+
+    it("as coding_service_unready, image_unavailable", async () => {
+      const h = await failingServices(true);
+      await expect(h.launcher.launch(h.spec)).rejects.toThrow("coding_service_unready:fakedb");
+      expect((await h.runs.get("run-1"))?.phase).toBe("provisioning_failed");
+      expect(h.api.actors.size).toBe(0);
+      expect(h.serviceStates.filter((u) => u.name === "fakedb").at(-1)).toEqual({
+        runId: "run-1",
+        name: "fakedb",
+        state: "failed",
+        reason: "image_unavailable",
+      });
+    });
+
+    it("but not without that record: the holder's image stays the suspect (image_unready)", async () => {
+      const h = await failingServices(false);
+      const handle = await h.launcher.launch(h.spec);
+      expect((await h.runs.get("run-1"))?.phase).toBe("image_unready");
+      expect(await h.launcher.status(handle)).toEqual({ state: "failed" });
+      expect(h.serviceStates).toEqual([]);
+    });
+  });
+
+  it("capacity counts the services", async () => {
+    const h = await makeHarness({ services: SVC });
+    const plain = { ...h.spec, services: undefined };
+    const agent = agentTemplate(plain, CONFIG);
+    const plainTool = toolTemplate(plain, CONFIG);
+    const servicesTool = toolTemplate(h.spec, CONFIG);
+    expect(servicesTool.memoryBytes).toBeGreaterThan(plainTool.memoryBytes);
+    const worker = (cpu: number, memory: number): WorkerInfo => ({
+      pool: "p",
+      labels: {},
+      freeCpuMillicores: cpu,
+      freeMemoryBytes: memory,
+    });
+    h.api.listWorkers = async () => [
+      worker(agent.cpuMillicores + plainTool.cpuMillicores, agent.memoryBytes + plainTool.memoryBytes),
+    ];
+    expect(await h.launcher.hasCapacityFor(plain)).toBe(true);
+    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(false);
+    h.api.listWorkers = async () => [
+      worker(agent.cpuMillicores + servicesTool.cpuMillicores, agent.memoryBytes + servicesTool.memoryBytes),
+    ];
+    expect(await h.launcher.hasCapacityFor(h.spec)).toBe(true);
+  });
+
+  it("remove deletes the services report with the run", async () => {
+    const h = await makeHarness({ services: SVC, onSleep: (x) => reportServices(x, READY) });
+    const handle = await h.launcher.launch(h.spec);
+    expect(await h.blobs.head(BLOB.services(h.token))).not.toBeNull();
+    await finish(h);
+    await h.launcher.remove(handle);
+    expect(await tokenBlobs(h)).toEqual([]);
+  });
+
+  it("stop deletes the actors, services included", async () => {
+    const h = await makeHarness({ services: SVC, onSleep: (x) => reportServices(x, READY) });
+    const handle = await h.launcher.launch(h.spec);
+    await h.launcher.stop(handle);
+    expect(h.api.actors.size).toBe(0);
+  });
+
+  it("stopped while it waits: no failure is reported and the actors stay deleted", async () => {
+    const h = await makeHarness({
+      services: SVC,
+      onSleep: async (x) => {
+        if (x.sleeps() === 1) await x.launcher.stop(x.launcher.plannedHandle(x.spec)!);
+      },
+    });
+    await h.launcher.launch(h.spec);
+    expect((await h.runs.get("run-1"))?.phase).toBe("stopped");
+    expect(h.api.actors.size).toBe(0);
+    expect(h.serviceStates.some((u) => u.state === "failed")).toBe(false);
+  });
+
+  it("keeps every serviceEnv value out of templates, policies, rows, states, events, errors and logs", async () => {
+    const logs: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    const writeOut = process.stdout.write.bind(process.stdout);
+    process.stderr.write = (chunk: string | Uint8Array) => (logs.push(String(chunk)), true);
+    process.stdout.write = (chunk: string | Uint8Array) => (logs.push(String(chunk)), true);
+    const ok = await makeHarness({ services: SVC, onSleep: (x) => reportServices(x, READY) });
+    const failing = await makeHarness({
+      services: SVC,
+      onSleep: (x) => reportServices(x, [{ name: "fakedb", state: "failed", reason: "probe_failed" }]),
+    });
+    let error: unknown;
+    try {
+      await ok.launcher.launch(ok.spec);
+      error = await failing.launcher.launch(failing.spec).catch((e: unknown) => e);
+    } finally {
+      process.stderr.write = write;
+      process.stdout.write = writeOut;
+    }
+    const value = "FAKE_SERVICE_ENV_VALUE_0001";
+    expect(logs.join("")).not.toContain(value);
+    for (const h of [ok, failing]) {
+      const outside = JSON.stringify([
+        [...h.api.templates.values()],
+        [...h.api.egressPolicies.values()],
+        await h.runs.get("run-1"),
+        h.serviceStates,
+        h.callFailures,
+        h.templateEvents,
+        [...h.secrets.secrets.values()],
+      ]);
+      expect(outside).not.toContain(value);
+      expect(outside).not.toContain("FAKE_READINESS_ARG_0001");
+      expect(outside).not.toContain("--fake-start-arg-0001");
+      // Only the setup blob carries it.
+      for (const [key, body] of await allBlobs(h)) {
+        if (key !== BLOB.toolSetup(h.token)) expect(body).not.toContain(value);
+      }
+    }
+    expect(JSON.stringify({ message: (error as Error).message, stack: (error as Error).stack })).not.toContain(value);
   });
 });

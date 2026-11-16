@@ -19,6 +19,17 @@ import { RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
 
 const native: Executor = { async start() {}, async stop() {} };
+
+/** The SubstrateJobLauncher a configured executor holds (its options.jobs, behind any router). */
+function findSubstrateLauncher(value: unknown, depth = 0): SubstrateJobLauncher | undefined {
+  if (value instanceof SubstrateJobLauncher) return value;
+  if (!value || typeof value !== "object" || depth > 3) return undefined;
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    const found = findSubstrateLauncher(child, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
 // Construction never queries the database.
 const db = {} as unknown as PrismaClient;
 // The kind harness's local registry form (host with a port).
@@ -141,6 +152,29 @@ describe("JOB_LAUNCHER=substrate", () => {
     const resolveMcpToken = async () => undefined;
     expect(build(resolveMcpToken)).toBe(resolveMcpToken);
     expect(build()).toBeUndefined();
+  });
+
+  it("passes the service-state reporter to the Substrate launcher", () => {
+    const onServiceState = async () => undefined;
+    const launcher = buildSubstrateJobLauncher({
+      env,
+      db,
+      workspaceRoot: join(dir, "ws"),
+      resolveCapability: async () => "cap",
+      onServiceState,
+      substrateApi: new FakeSubstrateApi({ workers: 1 }),
+      kubernetesApi: new FakeKubernetesApi(),
+    });
+    expect((launcher as unknown as { options: { onServiceState?: unknown } }).options.onServiceState).toBe(
+      onServiceState,
+    );
+    // The configured executor's Substrate branch passes the reporter it builds for Docker and Kubernetes.
+    const executor = build({}) as unknown as { options?: { jobs?: unknown } } & Record<string, unknown>;
+    const jobs = findSubstrateLauncher(executor);
+    expect(jobs).toBeInstanceOf(SubstrateJobLauncher);
+    expect(typeof (jobs as unknown as { options: { onServiceState?: unknown } }).options.onServiceState).toBe(
+      "function",
+    );
   });
 
   it("passes the collect grace and startup timeout to the launcher, in milliseconds", () => {

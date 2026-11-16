@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { logger, setLogLineFilter } from "../../../core/logger.js";
+import type { ResolvedCodingService } from "../../../coding/services/catalog.js";
 import { warmFingerprint } from "../warm-fingerprint.js";
 import { JobCapacityError, type JobHandle, type JobRetention, type JobSpec } from "../types.js";
 import {
@@ -12,7 +13,10 @@ import {
   FAKE_CAP,
   FAKE_MCP,
   FAKE_MCP_2,
+  FAKE_SERVICE,
   makeHarness,
+  POSTGRES_16_SERVICE,
+  reportServices,
   TOOL_IMAGE,
   type Harness,
 } from "./launcher.test-support.js";
@@ -45,6 +49,11 @@ const FAKE_MCP_3 = "rmt_FAKE_MCP_TOKEN_NOT_REAL_" + "3".repeat(19);
 /** Each run's MCP token (asked only for a spec with mcpTools). */
 const MCPS: Record<string, string | undefined> = { "run-1": FAKE_MCP, "run-2": FAKE_MCP_2, "run-3": FAKE_MCP_3 };
 const MODEL = "claude-sonnet-5";
+const SVC = [POSTGRES_16_SERVICE, FAKE_SERVICE];
+const SVC_READY = [
+  { name: "fakedb", state: "ready" as const },
+  { name: "postgres", state: "ready" as const },
+];
 
 async function warmHarness(
   options: {
@@ -53,9 +62,13 @@ async function warmHarness(
     workerSize?: Room;
     suspendedHoldRoom?: boolean;
     mcpTokenFor?: (runId: string) => string | undefined;
+    services?: ResolvedCodingService[];
+    onSleep?: (h: Harness) => Promise<void> | void;
   } = {},
 ): Promise<Harness> {
   const h = await makeHarness({
+    ...(options.services ? { services: options.services } : {}),
+    ...(options.onSleep ? { onSleep: options.onSleep } : {}),
     warmRounds: options.warmRounds ?? WARM,
     ...(options.workers !== undefined ? { workers: options.workers } : {}),
     ...(options.workerSize ? { workerSize: options.workerSize } : {}),
@@ -1433,12 +1446,29 @@ describe("SubstrateJobLauncher with warm rounds", () => {
         dependencyCache: true,
       });
       expect(await logged.warmOutcome(cacheSecond)).toEqual({ adopted: true });
+      // A run with services (its holder's report already written): cold, and removed, never parked.
+      const svcToken = substrateRunToken("run-7");
+      await h.blobs.put(BLOB.services(svcToken), Buffer.from(JSON.stringify({ services: SVC_READY })));
+      const withServices = await logged.launch({ ...(await otherRun(h, "run-7")), services: SVC });
+      await finishRound(h, svcToken, "run-7", 1);
+      expect(await logged.retain(withServices, RETAIN)).toBe(false);
     } finally {
       process.stdout.write = writeOut;
       process.stderr.write = writeErr;
       setLogLineFilter((line) => line);
     }
-    const shapes = [FAKE_CAP, CAP_2, CAP_3, "rrg_", FAKE_MCP, FAKE_MCP_2, FAKE_MCP_3, "rmt_"];
+    const shapes = [
+      FAKE_CAP,
+      CAP_2,
+      CAP_3,
+      "rrg_",
+      FAKE_MCP,
+      FAKE_MCP_2,
+      FAKE_MCP_3,
+      "rmt_",
+      "FAKE_SERVICE_ENV_VALUE_0001",
+      "FAKE_READINESS_ARG_0001",
+    ];
     const rows = await Promise.all(["run-1", "run-2", "run-3", "run-4", "run-5", "run-6"].map((id) => h.runs.get(id)));
     expect(rows[3]?.repositories).toEqual(EXTRAS);
     const outputs = [
@@ -1553,5 +1583,68 @@ describe("warm rounds and Codex (single actor)", () => {
     expect(h.api.actors.size).toBe(0);
     expect(h.secrets.secrets.size).toBe(0);
     expect(h.warmEvents).toEqual([]);
+  });
+});
+
+describe("warm rounds and coding services", () => {
+  it("retain removes a run with services, and says why", async () => {
+    const h = await warmHarness({ services: SVC, onSleep: (x) => reportServices(x, SVC_READY) });
+    const handle = await h.launcher.launch(h.spec);
+    await finishRound(h, h.token, "run-1", 1);
+    expect((await h.launcher.status(handle)).state).toBe("succeeded");
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(false);
+    expect((await h.runs.get("run-1"))?.phase).toBe("removed");
+    expect(h.api.actors.size).toBe(0);
+    expect(await h.runs.countParked()).toBe(0);
+    expect(h.warmEvents).toContainEqual({
+      event: "substrate_warm_removed",
+      runId: "run-1",
+      runToken: h.token,
+      reason: "services",
+    });
+  });
+
+  it("never adopts for a spec with services", async () => {
+    const run2 = substrateRunToken("run-2");
+    const h = await warmHarness({
+      onSleep: (x) => x.blobs.put(BLOB.services(run2), Buffer.from(JSON.stringify({ services: SVC_READY }))),
+    });
+    await parkedRoundOne(h);
+    const spec = { ...(await followUp(h, "run-2")), services: SVC };
+    const handle = await h.launcher.launch(spec);
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "fingerprint_changed" });
+    expect((await h.runs.get("run-1"))?.phase).toBe("removed");
+    const row = await h.runs.get("run-2");
+    expect(row?.token).toBe(run2);
+    expect(row?.phase).toBe("running");
+    expect(row?.services).toEqual(["fakedb", "postgres"]);
+    // It waited for its services like any cold run.
+    expect(h.serviceStates.filter((u) => u.runId === "run-2" && u.state === "ready").map((u) => u.name)).toEqual([
+      "fakedb",
+      "postgres",
+    ]);
+  });
+
+  it("treats an unreadable services column as services", async () => {
+    const h = await warmHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await finishRound(h, h.token, "run-1", 1);
+    expect((await h.launcher.status(handle)).state).toBe("succeeded");
+    // What the database store gives for a stored value that does not parse.
+    const get = h.runs.get.bind(h.runs);
+    const getByToken = h.runs.getByToken.bind(h.runs);
+    const unreadable = (record: SubstrateRunRecord | undefined): SubstrateRunRecord | undefined =>
+      record ? { ...record, servicesUnreadable: true } : record;
+    h.runs.get = async (runId) => unreadable(await get(runId));
+    h.runs.getByToken = async (token) => unreadable(await getByToken(token));
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(false);
+    expect((await get("run-1"))?.phase).toBe("removed");
+    expect(await h.runs.countParked()).toBe(0);
+    expect(h.warmEvents).toContainEqual({
+      event: "substrate_warm_removed",
+      runId: "run-1",
+      runToken: h.token,
+      reason: "services",
+    });
   });
 });

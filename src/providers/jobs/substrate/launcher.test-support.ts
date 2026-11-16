@@ -9,6 +9,7 @@ import { MemoryRelayStore } from "../../coding-proxy/substrate/memory-relay-stor
 import { LocalBlobStore } from "../../storage/local.js";
 import type { BlobInfo } from "../../storage/types.js";
 import { KubernetesAlreadyExistsError } from "../kubernetes-api.js";
+import type { ServiceStateUpdate } from "../service-state.js";
 import type { JobSpec } from "../types.js";
 import { FakeSubstrateApi, type FakeSubstrateOptions } from "./fake-api.js";
 import {
@@ -18,7 +19,7 @@ import {
   type WarmEvent,
   type WarmRoundsOptions,
 } from "./launcher.js";
-import { substrateRunToken } from "./names.js";
+import { BLOB, substrateRunToken, type SubstrateServiceReport } from "./names.js";
 import { MemorySubstrateRunStore, type SubstrateRunStore } from "./run-store.js";
 import type { SubstrateLaunchConfig } from "./specs.js";
 import { MemorySubstrateTemplateStore, type SubstrateTemplateStore } from "./template-store.js";
@@ -124,6 +125,10 @@ export interface Harness {
   templates: SubstrateTemplateStore;
   /** Every template event the launcher reported. */
   templateEvents: TemplateEvent[];
+  /** Every coding-service display state the launcher reported (onServiceState). */
+  serviceStates: ServiceStateUpdate[];
+  /** How many times the launcher slept (each sleep advances the clock by its ms). */
+  sleeps: () => number;
   root: string;
 }
 
@@ -155,6 +160,10 @@ export async function makeHarness(
      * (`# <name>`), and the spec lists it with that folder as its host path.
      */
     repositories?: { name: string; access: "read" | "write" }[];
+    /** The run's coding services (JobSpec.services). */
+    services?: ResolvedCodingService[];
+    /** Called on each launcher sleep, after the clock advanced (write a services report here). */
+    onSleep?: (h: Harness) => Promise<void> | void;
   } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "wardby-substrate-launcher-"));
@@ -184,6 +193,10 @@ export async function makeHarness(
   const warmEvents: WarmEvent[] = [];
   const templates = options.templates ?? new MemorySubstrateTemplateStore();
   const templateEvents: TemplateEvent[] = [];
+  const serviceStates: ServiceStateUpdate[] = [];
+  let sleeps = 0;
+  // Set once the harness exists: a sleep hands it to onSleep.
+  const ref: { harness?: Harness } = {};
   const blobs = new ClockedBlobStore(join(root, "blobs"), () => now);
   const relay = new MemoryRelayStore();
   relay.register(substrateRunToken(runId), 1 << 20);
@@ -207,6 +220,14 @@ export async function makeHarness(
     ...(options.collectGraceMs !== undefined ? { collectGraceMs: options.collectGraceMs } : {}),
     ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
     ...(options.warmRounds ? { warmRounds: options.warmRounds, onWarmEvent: (event) => warmEvents.push(event) } : {}),
+    onServiceState: async (update) => {
+      serviceStates.push(update);
+    },
+    sleep: async (ms) => {
+      sleeps++;
+      now += ms;
+      if (ref.harness) await options.onSleep?.(ref.harness);
+    },
   });
   const spec: JobSpec = {
     kind: "coding-agent",
@@ -223,8 +244,9 @@ export async function makeHarness(
     limits: { cpus: 1, memoryMb: 1024, pids: 256, diskMb: 64 },
     labels: {},
     ...(options.repositories ? { repositories } : {}),
+    ...(options.services ? { services: options.services } : {}),
   };
-  return {
+  const harness: Harness = {
     launcher,
     api,
     runs,
@@ -242,8 +264,17 @@ export async function makeHarness(
     warmEvents,
     templates,
     templateEvents,
+    serviceStates,
+    sleeps: () => sleeps,
     root,
   };
+  ref.harness = harness;
+  return harness;
+}
+
+/** Writes the holder bridge's services report (as the proxy stores it) for the harness's run. */
+export async function reportServices(h: Harness, entries: SubstrateServiceReport[]): Promise<void> {
+  await h.blobs.put(BLOB.services(h.token), Buffer.from(JSON.stringify({ services: entries })));
 }
 
 /** Every file the blob store holds, with its contents. */
