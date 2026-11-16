@@ -327,7 +327,10 @@ export async function mentionCandidates(
   db: CommentDb,
   documentId: string,
 ): Promise<{ principalId: string; name: string }[]> {
-  const doc = await db.document.findUnique({ where: { id: documentId }, select: { ownerId: true } });
+  const doc = await db.document.findUnique({
+    where: { id: documentId },
+    select: { ownerId: true, planSet: { select: { accessAgent: { select: { id: true, ownerId: true } } } } },
+  });
   if (!doc) throw new Error("document_not_found");
   const grants = await db.resourceGrant.findMany({
     where: { resourceType: "document", resourceId: documentId },
@@ -337,11 +340,7 @@ export async function mentionCandidates(
   for (const g of grants) if (g.granteeKind === "principal" && g.granteePrincipalId) ids.add(g.granteePrincipalId);
   let everyone = grants.some((g) => g.granteeKind === "everyone");
   // A plan document: the triggered agent's owner and grantees can comment too (spec §6, R24), so offer them.
-  const plan = await db.document.findUnique({
-    where: { id: documentId },
-    select: { planSet: { select: { accessAgent: { select: { id: true, ownerId: true } } } } },
-  });
-  const agent = plan?.planSet?.accessAgent;
+  const agent = doc.planSet?.accessAgent;
   if (agent) {
     if (agent.ownerId) ids.add(agent.ownerId);
     const agentGrants = await db.resourceGrant.findMany({
