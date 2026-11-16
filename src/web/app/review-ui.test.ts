@@ -146,3 +146,141 @@ describe("ReviewPanel: reopening", () => {
     expect(panel.textContent).not.toContain("ask someone");
   });
 });
+
+describe("ReviewPanel: the reviewer picker", () => {
+  type Candidates = Awaited<ReturnType<Api["reviewCandidates"]>>;
+  const draft = (): ReviewPayload => ({
+    ...payload(1),
+    state: "draft",
+    progress: { approved: 0, total: 0 },
+    reviewers: [],
+    can: { submit: true, review: false, force: false, reopen: false, archive: true, unarchive: false },
+  });
+  const you = { principalId: "p-owner", name: "Owner" };
+  function picker(lists: Candidates[]) {
+    document.body.replaceChildren();
+    const banner = document.createElement("div");
+    const panel = document.createElement("div");
+    document.body.append(banner, panel);
+    let call = 0;
+    const api = {
+      reviewCandidates: vi.fn(() => Promise.resolve(lists[Math.min(call++, lists.length - 1)])),
+      createCommentLink: vi.fn(() =>
+        Promise.resolve({ id: "l1", path: "/s/tok", expiresAt: "2026-12-01T00:00:00.000Z" }),
+      ),
+      review: vi.fn((body: unknown) => Promise.resolve({ review: { ...draft(), state: "in_review", body } })),
+    } as unknown as Api;
+    const host: ReviewHost = {
+      api,
+      banner,
+      panel,
+      showReviewTab: vi.fn(),
+      showChanges: vi.fn(),
+      loadLatest: vi.fn(() => Promise.resolve()),
+      onLock: vi.fn(),
+      onState: vi.fn(),
+    };
+    new ReviewPanel(host, draft(), 1);
+    return { panel, api };
+  }
+  const button = (panel: HTMLElement, label: string) =>
+    [...panel.querySelectorAll("button")].find((b) => b.textContent === label);
+  const names = (panel: HTMLElement) =>
+    [...panel.querySelectorAll<HTMLLabelElement>(".rv-pick-list .rv-pick")]
+      .filter((l) => !l.hidden)
+      .map((l) => l.textContent);
+
+  it("a draft offers Start review; the picker lists members with access and guests, and submits the picked", async () => {
+    const { panel, api } = picker([
+      {
+        members: [you, { principalId: "p-bo", name: "Bo" }],
+        guests: [{ guestId: "g1", name: "Gail" }],
+      },
+    ]);
+    expect(button(panel, "Submit for review")).toBeUndefined();
+    button(panel, "Start review")!.click();
+    await vi.waitFor(() => expect(names(panel)).toEqual(["Owner", "Bo", "Gail (guest)"]));
+    expect(panel.textContent).not.toContain("Only people with access");
+    expect(button(panel, "Start review")).toBeDefined();
+    panel.querySelector<HTMLInputElement>('input[aria-label="Bo"]')!.click();
+    button(panel, "Submit for review")!.click();
+    await vi.waitFor(() =>
+      expect(api.review).toHaveBeenCalledWith({ action: "submit", reviewers: ["p-bo"], finalApproverId: null }),
+    );
+  });
+
+  it("the search filters in place, keeping the same box (and its focus) while typing", async () => {
+    const { panel } = picker([
+      {
+        members: [you, { principalId: "p-ada", name: "Ada Lovelace" }, { principalId: "p-bo", name: "Bo" }],
+        guests: [],
+      },
+    ]);
+    button(panel, "Start review")!.click();
+    await vi.waitFor(() => expect(names(panel)).toHaveLength(3));
+    const search = panel.querySelector<HTMLInputElement>('input[aria-label="Find people"]')!;
+    search.focus();
+    search.value = "love";
+    search.dispatchEvent(new Event("input"));
+    expect(names(panel)).toEqual(["Ada Lovelace"]);
+    expect(document.activeElement).toBe(search);
+    search.value = "zed";
+    search.dispatchEvent(new Event("input"));
+    expect(names(panel)).toEqual([]);
+    expect(panel.textContent).toContain("No one matches.");
+  });
+
+  it("with only the owner to name, says so; a comment link is made, shown with this origin, and Refresh lists its guest", async () => {
+    const { panel, api } = picker([
+      { members: [you], guests: [] },
+      { members: [you], guests: [{ guestId: "g1", name: "Gail" }] },
+    ]);
+    button(panel, "Start review")!.click();
+    await vi.waitFor(() =>
+      expect(panel.textContent).toContain("Only people with access to this document can be named."),
+    );
+    expect(panel.querySelector('input[aria-label="Find people"]')).toBeNull();
+    button(panel, "Create comment link")!.click();
+    await vi.waitFor(() =>
+      expect(panel.querySelector<HTMLInputElement>('input[aria-label="Comment link"]')?.value).toBe(
+        `${location.origin}/s/tok`,
+      ),
+    );
+    expect(api.createCommentLink).toHaveBeenCalledTimes(1);
+    button(panel, "Refresh list")!.click();
+    await vi.waitFor(() => expect(names(panel)).toEqual(["Owner", "Gail (guest)"]));
+    // The link stays shown until the picker closes; closing forgets it.
+    expect(panel.querySelector('input[aria-label="Comment link"]')).not.toBeNull();
+    button(panel, "Cancel")!.click();
+    button(panel, "Start review")!.click();
+    await vi.waitFor(() => expect(names(panel)).toHaveLength(2));
+    expect(panel.querySelector('input[aria-label="Comment link"]')).toBeNull();
+  });
+
+  it("in review the bar says Edit reviewers and the picker saves", async () => {
+    document.body.replaceChildren();
+    const banner = document.createElement("div");
+    const panel = document.createElement("div");
+    document.body.append(banner, panel);
+    const api = {
+      reviewCandidates: vi.fn(() => Promise.resolve({ members: [you], guests: [] })),
+    } as unknown as Api;
+    new ReviewPanel(
+      {
+        api,
+        banner,
+        panel,
+        showReviewTab: vi.fn(),
+        showChanges: vi.fn(),
+        loadLatest: vi.fn(() => Promise.resolve()),
+        onLock: vi.fn(),
+        onState: vi.fn(),
+      },
+      { ...payload(1), can: { ...payload(1).can, submit: true } },
+      1,
+    );
+    button(panel, "Edit reviewers")!.click();
+    await vi.waitFor(() => expect(button(panel, "Save reviewers")).toBeDefined());
+    expect(button(panel, "Create comment link")).toBeDefined();
+  });
+});

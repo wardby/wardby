@@ -32,6 +32,30 @@ export function bannerText(r: ReviewPayload): string {
 /** Shown on an approved document to anyone who can't reopen it (a guest, or a member without write access). */
 export const ASK_TO_REOPEN = "Approved and locked. To change it, ask someone who can edit it to reopen it.";
 
+/** The reviewer picker's wording (review-ui.ts). */
+export const PICKER = {
+  start: "Start review",
+  submit: "Submit for review",
+  edit: "Edit reviewers",
+  save: "Save reviewers",
+  find: "Find people",
+  onlyYou:
+    "Only people with access to this document can be named. For anyone else, create a comment link: once they open it and give a name, they appear here.",
+  noMatch: "No one matches.",
+  createLink: "Create comment link",
+  linkShown:
+    "Comment link (shown once; expires in 14 days). Send it to the reviewer; after they open it and give a name, choose Refresh list.",
+  copy: "Copy",
+  copied: "Copied",
+  refresh: "Refresh list",
+} as const;
+
+/** Whether a candidate's name matches the picker's search (case-insensitive, anywhere in the name). */
+export function matchesQuery(name: string, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  return q === "" || name.toLowerCase().includes(q);
+}
+
 export function reviewerChip(r: ReviewerPayload): string {
   if (r.verdict === "none" || r.versionNumber === null) return "Waiting";
   const label = r.verdict === "approved" ? "Approved" : "Changes requested";
