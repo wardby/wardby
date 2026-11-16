@@ -263,6 +263,11 @@ actor (Claude Code) or the Codex actor, never in Claude's agent actor.
   `0555`, and setuid, setgid and sticky bits are cleared. A command can still
   change its own copy's permissions, but a read repository's content is never
   uploaded or collected.
+- **Repositories root.** After seeding, the bridge sets `/repos` to `0755`,
+  or else adds the sticky bit, when it is allowed to. On a root-owned mount
+  it is not, and the root keeps its mode; the bridge logs
+  `substrate_bridge_repos_root_not_hardened` and the run continues. A write
+  repository's folder is re-checked before collect either way.
 - **Disk.** The default repository and every extra are seeded as tars into one
   budget, the run's disk (`workspaceDiskMb`, else `CODING_DISK_MB`). Over it,
   the run fails at launch with
@@ -412,11 +417,27 @@ park or adoption last used it.
   The removal age is never less than 27 hours, whatever the setting: the
   longest coding run (2 hours) plus the longest `SUBSTRATE_PARK_TTL_SEC`
   (1 day) plus an hour, so a template is never removed under a running or kept
-  round.
+  round. Substrate does not refuse to delete a template that kept actors still
+  use; if one goes anyway (removed with Substrate's tooling, say), the next
+  round cannot resume them and starts fresh instead (the "no longer available"
+  step line under [When a round starts fresh](#when-a-round-starts-fresh)). A
+  launch whose template is removed just before it creates its actors creates the
+  template again and carries on (see
+  [`substrate_template_missing`](../help/errors/substrate-template-missing.md)).
 - **Storage.** Golden snapshots cost storage in Substrate, as kept rounds do
   (see [Storage cost](#storage-cost)). `SUBSTRATE_TEMPLATE_TTL_SEC` bounds how
   long an unused one stays.
 - **A golden snapshot that fails.** The first failure rebuilds the template.
+  Substrate often refuses a run's actor start as unavailable while the golden
+  build is failing, before its status says so; Wardby then reads the template's
+  status again. A failed build counts as a golden-snapshot failure rather than
+  [`substrate_unavailable`](../help/errors/substrate-unavailable.md). A template
+  still building (a status with no golden snapshot or no tag yet), on one no actor has started from, is not counted and
+  the template is not rebuilt: the run goes back to the queue, and a broken
+  build has reported its failure by the time the run is retried, when it is
+  counted. A run that counts the first failure, at its start or after a refused start,
+  goes back to the queue while the template is rebuilt, and is launched again
+  after the backoff.
   A second one within `SUBSTRATE_TEMPLATE_RETRY_SEC` fails the run with
   [`substrate_image_unready`](../help/errors/substrate-image-unready.md)
   instead, and so does a template that never becomes ready within
@@ -425,8 +446,8 @@ park or adoption last used it.
   new template spent waiting for capacity does not count; a control plane
   restart starts the count again. Wardby judges ready from Substrate's template
   status when Substrate reports it: a template whose golden snapshot is tagged
-  is ready (its runs only ever wait for room), and one whose status has no tag
-  yet is not. A template an actor has already started from is always ready: it
+  is ready (its runs only ever wait for room), and one still building (no
+  golden-snapshot status or no tag yet) is not. A template an actor has already started from is always ready: it
   never fails this way, whatever its status says later, and Wardby does not
   read the status again for it. When Substrate reports no golden-snapshot
   status, a template counts as ready once an actor from it has started. A
@@ -437,8 +458,9 @@ park or adoption last used it.
 - **Log events**, each with the template's name and role and never an image's
   content or Substrate's message: `substrate_template_golden_failed`,
   `substrate_template_unready`, `substrate_template_status_read_failed` (the
-  template's status could not be read; Wardby falls back to whether an actor has
-  started from it), `substrate_template_record_failed` (the
+  template's status could not be read; when judging ready, Wardby falls back to
+  whether an actor has started from it, and after a refused actor start the
+  call's own error stands), `substrate_template_record_failed` (the
   failure count could not be written; the template is rebuilt),
   `substrate_template_remove_failed` (all warn) and `substrate_template_removed`
   (info).
@@ -496,15 +518,15 @@ A continuation that cannot resume the kept round starts a normal fresh round.
 When the launcher reports how a round started, the round gets one run step line
 saying so (`get_run` shows `warmStart: true` or `false` on the round):
 
-| Step line                                                                        | Meaning                                                            |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| Resumed the previous round's workspace and session                               | The round resumed warm.                                            |
-| Started a fresh workspace: the previous round was not kept                       | It did not qualify, or was removed (see below).                    |
-| Started a fresh workspace: the previous round's sandbox expired                  | `SUBSTRATE_PARK_TTL_SEC` passed.                                   |
-| Started a fresh workspace: the branch changed since the previous round           | The branch has commits the kept workspace lacks.                   |
-| Started a fresh workspace: the agent's settings changed since the previous round | A setting the round was launched with changed (see below).         |
-| Started a fresh workspace: the previous round's sandbox was no longer available  | The actors were gone from Substrate or not in the suspended state. |
-| Started a fresh workspace: there was no room to resume the previous round        | The WorkerPool had no capacity to resume it.                       |
+| Step line                                                                        | Meaning                                                                                                 |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Resumed the previous round's workspace and session                               | The round resumed warm.                                                                                 |
+| Started a fresh workspace: the previous round was not kept                       | It did not qualify, or was removed (see below).                                                         |
+| Started a fresh workspace: the previous round's sandbox expired                  | `SUBSTRATE_PARK_TTL_SEC` passed.                                                                        |
+| Started a fresh workspace: the branch changed since the previous round           | The branch has commits the kept workspace lacks.                                                        |
+| Started a fresh workspace: the agent's settings changed since the previous round | A setting the round was launched with changed (see below).                                              |
+| Started a fresh workspace: the previous round's sandbox was no longer available  | The actors, or their template, were gone from Substrate, or the actors were not in the suspended state. |
+| Started a fresh workspace: there was no room to resume the previous round        | The WorkerPool had no capacity to resume it.                                                            |
 
 A round whose branch preparation merged the target branch into the working
 branch (a pull request whose base moved) also starts fresh, because the kept
@@ -647,6 +669,7 @@ Known recovery steps:
 Error articles: [`substrate_unavailable`](../help/errors/substrate-unavailable.md),
 [`substrate_capacity`](../help/errors/substrate-capacity.md),
 [`substrate_provisioning_failed`](../help/errors/substrate-provisioning-failed.md),
+[`substrate_template_missing`](../help/errors/substrate-template-missing.md),
 [`substrate_startup_timeout`](../help/errors/substrate-startup-timeout.md),
 [`substrate_collect_timeout`](../help/errors/substrate-collect-timeout.md),
 [`substrate_collect_failed`](../help/errors/substrate-collect-failed.md),

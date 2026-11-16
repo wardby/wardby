@@ -4,7 +4,7 @@ title: A Substrate run's bridge is from another release (substrate_bridge_incomp
 summary: A coding run on the experimental Substrate launcher failed because the Substrate bridge in its image speaks another protocol than the coding proxy; use bridge images and custom images built for the proxy's release.
 audience: operator
 tags: [error, substrate, substrate_bridge_incompatible, custom-image, bridge, upgrade, job launcher]
-appliesTo: ">=0.9.15"
+appliesTo: ">=0.10.1"
 ---
 
 # A Substrate run's bridge is from another release

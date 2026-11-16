@@ -43,6 +43,9 @@ export const SCOPES_SUPPORTED = [
   // Register host providers and approve their tools (docs/host-providers.md).
   // Bound tools decide who has permission and who wrote a comment.
   "hosts:admin",
+  // Documents: read/list, and create/change/share (no role needed; document access itself is per document).
+  "documents:read",
+  "documents:write",
 ];
 
 /**

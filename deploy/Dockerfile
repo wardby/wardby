@@ -11,7 +11,7 @@ COPY prisma ./prisma
 COPY scripts ./scripts
 COPY help ./help
 COPY src ./src
-COPY tsconfig.json tsconfig.build.json prisma.config.ts ./
+COPY tsconfig.json tsconfig.build.json prisma.config.ts NOTICE ./
 # build runs prisma generate (into src/generated/prisma) before tsc, so the
 # client ships compiled inside dist/generated/prisma.
 RUN npm run build
@@ -73,6 +73,9 @@ RUN npm pkg delete dependencies.prisma devDependencies scripts \
 # through package.json's "#prisma" import); only @prisma/client's runtime and
 # the pg adapter come from node_modules.
 COPY --from=build /app/dist ./dist
+# The image ships third-party code bundled into dist/web-assets (Tiptap, ProseMirror, marked);
+# their licence notices travel with it.
+COPY LICENSE NOTICE ./
 # git.ts resolves this relative to its own module URL (dist/providers/vcs ->
 # ../../../scripts), and git runs it as GIT_ASKPASS to receive the GitHub App
 # token. Without it a coding run gets all the way through the agent's work --
@@ -83,7 +86,7 @@ COPY --from=build /app/dist ./dist
 # everything else under scripts/ is development tooling that has no business in
 # a runtime image.
 COPY --from=build /app/scripts/git-askpass.sh ./scripts/git-askpass.sh
-RUN test -x scripts/git-askpass.sh && test ! -d node_modules/prisma && test ! -d node_modules/@prisma/config && test ! -d node_modules/deepmerge-ts && test ! -d node_modules/mysql2 \
+RUN test -x scripts/git-askpass.sh && test -f NOTICE && test ! -d node_modules/prisma && test ! -d node_modules/@prisma/config && test ! -d node_modules/deepmerge-ts && test ! -d node_modules/mysql2 \
     && test -f dist/generated/prisma/client.js && test -d node_modules/@prisma/adapter-pg \
     && test -f node_modules/openai/index.mjs && test ! -d node_modules/openai/src \
     && test -z "$(find node_modules/openai -name '*.map' -print -quit)" \
@@ -96,3 +99,33 @@ ENV NODE_ENV=production
 # The complete process: MCP + scheduler + reconciler. A deployment that
 # splits them (deploy/production/compose.yml) overrides this per container.
 CMD ["node", "dist/cli.js", "serve"]
+
+# Optional PNG/PDF export renderer (docs/documents.md, "Exports"): the runtime image plus
+# Playwright's Chromium headless shell, so it shares every layer with the control plane except
+# the browser. Runs in its own pod with no database, no secrets and no egress
+# (deploy/kind-coding/manifests/renderer/). Linux amd64 and arm64.
+FROM runtime AS renderer
+USER root
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright HOME=/tmp
+# The browser's runtime libraries are installed by name rather than with `--with-deps`, which
+# also pulls Playwright's "tools" set (xvfb, Mesa, a dozen font packages) that a headless shell
+# never uses. The list is Playwright's own debian12 "chromium" dependency list (the same for
+# amd64 and arm64; playwright-core lib/coreBundle.js, `deps["debian12-x64"].chromium`): re-check
+# it on every playwright-core bump. Fonts are a deliberate set: fontconfig, Liberation (metric
+# compatible with Arial/Times/Courier), Noto Color Emoji and WenQuanYi Zen Hei for CJK text.
+# The browser install also drops Playwright's ffmpeg, used only for recordVideo, which the
+# renderer never uses; it is removed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcups2 libdbus-1-3 \
+       libdrm2 libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 \
+       libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
+       libfontconfig1 libfreetype6 fonts-liberation fonts-noto-color-emoji fonts-wqy-zenhei \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && npx --no-install playwright-core install --only-shell chromium \
+    && rm -rf /ms-playwright/ffmpeg-* \
+    && chmod -R a+rX /ms-playwright
+USER node
+EXPOSE 8796
+CMD ["node", "dist/renderer/main.js"]

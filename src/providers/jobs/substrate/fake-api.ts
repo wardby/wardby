@@ -2,6 +2,7 @@ import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
   SubstrateNotFoundError,
+  SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type ActorInfo,
   type ActorState,
@@ -74,7 +75,10 @@ export class FakeSubstrateApi implements SubstrateApi {
     const key = `${atespace}/${name}`;
     // Substrate refuses an actor without a name (InvalidArgument, which the client reports as unavailable).
     if (!name) throw new SubstrateUnavailableError("substrate_unavailable");
-    if (!this.templates.has(`${atespace}/${template}`)) throw new SubstrateNotFoundError("substrate_not_found");
+    // Like Substrate: a template that is gone (or never was) is FailedPrecondition.
+    if (!this.templates.has(`${atespace}/${template}`)) {
+      throw new SubstrateTemplateMissingError("substrate_template_missing");
+    }
     if (this.actors.has(key)) throw new SubstrateAlreadyExistsError(key);
     this.actors.set(key, { state: "SUSPENDED", templateName: template });
   }
@@ -86,6 +90,10 @@ export class FakeSubstrateApi implements SubstrateApi {
     const actor = this.actors.get(`${atespace}/${name}`);
     if (!actor) throw new SubstrateNotFoundError("substrate_not_found");
     if (actor.state === "RUNNING") return;
+    // Like Substrate: an actor whose template was deleted cannot resume (FailedPrecondition).
+    if (!this.templates.has(`${atespace}/${actor.templateName}`)) {
+      throw new SubstrateTemplateMissingError("substrate_template_missing");
+    }
     // Still holding its room (suspendedHoldRoom): it resumes where it was.
     if (actor.worker !== undefined) {
       actor.state = "RUNNING";

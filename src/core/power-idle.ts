@@ -8,6 +8,7 @@
  * run ids that keep a target busy right now (recent finishes do not count).
  */
 import type { PrismaClient, RunStatus } from "#prisma";
+import { EXPORT_STALE_MS } from "./documents/exports.js";
 import type { PowerTarget } from "./power.js";
 
 const ACTIVE = { in: ["pending", "running"] as RunStatus[] };
@@ -33,8 +34,18 @@ export async function gatewayBusy(db: PrismaClient, since: Date): Promise<boolea
   return (await db.nativeGatewaySession.count({ where: { status: "active" } })) > 0;
 }
 
+/** The renderer is busy when any export was requested since `since`: its work is the DocumentExport rows. */
+export async function rendererBusy(db: PrismaClient, since: Date): Promise<boolean> {
+  return (await db.documentExport.count({ where: { createdAt: { gte: since } } })) > 0;
+}
+
 export function powerBusy(db: PrismaClient): (target: PowerTarget, since: Date) => Promise<boolean> {
-  return (target, since) => (target === "proxy" ? proxyBusy(db, since) : gatewayBusy(db, since));
+  return (target, since) =>
+    target === "proxy"
+      ? proxyBusy(db, since)
+      : target === "renderer"
+        ? rendererBusy(db, since)
+        : gatewayBusy(db, since);
 }
 
 /**
@@ -46,6 +57,17 @@ export async function powerBlockers(db: PrismaClient, target: PowerTarget): Prom
   if (target === "proxy") {
     const rows = await db.codingRun.findMany({ where: { run: { status: ACTIVE } }, select: { runId: true } });
     return [...new Set(rows.map((r) => r.runId))].sort();
+  }
+  if (target === "renderer") {
+    // Queued or running exports; one older than EXPORT_STALE_MS is abandoned (the sweeper fails it) and blocks nothing.
+    const rows = await db.documentExport.findMany({
+      where: {
+        status: { in: ["queued", "running"] },
+        createdAt: { gte: new Date(Date.now() - EXPORT_STALE_MS) },
+      },
+      select: { id: true },
+    });
+    return rows.map((r) => r.id).sort();
   }
   const [runs, sessions, mcpCodingRuns] = await Promise.all([
     db.run.findMany({ where: { nativeExecutionMode: "sandbox", status: ACTIVE }, select: { id: true } }),

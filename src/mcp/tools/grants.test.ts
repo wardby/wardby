@@ -65,6 +65,10 @@ function fakeDb(
     codingRun: { create: async ({ data }: { data: unknown }) => data },
     task: { create: async ({ data }: { data: unknown }) => data },
     webhook: {},
+    document: {
+      findUnique: async ({ where }: { where: { id: string } }) =>
+        where.id === "d1" ? { id: "d1", ownerId: "owner" } : null,
+    },
     $queryRaw: async () => [],
   };
   db.isolationLevels = [];
@@ -241,6 +245,37 @@ describe("grant_access / revoke_access / list_access", () => {
     });
     expect(denied.isError).toBe(true);
     await grantee.client.close();
+  });
+
+  it("shares a document: owner grants comment, others are refused, everyone is capped at comment", async () => {
+    const db = fakeDb(agents, people, [
+      { resourceType: "document", resourceId: "d1", principalId: "alice", level: "read" },
+    ]);
+    const owner = await connect(db, ctx(db, "owner"));
+    const grant = (args: Record<string, unknown>) =>
+      owner.client.callTool({
+        name: "grant_access",
+        arguments: { resourceType: "document", resourceId: "d1", ...args },
+      });
+    const ok = await grant({ grantee: { subject: "sub-bob" }, level: "comment" });
+    expect(ok.isError).toBeFalsy();
+    expect(db.resourceGrant.rows.find((r) => r.granteePrincipalId === "bob")).toBeDefined();
+    const tooHigh = await grant({ grantee: "everyone", level: "write" });
+    expect(tooHigh.isError).toBe(true);
+    expect(text(tooHigh)).toMatch(/at most comment/);
+    const everyone = await grant({ grantee: "everyone", level: "comment" });
+    expect(everyone.isError).toBeFalsy();
+    await owner.client.close();
+
+    // alice holds read: she sees the document but may not manage grants (403).
+    const reader = await connect(db, ctx(db, "alice"));
+    const refused = await reader.client.callTool({
+      name: "grant_access",
+      arguments: { resourceType: "document", resourceId: "d1", grantee: { subject: "sub-bob" }, level: "read" },
+    });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/owner/);
+    await reader.client.close();
   });
 
   it("refuses self-grants, unknown subjects, bad levels and other types", async () => {

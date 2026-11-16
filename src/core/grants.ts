@@ -16,6 +16,7 @@ export const LEVELS = {
   tool: ["read", "use", "write"],
   budget_group: ["read", "use", "write"],
   mcp_server: ["read", "use", "write"],
+  document: ["read", "comment", "write"],
 } as const;
 
 export type ResourceType = keyof typeof LEVELS;
@@ -29,12 +30,18 @@ export type Access<T extends ResourceType = ResourceType> = "none" | Level<T> | 
  * the binding tools. Otherwise anyone could rewrite the prompt of an agent
  * that holds its owner's secrets.
  */
-export const EVERYONE_MAX = { agent: "write", tool: "use", budget_group: "use", mcp_server: "use" } as const satisfies {
+export const EVERYONE_MAX = {
+  agent: "write",
+  tool: "use",
+  budget_group: "use",
+  mcp_server: "use",
+  document: "comment",
+} as const satisfies {
   [T in ResourceType]: Level<T>;
 };
 
-/** Types grant_access/revoke_access accept today: agents and MCP servers. */
-export const SHAREABLE_TYPES: readonly ResourceType[] = ["agent", "mcp_server"];
+/** Types grant_access/revoke_access accept today: agents, MCP servers and documents. */
+export const SHAREABLE_TYPES: readonly ResourceType[] = ["agent", "mcp_server", "document"];
 
 export const EVERYONE_KEY = "everyone";
 

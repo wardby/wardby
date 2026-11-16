@@ -159,13 +159,16 @@ describe("deploy/aws parity with the GKE deployment", () => {
     expect(tosetList(read("secrets.tf"), "secret_ids").sort()).toEqual(gke.sort());
   });
 
-  it("creates one ECR repository per docker-bake.hcl default target", () => {
+  it("creates one ECR repository per docker-bake.hcl default target, plus the optional renderer", () => {
     const bake = readFileSync(join(repoRoot, "deploy", "gke", "docker-bake.hcl"), "utf8");
     const targets = [
       ...bake.match(/group "default"\s*\{[\s\S]*?targets\s*=\s*\[([\s\S]*?)\]/)[1].matchAll(/"([^"]+)"/g),
     ].map((m) => m[1]);
     expect(targets.length).toBeGreaterThan(0);
-    expect(tosetList(read("ecr.tf"), "image_names").sort()).toEqual(targets.sort());
+    expect(tosetList(read("ecr.tf"), "image_names").sort()).toEqual([...targets, "renderer"].sort());
+    // The renderer is a separate bake target outside the default group.
+    expect(targets).not.toContain("renderer");
+    expect(bake).toMatch(/target "renderer"/);
   });
 });
 

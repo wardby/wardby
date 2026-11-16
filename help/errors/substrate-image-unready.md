@@ -4,7 +4,7 @@ title: A Substrate run's image never became ready (substrate_image_unready)
 summary: A coding run on the experimental Substrate launcher failed because Substrate could not build its template's golden snapshot twice in a row, or the template never became ready; usually a custom image without the Substrate bridge.
 audience: operator
 tags: [error, substrate, substrate_image_unready, workerImageRef, golden snapshot, job launcher]
-appliesTo: ">=0.9.15"
+appliesTo: ">=0.10.1"
 ---
 
 # A Substrate run's image never became ready
@@ -21,11 +21,22 @@ actor, so the run fails instead of waiting in the queue. One of these happened:
 
 Wardby uses Substrate's template status to judge ready when Substrate reports
 it: a template whose golden snapshot is tagged is ready and never fails this
-way, and one with a golden-snapshot status but no tag yet is not ready. A
+way, and one still building (a status with no golden-snapshot status or no tag yet) is
+not ready. A
 template an actor has already started from is always ready and never fails this
 way, whatever its status says later. When Substrate reports no such status, a
 template counts as ready once an actor from it has started. A failed
 golden-snapshot build always counts as a failure.
+
+A broken image's first run is usually refused by Substrate as unavailable when
+it starts its actors, before the template's status shows the failed build.
+Wardby reads the status again then: a failed build counts as a golden-snapshot
+failure. A template still building (no golden-snapshot status or no tag yet), on which no
+actor has started, is not counted: the run goes back to the queue without a rebuild, and the failed
+build is counted when the run is retried. The run that counts the first failure
+goes back to the queue while the template is rebuilt, and the run that counts
+the second failure fails with `substrate_image_unready`, not
+`substrate_unavailable`.
 
 The control plane logs `substrate_template_unready` (with the template's name,
 its role and the reason `golden_failed` or `never_ready`) and, for each failed

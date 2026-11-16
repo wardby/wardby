@@ -18,5 +18,7 @@
   },
   // tools/** (the wardby-sim test simulator) is type-checked here but never built:
   // tsconfig.build.json narrows include and sets rootDir to src.
-  "include": ["src/**/*.ts", "tools/**/*.ts"]
+  "include": ["src/**/*.ts", "tools/**/*.ts"],
+  // The browser app has its own project (DOM types): src/web/app/tsconfig.json.
+  "exclude": ["src/web/app/**"]
 }

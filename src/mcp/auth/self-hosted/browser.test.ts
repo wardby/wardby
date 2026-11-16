@@ -5,6 +5,7 @@ import { createPrismaClient } from "../../../core/db.js";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { SelfHostedAuthProvider } from "../../../providers/auth/self-hosted.js";
 import { IdentityService } from "./credentials.js";
+import { LOGIN_KEY_INVALID, LOGIN_KEY_INVALID_TEXT } from "./browser.js";
 import { startHttpServer, type HttpServerHandle } from "../../transport/streamable-http.js";
 import { buildMcpServer } from "../../server.js";
 import type { McpProviders } from "../../context.js";
@@ -143,6 +144,18 @@ describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)",
     const interaction = /name="interaction" value="([^"]*)"/.exec(page)![1];
     const form = { login_key: user.loginKey, csrf, interaction };
     expect((await visit("/login", form, { origin: "https://evil.example" })).status).toBe(403);
+    // A wrong key says so (and only for /login), without saying whether the user exists.
+    const wrong = await visit(
+      "/login",
+      { ...form, login_key: user.loginKey.slice(0, -4) + "AAAA" },
+      { accept: "application/json" },
+    );
+    expect(wrong.status).toBe(400);
+    expect(await wrong.json()).toMatchObject({ error: "invalid_request", error_description: LOGIN_KEY_INVALID });
+    expect(page).toContain(LOGIN_KEY_INVALID_TEXT);
+    // The failed attempt used the page's challenge: sign in from a fresh page.
+    const fresh = await (await visit(authorized.headers.get("location")!)).text();
+    form.csrf = /name="csrf" value="([^"]+)"/.exec(fresh)![1];
     const signedIn = await visit("/login", form);
     expect(signedIn.status).toBe(303);
     expect(signedIn.headers.get("set-cookie")).toContain("HttpOnly; SameSite=Lax");
@@ -185,5 +198,68 @@ describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)",
     const session = jar.get("wardby-dev-session")!;
     expect((await visit("/logout", { csrf: logoutCsrf })).status).toBe(303);
     await expect(provider.sessions.get(session)).rejects.toThrow();
+  }, 30_000);
+
+  it("keeps /login's return path only when it is a safe /d/ or /s/ path", async () => {
+    const probe = createServer();
+    await new Promise<void>((r) => probe.listen(0, "127.0.0.1", r));
+    const port = (probe.address() as import("node:net").AddressInfo).port;
+    await new Promise<void>((r) => probe.close(() => r()));
+    const origin = `http://127.0.0.1:${port}`;
+    const provider = new SelfHostedAuthProvider(
+      { canonicalUri: origin + "/mcp", signingKey: "a1".repeat(32), credentialHashKey: "b2".repeat(32) },
+      db,
+    );
+    const identity = new IdentityService(db, "b2".repeat(32));
+    const subject = "browser-return-" + randomUUID();
+    subjects.push(subject);
+    const user = await identity.createUser(subject);
+    const providers = {} as McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: origin + "/mcp" } });
+    const own = await startHttpServer({
+      mcp,
+      config: { canonicalUri: origin + "/mcp", httpBind: { host: "127.0.0.1", port }, authProviderKind: "self-hosted" },
+      auth: { authProvider: provider, db, providers },
+      selfHosted: provider,
+    });
+    try {
+      const signIn = async (back: string) => {
+        const jar = new Map<string, string>();
+        const take = (res: Response) => {
+          for (const value of res.headers.getSetCookie()) {
+            const [key, token] = value.split(";", 1)[0].split("=");
+            jar.set(key, token);
+          }
+          return res;
+        };
+        const cookie = () => [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+        const page = take(
+          await fetch(`${origin}/login?return=${encodeURIComponent(back)}`, { headers: { cookie: cookie() } }),
+        );
+        const html = await page.text();
+        const csrf = /name="csrf" value="([^"]+)"/.exec(html)![1];
+        const posted = take(
+          await fetch(`${origin}/login`, {
+            method: "POST",
+            redirect: "manual",
+            headers: { cookie: cookie(), origin, "content-type": "application/x-www-form-urlencoded" },
+            // The form field is sent as given, whatever the page kept.
+            body: new URLSearchParams({ login_key: user.loginKey, csrf, interaction: "", return: back }),
+          }),
+        );
+        return { html, location: posted.headers.get("location") };
+      };
+      const safe = await signIn("/d/doc123");
+      expect(safe.html).toContain('name="return" value="/d/doc123"');
+      expect(safe.location).toBe("/d/doc123");
+      // Four sign-ins in all: the login limiter allows five per window.
+      for (const back of ["https://evil.example/d/x", "//evil.example/d/x", "/d/../logout"]) {
+        const out = await signIn(back);
+        expect(out.html, back).not.toContain('name="return"');
+        expect(out.location, back).toBe("/logout");
+      }
+    } finally {
+      await own.close();
+    }
   }, 30_000);
 });

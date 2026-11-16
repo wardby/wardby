@@ -1,5 +1,5 @@
 /**
- * Viewer HTTP routes: GET /admin/api/graph, /admin/api/runs/:id, /admin/api/infra and the
+ * Viewer HTTP routes: GET /admin/api/graph, /admin/api/runs/:id, /admin/api/infra, /admin/api/documents and the
  * /admin/api/events SSE stream. Read-only and deployment-wide, so every route
  * authenticates and then requires the privileged `admin:view` scope (admin role
  * only) BEFORE touching the database or the event bus. McpErrors propagate to
@@ -11,10 +11,18 @@ import type { McpRequestContext } from "../mcp/context.js";
 import { requireScope } from "../mcp/auth/resource-server.js";
 import { sendJson } from "../mcp/transport/streamable-http.js";
 import type { InfraInfo } from "./api-schema.js";
+import { loadViewerDocuments } from "./documents.js";
 import { loadGraph, parseSince, type IssueSites } from "./graph.js";
-import { DEFAULT_GRAPH_LIMIT, MAX_GRAPH_LIMIT, SSE_HEARTBEAT_MS } from "./limits.js";
+import {
+  DEFAULT_DOCUMENTS_LIMIT,
+  DEFAULT_GRAPH_LIMIT,
+  MAX_DOCUMENTS_LIMIT,
+  MAX_GRAPH_LIMIT,
+  SSE_HEARTBEAT_MS,
+} from "./limits.js";
 import { loadRunDetail } from "./run-detail.js";
 import type { ViewerEventBus } from "./event-bus.js";
+import { openSseStream } from "../mcp/transport/sse-stream.js";
 
 export const VIEWER_API_PREFIX = "/admin/api/";
 /** A stream whose unsent backlog exceeds this is ended; the client reconnects and resyncs. */
@@ -49,59 +57,26 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
   let nextEventId = 0;
 
   function openStream(req: IncomingMessage, res: ServerResponse): void {
-    // The client may have gone while we awaited authentication; its close
-    // events already fired and will not fire again, so subscribing now would leak.
-    if (req.destroyed || res.destroyed || res.writableEnded) return;
-    res.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-store",
-      connection: "keep-alive",
-      "x-accel-buffering": "no",
-    });
-    let done = false;
-    // A client that stops reading (or reads too slowly) must not grow server
-    // memory without bound: past the limit, drop the stream (its backlog with
-    // it); the client reconnects and resyncs.
-    const send = (frame: string): void => {
-      if (done) return;
-      res.write(frame);
-      if (res.writableLength > maxBufferedBytes) {
-        cleanup();
-        res.destroy();
-      }
-    };
-    res.write("retry: 3000\n\n");
-    res.write(`event: hello\ndata: ${JSON.stringify({ connected: deps.bus.connected() })}\n\n`);
-    const unsubscribe = deps.bus.subscribe((event) => {
-      send(`id: ${++nextEventId}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`);
-    });
+    const stream = openSseStream(req, res, { heartbeatMs, maxBufferedBytes });
+    if (!stream) return;
+    stream.send(`event: hello\ndata: ${JSON.stringify({ connected: deps.bus.connected() })}\n\n`);
+    stream.onEnd(
+      deps.bus.subscribe((event) => {
+        stream.send(`id: ${++nextEventId}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`);
+      }),
+    );
     // Every transition to live (including the bus's first connect, which
     // usually lands just after this stream opens) may follow missed events, so
     // tell the client to refetch the graph. Going down only changes status.
-    const unstate = deps.bus.onState((live) => {
-      send(`event: status\ndata: ${JSON.stringify({ connected: live })}\n\n`);
-      if (live) send("event: resync\ndata: {}\n\n");
-    });
-    const heartbeat = setInterval(() => send(": ping\n\n"), heartbeatMs);
-    const cleanup = (): void => {
-      if (done) return;
-      done = true;
-      clearInterval(heartbeat);
-      unsubscribe();
-      unstate();
-      streams.delete(close);
-    };
-    const close = (): void => {
-      cleanup();
-      // Close the connection with the stream, so shutdown never waits for the
-      // keep-alive timeout.
-      res.shouldKeepAlive = false;
-      res.end();
-    };
+    stream.onEnd(
+      deps.bus.onState((live) => {
+        stream.send(`event: status\ndata: ${JSON.stringify({ connected: live })}\n\n`);
+        if (live) stream.send("event: resync\ndata: {}\n\n");
+      }),
+    );
+    const close = () => stream.close();
     streams.add(close);
-    req.on("close", cleanup);
-    res.on("close", cleanup);
-    res.on("error", cleanup);
+    stream.onEnd(() => streams.delete(close));
   }
 
   return {
@@ -111,7 +86,8 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
       const isGraph = path === "/admin/api/graph";
       const isEvents = path === "/admin/api/events";
       const isInfra = path === "/admin/api/infra";
-      if (!isGraph && !isEvents && !isInfra && !runMatch) return false;
+      const isDocuments = path === "/admin/api/documents";
+      if (!isGraph && !isEvents && !isInfra && !isDocuments && !runMatch) return false;
 
       const ctx = await deps.authenticate(req.headers.authorization);
       requireScope(ctx, deps.canonicalUri, "admin:view");
@@ -123,6 +99,28 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
 
       if (isInfra) {
         sendJson(res, 200, deps.infra);
+        return true;
+      }
+
+      if (isDocuments) {
+        const limitParam = url.searchParams.get("limit");
+        let limit = DEFAULT_DOCUMENTS_LIMIT;
+        if (limitParam !== null) {
+          limit = /^\d{1,6}$/.test(limitParam) ? Number(limitParam) : 0;
+          if (limit < 1 || limit > MAX_DOCUMENTS_LIMIT) {
+            sendJson(res, 400, { error: "invalid_limit" });
+            return true;
+          }
+        }
+        sendJson(
+          res,
+          200,
+          await loadViewerDocuments(deps.db, ctx.principal.id, {
+            limit,
+            agentId: url.searchParams.get("agent") || undefined,
+            repository: url.searchParams.get("repository") || undefined,
+          }),
+        );
         return true;
       }
 

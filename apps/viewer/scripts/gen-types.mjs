@@ -14,6 +14,7 @@ const SCHEMAS = [
   ["run-detail", "RunDetail"],
   ["viewer-event", "ViewerEvent"],
   ["infra-info", "InfraInfo"],
+  ["document-list", "DocumentList"],
 ];
 
 const HEADER = "// Generated from src/viewer/schemas by scripts/gen-types.mjs — do not edit.\n\n";

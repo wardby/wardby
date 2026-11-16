@@ -215,6 +215,35 @@ now runs and apply, so they catch up.
   maintenance window and the apply reports a failure deleting the old parameter
   group, which the instance still uses; apply again once the window has passed.
 
+## PNG/PDF export renderer (optional)
+
+Off by default. PNG and PDF exports of designs and Markdown documents (see
+[Exports](../../docs/documents.md#exports)) need a renderer: a small service that
+runs headless Chromium over the boards the control plane sends it. Without it
+those requests are refused as `export_renderer_unavailable`; HTML exports need
+nothing.
+
+The module creates a `renderer` ECR repository alongside the others. To turn the
+renderer on:
+
+1. Build the `renderer` target of `deploy/gke/docker-bake.hcl` (it is not in the
+   default group) and push it to the module's `renderer` repository.
+2. Apply `deploy/kind-coding/manifests/renderer/gvisor` with the pushed image's
+   digest substituted for `wardby-renderer-image`.
+3. Set `WARDBY_RENDERER_URL=http://wardby-renderer.wardby-coding.svc.cluster.local:8796`
+   on the control plane.
+
+- **Isolation.** Chromium runs without its own sandbox, so the pod is the
+  boundary: it runs on the gVisor node group, as a non-root user with a
+  read-only root filesystem and no capabilities, with no service-account token,
+  database or secrets, and a NetworkPolicy that admits only the control plane on
+  port 8796 and lets the renderer reach nothing.
+- **Size.** Requests equal limits: 500m CPU, 2 GiB memory, 1 GiB ephemeral
+  storage.
+- **Low-power mode.** With low-power mode on, the renderer sleeps when no export
+  was requested in the idle window, and the first export after that waits for
+  it to wake (up to 5 minutes).
+
 ## Run dependency cache
 
 Off by default. The coding-run dependency cache (see

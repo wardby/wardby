@@ -21,7 +21,8 @@ The reason is in the control plane log, at the run's first launch attempt:
 
 - `substrate_call_failed` names the Substrate call that failed
   (`createActor`, `putEgressPolicy`, `resumeActor`, ...) and its error code; see
-  [substrate_unavailable](substrate-unavailable.md);
+  [substrate_unavailable](substrate-unavailable.md) and
+  [substrate_template_missing](substrate-template-missing.md);
 - the launch error itself, such as
   [substrate_seed_too_large](substrate-seed-too-large.md), names the cause.
 

@@ -148,6 +148,9 @@ See [Warm rounds on Substrate](substrate-warm-rounds.md).
 - [substrate_image_unready](errors/substrate-image-unready.md): a template's
   golden snapshot failed twice, or no actor ever started from it (often a
   custom image without the bridge).
+- [substrate_template_missing](errors/substrate-template-missing.md): the
+  run's actor template is gone from Substrate (a launch creates it again; a warm
+  round starts fresh).
 - [substrate_bridge_incompatible](errors/substrate-bridge-incompatible.md): the
   image's bridge is from another release than the coding proxy.
 - [substrate_image_incomplete](errors/substrate-image-incomplete.md): the image

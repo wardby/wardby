@@ -63,6 +63,7 @@ model Agent {
   mcpServers           AgentMcpServer[]
   notificationChannels NotificationChannel[]
   runHooks             RunHook[]
+  documents            Document[]
 
   /// Self-defects opt-in: the Jira project and issue type wardby files the agent's own failures into. Both or neither.
   defectProjectKey String?
@@ -352,6 +353,7 @@ enum RunTrigger {
   webhook
   subagent
   host_event
+  comment
 }
 
 model Run {
@@ -1226,6 +1228,10 @@ model Principal {
   budgetGroups BudgetGroup[]
   mcpServers   McpServer[]
 
+  ownedDocuments Document[]        @relation("DocumentOwner")
+  webSessions    WebSession[]
+  profile        PrincipalProfile?
+
   hostIdentities           HostIdentity[]
   hostIdentityLinkRequests HostIdentityLinkRequest[]
   oauthLinkRequests        OAuthLinkRequest[]
@@ -1240,7 +1246,7 @@ model Principal {
 /// AgentRepository.provider, so a new type or level needs no enum migration.
 model ResourceGrant {
   id                 String     @id @default(cuid())
-  /// "agent" | "tool" | "budget_group" | "mcp_server" (later "secret" | "datastore").
+  /// "agent" | "tool" | "budget_group" | "mcp_server" | "document" (later "secret" | "datastore").
   resourceType       String
   resourceId         String
   /// "principal" | "everyone" (later "group").
@@ -2334,6 +2340,277 @@ model HostProviderTrustedAccount {
   hostProvider HostProvider @relation(fields: [provider], references: [name], onDelete: Cascade)
 
   @@id([provider, accountId])
+}
+
+model Document {
+  id               String              @id @default(cuid())
+  /// "document" | "design"
+  kind             String              @default("document")
+  title            String
+  ownerId          String
+  owner            Principal           @relation("DocumentOwner", fields: [ownerId], references: [id])
+  agentId          String?
+  agent            Agent?              @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  /// e.g. "owner/repo" or "local:/abs/path"; with path, enables send-to-agent
+  repository       String?
+  /// repo-relative Markdown file (documents) or design directory (designs)
+  path             String?
+  baseRef          String?
+  /// draft | in_review | changes_requested | approved | archived (src/core/documents/review-state.ts)
+  reviewState              String                @default("draft")
+  /// the state when it was archived; unarchive returns to it
+  reviewStateBeforeArchive String?
+  /// a principal id (plain text, like DocumentVersion.createdById): may force approve
+  finalApproverId          String?
+  currentVersionId String?             @unique
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  versions         DocumentVersion[]   @relation("DocumentVersions")
+  currentVersion   DocumentVersion?    @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  threads          CommentThread[]
+  shareLinks       DocumentShareLink[]
+  contents         DocumentContent[]
+  exports          DocumentExport[]
+  reviewers                DocumentReviewer[]
+  reviewEvents             DocumentReviewEvent[]
+
+  @@index([ownerId])
+  @@index([agentId])
+}
+
+model DocumentVersion {
+  id          String    @id @default(cuid())
+  documentId  String
+  document    Document  @relation("DocumentVersions", fields: [documentId], references: [id], onDelete: Cascade)
+  number      Int
+  /// "markdown" | "boards-v1"
+  format      String    @default("markdown")
+  /// Markdown versions only (<= 1 MiB, checked in code); design versions keep their files in DocumentFile
+  markdown    String?
+  /// kind check, sanitiser, size and fidelity warnings (src/core/documents/warnings.ts)
+  warnings    Json?
+  files       DocumentFile[]
+  /// sha256 hex of the content (see src/core/documents/content.ts)
+  contentHash String
+  /// "editor" | "agent" | "mcp" | "import" | "review"
+  via         String
+  createdById String?
+  runId       String?
+  summary     String?
+  createdAt   DateTime  @default(now())
+  currentOf   Document? @relation("CurrentVersion")
+
+  @@unique([documentId, number])
+}
+
+/// A design file's text, stored once per document and content hash.
+model DocumentContent {
+  documentId String
+  document   Document       @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  /// sha256 hex of text
+  hash       String
+  text       String
+  size       Int
+  createdAt  DateTime       @default(now())
+  files      DocumentFile[]
+
+  @@id([documentId, hash])
+}
+
+/// A file of a design version (manifest.json, boards/<id>.html, brand.md).
+model DocumentFile {
+  versionId  String
+  version    DocumentVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  path       String
+  documentId String
+  hash       String
+  content    DocumentContent @relation(fields: [documentId, hash], references: [documentId, hash], onDelete: NoAction)
+  mime       String
+
+  @@id([versionId, path])
+  @@index([documentId, hash])
+}
+
+/// A PNG or PDF export job; rows and bytes are deleted an hour after they were requested.
+model DocumentExport {
+  id            String    @id @default(cuid())
+  documentId    String
+  document      Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  versionId     String
+  /// "png" | "pdf"
+  format        String
+  /// png: the board id
+  board         String?
+  /// queued | running | done | failed
+  status        String    @default("queued")
+  errorCode     String?
+  requestedById String?
+  guestId       String?
+  mime          String?
+  /// <= 20 MiB
+  data          Bytes?
+  size          Int?
+  createdAt     DateTime  @default(now())
+  finishedAt    DateTime?
+
+  @@index([documentId, createdAt])
+  @@index([status, createdAt])
+  @@index([createdAt])
+}
+
+model CommentThread {
+  id                String    @id @default(cuid())
+  documentId        String
+  document          Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  /// per-document display number (#1, #2...)
+  number            Int
+  /// version it was created on
+  versionId         String
+  /// see src/core/documents/anchors.ts TextAnchor
+  anchor            Json
+  /// open | resolved | outdated
+  status            String    @default("open")
+  sentAt            DateTime?
+  sentById          String?
+  sentRunId         String?
+  /// the document version number the thread was sent with; the agent's edit is published only while it is still the latest
+  sentVersionNumber Int?
+  /// the sent run whose ending was answered on this thread (claimed once per run)
+  answeredRunId     String?
+  /// set when sentRunId is a reconcile run: the earlier run whose conflicted edit it re-applies (one reconcile per send)
+  reconcileOfRunId  String?
+  resolvedById      String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  comments          Comment[]
+
+  @@unique([documentId, number])
+  @@index([documentId, status])
+  @@index([sentRunId])
+}
+
+model Comment {
+  id        String         @id @default(cuid())
+  threadId  String
+  thread    CommentThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  /// principal
+  authorId  String?
+  guestId   String?
+  guest     DocumentGuest? @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  /// agent reply
+  runId     String?
+  /// principal who sent the thread to the agent
+  viaId     String?
+  /// Markdown subset; mentions as @[principalId]
+  body      String
+  editedAt  DateTime?
+  deletedAt DateTime?
+  createdAt DateTime       @default(now())
+
+  @@index([threadId, createdAt])
+}
+
+model DocumentShareLink {
+  id          String          @id @default(cuid())
+  documentId  String
+  document    Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  /// sha256 hex; the token is never stored
+  tokenHash   String          @unique
+  /// "view" | "comment"
+  permission  String
+  expiresAt   DateTime
+  createdById String
+  revokedAt   DateTime?
+  createdAt   DateTime        @default(now())
+  guests      DocumentGuest[]
+
+  @@index([documentId])
+}
+
+model DocumentGuest {
+  id          String            @id @default(cuid())
+  shareLinkId String
+  shareLink   DocumentShareLink @relation(fields: [shareLinkId], references: [id], onDelete: Cascade)
+  name        String
+  email       String?
+  createdAt   DateTime          @default(now())
+  lastUsedAt  DateTime          @default(now())
+  comments    Comment[]
+  sessions    WebSession[]
+  reviewers   DocumentReviewer[]
+
+  @@index([shareLinkId])
+}
+
+model DocumentReviewer {
+  id            String         @id @default(cuid())
+  documentId    String
+  document      Document       @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  /// exactly one of principalId and guestId is set (hand-written CHECK DocumentReviewer_one_reviewer)
+  principalId   String?
+  guestId       String?
+  guest         DocumentGuest? @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  /// none | approved | changes_requested
+  verdict       String         @default("none")
+  /// the version the verdict was given on
+  versionNumber Int?
+  /// redacted against the document agent's secret values before it is stored
+  note          String?
+  verdictAt     DateTime?
+  createdAt     DateTime       @default(now())
+
+  @@unique([documentId, principalId])
+  @@unique([documentId, guestId])
+  @@index([documentId])
+}
+
+/// Append-only review history: ids, states, version numbers and notes, never document content.
+model DocumentReviewEvent {
+  id               String   @id @default(cuid())
+  documentId       String
+  document         Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  actorPrincipalId String?
+  actorGuestId     String?
+  /// submitted | reviewers_changed | approved | changes_requested | force_approved | reopened | archived | unarchived
+  kind             String
+  fromState        String
+  toState          String
+  versionNumber    Int
+  /// redacted like DocumentReviewer.note
+  note             String?
+  /// force_approved only: DocumentReviewer ids that had not approved the current version
+  overridden       Json?
+  createdAt        DateTime @default(now())
+
+  @@index([documentId, createdAt])
+}
+
+model WebSession {
+  id          String         @id @default(cuid())
+  tokenHash   String         @unique
+  csrfHash    String
+  principalId String?
+  principal   Principal?     @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  guestId     String?
+  guest       DocumentGuest? @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  /// set when the session came through a share link
+  shareLinkId String?
+  expiresAt   DateTime
+  lastSeenAt  DateTime       @default(now())
+  createdAt   DateTime       @default(now())
+
+  @@index([principalId])
+  @@index([expiresAt])
+}
+
+model PrincipalProfile {
+  principalId String    @id
+  principal   Principal @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  displayName String?
+  email       String?
+  /// "oidc" | "self-hosted" | "operator"
+  source      String
+  updatedAt   DateTime  @updatedAt
 }
 
 /// An admin's grant of a server-held connection to a public tool (#529): the

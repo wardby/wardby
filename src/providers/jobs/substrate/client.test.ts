@@ -26,6 +26,7 @@ import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
   SubstrateNotFoundError,
+  SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type ActorTemplateSpec,
 } from "./api.js";
@@ -97,16 +98,14 @@ describe("createSubstrateApi (Connect adapter)", () => {
     expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
     reply = golden({ goldenTag: create(ObjectRefSchema, { atespace: "s", name: "" }) });
     expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
-    // No golden-snapshot status at all: unknown.
-    for (const none of [
-      create(ActorTemplateSchema, {}),
-      create(ActorTemplateSchema, { status: create(ActorTemplateStatusSchema, {}) }),
-    ]) {
-      reply = none;
-      const info = await api.getActorTemplate("s", "t");
-      expect(info).toEqual({ goldenSnapshotFailed: false });
-      expect(info).not.toHaveProperty("goldenSnapshotReady");
-    }
+    // A status with no golden-snapshot status yet: still building, not ready (not a failure).
+    reply = create(ActorTemplateSchema, { status: create(ActorTemplateStatusSchema, {}) });
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
+    // No status at all: unknown.
+    reply = create(ActorTemplateSchema, {});
+    const info = await api.getActorTemplate("s", "t");
+    expect(info).toEqual({ goldenSnapshotFailed: false });
+    expect(info).not.toHaveProperty("goldenSnapshotReady");
   });
 
   it("deletes a template by name; a missing one is success", async () => {
@@ -152,6 +151,34 @@ describe("createSubstrateApi (Connect adapter)", () => {
     expect(error).toBeInstanceOf(SubstrateNotFoundError);
     expect((error as Error).message).toBe("substrate_not_found");
     expect(String((error as Error).message)).not.toContain(SECRET);
+  });
+
+  it("maps FAILED_PRECONDITION (a missing template) on createActor and resumeActor to SubstrateTemplateMissingError", async () => {
+    const api = control({
+      createActor: () => {
+        throw new ConnectError(`template ${SECRET} gone`, Code.FailedPrecondition);
+      },
+      resumeActor: () => {
+        throw new ConnectError(`template ${SECRET} gone`, Code.FailedPrecondition);
+      },
+    });
+    for (const attempt of [api.createActor("s", "a", "t"), api.resumeActor("s", "a")]) {
+      const error = await attempt.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(SubstrateTemplateMissingError);
+      expect(error).not.toBeInstanceOf(SubstrateNotFoundError);
+      expect((error as SubstrateTemplateMissingError).code).toBe("substrate_template_missing");
+      expect((error as Error).message).toBe("substrate_template_missing");
+      expect(String((error as Error).message)).not.toContain(SECRET);
+    }
+  });
+
+  it("keeps NOT_FOUND on resumeActor (the actor is gone) apart from a missing template", async () => {
+    const api = control({
+      resumeActor: () => {
+        throw new ConnectError("x", Code.NotFound);
+      },
+    });
+    await expect(api.resumeActor("s", "a")).rejects.toBeInstanceOf(SubstrateNotFoundError);
   });
 
   it("never surfaces the server's message on UNAVAILABLE", async () => {

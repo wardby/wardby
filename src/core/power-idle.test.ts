@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "#prisma";
 import { FakeKubernetesApi } from "../providers/jobs/fake-kubernetes-api.js";
 import { createPower, POWER_WOKE_AT } from "./power.js";
+import { EXPORT_STALE_MS } from "./documents/exports.js";
 import { gatewayBusy, powerBlockers, powerBusy, proxyBusy } from "./power-idle.js";
 
 const since = new Date("2026-10-11T11:30:00Z");
@@ -159,5 +160,35 @@ describe("low-power sweep with a coding run that has MCP tools", () => {
       { name: names.proxy, replicas: 0 },
       { name: names.gateway, replicas: 0 },
     ]);
+  });
+});
+
+describe("renderer idle rules", () => {
+  it("powerBusy(renderer) is true iff a DocumentExport was created at or after the window start", async () => {
+    const count = vi.fn(async (_args: unknown) => 1);
+    const db = { documentExport: { count } } as unknown as PrismaClient;
+    expect(await powerBusy(db)("renderer", since)).toBe(true);
+    expect(count).toHaveBeenCalledWith({ where: { createdAt: { gte: since } } });
+    count.mockResolvedValueOnce(0);
+    expect(await powerBusy(db)("renderer", since)).toBe(false);
+  });
+
+  it("powerBlockers(renderer) lists queued or running exports newer than the stale cutoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-11T12:00:00Z"));
+    try {
+      const findMany = vi.fn(async (_args: unknown) => [{ id: "exp_b" }, { id: "exp_a" }]);
+      const db = { documentExport: { findMany } } as unknown as PrismaClient;
+      expect(await powerBlockers(db, "renderer")).toEqual(["exp_a", "exp_b"]);
+      expect(findMany).toHaveBeenCalledWith({
+        where: {
+          status: { in: ["queued", "running"] },
+          createdAt: { gte: new Date(Date.parse("2026-10-11T12:00:00Z") - EXPORT_STALE_MS) },
+        },
+        select: { id: true },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

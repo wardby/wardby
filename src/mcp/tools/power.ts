@@ -17,7 +17,7 @@ import { textResult } from "./text-result.js";
 
 const powerToolLog = logger.child({ module: "mcp-power" });
 
-const TARGETS = ["proxy", "gateway"] as const satisfies readonly PowerTarget[];
+const TARGETS = ["proxy", "gateway", "renderer"] as const satisfies readonly PowerTarget[];
 const SleepSchema = z.object({ target: z.enum(TARGETS).optional() }).strict();
 const StatusSchema = z.object({}).strict();
 
@@ -37,7 +37,7 @@ export function registerPowerTools(mcp: WardbyMcpServer): void {
     name: "power_status",
     scope: "power:manage",
     description:
-      "Admins (power:manage): low-power mode state. For the coding proxy and the native gateway: replicas, whether a ready endpoint exists, when it last woke (wokeAt), and blockers (run ids keeping it busy; for the gateway: sandbox runs, coding runs with MCP tools and runs with an active gateway session). Returns { enabled: false } when low-power mode is off.",
+      "Admins (power:manage): low-power mode state. For the coding proxy, the native gateway and (when WARDBY_RENDERER_URL is set) the export renderer: replicas, whether a ready endpoint exists, when it last woke (wokeAt), and blockers (run ids keeping it busy; for the gateway: sandbox runs, coding runs with MCP tools and runs with an active gateway session; for the renderer: queued or running export ids). Returns { enabled: false } when low-power mode is off.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (rawArgs: unknown, ctx) => {
       parse(StatusSchema, "power_status arguments", rawArgs);
@@ -49,7 +49,7 @@ export function registerPowerTools(mcp: WardbyMcpServer): void {
     name: "power_sleep",
     scope: "power:manage",
     description:
-      "Admins (power:manage): scale the coding proxy and/or native gateway to zero now, skipping low-power mode's idle window. It never stops a run: a target is refused while it has active or queued runs (for the gateway: sandbox runs and coding runs with MCP tools, and also an active gateway session), and those run ids are returned under blocked. Recently finished runs do not block it. The next run wakes the target again. Fails (409 low_power_disabled) when low-power mode is off.",
+      "Admins (power:manage): scale the coding proxy, native gateway and export renderer (or one named target) to zero now, skipping low-power mode's idle window. It never stops a run: a target is refused while it has active or queued runs (for the gateway: sandbox runs and coding runs with MCP tools, and also an active gateway session), and those run ids are returned under blocked. Recently finished runs do not block it. The next run wakes the target again. Fails (409 low_power_disabled) when low-power mode is off.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -57,12 +57,14 @@ export function registerPowerTools(mcp: WardbyMcpServer): void {
         target: {
           type: "string",
           enum: [...TARGETS],
-          description: "Sleep only this target. Omit to sleep both.",
+          description:
+            "Sleep only this target. Omit to sleep every deployed target. renderer is the optional PNG/PDF export renderer; a target that is not deployed is skipped.",
         },
       },
     },
     handler: async (rawArgs: unknown, ctx) => {
       const { target } = parse(SleepSchema, "power_sleep arguments", rawArgs);
+      // No target: every target; sleepNow skips one this deployment does not have.
       const targets: PowerTarget[] = target ? [target] : [...TARGETS];
       const power = ctx.providers.power ?? DISABLED_POWER;
       const audit = { event: "power.sleep", principal: ctx.principal.id, targets };

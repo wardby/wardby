@@ -4,6 +4,7 @@ import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
   SubstrateNotFoundError,
+  SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type ActorTemplateSpec,
 } from "./api.js";
@@ -83,7 +84,7 @@ describe("FakeSubstrateApi", () => {
     await api.ensureActorTemplate(template("t", 500, 2 ** 20));
     await api.createActor("s", "a", "t");
     await expect(api.createActor("s", "a", "t")).rejects.toBeInstanceOf(SubstrateAlreadyExistsError);
-    await expect(api.createActor("s", "b", "missing")).rejects.toBeInstanceOf(SubstrateNotFoundError);
+    await expect(api.createActor("s", "b", "missing")).rejects.toBeInstanceOf(SubstrateTemplateMissingError);
   });
 
   it("places many actors on one worker by free CPU and memory, and refuses what does not fit", async () => {

@@ -26,7 +26,14 @@ import {
   loadJiraConfig,
   loadGitHubVcsConfig,
   loadBlobStoreConfig,
+  loadSecretConfig,
+  loadWebOidcConfig,
 } from "../config/providers.js";
+import { createDocumentStreams } from "../web/events.js";
+import { createOidcLogin } from "../web/oidc-login.js";
+import { sendThreadsToAgent } from "../core/documents/agent-loop.js";
+import { createDocumentEventBus } from "../core/documents/events.js";
+import type { WebDeps } from "../web/routes.js";
 import { prisma } from "../core/db.js";
 import { guardDatastore, guardAgentMemory } from "../core/secret-guarded-stores.js";
 import { createDbSecretWriteGuard } from "../core/secret-guard.js";
@@ -50,6 +57,9 @@ import type { NativeRunProviders } from "../core/runner.js";
 import { buildAuthProvider } from "../providers/auth/index.js";
 import { GitHubAppClient } from "../providers/vcs/github.js";
 import { loadGitHubAllowedAccounts } from "../config/github-allowed-accounts.js";
+import { loadRendererConfig } from "../config/renderer.js";
+import { RENDERER_WAKE_TIMEOUT_MS } from "../core/documents/exports.js";
+import { createRendererClient } from "../core/documents/renderer-client.js";
 import type { SelfHostedAuthProvider } from "../providers/auth/self-hosted.js";
 import { buildMcpServer, type WardbyMcpServer } from "./server.js";
 import { buildPower } from "../core/power-composition.js";
@@ -92,6 +102,7 @@ import { registerHostAccountTools } from "./tools/host-accounts.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerPackageTools } from "./tools/packages.js";
 import { registerSecretsTools, type SecretElicitationUrlBuilder, type SecretsToolsOptions } from "./tools/secrets.js";
+import { httpOrigin as publicHttpOrigin, registerDocumentTools } from "./tools/documents.js";
 import { registerWebhookTools } from "./tools/webhooks.js";
 import { STDIO_SECRET_PATH, secretFormRoute } from "./tools/secret-elicitation-server.js";
 import { createStdioLinkHost } from "./transport/stdio-link-host.js";
@@ -133,8 +144,10 @@ export function localOperatorContext(
   principal: Principal,
   providers: McpProviders,
   db: PrismaClient,
+  publicOrigin?: string,
 ): McpRequestContext {
   return {
+    ...(publicOrigin ? { publicOrigin } : {}),
     principal,
     scopes: new Set(SCOPES_SUPPORTED),
     roles: [...ROLE_NAMES],
@@ -208,6 +221,7 @@ export function registerAllTools(
     oauthLoopback: opts.oauthLoopback,
   });
   registerWebhookTools(mcp);
+  registerDocumentTools(mcp);
 }
 
 export interface McpProviderComposition {
@@ -368,7 +382,27 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   // call via `modelCatalog.refreshNow()` after each write — there is no
   // separate refresh tool.
   const modelCatalog = await startModelCatalog(prisma);
-  const providers = options.providers ?? buildMcpProviders().providers;
+  const baseProviders = options.providers ?? buildMcpProviders().providers;
+  // PNG/PDF exports, built once and shared by the web routes (canRender) and export_document. Without
+  // WARDBY_RENDERER_URL those requests are refused as export_renderer_unavailable. Parsed now so a
+  // malformed URL stops startup; only whether one is set is logged, never the URL.
+  const rendererConfig = loadRendererConfig();
+  mcpLog.info({ configured: rendererConfig.url !== null }, "PNG/PDF export renderer");
+  const rendererPower = baseProviders.power;
+  const providers: McpProviders = baseProviders.exports
+    ? baseProviders
+    : {
+        ...baseProviders,
+        exports: {
+          db: prisma,
+          renderer: rendererConfig.url ? createRendererClient(rendererConfig.url) : null,
+          // Low-power mode keeps the renderer at zero until an export needs it.
+          wake:
+            rendererPower?.enabled && rendererConfig.url
+              ? (id) => rendererPower.ensureAwake("renderer", { timeoutMs: RENDERER_WAKE_TIMEOUT_MS, runId: id })
+              : undefined,
+        },
+      };
   await providers.executor.launch?.();
   warmUpExecutor(providers.executor);
   if (!options.schedulerAttached) await warnIfNothingWillFireSchedules();
@@ -420,7 +454,10 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     // local identity for the whole connection, per the design's own
     // "stdio local mode: no token; the operator is trusted."
     const principal = await resolvePrincipal(mcpConfig.localPrincipal, prisma);
-    mcp.setFixedContext(localOperatorContext(principal, providers, prisma));
+    // Links to the document pages use MCP_CANONICAL_URI's origin when the operator set one.
+    mcp.setFixedContext(
+      localOperatorContext(principal, providers, prisma, publicHttpOrigin(mcpConfig.canonicalUri) ?? undefined),
+    );
     const stdio = runStdioServer(mcp);
     return {
       close: async () => {
@@ -558,6 +595,10 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
   const viewerBus = process.env.DATABASE_URL
     ? createViewerEventBus({ connectionString: process.env.DATABASE_URL })
     : undefined;
+  // Live document events (GET /d/api/<id>/events), fed by pg_notify from the document services.
+  const documentsBus = process.env.DATABASE_URL
+    ? createDocumentEventBus({ connectionString: process.env.DATABASE_URL })
+    : undefined;
   const viewer = viewerBus
     ? createViewerApi({
         db: prisma,
@@ -569,6 +610,44 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
         issueSites: jiraConfig ? { jira: jiraConfig.siteUrl } : {},
       })
     : undefined;
+  // The document pages (/d/, /s/, /web/). Delegating mode signs browsers in
+  // with OIDC against AUTH_ISSUER; self-hosted mode bridges its own login.
+  const webOidc = loadWebOidcConfig();
+  const web: WebDeps = {
+    db: prisma,
+    cipher: providers.secrets,
+    canonicalUri: canonicalHref,
+    authMode: authProviderKind,
+    ...(selfHosted ? { selfHosted } : {}),
+    ...(documentsBus ? { events: createDocumentStreams({ bus: documentsBus }) } : {}),
+    ...(providers.exports ? { exports: providers.exports } : {}),
+    // The callers have required write on the document; sendThreadsToAgent checks it again.
+    sendThreads: (input) =>
+      sendThreadsToAgent(
+        prisma,
+        {
+          executor: providers.executor,
+          cipher: providers.secrets,
+          selfDefects: { db: prisma, issueTrackers: providers.issueTrackers },
+        },
+        input,
+      ),
+    ...(authProviderKind === "delegating"
+      ? {
+          oidc: createOidcLogin({
+            issuer: authConfig.issuer,
+            jwksUri: authConfig.jwksUri,
+            clientId: webOidc.clientId,
+            clientSecret: webOidc.clientSecret,
+            scopes: webOidc.scopes,
+            canonicalUri: canonicalHref,
+            appKey: loadSecretConfig().appKey,
+            fetchOptions: providers.sandboxFetchOptions,
+            fetchImpl: providers.sandboxFetch,
+          }),
+        }
+      : {}),
+  };
   const http = await startHttpServer({
     mcp,
     config: {
@@ -590,6 +669,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     },
     viewer,
     blobs,
+    web,
   });
   const cleanupTimer = selfHosted
     ? setInterval(() => {
@@ -601,6 +681,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       if (cleanupTimer) clearInterval(cleanupTimer);
       await closeQuietly(http.close(), "HTTP transport close");
       await closeQuietly(viewerBus?.close(), "viewer event bus close");
+      await closeQuietly(documentsBus?.close(), "documents event bus close");
       // Let the runs this instance is executing finish before the executor
       // closes under them; a run abandoned here is lost, never resumed.
       await waitForInFlightRuns(drainSeconds * 1000);

@@ -43,6 +43,7 @@ pub fn run() {
             commands::fetch_graph,
             commands::fetch_run,
             commands::fetch_infra,
+            commands::fetch_documents,
             commands::kube_contexts,
             commands::set_kube_context,
             commands::kube_connect,

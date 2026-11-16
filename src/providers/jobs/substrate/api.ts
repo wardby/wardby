@@ -67,9 +67,9 @@ export interface TemplateInfo {
   /**
    * The template's golden snapshot is built (Substrate's status.goldenSnapshotStatus.goldenTag is
    * set, which it documents as set after tagging the snapshot and deleting the temporary golden
-   * actor). False while the template has a golden-snapshot status without a tag yet; undefined when
-   * Substrate reports no golden-snapshot status at all (the launcher then falls back to its own
-   * readiness record). Only whether the tag is set: the tag itself is never carried.
+   * actor). False (building) while the template has a status with no golden-snapshot status yet, or
+   * one without a tag yet; undefined when Substrate reports no status at all (the launcher then
+   * falls back to its own readiness record). Only whether the tag is set: the tag itself is never carried.
    */
   goldenSnapshotReady?: boolean;
 }
@@ -95,6 +95,15 @@ export class SubstrateExhaustedError extends Error {
 export class SubstrateUnavailableError extends Error {
   readonly code = "substrate_unavailable";
 }
+/**
+ * The actor's template does not exist (deleted, or never created): Substrate answers
+ * FailedPrecondition, not NotFound, for CreateActor from such a template and for ResumeActor of an
+ * actor whose template is gone. Distinct from SubstrateNotFoundError, which on resumeActor means the
+ * actor itself is gone.
+ */
+export class SubstrateTemplateMissingError extends Error {
+  readonly code = "substrate_template_missing";
+}
 
 export interface SubstrateApi {
   /** AlreadyExists is success. */
@@ -102,10 +111,16 @@ export interface SubstrateApi {
   getActorTemplate(atespace: string, name: string): Promise<TemplateInfo | undefined>;
   /** A missing template is success. */
   deleteActorTemplate(atespace: string, name: string): Promise<void>;
-  /** Throws SubstrateAlreadyExistsError, or SubstrateNotFoundError when the template is gone. */
+  /**
+   * Throws SubstrateAlreadyExistsError, or SubstrateTemplateMissingError (FailedPrecondition) or
+   * SubstrateNotFoundError when the template is gone.
+   */
   createActor(atespace: string, name: string, template: string): Promise<void>;
   getActor(atespace: string, name: string): Promise<ActorInfo | undefined>;
-  /** Throws SubstrateExhaustedError when no worker has room. */
+  /**
+   * Throws SubstrateExhaustedError when no worker has room, SubstrateNotFoundError when the actor is
+   * gone, SubstrateTemplateMissingError when its template is gone.
+   */
   resumeActor(atespace: string, name: string): Promise<void>;
   /**
    * Checkpoints a running actor and waits until its snapshot is in durable storage (warm rounds:

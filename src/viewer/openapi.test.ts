@@ -15,6 +15,8 @@ vi.mock("./graph.js", async (importOriginal) => ({
   loadGraph: vi.fn(),
 }));
 vi.mock("./run-detail.js", () => ({ loadRunDetail: vi.fn() }));
+vi.mock("./documents.js", () => ({ loadViewerDocuments: vi.fn() }));
+import { loadViewerDocuments } from "./documents.js";
 import { loadGraph } from "./graph.js";
 import { loadRunDetail } from "./run-detail.js";
 import { createViewerApi, type ViewerApi } from "./http.js";
@@ -46,9 +48,10 @@ describe("published viewer OpenAPI document", () => {
     expect(doc.servers).toEqual([{ url: "https://{host}", variables: { host: { default: "wardby.example.com" } } }]);
   });
 
-  it("documents exactly the four GET operations, each behind bearer auth", () => {
+  it("documents exactly the five GET operations, each behind bearer auth", () => {
     const doc = build();
     expect(Object.keys(doc.paths).sort()).toEqual([
+      "/admin/api/documents",
       "/admin/api/events",
       "/admin/api/graph",
       "/admin/api/infra",
@@ -195,7 +198,12 @@ async function start(): Promise<string> {
     authenticate: async (authorization) => {
       if (!authorization) throw unauthorized("no token", "https://host/.well-known/oauth-protected-resource");
       const scopes = authorization === "Bearer noscope" ? [] : ["admin:view"];
-      return { scopes: new Set(scopes), roles: ["admin"], providers: { secrets: {} } } as unknown as McpRequestContext;
+      return {
+        principal: { id: "p1" },
+        scopes: new Set(scopes),
+        roles: ["admin"],
+        providers: { secrets: {} },
+      } as unknown as McpRequestContext;
     },
     canonicalUri: URI,
     infra: INFRA,
@@ -243,6 +251,10 @@ const SCENARIOS: Record<string, Record<string, Scenario>> = {
     "404": { path: "/admin/api/runs/missing", expect: {} },
   },
   "/admin/api/infra": { "200": { path: "/admin/api/infra", expect: { schema: "infra-info" } } },
+  "/admin/api/documents": {
+    "200": { path: "/admin/api/documents", expect: { schema: "document-list" } },
+    "400": { path: "/admin/api/documents?limit=0", expect: {} },
+  },
   "/admin/api/events": { "200": { path: "/admin/api/events", expect: { contentType: "text/event-stream" } } },
 };
 const concrete = (docPath: string): string => docPath.replace("{id}", "r1");
@@ -255,6 +267,7 @@ const documentedCodes = (response: Obj): string[] => response["x-error-codes"] a
 describe("viewer OpenAPI document conforms to the routes", () => {
   it("every documented status of every route happens, with its documented body", async () => {
     vi.mocked(loadGraph).mockResolvedValue(SNAPSHOT as never);
+    vi.mocked(loadViewerDocuments).mockResolvedValue({ documents: [], truncated: false });
     vi.mocked(loadRunDetail).mockImplementation((async (_db: unknown, id: string) =>
       id === "r1" ? DETAIL : null) as never);
     const base = await start();

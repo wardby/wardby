@@ -1,0 +1,10 @@
+# The renderer under gVisor (GKE Sandbox on Autopilot; the gVisor node group on EKS): Chromium
+# parses untrusted boards, so it runs in the same sandbox runtime as coding runs.
+resources:
+  - ../base
+patches:
+  - target: { group: apps, version: v1, kind: Deployment, name: wardby-renderer }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/runtimeClassName
+        value: gvisor

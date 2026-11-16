@@ -2,7 +2,8 @@
 # replicas (each rounded up to 500m by Autopilot with its Auth Proxy sidecar) and
 # NATIVE_SANDBOX_MAX_CONCURRENT plus NATIVE_SANDBOX_WARM_POOL_SIZE (control-plane.yaml) worker pods
 # of 500m / 512Mi. Raise this together with CODING_MAX_CONCURRENT, NATIVE_SANDBOX_MAX_CONCURRENT,
-# or NATIVE_SANDBOX_WARM_POOL_SIZE.
+# or NATIVE_SANDBOX_WARM_POOL_SIZE. It also leaves room for the optional export renderer
+# (../../renderer: one pod, 500m / 2Gi), whether or not a deployment turns it on.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -10,8 +11,8 @@ metadata:
   namespace: wardby-coding
 spec:
   hard:
-    pods: "26"
-    requests.cpu: "11"
-    requests.memory: 20Gi
-    limits.cpu: "11"
-    limits.memory: 20Gi
+    pods: "27"
+    requests.cpu: "11.5"
+    requests.memory: 22Gi
+    limits.cpu: "11.5"
+    limits.memory: 22Gi

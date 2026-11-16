@@ -7,6 +7,7 @@
 #   WARDBY_LOW_POWER=1 WARDBY_HOSTNAME=app.example.com deploy/gke/up.sh   # low-power mode
 #   WARDBY_GITHUB_ALLOWED_ACCOUNTS=acme,acme-labs   # optional: accounts the GitHub App serves besides its owner
 #   WARDBY_MOBILE_ENABLED=true   # optional: allow the wardby mobile app to sign in (default false)
+#   WARDBY_RENDERER=true   # optional: PNG/PDF export renderer (default false; see docs/documents.md "Exports")
 #   WARDBY_MENTION_EXPLANATIONS=false   # optional: no reply saying why a mention started nothing (default true)
 #   WARDBY_DEPENDENCY_CACHE=true   # optional: run dependency cache on the coding proxy (default false; needs dependency_cache_enabled in terraform.tfvars)
 #   WARDBY_SESSION_TRANSCRIPTS=true   # optional: store sessionResume transcripts on the control plane (default false; needs session_transcripts_enabled in terraform.tfvars)
@@ -112,6 +113,46 @@ else
   echo "up.sh: mobile sign-in is off."
 fi
 # --- end WARDBY_MOBILE_ENABLED check ---
+
+# --- WARDBY_RENDERER check ---
+# Optional: true builds the renderer image, deploys the PNG/PDF export renderer
+# (deploy/kind-coding/manifests/renderer/gvisor) and points the control plane at
+# it. Empty = false: the renderer's objects are removed and PNG and PDF exports
+# are refused as export_renderer_unavailable.
+WARDBY_RENDERER="${WARDBY_RENDERER:-false}"
+case "$WARDBY_RENDERER" in
+  true | false) ;;
+  *)
+    echo "up.sh: WARDBY_RENDERER must be true or false (got \"$WARDBY_RENDERER\")." >&2
+    exit 1
+    ;;
+esac
+if [[ "$WARDBY_RENDERER" = true ]]; then
+  echo "up.sh: export renderer is on."
+else
+  echo "up.sh: export renderer is off."
+fi
+# --- end WARDBY_RENDERER check ---
+
+# --- WARDBY_RENDERER control-plane env ---
+# Adds WARDBY_RENDERER_URL to the control plane's container, right after its
+# WARDBY_MOBILE_ENABLED entry, like CODING_MAX_DISK_MB below. Only when the
+# renderer is on; otherwise the render passes through unchanged. The value is
+# the renderer Service's in-cluster address (a fixed name, not target identity).
+inject_renderer_env() {
+  if [[ "$WARDBY_RENDERER" != true ]]; then
+    cat
+    return
+  fi
+  awk '
+    { print }
+    /^ *value: wardby_mobile_enabled$/ {
+      match($0, /^ */); value_indent = substr($0, 1, RLENGTH); item_indent = substr(value_indent, 3)
+      print item_indent "- name: WARDBY_RENDERER_URL"
+      print value_indent "value: \"http://wardby-renderer.wardby-coding.svc.cluster.local:8796\""
+    }'
+}
+# --- end WARDBY_RENDERER control-plane env ---
 
 # --- WARDBY_MENTION_EXPLANATIONS check ---
 # Optional: false stops the GitHub App replying to say why a mention started
@@ -489,7 +530,7 @@ iam_substitutions() {
 # match a real registry path (which never starts with "wardby-").
 assert_no_placeholders() {
   local leftover
-  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*|value: wardby_github_allowed_accounts|value: wardby_mobile_enabled' || true)"
+  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*|value: wardby_github_allowed_accounts|value: wardby_mobile_enabled|image: wardby-renderer-image' || true)"
   if [[ -n "$leftover" ]]; then
     echo "up.sh: unresolved placeholder(s) in rendered manifest:" >&2
     echo "$leftover" | sort -u >&2
@@ -551,6 +592,11 @@ echo "==> 3/${TOTAL_STEPS} build and push images (linux/amd64)"
 # builder's own platform, so an arm64 Mac only emulates what actually ships.
 REGISTRY="$REGISTRY" docker buildx bake -f deploy/gke/docker-bake.hcl --load >/dev/null
 IMAGES=(runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner claude-tool-runner-node-python native-worker)
+if [[ "$WARDBY_RENDERER" = true ]]; then
+  # Not in bake's default group: only a deployment that turns the renderer on builds it.
+  REGISTRY="$REGISTRY" docker buildx bake -f deploy/gke/docker-bake.hcl renderer --load >/dev/null
+  IMAGES+=(renderer)
+fi
 PUSH_PIDS=()
 for img in "${IMAGES[@]}"; do
   docker push "${REGISTRY}/${img}:latest" >/dev/null &
@@ -588,6 +634,10 @@ CLAUDE_WORKER_IMAGE="$(digest_of claude-coding-worker)"
 CLAUDE_TOOL_RUNNER_IMAGE="$(digest_of claude-tool-runner)"
 CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON="$(digest_of claude-tool-runner-node-python)"
 NATIVE_WORKER_IMAGE="$(digest_of native-worker)"
+RENDERER_IMAGE=""
+if [[ "$WARDBY_RENDERER" = true ]]; then
+  RENDERER_IMAGE="$(digest_of renderer)"
+fi
 
 echo "==> 4/${TOTAL_STEPS} verify the worker images have tar, head and test"
 # Seeding and collection shell out to these. Without them every launch hangs
@@ -839,6 +889,7 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | inject_coding_resources_env \
   | inject_coding_bash_timeouts_env \
   | inject_run_steps_env \
+  | inject_renderer_env \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|value: wardby-dbos-app-version|value: \"${RUNTIME_IMAGE##*@}\"|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \
@@ -862,7 +913,7 @@ assert_no_placeholders "$OVERLAY_MANIFEST"
 # 0 mid-deploy (and steps 11-12 find their pods). With the mode off the stamp is
 # never read again. A Deployment not created yet is skipped.
 LOW_POWER_WOKE_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-for low_power_target in wardby-coding-proxy wardby-native-gateway; do
+for low_power_target in wardby-coding-proxy wardby-native-gateway wardby-renderer; do
   low_power_found="$(kubectl -n "$NAMESPACE" get deploy "$low_power_target" --ignore-not-found -o name)"
   if [ -n "$low_power_found" ]; then
     kubectl -n "$NAMESPACE" annotate "deploy/$low_power_target" "wardby.io/power-woke-at=$LOW_POWER_WOKE_AT" --overwrite >/dev/null
@@ -884,10 +935,30 @@ if [ "$LOW_POWER" = 0 ]; then
   kubectl -n "$NAMESPACE" delete role/wardby-power rolebinding/wardby-power --ignore-not-found >/dev/null
 fi
 # end low-power undo
+# export renderer
+# On: apply the renderer (gVisor, no egress; its Deployment sets no replicas, so a
+# sleeping low-power renderer stays asleep). Off: remove whatever an earlier run
+# applied; nothing else uses these names.
+if [[ "$WARDBY_RENDERER" = true ]]; then
+  RENDERER_MANIFEST="$(kubectl kustomize deploy/kind-coding/manifests/renderer/gvisor \
+    | sed -e "s|image: wardby-renderer-image|image: ${RENDERER_IMAGE}|")"
+  assert_no_placeholders "$RENDERER_MANIFEST"
+  echo "$RENDERER_MANIFEST" | kubectl apply -f - >/dev/null
+  if [ "$LOW_POWER" = 0 ]; then
+    # Without low-power mode nothing wakes it: a renderer left at 0 by an earlier low-power deploy comes back to 1.
+    kubectl -n "$NAMESPACE" scale deploy/wardby-renderer --replicas=1 >/dev/null
+  fi
+else
+  kubectl -n "$NAMESPACE" delete deploy/wardby-renderer svc/wardby-renderer networkpolicy/wardby-renderer networkpolicy/wardby-control-plane-renderer-egress --ignore-not-found >/dev/null
+fi
+# end export renderer
 
 echo "==> 11/${TOTAL_STEPS} wait for rollouts"
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-coding-proxy --timeout=300s
 kubectl -n "$NAMESPACE" rollout status deploy/wardby-native-gateway --timeout=300s
+if [ "$WARDBY_RENDERER" = true ] && [ "$LOW_POWER" = 0 ]; then
+  kubectl -n "$NAMESPACE" rollout status deploy/wardby-renderer --timeout=300s
+fi
 if ! kubectl -n "$NAMESPACE" rollout status deploy/wardby-control-plane --timeout=600s; then
   # The previous pod keeps serving (maxUnavailable 0). The durable executor
   # launches before anything else, so a missing `dbos` schema grant shows here
