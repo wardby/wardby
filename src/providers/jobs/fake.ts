@@ -18,6 +18,8 @@ export interface FakeJobPlan {
   /** Status returned by each successive poll; the final entry remains stable. */
   statusScript?: JobStatus[];
   result?: JobResult;
+  /** The text readPlanFiles returns for the job. */
+  planFiles?: string;
 }
 
 interface FakeJobRecord {
@@ -28,6 +30,7 @@ interface FakeJobRecord {
   statusCursor: number;
   result?: JobResult;
   plannedResult?: JobResult;
+  planFiles?: string;
   removed: boolean;
   /** Host folders standing in for the job's /workspace ("") and /repos/<name>, for materializeWorkspace. */
   workspaces: Map<string, string>;
@@ -99,6 +102,7 @@ export class FakeJobLauncher implements WorkspaceJobLauncher {
       statusScript,
       statusCursor: 0,
       plannedResult: plan.result ? clone(plan.result) : undefined,
+      planFiles: plan.planFiles,
       removed: false,
       workspaces: new Map(),
     };
@@ -115,6 +119,13 @@ export class FakeJobLauncher implements WorkspaceJobLauncher {
       this.transition(record, scripted, TERMINAL_STATES.has(scripted.state) ? record.plannedResult : undefined);
     }
     return clone(record.status);
+  }
+
+  async readPlanFiles(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
+    const record = this.jobs.get(handle.id);
+    if (!record || record.removed || record.planFiles === undefined) return undefined;
+    if (Buffer.byteLength(record.planFiles) > maxBytes) throw new Error("plan_files_too_large");
+    return record.planFiles;
   }
 
   async collect(handle: JobHandle): Promise<JobResult> {

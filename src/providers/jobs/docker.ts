@@ -23,6 +23,7 @@ import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { readBoundedRegularFile } from "../../coding-worker/artifact.js";
 import {
   parseCodingWorkerOutputJson,
+  PLAN_FILES_ARTIFACT,
   redactAndTruncate,
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
@@ -1358,23 +1359,31 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   }
 
   async readTranscript(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
+    return this.readOutputFile(handle, "session.jsonl", maxBytes, "transcript_too_large");
+  }
+
+  async readPlanFiles(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
+    return this.readOutputFile(handle, PLAN_FILES_ARTIFACT, maxBytes, "plan_files_too_large");
+  }
+
+  private async readOutputFile(
+    handle: JobHandle,
+    name: string,
+    maxBytes: number,
+    tooLarge: string,
+  ): Promise<string | undefined> {
     await this.ready;
     const record = await this.findRecord(handle);
     if (!record) return undefined;
-    const staging = await mkdtemp(join(this.stateRoot, ".wardby-transcript-"));
-    const target = join(staging, "session.jsonl");
+    const staging = await mkdtemp(join(this.stateRoot, ".wardby-output-"));
+    const target = join(staging, name);
     try {
       try {
-        await this.run([
-          "container",
-          "cp",
-          `${this.keeperName(record)}:/run/wardby/storage/output/session.jsonl`,
-          target,
-        ]);
+        await this.run(["container", "cp", `${this.keeperName(record)}:/run/wardby/storage/output/${name}`, target]);
       } catch {
         return undefined;
       }
-      return await readBoundedRegularFile(target, maxBytes, "transcript_too_large");
+      return await readBoundedRegularFile(target, maxBytes, tooLarge);
     } finally {
       await rm(staging, { recursive: true, force: true });
     }

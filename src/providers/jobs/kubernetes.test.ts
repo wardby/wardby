@@ -440,6 +440,51 @@ describe("KubernetesJobLauncher", () => {
     });
   });
 
+  describe("readPlanFiles", () => {
+    const PATH = "/run/wardby/storage/output/plan-files.json";
+    it("reads the keeper's plan-files.json, bounded, without touching the job record", async () => {
+      const h = await harness();
+      const handle = await h.launcher.launch(h.spec);
+      h.fail(1);
+      const read = () =>
+        (h.launcher as unknown as { readRecord: (n: unknown) => Promise<unknown> }).readRecord(h.names);
+      const before = JSON.stringify(await read());
+      h.api.onExec = async ({ command, stdout }) => {
+        stdout?.end(command[0] === "head" ? '{"schemaVersion":1}' : undefined);
+        return 0;
+      };
+      expect(await h.launcher.readPlanFiles(handle, 1024)).toBe('{"schemaVersion":1}');
+      const call = h.api.execCalls.at(-1)!;
+      expect(call.container).toBe("keeper");
+      expect(call.command).toEqual(["head", "-c", "1025", PATH]);
+      expect(JSON.stringify(await read())).toBe(before);
+    });
+
+    it("returns undefined when the file is absent or the pod is gone", async () => {
+      const h = await harness();
+      const handle = await h.launcher.launch(h.spec);
+      h.api.onExec = async ({ stdout }) => {
+        stdout?.end();
+        return 1;
+      };
+      expect(await h.launcher.readPlanFiles(handle, 1024)).toBeUndefined();
+      h.api.onExec = async () => {
+        throw new Error("pod gone");
+      };
+      expect(await h.launcher.readPlanFiles(handle, 1024)).toBeUndefined();
+    });
+
+    it("rejects plan files larger than maxBytes", async () => {
+      const h = await harness();
+      const handle = await h.launcher.launch(h.spec);
+      h.api.onExec = async ({ stdout }) => {
+        stdout?.end("x".repeat(11));
+        return 0;
+      };
+      await expect(h.launcher.readPlanFiles(handle, 10)).rejects.toThrow("plan_files_too_large");
+    });
+  });
+
   it("materializes only a succeeded run, only into its exact workspace, via the strict extractor", async () => {
     const h = await harness();
     const handle = await h.launcher.launch(h.spec);
