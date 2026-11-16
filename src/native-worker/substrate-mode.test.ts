@@ -281,7 +281,11 @@ describe("runSubstrateMode", () => {
   });
 
   it("a canary name runs the canary: one POST to the canary route, no input fetch, then idles", async () => {
-    const recorded = recordingFetch([() => json({ ok: true }), () => new Response(null, { status: 204 })]);
+    const recorded = recordingFetch([
+      () => json({ ok: true }),
+      () => json({ ok: true }),
+      () => new Response(null, { status: 204 }),
+    ]);
     const connect = vi.fn(async () => false);
     const { options, run, name } = setup({ fetch: recorded.fetch, connect });
     const { done, port } = await start(options);
@@ -289,9 +293,10 @@ describe("runSubstrateMode", () => {
     await done;
     expect(recorded.calls.map((c) => [c.init?.method ?? "GET", c.url])).toEqual([
       ["GET", "http://wardby-native-gateway.wardby.svc.cluster.local:8790/healthz"],
+      ["GET", "http://wardby-native-gateway.wardby.svc.cluster.local:8790/healthz"],
       ["POST", "http://wardby-native-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/canary"],
     ]);
-    expect(JSON.parse(recorded.calls[1].init?.body as string)).toEqual({
+    expect(JSON.parse(recorded.calls[2].init?.body as string)).toEqual({
       actor: "wr-0123456789abcdef0123-canary",
       result: "pass",
     });
@@ -301,7 +306,11 @@ describe("runSubstrateMode", () => {
   });
 
   it("the canary probes the deny port the template names (NATIVE_GATEWAY_DENY_PORT)", async () => {
-    const recorded = recordingFetch([() => json({ ok: true }), () => new Response(null, { status: 204 })]);
+    const recorded = recordingFetch([
+      () => json({ ok: true }),
+      () => json({ ok: true }),
+      () => new Response(null, { status: 204 }),
+    ]);
     const connect = vi.fn(async () => false);
     const { options, name } = setup({
       fetch: recorded.fetch,
@@ -316,7 +325,11 @@ describe("runSubstrateMode", () => {
   });
 
   it.each(["0", "65536", "80x"])("fails a canary whose deny port is %s with a fixed code", async (value) => {
-    const recorded = recordingFetch([() => json({ ok: true }), () => new Response(null, { status: 204 })]);
+    const recorded = recordingFetch([
+      () => json({ ok: true }),
+      () => json({ ok: true }),
+      () => new Response(null, { status: 204 }),
+    ]);
     const { options, name } = setup({
       fetch: recorded.fetch,
       connect: async () => false,
@@ -329,7 +342,11 @@ describe("runSubstrateMode", () => {
   });
 
   it("fails a canary whose verdict cannot be posted", async () => {
-    const recorded = recordingFetch([() => json({ ok: true }), () => new Response(null, { status: 500 })]);
+    const recorded = recordingFetch([
+      () => json({ ok: true }),
+      () => json({ ok: true }),
+      () => new Response(null, { status: 500 }),
+    ]);
     const { options, name } = setup({ fetch: recorded.fetch, connect: async () => false });
     const { done } = await start(options);
     name("wr-0123456789abcdef0123-canary");

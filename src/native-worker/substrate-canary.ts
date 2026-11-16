@@ -91,6 +91,9 @@ async function probe(gatewayUrl: string, options: NativeCanaryOptions): Promise<
   const deny = connect(host, options.denyPort ?? NATIVE_CANARY_DENY_PORT).catch(() => true);
   const outside = Promise.all(NATIVE_PROBE_OUTSIDE_TARGETS.map((t) => connect(t.host, t.port).catch(() => true)));
   const [denyReachable, outsideReachable] = await Promise.all([deny, outside]);
+  // A refused deny port looks the same as a gateway that dropped after the first check, so look
+  // again: a gateway that is gone proves nothing about the policy, and the verdict is retryable.
+  if (!(await gatewayHealthy(gatewayUrl, fetchFn))) return "gateway_unreachable";
   if (denyReachable) return "deny_port_reachable";
   if (outsideReachable.some(Boolean)) return "outside_reachable";
   return "pass";

@@ -65,6 +65,16 @@ describe("runNativeCanary", () => {
     expect(JSON.parse(calls.at(-1)?.init?.body as string)).toEqual({ actor: ACTOR, result: "gateway_unreachable" });
   });
 
+  it("reports gateway_unreachable, not a pass, when the gateway drops during the probes", async () => {
+    let healthzCalls = 0;
+    const { fetch } = fakeFetch(() => {
+      healthzCalls += 1;
+      return healthzCalls === 1 ? json({ ok: true }) : json({ ok: false }, 503);
+    });
+    expect(await runNativeCanary(GATEWAY_URL, ACTOR, { fetch, connect: reachable() })).toBe("gateway_unreachable");
+    expect(healthzCalls).toBe(2);
+  });
+
   it("reports deny_port_reachable when the gateway's deny port connects", async () => {
     const { fetch } = fakeFetch();
     const connect = reachable(`${GATEWAY_HOST}:8791`);
