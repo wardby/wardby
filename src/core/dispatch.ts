@@ -6,6 +6,7 @@ import {
   CodingTaskInputSchema,
   normalizeGitRef,
   composeCodingTask,
+  PLAN_FOLDER_PATH,
   publicCodingRunResult,
 } from "../coding/protocol.js";
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
@@ -39,6 +40,8 @@ import { logger } from "./logger.js";
 import { assertPlanFilesWithinLimits, savePlanInputFiles, type PlanFile } from "../coding/plan-files/store.js";
 import { PlanRefusedError } from "./plans/refusal.js";
 import { resolvePlanNumber } from "./plans/number.js";
+import { planFolderFor } from "./plans/settings.js";
+import { plannerTaskNote, withPlanSections } from "./plans/wording.js";
 import { readPlanDocument } from "../coding/profile.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
 import {
@@ -980,8 +983,10 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       kind: true,
       ownerId: true,
       budgetGroupId: true,
+      systemPrompt: true,
       codingProfile: {
         select: {
+          defaultTask: true,
           repository: true,
           baseRef: true,
           services: true,
@@ -1097,6 +1102,28 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     const err = new PlanRefusedError("plan_number_missing", "a planner run needs an issue or a planNumber");
     planRefusal = setRefusalOf(err);
     if (planRefusal === undefined) throw err;
+  }
+  // Plan sections ride in the stored request (R9), never the knowledge slot: a deferred composer
+  // (deferred-coding.ts) composes coding.task from the request later.
+  const planSections: string[] = [];
+  if (planSetting && planNumber !== undefined && options.planInputFiles === undefined) {
+    planSections.push(
+      plannerTaskNote({
+        store: planSetting.store,
+        folder: planSetting.store === "wardby" ? PLAN_FOLDER_PATH : planFolderFor(planSetting, planNumber),
+        number: planNumber,
+      }),
+    );
+  }
+  if (planSections.length > 0) {
+    try {
+      composeCodingTask(
+        preview?.systemPrompt,
+        withPlanSections(options.codingTask ?? preview?.codingProfile?.defaultTask ?? "", planSections),
+      );
+    } catch {
+      throw new PlanRefusedError("plan_too_large", "the plan instructions do not fit the coding task limit");
+    }
   }
   const persistOnce = () =>
     options.db.$transaction(
@@ -1244,8 +1271,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         if (agent.kind === "coding" && agent.codingProfile && target && codingBudget && !refusal) {
           // Checked above too; repeated so the provider type narrows here.
           assertCodingProviderModel(agent.codingProfile.provider, agent.model);
-          const request = options.codingTask ?? agent.codingProfile.defaultTask;
-          if (!request) throw new Error(`Coding agent "${agent.id}" requires a task.`);
+          const baseRequest = options.codingTask ?? agent.codingProfile.defaultTask;
+          if (!baseRequest) throw new Error(`Coding agent "${agent.id}" requires a task.`);
+          const request = withPlanSections(baseRequest, planSections);
           // The worker sees only the task text, so the agent's own instructions, and the
           // services note, ride in it. Deferred, the task is stored raw and composed when the
           // run starts; composing here only checks its size, so it throws exactly as today.
@@ -1340,7 +1368,15 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
                 ? packageAuditMode
                 : null,
               services,
-              collectPlanFiles: options.collectPlanFiles === true,
+              // The field's only writer (R5). A repository-store planner writes into the repository,
+              // never to the plan-files recorder: a run holds one store.
+              collectPlanFiles:
+                planSetting?.store !== "repository" &&
+                (options.collectPlanFiles === true || planSetting?.store === "wardby"),
+              planRepositoryPath:
+                planSetting?.store === "repository" && planNumber !== undefined
+                  ? planFolderFor(planSetting, planNumber)
+                  : null,
             },
           });
           await savePlanInputFiles(tx, run.id, options.planInputFiles ?? []);

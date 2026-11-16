@@ -12,6 +12,7 @@ import { createPrismaClient } from "./db.js";
 import { setLogLineFilter } from "./logger.js";
 import { checkContinuation, ContinuationRefusedError, dispatchRun } from "./dispatch.js";
 import { loadPlanFiles } from "../coding/plan-files/store.js";
+import { PLAN_FOLDER_PATH } from "../coding/protocol.js";
 import { PlanRefusedError } from "./plans/refusal.js";
 import { createRepoAccessGate } from "./repo-access.js";
 import { claimDueRun, findDueCandidates } from "./scheduler.js";
@@ -279,6 +280,51 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       const result = await dispatchRun({ db, executor, agentId, codingTask: "plan" });
       expect(result!.run.status).not.toBe("refused");
       expect((await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } })).planNumber).toBeNull();
+    });
+
+    describe("planner task note", () => {
+      const WRITE = /Write plan/;
+      async function run(
+        planDocument: object,
+        extra: Partial<Parameters<typeof dispatchRun>[0]> = {},
+        deferred = false,
+      ) {
+        const { agentId } = await codingAgent();
+        await db.codingAgentProfile.update({ where: { agentId }, data: { planDocument } });
+        const { executor } = fakeExecutor();
+        if (deferred) (executor as { defersCodingResolution?: boolean }).defersCodingResolution = true;
+        const result = await dispatchRun({ db, executor, agentId, codingTask: "plan it", planNumber: 12, ...extra });
+        return db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } });
+      }
+
+      it("a wardby-store planner's task and request carry the plan folder, and it collects files", async () => {
+        const row = await run({ store: "wardby", reviewers: [owner] });
+        expect(row.task).toContain(PLAN_FOLDER_PATH);
+        expect(row.request).toContain(PLAN_FOLDER_PATH);
+        expect(row.collectPlanFiles).toBe(true);
+        expect(row.planRepositoryPath).toBeNull();
+      });
+
+      it("a repository-store planner records the folder and does not collect files", async () => {
+        const row = await run({ store: "repository", path: "docs/plans/issue-{n}/", reviewers: [owner] });
+        expect(row.planRepositoryPath).toBe("docs/plans/issue-12/");
+        expect(row.collectPlanFiles).toBe(false);
+        expect(row.request).toContain("docs/plans/issue-12/");
+      });
+
+      it("a deferred executor's stored request holds the note", async () => {
+        const row = await run({ store: "wardby", reviewers: [owner] }, {}, true);
+        expect(row.request).toContain(PLAN_FOLDER_PATH);
+      });
+
+      it("a revision (planInputFiles) adds no planner note and collects files", async () => {
+        const row = await run(
+          { store: "wardby", reviewers: [owner] },
+          { planInputFiles: [{ path: "plan.md", content: "# P" }] },
+        );
+        expect(row.request).not.toMatch(WRITE);
+        expect(row.collectPlanFiles).toBe(true);
+      });
     });
 
     it("commits a refused run for a scheduled planner with no number", async () => {
