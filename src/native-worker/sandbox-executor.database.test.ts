@@ -454,10 +454,6 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
   });
 
   it("sweeps from rows when the launcher lists no workers", async () => {
-    await db.nativeGatewaySession.updateMany({
-      where: { workerRemovedAt: null },
-      data: { workerRemovedAt: new Date() },
-    });
     const fake = fakeLauncher({ listsWorkers: false });
     const executor = executorWith(fake.launcher);
     const live = await sandboxRun();
@@ -473,8 +469,11 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     await db.run.update({ where: { id: done.id }, data: { status: "succeeded" } });
     await db.nativeGatewaySession.update({ where: { runId: done.id }, data: { workerRemovedAt: new Date() } });
 
-    expect(await executor.sweep()).toBe(2);
-    expect(fake.removed.sort()).toEqual([ended.id, expired.id].sort());
+    // Other test files write sessions to the same table, so assert on this test's runs only.
+    await executor.sweep();
+    expect(fake.removed).toEqual(expect.arrayContaining([ended.id, expired.id]));
+    expect(fake.removed).not.toContain(live.id);
+    expect(fake.removed).not.toContain(done.id);
     expect(await removedAt(ended.id)).toBeInstanceOf(Date);
     expect(await removedAt(expired.id)).toBeInstanceOf(Date);
     expect(await removedAt(live.id)).toBeNull();
@@ -482,28 +481,27 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
   });
 
   it("leaves a row whose remove fails for the next pass", async () => {
-    await db.nativeGatewaySession.updateMany({
-      where: { workerRemovedAt: null },
-      data: { workerRemovedAt: new Date() },
-    });
     const fake = fakeLauncher({ listsWorkers: false });
-    const remove = vi.fn(async (runId: string) => void fake.removed.push(runId));
-    remove.mockRejectedValueOnce(new Error("delete failed"));
-    const executor = executorWith({ ...fake.launcher, remove });
     const run = await sandboxRun();
+    let failing = true;
+    const remove = vi.fn(async (runId: string) => {
+      if (failing && runId === run.id) throw new Error("delete failed");
+      fake.removed.push(runId);
+    });
+    const executor = executorWith({ ...fake.launcher, remove });
     await executor.start(run.id);
     await db.run.update({ where: { id: run.id }, data: { status: "succeeded" } });
-    expect(await executor.sweep()).toBe(0);
+    await executor.sweep();
+    expect(remove).toHaveBeenCalledWith(run.id);
+    expect(fake.removed).not.toContain(run.id);
     expect(await removedAt(run.id)).toBeNull();
-    expect(await executor.sweep()).toBe(1);
+    failing = false;
+    await executor.sweep();
+    expect(fake.removed).toContain(run.id);
     expect(await removedAt(run.id)).toBeInstanceOf(Date);
   });
 
   it("sweeps every interval only when the launcher lists no workers", async () => {
-    await db.nativeGatewaySession.updateMany({
-      where: { workerRemovedAt: null },
-      data: { workerRemovedAt: new Date() },
-    });
     const fake = fakeLauncher({ listsWorkers: false });
     const executor = new NativeSandboxExecutor({
       db,

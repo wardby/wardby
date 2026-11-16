@@ -897,6 +897,8 @@ model NativeGatewaySession {
 
   /// NATIVE_SANDBOX_MAX_CONCURRENT counts the active sessions on every start.
   @@index([status])
+  /// The row sweep scans the sessions whose worker was not recorded as removed.
+  @@index([workerRemovedAt])
 }
 
 /// One worker of the native sandbox warm pool (native sandbox phase 6): an
