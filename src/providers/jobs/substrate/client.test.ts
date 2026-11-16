@@ -25,6 +25,8 @@ import {
 import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
+  SubstrateNotFoundError,
+  SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type ActorTemplateSpec,
 } from "./api.js";
@@ -68,14 +70,42 @@ describe("createSubstrateApi (Connect adapter)", () => {
       },
     });
     const failed = await api.getActorTemplate("s", "t");
-    expect(failed).toEqual({ goldenSnapshotFailed: true });
+    expect(failed).toEqual({ goldenSnapshotFailed: true, goldenSnapshotReady: false });
     expect(JSON.stringify(failed)).not.toContain(SECRET);
     expect(asked?.actorTemplate).toMatchObject({ atespace: "s", name: "t" });
     reply = status("");
-    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false });
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
     reply = create(ActorTemplateSchema, {});
     expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false });
     expect(await api.getActorTemplate("s", "gone")).toBeUndefined();
+  });
+
+  it("reports whether a template's golden snapshot is tagged, without the tag", async () => {
+    const TAG = "golden-tag-fake-value-000001";
+    let reply = create(ActorTemplateSchema, {});
+    const api = control({ getActorTemplate: () => reply });
+    const golden = (fields: Parameters<typeof create<typeof GoldenSnapshotStatusSchema>>[1]) =>
+      create(ActorTemplateSchema, {
+        status: create(ActorTemplateStatusSchema, { goldenSnapshotStatus: create(GoldenSnapshotStatusSchema, fields) }),
+      });
+    // Tagged: ready.
+    reply = golden({ goldenTag: create(ObjectRefSchema, { atespace: "s", name: TAG }), snapshotTime: { seconds: 1n } });
+    const ready = await api.getActorTemplate("s", "t");
+    expect(ready).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: true });
+    expect(JSON.stringify(ready)).not.toContain(TAG);
+    // A status without a tag yet (or an empty one): not ready.
+    reply = golden({ snapshotTime: { seconds: 1n } });
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
+    reply = golden({ goldenTag: create(ObjectRefSchema, { atespace: "s", name: "" }) });
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
+    // A status with no golden-snapshot status yet: still building, not ready (not a failure).
+    reply = create(ActorTemplateSchema, { status: create(ActorTemplateStatusSchema, {}) });
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
+    // No status at all: unknown.
+    reply = create(ActorTemplateSchema, {});
+    const info = await api.getActorTemplate("s", "t");
+    expect(info).toEqual({ goldenSnapshotFailed: false });
+    expect(info).not.toHaveProperty("goldenSnapshotReady");
   });
 
   it("deletes a template by name; a missing one is success", async () => {
@@ -109,6 +139,46 @@ describe("createSubstrateApi (Connect adapter)", () => {
       },
     });
     await expect(api.resumeActor("s", "a")).rejects.toBeInstanceOf(SubstrateExhaustedError);
+  });
+
+  it("maps NOT_FOUND on createActor to SubstrateNotFoundError with the fixed message", async () => {
+    const api = control({
+      createActor: () => {
+        throw new ConnectError(`template ${SECRET} missing`, Code.NotFound);
+      },
+    });
+    const error = await api.createActor("s", "a", "t").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SubstrateNotFoundError);
+    expect((error as Error).message).toBe("substrate_not_found");
+    expect(String((error as Error).message)).not.toContain(SECRET);
+  });
+
+  it("maps FAILED_PRECONDITION (a missing template) on createActor and resumeActor to SubstrateTemplateMissingError", async () => {
+    const api = control({
+      createActor: () => {
+        throw new ConnectError(`template ${SECRET} gone`, Code.FailedPrecondition);
+      },
+      resumeActor: () => {
+        throw new ConnectError(`template ${SECRET} gone`, Code.FailedPrecondition);
+      },
+    });
+    for (const attempt of [api.createActor("s", "a", "t"), api.resumeActor("s", "a")]) {
+      const error = await attempt.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(SubstrateTemplateMissingError);
+      expect(error).not.toBeInstanceOf(SubstrateNotFoundError);
+      expect((error as SubstrateTemplateMissingError).code).toBe("substrate_template_missing");
+      expect((error as Error).message).toBe("substrate_template_missing");
+      expect(String((error as Error).message)).not.toContain(SECRET);
+    }
+  });
+
+  it("keeps NOT_FOUND on resumeActor (the actor is gone) apart from a missing template", async () => {
+    const api = control({
+      resumeActor: () => {
+        throw new ConnectError("x", Code.NotFound);
+      },
+    });
+    await expect(api.resumeActor("s", "a")).rejects.toBeInstanceOf(SubstrateNotFoundError);
   });
 
   it("never surfaces the server's message on UNAVAILABLE", async () => {
@@ -226,6 +296,7 @@ describe("createSubstrateApi (Connect adapter)", () => {
     expect(t?.metadata).toMatchObject({ atespace: "wardby-runs", name: "tpl" });
     expect(t?.workerSelector?.matchLabels).toEqual({ pool: "gvisor" });
     expect(t?.containers[0]?.wakeupProbe?.httpGet).toMatchObject({ path: "/healthz", port: 8080 });
+    expect(t?.containers[0]?.command).toEqual(["run"]);
     expect(t?.resources?.limits).toMatchObject({ cpuMillicores: 500n, memoryBytes: 1024n });
     expect(t?.snapshotConfig?.preferredFidelity).toBe(3);
     expect(t?.volumes).toHaveLength(3);
@@ -249,6 +320,74 @@ describe("createSubstrateApi (Connect adapter)", () => {
     expect(first?.https?.ports?.numbers).toEqual([443]);
     expect(first?.https?.effects?.replaceHeaders[0]?.actorJwt?.expirationSeconds).toBe(300n);
     expect(second?.http?.hostnames).toEqual(["p"]);
+  });
+
+  function metadataTemplate(path: string): ActorTemplateSpec {
+    return {
+      atespace: "wardby-runs",
+      name: "tpl",
+      containers: [{ name: "main", image: "repo@sha256:abc", volumeMounts: [{ name: "meta", mountPath: "/meta" }] }],
+      volumes: [{ name: "meta", actorMetadata: { path } }],
+      cpuMillicores: 500,
+      memoryBytes: 1024,
+      snapshotFidelity: "MEMORY",
+    };
+  }
+
+  it("refuses an absolute actorMetadata path before any call", async () => {
+    let called = false;
+    const api = control({
+      createActorTemplate: (req: CreateActorTemplateRequest) => {
+        called = true;
+        return req.actorTemplate;
+      },
+    });
+    const error = await api.ensureActorTemplate(metadataTemplate("/run/ate/actor")).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("substrate_template_invalid");
+    expect((error as Error).message).not.toContain("/run/ate/actor");
+    expect(called).toBe(false);
+  });
+
+  it.each(["..", "../escape", "actor/../..", "actor/.."])(
+    "refuses an actorMetadata path with a .. segment before any call: %s",
+    async (path) => {
+      let called = false;
+      const api = control({
+        createActorTemplate: (req: CreateActorTemplateRequest) => {
+          called = true;
+          return req.actorTemplate;
+        },
+      });
+      const error = await api.ensureActorTemplate(metadataTemplate(path)).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe("substrate_template_invalid");
+      expect(called).toBe(false);
+    },
+  );
+
+  it("accepts an actorMetadata path whose name only contains dots", async () => {
+    const api = control({ createActorTemplate: (req: CreateActorTemplateRequest) => req.actorTemplate });
+    await api.ensureActorTemplate(metadataTemplate("actor..d/meta"));
+  });
+
+  it("puts the files at the volume root for an empty path", async () => {
+    let template: CreateActorTemplateRequest | undefined;
+    const api = control({
+      createActorTemplate: (req: CreateActorTemplateRequest) => {
+        template = req;
+        return req.actorTemplate;
+      },
+    });
+    await api.ensureActorTemplate(metadataTemplate(""));
+    const items = template?.actorTemplate?.volumes[0]?.systemInfo?.dataSources[0]?.actorMetadata?.items;
+    expect(items?.map((i) => i.path)).toEqual(["name", "atespace", "uid"]);
   });
 
   it("lists free worker capacity across pages", async () => {

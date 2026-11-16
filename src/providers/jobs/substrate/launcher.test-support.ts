@@ -9,20 +9,32 @@ import type { BlobInfo } from "../../storage/types.js";
 import { KubernetesAlreadyExistsError } from "../kubernetes-api.js";
 import type { JobSpec } from "../types.js";
 import { FakeSubstrateApi, type FakeSubstrateOptions } from "./fake-api.js";
-import { SubstrateJobLauncher, type SubstrateCallFailure, type WarmEvent, type WarmRoundsOptions } from "./launcher.js";
+import {
+  SubstrateJobLauncher,
+  type SubstrateCallFailure,
+  type TemplateEvent,
+  type WarmEvent,
+  type WarmRoundsOptions,
+} from "./launcher.js";
 import { substrateRunToken } from "./names.js";
 import { MemorySubstrateRunStore, type SubstrateRunStore } from "./run-store.js";
 import type { SubstrateLaunchConfig } from "./specs.js";
+import { MemorySubstrateTemplateStore, type SubstrateTemplateStore } from "./template-store.js";
 
 export const FAKE_CAP = "rrp_fake_capability_value_000001";
 /** Fake MCP tokens, isMcpToken-shaped (`rmt_` + 43 characters). */
 export const FAKE_MCP = "rmt_FAKE_MCP_TOKEN_NOT_REAL_" + "1".repeat(19);
 export const FAKE_MCP_2 = "rmt_FAKE_MCP_TOKEN_NOT_REAL_" + "2".repeat(19);
-/** The configured bridge tool images (the default toolchain's and a per-toolchain one). */
+/** The configured tool images (the default toolchain's and a per-toolchain one). */
 export const TOOL_IMAGE = `registry.example/tool@sha256:${"b".repeat(64)}`;
 export const PYTHON_TOOL_IMAGE = `registry.example/tool-python@sha256:${"c".repeat(64)}`;
-/** The configured Codex bridge image (the Codex worker built on the Substrate Codex bridge). */
+/** The configured Codex image (the Codex worker built on the Substrate Codex bridge). */
 export const CODEX_IMAGE = `registry.example/substrate-codex@sha256:${"d".repeat(64)}`;
+/** An agent's custom images (workerImageRef): registry digests the deployment does not configure. */
+export const CUSTOM_TOOL_IMAGE = `registry.example/byo-tool@sha256:${"e".repeat(64)}`;
+export const CUSTOM_CODEX_IMAGE = `registry.example/byo-codex@sha256:${"9".repeat(64)}`;
+/** Docker's content-addressed local image ID: no registry to pull it from, so Substrate refuses it. */
+export const LOCAL_IMAGE_ID = `sha256:${"f".repeat(64)}`;
 export const ATESPACE = "wardby-runs";
 export const CONFIG: SubstrateLaunchConfig = {
   atespace: ATESPACE,
@@ -106,6 +118,10 @@ export interface Harness {
   callFailures: SubstrateCallFailure[];
   /** Every warm-round event the launcher reported (warm rounds only). */
   warmEvents: WarmEvent[];
+  /** The launcher's template record. */
+  templates: SubstrateTemplateStore;
+  /** Every template event the launcher reported. */
+  templateEvents: TemplateEvent[];
   root: string;
 }
 
@@ -118,6 +134,11 @@ export async function makeHarness(
     config?: Partial<SubstrateLaunchConfig>;
     runId?: string;
     runs?: SubstrateRunStore;
+    /** The template record (default: a fresh MemorySubstrateTemplateStore). */
+    templates?: SubstrateTemplateStore;
+    templateReadyMs?: number;
+    templateRetryMs?: number;
+    templateTtlMs?: number;
     collectGraceMs?: number;
     startupTimeoutMs?: number;
     warmRounds?: WarmRoundsOptions;
@@ -159,6 +180,8 @@ export async function makeHarness(
   const secrets = new RecordingSecrets();
   const callFailures: SubstrateCallFailure[] = [];
   const warmEvents: WarmEvent[] = [];
+  const templates = options.templates ?? new MemorySubstrateTemplateStore();
+  const templateEvents: TemplateEvent[] = [];
   const blobs = new ClockedBlobStore(join(root, "blobs"), () => now);
   const relay = new MemoryRelayStore();
   relay.register(substrateRunToken(runId), 1 << 20);
@@ -168,14 +191,17 @@ export async function makeHarness(
     blobs,
     secrets,
     relay,
-    bridgeToolImages: [TOOL_IMAGE, PYTHON_TOOL_IMAGE],
-    bridgeCodexImages: [CODEX_IMAGE],
     config: { ...CONFIG, ...options.config },
     workspaceRoot,
     resolveCapability: async (id) => options.capabilityFor?.(id) ?? FAKE_CAP,
     resolveMcpToken: async (id) => options.mcpTokenFor?.(id),
     now: () => now,
     onSubstrateCallFailed: (failure) => callFailures.push(failure),
+    templates,
+    onTemplateEvent: (event) => templateEvents.push(event),
+    ...(options.templateReadyMs !== undefined ? { templateReadyMs: options.templateReadyMs } : {}),
+    ...(options.templateRetryMs !== undefined ? { templateRetryMs: options.templateRetryMs } : {}),
+    ...(options.templateTtlMs !== undefined ? { templateTtlMs: options.templateTtlMs } : {}),
     ...(options.collectGraceMs !== undefined ? { collectGraceMs: options.collectGraceMs } : {}),
     ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
     ...(options.warmRounds ? { warmRounds: options.warmRounds, onWarmEvent: (event) => warmEvents.push(event) } : {}),
@@ -212,6 +238,8 @@ export async function makeHarness(
     },
     callFailures,
     warmEvents,
+    templates,
+    templateEvents,
     root,
   };
 }

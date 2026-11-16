@@ -546,6 +546,33 @@ describe("loadSubstrateJobConfig", () => {
     }
   });
 
+  it("reads the template settings, and sets none without them", () => {
+    const config = loadSubstrateJobConfig(base);
+    for (const key of ["templateTtlSec", "templateReadySec", "templateRetrySec"]) {
+      expect(config).not.toHaveProperty(key);
+    }
+    expect(
+      loadSubstrateJobConfig({
+        ...base,
+        SUBSTRATE_TEMPLATE_TTL_SEC: "86400",
+        SUBSTRATE_TEMPLATE_READY_SEC: "300",
+        SUBSTRATE_TEMPLATE_RETRY_SEC: "120",
+      }),
+    ).toMatchObject({ templateTtlSec: 86_400, templateReadySec: 300, templateRetrySec: 120 });
+    for (const [name, value, range] of [
+      ["SUBSTRATE_TEMPLATE_TTL_SEC", "60", "3600 and 7776000"],
+      ["SUBSTRATE_TEMPLATE_READY_SEC", "soon", "60 and 7200"],
+      ["SUBSTRATE_TEMPLATE_RETRY_SEC", "0", "120 and 86400"],
+      // At most the 60 s same-build interval: refused, so a window always outlasts it.
+      ["SUBSTRATE_TEMPLATE_RETRY_SEC", "60", "120 and 86400"],
+      ["SUBSTRATE_TEMPLATE_RETRY_SEC", "119", "120 and 86400"],
+    ] as const) {
+      expect(() => loadSubstrateJobConfig({ ...base, [name]: value })).toThrow(
+        `${name} must be an integer between ${range}.`,
+      );
+    }
+  });
+
   it("turns warm rounds on only with SUBSTRATE_WARM_ROUNDS=true, with its park TTL and park cap", () => {
     expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_WARM_ROUNDS: "false" })).not.toHaveProperty("warmRounds");
     expect(loadSubstrateJobConfig({ ...base, SUBSTRATE_PARK_TTL_SEC: "120" })).not.toHaveProperty("warmRounds");

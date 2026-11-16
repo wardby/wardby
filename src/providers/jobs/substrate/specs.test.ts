@@ -1,8 +1,10 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import type { JobSpec } from "../types.js";
 import { templateName } from "./names.js";
 import {
+  BRIDGE_COMMANDS,
   agentEgress,
   agentTemplate,
   codexTemplate,
@@ -17,6 +19,8 @@ const FAKE_CAP = "rrp_fake_capability_value_000001";
 const FAKE_MCP = "rmt_FAKE_MCP_TOKEN_NOT_REAL_" + "1".repeat(19);
 const TOKEN = "wr-00000000000000000000";
 const DIGEST = "a".repeat(64);
+const CUSTOM_TOOL_IMAGE = "registry.example/byo-tool@sha256:" + "e".repeat(64);
+const CUSTOM_CODEX_IMAGE = "registry.example/byo-codex@sha256:" + "9".repeat(64);
 const CONFIG: SubstrateLaunchConfig = {
   atespace: "wardby-runs",
   credentialsNamespace: "wardby-run-credentials",
@@ -50,9 +54,58 @@ const REPOS_SPEC: JobSpec = { ...fakeClaudeSpec(), repositories: REPOSITORIES };
 const REPOS_CODEX_SPEC: JobSpec = { ...fakeCodexSpec(), repositories: REPOSITORIES };
 
 describe("substrate spec builders", () => {
-  it("keeps today's tool and Codex template names without repositories", () => {
-    expect(toolTemplate(fakeClaudeSpec(), CONFIG).name).toBe("wardby-tool-1400fad4aaa431ed");
-    expect(codexTemplate(fakeCodexSpec(), CONFIG).name).toBe("wardby-codex-bde8fe8a156efd90");
+  it("pins the agent, tool and Codex template names (with the bridge command)", () => {
+    expect(agentTemplate(fakeClaudeSpec(), CONFIG).name).toBe("wardby-agent-e531f66094b4abb3");
+    expect(toolTemplate(fakeClaudeSpec(), CONFIG).name).toBe("wardby-tool-4e75abf2e2df9092");
+    expect(codexTemplate(fakeCodexSpec(), CONFIG).name).toBe("wardby-codex-43f51d8682886d7b");
+  });
+
+  it("sets the bridge command on every template", () => {
+    const configs = [CONFIG, { ...CONFIG, warmRounds: true }];
+    for (const config of configs) {
+      for (const spec of [fakeClaudeSpec(), REPOS_SPEC]) {
+        expect(agentTemplate(spec, config).containers[0]?.command).toEqual([
+          "node",
+          "/opt/wardby/substrate-bridge/agent.js",
+        ]);
+        expect(toolTemplate(spec, config).containers[0]?.command).toEqual([
+          "node",
+          "/opt/wardby/substrate-bridge/tool.js",
+        ]);
+      }
+      for (const spec of [fakeCodexSpec(), REPOS_CODEX_SPEC]) {
+        expect(codexTemplate(spec, config).containers[0]?.command).toEqual([
+          "node",
+          "/opt/wardby/substrate-bridge/codex.js",
+        ]);
+      }
+    }
+  });
+
+  it("uses the bridge images' own entrypoints", () => {
+    for (const role of ["agent", "tool", "codex"] as const) {
+      const dockerfile = readFileSync(new URL(`../../../substrate-bridge/Dockerfile.${role}`, import.meta.url), "utf8");
+      expect(dockerfile).toContain(`ENTRYPOINT ${JSON.stringify(BRIDGE_COMMANDS[role]).replace(/,/g, ", ")}`);
+    }
+  });
+
+  it("names a custom tool image's template by its digest and keeps the agent template shared", () => {
+    const custom: JobSpec = { ...fakeClaudeSpec(), toolImage: CUSTOM_TOOL_IMAGE };
+    const t = toolTemplate(custom, CONFIG);
+    expect(t.name).not.toBe(toolTemplate(fakeClaudeSpec(), CONFIG).name);
+    expect(t.name).toMatch(/^wardby-tool-[0-9a-f]{16}$/);
+    expect(agentTemplate(custom, CONFIG)).toEqual(agentTemplate(fakeClaudeSpec(), CONFIG));
+    expect(t.containers[0]?.image).toBe(CUSTOM_TOOL_IMAGE);
+    expect(t.containers[0]?.command).toEqual(["node", "/opt/wardby/substrate-bridge/tool.js"]);
+  });
+
+  it("names a custom Codex image's template by its digest", () => {
+    const custom: JobSpec = { ...fakeCodexSpec(), image: CUSTOM_CODEX_IMAGE };
+    const t = codexTemplate(custom, CONFIG);
+    expect(t.name).not.toBe(codexTemplate(fakeCodexSpec(), CONFIG).name);
+    expect(t.name).toMatch(/^wardby-codex-[0-9a-f]{16}$/);
+    expect(t.containers[0]?.image).toBe(CUSTOM_CODEX_IMAGE);
+    expect(t.containers[0]?.command).toEqual(["node", "/opt/wardby/substrate-bridge/codex.js"]);
   });
 
   it("mounts /repos on the tool template only for a spec with repositories", () => {
@@ -113,17 +166,33 @@ describe("substrate spec builders", () => {
 
   it("never puts a secret in a template, env or egress policy", () => {
     const spec = fakeClaudeSpec();
-    const all = JSON.stringify([
+    const templates = [
       agentTemplate(spec, CONFIG),
       toolTemplate(spec, CONFIG),
       toolTemplate(REPOS_SPEC, CONFIG),
       codexTemplate(REPOS_CODEX_SPEC, CONFIG),
+      toolTemplate({ ...spec, toolImage: CUSTOM_TOOL_IMAGE }, CONFIG),
+      codexTemplate({ ...fakeCodexSpec(), image: CUSTOM_CODEX_IMAGE }, CONFIG),
+      agentTemplate({ ...spec, mcpTools: true }, CONFIG),
+      toolTemplate({ ...spec, mcpTools: true }, CONFIG),
+      codexTemplate({ ...fakeCodexSpec(), mcpTools: true }, CONFIG),
+    ];
+    // Templates are shared across runs: no run id or run token either (the egress policy names the
+    // per-run Secret by token, so that check is for templates only).
+    const shared = JSON.stringify(templates);
+    expect(shared).not.toContain(spec.runId);
+    expect(shared).not.toContain(TOKEN);
+    expect(shared).not.toContain("wr-");
+    const all = JSON.stringify([
+      ...templates,
       agentEgress(TOKEN, CONFIG),
       agentEgress(TOKEN, CONFIG, { mcp: true }),
       toolEgress(CONFIG),
       workerEnv(CONFIG),
     ]);
     expect(all).not.toContain(FAKE_CAP);
+    expect(all).not.toContain(FAKE_MCP);
+    expect(all).not.toContain(deriveRegistryToken(FAKE_CAP));
     expect(all).not.toContain("rmt_");
     expect(all).not.toContain("rrg_");
     expect(all).not.toContain("rrp_");
@@ -260,6 +329,7 @@ describe("substrate spec builders", () => {
       {
         name: "agent",
         image: spec.image,
+        command: ["node", "/opt/wardby/substrate-bridge/agent.js"],
         env: [{ name: "WARDBY_PROXY_URL", value: `http://${CONFIG.proxyHost}:${CONFIG.proxyPort}` }],
         wakeupProbe: { path: "/readyz", port: 8080 },
         volumeMounts: [
@@ -281,6 +351,7 @@ describe("substrate spec builders", () => {
     expect(t.memoryBytes).toBe(512 * 2 ** 20);
     expect(t.containers[0]?.name).toBe("tool");
     expect(t.containers[0]?.image).toBe(spec.toolImage);
+    expect(t.containers[0]?.command).toEqual([...BRIDGE_COMMANDS.tool]);
     expect(t.containers[0]?.volumeMounts).toEqual([
       { name: "run", mountPath: "/run/wardby" },
       { name: "workspace", mountPath: "/workspace" },
@@ -309,6 +380,7 @@ describe("substrate spec builders", () => {
         {
           name: "agent",
           image: spec.image,
+          command: ["node", "/opt/wardby/substrate-bridge/codex.js"],
           env: [{ name: "WARDBY_PROXY_URL", value: `http://${CONFIG.proxyHost}:${CONFIG.proxyPort}` }],
           wakeupProbe: { path: "/readyz", port: 8080 },
           volumeMounts: [

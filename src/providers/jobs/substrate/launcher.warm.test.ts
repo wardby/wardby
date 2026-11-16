@@ -8,6 +8,7 @@ import { JobCapacityError, type JobHandle, type JobRetention, type JobSpec } fro
 import {
   allBlobs,
   CONFIG,
+  CUSTOM_TOOL_IMAGE,
   FAKE_CAP,
   FAKE_MCP,
   FAKE_MCP_2,
@@ -15,6 +16,7 @@ import {
   TOOL_IMAGE,
   type Harness,
 } from "./launcher.test-support.js";
+import { SubstrateExhaustedError } from "./api.js";
 import type { Room } from "./placement.js";
 import type { SubstrateRunRecord } from "./run-store.js";
 import { SubstrateJobLauncher, type WarmRoundsOptions } from "./launcher.js";
@@ -145,7 +147,7 @@ function restartedLauncher(h: Harness, warmRounds: WarmRoundsOptions | null = WA
     blobs: h.blobs,
     secrets: h.secrets,
     relay: h.relay,
-    bridgeToolImages: [TOOL_IMAGE],
+    templates: h.templates,
     config: CONFIG,
     workspaceRoot: h.workspaceRoot,
     resolveCapability: async (runId) => CAPS[runId] ?? FAKE_CAP,
@@ -458,6 +460,116 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(await restartedLauncher(h).warmOutcome(handle)).toEqual({ adopted: true });
   });
 
+  it("park and adoption bump the run's templates", async () => {
+    const T0 = 1_000_000;
+    const HOUR = 3_600_000;
+    const h = await warmHarness({ warmRounds: { parkTtlMs: 4 * HOUR, parkMax: 10 } });
+    const handle = await h.launcher.launch(h.spec);
+    await finishRound(h, h.token, "run-1", 1);
+    // The templates the actors were created from, as Substrate reports them.
+    const names = [agentActorName(h.token), toolActorName(h.token)].map(
+      (name) => h.api.actors.get(`${CONFIG.atespace}/${name}`)!.templateName,
+    );
+    const lastUsed = async () => Promise.all(names.map(async (name) => (await h.templates.get(name))?.lastUsedAt));
+    expect(await lastUsed()).toEqual([new Date(T0), new Date(T0)]);
+    h.setNow(T0 + HOUR);
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    expect(await lastUsed()).toEqual([new Date(T0 + HOUR), new Date(T0 + HOUR)]);
+    h.setNow(T0 + 2 * HOUR);
+    // The continuation adopts: the bump follows the parked actors' templates (a spec naming another
+    // tool template starts cold instead; see "starts cold with fingerprint_changed ...").
+    const second = await h.launcher.launch(await followUp(h, "run-2"));
+    expect(await h.launcher.warmOutcome(second)).toEqual({ adopted: true });
+    expect(await lastUsed()).toEqual([new Date(T0 + 2 * HOUR), new Date(T0 + 2 * HOUR)]);
+    expect(await h.templates.get(names[0])).toMatchObject({ createdAt: new Date(T0) });
+
+    // Best effort: a park whose getActor fails still parks.
+    const b = await warmHarness();
+    const handleB = await b.launcher.launch(b.spec);
+    await finishRound(b, b.token, "run-1", 1);
+    b.api.getActor = async () => {
+      throw new Error("substrate down");
+    };
+    expect(await b.launcher.retain(handleB, RETAIN)).toBe(true);
+    expect((await b.runs.get("run-1"))!.phase).toBe("parked");
+  });
+
+  it("never removes the template of a parked run", async () => {
+    const T0 = 1_000_000;
+    const MINUTE = 60_000;
+    const DAY = 24 * 60 * MINUTE;
+    const h = await warmHarness();
+    const handle = await h.launcher.launch(h.spec);
+    await finishRound(h, h.token, "run-1", 1);
+    const names = [agentActorName(h.token), toolActorName(h.token)].map(
+      (name) => h.api.actors.get(`${CONFIG.atespace}/${name}`)!.templateName,
+    );
+    // Parked just before the TTL from its launch: park bumps its templates.
+    h.setNow(T0 + 7 * DAY - MINUTE);
+    expect(await h.launcher.retain(handle, RETAIN)).toBe(true);
+    const deleted: string[] = [];
+    const deleteActorTemplate = h.api.deleteActorTemplate.bind(h.api);
+    h.api.deleteActorTemplate = async (atespace, name) => {
+      deleted.push(name);
+      return deleteActorTemplate(atespace, name);
+    };
+    // Another run on a custom tool image: its launch sweeps, past the TTL from run-1's launch.
+    h.setNow(T0 + 7 * DAY + 30 * MINUTE);
+    const other = { ...(await otherRun(h, "run-2")), toolImage: CUSTOM_TOOL_IMAGE };
+    await h.launcher.launch(other);
+    expect(deleted.filter((name) => names.includes(name))).toEqual([]);
+    for (const name of names) {
+      expect(h.api.templates.has(`${CONFIG.atespace}/${name}`)).toBe(true);
+      expect(await h.templates.get(name)).toBeDefined();
+    }
+    // The follow-up adopts the parked actors.
+    h.setNow(T0 + 7 * DAY + 40 * MINUTE);
+    const second = await h.launcher.launch(await followUp(h, "run-3"));
+    expect(await h.launcher.warmOutcome(second)).toEqual({ adopted: true });
+    expect(await h.runs.get("run-3")).toMatchObject({ token: h.token, phase: "running", round: 2 });
+  });
+
+  it("adopts on the same custom digest and starts fresh on a new one", async () => {
+    const h = await warmHarness();
+    h.spec.toolImage = CUSTOM_TOOL_IMAGE;
+    await parkedRoundOne(h);
+    const second = await h.launcher.launch({ ...(await followUp(h, "run-2")), toolImage: CUSTOM_TOOL_IMAGE });
+    expect(await h.launcher.warmOutcome(second)).toEqual({ adopted: true });
+    expect(await h.runs.get("run-2")).toMatchObject({ token: h.token, phase: "running", round: 2 });
+    await finishRound(h, h.token, "run-2", 2);
+    expect((await h.launcher.status(second)).state).toBe("succeeded");
+    expect(await h.launcher.retain(second, RETAIN)).toBe(true);
+    expect((await h.runs.get("run-2"))!.phase).toBe("parked");
+    // A new custom digest changes the executor's fingerprint (warm-fingerprint.ts hashes toolImage).
+    const newDigest = "registry.example/byo-tool@sha256:" + "8".repeat(64);
+    const spec3: JobSpec = {
+      ...(await followUp(h, "run-3", { from: "run-2", fingerprint: "e".repeat(64) })),
+      toolImage: newDigest,
+    };
+    const third = await h.launcher.launch(spec3);
+    expect(await h.launcher.warmOutcome(third)).toEqual({ adopted: false, reason: "fingerprint_changed" });
+    const token3 = substrateRunToken("run-3");
+    expect(await h.runs.get("run-3")).toMatchObject({ token: token3, round: 1, coldReason: "fingerprint_changed" });
+    expect((await h.runs.get("run-2"))!.phase).toBe("removed");
+    const tool3 = h.api.actors.get(`${CONFIG.atespace}/${toolActorName(token3)}`);
+    expect(tool3?.templateName).toBe(toolTemplate(spec3, { ...CONFIG, warmRounds: true }).name);
+    expect(h.api.templates.get(`${CONFIG.atespace}/${tool3!.templateName}`)?.containers[0]?.image).toBe(newDigest);
+  });
+
+  it("starts cold with fingerprint_changed when the parked tool actor's template is not the spec's", async () => {
+    const h = await warmHarness();
+    await parkedRoundOne(h);
+    // The same fingerprint, but a spec whose tool template differs (as a changed worker env would).
+    const spec2: JobSpec = { ...(await followUp(h, "run-2")), toolImage: CUSTOM_TOOL_IMAGE };
+    const second = await h.launcher.launch(spec2);
+    expect(await h.launcher.warmOutcome(second)).toEqual({ adopted: false, reason: "fingerprint_changed" });
+    const token2 = substrateRunToken("run-2");
+    expect(await h.runs.get("run-2")).toMatchObject({ token: token2, round: 1, coldReason: "fingerprint_changed" });
+    expect((await h.runs.get("run-1"))!.phase).toBe("removed");
+    const tool2 = h.api.actors.get(`${CONFIG.atespace}/${toolActorName(token2)}`);
+    expect(tool2?.templateName).toBe(toolTemplate(spec2, { ...CONFIG, warmRounds: true }).name);
+  });
+
   it("adopts with MCP tools: the fresh Secret holds the new run's MCP token; no policy is re-put", async () => {
     const h = await warmHarness();
     const puts: string[] = [];
@@ -700,6 +812,69 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(JSON.parse((await h.launcher.collect(handle)).resultArtifact!)).toMatchObject({ runId: "run-2" });
   });
 
+  it("starts fresh, cold for actor_missing, when a parked actor's template was removed (resume: FailedPrecondition)", async () => {
+    const h = await warmHarness();
+    await parkedRoundOne(h);
+    const spec2 = await followUp(h, "run-2");
+    // Removed while run-1 was parked; Substrate keeps the suspended actors, which can no longer resume.
+    const tool = toolTemplate(h.spec, { ...CONFIG, warmRounds: true });
+    await h.api.deleteActorTemplate(CONFIG.atespace, tool.name);
+    const handle = await h.launcher.launch(spec2);
+    expect(handle).toEqual(h.launcher.plannedHandle(spec2));
+    // Round 1 again under the inherited token, never failed as substrate_unavailable.
+    expect(await h.runs.get("run-2")).toMatchObject({
+      token: h.token,
+      phase: "running",
+      round: 1,
+      coldReason: "actor_missing",
+    });
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "actor_missing" });
+    expect(await restartedLauncher(h).warmOutcome(handle)).toEqual({ adopted: false, reason: "actor_missing" });
+    expect((await h.runs.get("run-1"))!.phase).toBe("adopted");
+    // The template is ensured again and fresh actors are created from it: a seed, no round record.
+    expect(h.api.templates.has(`${CONFIG.atespace}/${tool.name}`)).toBe(true);
+    expect(actorStates(h, h.token)).toEqual(["RUNNING", "RUNNING"]);
+    expect(await h.blobs.head(BLOB.seed(h.token))).not.toBeNull();
+    expect(await h.blobs.head(roundBlob(h.token))).toBeNull();
+    expect(h.warmEvents.filter((e) => e.event === "substrate_warm_not_adopted")).toEqual([
+      {
+        event: "substrate_warm_not_adopted",
+        runId: "run-2",
+        runToken: h.token,
+        adoptedRunId: "run-1",
+        reason: "actor_missing",
+      },
+    ]);
+    expect(h.warmEvents.some((e) => e.event === "substrate_warm_adopted")).toBe(false);
+    await finishRound(h, h.token, "run-2", 1);
+    expect(JSON.parse((await h.launcher.collect(handle)).resultArtifact!)).toMatchObject({ runId: "run-2" });
+  });
+
+  it("keeps cold reason actor_missing when that cold relaunch is refused for capacity", async () => {
+    const h = await warmHarness();
+    await parkedRoundOne(h);
+    const spec2 = await followUp(h, "run-2");
+    const tool = toolTemplate(h.spec, { ...CONFIG, warmRounds: true });
+    await h.api.deleteActorTemplate(CONFIG.atespace, tool.name);
+    const resume = h.api.resumeActor.bind(h.api);
+    let toolResumes = 0;
+    h.api.resumeActor = async (atespace, name) => {
+      // The adoption's resume finds the template gone; the cold relaunch's first resume finds no room.
+      if (name.endsWith("-tool") && ++toolResumes === 2) throw new SubstrateExhaustedError("no worker has room");
+      return resume(atespace, name);
+    };
+    await expect(h.launcher.launch(spec2)).rejects.toBeInstanceOf(JobCapacityError);
+    expect(await h.runs.get("run-2")).toMatchObject({ phase: "requeued", coldReason: "actor_missing" });
+    const handle = await h.launcher.launch(spec2);
+    expect(await h.runs.get("run-2")).toMatchObject({
+      token: h.token,
+      phase: "running",
+      round: 1,
+      coldReason: "actor_missing",
+    });
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "actor_missing" });
+  });
+
   describe("a refused adopter whose cleanup could not delete the parked actors", () => {
     /** run-1 parked, run-2 refused for capacity while resuming, its cleanup's actor and round-record deletes failing. */
     async function refusedWithLeftovers(h: Harness, failingDeletes: number) {
@@ -809,7 +984,7 @@ describe("SubstrateJobLauncher with warm rounds", () => {
       blobs: s.blobs,
       secrets: s.secrets,
       relay: s.relay,
-      bridgeToolImages: [TOOL_IMAGE],
+      templates: s.templates,
       config: CONFIG,
       workspaceRoot: s.workspaceRoot,
       resolveCapability: async () => FAKE_CAP,

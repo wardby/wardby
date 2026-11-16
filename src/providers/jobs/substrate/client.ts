@@ -58,6 +58,7 @@ import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
   SubstrateNotFoundError,
+  SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type ActorInfo,
   type ActorState,
@@ -112,6 +113,11 @@ function unavailable(): SubstrateUnavailableError {
   return new SubstrateUnavailableError("substrate_unavailable");
 }
 
+/** Substrate's answer (FailedPrecondition) when an actor's template is gone; a fixed message. */
+function templateMissing(): never {
+  throw new SubstrateTemplateMissingError("substrate_template_missing");
+}
+
 const STATE_NAMES: Partial<Record<WireActorState, ActorState>> = {
   [WireActorState.RESUMING]: "RESUMING",
   [WireActorState.RUNNING]: "RUNNING",
@@ -144,7 +150,10 @@ function volumeToWire(volume: ActorTemplateSpec["volumes"][number]): WireVolume 
       }),
     });
   }
-  const dir = volume.actorMetadata.path.replace(/\/+$/, "");
+  // Relative to the volume and inside it (no `..` segment); a fixed message, never the path.
+  const path = volume.actorMetadata.path;
+  if (path.startsWith("/") || path.split("/").includes("..")) throw new Error("substrate_template_invalid");
+  const dir = path.replace(/\/+$/, "");
   const item = (field: ActorMetadataField, file: string) =>
     create(ActorMetadataItemSchema, { field, path: dir ? `${dir}/${file}` : file });
   return create(VolumeSchema, {
@@ -261,8 +270,13 @@ class GrpcSubstrateApi implements SubstrateApi {
         const template = await this.control.getActorTemplate(
           create(GetActorTemplateRequestSchema, { actorTemplate: ref(atespace, name) }),
         );
-        // Only whether the build failed: the error message itself is never read out.
-        return { goldenSnapshotFailed: (template.status?.goldenSnapshotStatus?.errorMessage ?? "") !== "" };
+        // Only whether the build failed or is done: neither the error message nor the tag is read out.
+        const golden = template.status?.goldenSnapshotStatus;
+        const info: TemplateInfo = { goldenSnapshotFailed: (golden?.errorMessage ?? "") !== "" };
+        // A status without a golden-snapshot status is a template still building (Substrate reports
+        // none until its build has a result): not ready. No status at all stays unknown (undefined).
+        if (template.status) info.goldenSnapshotReady = (golden?.goldenTag?.name ?? "") !== "";
+        return info;
       },
       { [Code.NotFound]: () => undefined },
     );
@@ -293,6 +307,12 @@ class GrpcSubstrateApi implements SubstrateApi {
         [Code.AlreadyExists]: () => {
           throw new SubstrateAlreadyExistsError("substrate_already_exists");
         },
+        // The actor's template is gone (a sweep removed it, or it never existed): Substrate answers
+        // FailedPrecondition. The launcher ensures it again; NotFound is kept for the same case.
+        [Code.FailedPrecondition]: templateMissing,
+        [Code.NotFound]: () => {
+          throw new SubstrateNotFoundError("substrate_not_found");
+        },
       },
     );
   }
@@ -321,6 +341,12 @@ class GrpcSubstrateApi implements SubstrateApi {
         [Code.ResourceExhausted]: () => {
           throw new SubstrateExhaustedError("substrate_resource_exhausted");
         },
+        // The actor's template is gone (deleted while the actor was suspended). Every
+        // FailedPrecondition on resume is taken to mean that: it is the only cause seen from a live
+        // Substrate. Should Substrate also use it for another precondition (an actor's state, say),
+        // an adopter would start fresh (benign), but a cold launch would fail labelled
+        // substrate_template_missing.
+        [Code.FailedPrecondition]: templateMissing,
         [Code.NotFound]: () => {
           throw new SubstrateNotFoundError("substrate_not_found");
         },

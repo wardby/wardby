@@ -22,8 +22,7 @@ reach is the coding proxy.
 
 - your cluster already runs Substrate 1.0 or later (GKE Standard, not
   Autopilot) and you want its isolation and credential-free actors;
-- your coding agents are Claude Code or Codex, without coding services or a
-  custom worker image (`workerImageRef`).
+- your coding agents are Claude Code or Codex, without coding services.
 
 Otherwise use `kubernetes` (or `docker`): they support every coding feature. A
 run that needs a feature the Substrate backend lacks fails with
@@ -64,12 +63,18 @@ run that needs a feature the Substrate backend lacks fails with
 Run the coding proxy of the same release before sending Codex runs. When you
 upgrade, go in this order:
 
-1. Apply the `20261121000000_substrate_codex_shape` and
-   `20261122000000_substrate_repositories` migrations
+1. Apply the `20261121000000_substrate_codex_shape`,
+   `20261122000000_substrate_repositories` and
+   `20261123000000_substrate_templates` migrations
    (`prisma migrate deploy`). The new proxy reads the `repositories` column on
    every Substrate request, so it must exist before the proxy starts.
 2. Start the new coding proxy.
 3. Start the new control plane.
+
+Upgrade with no Substrate run in flight, and move the bridge images and every
+custom image to the new release's bridge at the same time: the proxy refuses a
+bridge of another release
+([substrate_bridge_incompatible](errors/substrate-bridge-incompatible.md)).
 
 ## MCP tools
 
@@ -97,6 +102,16 @@ Codex to the bridge images by digest (step 2 above).
 
 Every variable, default and limit is in the
 [Substrate backend guide](../docs/substrate-backend.md).
+
+## Custom images
+
+Custom worker images (`workerImageRef`) work when they contain this release's
+Substrate bridge; see [build-claude-code-image](build-claude-code-image.md),
+[build-worker-image](build-worker-image.md) and
+[Custom images](../docs/substrate-backend.md#custom-images). The image must be a
+registry digest the Substrate workers can pull, and its first run waits while
+Substrate builds the template's golden snapshot. Rebuild it on each release's
+bridge.
 
 ## Dependency cache
 
@@ -129,7 +144,18 @@ See [Warm rounds on Substrate](substrate-warm-rounds.md).
 - [substrate_result_missing](errors/substrate-result-missing.md): the run ended
   without a usable result.
 - [substrate_feature_unsupported](errors/substrate-feature-unsupported.md): the
-  run needs services or a custom worker image.
+  run needs services.
+- [substrate_image_unready](errors/substrate-image-unready.md): a template's
+  golden snapshot failed twice, or no actor ever started from it (often a
+  custom image without the bridge).
+- [substrate_template_missing](errors/substrate-template-missing.md): the
+  run's actor template is gone from Substrate (a launch creates it again; a warm
+  round starts fresh).
+- [substrate_bridge_incompatible](errors/substrate-bridge-incompatible.md): the
+  image's bridge is from another release than the coding proxy.
+- [substrate_image_incomplete](errors/substrate-image-incomplete.md): the image
+  runs as root, or lacks the runner, GNU tar, or a writable `/workspace` or
+  `/run/wardby`.
 - At launch, from the deployment's settings:
   [substrate_image_not_digest](errors/substrate-image-not-digest.md),
   [substrate_seed_too_large](errors/substrate-seed-too-large.md) and

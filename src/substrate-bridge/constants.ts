@@ -11,6 +11,15 @@ export const PLACEHOLDER_CAPABILITY = "rrp_placeholder_injected_by_gateway";
 export const ACTOR_JWT_HEADER = "x-wardby-actor-jwt";
 /** The tool actor's ACTOR_JWT_HEADER value; the egress gateway replaces it with the actor JWT. */
 export const GATEWAY_ACTOR_JWT_PLACEHOLDER = "placeholder";
+/**
+ * The protocol of the routes, bodies and headers this bridge uses with the coding proxy (an integer,
+ * bumped whenever one of them changes). The proxy serves names.ts BRIDGE_PROTOCOL_RANGE.
+ */
+export const BRIDGE_PROTOCOL = 1;
+/** The header every bridge request to the proxy carries (names.ts BRIDGE_PROTOCOL_HEADER). */
+export const BRIDGE_PROTOCOL_HEADER = "x-wardby-bridge-protocol";
+/** What a bridge's image check reports missing (names.ts SUBSTRATE_IMAGE_ITEMS; constants.test.ts keeps them equal). */
+export const IMAGE_ITEMS = ["user", "runner", "tar", "workspace", "run_dir"] as const;
 export const AGENT_SUFFIX = "-agent";
 export const TOOL_SUFFIX = "-tool";
 /** substrateRunToken: "wr-" + 20 hex chars. */

@@ -33,6 +33,11 @@ export function actorNamesFor(token: string, shape: SubstrateActorShape): string
  */
 export const TOOL_ACTOR_JWT_HEADER = "X-Wardby-Actor-Jwt";
 
+/** The header a bridge names its protocol in (substrate-bridge/constants.ts BRIDGE_PROTOCOL_HEADER). */
+export const BRIDGE_PROTOCOL_HEADER = "x-wardby-bridge-protocol";
+/** The bridge protocols this release's proxy serves, both ends included (ruling D4: a range, 1 to start). */
+export const BRIDGE_PROTOCOL_RANGE = { min: 1, max: 1 } as const;
+
 /** The header the agent actor sends its MCP token placeholder in; the egress gateway fills it (specs.ts agentEgress). */
 export const MCP_TOKEN_EGRESS_HEADER = "X-Wardby-Mcp-Token";
 
@@ -55,6 +60,14 @@ export function templateName(
   return `wardby-${role}-${hex(`${role}|${image}|${cpuMillicores}|${memoryBytes}|${variant}`, 16)}`;
 }
 
+const TEMPLATE_NAME = /^wardby-(agent|tool|codex)-[0-9a-f]{16}$/;
+
+/** The role a templateName() names; undefined for any other string (not a template wardby names). */
+export function templateRoleOf(name: string): "agent" | "tool" | "codex" | undefined {
+  const match = TEMPLATE_NAME.exec(name);
+  return match ? (match[1] as "agent" | "tool" | "codex") : undefined;
+}
+
 /**
  * The name of a per-round blob: round 1 (every run without warm rounds) keeps the original name,
  * round n > 1 gets `-<n>` before the extension.
@@ -75,7 +88,27 @@ export const BLOB = {
   done: (t: string, round?: number) => perRound(t, "done", "json", round),
   /** Written by the proxy (if absent) on the agent's first successful input download: the run reached the proxy. */
   started: (t: string, round?: number) => perRound(t, "started", "json", round),
+  /**
+   * Written by the proxy (if absent) when an authenticated bridge request named a protocol outside
+   * BRIDGE_PROTOCOL_RANGE: `{"protocol": <int or null>}`. The launcher fails the run with
+   * substrate_bridge_incompatible. Once per run (not per round).
+   */
+  bridgeRefused: (t: string) => `substrate/runs/${t}/bridge-refused.json`,
+  /**
+   * Written by the proxy (if absent) from the holder's image check: `{"item": <SubstrateImageItem>}`.
+   * The launcher fails the run with substrate_image_incomplete:<item>. Once per run.
+   */
+  imageIncomplete: (t: string) => `substrate/runs/${t}/image-incomplete.json`,
 };
+
+/** The fixed items a bridge's image check may report (substrate-bridge/constants.ts IMAGE_ITEMS). */
+export const SUBSTRATE_IMAGE_ITEMS = ["user", "runner", "tar", "workspace", "run_dir"] as const;
+export type SubstrateImageItem = (typeof SUBSTRATE_IMAGE_ITEMS)[number];
+
+/** Whether `value` is one of SUBSTRATE_IMAGE_ITEMS (never any other string: the report carries no free text). */
+export function isSubstrateImageItem(value: unknown): value is SubstrateImageItem {
+  return typeof value === "string" && (SUBSTRATE_IMAGE_ITEMS as readonly string[]).includes(value);
+}
 
 /** An extra repository's name, refused unless it is a link name (never `workspace`, never a path). */
 function repositoryName(name: string): string {

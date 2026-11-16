@@ -1,0 +1,20 @@
+# Example custom tool runner for a Claude Code agent that also runs on the Substrate launcher: the
+# tool runner of your wardby release, your tools, then the Substrate bridge from the same release.
+# Build it with both bases pinned by digest (the keys in dist/quickstart-images.json):
+#   docker build -f src/substrate-bridge/Dockerfile.custom-tool-example \
+#     --build-arg TOOL_RUNNER_IMAGE=<registry>/wardby-claude-tool-runner@sha256:<digest> \
+#     --build-arg BRIDGE_IMAGE=<registry>/wardby-substrate-tool@sha256:<digest> .
+# No ENTRYPOINT or CMD: every launcher sets the command itself, so this one image runs on Docker,
+# Kubernetes and Substrate.
+ARG TOOL_RUNNER_IMAGE
+ARG BRIDGE_IMAGE
+FROM ${BRIDGE_IMAGE} AS bridge
+FROM ${TOOL_RUNNER_IMAGE}
+USER root
+RUN printf '#!/bin/sh\necho wardby-custom-tool-ok\n' > /usr/local/bin/wardby-custom-tool \
+    && chmod 0755 /usr/local/bin/wardby-custom-tool
+# The Substrate bridge, and the directories it writes.
+COPY --from=bridge /opt/wardby/substrate-bridge/ /opt/wardby/substrate-bridge/
+RUN mkdir -p /run/wardby/input /run/wardby/output /run/wardby/tool /workspace \
+    && chown -R 10001:10001 /run/wardby /workspace
+USER 10001:10001

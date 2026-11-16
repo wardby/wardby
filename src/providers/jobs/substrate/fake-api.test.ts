@@ -4,6 +4,7 @@ import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
   SubstrateNotFoundError,
+  SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type ActorTemplateSpec,
 } from "./api.js";
@@ -53,6 +54,19 @@ describe("FakeSubstrateApi", () => {
     expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false });
   });
 
+  it("reports a template's golden-snapshot ready signal only once set, until the template is deleted", async () => {
+    const api = new FakeSubstrateApi({ workers: 1 });
+    await api.ensureActorTemplate(template("t", 500, 2 ** 20));
+    expect(await api.getActorTemplate("s", "t")).not.toHaveProperty("goldenSnapshotReady");
+    api.setGoldenSnapshotReady("s", "t", false);
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
+    api.setGoldenSnapshotReady("s", "t", true);
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: true });
+    await api.deleteActorTemplate("s", "t");
+    await api.ensureActorTemplate(template("t", 500, 2 ** 20));
+    expect(await api.getActorTemplate("s", "t")).not.toHaveProperty("goldenSnapshotReady");
+  });
+
   it("creates, resumes and deletes actors", async () => {
     const api = new FakeSubstrateApi({ workers: 1 });
     await api.ensureActorTemplate(template("t", 500, 2 ** 20));
@@ -70,7 +84,7 @@ describe("FakeSubstrateApi", () => {
     await api.ensureActorTemplate(template("t", 500, 2 ** 20));
     await api.createActor("s", "a", "t");
     await expect(api.createActor("s", "a", "t")).rejects.toBeInstanceOf(SubstrateAlreadyExistsError);
-    await expect(api.createActor("s", "b", "missing")).rejects.toBeInstanceOf(SubstrateNotFoundError);
+    await expect(api.createActor("s", "b", "missing")).rejects.toBeInstanceOf(SubstrateTemplateMissingError);
   });
 
   it("places many actors on one worker by free CPU and memory, and refuses what does not fit", async () => {

@@ -47,6 +47,20 @@
  * is logged; the route line's `repository` field is the validated link name, set only once the caller
  * authenticated and the row lists that name. An upload that finishes after `done` was written is
  * refused (409) and its blob deleted.
+ *
+ * Bridge protocol: every authenticated request must name a protocol in BRIDGE_PROTOCOL_RANGE in
+ * BRIDGE_PROTOCOL_HEADER (1 to 6 digits; missing or malformed is no protocol). Any other is refused
+ * with 426 substrate_bridge_incompatible, checked after authentication (so an unauthenticated
+ * request can never record a refusal) and before any body is read, and recorded once per run in
+ * BLOB.bridgeRefused (`{"protocol": <int or null>}`), from which the launcher fails the run. The
+ * warn line carries the run token, route and the received integer or null, never a header or body.
+ *
+ * Image self-check: `POST image-incomplete` is holder-only. Its body is `{"item": <item>}` and nothing
+ * else, the item one of SUBSTRATE_IMAGE_ITEMS: an enum item, never free text from the image (anything
+ * else is 400, the body neither logged nor echoed). It is recorded once per run in
+ * BLOB.imageIncomplete, from which the launcher fails the run as substrate_image_incomplete:<item>.
+ * It never writes `done`, drops the relay or touches the setup state. The route line's `item` field is
+ * set only after the body was validated.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline, Transform } from "node:stream";
@@ -57,10 +71,14 @@ import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import { isCodingRepositoryName } from "../../../coding/protocol.js";
 import {
   BLOB,
+  BRIDGE_PROTOCOL_HEADER,
+  BRIDGE_PROTOCOL_RANGE,
+  isSubstrateImageItem,
   MAX_ROUND,
   parseRound,
   REPO_BLOB,
   roundBlob,
+  type SubstrateImageItem,
   TOOL_ACTOR_JWT_HEADER,
   toolActorSubject,
 } from "../../jobs/substrate/names.js";
@@ -78,6 +96,8 @@ export const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_LINE_BODY_BYTES = 2 * MAX_LINE_BYTES + 4096;
 /** The longest exit report body (a code, a diagnostic and up to MAX_CODING_OUTPUT_ISSUES issues). */
 const MAX_EXIT_BYTES = 8 * 1024;
+/** The longest image report body (`{"item":"workspace"}` is 20 bytes). */
+const MAX_IMAGE_REPORT_BYTES = 64;
 /** The longest operator-diagnostics tail (the bridges' DIAGNOSTICS_TAIL.bytes; constants.test.ts keeps them equal). */
 export const MAX_DIAGNOSTICS_BYTES = 8 * 1024;
 const DEFAULT_POLL_WAIT_MS = 20_000;
@@ -148,7 +168,8 @@ type RouteName =
   | "workspace-failed"
   | "diagnostics"
   | "repos.seed"
-  | "repos.workspace";
+  | "repos.workspace"
+  | "image-incomplete";
 
 interface Matched {
   name: RouteName;
@@ -218,6 +239,8 @@ function match(method: string, rest: string): Matched | undefined {
       return { name: "workspace-failed", caller: "holder" };
     case "POST diagnostics":
       return { name: "diagnostics", caller: "agent" };
+    case "POST image-incomplete":
+      return { name: "image-incomplete", caller: "holder" };
     default:
       return undefined;
   }
@@ -513,6 +536,29 @@ export function createSubstrateRoutes(
     return { code, ...diagnostic };
   }
 
+  /**
+   * The holder's image report: exactly `{"item": <SubstrateImageItem>}`. Content-Length required, at
+   * most MAX_IMAGE_REPORT_BYTES; anything else refuses the body (never logged or echoed).
+   */
+  async function readImageReport(request: IncomingMessage): Promise<SubstrateImageItem> {
+    const length = request.headers["content-length"];
+    if (length === undefined) throw new RouteError(411, "length_required");
+    if (!/^\d+$/.test(length) || Number(length) > MAX_IMAGE_REPORT_BYTES) throw new RouteError(413, "too_large");
+    const raw = await readBody(request, MAX_IMAGE_REPORT_BYTES, AbortSignal.timeout(HTTP_LIMITS.requestMs));
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      throw new RouteError(400, "bad_request");
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new RouteError(400, "bad_request");
+    const keys = Object.keys(value);
+    const item = (value as { item?: unknown }).item;
+    if (keys.length !== 1 || keys[0] !== "item" || !isSubstrateImageItem(item))
+      throw new RouteError(400, "bad_request");
+    return item;
+  }
+
   /** A diagnostics tail: Content-Length required, at most MAX_DIAGNOSTICS_BYTES, read as UTF-8 text. */
   async function readDiagnostics(request: IncomingMessage): Promise<string> {
     const length = request.headers["content-length"];
@@ -561,6 +607,8 @@ export function createSubstrateRoutes(
     let inputDeletedSetup: boolean | undefined;
     /** repos.*: the repository name, set only once the caller authenticated and the row lists it. */
     let loggedRepository: string | undefined;
+    /** image-incomplete: the reported item, set only once the body was validated. */
+    let loggedItem: SubstrateImageItem | undefined;
     response.once("close", () => {
       log.info(
         {
@@ -573,6 +621,7 @@ export function createSubstrateRoutes(
           ...(errorKind ? { errorKind } : {}),
           ...(inputDeletedSetup !== undefined ? { setupDeleted: inputDeletedSetup } : {}),
           ...(loggedRepository ? { repository: loggedRepository } : {}),
+          ...(loggedItem ? { item: loggedItem } : {}),
         },
         "coding proxy substrate route",
       );
@@ -594,6 +643,24 @@ export function createSubstrateRoutes(
       if (side === "agent") session = await agentSession(request, token);
       const allowed = side === "agent" ? session !== undefined : await toolAuth(request, token);
       if (!allowed) throw new RouteError(401, "unauthorized");
+      // Bridge protocol, only once authenticated: an unauthenticated request can never record a
+      // refusal and fail someone's run. Nothing else of the request is read.
+      const raw = request.headers[BRIDGE_PROTOCOL_HEADER];
+      const protocol = typeof raw === "string" && /^[0-9]{1,6}$/.test(raw) ? Number(raw) : null;
+      if (protocol === null || protocol < BRIDGE_PROTOCOL_RANGE.min || protocol > BRIDGE_PROTOCOL_RANGE.max) {
+        // Written only when absent; never the request's headers or body. A failed write answers 500 (no
+        // warn: it throws before the log line), which the bridge retries, so a later attempt records and warns.
+        if (!(await options.blobs.head(BLOB.bridgeRefused(token)))) {
+          await options.blobs.put(BLOB.bridgeRefused(token), Buffer.from(JSON.stringify({ protocol })), {
+            contentType: "application/json",
+          });
+        }
+        log.warn(
+          { event: "substrate.bridge_refused", runToken: token, route: matched.name, protocol },
+          "substrate bridge refused",
+        );
+        throw new RouteError(426, "substrate_bridge_incompatible");
+      }
       if (matched.repository !== undefined && listed(layout, matched.repository, false)) {
         loggedRepository = matched.repository;
       }
@@ -808,6 +875,19 @@ export function createSubstrateRoutes(
               // Best-effort: the answer is 409 whatever the delete did.
             }
             throw new RouteError(409, "substrate_run_collected");
+          }
+          sendJson(response, 200, {});
+          return;
+        }
+        case "image-incomplete": {
+          // The holder's image lacks a prerequisite: one enum item, recorded once (the first report
+          // stands). Never writes `done`, drops the relay or touches setupDeleted: the launcher fails the run.
+          const item = await readImageReport(request);
+          loggedItem = item;
+          if (!(await blobs.head(BLOB.imageIncomplete(token)))) {
+            await blobs.put(BLOB.imageIncomplete(token), Buffer.from(JSON.stringify({ item })), {
+              contentType: "application/json",
+            });
           }
           sendJson(response, 200, {});
           return;
