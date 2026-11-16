@@ -5,6 +5,7 @@ import { buildNativeSandboxExecutor } from "./composition.js";
 import { FakeSubstrateApi } from "../providers/substrate/fake-api.js";
 import { FakeKubernetesApi } from "../providers/jobs/fake-kubernetes-api.js";
 import { NativeSandboxExecutor } from "./sandbox-executor.js";
+import { SubstrateNativeWorkerLauncher } from "./substrate-launcher.js";
 
 const image = `ghcr.io/wardby/wardby/wardby-native-worker@sha256:${"a".repeat(64)}`;
 const base = { NATIVE_SANDBOX_LAUNCHER: "docker", NATIVE_SANDBOX_WORKER_IMAGE: image, NATIVE_GATEWAY_CONTAINER: "gw" };
@@ -306,14 +307,32 @@ describe("native sandbox on Substrate", () => {
     expect(() => loadNativeSandboxConfig(env)).toThrow(message);
   });
 
-  it("builds nothing yet and never falls back to Docker", () => {
+  it("builds the Substrate executor with the shared API and no pool", () => {
+    const fake = new FakeSubstrateApi({ workers: 1 });
+    const executor = buildNativeSandboxExecutor({
+      db: {} as never,
+      providers: {} as NativeRunProviders,
+      env: SUBSTRATE,
+      substrateApi: fake,
+      kubernetesApi: new FakeKubernetesApi(),
+    });
+    expect(executor).toBeInstanceOf(NativeSandboxExecutor);
+    const launcher = (executor as unknown as { options: { launcher: unknown; gatewayUrl: string } }).options;
+    expect(launcher.launcher).toBeInstanceOf(SubstrateNativeWorkerLauncher);
+    expect(launcher.gatewayUrl).toBe(GATEWAY_URL);
+    // Nothing is called at build time.
+    expect(fake.templates.size).toBe(0);
+  });
+
+  it("fails at startup for a size that rounds to nothing", () => {
     expect(() =>
       buildNativeSandboxExecutor({
         db: {} as never,
         providers: {} as NativeRunProviders,
-        env: SUBSTRATE,
+        env: { ...SUBSTRATE, NATIVE_SANDBOX_CPUS: "0.0001" },
         substrateApi: new FakeSubstrateApi({ workers: 1 }),
+        kubernetesApi: new FakeKubernetesApi(),
       }),
-    ).toThrow(/native_sandbox_unavailable/);
+    ).toThrow("substrate_limits_too_small");
   });
 });

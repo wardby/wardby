@@ -22,7 +22,18 @@ export type SubstrateCall =
   | "putEgressPolicy"
   | "resumeActor"
   | "suspendActor"
-  | "deleteEgressPolicy";
+  | "deleteEgressPolicy"
+  | "getActor"
+  | "deleteActor"
+  | "listWorkers";
+
+/**
+ * A template's golden snapshot failed for good while a launch waited for it (the native launcher's
+ * golden window). Its message is fixed; Substrate's own status message is never read.
+ */
+export class SubstrateGoldenSnapshotFailedError extends Error {
+  readonly code = "golden_snapshot_failed";
+}
 
 /** Fixed fields only: the run, which call failed, and the error's fixed code. Never a request or message. */
 export interface SubstrateCallFailure {
@@ -48,7 +59,8 @@ export function substrateErrorCode(error: unknown): string {
     error instanceof SubstrateExhaustedError ||
     error instanceof SubstrateNotFoundError ||
     error instanceof SubstrateTemplateMissingError ||
-    error instanceof SubstrateUnavailableError
+    error instanceof SubstrateUnavailableError ||
+    error instanceof SubstrateGoldenSnapshotFailedError
   ) {
     return error.code;
   }

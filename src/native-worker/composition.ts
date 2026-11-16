@@ -16,6 +16,8 @@ import type { KubernetesApi } from "../providers/jobs/kubernetes-api.js";
 import { SANDBOX_RUN_MAX_SEC } from "../core/runner.js";
 import { NativeSandboxExecutor, type ManagedWorkerLauncher } from "./sandbox-executor.js";
 import type { SubstrateApi } from "../providers/substrate/api.js";
+import { createSubstrateApiFor } from "../providers/substrate/composition.js";
+import { SubstrateNativeWorkerLauncher } from "./substrate-launcher.js";
 import { PooledWorkerLauncher, type WarmWorkerLauncher } from "./warm-pool.js";
 import { PrismaWarmPoolLedger, type WarmPoolDb } from "./warm-pool-ledger.js";
 
@@ -26,9 +28,9 @@ export function buildNativeSandboxExecutor(options: {
   env?: NodeJS.ProcessEnv;
   /** Tests only: replaces the launcher. */
   launcher?: ManagedWorkerLauncher & Partial<WarmWorkerLauncher>;
-  /** Tests only: replaces the kubeconfig-backed client for NATIVE_SANDBOX_LAUNCHER=kubernetes. */
+  /** Tests only: replaces the kubeconfig-backed client (NATIVE_SANDBOX_LAUNCHER=kubernetes; Substrate: its Secrets). */
   kubernetesApi?: KubernetesApi;
-  /** Low-power mode: the shared Power the Kubernetes launcher wakes the native gateway through. */
+  /** Low-power mode: the shared Power the Kubernetes and Substrate launchers wake the native gateway through. */
   power?: Power;
   /** The process's one SubstrateApi (buildSharedSubstrateApi) for NATIVE_SANDBOX_LAUNCHER=substrate; tests pass a fake. */
   substrateApi?: SubstrateApi;
@@ -70,7 +72,25 @@ export function buildNativeSandboxExecutor(options: {
             gatewayContainer: config.gatewayContainer,
             limits,
           })
-        : unavailableSubstrate());
+        : new SubstrateNativeWorkerLauncher({
+            api: options.substrateApi ?? createSubstrateApiFor(config.substrate),
+            secrets: options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: config.substrate.kubeContext }),
+            config: {
+              atespace: config.substrate.atespace,
+              credentialsNamespace: config.substrate.credentialsNamespace,
+              image: config.workerImage,
+              gatewayUrl: config.gatewayUrl,
+              cpus: config.cpus,
+              memoryMb: config.memoryMb,
+              ...(config.substrate.workerSelector ? { workerSelector: config.substrate.workerSelector } : {}),
+            },
+            // The worker idles after its finish: the session's status is how its exit is seen.
+            sessionActive: async (runId) =>
+              (await options.db.nativeGatewaySession.findUnique({ where: { runId }, select: { status: true } }))
+                ?.status === "active",
+            goldenWaitMs: config.goldenWaitSec * 1000,
+            power: options.power ?? DISABLED_POWER,
+          }));
   // The pool also starts with size 0 when the launcher can run one: its first tick removes workers
   // left from an earlier configuration, and nothing runs after that.
   const launcher: ManagedWorkerLauncher = isWarmCapable(cold)
@@ -90,7 +110,8 @@ export function buildNativeSandboxExecutor(options: {
     db: options.db,
     providers: options.providers,
     launcher,
-    // Kubernetes resolves the gateway's ClusterIP per launch (resolveGatewayUrl) unless overridden.
+    // Kubernetes resolves the gateway's ClusterIP per launch (resolveGatewayUrl) unless overridden;
+    // Substrate always has NATIVE_GATEWAY_URL (its egress rule names the gateway's host).
     gatewayUrl: config.gatewayUrl ?? nativeGatewayUrl(),
     maxConcurrent: config.maxConcurrent,
   });
@@ -100,11 +121,4 @@ function isWarmCapable(
   launcher: ManagedWorkerLauncher & Partial<WarmWorkerLauncher>,
 ): launcher is ManagedWorkerLauncher & WarmWorkerLauncher {
   return typeof launcher.startWarm === "function" && typeof launcher.deliver === "function";
-}
-
-/** Replaced by the Substrate launcher; until then the Substrate configuration never reaches Docker. */
-function unavailableSubstrate(): never {
-  throw new Error(
-    "native_sandbox_unavailable: NATIVE_SANDBOX_LAUNCHER=substrate needs this release's Substrate launcher.",
-  );
 }

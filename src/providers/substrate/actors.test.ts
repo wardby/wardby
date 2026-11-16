@@ -13,6 +13,7 @@ import {
   ensureTemplate,
   namedCall,
   reportCallFailure,
+  SubstrateGoldenSnapshotFailedError,
   substrateErrorCode,
   type SubstrateCallFailure,
 } from "./actors.js";
@@ -44,6 +45,10 @@ describe("substrateErrorCode", () => {
     new SubstrateUnavailableError("x"),
   ])("is the fixed code of %o", (error) => {
     expect(substrateErrorCode(error)).toBe(error.code);
+  });
+
+  it("maps a golden snapshot that failed during a wait to golden_snapshot_failed", () => {
+    expect(substrateErrorCode(new SubstrateGoldenSnapshotFailedError("x"))).toBe("golden_snapshot_failed");
   });
 
   it("never reads another error's message", () => {

@@ -52,7 +52,8 @@ export const WORKER_TAIL_TIMEOUT_MS = 10_000;
  */
 export interface WorkerTailFields {
   stderrTail?: string;
-  stderrTailOmitted?: "secrets_unavailable" | "log_read_failed";
+  /** `not_available`: the launcher cannot read the worker's output at all (Substrate, D5). */
+  stderrTailOmitted?: "secrets_unavailable" | "log_read_failed" | "not_available";
 }
 
 /** `promise`, or a rejection once `ms` pass first. */

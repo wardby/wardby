@@ -25,7 +25,7 @@ export function nativeActorName(token: string): string {
  * in any field never share a name.
  */
 export function templateName(
-  role: "agent" | "tool" | "codex",
+  role: "agent" | "tool" | "codex" | "native",
   image: string,
   cpuMillicores: number,
   memoryBytes: number,
