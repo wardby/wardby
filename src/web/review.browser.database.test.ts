@@ -59,7 +59,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       const o = await open(d.ownerCookie, d.documentId);
       expect(await banner(o)).toContain("Draft · v1");
       await o.getByRole("tab", { name: "Review" }).click();
-      await o.getByRole("button", { name: "Submit for review" }).click();
+      await o.getByRole("button", { name: "Start review" }).click();
       await o.getByRole("checkbox", { name: "Ada Member" }).check();
       await o.getByRole("checkbox", { name: "Bo Member" }).check();
       await o.locator(".rv-form").getByRole("button", { name: "Submit for review" }).click();

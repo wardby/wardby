@@ -189,10 +189,13 @@ with `{"baseNumber": <n>}` (CSRF and `Origin` as for every change).
 A whole document or design has a review state, separate from its comment
 threads: **draft** (the default), **in review**, **changes requested**,
 **approved** and **archived**. The owner submits it for review (`submit_for_review`,
-or **Submit for review** on the page) and names the reviewers: members, or
-guests of this document's live comment share links who gave a name. Naming a
-member gives them comment access if they lack it. The owner may also name one
-final approver. Reviewers act only with live access (comment access for a
+or **Start review** on the page's Review tab) and names the reviewers: members
+with access to the document, or guests of this document's live comment share
+links who gave a name. Naming a member gives them comment access if they lack
+it. For a reviewer with no access, the page's reviewer picker offers **Create
+comment link**: the link is shown once, and once the reviewer opens it and
+gives a name, **Refresh list** shows them. The owner may also name one final
+approver. Reviewers act only with live access (comment access for a
 member, an unrevoked and unexpired comment link for a guest).
 
 The state is computed from the verdicts on the **current version** only: a

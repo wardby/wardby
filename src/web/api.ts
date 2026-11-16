@@ -31,6 +31,7 @@ import { versionFrames } from "../core/documents/boards/frames.js";
 import { MANIFEST_PATH, parseManifest } from "../core/documents/boards/format.js";
 import { recordFidelity, type FidelityBoard } from "../core/documents/fidelity.js";
 import { loadContent } from "../core/documents/files.js";
+import { createShareLink } from "../core/documents/share-links.js";
 import { getDocument, publishVersion } from "../core/documents/service.js";
 import {
   forceApprove,
@@ -238,6 +239,21 @@ export async function getReviewCandidates(
   viewer: Viewer,
 ): Promise<void> {
   sendWebJson(res, 200, await reviewCandidates(deps.db, documentId, viewer));
+}
+
+/**
+ * POST /d/api/<id>/share-links: the owner makes a comment link from the reviewer picker, for a reviewer
+ * with no account. Answers the link's path (the page adds its own origin) once; it is never shown again
+ * and never logged. Comment permission and the default expiry; the MCP tool create_share_link has the options.
+ */
+export async function postShareLink(
+  res: ServerResponse,
+  deps: WebDeps,
+  documentId: string,
+  viewer: Viewer,
+): Promise<void> {
+  const link = await createShareLink(deps.db, { documentId, viewer, permission: "comment" });
+  sendWebJson(res, 200, { id: link.id, path: link.url, expiresAt: link.expiresAt.toISOString() });
 }
 
 /** A version's stored warnings (always an array). */

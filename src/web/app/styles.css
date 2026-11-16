@@ -939,6 +939,18 @@ img.ProseMirror-separator {
   margin: 0.25rem 0;
   font-size: 0.95rem;
 }
+.rv-form .rv-search,
+.rv-form .rv-link {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0.25rem 0;
+}
+.rv-pick-list {
+  max-height: 14rem;
+  overflow-y: auto;
+}
 .rv-form .rv-pick select {
   flex: 1;
   min-width: 0;

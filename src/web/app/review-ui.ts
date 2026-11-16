@@ -14,8 +14,10 @@ import {
   ASK_TO_REOPEN,
   isLockedState,
   isReopenCopy,
+  matchesQuery,
   myCurrentVerdict,
   newerNote,
+  PICKER,
   pendingLines,
   raceNote,
   reviewerChip,
@@ -54,6 +56,11 @@ export class ReviewPanel {
   private picked = new Set<string>();
   private approver = "";
   private candidates: { ref: string; name: string; member: boolean }[] | null = null;
+  /** The picker's search, kept across re-renders. */
+  private query = "";
+  /** A comment link made from the picker: its URL is answered once, so it is kept until the picker closes. */
+  private newLink: string | null = null;
+  private copied = false;
   private busy = false;
   private error = "";
   private wasLocked: boolean;
@@ -217,7 +224,7 @@ export class ReviewPanel {
     if (can.submit)
       bar.append(
         btn(
-          state === "draft" ? "Submit for review" : "Edit reviewers",
+          state === "draft" ? PICKER.start : PICKER.edit,
           () => void this.openSubmit(),
           state === "draft" ? "primary" : "neutral",
         ),
@@ -245,6 +252,19 @@ export class ReviewPanel {
     this.form = "submit";
     this.picked = new Set(this.review.reviewers.flatMap((x) => (x.ref ? [x.ref] : [])));
     this.approver = this.review.finalApprover?.ref ?? "";
+    this.query = "";
+    this.newLink = null;
+    this.copied = false;
+    await this.loadCandidates();
+  }
+
+  private closeForm(): void {
+    this.form = "none";
+    this.newLink = null;
+    this.render();
+  }
+
+  private async loadCandidates(): Promise<void> {
     try {
       const c = await this.host.api.reviewCandidates();
       this.candidates = [
@@ -258,9 +278,53 @@ export class ReviewPanel {
     this.render();
   }
 
+  private async createLink(): Promise<void> {
+    if (this.busy) return;
+    this.busy = true;
+    this.error = "";
+    this.render();
+    try {
+      const link = await this.host.api.createCommentLink();
+      this.newLink = `${location.origin}${link.path}`;
+      this.copied = false;
+    } catch (err) {
+      this.error = errorMessage(err);
+    }
+    this.busy = false;
+    this.render();
+  }
+
   private submitForm(): HTMLElement {
     const form = h("div", { class: "rv-form", role: "group", aria: { label: "Reviewers" } }, h("h3", {}, "Reviewers"));
-    for (const c of this.candidates ?? []) {
+    const all = this.candidates ?? [];
+    const rows: { el: HTMLElement; name: string }[] = [];
+    const noMatch = h("p", { class: "rv-mine", role: "status" }, PICKER.noMatch);
+    // Filters in place (no re-render), so the search box keeps focus while typing.
+    const filter = () => {
+      let shown = 0;
+      for (const r of rows) {
+        const on = matchesQuery(r.name, this.query);
+        r.el.hidden = !on;
+        if (on) shown++;
+      }
+      noMatch.hidden = shown > 0 || rows.length === 0;
+    };
+    if (all.length > 1) {
+      const search = h("input", {
+        type: "search",
+        class: "rv-search",
+        attrs: { placeholder: PICKER.find },
+        aria: { label: PICKER.find },
+        onInput: (e) => {
+          this.query = (e.target as HTMLInputElement).value;
+          filter();
+        },
+      });
+      search.value = this.query;
+      form.append(search);
+    }
+    const list = h("div", { class: "rv-pick-list" });
+    for (const c of all) {
       const box = h("input", {
         type: "checkbox",
         aria: { label: c.name },
@@ -271,13 +335,64 @@ export class ReviewPanel {
         },
       });
       box.checked = this.picked.has(c.ref);
-      form.append(h("label", { class: "rv-pick" }, box, c.name));
+      const el = h("label", { class: "rv-pick" }, box, c.name);
+      rows.push({ el, name: c.name });
+      list.append(el);
+    }
+    form.append(list, noMatch);
+    filter();
+    if (all.length <= 1) form.append(h("p", { class: "rv-mine" }, PICKER.onlyYou));
+    if (this.newLink) {
+      const field = h("input", {
+        type: "text",
+        class: "rv-link",
+        attrs: { readonly: "" },
+        aria: { label: "Comment link" },
+      });
+      field.value = this.newLink;
+      const url = this.newLink;
+      form.append(
+        h("p", { class: "rv-mine", role: "status" }, PICKER.linkShown),
+        h(
+          "div",
+          { class: "rv-actions" },
+          field,
+          h(
+            "button",
+            {
+              type: "button",
+              class: "tonal",
+              onClick: () => {
+                void navigator.clipboard?.writeText(url).then(() => {
+                  this.copied = true;
+                  this.render();
+                });
+                field.select();
+              },
+            },
+            this.copied ? PICKER.copied : PICKER.copy,
+          ),
+          h("button", { type: "button", class: "neutral", onClick: () => void this.loadCandidates() }, PICKER.refresh),
+        ),
+      );
+    } else {
+      form.append(
+        h(
+          "div",
+          { class: "rv-actions" },
+          h(
+            "button",
+            { type: "button", class: "tonal", disabled: this.busy, onClick: () => void this.createLink() },
+            PICKER.createLink,
+          ),
+        ),
+      );
     }
     const select = h(
       "select",
       { aria: { label: "Final approver" }, onChange: (e) => (this.approver = (e.target as HTMLSelectElement).value) },
       h("option", { attrs: { value: "" } }, "No final approver"),
-      ...(this.candidates ?? []).filter((c) => c.member).map((c) => h("option", { attrs: { value: c.ref } }, c.name)),
+      ...all.filter((c) => c.member).map((c) => h("option", { attrs: { value: c.ref } }, c.name)),
     );
     select.value = this.approver;
     form.append(h("label", { class: "rv-pick" }, "Final approver (optional) ", select));
@@ -294,20 +409,9 @@ export class ReviewPanel {
             onClick: () =>
               void this.act({ action: "submit", reviewers: [...this.picked], finalApproverId: this.approver || null }),
           },
-          this.review.state === "draft" ? "Submit for review" : "Save reviewers",
+          this.review.state === "draft" ? PICKER.submit : PICKER.save,
         ),
-        h(
-          "button",
-          {
-            type: "button",
-            class: "neutral",
-            onClick: () => {
-              this.form = "none";
-              this.render();
-            },
-          },
-          "Cancel",
-        ),
+        h("button", { type: "button", class: "neutral", onClick: () => this.closeForm() }, "Cancel"),
       ),
     );
     return form;
@@ -371,6 +475,7 @@ export class ReviewPanel {
     try {
       const out = await this.host.api.review(body);
       this.form = "none";
+      this.newLink = null;
       this.forceNote = "";
       this.busy = false;
       this.apply(out.review);
