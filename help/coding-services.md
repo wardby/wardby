@@ -3,7 +3,7 @@ id: coding-services
 title: Give coding runs the services their tests need
 summary: Let coding runs on the Kubernetes or Docker launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml.
 audience: operator
-tags: [coding-agents, services, postgres, redis, mysql, kubernetes, docker]
+tags: [coding-agents, services, postgres, redis, valkey, mysql, kubernetes, docker]
 appliesTo: >=0.2.1
 ---
 
@@ -23,7 +23,8 @@ length of the run. Three parties agree before a service starts:
   `get_service` need `agents:read`. `create_service`, `update_service` and
   `delete_service` need `services:manage` and the `admin` or
   `service-manager` role. Built-in entries (`postgres` 15, 16 and 17, `redis`
-  7, `mysql` 8) cannot be changed over MCP.
+  7, `mysql` 8) cannot be changed over MCP. `redis` 7 runs Valkey 8.1
+  (BSD-3), a drop-in fork of Redis 7.2; add your own entry to run Redis.
 - **The agent's owner** lists the catalog names its runs may use in
   `codingProfile.services`. An empty list, the default, allows none.
 
