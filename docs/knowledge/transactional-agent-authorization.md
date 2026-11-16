@@ -7,11 +7,11 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-15T10:20:14.397Z }
 sources:
   - id: access
-    url: https://github.com/wardby/wardby/blob/9c0f910f919dec4f1a2149bae78612cda41f6007/src/mcp/auth/access.ts#L47-L70
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/mcp/auth/access.ts#L55-L78
   - id: mutation
-    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/mcp/tools/agents.ts#L847-L857
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/mcp/tools/agents.ts#L1015-L1025
   - id: isolation
-    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/mcp/tools/agents.ts#L975-L985
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/mcp/tools/agents.ts#L1176-L1184
 wardby:
   schema: 1
   roles: [builder, reviewer]
@@ -20,24 +20,24 @@ wardby:
     - id: access
       repo: github:wardby/wardby
       path: src/mcp/auth/access.ts
-      lines: [47, 70]
+      lines: [55, 78]
       symbol: assertAgentAccess
-      sha: 9c0f910f919dec4f1a2149bae78612cda41f6007
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
       spanHash: sha256:04c8d3accf60339956706f501fbf628ae620e8f368bd93c20825f6ef4f915cbb
     - id: mutation
       repo: github:wardby/wardby
       path: src/mcp/tools/agents.ts
-      lines: [847, 857]
+      lines: [1015, 1025]
       symbol: update_agent
-      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
       spanHash: sha256:f6b5789fc562f8de5ad3e905513cd239c4ac447229ee1ee6bf4378cadffaeaa6
     - id: isolation
       repo: github:wardby/wardby
       path: src/mcp/tools/agents.ts
-      lines: [975, 985]
+      lines: [1176, 1184]
       symbol: update_agent
-      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
-      spanHash: sha256:d3c25b8684e11ec56311649d617f6e933d380d4d063257e2f21804f502b2b832
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
+      spanHash: sha256:b79770bf512352163816485f3ca3c44fb5c53ffc56d45ad12c2d46ac46af6834
   confidence: high
 ---
 
@@ -45,8 +45,8 @@ The access helpers default to `ctx.db`; callers inside a mutation transaction mu
 
 **Why:** checking access only before a mutation, or using the default client within it, lets a concurrent grant revocation escape the transaction’s conflict detection. The operator-facing revocation behavior is described in [Security deployment, Sharing agents](../security-deployment.md); this concept records the transaction contract behind that behavior.
 
-[^access]: src/mcp/auth/access.ts, lines 47-70.
+[^access]: src/mcp/auth/access.ts, lines 55-78.
 
-[^mutation]: src/mcp/tools/agents.ts, lines 847-857.
+[^mutation]: src/mcp/tools/agents.ts, lines 1015-1025.
 
-[^isolation]: src/mcp/tools/agents.ts, lines 975-985.
+[^isolation]: src/mcp/tools/agents.ts, lines 1176-1184.
