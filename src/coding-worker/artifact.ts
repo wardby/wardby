@@ -1,10 +1,12 @@
 import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   MAX_CODING_ARTIFACT_BYTES,
   MAX_CODING_INPUT_BYTES,
+  MAX_PLAN_FILES_WIRE_BYTES,
   parseCodingTaskInputJson,
+  type CodingPlanFilesOutput,
   type CodingWorkerOutput,
 } from "../coding/protocol.js";
 
@@ -56,11 +58,18 @@ export async function readCodingInput(path: string) {
 }
 
 export async function writeCodingOutputAtomic(path: string, output: CodingWorkerOutput): Promise<void> {
+  await writeJsonAtomic(path, `${JSON.stringify(output)}\n`, MAX_CODING_ARTIFACT_BYTES);
+}
+
+export async function writePlanFilesOutputAtomic(path: string, output: CodingPlanFilesOutput): Promise<void> {
+  await writeJsonAtomic(path, `${JSON.stringify(output)}\n`, MAX_PLAN_FILES_WIRE_BYTES);
+}
+
+async function writeJsonAtomic(path: string, payload: string, maxBytes: number): Promise<void> {
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const temporary = join(directory, `.result-${process.pid}-${Date.now()}.tmp`);
-  const payload = `${JSON.stringify(output)}\n`;
-  if (Buffer.byteLength(payload) > MAX_CODING_ARTIFACT_BYTES) throw new Error("coding_output_size_limit");
+  const temporary = join(directory, `.${basename(path)}-${process.pid}-${Date.now()}.tmp`);
+  if (Buffer.byteLength(payload) > maxBytes) throw new Error("coding_output_size_limit");
   const file = await open(temporary, "wx", 0o600);
   try {
     await file.writeFile(payload);

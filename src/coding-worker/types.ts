@@ -76,6 +76,8 @@ export type WorkerClientFactory = (config: WorkerClientConfig) => WorkerAgentCli
 export interface WorkerRunOptions {
   input: CodingTaskInput;
   workspace: string;
+  /** Where the input plan files are placed; PLAN_FOLDER_PATH by default (tests override). */
+  planRoot?: string;
   proxyBaseUrl: string;
   capability: string;
   signal: AbortSignal;

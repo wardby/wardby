@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-import { readCodingInput, writeCodingOutputAtomic } from "./artifact.js";
+import { PLAN_FILES_ARTIFACT, PLAN_FOLDER_PATH, type CodingTaskInput } from "../coding/protocol.js";
+import { readCodingInput, writeCodingOutputAtomic, writePlanFilesOutputAtomic } from "./artifact.js";
 import { readWorkerCredentials } from "./credentials.js";
 import { describeError, workerTracerFor, type DebugTracer } from "./debug-trace.js";
 import { runCodingWorker } from "./driver.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "./errors.js";
 import { readMcpConfig } from "./mcp-config.js";
+import { collectPlanFolder } from "./plan-folder.mjs";
+import { collectPlanOutput, shouldCollectPlan } from "./plan-output.js";
 import { createCodexSdkClient } from "./sdk.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
@@ -25,8 +28,9 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => 
 let stage: "input" | "execution" | "output" = "input";
 // Only for a run the operator asked to trace; see debug-trace.ts. Pod log only.
 let trace: DebugTracer | undefined;
+let input: CodingTaskInput | undefined;
 try {
-  const input = await readCodingInput(INPUT_PATH);
+  input = await readCodingInput(INPUT_PATH);
   stage = "execution";
   const proxyBaseUrl = required("WARDBY_PROXY_URL");
   // WARDBY_RUN_CAPABILITY, plus on Substrate the header mode and the registry token (credentials.ts).
@@ -64,4 +68,13 @@ try {
   const issues = code === "coding_output_invalid" ? safeOutputIssues(error) : undefined;
   process.stderr.write(`${JSON.stringify({ error: code, ...(issues ? { issues } : {}) })}\n`);
   process.exitCode = controller.signal.aborted ? 143 : 1;
+}
+
+// Plan files: after the result (or failure), so a capture problem never changes the run's outcome.
+// Not on cancellation. Never logged: only a fixed warning code.
+if (input && !controller.signal.aborted && (await shouldCollectPlan(input, PLAN_FOLDER_PATH))) {
+  const plan = await collectPlanOutput(input.runId, () => collectPlanFolder(PLAN_FOLDER_PATH));
+  await writePlanFilesOutputAtomic(`/run/wardby/output/${PLAN_FILES_ARTIFACT}`, plan).catch(() => {
+    process.stderr.write(`${JSON.stringify({ warning: "plan_files_capture_failed" })}\n`);
+  });
 }

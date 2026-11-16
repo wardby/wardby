@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -1343,5 +1344,39 @@ describe("runCodingWorker git history (#536)", () => {
     expect(git(upstream, "bundle", "list-heads", join(workspace, ".git", "wardby-result.bundle"))).toBe(
       `${head} refs/wardby/bundle-head`,
     );
+  });
+});
+
+describe("runCodingWorker plan files", () => {
+  it("writes the input plan files before the agent starts, outside the workspace", async () => {
+    const workspace = await tempWorkspace();
+    const planRoot = join(await tempWorkspace(), "plan");
+    // What the plan folder held at the moment the client was created (R19): proves placement came first.
+    const seen: string[] = [];
+    const output = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "None.",
+      tests: [],
+    });
+    await runCodingWorker({
+      input: {
+        ...input,
+        planFiles: { files: [{ path: "plan.md", contentBase64: Buffer.from("# Plan v2\n").toString("base64") }] },
+      },
+      workspace,
+      planRoot,
+      proxyBaseUrl: "http://127.0.0.1:9",
+      capability: "rrp_" + "a".repeat(40),
+      signal: new AbortController().signal,
+      createClient: (config) => {
+        // Read synchronously here: the file must already be in place when the agent's client exists.
+        seen.push(existsSync(join(planRoot, "plan.md")) ? readFileSync(join(planRoot, "plan.md"), "utf8") : "missing");
+        return clientFor([{ type: "item.completed", item: { type: "agent_message", text: output } }], {})(config);
+      },
+    });
+    expect(seen).toEqual(["# Plan v2\n"]);
+    await expect(stat(join(workspace, "plan.md"))).rejects.toThrow();
   });
 });
