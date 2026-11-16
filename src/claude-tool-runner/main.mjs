@@ -50,6 +50,9 @@ export const PLAN_READ_TOOL = "wardby_plan_read";
 export const PLAN_ROOT = "/tmp/wardby-plan";
 /** base64Length(PLAN_FILES_LIMITS.maxFileBytes); main.test.mjs keeps it equal to the shared limit. */
 export const PLAN_PLACE_MAX_BASE64 = 1_398_104;
+/** PLAN_FILES_LIMITS.maxFileBytes; main.test.mjs keeps it equal to the shared limit. */
+export const PLAN_PLACE_MAX_BYTES = 1024 * 1024;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 /** The plan folder module (src/coding-worker/plan-folder.mjs), shipped to /opt/wardby/coding-worker/. */
 const loadDefaultPlanFolder = () => import("../coding-worker/plan-folder.mjs");
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -262,6 +265,11 @@ function toolServer(setup, gate, workspacePath, git, plan) {
         try {
           const module = await plan.load();
           if (!module.isSafePlanPath(path)) return { ok: false, reason: "plan_path_invalid" };
+          // No fixed code names a malformed encoding, so it is the folder's own: plan_folder_invalid.
+          if (!BASE64.test(content_base64)) return { ok: false, reason: "plan_folder_invalid" };
+          if (Buffer.from(content_base64, "base64").length > PLAN_PLACE_MAX_BYTES) {
+            return { ok: false, reason: "plan_too_large" };
+          }
           await module.placePlanFiles(plan.root, [{ path, contentBase64: content_base64 }]);
           return { ok: true };
         } catch (error) {

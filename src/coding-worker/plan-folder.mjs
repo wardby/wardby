@@ -47,6 +47,26 @@ async function ensureRoot(root) {
 
 export async function placePlanFiles(root, files) {
   for (const file of files) if (!isSafePlanPath(file.path)) throw new Error("plan_path_invalid");
+  const seen = new Set();
+  for (const file of files) {
+    if (seen.has(file.path)) throw new Error("plan_path_invalid");
+    seen.add(file.path);
+  }
+  // A path that is also a parent directory of another (a and a/b) cannot both exist.
+  for (const path of seen) {
+    const parts = path.split("/");
+    for (let i = 1; i < parts.length; i += 1)
+      if (seen.has(parts.slice(0, i).join("/"))) throw new Error("plan_path_invalid");
+  }
+  try {
+    await placeValidated(root, files);
+  } catch (error) {
+    if (typeof error?.message === "string" && /^plan_[a-z_]+$/.test(error.message)) throw error;
+    throw new Error("plan_folder_invalid");
+  }
+}
+
+async function placeValidated(root, files) {
   await ensureRoot(root);
   for (const file of files) {
     const segments = file.path.split("/");
@@ -127,11 +147,12 @@ export async function collectPlanFolder(root) {
         if ((await walk(full, path, depth + 1)) === "too_large") return "too_large";
         continue;
       }
-      if (!info.isFile() || !isSafePlanPath(path)) {
+      if (!info.isFile() || info.nlink > 1 || !isSafePlanPath(path)) {
         skip(path);
         continue;
       }
       if (files.length >= PLAN_LIMITS.maxFiles) return "too_large";
+      if (total + info.size > PLAN_LIMITS.maxTotalBytes) return "too_large";
       const bytes = await readRegular(full, PLAN_LIMITS.maxFileBytes);
       if (bytes === "too_large") return "too_large";
       if (bytes === null) {

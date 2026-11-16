@@ -7,7 +7,7 @@ import { runCodingWorker } from "./driver.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "./errors.js";
 import { readMcpConfig } from "./mcp-config.js";
 import { collectPlanFolder } from "./plan-folder.mjs";
-import { collectPlanOutput, shouldCollectPlan } from "./plan-output.js";
+import { capturePlanFiles } from "./plan-output.js";
 import { createCodexSdkClient } from "./sdk.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
@@ -72,9 +72,11 @@ try {
 
 // Plan files: after the result (or failure), so a capture problem never changes the run's outcome.
 // Not on cancellation. Never logged: only a fixed warning code.
-if (input && !controller.signal.aborted && (await shouldCollectPlan(input, PLAN_FOLDER_PATH))) {
-  const plan = await collectPlanOutput(input.runId, () => collectPlanFolder(PLAN_FOLDER_PATH));
-  await writePlanFilesOutputAtomic(`/run/wardby/output/${PLAN_FILES_ARTIFACT}`, plan).catch(() => {
-    process.stderr.write(`${JSON.stringify({ warning: "plan_files_capture_failed" })}\n`);
-  });
-}
+await capturePlanFiles({
+  input,
+  aborted: controller.signal.aborted,
+  root: PLAN_FOLDER_PATH,
+  collect: () => collectPlanFolder(PLAN_FOLDER_PATH),
+  write: (plan) => writePlanFilesOutputAtomic(`/run/wardby/output/${PLAN_FILES_ARTIFACT}`, plan),
+  warn: () => process.stderr.write(`${JSON.stringify({ warning: "plan_files_capture_failed" })}\n`),
+});

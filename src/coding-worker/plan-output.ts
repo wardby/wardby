@@ -39,3 +39,21 @@ export async function shouldCollectPlan(input: Pick<CodingTaskInput, "planFiles"
     return false;
   }
 }
+
+/**
+ * main.ts's plan capture, after result.json is written: skipped when the run was cancelled, and a
+ * write failure is only the fixed warning (never the error). Never throws.
+ */
+export async function capturePlanFiles(options: {
+  input: CodingTaskInput | undefined;
+  aborted: boolean;
+  root: string;
+  collect: () => Promise<PlanFolderResult | { status: "error"; error: "plan_tool_unavailable" | "plan_files_failed" }>;
+  write: (output: CodingPlanFilesOutput) => Promise<void>;
+  warn: () => void;
+}): Promise<void> {
+  const { input } = options;
+  if (!input || options.aborted || !(await shouldCollectPlan(input, options.root))) return;
+  const plan = await collectPlanOutput(input.runId, options.collect);
+  await options.write(plan).catch(() => options.warn());
+}

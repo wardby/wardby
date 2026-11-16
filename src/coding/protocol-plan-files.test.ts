@@ -80,6 +80,27 @@ describe("plan files: protocol", () => {
     expect(() => CodingTaskInputSchema.parse({ ...input, planFiles: { files } })).toThrow();
   });
 
+  it("refuses a single file over 1 MiB, by the per-file check", () => {
+    const over = Buffer.alloc(PLAN_FILES_LIMITS.maxFileBytes + 1, 97).toString("base64");
+    const result = CodingTaskInputSchema.safeParse({
+      ...input,
+      planFiles: { files: [{ path: "big.md", contentBase64: over }] },
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.message)).toContain("plan file too large");
+  });
+
+  it("refuses malformed base64 by the base64 check", () => {
+    for (const contentBase64 of ["abc", "not base64!", "ab=c", "a==="]) {
+      const result = CodingTaskInputSchema.safeParse({
+        ...input,
+        planFiles: { files: [{ path: "x.md", contentBase64 }] },
+      });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map((issue) => issue.message)).toContain("must be base64");
+    }
+  });
+
   it("parses an ok and an error output, and refuses mixed shapes", () => {
     const ok = parsePlanFilesOutputJson(
       JSON.stringify({

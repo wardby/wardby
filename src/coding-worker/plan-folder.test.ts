@@ -1,4 +1,6 @@
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { link, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -85,5 +87,81 @@ describe("plan folder", () => {
     await mkdir(root);
     for (let i = 0; i <= PLAN_LIMITS.maxFiles; i++) await writeFile(join(root, `f${i}.md`), "x");
     expect(await collectPlanFolder(root)).toEqual({ status: "error", error: "plan_too_large" });
+  });
+
+  it("sorts across directories by path: a.md before a/b.md", async () => {
+    await mkdir(join(root, "a"), { recursive: true });
+    await writeFile(join(root, "a/b.md"), "x");
+    await writeFile(join(root, "a.md"), "x");
+    const collected = await collectPlanFolder(root);
+    expect(collected.status === "ok" && collected.files.map((f) => f.path)).toEqual(["a.md", "a/b.md"]);
+  });
+
+  it.skipIf(process.platform === "win32")("skips a FIFO without blocking", async () => {
+    await mkdir(root);
+    execFileSync("mkfifo", [join(root, "pipe.md")]);
+    expect(await collectPlanFolder(root)).toEqual({ status: "ok", files: [], skipped: ["pipe.md"], skippedUnnamed: 0 });
+  });
+
+  it("skips a hardlinked file", async () => {
+    await mkdir(root);
+    await writeFile(join(base, "outside.txt"), "x");
+    await link(join(base, "outside.txt"), join(root, "linked.md"));
+    await writeFile(join(root, "plain.md"), "x");
+    const collected = await collectPlanFolder(root);
+    expect(collected).toMatchObject({ status: "ok", skipped: ["linked.md"] });
+    expect(collected.status === "ok" && collected.files.map((f) => f.path)).toEqual(["plain.md"]);
+  });
+
+  it("total bytes over maxTotalBytes is plan_too_large", async () => {
+    await mkdir(root);
+    const files = Math.floor(PLAN_LIMITS.maxTotalBytes / PLAN_LIMITS.maxFileBytes) + 1;
+    for (let i = 0; i < files; i++) await writeFile(join(root, `f${i}.md`), Buffer.alloc(PLAN_LIMITS.maxFileBytes, 97));
+    expect(await collectPlanFolder(root)).toEqual({ status: "error", error: "plan_too_large" });
+  });
+
+  it("past maxSkipped, further skipped paths are only counted", async () => {
+    await mkdir(root);
+    for (let i = 0; i < PLAN_LIMITS.maxSkipped + 5; i++) await writeFile(join(root, `bin${i}.md`), Buffer.from([0xff]));
+    const collected = await collectPlanFolder(root);
+    expect(collected.status === "ok" && collected.skipped).toHaveLength(PLAN_LIMITS.maxSkipped);
+    expect(collected.status === "ok" && collected.skippedUnnamed).toBe(5);
+  });
+
+  it("places with O_EXCL: an existing file is refused with a fixed code", async () => {
+    await mkdir(root);
+    await writeFile(join(root, "plan.md"), "agent's");
+    await expect(placePlanFiles(root, [{ path: "plan.md", contentBase64: b64("new") }])).rejects.toThrow(
+      "plan_folder_invalid",
+    );
+    expect(await readFile(join(root, "plan.md"), "utf8")).toBe("agent's");
+  });
+
+  it("an unsafe path creates nothing, not even the root", async () => {
+    await expect(
+      placePlanFiles(root, [
+        { path: "ok.md", contentBase64: b64("x") },
+        { path: "../bad.md", contentBase64: b64("x") },
+      ]),
+    ).rejects.toThrow("plan_path_invalid");
+    expect(existsSync(root)).toBe(false);
+  });
+
+  it("a duplicate path, or a file and a directory at one path, is plan_path_invalid", async () => {
+    const one = { path: "a", contentBase64: b64("x") };
+    const dup = [one, { ...one }];
+    const clash = [one, { path: "a/b", contentBase64: b64("x") }];
+    for (const files of [dup, clash, [...clash].reverse()]) {
+      await expect(placePlanFiles(root, files)).rejects.toThrow("plan_path_invalid");
+    }
+    expect(existsSync(root)).toBe(false);
+  });
+
+  it("a file already in the way of a directory is plan_folder_invalid, never a raw fs error", async () => {
+    await mkdir(root);
+    await writeFile(join(root, "a"), "x");
+    await expect(placePlanFiles(root, [{ path: "a/b.md", contentBase64: b64("x") }])).rejects.toThrow(
+      /^plan_folder_invalid$/,
+    );
   });
 });

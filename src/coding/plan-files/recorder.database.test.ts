@@ -150,6 +150,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
 
   it("re-checks limits and run id, and records fixed codes", async () => {
     const base = { runId, agentId, launchSecretVersions: versions };
+    await reset(); // an outcome is written once: each case starts from a run with none
     expect(
       await recorder().record({
         ...base,
@@ -158,14 +159,18 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
         },
       }),
     ).toBe("plan_too_large");
+    await reset(); // an outcome is written once: each case starts from a run with none
     expect(
       await recorder().record({
         ...base,
         read: async () => output("some-other-run", [{ path: "x.md", content: "x" }]),
       }),
     ).toBe("plan_files_failed");
+    await reset();
     expect(await recorder().record(base)).toBe("plan_files_unsupported");
+    await reset();
     expect(await recorder().record({ ...base, read: async () => undefined })).toBe("plan_files_missing");
+    await reset(); // an outcome is written once: each case starts from a run with none
     expect(
       await recorder().record({
         ...base,
@@ -394,7 +399,9 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
     expect(await recorder().storeChecked(base(), [{ path: "late.md", content: "late" }], [])).toBe("plan_files_failed");
     expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
-    expect(await recorder().record({ ...base(), read: async () => undefined })).toBe("plan_files_missing");
+    // A refused write reports the status the database holds, not the one the late writer computed.
+    expect(await recorder().record({ ...base(), read: async () => undefined })).toBe("plan_files_failed");
+    expect(await recorder().markFailed(runId)).toBe("plan_files_failed");
     const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
     expect(run.planFilesStatus).toBe("plan_files_failed");
   });
@@ -403,10 +410,10 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     expect(
       await recorder().record({ ...base(), read: async () => output(runId, [{ path: "a.md", content: "a" }]) }),
     ).toBe("stored");
-    await recorder().markFailed(runId);
+    expect(await recorder().markFailed(runId)).toBe("stored");
     expect(
       await recorder().record({ ...base(), read: async () => output(runId, [{ path: "b.md", content: "b" }]) }),
-    ).toBe("plan_files_failed");
+    ).toBe("stored");
     expect(await loadPlanFiles(db, runId, "output")).toEqual([{ path: "a.md", content: "a" }]);
     const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
     expect(run.planFilesStatus).toBe("stored");

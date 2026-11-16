@@ -836,7 +836,7 @@ describe("ContainerExecutor", () => {
             calls.push(input);
             return "stored";
           },
-          markFailed: async () => {},
+          markFailed: async () => "plan_files_failed" as const,
         },
       });
       holder.created = created;
@@ -925,6 +925,7 @@ describe("ContainerExecutor", () => {
             },
             markFailed: async () => {
               writeOnce("plan_files_failed", []);
+              return "plan_files_failed" as const;
             },
           },
         });

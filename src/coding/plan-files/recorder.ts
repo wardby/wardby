@@ -42,6 +42,10 @@ export interface RecordPlanFilesInput {
   read?: (maxBytes: number) => Promise<string | undefined>;
 }
 
+/** The write-once transaction holds up to an 8 MiB plan: Prisma's 5 s default is too short for it. */
+const WRITE_TRANSACTION_TIMEOUT_MS = 30_000;
+const WRITE_TRANSACTION_MAX_WAIT_MS = 10_000;
+
 const DECODER = new TextDecoder("utf-8", { fatal: true });
 
 /**
@@ -59,8 +63,7 @@ export class PlanFilesRecorder {
 
   async record(input: RecordPlanFilesInput): Promise<PlanFilesStatus> {
     const status = await this.capture(input).catch((): PlanFilesStatus => "plan_files_failed");
-    if (status !== "stored") await this.writeStatus(input.runId, status).catch(() => undefined);
-    return status;
+    return status === "stored" ? status : this.settle(input.runId, status);
   }
 
   async storeChecked(
@@ -71,8 +74,23 @@ export class PlanFilesRecorder {
     const status = await this.redactAndStore(input, files, { paths: skipped, unnamed: 0 }).catch(
       (): PlanFilesStatus => "plan_files_failed",
     );
-    if (status !== "stored") await this.writeStatus(input.runId, status).catch(() => undefined);
-    return status;
+    return status === "stored" ? status : this.settle(input.runId, status);
+  }
+
+  /** Writes a non-stored outcome and returns the status the database holds (a refused write read back). */
+  private async settle(runId: string, status: PlanFilesStatus): Promise<PlanFilesStatus> {
+    const written = await this.writeStatus(runId, status).catch(() => undefined);
+    return written === false ? await this.recordedStatus(runId, status) : status;
+  }
+
+  /** The status already recorded for the run; the given one when it cannot be read. */
+  private async recordedStatus(runId: string, fallback: PlanFilesStatus): Promise<PlanFilesStatus> {
+    try {
+      const run = await this.deps.db.codingRun.findUnique({ where: { runId }, select: { planFilesStatus: true } });
+      return (run?.planFilesStatus as PlanFilesStatus | null | undefined) ?? fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   private async capture(input: RecordPlanFilesInput): Promise<PlanFilesStatus> {
@@ -158,20 +176,20 @@ export class PlanFilesRecorder {
       planFilesSkipped: { ...skippedList },
     });
     // Refused: an outcome is already recorded (a timeout's plan_files_failed); it stands.
-    return written ? "stored" : "plan_files_failed";
+    return written ? "stored" : this.recordedStatus(input.runId, "plan_files_failed");
   }
 
   /**
    * The executor's timeout: records the fixed plan_files_failed unless an outcome is already recorded.
    * A recorder still running for this run can then neither add rows nor change the status.
    */
-  async markFailed(runId: string): Promise<void> {
-    await this.writeStatus(runId, "plan_files_failed");
+  async markFailed(runId: string): Promise<PlanFilesStatus> {
+    return this.settle(runId, "plan_files_failed");
   }
 
   /** A non-stored outcome: no output files (and no path lists) survive it. */
-  private async writeStatus(runId: string, status: PlanFilesStatus): Promise<void> {
-    await this.writeOnce(runId, [], {
+  private async writeStatus(runId: string, status: PlanFilesStatus): Promise<boolean> {
+    return this.writeOnce(runId, [], {
       planFilesStatus: status,
       planFilesWithheld: Prisma.DbNull,
       planFilesSkipped: Prisma.DbNull,
@@ -190,16 +208,19 @@ export class PlanFilesRecorder {
     files: PlanFile[],
     data: Pick<Prisma.CodingRunUpdateManyMutationInput, "planFilesStatus" | "planFilesWithheld" | "planFilesSkipped">,
   ): Promise<boolean> {
-    return this.deps.db.$transaction(async (tx) => {
-      const claimed = await tx.codingRun.updateMany({ where: { runId, planFilesStatus: null }, data });
-      if (claimed.count === 0) return false;
-      await tx.codingRunPlanFile.deleteMany({ where: { runId, direction: "output" } });
-      if (files.length > 0) {
-        await tx.codingRunPlanFile.createMany({
-          data: files.map((f) => ({ runId, direction: "output", path: f.path, content: f.content })),
-        });
-      }
-      return true;
-    });
+    return this.deps.db.$transaction(
+      async (tx) => {
+        const claimed = await tx.codingRun.updateMany({ where: { runId, planFilesStatus: null }, data });
+        if (claimed.count === 0) return false;
+        await tx.codingRunPlanFile.deleteMany({ where: { runId, direction: "output" } });
+        if (files.length > 0) {
+          await tx.codingRunPlanFile.createMany({
+            data: files.map((f) => ({ runId, direction: "output", path: f.path, content: f.content })),
+          });
+        }
+        return true;
+      },
+      { timeout: WRITE_TRANSACTION_TIMEOUT_MS, maxWait: WRITE_TRANSACTION_MAX_WAIT_MS },
+    );
   }
 }
