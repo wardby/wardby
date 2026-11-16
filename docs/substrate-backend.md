@@ -648,8 +648,9 @@ output by exact value (the capability and its placeholder) before it reaches
 the actor's own log, and the proxy redacts the tail again before logging it.
 The bridges also redact the placeholder for the run's MCP token.
 
-When a run with coding services reaches the keep step, the control plane logs
-`substrate_warm_removed` with reason `services` and removes its actors.
+A run with coding services is not offered for keeping at all: its actors are
+removed when it finishes, as with warm rounds off, and its next round starts
+fresh with empty services.
 
 ## What is not supported
 

@@ -126,8 +126,8 @@ launchers.
   do. `diskMib` is not enforced as a disk limit. MySQL needs about
   730 MiB idle.
 - **No restart, no warm rounds.** A service that exits is not restarted, and a
-  run with services is never kept between warm rounds (the
-  `substrate_warm_removed` reason is `services`).
+  run with services is never kept between warm rounds: its actors are removed
+  when it finishes, and the next round starts with empty services.
 - **Network.** A service container shares its workspace actor's access to the
   coding proxy; use only service images you trust as much as the code your
   agents run.
