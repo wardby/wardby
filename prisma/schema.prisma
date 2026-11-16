@@ -32,6 +32,8 @@ model Agent {
   runs                  Run[]
   kind                  AgentKind           @default(native)
   codingProfile         CodingAgentProfile?
+  planSets              PlanSet[]           @relation("PlanSetPlanner")
+  accessPlanSets        PlanSet[]           @relation("PlanSetAccess")
 
   // Phase 2: scheduling. `schedule` is a cron expression; null = manual-only.
   schedule        String?
@@ -354,6 +356,7 @@ enum RunTrigger {
   subagent
   host_event
   comment
+  plan_approved
 }
 
 model Run {
@@ -498,6 +501,10 @@ model CodingAgentProfile {
   workspaceDiskMb          Int?
   /// Git history in runs (#536): the clone depth (1..100000) when gitHistoryFull is false. Null with full false = off.
   gitHistoryDepth          Int?
+  /// Owner-set through update_agent: where this planner's plan goes and who reviews it (PlanDocumentSchema).
+  planDocument             Json?
+  /// Runs refuse to build from an unapproved plan set (plan_not_approved).
+  buildFromPlan            Boolean           @default(false)
   /// Git history in runs: the full history; overrides gitHistoryDepth.
   gitHistoryFull           Boolean           @default(false)
   packageAllowlist         Json              @default("{}")
@@ -543,6 +550,16 @@ model CodingRun {
   substrate             SubstrateRun?
   run                   Run                 @relation(fields: [runId], references: [id], onDelete: Cascade)
   task                  String
+  /// The plan this run writes or builds.
+  planNumber            Int?
+  /// The plan set a builder run used.
+  planSetId             String?
+  /// [{documentId, path, versionNumber}] a builder run was given.
+  planVersions          Json?
+  /// The ticket a plan_approved / build-ticket run builds.
+  planTicket            Int?
+  /// Store repository: the folder read from the run's workspace (planDocument.path with {n} filled).
+  planRepositoryPath    String?
   /// The run's own request (the trigger's task or the agent's default task), without the agent's standing instructions. Null on older runs.
   request               String?             @db.Text
   repository            String
@@ -2398,9 +2415,44 @@ model Document {
   exports          DocumentExport[]
   reviewers                DocumentReviewer[]
   reviewEvents             DocumentReviewEvent[]
+  planSetId                String?
+  planSet                  PlanSet?              @relation(fields: [planSetId], references: [id], onDelete: SetNull)
+  planPath                 String?
+  removedFromPlan          Boolean               @default(false)
 
   @@index([ownerId])
   @@index([agentId])
+  @@index([planSetId])
+}
+
+/// A planner's plan for one repository and number (docs/private spec §4): its documents are Documents with planSetId.
+model PlanSet {
+  id             String     @id @default(cuid())
+  /// The planner agent whose runs write the plan.
+  agentId        String
+  agent          Agent      @relation("PlanSetPlanner", fields: [agentId], references: [id], onDelete: Cascade)
+  repository     String
+  number         Int
+  /// "wardby" or "repository" (the planner's planDocument.store when the set was made).
+  store          String
+  /// The agent whose run started the work (the planner, or the lead that delegated): its owner and grantees comment.
+  accessAgentId  String?
+  accessAgent    Agent?     @relation("PlanSetAccess", fields: [accessAgentId], references: [id], onDelete: SetNull)
+  createdByRunId String
+  /// The issue the plan answers (CodingRun.issueProvider/issueKey of the first run), for notices and the build chain.
+  issueProvider  String?
+  issueKey       String?
+  /// Set when the last counted document became approved; cleared by a reopen (C2).
+  approvedAt     DateTime?
+  /// Build chain (§7b "build"): the ticket running or next, and why it stopped.
+  chainTicket    Int?
+  chainStopped   String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  documents      Document[]
+
+  @@unique([agentId, repository, number])
+  @@index([accessAgentId])
 }
 
 model DocumentVersion {

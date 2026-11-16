@@ -72,6 +72,7 @@ function triggerFor(row: RunRow, sites: IssueSites): RunTriggerInfo {
     case "webhook":
       return { kind: "webhook" };
     case "subagent":
+    case "plan_approved":
       return { kind: "subagent" };
     case "manual":
       return { kind: "manual" };
