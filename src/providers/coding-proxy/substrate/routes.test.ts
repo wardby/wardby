@@ -317,6 +317,7 @@ describe("substrate routes", () => {
       req.write("abc");
     });
     expect(big).toBe(413);
+    expect((await blobs.get(BLOB.planFiles(TOKEN))).toString()).toBe(body);
     // The tool side may not post plan files: the route is the agent's.
     expect((await fetch(`${base}/plan-files`, tool({ method: "POST", body: "{}" }))).status).toBe(401);
     const logged = JSON.stringify([logCalls, warnCalls]);

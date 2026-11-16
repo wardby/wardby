@@ -251,6 +251,10 @@ describe("substrate bridges, warm rounds", () => {
     const stops: number[] = [];
     const kills: number[] = [];
     const exits: Array<(code: number) => void> = [];
+    // Round 1's plan folder on the tool actor, there before any round starts: only the tool bridge's
+    // removal between rounds can take it away.
+    await mkdir(join(dir, "plan"), { recursive: true });
+    await writeFile(join(dir, "plan", "plan.md"), "round one\n");
     tool = await runTool({
       imageCheck: false,
       proxyUrl,
@@ -390,9 +394,6 @@ describe("substrate bridges, warm rounds", () => {
     await waitFor(() => (requests.some((r) => r.includes("/input?round=2")) ? true : undefined));
     // Something round 1 left in the workspace (an install, a virtualenv): kept as it is.
     await writeFile(join(workspace, "made-in-round-1.txt"), "kept\n");
-    // Round 1's plan folder on the tool actor: removed before round 2's runner starts.
-    await mkdir(join(dir, "plan"), { recursive: true });
-    await writeFile(join(dir, "plan", "plan.md"), "round one\n");
     await stageRoundTwo();
     await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN, 2))) ? true : undefined));
     await waitFor(async () => ((await blobs.head(BLOB.transcript(TOKEN, 2))) ? true : undefined));
