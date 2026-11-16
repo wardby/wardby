@@ -80,7 +80,7 @@ Docker and Kubernetes ones.
      `20261122000000_substrate_repositories`,
      `20261123000000_substrate_templates`,
      `20261124000000_substrate_services`,
-     `20261125000000_coding_service_substrate_image` and
+     `20261126000000_coding_service_substrate_image` and
      `20261127000000_builtin_service_setup_done`. The new proxy reads the
      `repositories` and `services` columns on every Substrate request, with or
      without extra repositories or services, so a proxy started before they

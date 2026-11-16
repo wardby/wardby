@@ -455,7 +455,7 @@ protected-path baseline without any change to its settings.
 
 This release adds the catalog fields `startCommand` and `substrateImage`
 (migrations `20261124000000_substrate_services`,
-`20261125000000_coding_service_substrate_image` and
+`20261126000000_coding_service_substrate_image` and
 `20261127000000_builtin_service_setup_done`, applied with
 `prisma migrate deploy`). The migrations set both on the built-in entries;
 Docker and Kubernetes runs are unchanged. A custom entry needs a
