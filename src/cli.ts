@@ -56,6 +56,7 @@ import { resolveDeferredCodingRun } from "./core/deferred-coding.js";
 import { parseGatewayListen, startGatewayServer } from "./native-worker/http-server.js";
 import { NATIVE_GATEWAY_DENY_PORT } from "./native-worker/docker-isolation.js";
 import { startDenyPortListener } from "./providers/coding-proxy/deny-port.js";
+import { buildSharedSubstrateApi } from "./providers/substrate/composition.js";
 import { buildNativeSandboxExecutor } from "./native-worker/composition.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
@@ -1016,7 +1017,10 @@ async function scheduler(args: string[]): Promise<void> {
   loadToolMaxTimeoutMs();
   loadMcpServersMode();
   loadMcpMaxCallsPerRun();
+  // One Substrate client for the process, shared by the job launcher and the native sandbox.
+  const substrateApi = buildSharedSubstrateApi(process.env);
   const executor = buildConfiguredExecutor({
+    substrateApi,
     native: nativeExecutor,
     db: prisma,
     providerConfig: config,
@@ -1025,7 +1029,7 @@ async function scheduler(args: string[]): Promise<void> {
     secretCipher: nativeProviders.secrets,
     runSteps,
     // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
-    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders, power }),
+    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders, power, substrateApi }),
   });
   nativeProviders.executor = executor;
   await executor.launch?.();

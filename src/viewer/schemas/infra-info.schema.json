@@ -78,7 +78,8 @@
                   "type": "string",
                   "enum": [
                     "docker",
-                    "kubernetes"
+                    "kubernetes",
+                    "substrate"
                   ]
                 },
                 "warmPoolSize": {

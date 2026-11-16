@@ -6,6 +6,7 @@
  * code change. The `assembleProviders` factory (which constructs the concrete
  * adapters) is added once the adapters exist.
  */
+import { isIP } from "node:net";
 import { MAX_RUN_REPOSITORIES_IN_INPUT } from "../coding/protocol.js";
 import {
   GVISOR_RUNTIME_CLASS,
@@ -479,14 +480,31 @@ export interface KubernetesNativeSandboxConfig extends NativeSandboxCommonConfig
 /** The native gateway Service (and Deployment) name when NATIVE_GATEWAY_SERVICE is unset. */
 export const DEFAULT_NATIVE_GATEWAY_SERVICE = "wardby-native-gateway";
 
-export type NativeSandboxConfig = DockerNativeSandboxConfig | KubernetesNativeSandboxConfig;
+/**
+ * NATIVE_SANDBOX_LAUNCHER=substrate: worker actors on a Substrate cluster, one golden snapshot per
+ * image. A separate setting from JOB_LAUNCHER (any combination works). It reads the shared
+ * SUBSTRATE_* connection variables; the warm pool is refused (golden snapshots replace it), and
+ * NATIVE_SANDBOX_PIDS is read but has no effect.
+ */
+export interface SubstrateNativeSandboxConfig extends NativeSandboxCommonConfig {
+  launcher: "substrate";
+  /** NATIVE_GATEWAY_URL, required: an http:// URL whose host is a hostname (egress rules match hostnames). */
+  gatewayUrl: string;
+  /** The shared SUBSTRATE_* connection; workerSelector is NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR when set. */
+  substrate: SubstrateConnectionConfig;
+  /** SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC (0..600, default 60). */
+  goldenWaitSec: number;
+}
+
+export type NativeSandboxConfig =
+  DockerNativeSandboxConfig | KubernetesNativeSandboxConfig | SubstrateNativeSandboxConfig;
 
 /** Undefined when NATIVE_SANDBOX_LAUNCHER is unset (sandbox-mode runs then fail closed). Throws on a bad configuration. */
 export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): NativeSandboxConfig | undefined {
   const launcher = env.NATIVE_SANDBOX_LAUNCHER?.trim();
   if (!launcher) return undefined;
-  if (launcher !== "docker" && launcher !== "kubernetes") {
-    throw new Error(`NATIVE_SANDBOX_LAUNCHER must be "docker" or "kubernetes" (got "${launcher}").`);
+  if (launcher !== "docker" && launcher !== "kubernetes" && launcher !== "substrate") {
+    throw new Error(`NATIVE_SANDBOX_LAUNCHER must be "docker", "kubernetes" or "substrate" (got "${launcher}").`);
   }
   const workerImage = imageVariable(env.NATIVE_SANDBOX_WORKER_IMAGE);
   if (!workerImage)
@@ -520,6 +538,48 @@ export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): N
         21_600_000,
       ) ?? 1_800_000,
   };
+  if (launcher === "substrate") {
+    if (!/@sha256:[0-9a-f]{64}$/.test(workerImage)) {
+      throw new Error(
+        "NATIVE_SANDBOX_WORKER_IMAGE must be a registry digest (repo@sha256:...) when NATIVE_SANDBOX_LAUNCHER=substrate.",
+      );
+    }
+    if (!gatewayUrl) {
+      throw new Error(
+        "NATIVE_GATEWAY_URL is required when NATIVE_SANDBOX_LAUNCHER=substrate: the egress rule names the gateway by hostname.",
+      );
+    }
+    const parsed = new URL(gatewayUrl);
+    if (parsed.protocol !== "http:") {
+      throw new Error(
+        "NATIVE_GATEWAY_URL must be an http:// URL when NATIVE_SANDBOX_LAUNCHER=substrate: the egress gateway injects the capability into plain HTTP.",
+      );
+    }
+    if (isIP(parsed.hostname.replace(/^\[|\]$/g, "")) !== 0) {
+      throw new Error(
+        "NATIVE_GATEWAY_URL must name the gateway by hostname when NATIVE_SANDBOX_LAUNCHER=substrate: egress rules match hostnames, not addresses.",
+      );
+    }
+    if (common.warmPoolSize > 0) {
+      throw new Error(
+        "NATIVE_SANDBOX_WARM_POOL_SIZE must be 0 when NATIVE_SANDBOX_LAUNCHER=substrate: golden snapshots replace the warm pool.",
+      );
+    }
+    const connection = loadSubstrateConnectionConfig(env, "NATIVE_SANDBOX_LAUNCHER=substrate");
+    const workerSelector =
+      parseWorkerSelector(env.NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR, "NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR") ??
+      connection.workerSelector;
+    const substrate: SubstrateConnectionConfig = { ...connection };
+    if (workerSelector) substrate.workerSelector = workerSelector;
+    const goldenWaitSec =
+      optionalBoundedInteger(
+        env.SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC?.trim() || undefined,
+        "SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC",
+        0,
+        600,
+      ) ?? 60;
+    return { launcher, ...common, gatewayUrl, substrate, goldenWaitSec };
+  }
   if (launcher === "kubernetes") {
     // A cluster pulls by registry digest; a local image id means nothing to it.
     if (!/@sha256:[0-9a-f]{64}$/.test(workerImage)) {

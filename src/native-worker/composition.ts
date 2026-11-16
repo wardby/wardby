@@ -15,6 +15,7 @@ import { ClientNodeKubernetesApi } from "../providers/jobs/kubernetes-client.js"
 import type { KubernetesApi } from "../providers/jobs/kubernetes-api.js";
 import { SANDBOX_RUN_MAX_SEC } from "../core/runner.js";
 import { NativeSandboxExecutor, type ManagedWorkerLauncher } from "./sandbox-executor.js";
+import type { SubstrateApi } from "../providers/substrate/api.js";
 import { PooledWorkerLauncher, type WarmWorkerLauncher } from "./warm-pool.js";
 import { PrismaWarmPoolLedger, type WarmPoolDb } from "./warm-pool-ledger.js";
 
@@ -29,6 +30,8 @@ export function buildNativeSandboxExecutor(options: {
   kubernetesApi?: KubernetesApi;
   /** Low-power mode: the shared Power the Kubernetes launcher wakes the native gateway through. */
   power?: Power;
+  /** The process's one SubstrateApi (buildSharedSubstrateApi) for NATIVE_SANDBOX_LAUNCHER=substrate; tests pass a fake. */
+  substrateApi?: SubstrateApi;
 }): NativeSandboxExecutor | undefined {
   const env = options.env ?? process.env;
   const config = loadNativeSandboxConfig(env);
@@ -61,11 +64,13 @@ export function buildNativeSandboxExecutor(options: {
           // Isolation proven inside the pod: the gateway may now serve the run.
           onNetworkProven: markReady,
         })
-      : new DockerNativeWorkerLauncher({
-          image: config.workerImage,
-          gatewayContainer: config.gatewayContainer,
-          limits,
-        }));
+      : config.launcher === "docker"
+        ? new DockerNativeWorkerLauncher({
+            image: config.workerImage,
+            gatewayContainer: config.gatewayContainer,
+            limits,
+          })
+        : unavailableSubstrate());
   // The pool also starts with size 0 when the launcher can run one: its first tick removes workers
   // left from an earlier configuration, and nothing runs after that.
   const launcher: ManagedWorkerLauncher = isWarmCapable(cold)
@@ -95,4 +100,11 @@ function isWarmCapable(
   launcher: ManagedWorkerLauncher & Partial<WarmWorkerLauncher>,
 ): launcher is ManagedWorkerLauncher & WarmWorkerLauncher {
   return typeof launcher.startWarm === "function" && typeof launcher.deliver === "function";
+}
+
+/** Replaced by the Substrate launcher; until then the Substrate configuration never reaches Docker. */
+function unavailableSubstrate(): never {
+  throw new Error(
+    "native_sandbox_unavailable: NATIVE_SANDBOX_LAUNCHER=substrate needs this release's Substrate launcher.",
+  );
 }

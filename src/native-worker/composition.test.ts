@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { loadNativeSandboxConfig } from "../config/providers.js";
 import type { NativeRunProviders } from "../core/runner.js";
 import { buildNativeSandboxExecutor } from "./composition.js";
+import { FakeSubstrateApi } from "../providers/substrate/fake-api.js";
 import { FakeKubernetesApi } from "../providers/jobs/fake-kubernetes-api.js";
 import { NativeSandboxExecutor } from "./sandbox-executor.js";
 
@@ -39,7 +40,7 @@ describe("native sandbox configuration", () => {
 
   it("fails fast on a configuration that cannot work", () => {
     expect(() => loadNativeSandboxConfig({ NATIVE_SANDBOX_LAUNCHER: "podman" })).toThrow(
-      /must be "docker" or "kubernetes"/,
+      /must be "docker", "kubernetes" or "substrate"/,
     );
     expect(() => loadNativeSandboxConfig({ ...base, NATIVE_SANDBOX_WORKER_IMAGE: "" })).toThrow(
       /NATIVE_SANDBOX_WORKER_IMAGE is required/,
@@ -204,5 +205,101 @@ describe("native sandbox configuration", () => {
       });
     expect(build({})).toBeInstanceOf(NativeSandboxExecutor);
     expect(build({ JOB_LAUNCHER: "docker" })).toBeInstanceOf(NativeSandboxExecutor);
+  });
+});
+
+describe("native sandbox on Substrate", () => {
+  const GATEWAY_URL = "http://wardby-native-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/call";
+  const SUBSTRATE = {
+    NATIVE_SANDBOX_LAUNCHER: "substrate",
+    NATIVE_SANDBOX_WORKER_IMAGE: image,
+    NATIVE_GATEWAY_URL: GATEWAY_URL,
+    SUBSTRATE_API_URL: "https://api.ate-system.svc.cluster.local:443",
+    SUBSTRATE_TOKEN_FILE: "/var/run/secrets/substrate/token",
+    SUBSTRATE_ATESPACE: "wardby-runs",
+  };
+
+  it("reads the Substrate launcher with the shared SUBSTRATE_* connection", () => {
+    expect(loadNativeSandboxConfig(SUBSTRATE)).toEqual({
+      launcher: "substrate",
+      workerImage: image,
+      gatewayUrl: GATEWAY_URL,
+      cpus: 1,
+      memoryMb: 512,
+      pids: 128,
+      warmPoolSize: 0,
+      warmMaxAgeMs: 1_800_000,
+      goldenWaitSec: 60,
+      substrate: {
+        apiUrl: SUBSTRATE.SUBSTRATE_API_URL,
+        tokenFile: SUBSTRATE.SUBSTRATE_TOKEN_FILE,
+        atespace: "wardby-runs",
+        credentialsNamespace: "wardby-run-secrets",
+      },
+    });
+  });
+
+  it("uses the native worker selector over the shared one", () => {
+    const shared = { ...SUBSTRATE, SUBSTRATE_WORKER_SELECTOR: "pool=coding" };
+    expect(
+      (loadNativeSandboxConfig(shared) as { substrate: { workerSelector?: unknown } }).substrate.workerSelector,
+    ).toEqual({
+      pool: "coding",
+    });
+    const own = { ...shared, NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR: "pool=native" };
+    expect(
+      (loadNativeSandboxConfig(own) as { substrate: { workerSelector?: unknown } }).substrate.workerSelector,
+    ).toEqual({
+      pool: "native",
+    });
+    const bad = { ...shared, NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR: "novalue" };
+    expect(() => loadNativeSandboxConfig(bad)).toThrow(/NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR/);
+    expect(() => loadNativeSandboxConfig(bad)).not.toThrow(/novalue/);
+  });
+
+  const { SUBSTRATE_ATESPACE: _atespace, ...withoutAtespace } = SUBSTRATE;
+  const { NATIVE_GATEWAY_URL: _gateway, ...withoutGateway } = SUBSTRATE;
+  it.each([
+    ["a local image id", { ...SUBSTRATE, NATIVE_SANDBOX_WORKER_IMAGE: `sha256:${"a".repeat(64)}` }, /registry digest/],
+    ["no gateway URL", withoutGateway, /NATIVE_GATEWAY_URL is required/],
+    [
+      "an https gateway",
+      { ...SUBSTRATE, NATIVE_GATEWAY_URL: "https://gw.example:8790/native-gateway/v1/call" },
+      /http:\/\//,
+    ],
+    [
+      "an IPv4 gateway",
+      { ...SUBSTRATE, NATIVE_GATEWAY_URL: "http://10.0.0.7:8790/native-gateway/v1/call" },
+      /by hostname/,
+    ],
+    [
+      "an IPv6 gateway",
+      { ...SUBSTRATE, NATIVE_GATEWAY_URL: "http://[fd00::1]:8790/native-gateway/v1/call" },
+      /by hostname/,
+    ],
+    [
+      "a warm pool",
+      { ...SUBSTRATE, NATIVE_SANDBOX_WARM_POOL_SIZE: "1" },
+      /NATIVE_SANDBOX_WARM_POOL_SIZE.*NATIVE_SANDBOX_LAUNCHER=substrate/,
+    ],
+    [
+      "a golden wait over 600",
+      { ...SUBSTRATE, SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC: "601" },
+      /SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC/,
+    ],
+    ["no atespace", withoutAtespace, /SUBSTRATE_ATESPACE is required when NATIVE_SANDBOX_LAUNCHER=substrate\./],
+  ])("refuses %s", (_name, env, message) => {
+    expect(() => loadNativeSandboxConfig(env)).toThrow(message);
+  });
+
+  it("builds nothing yet and never falls back to Docker", () => {
+    expect(() =>
+      buildNativeSandboxExecutor({
+        db: {} as never,
+        providers: {} as NativeRunProviders,
+        env: SUBSTRATE,
+        substrateApi: new FakeSubstrateApi({ workers: 1 }),
+      }),
+    ).toThrow(/native_sandbox_unavailable/);
   });
 });

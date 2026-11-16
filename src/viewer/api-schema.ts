@@ -275,7 +275,7 @@ export const InfraInfoSchema = z.object({
   /** How sandbox-mode native agents run; null when NATIVE_SANDBOX_LAUNCHER is unset. */
   native: z
     .object({
-      launcher: z.enum(["docker", "kubernetes"]),
+      launcher: z.enum(["docker", "kubernetes", "substrate"]),
       /** Idle workers kept ready for runs to claim (0 = no pool). */
       warmPoolSize: z.number().int(),
       kubernetes: z

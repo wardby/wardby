@@ -153,7 +153,7 @@ export interface ConfiguredExecutorOptions {
   providerConfig?: ProviderConfig;
   /** Tests only: replaces the kubeconfig-backed client when JOB_LAUNCHER=kubernetes. */
   kubernetesApi?: KubernetesApi;
-  /** Tests only: replaces the gRPC client when JOB_LAUNCHER=substrate. */
+  /** The process's shared SubstrateApi (buildSharedSubstrateApi); built from the config when absent. */
   substrateApi?: SubstrateApi;
   /** Repository authorization for coding runs; built from the configured review hosts when absent. */
   repoAccess?: RepoAccessGate;
