@@ -30,7 +30,7 @@ import {
 import { rememberSecretValue } from "./stderr-redaction.js";
 import { runNativeWorker, type GatewayTransport } from "./worker.js";
 
-export const NATIVE_SUBSTRATE_ENV = "WARDBY_NATIVE_SUBSTRATE";
+export { NATIVE_SUBSTRATE_ENV } from "./protocol.js";
 
 export interface SubstrateModeOptions {
   env: NodeJS.ProcessEnv;

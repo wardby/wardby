@@ -20,6 +20,9 @@ import { overlapsSecretValue } from "../sandbox/host-functions.js";
 export { causeCodeOf, GATEWAY_CAUSE_CODES };
 
 export const NATIVE_WORKER_PROTOCOL_VERSION = 1;
+
+/** Set to "1" in a Substrate native actor's env: the worker runs in substrate mode (substrate-mode.ts). */
+export const NATIVE_SUBSTRATE_ENV = "WARDBY_NATIVE_SUBSTRATE";
 /** Above the sandbox's 12 MiB bridge-result cap, plus envelope. */
 export const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 

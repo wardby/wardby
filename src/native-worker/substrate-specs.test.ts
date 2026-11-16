@@ -77,6 +77,7 @@ describe("nativeEgress", () => {
       },
     ]);
     expect(gatewayTarget("http://gw.example/native-gateway/v1/call")).toEqual({ host: "gw.example", port: 80 });
+    expect(gatewayTarget("https://gw.example/native-gateway/v1/call")).toEqual({ host: "gw.example", port: 443 });
   });
 });
 

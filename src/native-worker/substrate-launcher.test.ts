@@ -246,6 +246,51 @@ describe("SubstrateNativeWorkerLauncher.launch", () => {
     expect(JSON.stringify(substrateWarn.mock.calls)).not.toContain(FAKE_NATIVE_CAP);
   });
 
+  it("fails at once for room when the template's golden snapshot is already ready", async () => {
+    const h = nativeHarness();
+    const template = nativeTemplate(h.config);
+    await h.api.ensureActorTemplate(template);
+    h.api.setGoldenSnapshotReady(h.config.atespace, template.name, true);
+    h.api.failNext("resumeActor", () => new SubstrateExhaustedError("x"), 100);
+    await expect(h.launcher.launch(h.input())).rejects.toThrow(CAPACITY);
+    expect(h.order.filter((c) => c === "resumeActor")).toHaveLength(1);
+    expect(h.sleeps).toEqual([]);
+    expectNothingLeft(h);
+  });
+
+  it("abandons a run that ended during the golden wait", async () => {
+    const h = nativeHarness();
+    h.api.failNext("resumeActor", () => new SubstrateExhaustedError("x"), 100);
+    let checks = 0;
+    const err = (await h.launcher
+      .launch(h.input(), { stillWanted: async () => ++checks === 1 })
+      .catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(new RegExp(`^${NATIVE_SANDBOX_LAUNCH_ABANDONED}: `));
+    expect(h.order.filter((c) => c === "resumeActor")).toHaveLength(1);
+    expectNothingLeft(h);
+  });
+
+  it("still deletes the Secret when its clean-up cannot delete the actor, and leaves the actor to remove", async () => {
+    const h = nativeHarness();
+    h.api.failNext("resumeActor", new SubstrateUnavailableError("quoting " + FAKE_NATIVE_CAP));
+    h.api.failNext("deleteActor", new SubstrateUnavailableError("quoting " + FAKE_NATIVE_CAP));
+    const err = (await h.launcher.launch(h.input()).catch((e: unknown) => e)) as Error;
+    // The launch's own failure is the run error; the clean-up's is reported.
+    expect(err.message).toBe("native_sandbox_substrate_failed: resumeActor: substrate_unavailable");
+    expect(h.secrets.secrets.has(h.secretKey)).toBe(false);
+    // Policy first: an actor with no policy is offline (Substrate's egress is default-deny).
+    expect(h.api.egressPolicies.has(h.actorKey)).toBe(false);
+    expect(h.api.actors.has(h.actorKey)).toBe(true);
+    expect(h.failures).toEqual([
+      { runId: "run-1", substrateCall: "resumeActor", errorCode: "substrate_unavailable" },
+      { runId: "run-1", substrateCall: "deleteActor", errorCode: "substrate_unavailable" },
+    ]);
+    expect(JSON.stringify(h.failures)).not.toContain(FAKE_NATIVE_CAP);
+    // The ended session keeps workerRemovedAt null, so the executor's sweep calls remove (Task 6).
+    await h.launcher.remove("run-1");
+    expectNothingLeft(h);
+  });
+
   it("abandons a run that ended while waking", async () => {
     const ensureAwake = vi.fn(async () => {});
     const h = nativeHarness({ power: fakePower(ensureAwake) });
@@ -331,12 +376,44 @@ describe("SubstrateNativeWorkerLauncher state", () => {
     await failing.launcher.launch(failing.input());
     failing.api.failNext("deleteActor", new SubstrateUnavailableError("quoting " + FAKE_NATIVE_CAP));
     const err = (await failing.launcher.remove("run-1").catch((e: unknown) => e)) as Error;
+    // remove rejects, so the executor leaves workerRemovedAt null and the sweep retries (Task 6).
     expect(err.message).toBe("native_sandbox_substrate_failed: deleteActor: substrate_unavailable");
+    expect(err.message).not.toContain(FAKE_NATIVE_CAP);
+    // Policy first: an actor with no policy is offline (Substrate's egress is default-deny).
     expect(failing.api.egressPolicies.has(failing.actorKey)).toBe(false);
+    expect(failing.api.actors.has(failing.actorKey)).toBe(true);
+    // The Secret goes even though the actor did not.
     expect(failing.secrets.secrets.has(failing.secretKey)).toBe(false);
     expect(failing.failures).toEqual([
       { runId: "run-1", substrateCall: "deleteActor", errorCode: "substrate_unavailable" },
     ]);
+    // The sweep's retry finishes the job.
+    await failing.launcher.remove("run-1");
+    expectNothingLeft(failing);
+  });
+
+  it("rejects a failed kill with a fixed code and reports it", async () => {
+    const h = nativeHarness();
+    h.api.failNext("deleteActor", new SubstrateUnavailableError("quoting " + FAKE_NATIVE_CAP));
+    await expect(h.launcher.kill("run-1")).rejects.toThrow(
+      /^native_sandbox_substrate_failed: deleteActor: substrate_unavailable$/,
+    );
+    expect(h.failures).toEqual([{ runId: "run-1", substrateCall: "deleteActor", errorCode: "substrate_unavailable" }]);
+  });
+
+  it("rejects with a fixed code when the session cannot be read", async () => {
+    const h = nativeHarness({
+      launcher: {
+        sessionActive: async () => {
+          throw new Error("prisma says " + FAKE_NATIVE_CAP);
+        },
+      },
+    });
+    await h.api.ensureActorTemplate(nativeTemplate(h.config));
+    await h.api.createActor(h.config.atespace, h.actor, nativeTemplate(h.config).name);
+    const err = (await h.launcher.inspect("run-1").catch((e: unknown) => e)) as Error;
+    expect(err.message).toBe("native_sandbox_substrate_failed: sessionActive: unexpected");
+    expect(err.cause).toBeUndefined();
   });
 
   it("start ensures the template in the background, and launch waits for it", async () => {

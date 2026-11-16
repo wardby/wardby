@@ -16,7 +16,9 @@
  * launch (`networkReadyAtLaunch`, D1): nothing runs in the actor before its egress is pinned (the
  * canary, Task 7, proves the template's denials once per template). A resume refused for room is
  * retried while the template's golden snapshot may still be building (`goldenWaitMs` after its first
- * ensure); past that it is native_sandbox_capacity. Any failure deletes what the launch made.
+ * ensure by this process, unless Substrate reports it ready); past that it is native_sandbox_capacity.
+ * Any failure deletes what the launch made; a delete that fails there is reported, and the ended
+ * session (workerRemovedAt still null) leads the executor's sweep to `remove` it.
  *
  * Nothing per run is in the template (it is shared by every run and snapshotted before any run
  * exists), and nothing secret is in the template or the policy (Substrate logs both). Run errors
@@ -103,9 +105,15 @@ class NamedCallFailed extends Error {
 /** No worker has room (the pre-check, or a resume refused past the golden window). */
 class NoRoom extends Error {}
 
+const ABANDONED_MESSAGE = `${NATIVE_SANDBOX_LAUNCH_ABANDONED}: the run ended while its worker was launching; no worker was started.`;
+
+/** The run ended while the launch waited for room. */
+class Abandoned extends Error {}
+
 /** The run error for a failed launch: a fixed code and enums, never a message from Substrate or Kubernetes. */
 function launchError(error: unknown): Error {
   if (error instanceof NoRoom) return new Error(CAPACITY_MESSAGE);
+  if (error instanceof Abandoned) return new Error(ABANDONED_MESSAGE);
   if (error instanceof NamedCallFailed) {
     // A Kubernetes error is never a Substrate one, so a Secret failure is always `unexpected`.
     return new Error(`${NATIVE_SANDBOX_SUBSTRATE_FAILED}: ${error.call}: ${substrateErrorCode(error.original)}`);
@@ -120,7 +128,10 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
 
   private readonly template: ActorTemplateSpec;
   private readonly power: Power;
-  /** When each template was first ensured by this process: its golden snapshot may build until goldenWaitMs after. */
+  /**
+   * When each template was first ensured by this process: its golden snapshot may build until
+   * goldenWaitMs after. -Infinity once Substrate reports the snapshot ready (no wait).
+   */
   private readonly firstEnsuredAt = new Map<string, number>();
   private preparing: Promise<void> | undefined;
 
@@ -177,9 +188,9 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
   /** Ensures the template; a golden-failed one is recreated, and its golden window starts again. */
   private async ensure(call: NamedCall): Promise<void> {
     const info = await ensureTemplate(this.api, this.template, call);
-    if (info?.goldenSnapshotFailed || !this.firstEnsuredAt.has(this.template.name)) {
-      this.firstEnsuredAt.set(this.template.name, this.now());
-    }
+    const name = this.template.name;
+    if (info?.goldenSnapshotReady) this.firstEnsuredAt.set(name, Number.NEGATIVE_INFINITY);
+    else if (info?.goldenSnapshotFailed || !this.firstEnsuredAt.has(name)) this.firstEnsuredAt.set(name, this.now());
   }
 
   /** Ensures the template (and, Task 7, runs the canary); a failure is logged with fixed fields only. */
@@ -221,9 +232,7 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     }
     // A wake can take minutes: a run stopped meanwhile gets no actor.
     if (launchOptions.stillWanted && !(await launchOptions.stillWanted())) {
-      throw new Error(
-        `${NATIVE_SANDBOX_LAUNCH_ABANDONED}: the run ended while its worker was launching; no worker was started.`,
-      );
+      throw new Error(ABANDONED_MESSAGE);
     }
     // Never race the background ensure (start).
     if (this.preparing) await this.preparing;
@@ -243,9 +252,9 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
       await call("putEgressPolicy", () =>
         this.api.putEgressPolicy(this.atespace, actor, nativeEgress(token, this.options.config)),
       );
-      await this.resume(runId, actor, call);
+      await this.resume(runId, actor, call, launchOptions.stillWanted);
     } catch (error) {
-      await this.cleanUp(token, actor, { secret: secretMade, actor: actorMade });
+      await this.cleanUp(runId, token, actor, { secret: secretMade, actor: actorMade });
       throw launchError(error);
     }
     return this.handleFor(runId, (code) => this.logExit(runId, code));
@@ -288,9 +297,15 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
   /**
    * Resumes the actor. Refused for room while the template's golden snapshot may still be building
    * (goldenWaitMs after its first ensure): retried every retryMs, rechecking the template each time
-   * (a golden build that failed for good ends the wait). Past the window: no room.
+   * (a golden build that failed for good ends the wait, and so does a run that ended). Past the
+   * window: no room.
    */
-  private async resume(runId: string, actor: string, call: NamedCall): Promise<void> {
+  private async resume(
+    runId: string,
+    actor: string,
+    call: NamedCall,
+    stillWanted?: () => Promise<boolean>,
+  ): Promise<void> {
     const exhausted = (error: unknown) => error instanceof SubstrateExhaustedError;
     for (;;) {
       try {
@@ -304,6 +319,7 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
           throw new NoRoom();
         }
       }
+      if (stillWanted && !(await stillWanted())) throw new Abandoned();
       await this.sleep(this.options.retryMs ?? 2_000);
       await call("getActorTemplate", async () => {
         const info = await this.api.getActorTemplate(this.atespace, this.template.name);
@@ -313,13 +329,57 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     }
   }
 
-  /** Best effort: the policy, the actor, the Secret, each as far as the launch got. */
-  private async cleanUp(token: string, actor: string, made: { secret: boolean; actor: boolean }): Promise<void> {
-    if (made.actor) {
-      await this.api.deleteEgressPolicy(this.atespace, actor).catch(() => {});
-      await this.api.deleteActor(this.atespace, actor).catch(() => {});
+  /**
+   * Best effort: the policy, the actor, the Secret, each as far as the launch got, every one tried
+   * even when an earlier one fails. A failure is reported, never thrown: the launch's own error is
+   * the run's, and the executor ends the session with workerRemovedAt null, so its sweep calls
+   * `remove` for whatever is left.
+   */
+  private async cleanUp(
+    runId: string,
+    token: string,
+    actor: string,
+    made: { secret: boolean; actor: boolean },
+  ): Promise<void> {
+    await this.deleteAll(runId, this.removalSteps(token, actor, made)).catch(() => {});
+  }
+
+  /**
+   * The deletes for a run, in order. The policy goes before the actor: Substrate's egress is
+   * default-deny, so an actor whose actor delete fails after its policy is gone is offline, not open.
+   */
+  private removalSteps(
+    token: string,
+    actor: string,
+    made: { secret: boolean; actor: boolean } = { secret: true, actor: true },
+  ): [NativeSubstrateCall, () => Promise<void>][] {
+    return [
+      ...(made.actor
+        ? ([
+            ["deleteEgressPolicy", () => this.api.deleteEgressPolicy(this.atespace, actor)],
+            ["deleteActor", () => this.api.deleteActor(this.atespace, actor)],
+          ] as [NativeSubstrateCall, () => Promise<void>][])
+        : []),
+      ...(made.secret
+        ? ([["deleteSecret", () => this.deleteSecret(token)]] as [NativeSubstrateCall, () => Promise<void>][])
+        : []),
+    ];
+  }
+
+  /** Runs every step; each failure is reported with fixed fields; the first is thrown as a fixed code. */
+  private async deleteAll(runId: string, steps: [NativeSubstrateCall, () => Promise<void>][]): Promise<void> {
+    let first: Error | undefined;
+    for (const [name, step] of steps) {
+      try {
+        await step();
+      } catch (error) {
+        // A Kubernetes error is never a Substrate one: a Secret failure is `unexpected`.
+        const errorCode = substrateErrorCode(error);
+        this.report({ runId, substrateCall: name, errorCode });
+        first ??= new Error(`${NATIVE_SANDBOX_SUBSTRATE_FAILED}: ${name}: ${errorCode}`);
+      }
     }
-    if (made.secret) await this.deleteSecret(token).catch(() => {});
+    if (first) throw first;
   }
 
   private async deleteSecret(token: string): Promise<void> {
@@ -367,12 +427,19 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     }
     if (!info) return { state: "missing" };
     if (info.state === "CRASHED") return { state: "exited", exitCode: 1 };
+    let active: boolean;
+    try {
+      active = await this.options.sessionActive(runId);
+    } catch {
+      // A fixed code, like getActor's: the database's message never reaches the executor's log.
+      throw new Error(`${NATIVE_SANDBOX_SUBSTRATE_FAILED}: sessionActive: unexpected`);
+    }
     // The worker idles after its finish: an ended session is its exit.
-    if (!(await this.options.sessionActive(runId))) return { state: "exited", exitCode: 0 };
+    if (!active) return { state: "exited", exitCode: 0 };
     return { state: "running" };
   }
 
-  /** Deletes the actor (its policy goes with it). */
+  /** Deletes the actor, which stops it at once; `remove` (which always follows) deletes its policy and Secret. */
   async kill(runId: string): Promise<void> {
     const actor = nativeActorName(substrateRunToken(runId));
     try {
@@ -386,26 +453,14 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     }
   }
 
-  /** The policy, the actor and the Secret; each missing one is success. All three are tried; the first failure is thrown. */
+  /**
+   * The policy, the actor and the Secret (see removalSteps for the order); each missing one is
+   * success. All three are tried, so a failed actor delete still deletes the Secret, and the first
+   * failure is thrown: the executor then leaves workerRemovedAt null and its sweep tries again.
+   */
   async remove(runId: string): Promise<void> {
     const token = substrateRunToken(runId);
-    const actor = nativeActorName(token);
-    const steps: [NativeSubstrateCall, () => Promise<void>][] = [
-      ["deleteEgressPolicy", () => this.api.deleteEgressPolicy(this.atespace, actor)],
-      ["deleteActor", () => this.api.deleteActor(this.atespace, actor)],
-      ["deleteSecret", () => this.deleteSecret(token)],
-    ];
-    let first: Error | undefined;
-    for (const [name, step] of steps) {
-      try {
-        await step();
-      } catch (error) {
-        const errorCode = substrateErrorCode(error);
-        this.report({ runId, substrateCall: name, errorCode });
-        first ??= new Error(`${NATIVE_SANDBOX_SUBSTRATE_FAILED}: ${name}: ${errorCode}`);
-      }
-    }
-    if (first) throw first;
+    await this.deleteAll(runId, this.removalSteps(token, nativeActorName(token)));
   }
 
   /** No actor list in our SubstrateApi: always empty (the executor sweeps from session rows). */

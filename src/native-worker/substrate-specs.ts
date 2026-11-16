@@ -20,7 +20,7 @@ import {
   sortedSelector,
   toSize,
 } from "../providers/substrate/templates.js";
-import { NATIVE_SUBSTRATE_ENV } from "./substrate-mode.js";
+import { NATIVE_SUBSTRATE_ENV } from "./protocol.js";
 
 export interface NativeSubstrateLaunchConfig {
   atespace: string;
@@ -43,10 +43,10 @@ export const NATIVE_RUN_SECRET_KEY = "capability";
 /** The label every per-run native Secret carries (value: the run token), for a sweep to find them. */
 export const NATIVE_RUN_SECRET_LABEL = "wardby.dev/substrate-native-run";
 
-/** The gateway's hostname and port from NATIVE_GATEWAY_URL (port 80 when the URL has none). */
+/** The gateway's hostname and port from NATIVE_GATEWAY_URL (the scheme's default when the URL has none). */
 export function gatewayTarget(gatewayUrl: string): { host: string; port: number } {
   const url = new URL(gatewayUrl);
-  return { host: url.hostname, port: url.port ? Number(url.port) : 80 };
+  return { host: url.hostname, port: url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80 };
 }
 
 /** The worker's whole environment: substrate mode, and where the gateway is. Never a secret or a run value. */
