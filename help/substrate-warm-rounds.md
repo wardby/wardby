@@ -47,6 +47,8 @@ Rounds with git history always start fresh: a round of an agent with
 never resumes. See [Git history](git-history.md).
 
 A round with extra repositories is never kept; the next round starts fresh.
+A run with coding services is never kept either: the next round starts fresh,
+with empty services.
 
 ## Did the next round resume?
 

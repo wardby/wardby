@@ -7,9 +7,11 @@ the agent's owner says which ones the agent may use. Every run gets its own
 fresh, empty instance, and the run's sandbox and network policy do not change.
 
 Services work on the Kubernetes job launcher (`JOB_LAUNCHER=kubernetes`,
-running Kubernetes 1.29 or later, which its native sidecars need) and on the
-Docker job launcher (`JOB_LAUNCHER=docker`), for Codex and Claude Code agents
-on both; see [coding-worker-isolation.md](coding-worker-isolation.md). A run
+running Kubernetes 1.29 or later, which its native sidecars need), on the
+Docker job launcher (`JOB_LAUNCHER=docker`) and on the experimental Substrate
+job launcher (`JOB_LAUNCHER=substrate`), for Codex and Claude Code agents on
+all three; see [coding-worker-isolation.md](coding-worker-isolation.md) and
+[On the Substrate job launcher](#on-the-substrate-job-launcher). A run
 whose agent allows at least one service is refused if its repository declares
 one and the deployment can't start services (for example
 `JOB_LAUNCHER=local`) — an agent that allows none never reads the declaration
@@ -30,8 +32,10 @@ committed `.wardby/services.yaml` at the base ref, never from the working tree.
 3. The run starts each service before anything else in the run. On
    Kubernetes each is a native sidecar in the run's pod (an init container
    with `restartPolicy: Always`, which needs Kubernetes 1.29 or later). On
-   Docker each is its own container sharing the run's network namespace. The
-   coding agent does not start until every service reports ready.
+   Docker each is its own container sharing the run's network namespace. On
+   Substrate each is a container in the run's workspace actor (see
+   [below](#on-the-substrate-job-launcher)). The coding agent does not start
+   until every service reports ready.
 4. The agent's shells receive each service's variables (such as
    `DATABASE_URL`), and its instructions gain a short note listing the services,
    their variables, and that they start empty. Claude Code runs work the same
@@ -41,10 +45,75 @@ committed `.wardby/services.yaml` at the base ref, never from the working tree.
    sidecars, and the keeper and the agent wait for every service to be ready;
    on Docker the tool runner and the agent are created only after every
    service is ready.
-5. When the run ends, its pod (Kubernetes) or its containers (Docker) are
-   deleted, and each service and its data go with them.
+5. When the run ends, its pod (Kubernetes), its containers (Docker) or its
+   actors (Substrate) are deleted, and each service and its data go with them.
 
 `get_run` lists a run's services, for example `"services": ["postgres 16"]`.
+
+### On the Substrate job launcher
+
+On the experimental Substrate launcher (see
+[substrate-backend.md](substrate-backend.md#coding-services)), each service is
+a container in the run's workspace actor: the tool actor for Claude Code, or
+the Codex actor. The agent's shells reach it on `127.0.0.1` and receive the
+same variables as on the other launchers.
+
+- **Image and command.** The container runs the entry's `substrateImage` when
+  it has one, otherwise its `image`. Substrate does not run the image's own
+  entrypoint: once the run begins, a wardby start script exports the entry's
+  `serviceEnv` and runs its `startCommand`. The image needs `/bin/sh` with
+  `sleep` (`timeout` is used when present), so a distroless image cannot run
+  there.
+- **User.** The container runs as the image's default user, with almost no
+  Linux capabilities. An entrypoint that changes file ownership (`chown`) or
+  switches user (`gosu`, `su-exec`) fails, which is why the official postgres
+  and mysql images cannot start there. On Substrate, use an image whose
+  default user is non-root and start the server directly; see
+  [Custom entries on Substrate](#custom-entries-on-substrate).
+- **Isolation.** A service sees only its own data directory and script
+  directory, never the workspace. Its root filesystem is writable, but what it
+  writes there (outside `dataPath`) counts against the actor's memory.
+- **No restart.** A service that exits during a run is not restarted; the
+  run's tests see it gone.
+- **Readiness.** Each entry's readiness settings apply within
+  `SUBSTRATE_STARTUP_TIMEOUT_SEC`. A service that writes no progress within
+  30 seconds of its start (no `/bin/sh` in the image, say) fails at once. For
+  an entry with `substrateImage`, readiness passes only when the readiness
+  command succeeds **and** the entry's start command has written its setup-done
+  file (see below).
+- **First runs.** The first run of a new combination of workspace image and
+  services also waits in the queue while Substrate pulls the images and builds
+  that template's golden snapshot; later runs reuse it.
+- **Size.** The workspace actor's CPU and memory include every service's: its
+  catalog CPU, and as memory its catalog memory plus its disk (`diskMib`) plus
+  64 MiB for each writable path plus 64 MiB, the same formula as on Docker,
+  because files a service writes outside its data volume count against memory.
+  `diskMib` is not enforced as a disk limit, and no service has a CPU or memory
+  limit of its own inside the actor.
+- **Warm rounds.** A run with services is never kept between
+  [warm rounds](substrate-backend.md#warm-rounds); the next round starts fresh,
+  with empty services.
+- **Network.** On Substrate, a service container shares its workspace actor's
+  network access to the coding proxy, so a service image can send the same
+  requests repository code in that actor can; use only service images you trust
+  as much as the code your agents run.
+
+The built-in entries are set up for Substrate already: `postgres` 15, 16 and 17
+run CloudNativePG's PostgreSQL image, `mysql` 8 runs Percona Server 8.4 with
+its telemetry off, and `redis` 7 runs the catalog's redis image, started
+directly. Docker and Kubernetes keep the official images.
+
+#### Differences between launchers
+
+|                            | Kubernetes                    | Docker                   | Substrate                        |
+| -------------------------- | ----------------------------- | ------------------------ | -------------------------------- |
+| Service exits during a run | restarted                     | not restarted            | not restarted                    |
+| Runs as                    | uid 10001                     | uid 10001                | the image's default user         |
+| Image                      | `image`                       | `image`                  | `substrateImage`, else `image`   |
+| Disk limit (`diskMib`)     | enforced                      | enforced (memory-backed) | not enforced (counted in memory) |
+| `startCommand`             | ignored                       | ignored                  | required                         |
+| Start-up bound             | `KUBERNETES_READY_TIMEOUT_MS` | 120 seconds, fixed       | `SUBSTRATE_STARTUP_TIMEOUT_SEC`  |
+| Warm rounds                | n/a                           | n/a                      | never kept                       |
 
 ## Declaring services in a repository
 
@@ -97,8 +166,8 @@ caller's principal id).
 
 | Tool                                 | What it does                                                                              |
 | ------------------------------------ | ----------------------------------------------------------------------------------------- |
-| `list_services` (`agents:read`)      | Every entry: name, version, image, whether it is built in.                                |
-| `get_service` (`agents:read`)        | One entry in full, including `testEnv`, the variables a run's shells receive.             |
+| `list_services` (`agents:read`)      | Every entry: name, version, image, `substrateImage` when set, whether it is built in.     |
+| `get_service` (`agents:read`)        | One entry in full, including `testEnv`, `startCommand` and `substrateImage`.              |
 | `create_service` (`services:manage`) | Adds an entry. The image must be pinned by digest (`repo@sha256:...`).                    |
 | `update_service` (`services:manage`) | Changes an entry that is not built in. Runs already dispatched keep what they began with. |
 | `delete_service` (`services:manage`) | Removes an entry that is not built in.                                                    |
@@ -117,6 +186,8 @@ An entry has:
 | `resources`       | CPU (millicores), memory (MiB) and disk (MiB). Requests equal limits.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `dataPath`        | The directory the service writes its data to; an empty volume in every run (memory-backed on Docker).                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `writablePaths`   | Other directories the image writes to (a socket directory, `/tmp`). The service's root filesystem is read-only.                                                                                                                                                                                                                                                                                                                                                                                             |
+| `startCommand`    | The argv that starts the service, its image's ENTRYPOINT + CMD, or for an entry with `substrateImage` a setup script (see [Custom entries on Substrate](#custom-entries-on-substrate)). At most 16 arguments, each one line of at most 4096 bytes. Required on the Substrate launcher; ignored by Docker and Kubernetes.                                                                                                                                                                                    |
+| `substrateImage`  | Optional. An image pinned by registry digest (`repo@sha256:<64 hex>`) that the Substrate launcher runs instead of `image`. Requires `startCommand`. Docker and Kubernetes ignore it.                                                                                                                                                                                                                                                                                                                        |
 
 ### Built-in services
 
@@ -131,7 +202,7 @@ change only with a wardby release and cannot be updated or deleted over MCP.
 
 The credentials are fixed test values, visible to anyone who can read the
 catalog: each instance exists only inside one run's pod and is reachable only
-from it. Never put a real secret in `serviceEnv` or `testEnv`.
+from it. Never put a real secret in `serviceEnv`, `testEnv` or `startCommand`.
 
 ### Adding your own entry
 
@@ -164,8 +235,9 @@ limits):
 }
 ```
 
-The image runs as the run pod's non-root user with a read-only root
-filesystem and no Linux capabilities, so list every directory it writes to.
+On Kubernetes and Docker the image runs as the run pod's non-root user with a
+read-only root filesystem and no Linux capabilities, so list every directory it
+writes to.
 Probe the service over TCP on `127.0.0.1` rather than a Unix socket: database
 images commonly start a temporary socket-only server while they initialize.
 
@@ -173,6 +245,52 @@ On the Docker launcher, every directory the image declares as a `VOLUME` must
 be its `dataPath` or one of its `writablePaths`. Any other `VOLUME` would be an
 unbounded volume on the host's disk, so the run fails its isolation check
 instead.
+
+`startCommand` and `substrateImage` cannot be cleared with `update_service`:
+to remove one, delete the entry and create it again without it.
+
+### Custom entries on Substrate
+
+For the Substrate launcher an entry needs a `startCommand`; dispatch refuses a
+run whose entry has none (see [Errors](#errors)). If the entry's `image` starts
+its server directly as a non-root user, `startCommand` is just its ENTRYPOINT
+and CMD, for example `["redis-server", "--dir", "/data"]`.
+
+If the image's entrypoint changes ownership or switches user, as the official
+database images do, it cannot start on Substrate. Set `substrateImage` to an
+image whose default user is non-root and give a `startCommand` that
+initialises and runs the server itself. Its contract:
+
+- `startCommand` is required with `substrateImage` (that image's own
+  entrypoint is not used); the launcher refuses the entry otherwise.
+- The entry's `serviceEnv` is exported before the command runs; read the
+  values from the environment, never write them into the command.
+- Once setup is done (the database created, the users in place), the command
+  must create the file named by `$WARDBY_SERVICE_SETUP_DONE`, then keep the
+  server in the foreground. On Substrate such an entry is ready only when its
+  readiness command succeeds **and** that file exists; a command that never
+  creates it fails when its readiness threshold runs out.
+- Each argument is one line (use `;` between commands). The whole start
+  script, with the entry's environment, may be at most 16 KiB for one service
+  and 64 KiB for a run's services together, measured as JSON-escaped text; a
+  run over either is refused at dispatch.
+
+For example, the `postgres-postgis` entry above with a non-root PostGIS image
+for Substrate (shortened):
+
+```json
+{
+  "substrateImage": "registry.example.com/mirror/postgis-nonroot@sha256:<64 hex digits>",
+  "startCommand": [
+    "/bin/sh",
+    "-c",
+    "set -u; [ -s \"$PGDATA/PG_VERSION\" ] || initdb -D \"$PGDATA\" -U \"$POSTGRES_USER\" || exit 1; postgres -D \"$PGDATA\" -c listen_addresses=127.0.0.1 & pid=$!; until pg_isready -q -h 127.0.0.1; do sleep 1; done; createdb -h 127.0.0.1 -U \"$POSTGRES_USER\" \"$POSTGRES_DB\" || exit 1; : > \"$WARDBY_SERVICE_SETUP_DONE\"; wait \"$pid\""
+  ]
+}
+```
+
+Give a database enough memory for its idle size on top of its data: MySQL, for
+example, needs about 730 MiB idle.
 
 ## Allowing services for an agent
 
@@ -229,11 +347,24 @@ Protected-path entries also accept a leading `!` for your own exceptions:
 | The file couldn't be read                      | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."                                                                           |
 | A name and version the catalog doesn't have    | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                                                                                           |
 | A service the agent isn't allowed              | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                               |
-| Services on a deployment that can't start them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes or Docker job launcher."                                                   |
+| Services on a deployment that can't start them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes, Docker or Substrate job launcher."                                        |
+| A service this launcher can't start            | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for `<name>`, which this wardby deployment can't start: <reason>." (Substrate; reasons below)                                                                   |
 | A service never became ready                   | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |
 | The run's changes touched a protected path     | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change." |
 
 For a coding sub-agent of a sandboxed run, these refusals appear when the run starts instead of at dispatch, and the parent's delegation call receives the result.
+
+On the Substrate launcher, `<reason>` is one of:
+
+- "its service catalog entry has no start command": add a `startCommand` with
+  `update_service` (built-in entries have one);
+- "its service catalog entry's data path overlaps a directory the job launcher
+  reserves": the `dataPath` is `/run/wardby-svc`, inside it, or a parent of it
+  (such as `/run`); move it;
+- "its service catalog entry's environment and commands are too large for the
+  job launcher": the start script is over 16 KiB for the service or 64 KiB for
+  the run's services together; trim the entry's `serviceEnv` or
+  `startCommand`.
 
 A refused run's `error` (from `get_run`) is the code followed by that sentence.
 The sentence reaches the requester on the run's status comment and, for a
@@ -267,6 +398,14 @@ has one and otherwise pulls it without registry credentials. For a private
 registry, or to avoid public pull limits, pull the image on the Docker host
 beforehand (`docker pull <image>@sha256:<digest>`).
 
+On Substrate, a service is "not ready" when its readiness command keeps
+failing past its failure threshold, when it exits, when it writes no progress
+within 30 seconds of its start, when its image can't be pulled, or when the
+run's services are still not all ready within the entry's readiness settings,
+bounded by `SUBSTRATE_STARTUP_TIMEOUT_SEC` (default 300). The Substrate
+workers pull images themselves, without credentials from wardby; configure
+pull access on the worker nodes for a private registry.
+
 ## Cost and capacity
 
 Each service reserves its catalog resources for the whole run, on top of the
@@ -293,6 +432,12 @@ at its catalog entry's memory plus disk plus 64 MiB. A custom catalog entry's
 `resources` (`create_service`/`update_service`) is what sets those numbers, so
 review them before allowing a repository to declare more or larger services.
 
+On Substrate a run's services are sized into its workspace actor with the same
+memory formula as on Docker (catalog memory, plus disk, plus 64 MiB for each
+writable path, plus 64 MiB), on top of the run's own share, so size the
+WorkerPool for the worst case a repository could declare. The built-in `mysql`
+8 entry, for example, adds 3264 MiB.
+
 ## Upgrading an existing deployment
 
 `services:manage` is a new scope. If your deployment delegates to an
@@ -305,6 +450,19 @@ who maintain the catalog; see
 Existing agents are allowed no services until their owners add
 `codingProfile.services`, and every existing agent gets the `.wardby/`
 protected-path baseline without any change to its settings.
+
+### Services on the Substrate launcher
+
+This release adds the catalog fields `startCommand` and `substrateImage`
+(migrations `20261124000000_substrate_services`,
+`20261125000000_coding_service_substrate_image` and
+`20261127000000_builtin_service_setup_done`, applied with
+`prisma migrate deploy`). The migrations set both on the built-in entries;
+Docker and Kubernetes runs are unchanged. A custom entry needs a
+`startCommand` (set it with `update_service`), and a `substrateImage` too if
+its image's entrypoint changes ownership or switches user, before Substrate
+runs can use it; until then dispatch refuses them with
+`service_launcher_unsupported`.
 
 ### From 0.7.0: `YARN_*`, `PNPM_*` and `COREPACK_*` are reserved
 

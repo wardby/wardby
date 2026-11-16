@@ -77,10 +77,14 @@ Docker and Kubernetes ones.
   (`npm run prisma:migrate`) before the new coding proxy and control plane
   start. Upgrade in this order:
   1. Apply `20261121000000_substrate_codex_shape`,
-     `20261122000000_substrate_repositories` and
-     `20261123000000_substrate_templates`. The new proxy reads the
-     `repositories` column on every Substrate request, with or without extra
-     repositories, so a proxy started before it exists fails every run.
+     `20261122000000_substrate_repositories`,
+     `20261123000000_substrate_templates`,
+     `20261124000000_substrate_services`,
+     `20261125000000_coding_service_substrate_image` and
+     `20261127000000_builtin_service_setup_done`. The new proxy reads the
+     `repositories` and `services` columns on every Substrate request, with or
+     without extra repositories or services, so a proxy started before they
+     exist fails every run.
   2. Start the new coding proxy.
   3. Start the new control plane.
 - **Bridge images, custom images and the proxy from the same release.** Every
@@ -198,6 +202,8 @@ must arrive within ten minutes of being authenticated.
   Claude Code and Codex (see [Dependency cache](#dependency-cache)).
 - Custom worker images (`codingProfile.workerImageRef`), for Claude Code and
   Codex (see [Custom images](#custom-images)).
+- Coding services (`.wardby/services.yaml`), for Claude Code and Codex (see
+  [Coding services](#coding-services)).
 - Capacity: a run that cannot be placed because the WorkerPool has no room
   waits in the queue and is retried, like a quota refusal on Kubernetes.
 
@@ -337,6 +343,46 @@ in that store, next to the run files under `substrate/runs/`.
 - **Upgrade together.** The coding proxy, the tool runner images and the worker
   images must all be this release or later. An older tool runner on an adopted
   round still gets `reused_workspace`, from the proxy.
+
+### Coding services
+
+[Coding services](coding-services.md) run on Substrate for Claude Code and
+Codex. Each service is a container in the run's workspace actor (the tool
+actor, or the Codex actor), started by a wardby script after the run begins;
+the agent actor of a Claude Code run resumes only once every service is ready.
+The agent's shells receive the same variables as on the other launchers.
+
+- **Start command.** Substrate does not run an image's own entrypoint, so every
+  catalog entry a run uses needs a `startCommand`; dispatch refuses a run whose
+  entry has none with `service_launcher_unsupported`. The built-in entries
+  have one.
+- **Images.** A service runs as its image's default user with almost no Linux
+  capabilities, so an entrypoint that changes ownership or switches user
+  fails. A catalog entry's optional `substrateImage` names another image, by
+  registry digest, for Substrate only. The built-in `postgres` entries run
+  CloudNativePG's PostgreSQL image, `mysql` 8 runs Percona Server 8.4 (with its
+  telemetry off), and `redis` 7 runs the catalog's redis image, started
+  directly. Docker and Kubernetes keep the official images. A custom entry with
+  `substrateImage` must create `$WARDBY_SERVICE_SETUP_DONE` once its setup is
+  done; see
+  [Custom entries on Substrate](coding-services.md#custom-entries-on-substrate).
+- **Sizing.** The workspace actor is sized with its services on top of the
+  run's own share: each service's catalog CPU, and as memory its catalog
+  memory, disk and writable paths, the same formula as on Docker, because files
+  a service writes outside its data volume count against the actor's memory.
+  Each new combination of workspace image and services is its own template,
+  so its first run waits for a golden snapshot.
+- **Start-up bound.** The services' readiness is bounded by their readiness
+  settings and `SUBSTRATE_STARTUP_TIMEOUT_SEC`. A run whose service never
+  becomes ready fails with
+  [`service_unready`](../help/errors/service-unready.md)
+  (`coding_service_unready:<name>`).
+- **Warm rounds.** A run with services is never kept (see
+  [When a round starts fresh](#when-a-round-starts-fresh)).
+
+The details (what a service sees, the network note, the setup-done contract,
+the differences between launchers) are in
+[On the Substrate job launcher](coding-services.md#on-the-substrate-job-launcher).
 
 ### Custom images
 
@@ -532,7 +578,9 @@ A round whose branch preparation merged the target branch into the working
 branch (a pull request whose base moved) also starts fresh, because the kept
 workspace lacks that merge; it writes no step line. A round with extra
 repositories always starts fresh too, and writes no step line (the launcher
-records no start reason for it).
+records no start reason for it). A run with coding services is never kept;
+the next round starts fresh, with empty services (see
+[Diagnostics](#diagnostics)).
 
 ### What is kept and what is removed
 
@@ -599,16 +647,20 @@ output by exact value (the capability and its placeholder) before it reaches
 the actor's own log, and the proxy redacts the tail again before logging it.
 The bridges also redact the placeholder for the run's MCP token.
 
+When a run with coding services reaches the keep step, the control plane logs
+`substrate_warm_removed` with reason `services` and removes its actors.
+
 ## What is not supported
 
-A run that needs one of these fails at launch with
-[`substrate_feature_unsupported`](../help/errors/substrate-feature-unsupported.md).
-Use the Docker or Kubernetes launcher for them.
-
-- Coding services (`.wardby/services.yaml`).
 - Suspend and resume between rounds is off by default: every round starts new
   actors, as on the other launchers. Turn it on with
   [warm rounds](#warm-rounds).
+- A coding service whose catalog entry Substrate cannot start (no
+  `startCommand`, a `dataPath` that overlaps `/run/wardby-svc`, or a start
+  script over its size limit). Dispatch refuses such a run with
+  [`service_launcher_unsupported`](../help/errors/service-launcher-unsupported.md);
+  a run that reaches the launcher anyway fails with
+  [`substrate_feature_unsupported`](../help/errors/substrate-feature-unsupported.md).
 
 ## Troubleshooting
 
@@ -656,6 +708,12 @@ Known recovery steps:
   be pulled by the workers, or already uses port 8080 (the bridge's readiness
   probe). See
   [`substrate_image_unready`](../help/errors/substrate-image-unready.md).
+- **A run with services fails with `service_unready`.** The workspace actor's
+  log has `substrate_bridge_service_unready` with the service's name and a
+  reason: `start_failed` (no `/bin/sh` in the image, or it never started),
+  `exited` (a wrong `startCommand`, or an entrypoint that needs root),
+  `probe_failed` (the readiness command kept failing) or `timed_out`. See
+  [`service_unready`](../help/errors/service-unready.md).
 - **`substrate_bridge_incompatible`.** The image's bridge is from another
   release than the coding proxy. Rebuild the image on this release's bridge,
   and use the bridge images of the same release as the proxy.

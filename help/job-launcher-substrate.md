@@ -3,7 +3,19 @@ id: job-launcher-substrate
 title: Run coding agents on Substrate (experimental)
 summary: JOB_LAUNCHER=substrate runs Claude Code coding runs as two gVisor-sandboxed Agent Substrate actors, and Codex runs as one, with no Wardby secret inside; requirements, variables, limits and how it compares with the Docker and Kubernetes launchers.
 audience: operator
-tags: [substrate, job launcher, dependency-cache, JOB_LAUNCHER, experimental, codex, repositories, multi repository]
+tags:
+  [
+    substrate,
+    job launcher,
+    dependency-cache,
+    JOB_LAUNCHER,
+    experimental,
+    codex,
+    repositories,
+    multi repository,
+    services,
+    startCommand,
+  ]
 appliesTo: ">=0.9.15"
 ---
 
@@ -22,7 +34,10 @@ reach is the coding proxy.
 
 - your cluster already runs Substrate 1.0 or later (GKE Standard, not
   Autopilot) and you want its isolation and credential-free actors;
-- your coding agents are Claude Code or Codex, without coding services.
+- your coding agents are Claude Code or Codex. Coding services work too: each
+  catalog entry a run uses needs a `startCommand` (built-in entries have one);
+  see the `coding-services` help article and
+  [On the Substrate job launcher](../docs/coding-services.md#on-the-substrate-job-launcher).
 
 Otherwise use `kubernetes` (or `docker`): they support every coding feature. A
 run that needs a feature the Substrate backend lacks fails with
@@ -119,6 +134,18 @@ The dependency cache works as on Kubernetes; an adopted warm round skips it
 (`reused_workspace`). See [dependency-cache](dependency-cache.md) and the
 [Substrate backend guide](../docs/substrate-backend.md#dependency-cache).
 
+## Coding services
+
+Coding services (`.wardby/services.yaml`) work for Claude Code and Codex: each
+service is a container in the run's workspace actor, and the agent starts only
+once every service is ready. Substrate runs each service from its catalog
+entry's `startCommand` as the image's default user, so the built-in postgres
+and mysql entries carry a non-root `substrateImage` for Substrate (Docker and
+Kubernetes keep the official images). The actor is sized with the services'
+CPU and memory, and a run with services is never kept between warm rounds. See
+the `coding-services` help article and
+[On the Substrate job launcher](../docs/coding-services.md#on-the-substrate-job-launcher).
+
 ## Warm rounds
 
 With `SUBSTRATE_WARM_ROUNDS=true` a finished round is kept suspended and the
@@ -143,8 +170,12 @@ See [Warm rounds on Substrate](substrate-warm-rounds.md).
   `SUBSTRATE_WORKSPACE_MAX_MB`).
 - [substrate_result_missing](errors/substrate-result-missing.md): the run ended
   without a usable result.
-- [substrate_feature_unsupported](errors/substrate-feature-unsupported.md): the
-  run needs services.
+- [substrate_feature_unsupported](errors/substrate-feature-unsupported.md): a
+  service's catalog entry cannot start on Substrate (dispatch normally refuses
+  it first, with
+  [service_launcher_unsupported](errors/service-launcher-unsupported.md)).
+- [service_unready](errors/service-unready.md): a coding service never became
+  ready (`coding_service_unready:<name>`).
 - [substrate_image_unready](errors/substrate-image-unready.md): a template's
   golden snapshot failed twice, or no actor ever started from it (often a
   custom image without the bridge).
