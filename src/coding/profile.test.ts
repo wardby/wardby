@@ -33,6 +33,8 @@ describe("CodingProfileSchema", () => {
       claudeBareMode: true,
       dependencyCache: false,
       sessionResume: false,
+      planDocument: null,
+      buildFromPlan: false,
     });
   });
 
@@ -275,5 +277,36 @@ describe("gitHistory (#536)", () => {
       gitHistory: { depth: "full" },
     });
     expect(CodingProfilePatchSchema.safeParse({ gitHistory: { depth: 0 } }).success).toBe(false);
+  });
+});
+
+describe("planDocument", () => {
+  const base = { repository: "o/r" };
+  it("defaults to no plan document and buildFromPlan false", () => {
+    const parsed = CodingProfileSchema.parse(base);
+    expect(parsed.planDocument).toBeNull();
+    expect(parsed.buildFromPlan).toBe(false);
+  });
+  it("accepts store wardby with reviewers, and store repository with a {n} folder", () => {
+    expect(
+      CodingProfileSchema.parse({ ...base, planDocument: { store: "wardby", reviewers: ["p1"] } }).planDocument,
+    ).toEqual({ store: "wardby", reviewers: ["p1"], onApproved: "notify" });
+    expect(
+      CodingProfileSchema.parse({
+        ...base,
+        planDocument: { store: "repository", path: "docs/plans/issue-{n}/", reviewers: ["p1"] },
+      }).planDocument?.path,
+    ).toBe("docs/plans/issue-{n}/");
+  });
+  it.each([
+    { store: "repository", reviewers: ["p1"] },
+    { store: "repository", path: "docs/plans/", reviewers: ["p1"] },
+    { store: "repository", path: "docs/{n}/{n}/", reviewers: ["p1"] },
+    { store: "repository", path: "../{n}/", reviewers: ["p1"] },
+    { store: "wardby", reviewers: [] },
+    { store: "wardby", reviewers: Array.from({ length: 51 }, (_, i) => `p${i}`) },
+    { store: "wardby", reviewers: ["p1"], onApproved: "build" },
+  ])("refuses %j", (planDocument) => {
+    expect(() => CodingProfileSchema.parse({ ...base, planDocument })).toThrow();
   });
 });
