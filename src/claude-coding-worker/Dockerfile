@@ -56,7 +56,7 @@ RUN node --input-type=module -e 'const m = await import("/opt/wardby/claude-codi
 # Fail the build, not every run, when a module the worker imports is missing (a missing COPY
 # otherwise exits every run at startup with ERR_MODULE_NOT_FOUND). main.js runs on import, so this
 # loads everything it imports rather than main.js itself.
-RUN node --input-type=module -e 'await Promise.all(["claude-coding-worker/driver", "claude-coding-worker/sdk", "claude-coding-worker/transcript", "coding-worker/debug-trace", "coding-worker/artifact", "coding-worker/errors", "coding-worker/mcp-config", "coding-worker/plan-output"].map((name) => import(`/opt/wardby/${name}.js`)))'
+RUN node --input-type=module -e 'await Promise.all(["claude-coding-worker/driver", "claude-coding-worker/sdk", "claude-coding-worker/transcript", "claude-coding-worker/plan-files", "coding-worker/debug-trace", "coding-worker/artifact", "coding-worker/errors", "coding-worker/mcp-config", "coding-worker/plan-output"].map((name) => import(`/opt/wardby/${name}.js`)))'
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \

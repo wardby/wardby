@@ -1,6 +1,13 @@
 import { createRequire } from "node:module";
 import type { ClaudeQueryFactory, ClaudeQueryOptions, ClaudeSdkMessage } from "./driver.js";
-import { GIT_CHECK_TOOL, PREPARE_DEPENDENCIES_TOOL, RESULT_BUNDLE_TOOL } from "./tool-socket.js";
+import {
+  GIT_CHECK_TOOL,
+  PLAN_LIST_TOOL,
+  PLAN_PLACE_TOOL,
+  PLAN_READ_TOOL,
+  PREPARE_DEPENDENCIES_TOOL,
+  RESULT_BUNDLE_TOOL,
+} from "./tool-socket.js";
 import { assertMcpHeaderPlaceholder, WARDBY_MCP_SERVER, WARDBY_MCP_TIMEOUT_MS } from "../coding-worker/mcp-config.js";
 
 const runtimeRequire = createRequire(import.meta.url);
@@ -11,8 +18,10 @@ const TOOL_NAME = "mcp__wardby_tools__run_command";
  * dontAsk plus allowedTools would already deny it, this keeps it out of the tool list as well.
  */
 const PREPARE_DEPENDENCIES_TOOL_NAME = `mcp__wardby_tools__${PREPARE_DEPENDENCIES_TOOL}`;
-/** The tool runner's git tools (#536, tool-socket.ts), which the worker alone calls: disallowed the same way. */
-const GIT_TOOL_NAMES = [GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL].map((tool) => `mcp__wardby_tools__${tool}`);
+/** The tool runner's git and plan tools (tool-socket.ts), which the worker alone calls: disallowed the same way. */
+const WORKER_TOOL_NAMES = [GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL, PLAN_PLACE_TOOL, PLAN_LIST_TOOL, PLAN_READ_TOOL].map(
+  (tool) => `mcp__wardby_tools__${tool}`,
+);
 /**
  * Claude Code's own wall-clock limit on one wardby_tools call (its per-server MCP `timeout`, which
  * also sets the idle limit): above the longest command the tool runner can be set to run
@@ -43,7 +52,7 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     // On a run with MCP tools, the server-level rule allows every tool of wardby_mcp: the proxy and
     // the gateway allow only the run's pinned tools, and dontAsk denies anything not allowed here.
     allowedTools: [TOOL_NAME, ...(skills ? ["Skill"] : []), ...(config.mcp ? [`mcp__${WARDBY_MCP_SERVER}`] : [])],
-    disallowedTools: [PREPARE_DEPENDENCIES_TOOL_NAME, ...GIT_TOOL_NAMES],
+    disallowedTools: [PREPARE_DEPENDENCIES_TOOL_NAME, ...WORKER_TOOL_NAMES],
     strictMcpConfig: true,
     mcpServers: {
       wardby_tools: {

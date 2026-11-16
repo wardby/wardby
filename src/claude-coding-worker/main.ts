@@ -1,12 +1,21 @@
 #!/usr/bin/env node
-import { readCodingInput, writeCodingOutputAtomic } from "../coding-worker/artifact.js";
+import { readCodingInput, writeCodingOutputAtomic, writePlanFilesOutputAtomic } from "../coding-worker/artifact.js";
 import { describeError, workerDebugTracer, type DebugTracer } from "../coding-worker/debug-trace.js";
 import { safeOutputIssues, safeWorkerErrorCode } from "../coding-worker/errors.js";
 import { readMcpConfig } from "../coding-worker/mcp-config.js";
-import type { CodingTaskInput } from "../coding/protocol.js";
+import { PLAN_FILES_ARTIFACT, type CodingTaskInput } from "../coding/protocol.js";
+import { collectPlanOutput } from "../coding-worker/plan-output.js";
 import { CLAUDE_CONFIG_DIR, runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
-import { assertToolRunnerReachable, callGitCheck, callPrepareDependencies, callResultBundle } from "./tool-socket.js";
+import { collectPlanFilesViaToolRunner } from "./plan-files.js";
+import {
+  assertToolRunnerReachable,
+  callGitCheck,
+  callPlanPlace,
+  callPrepareDependencies,
+  callResultBundle,
+  openPlanSession,
+} from "./tool-socket.js";
 import { runTitle, TRANSCRIPT_OUTPUT_PATH, writeWorkerTranscript } from "./transcript.js";
 
 const INPUT_PATH = "/run/wardby/input/input.json";
@@ -48,6 +57,7 @@ try {
     prepareDependencies: () => callPrepareDependencies({ signal: controller.signal, deadlineAt: task.deadlineAt }),
     // A run with git history (#536): the tool runner has the workspace and git; this container has neither.
     gitCheck: () => callGitCheck({ signal: controller.signal }),
+    placePlanFile: (file) => callPlanPlace(file, { signal: controller.signal }),
     resultBundle: (repository, timeoutMs) => callResultBundle(repository, { signal: controller.signal, timeoutMs }),
     onProgress: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
     trace,
@@ -80,4 +90,38 @@ if (input?.sessionResume && sessionId && !controller.signal.aborted) {
   }).catch(() => {
     process.stderr.write(`${JSON.stringify({ warning: "transcript_capture_failed" })}\n`);
   });
+}
+// Plan files: after result.json (as the Codex worker), so a capture problem never changes the run's
+// outcome. Not on cancellation. Only fixed codes are ever written.
+if (input && !controller.signal.aborted) {
+  const session = await openPlanSession().catch(() => undefined);
+  try {
+    let listError: string | undefined;
+    const listed = session
+      ? await session.list().catch((error: unknown) => {
+          listError = error instanceof Error ? error.message : "plan_tool_failed";
+          return undefined;
+        })
+      : undefined;
+    const unavailable = listError === "plan_tool_unavailable";
+    const hasEntries = (listed as { paths?: unknown[] } | undefined)?.paths?.length;
+    if (input.planFiles || hasEntries || unavailable || (listed as { ok?: boolean } | undefined)?.ok === false) {
+      const plan = await collectPlanOutput(input.runId, () =>
+        session && !unavailable
+          ? collectPlanFilesViaToolRunner({
+              list: async () => {
+                if (listError) throw new Error(listError);
+                return listed;
+              },
+              read: (path) => session.read(path),
+            })
+          : Promise.resolve({ status: "error" as const, error: "plan_tool_unavailable" as const }),
+      );
+      await writePlanFilesOutputAtomic(`/run/wardby/output/${PLAN_FILES_ARTIFACT}`, plan).catch(() => {
+        process.stderr.write(`${JSON.stringify({ warning: "plan_files_capture_failed" })}\n`);
+      });
+    }
+  } finally {
+    session?.close();
+  }
 }
