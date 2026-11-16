@@ -51,6 +51,8 @@ export type GatewayErrorCode =
   | "budget_exhausted"
   /** The worker's network isolation is not proven yet: retry shortly. */
   | "not_ready"
+  /** No capability, or one that names no active session (HTTP 401; never sent over stdio). */
+  | "unauthorized"
   | "internal";
 
 export class GatewayError extends Error {
@@ -223,6 +225,8 @@ export type WorkerInput = z.infer<typeof WorkerInputSchema>;
 
 /** Where a worker that starts without its input fetches it (POST, same bearer auth as a call). */
 export const NATIVE_GATEWAY_INPUT_PATH = "/native-gateway/v1/input";
+/** The gateway's call route (http-server.ts NATIVE_GATEWAY_PATH): NATIVE_GATEWAY_URL ends with it. */
+export const NATIVE_GATEWAY_CALL_PATH = "/native-gateway/v1/call";
 
 /**
  * The bearer a Substrate worker sends (substrate mode): public, fixed, and replaced by the egress

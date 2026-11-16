@@ -76,12 +76,7 @@ const ok = (result: unknown): GatewayResponse => ({
   status: 200,
   body: { ok: true, result: result ?? null },
 });
-const fail = (
-  status: number,
-  code: GatewayErrorCode | "unauthorized",
-  message: string,
-  causeCode?: string,
-): GatewayResponse => ({
+const fail = (status: number, code: GatewayErrorCode, message: string, causeCode?: string): GatewayResponse => ({
   kind: "json",
   status,
   body: { ok: false, error: { code, message, ...(causeCode ? { causeCode } : {}) } },

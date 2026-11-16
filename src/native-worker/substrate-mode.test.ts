@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NATIVE_PLACEHOLDER_CAPABILITY, type WorkerInput } from "./protocol.js";
-import { runSubstrateMode, type SubstrateModeOptions } from "./substrate-mode.js";
+import { gatewayInputUrl, runSubstrateMode, type SubstrateModeOptions } from "./substrate-mode.js";
 
 const GATEWAY_URL = "http://wardby-native-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/call";
 const INPUT_URL = "http://wardby-native-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/input";
@@ -115,6 +115,43 @@ describe("runSubstrateMode", () => {
     // Named at last, so the test leaves nothing waiting.
     name(NATIVE_NAME);
     await done;
+  });
+
+  it.each(["wardby-native-abc123", "wr-0123456789abcdef0123-tool", "wr-0123456789abcdef0123-native-x"])(
+    "keeps waiting, with no request, while its name is %s (a golden or another role's name)",
+    async (other) => {
+      const { options, recorded, run, name } = setup();
+      const { done, port } = await start(options);
+      name(other);
+      await new Promise((wait) => setTimeout(wait, 300));
+      expect(await readyz(port)).toBe(200);
+      expect(recorded.calls).toHaveLength(0);
+      expect(run).not.toHaveBeenCalled();
+      // Named as the run actor at last, so the test leaves nothing waiting.
+      name(NATIVE_NAME);
+      await done;
+      expect(recorded.calls).toHaveLength(1);
+    },
+  );
+
+  it("keeps a path prefix of NATIVE_GATEWAY_URL in the input URL", async () => {
+    const prefixed = "http://gw.example:8790/team-a/native-gateway/v1/call";
+    const { options, recorded, run, name } = setup({ env: { NATIVE_GATEWAY_URL: prefixed } });
+    const { done } = await start(options);
+    name(NATIVE_NAME);
+    await done;
+    expect(recorded.calls[0].url).toBe("http://gw.example:8790/team-a/native-gateway/v1/input");
+    expect(run.mock.calls[0][0].gateway?.url).toBe(prefixed);
+  });
+
+  it.each([
+    [GATEWAY_URL, INPUT_URL],
+    ["http://gw.example/native-gateway/v1/call/", "http://gw.example/native-gateway/v1/input"],
+    ["http://gw.example/a/b/native-gateway/v1/call?x=1#f", "http://gw.example/a/b/native-gateway/v1/input"],
+    ["http://gw.example:8790", "http://gw.example:8790/native-gateway/v1/input"],
+    ["http://gw.example/prefix/", "http://gw.example/prefix/native-gateway/v1/input"],
+  ])("derives the input URL of %s", (call, input) => {
+    expect(gatewayInputUrl(call)).toBe(input);
   });
 
   it("fetches its input once named, and runs it with the placeholder only", async () => {

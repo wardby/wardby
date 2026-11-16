@@ -20,6 +20,7 @@ import { createHttpTransport, fetchSandboxInput } from "./http-transport.js";
 import {
   GatewayError,
   GatewayInputResponseSchema,
+  NATIVE_GATEWAY_CALL_PATH,
   NATIVE_GATEWAY_INPUT_PATH,
   NATIVE_PLACEHOLDER_CAPABILITY,
   WorkerInputSchema,
@@ -49,7 +50,7 @@ export interface SubstrateModeOptions {
 }
 
 /** The gateway error codes a worker knows; any other code from an answer is reported as `internal`. */
-const KNOWN_CODES: ReadonlySet<string> = new Set<GatewayErrorCode | "unauthorized">([
+const KNOWN_CODES: ReadonlySet<string> = new Set<GatewayErrorCode>([
   "run_not_drivable",
   "duplicate_call",
   "not_allowed",
@@ -72,13 +73,27 @@ function requireGatewayUrl(env: NodeJS.ProcessEnv): string {
 }
 
 /**
+ * The input route's URL from NATIVE_GATEWAY_URL (the call route's URL): the same origin and any path
+ * prefix in front of the call route, then NATIVE_GATEWAY_INPUT_PATH.
+ */
+export function gatewayInputUrl(gatewayUrl: string): string {
+  const url = new URL(gatewayUrl);
+  const path = url.pathname.replace(/\/+$/, "");
+  const prefix = path.endsWith(NATIVE_GATEWAY_CALL_PATH) ? path.slice(0, -NATIVE_GATEWAY_CALL_PATH.length) : path;
+  url.pathname = `${prefix}${NATIVE_GATEWAY_INPUT_PATH}`;
+  url.search = "";
+  url.hash = "";
+  return url.href;
+}
+
+/**
  * The input route's answer, or a GatewayError with a fixed message: the gateway's own message and
  * cause code are not kept, so nothing the answer carried reaches the worker's failure line.
  */
 async function fetchInput(gatewayUrl: string, options: SubstrateModeOptions): Promise<unknown> {
   try {
     return await fetchSandboxInput({
-      url: new URL(NATIVE_GATEWAY_INPUT_PATH, gatewayUrl).href,
+      url: gatewayInputUrl(gatewayUrl),
       capability: NATIVE_PLACEHOLDER_CAPABILITY,
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.sleep ? { sleep: options.sleep } : {}),

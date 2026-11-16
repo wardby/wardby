@@ -28,6 +28,7 @@ import {
   GATEWAY_INTERNAL_MESSAGE,
   GatewayError,
   MAX_MESSAGE_BYTES,
+  NATIVE_GATEWAY_CALL_PATH,
   NATIVE_GATEWAY_INPUT_PATH,
   toGatewayError,
 } from "./protocol.js";
@@ -35,7 +36,7 @@ import {
 /** The HTTP listener's own log. Exported so tests can watch it. */
 export const httpLog = logger.child({ module: "native-gateway-http" });
 
-export const NATIVE_GATEWAY_PATH = "/native-gateway/v1/call";
+export const NATIVE_GATEWAY_PATH = NATIVE_GATEWAY_CALL_PATH;
 
 export type NativeGatewayListen = ListenAddress;
 
