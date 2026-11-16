@@ -8,10 +8,10 @@ import {
   type PackageAuditReport,
 } from "../../coding/registry/audit-mode.js";
 import { mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { PrismaClient } from "#prisma";
 import type { RunTranscriptRecorder } from "../../coding/transcript/recorder.js";
-import type { PlanFilesRecorder } from "../../coding/plan-files/recorder.js";
+import type { PlanFilesPathList, PlanFilesRecorder } from "../../coding/plan-files/recorder.js";
 import { loadPlanFiles, type PlanFile } from "../../coding/plan-files/store.js";
 import { withBaseCommit, withExtraRepositories, type GitHistoryWording } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
@@ -1744,7 +1744,7 @@ export interface ContainerExecutorOptions {
   /** Session resume: stores a run's transcript before its job is removed. Absent = never captured. */
   transcripts?: Pick<RunTranscriptRecorder, "record">;
   /** Plan documents: stores a collecting run's returned plan folder before it is made terminal. Absent = never stored. */
-  planFiles?: Pick<PlanFilesRecorder, "record" | "markFailed" | "storeChecked">;
+  planFiles?: Pick<PlanFilesRecorder, "record" | "markFailed" | "markStatus" | "storeChecked">;
   /**
    * The run-steps writer: a continuation on a launcher with warm rounds gets one fixed step line
    * saying whether it resumed the previous round (warm-start-wording.ts). Absent = no line.
@@ -1885,6 +1885,58 @@ function assertRowWellFormed(run: ContainerRunSnapshot, extra: RunRepositorySnap
 
 /** A refusal by repository authorization; its message is the failure category's prefix (repo_access_*). */
 class RepoAccessError extends PreflightError {}
+
+/**
+ * A repository-stored plan's folder, read from a run's workspace. The folder is located after symlinks
+ * resolve (the deepest existing ancestor's real path, so a missing folder is still an empty plan), and
+ * refused (plan_folder_refused, nothing read) when that real folder is the workspace itself, leaves it,
+ * has a .git segment, or is covered by the run's protected paths (protectedPathMatcher, which the push
+ * enforces, with the .wardby/** baseline; probed with a file inside the folder). A collected file whose
+ * repository path is protected or under .git is dropped and counted as an unnamed skipped file.
+ */
+async function readRepositoryPlanFolder(
+  workspacePath: string,
+  setting: string,
+  isProtected: (path: string) => boolean,
+): Promise<
+  | { status: "ok"; files: PlanFile[]; skipped: PlanFilesPathList }
+  | { status: "error"; error: "plan_too_large" | "plan_folder_invalid" | "plan_folder_refused" }
+> {
+  const base = await realpath(workspacePath);
+  const inside = (path: string): boolean => path.startsWith(`${base}${sep}`);
+  const lexical = resolve(base, setting);
+  if (!inside(lexical)) return { status: "error", error: "plan_folder_refused" };
+  let probe = lexical;
+  let real = await realpath(probe).catch(() => undefined);
+  while (real === undefined && probe !== base) {
+    probe = dirname(probe);
+    real = await realpath(probe).catch(() => undefined);
+  }
+  if (real === undefined) return { status: "error", error: "plan_folder_invalid" };
+  const folder = probe === lexical ? real : join(real, relative(probe, lexical));
+  if (!inside(folder)) return { status: "error", error: "plan_folder_refused" };
+  const rel = relative(base, folder).split(sep).join("/");
+  const underGit = (path: string): boolean => path.split("/").some((segment) => segment.toLowerCase() === ".git");
+  if (underGit(rel) || isProtected(`${rel}/plan.md`) || isProtected(`${rel}/x`)) {
+    return { status: "error", error: "plan_folder_refused" };
+  }
+  const read: PlanFolderResult = await collectPlanFolder(folder).catch((): PlanFolderResult => ({
+    status: "error",
+    error: "plan_folder_invalid",
+  }));
+  if (read.status !== "ok") return read;
+  const files: PlanFile[] = [];
+  const skipped: PlanFilesPathList = { paths: [...read.skipped], unnamed: read.skippedUnnamed };
+  for (const file of read.files) {
+    const repositoryPath = `${rel}/${file.path}`;
+    if (underGit(repositoryPath) || isProtected(repositoryPath)) {
+      skipped.unnamed += 1;
+      continue;
+    }
+    files.push({ path: file.path, content: Buffer.from(file.contentBase64, "base64").toString("utf8") });
+  }
+  return { status: "ok", files, skipped };
+}
 
 export class ContainerExecutor implements Executor {
   private readonly artifactRoot: string;
@@ -2678,6 +2730,8 @@ export class ContainerExecutor implements Executor {
     // whose hooks publish the plan (B6) and finish a revision (B8) from these rows; the job and its
     // output are still present (releaseJob runs in the finally). A lost job has no output to read.
     if (run.collectPlanFiles && jobState !== "lost") await this.recordPlanFiles(run, handle);
+    // A repository-stored plan is read only from delivered work; any other end settles a fixed failure.
+    if (jobState !== "succeeded") await this.settleRepositoryPlanFailed(run);
     try {
       if (jobState !== "succeeded") {
         const collected = await this.options.jobs.collect(handle).catch(() => null);
@@ -2714,6 +2768,7 @@ export class ContainerExecutor implements Executor {
       // can cost more than its hold); the status comment then says so (overrunDetails).
       if (output.outcome === "budget_exhausted" && hasWritableExtras(current)) {
         this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
+        await this.settleRepositoryPlanFailed(run);
         const kept = await this.keepStoppedChangesAll(handle, current, output, heldWorkspaces);
         await this.recordRefusal(run.runId, sessionId);
         const latest = await this.requireCurrent(run.runId).catch(() => kept.current);
@@ -2750,6 +2805,7 @@ export class ContainerExecutor implements Executor {
       }
       if (output.outcome === "budget_exhausted") {
         this.emit({ stage: "budget_cutoff", runId: run.runId, jobId: handle.id });
+        await this.settleRepositoryPlanFailed(run);
         const kept = await this.keepStoppedChanges(run, handle, current, output, existingWorkspace);
         await this.recordRefusal(run.runId, sessionId);
         if (kept) {
@@ -2793,6 +2849,12 @@ export class ContainerExecutor implements Executor {
       if (output.outcome === "no_changes" && !(await this.mergedTargetBranch(current, existingWorkspace))) {
         // Before complete: the terminal hook (a no-change fix round's re-review) reads the refreshed body.
         const description = await this.refreshDescriptionInTime(current, output, existingWorkspace);
+        // The plan is read from the workspace as the run left it (no push), before the terminal write.
+        await this.recordRepositoryPlan(
+          run,
+          async () =>
+            existingWorkspace ?? (await this.options.vcs.recoverWorkspace(this.preflight(current, { launched: true }))),
+        );
         await this.recordRefusal(run.runId, sessionId);
         await this.options.store.complete(run.runId, "succeeded", this.resultFor(output, current), {
           ...dependencyCacheRecord(output),
@@ -2809,7 +2871,7 @@ export class ContainerExecutor implements Executor {
       const { finalized, workspace } = pushed;
       // Plan documents stored in the repository: read from the workspace the push left, before the
       // terminal write (store.complete fires the publish hook, which needs the stored rows).
-      if (run.planRepositoryPath) await this.recordRepositoryPlan(run, workspace.workspacePath, run.planRepositoryPath);
+      await this.recordRepositoryPlan(run, workspace);
       // An empty diff pushes nothing, so it refreshes the description the way a
       // worker no_changes does, before complete (the terminal hook reads the body).
       const description =
@@ -2845,6 +2907,8 @@ export class ContainerExecutor implements Executor {
       }
       finishedSummary = output.summary;
     } catch (error) {
+      // Nothing delivered: a repository-stored plan is not read; its fixed failure is settled first.
+      await this.settleRepositoryPlanFailed(run);
       if (error instanceof Error && error.message === "coding_run_no_longer_active") {
         // Stopped while its result was collected: the stop already wrote the terminal row.
         containerLog.info({ runId: run.runId }, "coding run was stopped before its result was published");
@@ -3170,6 +3234,11 @@ export class ContainerExecutor implements Executor {
     const failed = slots.filter((slot) => slot.error !== undefined);
     const pushed = done.flatMap((publish) => (publish.finalized.outcome === "no_changes" ? [] : [publish.finalized]));
     if (pushed.length === 0 && failed.length > 0) throw failed[0].error;
+    // A repository-stored plan is read from the default repository's workspace, before the terminal write.
+    await this.recordRepositoryPlan(
+      run,
+      slots.find((slot) => slot.name === RESERVED_REPOSITORY_NAME && slot.error === undefined)?.workspace,
+    );
     const records = await this.publishRecords(current, output, done, { budgetStopped: false });
     await this.recordRefusal(run.runId, sessionId);
     if (failed.length === 0) {
@@ -4699,88 +4768,82 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
-   * Plan documents stored in the repository: reads the plan folder from the run's workspace and stores it
-   * through the recorder's checked path. Never throws, never changes the run's outcome; only a fixed
-   * status code is logged, never content. Bounded by PLAN_FILES_RECORD_TIMEOUT_MS like recordPlanFiles.
-   *
-   * The folder is refused (the run's plan outcome is the fixed plan_files_failed, nothing is read) when it
-   * is outside the workspace after symlinks resolve, is under .git/, or holds a path the agent's
-   * protectedPaths (with the .wardby/** baseline) cover: protectedPathMatcher is the helper the push
-   * itself enforces, probed with a file inside the folder, because the PLAN_PATH shape also allows
-   * folders such as .git/{n}/ or .github/workflows/{n}/ that a run must not be able to read from.
+   * Plan documents stored in the repository: reads the plan folder from the run's workspace (the default
+   * repository's) and stores it through the recorder's checked path. Never throws, never changes the
+   * run's outcome; only a fixed status code is logged, never content. Bounded by
+   * PLAN_FILES_RECORD_TIMEOUT_MS like recordPlanFiles, since it runs before the terminal write. A folder
+   * that cannot be read settles its precise fixed code (readRepositoryPlanFolder); no workspace, an
+   * error or a timeout settles plan_files_failed. The recorder writes an outcome once.
    */
   private async recordRepositoryPlan(
     run: ContainerRunSnapshot,
-    workspacePath: string,
-    relative: string,
+    workspace: PreparedWorkspace | null | undefined | (() => Promise<PreparedWorkspace | null | undefined>),
   ): Promise<void> {
     const recorder = this.options.planFiles;
-    if (!recorder) return;
+    const setting = run.planRepositoryPath;
+    if (!recorder || !setting) return;
     let timer: NodeJS.Timeout | undefined;
     try {
       const reading = Promise.resolve()
-        .then(async () => {
-          const trimmed = relative.replace(/\/+$/, "");
-          const protectedByRun = protectedPathMatcher(
+        .then(async (): Promise<string> => {
+          const held = typeof workspace === "function" ? await workspace() : workspace;
+          if (!held) return recorder.markStatus(run.runId, "plan_files_failed");
+          const isProtected = protectedPathMatcher(
             Array.isArray(run.protectedPaths)
               ? run.protectedPaths.filter((p): p is string => typeof p === "string")
               : [],
           );
-          if (
-            trimmed.split("/")[0] === ".git" ||
-            protectedByRun(`${trimmed}/plan.md`) ||
-            protectedByRun(`${trimmed}/x`)
-          ) {
-            return "plan_folder_refused" as const;
-          }
-          const base = await realpath(workspacePath);
-          const resolved = resolve(base, trimmed);
-          if (!resolved.startsWith(`${base}${sep}`)) return "plan_folder_invalid" as const;
-          // A missing folder is an empty plan (collectPlanFolder), not an error; the deepest folder that
-          // exists must still resolve inside the workspace, so a symlinked parent cannot point elsewhere.
-          let probe = resolved;
-          let real = await realpath(probe).catch(() => undefined);
-          while (real === undefined && probe !== base) {
-            probe = dirname(probe);
-            real = await realpath(probe).catch(() => undefined);
-          }
-          if (real === undefined || (real !== base && !real.startsWith(`${base}${sep}`))) {
-            return "plan_folder_invalid" as const;
-          }
-          const read: PlanFolderResult = await collectPlanFolder(probe === resolved ? real : resolved).catch(
-            (): PlanFolderResult => ({ status: "error", error: "plan_folder_invalid" }),
-          );
-          if (read.status !== "ok") return read.error;
-          const files = read.files.map((f) => ({
-            path: f.path,
-            content: Buffer.from(f.contentBase64, "base64").toString("utf8"),
-          }));
+          const read = await readRepositoryPlanFolder(held.workspacePath, setting, isProtected);
+          if (read.status !== "ok") return recorder.markStatus(run.runId, read.error);
           return recorder.storeChecked(
             {
               runId: run.runId,
               agentId: run.agentId,
               ...(run.launchSecretVersions ? { launchSecretVersions: run.launchSecretVersions } : {}),
             },
-            files,
+            read.files,
             read.skipped,
           );
         })
-        .catch(() => "plan_files_failed" as const);
+        .catch(() => "error" as const);
       const timeout = new Promise<"timeout">((resolveTimeout) => {
         timer = setTimeout(() => resolveTimeout("timeout"), PLAN_FILES_RECORD_TIMEOUT_MS);
         timer.unref();
       });
       const result = await Promise.race([reading, timeout]);
-      if (result === "timeout") {
-        await recorder.markFailed(run.runId).catch(() => undefined);
-        containerLog.info({ runId: run.runId, planFiles: "plan_files_failed" }, "plan files not stored: timed out");
+      if (result === "timeout" || result === "error") {
+        await recorder.markStatus(run.runId, "plan_files_failed").catch(() => undefined);
+        containerLog.info({ runId: run.runId, planFiles: "plan_files_failed" }, `plan files not stored: ${result}`);
       } else if (result !== "stored") {
-        // Nothing was stored: a refused or unreadable folder leaves the fixed failed outcome, not a null one.
-        if (result === "plan_folder_refused" || result === "plan_folder_invalid" || result === "plan_too_large") {
-          await recorder.markFailed(run.runId).catch(() => undefined);
-        }
         containerLog.info({ runId: run.runId, planFiles: result }, "plan files not stored");
       }
+    } catch {
+      // never changes the run's outcome
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * A run with a repository-stored plan that ends without delivering its work: nothing is read, and the
+   * fixed plan_files_failed is settled before the terminal write, so the outcome is never left null.
+   * Write-once: an outcome already recorded stands. Bounded by PLAN_FILES_RECORD_TIMEOUT_MS; never throws.
+   */
+  private async settleRepositoryPlanFailed(run: ContainerRunSnapshot): Promise<void> {
+    const recorder = this.options.planFiles;
+    if (!recorder || !run.planRepositoryPath) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const timeout = new Promise<void>((resolveTimeout) => {
+        timer = setTimeout(resolveTimeout, PLAN_FILES_RECORD_TIMEOUT_MS);
+        timer.unref();
+      });
+      await Promise.race([
+        Promise.resolve()
+          .then(() => recorder.markStatus(run.runId, "plan_files_failed"))
+          .catch(() => undefined),
+        timeout,
+      ]);
     } catch {
       // never changes the run's outcome
     } finally {

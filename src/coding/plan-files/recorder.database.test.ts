@@ -346,7 +346,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
         { path: "plan.md", content: `key ${FAKE_SECRET}\n` },
         { path: "leak.md", content: `t ${FAKE_TOKEN}\n` },
       ],
-      ["skipped.md", `${FAKE_SECRET}.md`],
+      { paths: ["skipped.md", `${FAKE_SECRET}.md`], unnamed: 2 },
     );
     expect(status).toBe("stored");
     const stored = await loadPlanFiles(db, runId, "output");
@@ -354,7 +354,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
     expect(run.planFilesStatus).toBe("stored");
     expect(run.planFilesWithheld).toEqual({ paths: ["leak.md"], unnamed: 0 });
-    expect(run.planFilesSkipped).toEqual({ paths: ["skipped.md"], unnamed: 1 });
+    // The caller's unnamed count is carried, plus the path that held a secret value.
+    expect(run.planFilesSkipped).toEqual({ paths: ["skipped.md"], unnamed: 3 });
     const everything = JSON.stringify({ stored, run, logs: logged });
     expect(everything).not.toContain(FAKE_SECRET);
     expect(everything).not.toContain(FAKE_TOKEN);
@@ -372,7 +373,9 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     expect(() => assertPlanFilesWithinLimits([{ path: "../escape.md", content: "1" }])).toThrow("plan_path_invalid");
 
     await storeOne();
-    expect(await recorder().storeChecked(base(), [{ path: "big.md", content: big }], [])).toBe("plan_too_large");
+    expect(await recorder().storeChecked(base(), [{ path: "big.md", content: big }], { paths: [], unnamed: 0 })).toBe(
+      "plan_too_large",
+    );
     expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
     await reset();
     expect(
@@ -382,11 +385,22 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
           { path: "a.md", content: "1" },
           { path: "a.md", content: "2" },
         ],
-        [],
+        { paths: [], unnamed: 0 },
       ),
     ).toBe("plan_files_failed");
     const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
     expect(run.planFilesStatus).toBe("plan_files_failed");
+  });
+
+  it("markStatus settles a given fixed failure code once, through the write-once path", async () => {
+    expect(await recorder().markStatus(runId, "plan_folder_refused")).toBe("plan_folder_refused");
+    expect(await recorder().markStatus(runId, "plan_too_large")).toBe("plan_folder_refused");
+    expect(await recorder().storeChecked(base(), [{ path: "a.md", content: "a" }], { paths: [], unnamed: 0 })).toBe(
+      "plan_folder_refused",
+    );
+    expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesStatus).toBe("plan_folder_refused");
   });
 
   it("refuses to overwrite a recorded outcome: no rows added, status unchanged", async () => {
@@ -397,7 +411,9 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     });
     expect(late).toBe("plan_files_failed");
     expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
-    expect(await recorder().storeChecked(base(), [{ path: "late.md", content: "late" }], [])).toBe("plan_files_failed");
+    expect(
+      await recorder().storeChecked(base(), [{ path: "late.md", content: "late" }], { paths: [], unnamed: 0 }),
+    ).toBe("plan_files_failed");
     expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
     // A refused write reports the status the database holds, not the one the late writer computed.
     expect(await recorder().record({ ...base(), read: async () => undefined })).toBe("plan_files_failed");

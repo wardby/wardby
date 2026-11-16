@@ -9,12 +9,21 @@ export type PlanFilesStatus =
   | "stored"
   | "plan_too_large"
   | "plan_folder_invalid"
+  | "plan_folder_refused"
   | "plan_files_failed"
   | "plan_tool_unavailable"
   | "plan_files_unsupported"
   | "plan_files_missing"
   | "secrets_changed"
   | "secrets_unavailable";
+
+/**
+ * The fixed failure outcomes a caller that knows why nothing was stored can settle (markStatus).
+ * plan_folder_refused: a repository-stored plan's folder is one a run may not read from (under .git/,
+ * protected, or outside the workspace).
+ */
+export type PlanFilesFailureStatus =
+  "plan_too_large" | "plan_folder_invalid" | "plan_folder_refused" | "plan_files_failed";
 
 export type { PlanFile };
 
@@ -69,11 +78,9 @@ export class PlanFilesRecorder {
   async storeChecked(
     input: Omit<RecordPlanFilesInput, "read">,
     files: PlanFile[],
-    skipped: string[],
+    skipped: PlanFilesPathList,
   ): Promise<PlanFilesStatus> {
-    const status = await this.redactAndStore(input, files, { paths: skipped, unnamed: 0 }).catch(
-      (): PlanFilesStatus => "plan_files_failed",
-    );
+    const status = await this.redactAndStore(input, files, skipped).catch((): PlanFilesStatus => "plan_files_failed");
     return status === "stored" ? status : this.settle(input.runId, status);
   }
 
@@ -185,6 +192,14 @@ export class PlanFilesRecorder {
    */
   async markFailed(runId: string): Promise<PlanFilesStatus> {
     return this.settle(runId, "plan_files_failed");
+  }
+
+  /**
+   * Records a given fixed failure outcome through the same write-once path as markFailed, for a caller
+   * that knows the precise reason nothing was stored. Returns the status the database holds.
+   */
+  async markStatus(runId: string, status: PlanFilesFailureStatus): Promise<PlanFilesStatus> {
+    return this.settle(runId, status);
   }
 
   /** A non-stored outcome: no output files (and no path lists) survive it. */
