@@ -49,6 +49,14 @@ describe("native sandbox configuration", () => {
       /NATIVE_GATEWAY_CONTAINER is required/,
     );
     expect(() => loadNativeSandboxConfig({ ...base, NATIVE_GATEWAY_URL: "not a url" })).toThrow(/NATIVE_GATEWAY_URL/);
+    for (const bad of ["not a url", "ftp://fake-gw-secret-val"]) {
+      expect(() => loadNativeSandboxConfig({ ...base, NATIVE_GATEWAY_URL: bad })).toThrow(/NATIVE_GATEWAY_URL/);
+      try {
+        loadNativeSandboxConfig({ ...base, NATIVE_GATEWAY_URL: bad });
+      } catch (err) {
+        expect((err as Error).message).not.toContain(bad);
+      }
+    }
     expect(() => loadNativeSandboxConfig({ ...base, NATIVE_SANDBOX_MEMORY_MB: "-1" })).toThrow(
       /NATIVE_SANDBOX_MEMORY_MB/,
     );
@@ -255,6 +263,12 @@ describe("native sandbox on Substrate", () => {
     const bad = { ...shared, NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR: "novalue" };
     expect(() => loadNativeSandboxConfig(bad)).toThrow(/NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR/);
     expect(() => loadNativeSandboxConfig(bad)).not.toThrow(/novalue/);
+  });
+
+  it("names the variable, not its value, for a gateway URL that does not parse", () => {
+    const bad = "http://[fake-gw-secret-val";
+    expect(() => loadNativeSandboxConfig({ ...SUBSTRATE, NATIVE_GATEWAY_URL: bad })).toThrow(/NATIVE_GATEWAY_URL/);
+    expect(() => loadNativeSandboxConfig({ ...SUBSTRATE, NATIVE_GATEWAY_URL: bad })).not.toThrow(/fake-gw-secret-val/);
   });
 
   const { SUBSTRATE_ATESPACE: _atespace, ...withoutAtespace } = SUBSTRATE;

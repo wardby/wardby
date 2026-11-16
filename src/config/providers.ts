@@ -511,7 +511,7 @@ export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): N
     throw new Error(`NATIVE_SANDBOX_WORKER_IMAGE is required when NATIVE_SANDBOX_LAUNCHER=${launcher}.`);
   const gatewayUrl = env.NATIVE_GATEWAY_URL?.trim();
   if (gatewayUrl && !/^https?:\/\/[^\s]+$/.test(gatewayUrl)) {
-    throw new Error(`NATIVE_GATEWAY_URL must be an http(s) URL (got "${gatewayUrl}").`);
+    throw new Error(`NATIVE_GATEWAY_URL must be an http(s) URL.`);
   }
   const common = {
     workerImage,
@@ -549,7 +549,12 @@ export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): N
         "NATIVE_GATEWAY_URL is required when NATIVE_SANDBOX_LAUNCHER=substrate: the egress rule names the gateway by hostname.",
       );
     }
-    const parsed = new URL(gatewayUrl);
+    let parsed: URL;
+    try {
+      parsed = new URL(gatewayUrl);
+    } catch {
+      throw new Error("NATIVE_GATEWAY_URL must be a valid http:// URL.");
+    }
     if (parsed.protocol !== "http:") {
       throw new Error(
         "NATIVE_GATEWAY_URL must be an http:// URL when NATIVE_SANDBOX_LAUNCHER=substrate: the egress gateway injects the capability into plain HTTP.",
