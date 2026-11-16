@@ -54,7 +54,9 @@ export function planReplyLines(plan: PublishedPlan): string[] {
   }
   if (plan.ignored.length > 0) lines.push(`Ignored: ${plan.ignored.join(", ")}`);
   if (plan.skippedReviewers.length > 0) {
-    lines.push(`Not asked to review (no longer has access to the agent): ${plan.skippedReviewers.length} people`);
+    lines.push(
+      `Not asked to review (no longer has access to the agent): ${plan.skippedReviewers.length} ${plan.skippedReviewers.length === 1 ? "person" : "people"}`,
+    );
   }
   return lines;
 }

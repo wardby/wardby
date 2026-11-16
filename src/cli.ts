@@ -116,6 +116,7 @@ import { loadToolMaxTimeoutMs } from "./config/tool-timeout.js";
 import { loadMcpServersMode } from "./config/mcp-servers.js";
 import { loadMcpMaxCallsPerRun } from "./config/mcp-call-limit.js";
 import { startMcp, warmUpExecutor } from "./mcp/index.js";
+import { httpOrigin } from "./mcp/tools/documents.js";
 import { startServe } from "./serve.js";
 import { authCommand } from "./mcp/auth/self-hosted/cli.js";
 import { hostAccountCommand } from "./mcp/auth/host-account-cli.js";
@@ -807,6 +808,7 @@ async function run(name: string | undefined): Promise<void> {
         reviewHosts: buildReviewHosts(process.env, prisma),
         issueTrackers: buildIssueTrackers(),
         runSteps,
+        publicOrigin: httpOrigin(process.env.MCP_CANONICAL_URI),
       },
       prisma,
       (delta) => {
@@ -1001,6 +1003,7 @@ async function scheduler(args: string[]): Promise<void> {
     issueTrackers,
     repoAccess,
     runSteps,
+    publicOrigin: httpOrigin(process.env.MCP_CANONICAL_URI),
   };
   const nativeExecutor = buildExecutor(config, nativeProviders, prisma);
   const power = buildPower({ env: process.env, db: prisma });
@@ -1130,6 +1133,7 @@ async function nativeGateway(): Promise<void> {
     repoAccess: createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
     executor: new DeferredExecutor(prisma),
     runSteps: buildRunSteps(secrets),
+    publicOrigin: httpOrigin(process.env.MCP_CANONICAL_URI),
   };
   const server = await startGatewayServer(listen, {
     db: prisma,

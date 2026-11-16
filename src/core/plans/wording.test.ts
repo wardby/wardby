@@ -90,6 +90,16 @@ describe("plan reply lines", () => {
     expect(lines.join("\n")).not.toContain("p9");
   });
 
+  it("the skipped-reviewers line is singular for one person", () => {
+    const base = { number: 12, planSetId: "ps1", documents: [], ignored: [], withheld: [] };
+    expect(planReplyLines({ ...base, skippedReviewers: ["p9"] }).at(-1)).toBe(
+      "Not asked to review (no longer has access to the agent): 1 person",
+    );
+    expect(planReplyLines({ ...base, skippedReviewers: ["p9", "p10"] }).at(-1)).toBe(
+      "Not asked to review (no longer has access to the agent): 2 people",
+    );
+  });
+
   it("a document without a url shows its page path; failures and pending have one line", () => {
     const base = { number: 12, planSetId: "ps1", ignored: [], withheld: [], skippedReviewers: [] };
     const doc = {

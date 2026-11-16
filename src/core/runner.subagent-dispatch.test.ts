@@ -24,6 +24,12 @@ vi.mock("./dispatch.js", async (importOriginal) => {
   return { ...actual, dispatchRun: vi.fn(actual.dispatchRun) };
 });
 const { dispatchRun } = await import("./dispatch.js");
+// Passes through; the plan-link test below swaps in a published plan to read the origin the lead passes.
+vi.mock("./plans/publish.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./plans/publish.js")>();
+  return { ...actual, planSummaryForRun: vi.fn(actual.planSummaryForRun) };
+});
+const { planSummaryForRun } = await import("./plans/publish.js");
 
 // End-to-end coverage of the delegate_to_<boundName> dispatch tool: a real
 // NativeEngine driven by a scripted LLM, actually exercising runSandboxTool
@@ -431,8 +437,10 @@ function providers(
   llm: LlmProvider,
   executor?: { start(runId: string): Promise<void>; stop(): Promise<void> },
   memory: AgentMemoryStore = fakeMemory(),
+  publicOrigin?: string | null,
 ) {
   return {
+    ...(publicOrigin !== undefined ? { publicOrigin } : {}),
     llm,
     engine: new NativeEngine(),
     datastore: fakeDatastore(),
@@ -827,6 +835,69 @@ describe("delegate_to_<boundName> dispatch tool", () => {
     // a long-running container crash mid-dispatch is exactly what the
     // reconciler exists for.
     expect(childRuns[0].executionManaged).toBe(true);
+  });
+
+  it.each([
+    ["https://wardby.example", "https://wardby.example/d/d1"],
+    [null, undefined],
+  ])("a planner child's plan links use the public origin %s (R10c)", async (origin, url) => {
+    const lead: FakeAgent = {
+      id: "dispatcher-agent",
+      name: "lead",
+      systemPrompt: "You delegate.",
+      model: "m",
+      budgetUsd: 5,
+      maxTurns: 10,
+    };
+    const planner: FakeAgent = {
+      id: "implement-agent",
+      name: "planner",
+      systemPrompt: "unused",
+      model: "gpt-5.6-luna",
+      budgetUsd: 5,
+      maxTurns: 10,
+      kind: "coding",
+      codingProfile,
+    };
+    const db = fakeDb(
+      [lead, planner],
+      [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }],
+    );
+    const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+    const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "Planned.", costUsd: 0.01 });
+    const seen: Array<string | null> = [];
+    vi.mocked(planSummaryForRun).mockImplementationOnce(async (_db, _runId, o) => {
+      seen.push(o);
+      return {
+        number: 12,
+        planSetId: "ps1",
+        documents: [
+          {
+            id: "d1",
+            pagePath: "/d/d1",
+            ...(o ? { url: `${o}/d/d1` } : {}),
+            kind: "document",
+            path: "plan.md",
+            reviewState: "in_review",
+            versionNumber: 1,
+            change: "created",
+          },
+        ],
+        ignored: [],
+        withheld: [],
+        skippedReviewers: [],
+      };
+    });
+    const llm = scriptedLlm([
+      toolCall("delegate_to_implement", JSON.stringify({ task: "plan it" })),
+      finalAnswer("done"),
+    ]);
+    const result = await executeRun(parentRun.id, providers(llm, executor, undefined, origin), db);
+    expect(result.status).toBe("succeeded");
+    expect(seen).toEqual([origin]);
+    const doc = (toolResultSeen(llm, 1).plan as { documents: Array<Record<string, unknown>> }).documents[0];
+    expect(doc.pagePath).toBe("/d/d1");
+    expect(doc.url).toBe(url);
   });
 
   describe("a re-executed delegate call (a resume, or a takeover under a new version)", () => {

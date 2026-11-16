@@ -7,6 +7,7 @@ import { createDocument, publishVersion } from "../documents/service.js";
 import { principalGranteeKey } from "../grants.js";
 import { attachSecret, createSecret } from "../secrets.js";
 import { planRunFinishedHook } from "./hooks.js";
+import { codingChildResult } from "../runner.js";
 import { planReplyLines, planSummaryLines } from "./wording.js";
 import {
   PLAN_PUBLISH_LEASE_MS,
@@ -432,6 +433,29 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     await hook(bad);
     expect(notices).toHaveLength(2);
     expect(notices[1].text).toBe(planSummaryLines({ number: 12, error: "plan_too_large" }).join("\n"));
+  });
+
+  it("R10e: a secret in a stored output file or a document version never reaches the delegate result or the reply lines", async () => {
+    const agentId = await planner();
+    const name = `PLAN_LEAK_KEY_${s}`;
+    await createSecret(name, FAKE_SECRET, owner.id, cipher, db);
+    await attachSecret(agentId, name, owner.id, db);
+    const runId = await makeRun(agentId, [{ path: "plan.md", content: `# Plan\n\ntoken ${FAKE_SECRET}\n` }]);
+    const plan = published(await publishPlanFromRun(db, deps, runId));
+    // The secret is in the stored output file and, through a direct version, in a document's text.
+    expect(
+      (await db.codingRunPlanFile.findMany({ where: { runId } })).some((f) => f.content.includes(FAKE_SECRET)),
+    ).toBe(true);
+    await db.documentVersion.updateMany({
+      where: { documentId: plan.documents[0].id },
+      data: { markdown: `# Plan\n\nleaked ${FAKE_SECRET}\n` },
+    });
+    const summary = (await planSummaryForRun(db, runId, "https://wardby.example"))!;
+    const run = await db.run.findUniqueOrThrow({ where: { id: runId } });
+    const result = codingChildResult(run, undefined, undefined, [], summary);
+    expect(JSON.parse(result).plan.documents[0].url).toBe(`https://wardby.example/d/${plan.documents[0].id}`);
+    expect(result).not.toContain(FAKE_SECRET);
+    expect(planSummaryLines(summary).join("\n")).not.toContain(FAKE_SECRET);
   });
 
   it("two concurrent first publishes on a one-connection pool make one set and one document per path", async () => {

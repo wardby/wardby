@@ -529,6 +529,8 @@ export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "data
   sandboxFetch?: typeof safeFetch;
   /** Records runs' steps (src/core/run-steps/writer.ts); absent = no steps are recorded. */
   runSteps?: RunStepSink;
+  /** The public http(s) origin (MCP_CANONICAL_URI's), for absolute document links in a delegate result; unset: page paths only. */
+  publicOrigin?: string | null;
 };
 
 /**
@@ -836,9 +838,13 @@ function pullRequestsOf(
 
 /** The results stored on a coding run's writable extra repositories' rows, in set order. Empty on a read failure. */
 /** The planner child's plan for the lead's result; null for any other run, and when it cannot be read. */
-async function planSummaryOf(db: RunnerDb, runId: string): Promise<PlanSummary | null> {
-  // RunnerDb is the real client at runtime; planSummaryForRun reads plan tables RunnerDb does not name.
-  return planSummaryForRun(db as unknown as PrismaClient, runId, null).catch(() => null);
+async function planSummaryOf(db: RunnerDb, runId: string, origin: string | null): Promise<PlanSummary | null> {
+  // RunnerDb is the real client at runtime; planSummaryForRun reads plan tables RunnerDb does not name:
+  // planSet, planFile, document and documentVersion (and the run's own row).
+  return planSummaryForRun(db as unknown as PrismaClient, runId, origin).catch((err: unknown) => {
+    runnerLog.warn({ runId, errorName: err instanceof Error ? err.name : "unknown" }, "could not read the run's plan");
+    return null;
+  });
 }
 
 async function extraRepositoryResults(db: Pick<RunnerDb, "codingRunRepository">, runId: string): Promise<unknown[]> {
@@ -1211,6 +1217,8 @@ export interface NativeRunToolsOptions {
   reviewReads?: ReviewReadLedger;
   /** A sandboxed run's session deadline (the gateway's); an MCP tool call never runs past it. */
   deadlineAt?: Date;
+  /** The public origin for document links in a planner child's result (R10c); null/unset gives page paths only. */
+  origin?: string | null;
 }
 
 /** An attached user tool as the load step pinned it: its code, schema, and consented capabilities. */
@@ -1387,7 +1395,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
         stored?.result,
         await loadBudgetEvent(db, childRunId),
         await extraRepositoryResults(db, childRunId),
-        await planSummaryOf(db, childRunId),
+        await planSummaryOf(db, childRunId, options.origin ?? null),
       );
     }
     return nativeChildResult(waited.run, wait.mergeOrderNote);
@@ -2250,6 +2258,8 @@ export interface DurableDelegationContext {
   sessionId: string;
   /** Every secret value the run can read, to redact its logs by exact value (unset or failing: nothing is logged of an error but its name and code). */
   secretValues?: () => Promise<string[]>;
+  /** The public origin for document links in a planner child's result (R10c); null/unset gives page paths only. */
+  origin?: string | null;
   /** How long one call waits on the child before answering `pending` (the worker calls again). */
   pollWindowMs?: number;
   pollIntervalMs?: number;
@@ -2527,7 +2537,7 @@ export async function durableDelegate(
           stored?.result,
           await loadBudgetEvent(db, childRunId),
           await extraRepositoryResults(db, childRunId),
-          await planSummaryOf(db, childRunId),
+          await planSummaryOf(db, childRunId, ctx.origin ?? null),
         ),
       );
     }
@@ -2634,6 +2644,7 @@ export async function createSandboxSession(options: {
     reviewHosts,
     repoAccess,
     issueTrackers,
+    origin: providers.publicOrigin ?? null,
   });
   let input: WorkerInput;
   try {
@@ -2785,6 +2796,7 @@ async function executeTrackedRun(
       reviewHosts,
       repoAccess,
       issueTrackers,
+      origin: providers.publicOrigin ?? null,
     });
     const { runSandboxTool } = tools;
 

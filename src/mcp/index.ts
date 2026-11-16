@@ -275,6 +275,7 @@ export function buildMcpProviders(): McpProviderComposition {
     issueTrackers,
     repoAccess,
     runSteps,
+    publicOrigin: publicHttpOrigin(process.env.MCP_CANONICAL_URI),
   };
   // Read again at each tool call; checked here so a bad value stops start-up, not every run.
   loadToolMaxTimeoutMs();
