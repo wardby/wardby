@@ -66,9 +66,12 @@
  *   its createActor ensures it once more and retries. Substrate answers a missing template
  *   FailedPrecondition (SubstrateTemplateMissingError); an adoption whose parked actor's template is
  *   gone removes the park and starts the run fresh (cold reason actor_missing).
- * - A create or resume Substrate refuses (Unavailable, typically once a broken image's golden actor
- *   crashed) re-reads the template's status: a failed golden snapshot, or a status without a tag on
- *   a template that never started an actor, counts as a golden-snapshot failure (goldenFailureAfter).
+ * - A create or resume Substrate refuses Unavailable (typically once a broken image's golden actor
+ *   crashed) re-reads the template's status (goldenFailureAfter): only a failed golden snapshot counts
+ *   as a golden-snapshot failure. A status without a tag on a template that never started an actor
+ *   requeues the run uncounted, with no rebuild (a broken build reports its failure by the relaunch,
+ *   and ensureTemplate counts it then); once that template has been refused for longer than
+ *   SUBSTRATE_TEMPLATE_READY_SEC while the workers had room, the run fails as never_ready.
  */
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
@@ -259,6 +262,16 @@ class TemplateUnreadyError extends Error {
 class TemplateRebuildingError extends Error {
   constructor() {
     super("substrate_template_rebuilding");
+  }
+}
+
+/**
+ * A start was refused on a template still building its golden snapshot (no tag, never started an
+ * actor): the run requeues, uncounted and with no rebuild, unless the template is never ready.
+ */
+class TemplateBuildingError extends Error {
+  constructor() {
+    super("substrate_template_building");
   }
 }
 
@@ -454,18 +467,6 @@ function substrateErrorCode(error: unknown): string {
 /** createActor's answer when the template is gone: FailedPrecondition from Substrate, or NotFound. */
 function isTemplateGone(error: unknown): boolean {
   return error instanceof SubstrateTemplateMissingError || error instanceof SubstrateNotFoundError;
-}
-
-/**
- * A Substrate call that failed with Substrate's own answer (not capacity, not a name clash): after a
- * createActor or resumeActor, the template's status decides whether it is a golden-snapshot failure.
- */
-function isSubstrateFailure(error: unknown): boolean {
-  return (
-    error instanceof SubstrateUnavailableError ||
-    error instanceof SubstrateNotFoundError ||
-    error instanceof SubstrateTemplateMissingError
-  );
 }
 
 function isPhaseConflict(error: unknown): boolean {
@@ -704,7 +705,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       // Refused for capacity before: provision afresh (round 1), unless another replica just did. A
       // refused adopter (it holds the parked run's token) relaunches cold, for capacity.
       const refusedAdopter = claimed.record.token !== token;
-      const fields = refusedAdopter ? { coldReason: "capacity" as const } : {};
+      // A cold relaunch refused for capacity keeps the reason it went cold for (actor_missing).
+      const fields =
+        refusedAdopter && claimed.record.coldReason === undefined ? { coldReason: "capacity" as const } : {};
       if (!(await this.runs.reclaim(spec.runId, deadline(), fields))) return handle;
     }
     // An adopter refused for capacity keeps the parked run's token on its row (warm rounds).
@@ -999,15 +1002,24 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     } catch (caught) {
       // Clean up before recording requeued, so a relaunch never races this cleanup.
       await this.cleanup(token, 1, shape, repositoryNames(spec));
-      // A create or resume Substrate failed on a template whose golden snapshot failed (or was never
-      // built): counted as a golden-snapshot failure, so the run requeues or fails as
-      // substrate_image_unready by the same rules as at ensureTemplate, not substrate_unavailable.
-      const golden = starting && isSubstrateFailure(caught) ? await this.goldenFailureAfter(starting, call) : undefined;
+      // A create or resume Substrate refused Unavailable on a template whose golden snapshot failed:
+      // counted as a golden-snapshot failure, so the run requeues or fails as substrate_image_unready
+      // by the same rules as at ensureTemplate, not substrate_unavailable. On a template still
+      // building (no tag, never started an actor) it requeues uncounted. A missing template
+      // (TemplateMissing, NotFound) is never a failed build: its own error stands.
+      const refused = starting;
+      const golden =
+        refused && caught instanceof SubstrateUnavailableError
+          ? await this.goldenFailureAfter(refused, call)
+          : undefined;
       const error: unknown = golden ?? caught;
       // A template that cannot start an actor: the run fails now (substrate_image_unready) and is
       // never requeued. The launch resolves with its handle; status() answers the recorded failure.
+      // A still-building template refused past SUBSTRATE_TEMPLATE_READY_SEC is never ready, as a
+      // refused resume is.
       if (
         error instanceof TemplateUnreadyError ||
+        (error instanceof TemplateBuildingError && refused && (await this.neverReady(templates, refused))) ||
         (error instanceof SubstrateExhaustedError && resuming && (await this.neverReady(templates, resuming)))
       ) {
         await this.runs.setPhase(spec.runId, "image_unready", ["provisioning"]).catch(() => undefined);
@@ -1020,6 +1032,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (error instanceof TemplateRebuildingError) {
         await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
         throw new JobCapacityError("substrate_capacity: template rebuilding", { cause: error });
+      }
+      if (error instanceof TemplateBuildingError) {
+        await this.runs.setPhase(spec.runId, "requeued", ["provisioning"]).catch(() => undefined);
+        throw new JobCapacityError("substrate_capacity: template building", { cause: error });
       }
       await this.runs.setPhase(spec.runId, "provisioning_failed", ["provisioning"]).catch(() => undefined);
       throw error;
@@ -1151,20 +1167,21 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * After a createActor or resumeActor Substrate failed (provision): whether that was the actor's
-   * template failing its golden snapshot. Substrate answers such a launch Unavailable once the golden
-   * actor crashes, before its status reports the failure, so this re-reads the status: a failed
-   * golden snapshot, or a golden-snapshot status with no tag yet on a template that never started an
-   * actor (no readyAt), is counted as a golden-snapshot failure by ensureTemplate's rules. Returns the error the run ends
-   * with: TemplateRebuildingError (requeue: the same build, or a first failure, whose rebuild is
-   * started here) or TemplateUnreadyError (a second failure: substrate_image_unready). Undefined
-   * when it is not a golden failure (a ready or missing template, a status or row that cannot be
-   * read, a rebuild that failed): the call's own error stands.
+   * After a createActor or resumeActor Substrate refused Unavailable (provision): whether that was the
+   * actor's template failing its golden snapshot. This re-reads the status. Only a failed golden
+   * snapshot (goldenSnapshotFailed) is counted, by ensureTemplate's rules: TemplateRebuildingError
+   * (requeue: the same build, or a first failure, whose rebuild is started here) or
+   * TemplateUnreadyError (a second failure: substrate_image_unready). A golden-snapshot status with
+   * no tag yet on a template that never started an actor (no readyAt) is the normal window of a new
+   * template's first run: TemplateBuildingError (requeue, uncounted, no rebuild; a broken build
+   * reports its failure by the relaunch, and ensureTemplate counts it then). Undefined otherwise (a
+   * ready or missing template, a status or row that cannot be read, a rebuild that failed): the
+   * call's own error stands.
    */
   private async goldenFailureAfter(
     template: ActorTemplateSpec,
     call: <T>(name: SubstrateCall, fn: () => Promise<T>) => Promise<T>,
-  ): Promise<TemplateUnreadyError | TemplateRebuildingError | undefined> {
+  ): Promise<TemplateUnreadyError | TemplateRebuildingError | TemplateBuildingError | undefined> {
     const role = templateRoleOf(template.name);
     if (!role) return undefined;
     let info: TemplateInfo | undefined;
@@ -1185,6 +1202,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       } catch {
         return undefined;
       }
+      // Still building: never counted and never rebuilt here.
+      return new TemplateBuildingError();
     }
     try {
       await this.countGoldenFailure(template, role, call);

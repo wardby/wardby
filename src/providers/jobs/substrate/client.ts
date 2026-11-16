@@ -339,7 +339,11 @@ class GrpcSubstrateApi implements SubstrateApi {
         [Code.ResourceExhausted]: () => {
           throw new SubstrateExhaustedError("substrate_resource_exhausted");
         },
-        // The actor's template is gone (deleted while the actor was suspended).
+        // The actor's template is gone (deleted while the actor was suspended). Every
+        // FailedPrecondition on resume is taken to mean that: it is the only cause seen from a live
+        // Substrate. Should Substrate also use it for another precondition (an actor's state, say),
+        // an adopter would start fresh (benign), but a cold launch would fail labelled
+        // substrate_template_missing.
         [Code.FailedPrecondition]: templateMissing,
         [Code.NotFound]: () => {
           throw new SubstrateNotFoundError("substrate_not_found");

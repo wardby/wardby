@@ -16,6 +16,7 @@ import {
   TOOL_IMAGE,
   type Harness,
 } from "./launcher.test-support.js";
+import { SubstrateExhaustedError } from "./api.js";
 import type { Room } from "./placement.js";
 import type { SubstrateRunRecord } from "./run-store.js";
 import { SubstrateJobLauncher, type WarmRoundsOptions } from "./launcher.js";
@@ -847,6 +848,31 @@ describe("SubstrateJobLauncher with warm rounds", () => {
     expect(h.warmEvents.some((e) => e.event === "substrate_warm_adopted")).toBe(false);
     await finishRound(h, h.token, "run-2", 1);
     expect(JSON.parse((await h.launcher.collect(handle)).resultArtifact!)).toMatchObject({ runId: "run-2" });
+  });
+
+  it("keeps cold reason actor_missing when that cold relaunch is refused for capacity", async () => {
+    const h = await warmHarness();
+    await parkedRoundOne(h);
+    const spec2 = await followUp(h, "run-2");
+    const tool = toolTemplate(h.spec, { ...CONFIG, warmRounds: true });
+    await h.api.deleteActorTemplate(CONFIG.atespace, tool.name);
+    const resume = h.api.resumeActor.bind(h.api);
+    let toolResumes = 0;
+    h.api.resumeActor = async (atespace, name) => {
+      // The adoption's resume finds the template gone; the cold relaunch's first resume finds no room.
+      if (name.endsWith("-tool") && ++toolResumes === 2) throw new SubstrateExhaustedError("no worker has room");
+      return resume(atespace, name);
+    };
+    await expect(h.launcher.launch(spec2)).rejects.toBeInstanceOf(JobCapacityError);
+    expect(await h.runs.get("run-2")).toMatchObject({ phase: "requeued", coldReason: "actor_missing" });
+    const handle = await h.launcher.launch(spec2);
+    expect(await h.runs.get("run-2")).toMatchObject({
+      token: h.token,
+      phase: "running",
+      round: 1,
+      coldReason: "actor_missing",
+    });
+    expect(await h.launcher.warmOutcome(handle)).toEqual({ adopted: false, reason: "actor_missing" });
   });
 
   describe("a refused adopter whose cleanup could not delete the parked actors", () => {

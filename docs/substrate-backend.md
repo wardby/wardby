@@ -425,11 +425,13 @@ park or adoption last used it.
 - **A golden snapshot that fails.** The first failure rebuilds the template.
   Substrate often refuses a run's actor start as unavailable while the golden
   build is failing, before its status says so; Wardby then reads the template's
-  status again, and a failed build, or a status with no tag on a template no
-  actor has started from, counts as a golden-snapshot failure rather than
-  [`substrate_unavailable`](../help/errors/substrate-unavailable.md). A run
-  whose start counted the first failure goes back to the queue while the
-  template is rebuilt.
+  status again. A failed build counts as a golden-snapshot failure rather than
+  [`substrate_unavailable`](../help/errors/substrate-unavailable.md). A status
+  with no tag yet, on a template no actor has started from, is not counted and
+  the template is not rebuilt: the run goes back to the queue, and a broken
+  build has reported its failure by the time the run is retried, when it is
+  counted. A run whose start counted the first failure goes back to the queue
+  while the template is rebuilt.
   A second one within `SUBSTRATE_TEMPLATE_RETRY_SEC` fails the run with
   [`substrate_image_unready`](../help/errors/substrate-image-unready.md)
   instead, and so does a template that never becomes ready within
@@ -450,8 +452,9 @@ park or adoption last used it.
 - **Log events**, each with the template's name and role and never an image's
   content or Substrate's message: `substrate_template_golden_failed`,
   `substrate_template_unready`, `substrate_template_status_read_failed` (the
-  template's status could not be read; Wardby falls back to whether an actor has
-  started from it), `substrate_template_record_failed` (the
+  template's status could not be read; when judging ready, Wardby falls back to
+  whether an actor has started from it, and after a refused actor start the
+  call's own error stands), `substrate_template_record_failed` (the
   failure count could not be written; the template is rebuilt),
   `substrate_template_remove_failed` (all warn) and `substrate_template_removed`
   (info).
