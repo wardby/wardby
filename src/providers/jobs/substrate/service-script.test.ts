@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,6 +17,8 @@ import {
   MAX_SERVICE_SCRIPT_BYTES,
   MAX_SERVICE_SCRIPTS_BYTES,
   SERVICE_SCRIPT_DIR,
+  SERVICE_SETUP_DONE_ENV,
+  SERVICE_SETUP_DONE_FILE,
   SERVICE_STATE_LINE,
   serviceStartScript,
   servicesInOrder,
@@ -37,13 +39,15 @@ const PINNED_POSTGRES =
     "export POSTGRES_DB='test'",
     "export POSTGRES_PASSWORD='test'",
     "export POSTGRES_USER='test'",
+    'rm -f "$dir/setup-done"',
+    'export WARDBY_SERVICE_SETUP_DONE="$dir/setup-done"',
     `'/bin/sh' '-c' ${shellQuote(POSTGRES_SUBSTRATE_SCRIPT)} &`,
     "pid=$!",
     'if command -v timeout >/dev/null 2>&1; then t="timeout 2"; else t=""; fi',
     "n=0",
     "while :; do",
     "  if ! kill -0 \"$pid\" 2>/dev/null; then st 'state=exited'; idle; fi",
-    "  if $t 'pg_isready' '-h' '127.0.0.1' '-p' '5432' '-U' 'test' '-d' 'test' >/dev/null 2>&1; then st 'state=ready'; break; fi",
+    "  if $t 'pg_isready' '-h' '127.0.0.1' '-p' '5432' '-U' 'test' '-d' 'test' >/dev/null 2>&1 && [ -e \"$dir/setup-done\" ]; then st 'state=ready'; break; fi",
     "  n=$((n + 1))",
     "  if [ \"$n\" -ge 30 ]; then st 'state=failed reason=probe_failed'; idle; fi",
     '  st "state=probing attempts=$n"',
@@ -91,13 +95,15 @@ const PINNED_MYSQL =
     "export MYSQL_PASSWORD='test'",
     "export MYSQL_ROOT_PASSWORD='test'",
     "export MYSQL_USER='test'",
+    'rm -f "$dir/setup-done"',
+    'export WARDBY_SERVICE_SETUP_DONE="$dir/setup-done"',
     `'/bin/sh' '-c' ${shellQuote(MYSQL_SUBSTRATE_SCRIPT)} &`,
     "pid=$!",
     'if command -v timeout >/dev/null 2>&1; then t="timeout 3"; else t=""; fi',
     "n=0",
     "while :; do",
     "  if ! kill -0 \"$pid\" 2>/dev/null; then st 'state=exited'; idle; fi",
-    "  if $t 'mysqladmin' 'ping' '-h' '127.0.0.1' '-P' '3306' '-utest' '-ptest' '--silent' >/dev/null 2>&1; then st 'state=ready'; break; fi",
+    "  if $t 'mysqladmin' 'ping' '-h' '127.0.0.1' '-P' '3306' '-utest' '-ptest' '--silent' >/dev/null 2>&1 && [ -e \"$dir/setup-done\" ]; then st 'state=ready'; break; fi",
     "  n=$((n + 1))",
     "  if [ \"$n\" -ge 45 ]; then st 'state=failed reason=probe_failed'; idle; fi",
     '  st "state=probing attempts=$n"',
@@ -286,6 +292,75 @@ describe("serviceStartScript in a real shell", () => {
     expect(alive(child)).toBe(true);
   });
 
+  // A substrateImage entry's own script runs its setup after the daemon answers (createdb, the mysql
+  // user), so its readiness command alone can pass too early: it is ready only once the script has
+  // also written $WARDBY_SERVICE_SETUP_DONE.
+  const SUBSTRATE_FAKE: ResolvedCodingService = {
+    ...FAKE_SERVICE,
+    substrateImage: `registry.example/fakedb-substrate@sha256:${"c".repeat(64)}`,
+  };
+
+  it("keeps a substrateImage entry probing until its setup is done, then fails it at the threshold", async () => {
+    const dir = tempDir();
+    const service: ResolvedCodingService = {
+      ...SUBSTRATE_FAKE,
+      startCommand: ["sleep", "30"],
+      readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 2 },
+    };
+    const child = run(serviceStartScript(service, { stateDir: dir }));
+    const seen = new Set<string>();
+    await waitFor(() => {
+      const state = readState(dir);
+      if (state) seen.add(state);
+      return state === "state=failed reason=probe_failed";
+    }, 8000);
+    expect(seen.has("state=probing attempts=1")).toBe(true);
+    expect(seen.has("state=ready")).toBe(false);
+    expect(readState(dir)).toBe("state=failed reason=probe_failed");
+    expect(existsSync(join(dir, "setup-done"))).toBe(false);
+    expect(alive(child)).toBe(true);
+  }, 15_000);
+
+  it("makes a substrateImage entry ready only after its script writes the setup-done file", async () => {
+    const dir = tempDir();
+    const out = join(dir, "var.out");
+    const service: ResolvedCodingService = {
+      ...SUBSTRATE_FAKE,
+      startCommand: [
+        "/bin/sh",
+        "-c",
+        'printf "%s" "$WARDBY_SERVICE_SETUP_DONE" > "$0"; sleep 2; : > "$WARDBY_SERVICE_SETUP_DONE"; exec sleep 30',
+        out,
+      ],
+      readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 10 },
+    };
+    run(serviceStartScript(service, { stateDir: dir }));
+    const seen: string[] = [];
+    await waitFor(() => {
+      const state = readState(dir);
+      if (state && seen.at(-1) !== state) seen.push(state);
+      return state === "state=ready";
+    }, 8000);
+    // The file only ever appears, so it existing now means it existed when ready was written.
+    expect(readState(dir)).toBe("state=ready");
+    expect(seen).toContain("state=probing attempts=1");
+    expect(existsSync(join(dir, "setup-done"))).toBe(true);
+    expect(readFileSync(out, "utf8")).toBe(join(dir, "setup-done"));
+  }, 15_000);
+
+  it("clears a setup-done file left from before the script started", async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "setup-done"), "");
+    const service: ResolvedCodingService = {
+      ...SUBSTRATE_FAKE,
+      startCommand: ["sleep", "30"],
+      readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 2 },
+    };
+    run(serviceStartScript(service, { stateDir: dir }));
+    await waitFor(() => readState(dir) === "state=failed reason=probe_failed", 8000);
+    expect(readState(dir)).toBe("state=failed reason=probe_failed");
+  }, 15_000);
+
   it("works without timeout", async () => {
     const dir = tempDir();
     const bin = tempDir();
@@ -338,6 +413,21 @@ describe("serviceStartScript text", () => {
     expect(logs).toEqual([]);
     expect(script).toContain("export FAKEDB_PASSWORD='FAKE_SERVICE_ENV_VALUE_0001'");
     expect(script).toContain("export FAKEDB_QUOTE='it'\\''s $HOME `x`'");
+  });
+
+  it("gives only a substrateImage entry the setup-done variable and gate", () => {
+    const plain = serviceStartScript(FAKE_SERVICE);
+    expect(plain).not.toContain("WARDBY_SERVICE_SETUP_DONE");
+    expect(plain).not.toContain("setup-done");
+    expect(serviceStartScript(builtin("redis", "7"))).not.toContain("setup-done");
+    const gated = serviceStartScript({
+      ...FAKE_SERVICE,
+      substrateImage: `registry.example/x@sha256:${"c".repeat(64)}`,
+    });
+    expect(gated).toContain('export WARDBY_SERVICE_SETUP_DONE="$dir/setup-done"');
+    expect(gated).toContain(`>/dev/null 2>&1 && [ -e "$dir/setup-done" ]; then st 'state=ready'`);
+    expect(SERVICE_SETUP_DONE_ENV).toBe("WARDBY_SERVICE_SETUP_DONE");
+    expect(SERVICE_SETUP_DONE_FILE).toBe("setup-done");
   });
 
   it("throws for an entry without a start command", () => {

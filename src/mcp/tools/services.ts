@@ -142,7 +142,7 @@ const definitionProperties = {
     maxItems: 16,
     items: { type: "string" },
     description:
-      'The argv that starts the service on the Substrate job launcher: its image\'s ENTRYPOINT + CMD (e.g. ["redis-server", "--dir", "/data"]), or with substrateImage, a script (["/bin/sh", "-c", "..."]) that initialises and runs the service as that image\'s user. Required on the Substrate job launcher, which refuses an entry without it at dispatch; Docker and Kubernetes run the image\'s own entrypoint and ignore it. Each argument is one line of at most 4096 bytes. To remove it, delete and re-create the entry.',
+      'The argv that starts the service on the Substrate job launcher: its image\'s ENTRYPOINT + CMD (e.g. ["redis-server", "--dir", "/data"]), or with substrateImage, a script (["/bin/sh", "-c", "..."]) that initialises and runs the service as that image\'s user, and as its last setup step writes the file named by $WARDBY_SERVICE_SETUP_DONE (e.g. `: > "$WARDBY_SERVICE_SETUP_DONE"`): on Substrate such an entry is ready only once that file exists and its readiness command passes. Required on the Substrate job launcher, which refuses an entry without it at dispatch; Docker and Kubernetes run the image\'s own entrypoint and ignore it. Each argument is one line of at most 4096 bytes. To remove it, delete and re-create the entry.',
   },
   resources: {
     type: "object",

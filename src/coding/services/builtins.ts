@@ -36,13 +36,17 @@
  *
  * The scripts read the entry's serviceEnv by name only (the launcher's start
  * script exports it first); no value is written into them. Each is one line:
- * a startCommand argument may not hold a newline.
+ * a startCommand argument may not hold a newline. Each writes the file named by
+ * $WARDBY_SERVICE_SETUP_DONE (set by the launcher's start script) once its setup
+ * is done: the readiness command alone passes before createdb has run or the
+ * mysql user exists (mysqladmin ping answers even "Access denied").
  */
 import type { CodingServiceDefinition } from "./catalog.js";
 
 /**
  * Initialise PGDATA on first start (the password reaches initdb through a 0600 file in /tmp, removed
- * at once), run postgres on 127.0.0.1, create POSTGRES_DB once it answers, and stay in the foreground.
+ * at once), run postgres on 127.0.0.1, create POSTGRES_DB once it answers, mark setup done, and stay
+ * in the foreground.
  */
 export const POSTGRES_SUBSTRATE_SCRIPT = [
   "set -u;",
@@ -57,13 +61,15 @@ export const POSTGRES_SUBSTRATE_SCRIPT = [
   'export PGPASSWORD="$POSTGRES_PASSWORD";',
   `psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc 'select 1' >/dev/null 2>&1 || createdb -h 127.0.0.1 -U "$POSTGRES_USER" "$POSTGRES_DB" || exit 1;`,
   "unset PGPASSWORD;",
+  ': > "$WARDBY_SERVICE_SETUP_DONE" || exit 1;',
   'wait "$pid"',
 ].join(" ");
 
 /**
  * Initialise the datadir on first start, run mysqld on 127.0.0.1, and on that first start create
  * MYSQL_DATABASE and MYSQL_USER and set root's password over the root socket, with the SQL on stdin
- * (values SQL-quoted, never in an argument); then stay in the foreground. Telemetry is off.
+ * (values SQL-quoted, never in an argument); then mark setup done and stay in the foreground.
+ * Telemetry is off.
  */
 export const MYSQL_SUBSTRATE_SCRIPT = [
   "export PERCONA_TELEMETRY_DISABLE=1; set -u;",
@@ -77,6 +83,7 @@ export const MYSQL_SUBSTRATE_SCRIPT = [
   'd=$(printf \'%s\' "$MYSQL_DATABASE" | sed \'s/`/``/g\'); u=$(lit "$MYSQL_USER"); p=$(lit "$MYSQL_PASSWORD"); r=$(lit "$MYSQL_ROOT_PASSWORD");',
   String.raw`printf '%s\n' "CREATE DATABASE IF NOT EXISTS \`$d\`;" "CREATE USER IF NOT EXISTS '$u'@'%' IDENTIFIED BY '$p';" "GRANT ALL ON \`$d\`.* TO '$u'@'%';" "ALTER USER 'root'@'localhost' IDENTIFIED BY '$r';" | mysql --socket=/tmp/mysqld.sock -uroot || exit 1;`,
   "fi;",
+  ': > "$WARDBY_SERVICE_SETUP_DONE" || exit 1;',
   'wait "$pid"',
 ].join(" ");
 

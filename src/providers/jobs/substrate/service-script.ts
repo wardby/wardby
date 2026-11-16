@@ -28,6 +28,17 @@ export const MAX_SERVICE_SCRIPTS_BYTES = 64 * 1024;
 /** How long a service may go without writing its first state after start.sh is written (start_failed). */
 export const SERVICE_START_MARKER_MS = 30_000;
 
+/**
+ * An entry with substrateImage runs its own setup script (builtins.ts), which starts the daemon in
+ * the background and then sets the service up (createdb; the mysql user and root password). Its
+ * readiness command can pass before that setup ends, so its start script also waits for the file
+ * named by SERVICE_SETUP_DONE_ENV (`<stateDir>/setup-done`, a path, never a value), which the setup
+ * script writes as its last step. Entries without substrateImage keep their readiness command alone.
+ * Docker and Kubernetes never set the variable: it exists only in this start script.
+ */
+export const SERVICE_SETUP_DONE_ENV = "WARDBY_SERVICE_SETUP_DONE";
+export const SERVICE_SETUP_DONE_FILE = "setup-done";
+
 /** The fixed state-file tokens (one line), written by the start script only. */
 export const SERVICE_STATE_LINE =
   /^state=(starting|probing|ready|failed|exited)(?: attempts=([0-9]{1,5}))?(?: reason=(probe_failed))?\n?$/;
@@ -51,6 +62,8 @@ export function servicesInOrder(services: readonly ResolvedCodingService[]): Res
 export function serviceStartScript(service: ResolvedCodingService, options: { stateDir?: string } = {}): string {
   const { startCommand, readiness, serviceEnv } = service;
   if (startCommand === undefined) throw new Error("substrate_service_start_command_missing");
+  const gated = service.substrateImage !== undefined;
+  const done = `"$dir/${SERVICE_SETUP_DONE_FILE}"`;
   const exports = Object.entries(serviceEnv)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     // Names match SERVICE_ENV_NAME (validated), so they are written unquoted; values are always quoted.
@@ -64,13 +77,15 @@ export function serviceStartScript(service: ResolvedCodingService, options: { st
       "idle() { while :; do sleep 3600; done; }",
       "st 'state=starting'",
       ...exports,
+      // After serviceEnv, so no entry's variable can replace it; cleared first, so only this start counts.
+      ...(gated ? [`rm -f ${done}`, `export ${SERVICE_SETUP_DONE_ENV}=${done}`] : []),
       `${quoteArgs(startCommand)} &`,
       "pid=$!",
       `if command -v timeout >/dev/null 2>&1; then t="timeout ${readiness.timeoutSeconds}"; else t=""; fi`,
       "n=0",
       "while :; do",
       `  if ! kill -0 "$pid" 2>/dev/null; then st 'state=exited'; idle; fi`,
-      `  if $t ${quoteArgs(readiness.command)} >/dev/null 2>&1; then st 'state=ready'; break; fi`,
+      `  if $t ${quoteArgs(readiness.command)} >/dev/null 2>&1${gated ? ` && [ -e ${done} ]` : ""}; then st 'state=ready'; break; fi`,
       "  n=$((n + 1))",
       `  if [ "$n" -ge ${readiness.failureThreshold} ]; then st 'state=failed reason=probe_failed'; idle; fi`,
       `  st "state=probing attempts=$n"`,

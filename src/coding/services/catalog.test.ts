@@ -82,6 +82,10 @@ describe("built-in coding services", () => {
       }
     }
     expect(MYSQL_SUBSTRATE_SCRIPT.startsWith("export PERCONA_TELEMETRY_DISABLE=1;")).toBe(true);
+    // Each marks its setup done (the Substrate start script's readiness waits for it) as its last step.
+    for (const script of [POSTGRES_SUBSTRATE_SCRIPT, MYSQL_SUBSTRATE_SCRIPT]) {
+      expect(script.endsWith(': > "$WARDBY_SERVICE_SETUP_DONE" || exit 1; wait "$pid"')).toBe(true);
+    }
     // The password reaches initdb through a file, never an argument, and the file goes at once.
     expect(POSTGRES_SUBSTRATE_SCRIPT).toContain('--pwfile="$pw"');
     expect(POSTGRES_SUBSTRATE_SCRIPT).toContain('rm -f "$pw"');
