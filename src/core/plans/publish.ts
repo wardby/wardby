@@ -5,6 +5,7 @@
  * already redacted when they were recorded. Nothing here logs or returns file content: results
  * carry ids, paths, states and version numbers only.
  */
+import { createHash } from "node:crypto";
 import type { PrismaClient } from "#prisma";
 import { readPlanDocument } from "../../coding/profile.js";
 import { loadPlanFiles } from "../../coding/plan-files/store.js";
@@ -14,12 +15,15 @@ import { documentSecretValues } from "../documents/redact.js";
 import { submitForReview } from "../documents/review.js";
 import { createDocument, publishVersion } from "../documents/service.js";
 import { atLeast, effectiveAccess } from "../grants.js";
+import { TERMINAL_RUN_STATUSES } from "../host-status.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { parsePlanLayout, type PlanLayoutDocument } from "./layout.js";
 
 export type SecretCipher = Parameters<typeof loadAgentSecretValues>[1];
 
-export type PlanPublishError = "plan_too_large" | "plan_empty" | "plan_files_unsupported" | "plan_not_stored";
+/** plan_publish_failed: the publish threw partway (CodingRun.planPublishStatus); never the error's text. */
+export type PlanPublishError =
+  "plan_too_large" | "plan_empty" | "plan_files_unsupported" | "plan_not_stored" | "plan_publish_failed";
 export type PlanDocumentChange =
   "created" | "updated" | "unchanged" | "removed" | "approved_unchanged" | "archived_unchanged";
 
@@ -58,7 +62,42 @@ export interface PlanPublishDeps {
   origin: string | null;
 }
 
-const TERMINAL = new Set(["succeeded", "failed", "refused", "lost", "budget_exhausted", "cancelled"]);
+const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
+
+/** CodingRun.planPublishStatus once a publish finished, or once one threw (a fixed code, never error text). */
+export const PLAN_PUBLISHED = "published";
+export const PLAN_PUBLISH_FAILED = "plan_publish_failed";
+
+/**
+ * The lock transaction holds one pool connection for the whole publish (the writes run on others, as the
+ * document service opens its own transactions). A waiter gives up after the lock timeout, and the
+ * transaction timeout bounds the holder: up to 20 documents, each a few small reads and writes.
+ */
+const PLAN_PUBLISH_LOCK_TIMEOUT_MS = 120_000;
+const PLAN_PUBLISH_TRANSACTION_TIMEOUT_MS = 300_000;
+const PLAN_PUBLISH_MAX_WAIT_MS = 10_000;
+
+/** A stable advisory-lock key for one plan set (agent, repository, number). */
+export function planSetLockKey(agentId: string, repository: string, number: number): bigint {
+  const digest = createHash("sha256").update(`wardby:plan-set:${agentId}\u0000${repository}\u0000${number}`).digest();
+  return digest.readBigInt64BE(0);
+}
+
+/** Runs fn while holding the plan set's advisory transaction lock: one publish per set at a time. */
+async function withPlanSetLock<T>(db: PrismaClient, key: bigint, fn: () => Promise<T>): Promise<T> {
+  return db.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT set_config('lock_timeout', ${`${PLAN_PUBLISH_LOCK_TIMEOUT_MS}ms`}, true)`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${key})`;
+      return fn();
+    },
+    { timeout: PLAN_PUBLISH_TRANSACTION_TIMEOUT_MS, maxWait: PLAN_PUBLISH_MAX_WAIT_MS },
+  );
+}
+
+async function markPublish(db: PrismaClient, runId: string, status: string | null): Promise<void> {
+  await db.codingRun.update({ where: { runId }, data: { planPublishStatus: status } });
+}
 
 /** CodingRun.planFilesStatus (anything but "stored") as a publish error. */
 function publishErrorOf(status: string | null): PlanPublishError {
@@ -130,6 +169,39 @@ export async function reviewersWithAccess(
   return { reviewers, skippedReviewers };
 }
 
+/** Whether a final approver still exists and has at least read on the agent (the set's access agent). */
+async function approverHasAccess(db: PrismaClient, agentId: string, principalId: string): Promise<boolean> {
+  const [principal, agent] = await Promise.all([
+    db.principal.findUnique({ where: { id: principalId }, select: { id: true } }),
+    db.agent.findUnique({ where: { id: agentId }, select: { id: true, ownerId: true } }),
+  ]);
+  if (!principal || !agent) return false;
+  return atLeast("agent", await effectiveAccess(db, "agent", agent, principalId), "read");
+}
+
+/**
+ * Who a plan document is submitted to: reviewers with read on the planner (R10b), and the final approver
+ * when it still exists and has read on the set's access agent. Anyone left out is in skippedReviewers
+ * (ids only); a dropped final approver never fails the publish.
+ */
+async function planReviewers(
+  db: PrismaClient,
+  planner: { id: string; ownerId: string },
+  accessAgentId: string,
+  setting: { reviewers: readonly string[]; finalApproverId?: string },
+): Promise<{ reviewers: string[]; skippedReviewers: string[]; finalApproverId?: string }> {
+  const checked = await reviewersWithAccess(db, planner, setting.reviewers);
+  const approver = setting.finalApproverId;
+  if (!approver) return checked;
+  if (await approverHasAccess(db, accessAgentId, approver)) return { ...checked, finalApproverId: approver };
+  return {
+    ...checked,
+    skippedReviewers: checked.skippedReviewers.includes(approver)
+      ? checked.skippedReviewers
+      : [...checked.skippedReviewers, approver],
+  };
+}
+
 function documentLink(origin: string | null, id: string): { pagePath: string; url?: string } {
   const pagePath = `/d/${id}`;
   return origin === null ? { pagePath } : { pagePath, url: `${origin}${pagePath}` };
@@ -184,7 +256,9 @@ const asKind = (kind: string): "document" | "design" => (kind === "design" ? "de
 /**
  * Publishes a succeeded planner run's stored plan files as its plan set: creates the set and its
  * documents on the first run, the next version of each changed document on a later one. null: the
- * run is not a planner run (or did not succeed).
+ * run is not a planner run (or did not succeed). One publish per set at a time (an advisory lock).
+ * When a step throws, the other documents are still published, CodingRun.planPublishStatus records
+ * plan_publish_failed, and the first error is thrown; a retry of the same run finishes the set.
  */
 export async function publishPlanFromRun(
   db: PrismaClient,
@@ -193,10 +267,32 @@ export async function publishPlanFromRun(
 ): Promise<PublishedPlan | PlanPublishFailure | null> {
   const planner = await readPlannerRun(db, runId);
   if (!planner || planner.coding.run.status !== "succeeded") return null;
-  const { coding, setting, number, ownerId } = planner;
+  const { coding, number } = planner;
   if (coding.planFilesStatus !== "stored") return { number, error: publishErrorOf(coding.planFilesStatus) };
   const layout = parsePlanLayout(await loadPlanFiles(db, runId, "output"));
   if (!layout.ok) return { number, error: layout.error };
+  const lockKey = planSetLockKey(coding.run.agentId, coding.repository, number);
+  try {
+    return await withPlanSetLock(db, lockKey, () =>
+      publishSet(db, deps, runId, planner, layout.documents, layout.ignored),
+    );
+  } catch (err) {
+    // Best effort: the marker must not hide the publish's own error.
+    await markPublish(db, runId, PLAN_PUBLISH_FAILED).catch(() => undefined);
+    throw err;
+  }
+}
+
+async function publishSet(
+  db: PrismaClient,
+  deps: PlanPublishDeps,
+  runId: string,
+  planner: NonNullable<Awaited<ReturnType<typeof readPlannerRun>>>,
+  layoutDocuments: readonly PlanLayoutDocument[],
+  ignored: string[],
+): Promise<PublishedPlan> {
+  const { coding, setting, number, ownerId } = planner;
+  await markPublish(db, runId, null);
   const agentId = coding.run.agentId;
   // The store this run wrote to (B4 sets planRepositoryPath only for store "repository").
   const repositoryPath = coding.planRepositoryPath;
@@ -221,15 +317,31 @@ export async function publishPlanFromRun(
       },
     },
   });
-  const checked = await reviewersWithAccess(db, { id: agentId, ownerId }, setting.reviewers);
-  const reviewers = checked.reviewers.length ? checked.reviewers : [ownerId];
+  const review = await planReviewers(db, { id: agentId, ownerId }, set.accessAgentId ?? agentId, setting);
+  const submit = (documentId: string) =>
+    submitForReview(db, {
+      documentId,
+      viewer: { kind: "principal", principalId: ownerId },
+      reviewers: review.reviewers.length ? review.reviewers : [ownerId],
+      ...(review.finalApproverId ? { finalApproverId: review.finalApproverId } : {}),
+    });
+  // Store repository: a document that gets a version from this run links to this run's plan folder and branch.
+  const linkToRun = async (documentId: string, path: string) => {
+    if (!repositoryPath) return;
+    await db.document.update({
+      where: { id: documentId },
+      data: { repository: coding.repository, path: joinPlanPath(repositoryPath, path), baseRef: coding.headRef },
+    });
+  };
   const secrets = await documentSecretValues(db, deps.cipher, agentId);
   const byPath = new Map(set.documents.flatMap((d) => (d.planPath ? [[d.planPath, d] as const] : [])));
   const results: PublishedPlanDocument[] = [];
+  let failure: Error | undefined;
+  const asError = (err: unknown) => (err instanceof Error ? err : new Error(PLAN_PUBLISH_FAILED));
   const report = async (id: string, doc: { kind: "document" | "design"; path: string }, change: PlanDocumentChange) =>
     results.push(await describePlanDocument(db, deps.origin, id, doc, change));
 
-  for (const doc of layout.documents) {
+  const publishOne = async (doc: PlanLayoutDocument): Promise<void> => {
     const existing = byPath.get(doc.path);
     byPath.delete(doc.path);
     const content = contentOf(doc);
@@ -250,39 +362,37 @@ export async function publishPlanFromRun(
         // Version 1 records the run that wrote it, like every later version (R11, planSummaryForRun).
         db.documentVersion.update({ where: { id: created.versionId }, data: { runId } }),
       ]);
-      await submitForReview(db, {
-        documentId: created.id,
-        viewer: { kind: "principal", principalId: ownerId },
-        reviewers,
-        ...(setting.finalApproverId ? { finalApproverId: setting.finalApproverId } : {}),
-      });
+      await submit(created.id);
       await report(created.id, doc, "created");
-      continue;
+      return;
     }
     if (existing.removedFromPlan) {
       await db.document.update({ where: { id: existing.id }, data: { removedFromPlan: false } });
     }
-    // R11: one writer per version. A version this run already wrote (B8's revision publish) is left alone.
+    // R11: one writer per version. A version this run already wrote (B8's revision publish, or an
+    // earlier attempt of this publish) is left alone; a document still in draft is submitted now.
     const own = await db.documentVersion.findFirst({
       where: { documentId: existing.id, runId },
       select: { number: true },
     });
     if (own) {
+      if (existing.reviewState === "draft") await submit(existing.id);
+      await linkToRun(existing.id, doc.path);
       await report(existing.id, doc, own.number === 1 ? "created" : "updated");
-      continue;
+      return;
     }
     // R21: an archived document is never reported as approved.
     if (existing.reviewState === "approved") {
       await report(existing.id, doc, "approved_unchanged");
-      continue;
+      return;
     }
     if (existing.reviewState === "archived") {
       await report(existing.id, doc, "archived_unchanged");
-      continue;
+      return;
     }
     if (sameContent(doc.kind, existing.currentVersion, content, secrets)) {
       await report(existing.id, doc, "unchanged");
-      continue;
+      return;
     }
     try {
       await publishVersion(db, deps.cipher, {
@@ -297,31 +407,47 @@ export async function publishPlanFromRun(
       // A newer version (a person's edit) is never overwritten: reported as not updated.
       if (err instanceof Error && err.message === "document_version_conflict") {
         await report(existing.id, doc, "unchanged");
-        continue;
+        return;
       }
       // Approved or archived since it was read.
       if (err instanceof Error && err.message === "document_locked") {
         const now = await db.document.findUnique({ where: { id: existing.id }, select: { reviewState: true } });
         await report(existing.id, doc, now?.reviewState === "archived" ? "archived_unchanged" : "approved_unchanged");
-        continue;
+        return;
       }
       throw err;
     }
+    await linkToRun(existing.id, doc.path);
     await report(existing.id, doc, "updated");
+  };
+
+  // A step that throws does not abandon the rest of the set: the first error is thrown at the end.
+  for (const doc of layoutDocuments) {
+    try {
+      await publishOne(doc);
+    } catch (err) {
+      failure ??= asError(err);
+    }
   }
   for (const gone of byPath.values()) {
-    if (!gone.removedFromPlan) {
-      await db.document.update({ where: { id: gone.id }, data: { removedFromPlan: true } });
+    try {
+      if (!gone.removedFromPlan) {
+        await db.document.update({ where: { id: gone.id }, data: { removedFromPlan: true } });
+      }
+      await report(gone.id, { kind: asKind(gone.kind), path: gone.planPath! }, "removed");
+    } catch (err) {
+      failure ??= asError(err);
     }
-    await report(gone.id, { kind: asKind(gone.kind), path: gone.planPath! }, "removed");
   }
+  if (failure) throw failure;
+  await markPublish(db, runId, PLAN_PUBLISHED);
   return {
     number,
     planSetId: set.id,
     documents: results,
-    ignored: layout.ignored,
+    ignored,
     withheld: withheldPaths(coding.planFilesWithheld),
-    skippedReviewers: checked.skippedReviewers,
+    skippedReviewers: review.skippedReviewers,
   };
 }
 
@@ -344,6 +470,9 @@ export async function planSummaryForRun(
   if (coding.planFilesStatus !== "stored") return { number, error: publishErrorOf(coding.planFilesStatus) };
   const layout = parsePlanLayout(await loadPlanFiles(db, runId, "output"));
   if (!layout.ok) return { number, error: layout.error };
+  // This run's publish has not finished (or not started): pending, never an earlier run's states.
+  if (coding.planPublishStatus === null) return pending;
+  if (coding.planPublishStatus !== PLAN_PUBLISHED) return { number, error: "plan_publish_failed" };
   const agentId = coding.run.agentId;
   const set = await db.planSet.findUnique({
     where: { agentId_repository_number: { agentId, repository: coding.repository, number } },
@@ -351,8 +480,6 @@ export async function planSummaryForRun(
   });
   if (!set) return pending;
   const byPath = new Map(set.documents.flatMap((d) => (d.planPath ? [[d.planPath, d] as const] : [])));
-  // The set exists but this run's documents are not all in it yet: the publish is still writing.
-  if (layout.documents.some((doc) => !byPath.has(doc.path))) return pending;
   const own = await db.documentVersion.findMany({
     where: { documentId: { in: set.documents.map((d) => d.id) }, runId },
     select: { documentId: true, number: true },
@@ -373,7 +500,9 @@ export async function planSummaryForRun(
   });
   const documents: PublishedPlanDocument[] = [];
   for (const doc of layout.documents) {
-    const row = byPath.get(doc.path)!;
+    const row = byPath.get(doc.path);
+    // Deleted since the publish finished.
+    if (!row) continue;
     byPath.delete(doc.path);
     const mine = ownNumber.get(row.id);
     const change: PlanDocumentChange =
@@ -393,7 +522,7 @@ export async function planSummaryForRun(
   for (const row of byPath.values()) {
     documents.push(describeRow(row, { kind: asKind(row.kind), path: row.planPath! }, "removed"));
   }
-  const { skippedReviewers } = await reviewersWithAccess(db, { id: agentId, ownerId }, setting.reviewers);
+  const { skippedReviewers } = await planReviewers(db, { id: agentId, ownerId }, set.accessAgentId ?? agentId, setting);
   return {
     number,
     planSetId: set.id,

@@ -426,7 +426,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
               const planHook = planRunFinishedHook(() => ({ db: options.db, cipher, origin }));
               return (runId: string) => {
                 documentHook(runId);
-                planHook(runId);
+                void planHook(runId);
               };
             })(),
           }

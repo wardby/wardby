@@ -18,10 +18,11 @@ export type PostIssueNotice = (
 
 export function planRunFinishedHook(
   deps: () => { db: PrismaClient; cipher: SecretCipher; origin: string | null; postIssueNotice?: PostIssueNotice },
-): (runId: string) => void {
+): (runId: string) => Promise<void> {
+  // The promise settles when the work is done and never rejects; callers do not await it (R10d).
   return (runId) =>
-    outsideRunContext(() => {
-      void Promise.resolve()
+    outsideRunContext(() =>
+      Promise.resolve()
         .then(async () => {
           const { db, cipher, origin } = deps();
           // R11: a revision (a document run: its threads were sent with this run) is published by
@@ -29,8 +30,8 @@ export function planRunFinishedHook(
           if (await db.commentThread.findFirst({ where: { sentRunId: runId }, select: { id: true } })) return;
           await publishPlanFromRun(db, { cipher, origin }, runId);
         })
-        .catch((err: unknown) =>
-          plansLog.warn({ runId, errorName: err instanceof Error ? err.name : typeof err }, "plan hook failed"),
-        );
-    });
+        .catch((err: unknown) => {
+          plansLog.warn({ runId, errorName: err instanceof Error ? err.name : typeof err }, "plan hook failed");
+        }),
+    );
 }

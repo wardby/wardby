@@ -680,6 +680,9 @@ model CodingRun {
   /// Paths the worker skipped (symlinks, non-UTF-8, unsafe names) as { paths, unnamed }: unnamed is the
   /// worker's skippedUnnamed plus every skipped path that holds a secret or token-shaped value.
   planFilesSkipped      Json?
+  /// The plan publish of this run (plans/publish.ts): "published" when it finished, or a fixed error
+  /// code ("plan_publish_failed") when it threw. Null: not published yet. Never error text.
+  planPublishStatus     String?
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
   proxySession          CodingProxySession?
@@ -2423,6 +2426,8 @@ model Document {
   @@index([ownerId])
   @@index([agentId])
   @@index([planSetId])
+  /// One document per plan path in a set. Postgres treats NULLs as distinct, so documents outside a set are unaffected.
+  @@unique([planSetId, planPath])
 }
 
 /// A planner's plan for one repository and number (docs/private spec §4): its documents are Documents with planSetId.

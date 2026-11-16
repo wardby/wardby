@@ -2,11 +2,17 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Principal, RunStatus } from "#prisma";
 import { createPrismaClient } from "../db.js";
+import { submitForReview } from "../documents/review.js";
 import { createDocument, publishVersion } from "../documents/service.js";
 import { principalGranteeKey } from "../grants.js";
 import { attachSecret, createSecret } from "../secrets.js";
 import { planRunFinishedHook } from "./hooks.js";
 import { planSummaryForRun, publishPlanFromRun, type PublishedPlan } from "./publish.js";
+
+vi.mock("../documents/review.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../documents/review.js")>();
+  return { ...real, submitForReview: vi.fn(real.submitForReview) };
+});
 
 const FAKE_SECRET = "wardby-fake-plan-secret-4b1e";
 
@@ -119,6 +125,8 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     if (!result || "error" in result) throw new Error(`expected a published plan, got ${JSON.stringify(result)}`);
     return result;
   };
+  const marker = async (runId: string) =>
+    (await db.codingRun.findUniqueOrThrow({ where: { runId }, select: { planPublishStatus: true } })).planPublishStatus;
   const changes = (plan: PublishedPlan) => Object.fromEntries(plan.documents.map((d) => [d.path, d.change]));
 
   it("first run: creates the set and one reviewed document per file, owned by the planner's owner", async () => {
@@ -144,6 +152,7 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     expect(plan.documents[0].url).toBeUndefined();
     const reviewers = await db.documentReviewer.findMany({ where: { documentId: docs[0].id } });
     expect(reviewers.map((r) => r.principalId)).toEqual([owner.id]);
+    expect(await marker(runId)).toBe("published");
   });
 
   it("a later run: a changed file is the next version, the same file unchanged, a gone file removed", async () => {
@@ -275,6 +284,22 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
       "plan.md": "unchanged",
       "screens/": "unchanged",
     });
+    // A document that gets a version from a later run links to that run's branch (and plan folder).
+    const third = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n\nv2\n" }, ...files.slice(1)], {
+      planRepositoryPath: "docs/plans/12b/",
+    });
+    expect(changes(published(await publishPlanFromRun(db, deps, third)))).toEqual({
+      "plan.md": "updated",
+      "screens/": "unchanged",
+    });
+    const after = await db.document.findMany({
+      where: { id: { in: plan1.documents.map((d) => d.id) } },
+      orderBy: { planPath: "asc" },
+    });
+    expect(after.map((d) => [d.planPath, d.repository, d.path, d.baseRef])).toEqual([
+      ["plan.md", "o/r", "docs/plans/12b/plan.md", `wardby/run-${third}`],
+      ["screens/", "o/r", "docs/plans/12/screens/", `wardby/run-${first}`],
+    ]);
   });
 
   it("R11: a document that already has a version from this run is left alone and reported as updated", async () => {
@@ -314,7 +339,8 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
       { path: "plan.md", content: "# Plan\n\nv2\n" },
       { path: "api.md", content: "# API\n" },
     ]);
-    expect(await planSummaryForRun(db, later, null)).toMatchObject({ number: 12 });
+    // The set exists, but this run's publish has not finished: pending, never the old documents' states.
+    expect(await planSummaryForRun(db, later, null)).toEqual({ number: 12, documents: [], pending: true });
     const plan2 = published(await publishPlanFromRun(db, deps, later));
     expect(await planSummaryForRun(db, later, null)).toEqual(plan2);
   });
@@ -356,19 +382,82 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
         sentRunId: revision,
       },
     });
-    hook(revision);
+    // The hook's promise settles when its work is done (callers never await it, R10d).
+    await hook(revision);
+    expect(await marker(revision)).toBeNull();
+    expect(await db.planSet.count({ where: { agentId } })).toBe(0);
     const plain = await planner();
     const runId = await makeRun(plain, [{ path: "plan.md", content: "# Plan\n" }]);
-    hook(runId);
-    await vi.waitFor(
-      async () =>
-        expect(await planSummaryForRun(db, runId, null)).toMatchObject({
-          documents: [{ path: "plan.md", change: "created", reviewState: "in_review" }],
-        }),
-      { timeout: 5000 },
+    await hook(runId);
+    expect(await marker(runId)).toBe("published");
+    expect(await planSummaryForRun(db, runId, null)).toMatchObject({
+      documents: [{ path: "plan.md", change: "created", reviewState: "in_review" }],
+    });
+  });
+
+  it("two concurrent first publishes for the same set make one set and one document per path", async () => {
+    const agentId = await planner();
+    const a = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n\na\n" }]);
+    const b = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n\nb\n" }]);
+    const [planA, planB] = await Promise.all([publishPlanFromRun(db, deps, a), publishPlanFromRun(db, deps, b)]);
+    expect(published(planA).planSetId).toBe(published(planB).planSetId);
+    expect(await db.planSet.count({ where: { agentId } })).toBe(1);
+    expect(await db.document.count({ where: { planSetId: published(planA).planSetId, planPath: "plan.md" } })).toBe(1);
+    expect([await marker(a), await marker(b)]).toEqual(["published", "published"]);
+  });
+
+  it("a submit that fails mid-set: the rest still publish, the failure is recorded, and a retry leaves no draft", async () => {
+    const agentId = await planner();
+    const runId = await makeRun(agentId, [
+      { path: "plan.md", content: "# Plan\n" },
+      { path: "api.md", content: "# API\n" },
+    ]);
+    vi.mocked(submitForReview).mockRejectedValueOnce(new Error("submit failed"));
+    await expect(publishPlanFromRun(db, deps, runId)).rejects.toThrow("submit failed");
+    expect(await marker(runId)).toBe("plan_publish_failed");
+    expect(await planSummaryForRun(db, runId, null)).toEqual({ number: 12, error: "plan_publish_failed" });
+    const set = await db.planSet.findFirstOrThrow({ where: { agentId } });
+    const states = async () =>
+      Object.fromEntries(
+        (await db.document.findMany({ where: { planSetId: set.id } })).map((d) => [d.planPath, d.reviewState]),
+      );
+    // plan.md is first: its submit failed, and api.md was still published after it.
+    expect(await states()).toEqual({ "plan.md": "draft", "api.md": "in_review" });
+    const retry = published(await publishPlanFromRun(db, deps, runId));
+    expect(changes(retry)).toEqual({ "plan.md": "created", "api.md": "created" });
+    expect(await states()).toEqual({ "plan.md": "in_review", "api.md": "in_review" });
+    expect(await marker(runId)).toBe("published");
+    expect(await planSummaryForRun(db, runId, null)).toEqual(retry);
+  });
+
+  it("a final approver who no longer exists or has no access to the access agent is dropped, not fatal", async () => {
+    const approver = await db.principal.create({ data: { subject: `plan-pub-approver-${s}` } });
+    const agentId = await makeAgent("coding", {
+      store: "wardby",
+      reviewers: [owner.id],
+      finalApproverId: approver.id,
+      onApproved: "notify",
+    });
+    await grantRead(agentId, approver.id);
+    const first = published(
+      await publishPlanFromRun(db, deps, await makeRun(agentId, [{ path: "a.md", content: "# A" }])),
     );
-    // The hook's last step is a read; let it finish before the rows are cleaned up.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(await db.planSet.count({ where: { agentId } })).toBe(0);
+    expect(first.skippedReviewers).toEqual([]);
+    expect((await db.document.findUniqueOrThrow({ where: { id: first.documents[0].id } })).finalApproverId).toBe(
+      approver.id,
+    );
+    await db.resourceGrant.deleteMany({ where: { resourceType: "agent", resourceId: agentId } });
+    const runId = await makeRun(agentId, [
+      { path: "a.md", content: "# A" },
+      { path: "b.md", content: "# B" },
+    ]);
+    const second = published(await publishPlanFromRun(db, deps, runId));
+    expect(second.skippedReviewers).toEqual([approver.id]);
+    const added = await db.document.findUniqueOrThrow({
+      where: { id: second.documents.find((d) => d.path === "b.md")!.id },
+    });
+    expect(added).toMatchObject({ reviewState: "in_review", finalApproverId: null });
+    expect(await planSummaryForRun(db, runId, null)).toEqual(second);
+    await db.principal.delete({ where: { id: approver.id } }).catch(() => undefined);
   });
 });
