@@ -30,7 +30,7 @@ import {
   MAX_DEBUG_TRACE_MAX_MB,
   isLocalRepository,
 } from "../../coding/protocol.js";
-import { loadBlobStoreConfig, loadContainerExecutorConfig } from "../../config/providers.js";
+import { loadBlobStoreConfig, loadContainerExecutorConfig, loadProviderConfig } from "../../config/providers.js";
 import { codingProviderSupportsModel } from "../../coding/provider.js";
 import { ACCEPTED_ADVISORY_ID, MAX_ACCEPTED_ADVISORIES } from "../../coding/registry/allowlist.js";
 import {
@@ -198,6 +198,9 @@ export const SESSION_RESUME_IMAGE_WARNING =
 export const SESSION_RESUME_NO_STORE_WARNING =
   "sessionResume is on but this server has no blob store (BLOB_STORE), so transcripts are not kept. See the resume-runs-locally help article.";
 
+export const SUBSTRATE_IMAGE_WARNING =
+  "This deployment runs coding agents on Substrate: the image must contain this release's Substrate bridge (see the build-claude-code-image or build-worker-image help article), and end as a non-root user, or its runs fail (substrate_image_unready, substrate_bridge_incompatible or substrate_image_incomplete).";
+
 /** The stored coding-profile fields the output warnings read. */
 interface WarnedProfile {
   dependencyCache: boolean;
@@ -216,11 +219,21 @@ function blobStoreConfigured(): boolean {
   }
 }
 
+/** For a warning only: whether JOB_LAUNCHER is substrate; never fails the tool call. */
+function substrateLauncher(): boolean {
+  try {
+    return loadProviderConfig(process.env).jobs === "substrate";
+  } catch {
+    return false;
+  }
+}
+
 /** Non-blocking warnings about an agent's coding profile as stored. */
 function profileWarnings(profile: WarnedProfile | null, now: Date): string[] {
   const warnings = profile?.dependencyCache && profile.workerImageRef ? [DEPENDENCY_CACHE_IMAGE_WARNING] : [];
   if (profile?.sessionResume && profile.workerImageRef) warnings.push(SESSION_RESUME_IMAGE_WARNING);
   if (profile?.sessionResume && !blobStoreConfigured()) warnings.push(SESSION_RESUME_NO_STORE_WARNING);
+  if (profile?.workerImageRef && substrateLauncher()) warnings.push(SUBSTRATE_IMAGE_WARNING);
   if (profile && isPackageAuditActive(profile.packageAuditMode, profile.packageAuditUntil, now))
     warnings.push(packageAuditActiveWarning(profile.packageAuditMode, profile.packageAuditUntil!));
   return warnings;

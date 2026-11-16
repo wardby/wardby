@@ -1,0 +1,22 @@
+# Example custom worker for a Codex agent that also runs on the Substrate launcher: a driver-based
+# worker (the wardby-coding-worker-driver image driver-vN, or your own image built FROM it), your
+# tools, then the Substrate bridge from your wardby release.
+# Build it with both bases pinned by digest (the bridge's is the substrateCodex key in
+# dist/quickstart-images.json):
+#   docker build -f src/substrate-bridge/Dockerfile.custom-codex-example \
+#     --build-arg WORKER_IMAGE=<registry>/wardby-coding-worker-driver@sha256:<digest> \
+#     --build-arg BRIDGE_IMAGE=<registry>/wardby-substrate-codex@sha256:<digest> .
+# No ENTRYPOINT or CMD: every launcher sets the command itself, so this one image runs on Docker,
+# Kubernetes and Substrate.
+ARG WORKER_IMAGE
+ARG BRIDGE_IMAGE
+FROM ${BRIDGE_IMAGE} AS bridge
+FROM ${WORKER_IMAGE}
+USER root
+RUN printf '#!/bin/sh\necho wardby-custom-tool-ok\n' > /usr/local/bin/wardby-custom-tool \
+    && chmod 0755 /usr/local/bin/wardby-custom-tool
+# The Substrate bridge, and the directories it writes.
+COPY --from=bridge /opt/wardby/substrate-bridge/ /opt/wardby/substrate-bridge/
+RUN mkdir -p /run/wardby/input /run/wardby/output /workspace \
+    && chown -R 10001:10001 /run/wardby /workspace
+USER 10001:10001

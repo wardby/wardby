@@ -3,6 +3,8 @@ import { access, readFile } from "node:fs/promises";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import {
   AGENT_SUFFIX,
+  BRIDGE_PROTOCOL,
+  BRIDGE_PROTOCOL_HEADER,
   DIAGNOSTICS_TAIL,
   INJECTED_MCP_TOKEN_PLACEHOLDER,
   MCP_TOKEN_ENV,
@@ -24,6 +26,11 @@ export type Logger = (event: string, fields?: Record<string, string | number>) =
 export const stderrLogger: Logger = (event, fields = {}) => {
   process.stderr.write(`${JSON.stringify({ event, ...fields })}\n`);
 };
+
+/** The headers of every bridge request to the proxy: the actor's credential header and the bridge protocol. */
+export function proxyHeaders(credential: Record<string, string>): Record<string, string> {
+  return { ...credential, [BRIDGE_PROTOCOL_HEADER]: String(BRIDGE_PROTOCOL) };
+}
 
 /** Any run actor's name: the run token and a role suffix. */
 const RUN_ACTOR_NAME = new RegExp(`^${RUN_TOKEN_PATTERN.source.slice(1, -1)}(${AGENT_SUFFIX}|${TOOL_SUFFIX})$`);

@@ -15,6 +15,10 @@ is not a failure: the launcher removes what it created and the run goes back to
 the queue, like a Kubernetes run that fits no quota. It stays `pending` with
 `codingQueuedAt` set and is retried later.
 
+A run on a new template waits while its golden snapshot builds; a template that
+never becomes ready fails with
+[substrate_image_unready](substrate-image-unready.md).
+
 A run still waiting after `CODING_QUEUE_TIMEOUT_SEC` fails with
 `coding_queue_timeout`. If that happens often:
 

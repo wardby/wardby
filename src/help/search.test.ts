@@ -435,6 +435,27 @@ describe("Substrate dependency cache help", () => {
   });
 });
 
+describe("Substrate custom image help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (query: string) =>
+      searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    for (const query of ["substrate custom image", "workerImageRef substrate"]) {
+      expect(
+        top3(query).some((id) => id === "job-launcher-substrate" || id === "build-claude-code-image"),
+        query,
+      ).toBe(true);
+    }
+    expect(top3("substrate_image_unready")).toContain("errors/substrate-image-unready");
+    expect(top3("substrate_bridge_incompatible")).toContain("errors/substrate-bridge-incompatible");
+    expect(top3("substrate_image_incomplete")).toContain("errors/substrate-image-incomplete");
+  });
+});
+
 describe("pnpm and yarn help", () => {
   it("is found for the obvious queries", async () => {
     const { buildHelpCatalog } = await import("./catalog.js");

@@ -2201,7 +2201,12 @@ export class ContainerExecutor implements Executor {
             await rm(this.artifactPath(runId), { recursive: true, force: true }).catch(() => undefined);
             this.recordCapacityRefusal(runId);
             this.emit({ stage: "queued", runId });
-            containerLog.info({ runId }, "coding run waiting for capacity: the cluster refused its pod");
+            // The launcher's message is a fixed string (quota, no room, template building), never
+            // run content, so it is safe to log as the reason.
+            containerLog.info(
+              { runId, reason: error.message },
+              "coding run back in the queue: the launcher could not start it yet",
+            );
           }
           return;
         }

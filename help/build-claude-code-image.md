@@ -1,9 +1,9 @@
 ---
 id: build-claude-code-image
 title: Build a tool runner image for a Claude Code agent
-summary: A procedure an MCP assistant follows to build a custom image for a Claude Code coding agent (Ruby, Go, Java or another language) FROM the release's tool runner image, check it, and set it with workerImageRef.
+summary: A procedure an MCP assistant follows to build a custom image for a Claude Code coding agent (Ruby, Go, Java or another language) FROM the release's tool runner image, check it, and set it with workerImageRef; on Substrate, the custom image also needs the Substrate bridge.
 audience: operator
-tags: [claude-code, custom-image, workerImageRef, tool-runner, worker-image, other-language, ruby, toolchain]
+tags: [claude-code, custom-image, workerImageRef, tool-runner, worker-image, other-language, ruby, toolchain, substrate]
 appliesTo: ">=0.6.0"
 ---
 
@@ -77,6 +77,16 @@ Rules:
   `no-new-privileges`, so setuid programs do not help.
 - Release images are `linux/amd64`. On an ARM machine, pass
   `--platform linux/amd64` to `docker build` and `docker run`.
+- **Substrate needs the bridge.** On a Substrate deployment
+  (`JOB_LAUNCHER=substrate`), add the Substrate bridge lines (see
+  the `job-launcher-substrate` help article and
+  [Custom images](../docs/substrate-backend.md#custom-images)) or build `FROM`
+  the release's `wardby-substrate-tool` image instead. Without the bridge the
+  agent's runs fail with
+  `substrate_image_unready`. The layer does
+  nothing on Docker and Kubernetes, so one image serves every launcher.
+  Substrate runs the image as its last `USER` and the bridge refuses root
+  (`substrate_image_incomplete:user`), so keep `USER 10001:10001` last.
 
 ## Step 4: build it and run the tests the way a run would
 
@@ -108,6 +118,11 @@ run. A "command not found" means a missing program or a missing
   Wardby never pulls these images, so build on the same machine.
 - **Kubernetes**: push the image to a registry the cluster can pull from,
   and use `<registry>/<name>@sha256:<digest>`.
+- **Substrate**: push it to a registry the Substrate workers can pull from and
+  use `<registry>/<name>@sha256:<digest>`; a local image ID is refused
+  (`substrate_image_not_digest`). The
+  bridge digest is the `substrateTool` key in `dist/quickstart-images.json` of
+  your release.
 
 ## Step 6: update the builder and try it
 
@@ -122,7 +137,9 @@ run. A "command not found" means a missing program or a missing
 
 If a run fails with `worker_tool_runner_unreachable`, the image was usually not
 built `FROM` this release's tool runner, or its `USER` or `ENTRYPOINT` was
-changed. Rebuild the image whenever Wardby is upgraded.
+changed. Rebuild the image whenever Wardby is upgraded. On Substrate, a bridge
+from another release fails the run with
+`substrate_bridge_incompatible`.
 
 If the agent will use git history (`codingProfile.gitHistory`, Wardby 0.9.13 or later; see
 [Git history in a run](git-history.md)), the tool runner must have `git`: the release's

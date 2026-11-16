@@ -8,12 +8,11 @@ import { join } from "node:path";
 import { FakeKubernetesApi } from "../jobs/fake-kubernetes-api.js";
 import { FakeSubstrateApi } from "../jobs/substrate/fake-api.js";
 import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
+import { PrismaSubstrateTemplateStore } from "../jobs/substrate/template-store.js";
 import {
   assertSubstrateDigestImages,
   buildConfiguredExecutor,
   buildSubstrateJobLauncher,
-  configuredClaudeToolImages,
-  configuredCodexWorkerImages,
   reReviewOnCodingRunTerminal,
 } from "./composition.js";
 import { RoutingExecutor } from "./routing.js";
@@ -91,28 +90,6 @@ describe("JOB_LAUNCHER=substrate", () => {
     expect(build({})).toBeInstanceOf(RoutingExecutor);
   });
 
-  it("lists every configured Claude tool-runner image as a bridge image, and nothing else", () => {
-    const python = `registry.example/tool-python@sha256:${"c".repeat(64)}`;
-    expect(
-      configuredClaudeToolImages({
-        claudeToolRunnerImage: REGISTRY_IMAGE,
-        claudeToolRunnerImages: { "node-python": { "3.12": python } },
-      }),
-    ).toEqual([REGISTRY_IMAGE, python]);
-    expect(configuredClaudeToolImages({ claudeToolRunnerImage: undefined, claudeToolRunnerImages: {} })).toEqual([]);
-  });
-
-  it("lists every configured Codex worker image as a Codex bridge image, and nothing else", () => {
-    const python = `registry.example/worker-python@sha256:${"c".repeat(64)}`;
-    expect(
-      configuredCodexWorkerImages({
-        workerImage: REGISTRY_IMAGE,
-        additionalWorkerImages: { "node-python": { "3.12": python } },
-      }),
-    ).toEqual([REGISTRY_IMAGE, python]);
-    expect(configuredCodexWorkerImages({ workerImage: undefined, additionalWorkerImages: {} })).toEqual([]);
-  });
-
   it("refuses a Codex node-python worker image that isn't a registry digest", () => {
     expect(() => build({ CODING_WORKER_IMAGE_NODE_PYTHON_3_12: LOCAL_IMAGE })).toThrow(
       "CODING_WORKER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=substrate.",
@@ -144,8 +121,6 @@ describe("JOB_LAUNCHER=substrate", () => {
       resolveCapability: async () => "cap",
       substrateApi: new FakeSubstrateApi({ workers: 1 }),
       kubernetesApi: new FakeKubernetesApi(),
-      bridgeToolImages: [],
-      bridgeCodexImages: [],
     });
     expect(launcher).toBeInstanceOf(SubstrateJobLauncher);
   });
@@ -161,8 +136,6 @@ describe("JOB_LAUNCHER=substrate", () => {
           ...(resolveMcpToken ? { resolveMcpToken } : {}),
           substrateApi: new FakeSubstrateApi({ workers: 1 }),
           kubernetesApi: new FakeKubernetesApi(),
-          bridgeToolImages: [],
-          bridgeCodexImages: [],
         }) as unknown as { options: { resolveMcpToken?: unknown } }
       ).options.resolveMcpToken;
     const resolveMcpToken = async () => undefined;
@@ -178,13 +151,39 @@ describe("JOB_LAUNCHER=substrate", () => {
       resolveCapability: async () => "cap",
       substrateApi: new FakeSubstrateApi({ workers: 1 }),
       kubernetesApi: new FakeKubernetesApi(),
-      bridgeToolImages: [],
-      bridgeCodexImages: [],
     });
     const options = (launcher as unknown as { options: { collectGraceMs?: number; startupTimeoutMs?: number } })
       .options;
     expect(options.collectGraceMs).toBe(45_000);
     expect(options.startupTimeoutMs).toBe(900_000);
+  });
+
+  it("passes the template settings to the launcher, in milliseconds", () => {
+    const build = (extra: Record<string, string>) =>
+      (
+        buildSubstrateJobLauncher({
+          env: { ...env, ...extra },
+          db,
+          workspaceRoot: join(dir, "ws"),
+          resolveCapability: async () => "cap",
+          substrateApi: new FakeSubstrateApi({ workers: 1 }),
+          kubernetesApi: new FakeKubernetesApi(),
+        }) as unknown as {
+          options: { templates: unknown; templateTtlMs?: number; templateReadyMs?: number; templateRetryMs?: number };
+        }
+      ).options;
+    const options = build({
+      SUBSTRATE_TEMPLATE_TTL_SEC: "86400",
+      SUBSTRATE_TEMPLATE_READY_SEC: "300",
+      SUBSTRATE_TEMPLATE_RETRY_SEC: "120",
+    });
+    expect(options.templates).toBeInstanceOf(PrismaSubstrateTemplateStore);
+    expect(options.templateTtlMs).toBe(86_400_000);
+    expect(options.templateReadyMs).toBe(300_000);
+    expect(options.templateRetryMs).toBe(120_000);
+    const defaults = build({});
+    expect(defaults.templates).toBeInstanceOf(PrismaSubstrateTemplateStore);
+    for (const key of ["templateTtlMs", "templateReadyMs", "templateRetryMs"]) expect(defaults).not.toHaveProperty(key);
   });
 
   it("passes warm rounds to the launcher only when SUBSTRATE_WARM_ROUNDS=true", () => {
@@ -197,8 +196,6 @@ describe("JOB_LAUNCHER=substrate", () => {
           resolveCapability: async () => "cap",
           substrateApi: new FakeSubstrateApi({ workers: 1 }),
           kubernetesApi: new FakeKubernetesApi(),
-          bridgeToolImages: [],
-          bridgeCodexImages: [],
         }) as unknown as { options: { warmRounds?: unknown } }
       ).options;
     expect(build({})).not.toHaveProperty("warmRounds");

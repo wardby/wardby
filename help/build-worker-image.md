@@ -1,9 +1,9 @@
 ---
 id: build-worker-image
 title: Build a custom worker image for another language
-summary: A procedure an MCP assistant follows to build a custom coding worker image for Go, Java, Rust or another language on Wardby's driver base image, check it, and point a Codex coding agent at it with workerImageRef.
+summary: A procedure an MCP assistant follows to build a custom coding worker image for Go, Java, Rust or another language on Wardby's driver base image, check it, and point a Codex coding agent at it with workerImageRef; on Substrate, the custom image also needs the Substrate bridge.
 audience: operator
-tags: [worker-image, custom-image, workerImageRef, toolchain, other-language, go, golang, java, rust, ruby, codex]
+tags: [worker-image, custom-image, workerImageRef, toolchain, other-language, go, java, rust, ruby, codex, substrate]
 appliesTo: ">=0.5.3"
 ---
 
@@ -152,6 +152,16 @@ Other rules:
   into the build context, and rebuild the image when its dependencies change.
 - The base image is `linux/amd64`. On an Apple Silicon or other ARM machine,
   pass `--platform linux/amd64` to `docker build` and `docker run`.
+- **Substrate needs the bridge.** On a Substrate deployment
+  (`JOB_LAUNCHER=substrate`), add the Substrate bridge lines from the release's
+  `wardby-substrate-codex` image before the last `USER` line (see
+  the `job-launcher-substrate` help article and
+  [Custom images](../docs/substrate-backend.md#custom-images)). Without the
+  bridge the agent's runs fail with
+  `substrate_image_unready`. The layer does
+  nothing on Docker and Kubernetes, so one image serves every launcher.
+  Substrate runs the image as its last `USER` and the bridge refuses root
+  (`substrate_image_incomplete:user`), so keep `USER 10001:10001` last.
 
 ## Step 4: build it and run the tests the way a run would
 
@@ -181,6 +191,13 @@ writes executables to `/tmp` or `/home/wardby`. Delete the clone afterwards.
   (a `sha256:...` value).
 - **Hosted Wardby**: push the image to a registry the workers can pull from,
   and use `<registry>/<name>@sha256:<digest>`.
+- **Substrate**: push it to a registry the Substrate workers can pull from and
+  use `<registry>/<name>@sha256:<digest>`; a local image ID is refused
+  (`substrate_image_not_digest`). The
+  bridge digest is the `substrateCodex` key in `dist/quickstart-images.json` of
+  your release. Rebuild the image on each release's bridge: a bridge from
+  another release fails the run with
+  `substrate_bridge_incompatible`.
 
 ## Step 6: update the builder and try it
 
