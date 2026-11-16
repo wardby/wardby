@@ -51,7 +51,8 @@ const DECODER = new TextDecoder("utf-8", { fatal: true });
  * the run's rrp_/rrg_/rmt_ tokens and Bearer values included) is withheld (its path recorded, never its
  * text). A path that holds a secret or token-shaped value is never stored, only counted. Nothing is
  * stored when a delivered secret changed while the run ran; every outcome other than "stored" removes
- * the run's stored output files. Never throws, never logs content.
+ * the run's stored output files. An outcome is written once: nothing overwrites a recorded
+ * planFilesStatus (see writeOnce). Never throws, never logs content.
  */
 export class PlanFilesRecorder {
   constructor(private readonly deps: PlanFilesRecorderDeps) {}
@@ -151,31 +152,54 @@ export class PlanFilesRecorder {
       paths: skippedNamed,
       unnamed: skipped.unnamed + skipped.paths.length - skippedNamed.length,
     };
-    await this.deps.db.$transaction([
-      this.deps.db.codingRunPlanFile.deleteMany({ where: { runId: input.runId, direction: "output" } }),
-      this.deps.db.codingRunPlanFile.createMany({
-        data: kept.map((f) => ({ runId: input.runId, direction: "output", path: f.path, content: f.content })),
-      }),
-      this.deps.db.codingRun.update({
-        where: { runId: input.runId },
-        data: {
-          planFilesStatus: "stored",
-          planFilesWithheld: { ...withheld },
-          planFilesSkipped: { ...skippedList },
-        },
-      }),
-    ]);
-    return "stored";
+    const written = await this.writeOnce(input.runId, kept, {
+      planFilesStatus: "stored",
+      planFilesWithheld: { ...withheld },
+      planFilesSkipped: { ...skippedList },
+    });
+    // Refused: an outcome is already recorded (a timeout's plan_files_failed); it stands.
+    return written ? "stored" : "plan_files_failed";
   }
 
-  /** A non-stored outcome: no output files (and no path lists) from an earlier record survive it. */
+  /**
+   * The executor's timeout: records the fixed plan_files_failed unless an outcome is already recorded.
+   * A recorder still running for this run can then neither add rows nor change the status.
+   */
+  async markFailed(runId: string): Promise<void> {
+    await this.writeStatus(runId, "plan_files_failed");
+  }
+
+  /** A non-stored outcome: no output files (and no path lists) survive it. */
   private async writeStatus(runId: string, status: PlanFilesStatus): Promise<void> {
-    await this.deps.db.$transaction([
-      this.deps.db.codingRunPlanFile.deleteMany({ where: { runId, direction: "output" } }),
-      this.deps.db.codingRun.update({
-        where: { runId },
-        data: { planFilesStatus: status, planFilesWithheld: Prisma.DbNull, planFilesSkipped: Prisma.DbNull },
-      }),
-    ]);
+    await this.writeOnce(runId, [], {
+      planFilesStatus: status,
+      planFilesWithheld: Prisma.DbNull,
+      planFilesSkipped: Prisma.DbNull,
+    });
+  }
+
+  /**
+   * The one place an outcome is written: the status, the path lists and the output rows, in one
+   * transaction, and only while planFilesStatus is still null. A run's outcome is written once, so a
+   * recorder that finishes after the executor gave up on it (and the run went terminal) stores nothing.
+   * The conditional update takes the row lock first, so two writers for the same run serialize and the
+   * second sees the first's status. Returns false when refused.
+   */
+  private async writeOnce(
+    runId: string,
+    files: PlanFile[],
+    data: Pick<Prisma.CodingRunUpdateManyMutationInput, "planFilesStatus" | "planFilesWithheld" | "planFilesSkipped">,
+  ): Promise<boolean> {
+    return this.deps.db.$transaction(async (tx) => {
+      const claimed = await tx.codingRun.updateMany({ where: { runId, planFilesStatus: null }, data });
+      if (claimed.count === 0) return false;
+      await tx.codingRunPlanFile.deleteMany({ where: { runId, direction: "output" } });
+      if (files.length > 0) {
+        await tx.codingRunPlanFile.createMany({
+          data: files.map((f) => ({ runId, direction: "output", path: f.path, content: f.content })),
+        });
+      }
+      return true;
+    });
   }
 }

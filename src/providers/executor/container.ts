@@ -167,6 +167,11 @@ const containerLog = logger.child({ module: "container-executor" });
 
 /** A transcript read and store must not hold up the job's removal for long. */
 const TRANSCRIPT_RECORD_TIMEOUT_MS = 60_000;
+/**
+ * Plan documents are recorded before the run's terminal write, so a hung read or store must not hold
+ * the run (and its job, cleanup and slot) open. On timeout the run's plan outcome is plan_files_failed.
+ */
+const PLAN_FILES_RECORD_TIMEOUT_MS = 60_000;
 /** A logged context skip path is cut to this many characters: a refused import is reported as written. */
 const MAX_LOGGED_SKIP_PATH_CHARS = 256;
 
@@ -1734,7 +1739,7 @@ export interface ContainerExecutorOptions {
   /** Session resume: stores a run's transcript before its job is removed. Absent = never captured. */
   transcripts?: Pick<RunTranscriptRecorder, "record">;
   /** Plan documents: stores a collecting run's returned plan folder before it is made terminal. Absent = never stored. */
-  planFiles?: Pick<PlanFilesRecorder, "record">;
+  planFiles?: Pick<PlanFilesRecorder, "record" | "markFailed">;
   /**
    * The run-steps writer: a continuation on a launcher with warm rounds gets one fixed step line
    * saying whether it resumed the previous round (warm-start-wording.ts). Absent = no line.
@@ -2244,6 +2249,8 @@ export class ContainerExecutor implements Executor {
         failureCategory: failure.audit.failureCategory,
         diagnosticId: failure.audit.diagnosticId,
       });
+      // Plan output is intentionally not recorded here: the job's state is unknown (it may never have
+      // started), so there is nothing trustworthy to read and planFilesStatus stays null.
       await this.options.store.terminate(runId, status, failure.error, failure.audit);
       this.terminal(run, status, failure.audit);
       if (handle) await this.options.jobs.remove(handle).catch(() => undefined);
@@ -4640,20 +4647,44 @@ export class ContainerExecutor implements Executor {
     };
   }
 
-  /** Plan documents: never throws, never changes the run's outcome; only a status code is logged. */
+  /**
+   * Plan documents: never throws, never changes the run's outcome; only a status code is logged. Bounded
+   * by PLAN_FILES_RECORD_TIMEOUT_MS, since it runs before the terminal write. On timeout the run's plan
+   * outcome is the fixed plan_files_failed; the recorder writes an outcome only once, so one that
+   * finishes later stores nothing.
+   */
   private async recordPlanFiles(run: ContainerRunSnapshot, handle: JobHandle): Promise<void> {
     const recorder = this.options.planFiles;
     if (!recorder) return;
     const jobs = this.options.jobs;
-    const status = await recorder
-      .record({
-        runId: run.runId,
-        agentId: run.agentId,
-        ...(run.launchSecretVersions ? { launchSecretVersions: run.launchSecretVersions } : {}),
-        ...(jobs.readPlanFiles ? { read: (maxBytes: number) => jobs.readPlanFiles!(handle, maxBytes) } : {}),
-      })
-      .catch(() => "plan_files_failed" as const);
-    if (status !== "stored") containerLog.info({ runId: run.runId, planFiles: status }, "plan files not stored");
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const recording = Promise.resolve()
+        .then(() =>
+          recorder.record({
+            runId: run.runId,
+            agentId: run.agentId,
+            ...(run.launchSecretVersions ? { launchSecretVersions: run.launchSecretVersions } : {}),
+            ...(jobs.readPlanFiles ? { read: (maxBytes: number) => jobs.readPlanFiles!(handle, maxBytes) } : {}),
+          }),
+        )
+        .catch(() => "plan_files_failed" as const);
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), PLAN_FILES_RECORD_TIMEOUT_MS);
+        timer.unref();
+      });
+      const result = await Promise.race([recording, timeout]);
+      if (result === "timeout") {
+        await recorder.markFailed(run.runId).catch(() => undefined);
+        containerLog.info({ runId: run.runId, planFiles: "plan_files_failed" }, "plan files not stored: timed out");
+      } else if (result !== "stored") {
+        containerLog.info({ runId: run.runId, planFiles: result }, "plan files not stored");
+      }
+    } catch {
+      // never changes the run's outcome
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**

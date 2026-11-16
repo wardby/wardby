@@ -836,6 +836,7 @@ describe("ContainerExecutor", () => {
             calls.push(input);
             return "stored";
           },
+          markFailed: async () => {},
         },
       });
       holder.created = created;
@@ -897,6 +898,56 @@ describe("ContainerExecutor", () => {
         async () => `{"x":"${FAKE_SECRET}"}`,
       );
       expect(JSON.stringify(logged)).not.toContain(FAKE_SECRET);
+    });
+
+    it("a hung plan read is abandoned after the timeout: the run still goes terminal and a late result stores nothing", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        // A fake recorder with the real store's write-once rule (recorder.ts writeOnce).
+        let status: string | null = null;
+        const storedRows: string[] = [];
+        const writeOnce = (next: string, rows: string[]): boolean => {
+          if (status !== null) return false;
+          status = next;
+          storedRows.push(...rows);
+          return true;
+        };
+        let finishRead: ((text: string) => void) | undefined;
+        let recordSettled: Promise<unknown> | undefined;
+        const created = await harness({ collectPlanFiles: true }, IMAGE, undefined, undefined, {
+          planFiles: {
+            record: (input) => {
+              recordSettled = (async () => {
+                const text = await input.read!(1024);
+                return writeOnce("stored", [text ?? ""]) ? "stored" : "plan_files_failed";
+              })();
+              return recordSettled as Promise<"stored" | "plan_files_failed">;
+            },
+            markFailed: async () => {
+              writeOnce("plan_files_failed", []);
+            },
+          },
+        });
+        // Never resolves until the test says so.
+        created.jobs.readPlanFiles = () =>
+          new Promise<string | undefined>((resolve) => {
+            finishRead = resolve;
+          });
+        const running = created.executor.start("run-1");
+        await vi.waitFor(() => expect(finishRead).toBeDefined(), { timeout: 3000, interval: 5 });
+        expect(created.store.completions).toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(61_000);
+        await running;
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.jobs.removals).toBe(1);
+        expect(status).toBe("plan_files_failed");
+        finishRead!("late plan");
+        expect(await recordSettled).toBe("plan_files_failed");
+        expect(status).toBe("plan_files_failed");
+        expect(storedRows).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

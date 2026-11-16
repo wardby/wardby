@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { Prisma } from "#prisma";
 import { createPrismaClient } from "../../core/db.js";
 import type { SecretVersion } from "../../core/secret-versions.js";
 import { PlanFilesRecorder } from "./recorder.js";
@@ -89,6 +90,16 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     await db.principal.deleteMany({ where: { id: stamp } });
     await db.$disconnect();
   });
+
+  /** Every test starts from a run with no plan outcome yet: an outcome is written once (writeOnce). */
+  const reset = async () => {
+    await db.codingRunPlanFile.deleteMany({ where: { runId, direction: "output" } });
+    await db.codingRun.update({
+      where: { runId },
+      data: { planFilesStatus: null, planFilesWithheld: Prisma.DbNull, planFilesSkipped: Prisma.DbNull },
+    });
+  };
+  beforeEach(reset);
 
   const recorder = (over: Partial<ConstructorParameters<typeof PlanFilesRecorder>[0]> = {}) =>
     new PlanFilesRecorder({
@@ -187,10 +198,9 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
   });
   const base = () => ({ runId, agentId, launchSecretVersions: versions });
+  /** Output rows left with no outcome recorded: a non-stored outcome must remove them in its transaction. */
   const storeOne = async () => {
-    expect(
-      await recorder().record({ ...base(), read: async () => output(runId, [{ path: "a.md", content: "a" }]) }),
-    ).toBe("stored");
+    await db.codingRunPlanFile.create({ data: { runId, direction: "output", path: "a.md", content: "a" } });
     expect(await loadPlanFiles(db, runId, "output")).toHaveLength(1);
   };
 
@@ -273,8 +283,12 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     expect(run.planFilesSkipped).toEqual({ paths: ["link.md", "bin.md"], unnamed: 3 });
   });
 
-  it("a later non-stored outcome removes the stored output files and path lists", async () => {
+  it("a non-stored outcome removes leftover output files and path lists", async () => {
     await storeOne();
+    await db.codingRun.update({
+      where: { runId },
+      data: { planFilesWithheld: { paths: ["w.md"], unnamed: 0 }, planFilesSkipped: { paths: [], unnamed: 0 } },
+    });
     const status = await recorder({
       secretVersions: async () => [{ id: "s1", name: "API_KEY", updatedAt: "2026-11-16T12:00:00.000Z" }],
     }).record({ ...base(), read: async () => output(runId, [{ path: "b.md", content: "b" }]) });
@@ -297,6 +311,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
       }).record({ ...base(), read }),
     ).toBe("secrets_unavailable");
     expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
+    await reset();
     expect(
       await recorder({
         secretVersions: async () => {
@@ -354,6 +369,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     await storeOne();
     expect(await recorder().storeChecked(base(), [{ path: "big.md", content: big }], [])).toBe("plan_too_large");
     expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
+    await reset();
     expect(
       await recorder().storeChecked(
         base(),
@@ -366,5 +382,34 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     ).toBe("plan_files_failed");
     const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
     expect(run.planFilesStatus).toBe("plan_files_failed");
+  });
+
+  it("refuses to overwrite a recorded outcome: no rows added, status unchanged", async () => {
+    await recorder().markFailed(runId);
+    const late = await recorder().record({
+      ...base(),
+      read: async () => output(runId, [{ path: "late.md", content: "late" }]),
+    });
+    expect(late).toBe("plan_files_failed");
+    expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
+    expect(await recorder().storeChecked(base(), [{ path: "late.md", content: "late" }], [])).toBe("plan_files_failed");
+    expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
+    expect(await recorder().record({ ...base(), read: async () => undefined })).toBe("plan_files_missing");
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesStatus).toBe("plan_files_failed");
+  });
+
+  it("refuses to replace stored files: a later outcome leaves the first one's rows and status", async () => {
+    expect(
+      await recorder().record({ ...base(), read: async () => output(runId, [{ path: "a.md", content: "a" }]) }),
+    ).toBe("stored");
+    await recorder().markFailed(runId);
+    expect(
+      await recorder().record({ ...base(), read: async () => output(runId, [{ path: "b.md", content: "b" }]) }),
+    ).toBe("plan_files_failed");
+    expect(await loadPlanFiles(db, runId, "output")).toEqual([{ path: "a.md", content: "a" }]);
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesStatus).toBe("stored");
+    expect(run.planFilesSkipped).toEqual({ paths: [], unnamed: 0 });
   });
 });
