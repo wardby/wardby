@@ -19,7 +19,7 @@
  * Errors are codes; nothing here logs.
  */
 import { Prisma, type PrismaClient } from "#prisma";
-import { atLeast, effectiveAccess, principalGranteeKey } from "../grants.js";
+import { atLeast, principalGranteeKey } from "../grants.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import { documentAccess, requireDocumentAccess, type Viewer } from "./access.js";
@@ -238,7 +238,9 @@ const parseRef = (ref: string): Ref => (ref.startsWith("guest:") ? { guestId: re
 
 /** Raises a principal to comment access on the document when they hold less; never lowers a grant. */
 async function ensureCommentAccess(tx: Tx, doc: { id: string; ownerId: string }, principalId: string, by: string) {
-  if (atLeast("document", await effectiveAccess(tx, "document", doc, principalId), "comment")) return;
+  // Through the shared rule, so access that comes live from a plan's access agent is not copied into a grant.
+  const held = await documentAccess(tx, doc.id, { kind: "principal", principalId });
+  if (atLeast("document", held, "comment")) return;
   const granteeKey = principalGranteeKey(principalId);
   await tx.resourceGrant.upsert({
     where: { resourceType_resourceId_granteeKey: { resourceType: "document", resourceId: doc.id, granteeKey } },

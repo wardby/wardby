@@ -107,12 +107,52 @@ describe.skipIf(!process.env.DATABASE_URL)("plan documents: access follows the t
     expect(await documentAccess(db, docId, as(x))).toBe("none");
   });
 
-  it("a deleted access agent falls back to normal document access", async () => {
+  it("a share link adds to agent access; a guest gets only its link even with an everyone grant on the agent", async () => {
     await agentGrant(lead, g, "read");
-    await db.agent.delete({ where: { id: lead } });
-    expect((await db.planSet.findUniqueOrThrow({ where: { id: setId } })).accessAgentId).toBeNull();
-    expect(await documentAccess(db, docId, as(l))).toBe("none");
-    expect(await documentAccess(db, docId, as(g))).toBe("none");
-    expect(await documentAccess(db, docId, as(p))).toBe("owner");
+    await agentGrant(lead, null, "read");
+    const link = async (permission: string) =>
+      db.documentShareLink.create({
+        data: {
+          documentId: docId,
+          tokenHash: randomUUID(),
+          permission,
+          expiresAt: new Date(Date.now() + 86_400_000),
+          createdById: p.id,
+        },
+      });
+    const view = await link("view");
+    // read grant on the agent plus a view link: comment (the higher).
+    expect(await documentAccess(db, docId, { ...as(g), shareLinkId: view.id })).toBe("comment");
+    // A guest on the view link gets read, not the agent's comment.
+    const guest = { kind: "guest" as const, guestId: "gx", shareLinkId: view.id, permission: "view" as const };
+    expect(await documentAccess(db, docId, guest)).toBe("read");
+    await db.resourceGrant.deleteMany({ where: { resourceId: lead } });
+    await db.documentShareLink.deleteMany({ where: { documentId: docId } });
+  });
+
+  it("a deleted access agent falls back to normal document access", async () => {
+    const dl = `acc-del-${s}`;
+    await db.agent.create({ data: { id: dl, name: dl, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: l.id } });
+    const set = await db.planSet.create({
+      data: {
+        agentId: planner,
+        accessAgentId: dl,
+        repository: `o/d-${s}`,
+        number: 2,
+        store: "wardby",
+        createdByRunId: "run-y",
+      },
+    });
+    const d = (await db.document.create({ data: { title: "Del", ownerId: p.id, planSetId: set.id } })).id;
+    await agentGrant(dl, g, "read");
+    expect(await documentAccess(db, d, as(g))).toBe("comment");
+    await db.agent.delete({ where: { id: dl } });
+    expect((await db.planSet.findUniqueOrThrow({ where: { id: set.id } })).accessAgentId).toBeNull();
+    expect(await documentAccess(db, d, as(l))).toBe("none");
+    expect(await documentAccess(db, d, as(g))).toBe("none");
+    expect(await documentAccess(db, d, as(p))).toBe("owner");
+    await db.document.deleteMany({ where: { id: d } });
+    await db.planSet.deleteMany({ where: { id: set.id } });
+    await db.resourceGrant.deleteMany({ where: { resourceId: dl } });
   });
 });
