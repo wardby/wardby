@@ -24,6 +24,7 @@ export const NATIVE_CONFIG: NativeSubstrateLaunchConfig = {
   gatewayUrl: GATEWAY_URL,
   cpus: 1,
   memoryMb: 512,
+  denyPort: 8791,
 };
 /** Text that must never leave the control plane: the run's prompt. */
 export const FAKE_PROMPT = "FAKE_SYSTEM_PROMPT_native_0042";

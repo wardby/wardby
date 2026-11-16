@@ -1,7 +1,8 @@
 /**
  * Where a Substrate startup canary's verdict waits for the launcher (substrate-launcher.ts): the
  * launcher creates the row before the canary actor starts, the gateway's unauthenticated canary
- * route records the verdict once, and the launcher reads it and deletes the row.
+ * route records the verdict once, and the launcher reads it and deletes the actor and then the row.
+ * A row left by a process that died mid-canary names an actor to sweep (`stale`).
  *
  * The route takes no credential, so the row is what limits it: a report counts only for an actor
  * name that already has a row (random, `wr-<20 hex>-canary`), only once, and only within
@@ -20,6 +21,12 @@ export interface NativeCanaryStore {
   report(actor: string, result: NativeCanaryResult, at: Date): Promise<boolean>;
   result(actor: string): Promise<NativeCanaryResult | undefined>;
   delete(actor: string): Promise<void>;
+  /**
+   * Actors whose row was created before `before`, oldest first. A row outlives its canary only when
+   * the process died mid-canary (or could not delete the actor): the launcher's sweep deletes the
+   * actor, its policy and then the row.
+   */
+  stale(before: Date): Promise<string[]>;
 }
 
 const KNOWN: ReadonlySet<string> = new Set(NATIVE_CANARY_RESULTS);
@@ -54,6 +61,15 @@ export class PrismaNativeCanaryStore implements NativeCanaryStore {
   async delete(actor: string): Promise<void> {
     await this.db.nativeSubstrateCanary.deleteMany({ where: { actor } });
   }
+
+  async stale(before: Date): Promise<string[]> {
+    const rows = await this.db.nativeSubstrateCanary.findMany({
+      where: { createdAt: { lt: before } },
+      orderBy: { createdAt: "asc" },
+      select: { actor: true },
+    });
+    return rows.map((row) => row.actor);
+  }
 }
 
 /** The same contract in memory (tests, and a process with no database). */
@@ -85,5 +101,12 @@ export class MemoryNativeCanaryStore implements NativeCanaryStore {
 
   async delete(actor: string): Promise<void> {
     this.rows.delete(actor);
+  }
+
+  async stale(before: Date): Promise<string[]> {
+    return [...this.rows.entries()]
+      .filter(([, row]) => row.createdAt.getTime() < before.getTime())
+      .sort(([, a], [, b]) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map(([actor]) => actor);
   }
 }

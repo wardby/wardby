@@ -300,6 +300,34 @@ describe("runSubstrateMode", () => {
     expect(await readyz(port)).toBe(200);
   });
 
+  it("the canary probes the deny port the template names (NATIVE_GATEWAY_DENY_PORT)", async () => {
+    const recorded = recordingFetch([() => json({ ok: true }), () => new Response(null, { status: 204 })]);
+    const connect = vi.fn(async () => false);
+    const { options, name } = setup({
+      fetch: recorded.fetch,
+      connect,
+      env: { NATIVE_GATEWAY_URL: GATEWAY_URL, NATIVE_GATEWAY_DENY_PORT: "9901" },
+    });
+    const { done } = await start(options);
+    name("wr-0123456789abcdef0123-canary");
+    await done;
+    expect(connect).toHaveBeenCalledWith("wardby-native-gateway.wardby.svc.cluster.local", 9901);
+    expect(connect.mock.calls.some((c: unknown[]) => c[1] === 8791)).toBe(false);
+  });
+
+  it.each(["0", "65536", "80x"])("fails a canary whose deny port is %s with a fixed code", async (value) => {
+    const recorded = recordingFetch([() => json({ ok: true }), () => new Response(null, { status: 204 })]);
+    const { options, name } = setup({
+      fetch: recorded.fetch,
+      connect: async () => false,
+      env: { NATIVE_GATEWAY_URL: GATEWAY_URL, NATIVE_GATEWAY_DENY_PORT: value },
+    });
+    const { done } = await start(options);
+    name("wr-0123456789abcdef0123-canary");
+    await expect(done).rejects.toThrow(/^native_substrate_env_missing$/);
+    expect(recorded.calls).toHaveLength(0);
+  });
+
   it("fails a canary whose verdict cannot be posted", async () => {
     const recorded = recordingFetch([() => json({ ok: true }), () => new Response(null, { status: 500 })]);
     const { options, name } = setup({ fetch: recorded.fetch, connect: async () => false });

@@ -4,7 +4,7 @@
  *
  * Substrate logs templates and policies, and every run actor resumes from the template's golden
  * snapshot, so neither carries anything of a run: the template holds only the worker's image,
- * command, size and two env values (substrate mode, and the gateway's URL), and the policy only a
+ * command, size and three env values (substrate mode, the gateway's URL and deny port), and the policy only a
  * `credentialUri` reference. The run's capability lives only in the per-run Secret, which the
  * egress gateway reads to put it in the worker's Authorization header on the wire.
  */
@@ -20,7 +20,7 @@ import {
   sortedSelector,
   toSize,
 } from "../providers/substrate/templates.js";
-import { NATIVE_SUBSTRATE_ENV } from "./protocol.js";
+import { NATIVE_DENY_PORT_ENV, NATIVE_SUBSTRATE_ENV } from "./protocol.js";
 
 export interface NativeSubstrateLaunchConfig {
   atespace: string;
@@ -31,6 +31,8 @@ export interface NativeSubstrateLaunchConfig {
   gatewayUrl: string;
   cpus: number;
   memoryMb: number;
+  /** NATIVE_GATEWAY_DENY_PORT (default 8791): the gateway's deny port, which the startup canary probes. */
+  denyPort: number;
   workerSelector?: Record<string, string>;
 }
 
@@ -49,18 +51,22 @@ export function gatewayTarget(gatewayUrl: string): { host: string; port: number 
   return { host: url.hostname, port: url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80 };
 }
 
-/** The worker's whole environment: substrate mode, and where the gateway is. Never a secret or a run value. */
+/**
+ * The worker's whole environment: substrate mode, where the gateway is, and its deny port (for the
+ * startup canary). Never a secret or a run value.
+ */
 function nativeEnv(config: NativeSubstrateLaunchConfig): { name: string; value: string }[] {
   return [
     { name: NATIVE_SUBSTRATE_ENV, value: "1" },
     { name: "NATIVE_GATEWAY_URL", value: config.gatewayUrl },
+    { name: NATIVE_DENY_PORT_ENV, value: String(config.denyPort) },
   ];
 }
 
 /**
  * One template per configuration; no per-run value. Name: templateName("native", image, size,
- * variant of { env, command, workerSelector sorted }), so any change of image, size, gateway or
- * selector names a new template. Throws substrate_limits_too_small for a size that rounds to nothing.
+ * variant of { env, command, workerSelector sorted }), so any change of image, size, gateway, deny
+ * port or selector names a new template. Throws substrate_limits_too_small for a size that rounds to nothing.
  */
 export function nativeTemplate(config: NativeSubstrateLaunchConfig): ActorTemplateSpec {
   const size = toSize(config.cpus, config.memoryMb);

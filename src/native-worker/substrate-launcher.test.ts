@@ -4,6 +4,7 @@ import {
   SubstrateNotFoundError,
   SubstrateUnavailableError,
 } from "../providers/substrate/api.js";
+import { nativeActorName, substrateRunToken } from "../providers/substrate/names.js";
 import { NATIVE_SANDBOX_LAUNCH_ABANDONED } from "./launch.js";
 import type { MemoryNativeCanaryStore } from "./substrate-canary-store.js";
 import {
@@ -515,8 +516,6 @@ describe("SubstrateNativeWorkerLauncher startup canary", () => {
   it.each([
     ["deny_port_reachable", { canaryVerdict: "deny_port_reachable" as const }],
     ["outside_reachable", { canaryVerdict: "outside_reachable" as const }],
-    ["gateway_unreachable", { canaryVerdict: "gateway_unreachable" as const }],
-    ["canary_timeout", { canaryVerdict: "silent" as const, launcher: { canaryTimeoutMs: 5_000 } }],
   ])("refuses every launch after a %s canary, with no second canary", async (reason, options) => {
     const h = nativeHarness(options);
     await expect(h.launcher.launch(h.input())).rejects.toThrow(UNENFORCED(reason));
@@ -533,6 +532,105 @@ describe("SubstrateNativeWorkerLauncher startup canary", () => {
       { template: nativeTemplate(NATIVE_CONFIG).name, result: reason },
       "native substrate canary",
     );
+  });
+
+  it.each([
+    ["gateway_unreachable", { canaryVerdict: "gateway_unreachable" as const }],
+    ["canary_timeout", { canaryVerdict: "silent" as const, launcher: { canaryTimeoutMs: 5_000 } }],
+  ])("refuses the launch after a %s canary, and the next launch runs a new one", async (reason, options) => {
+    const h = nativeHarness(options);
+    await expect(h.launcher.launch(h.input())).rejects.toThrow(UNENFORCED(reason));
+    expect(h.secrets.calls).toEqual([]);
+    expect(substrateWarn).toHaveBeenCalledWith(
+      { template: nativeTemplate(NATIVE_CONFIG).name, result: reason },
+      "native substrate canary",
+    );
+    // Says nothing about the policy (the gateway was down or slow): tried again, not kept.
+    h.harness.canaryVerdict = "pass";
+    await h.launcher.launch(h.input({ runId: "run-2" }));
+    expect(canaryActors(h)).toHaveLength(2);
+    expect(h.api.actors.get(`${NATIVE_CONFIG.atespace}/${nativeActorName(substrateRunToken("run-2"))}`)?.state).toBe(
+      "RUNNING",
+    );
+  });
+
+  it("keeps a real isolation failure even after a retryable outcome", async () => {
+    const h = nativeHarness({ canaryVerdict: "gateway_unreachable" });
+    await expect(h.launcher.launch(h.input())).rejects.toThrow(UNENFORCED("gateway_unreachable"));
+    h.harness.canaryVerdict = "deny_port_reachable";
+    await expect(h.launcher.launch(h.input())).rejects.toThrow(UNENFORCED("deny_port_reachable"));
+    h.harness.canaryVerdict = "pass";
+    await expect(h.launcher.launch(h.input())).rejects.toThrow(UNENFORCED("deny_port_reachable"));
+    expect(canaryActors(h)).toHaveLength(2);
+    expect(h.secrets.calls).toEqual([]);
+  });
+
+  it("under low-power mode, start runs no canary, and a launch wakes the gateway before its canary", async () => {
+    const events: string[] = [];
+    let awake = false;
+    const ensureAwake = vi.fn(async () => {
+      events.push("ensureAwake");
+      awake = true;
+    });
+    const h = nativeHarness({ power: fakePower(ensureAwake) });
+    // An asleep gateway: the canary could not reach it.
+    h.api.onCanaryResumed = async (actor) => {
+      await h.canaries.report(actor, awake ? "pass" : "gateway_unreachable", new Date());
+    };
+    h.api.canaryBefore.createActor = async () => void events.push("canary");
+    await h.launcher.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(h.api.canaryCalls).toEqual([]);
+    expect(ensureAwake).not.toHaveBeenCalled();
+    await h.launcher.launch(h.input());
+    expect(events).toEqual(["ensureAwake", "canary"]);
+    expect(h.api.actors.get(h.actorKey)?.state).toBe("RUNNING");
+  });
+
+  it("sweeps a canary left by a crashed process (its actor, policy and row) before a new one", async () => {
+    const h = nativeHarness();
+    const store = h.canaries as MemoryNativeCanaryStore;
+    const stale = "wr-00000000000000000000-canary";
+    const fresh = "wr-11111111111111111111-canary";
+    await h.api.ensureActorTemplate(nativeTemplate(NATIVE_CONFIG));
+    for (const actor of [stale, fresh]) {
+      await h.api.createActor(NATIVE_CONFIG.atespace, actor, nativeTemplate(NATIVE_CONFIG).name);
+      await h.api.putEgressPolicy(NATIVE_CONFIG.atespace, actor, nativeCanaryEgress(NATIVE_CONFIG));
+    }
+    // The stale row is older than any canary can run; the fresh one may be another replica's.
+    store.rows.set(stale, { template: "wardby-native-0123456789abcdef", createdAt: new Date(0) });
+    store.rows.set(fresh, { template: "wardby-native-0123456789abcdef", createdAt: new Date(h.now()) });
+    await h.launcher.launch(h.input());
+    expect(h.api.actors.has(`${NATIVE_CONFIG.atespace}/${stale}`)).toBe(false);
+    expect(h.api.egressPolicies.has(`${NATIVE_CONFIG.atespace}/${stale}`)).toBe(false);
+    expect(store.rows.has(stale)).toBe(false);
+    expect(h.api.actors.has(`${NATIVE_CONFIG.atespace}/${fresh}`)).toBe(true);
+    expect(store.rows.has(fresh)).toBe(true);
+    expect(h.api.actors.get(h.actorKey)?.state).toBe("RUNNING");
+  });
+
+  it("keeps a stale row whose actor cannot be deleted, for a later sweep", async () => {
+    const h = nativeHarness();
+    const store = h.canaries as MemoryNativeCanaryStore;
+    const stale = "wr-00000000000000000000-canary";
+    store.rows.set(stale, { template: "wardby-native-0123456789abcdef", createdAt: new Date(0) });
+    failNextCanary(h.api, "deleteActor", new SubstrateUnavailableError("quoting " + FAKE_NATIVE_CAP));
+    await h.launcher.launch(h.input());
+    expect(store.rows.has(stale)).toBe(true);
+    expect(JSON.stringify(substrateWarn.mock.calls)).not.toContain(FAKE_NATIVE_CAP);
+  });
+
+  it("keeps the canary's row when its actor cannot be deleted, so the sweep finds it", async () => {
+    const h = nativeHarness();
+    const store = h.canaries as MemoryNativeCanaryStore;
+    let actor = "";
+    h.api.canaryBefore.deleteActor = async (_atespace, name) => {
+      actor = name as string;
+      throw new SubstrateUnavailableError("down");
+    };
+    await h.launcher.launch(h.input());
+    expect(actor).toMatch(/-canary$/);
+    expect(store.rows.has(actor)).toBe(true);
   });
 
   it("waits a second between reads of the verdict, up to canaryTimeoutMs", async () => {

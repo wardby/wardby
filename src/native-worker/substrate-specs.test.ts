@@ -22,6 +22,7 @@ describe("nativeTemplate", () => {
         env: [
           { name: "WARDBY_NATIVE_SUBSTRATE", value: "1" },
           { name: "NATIVE_GATEWAY_URL", value: GATEWAY_URL },
+          { name: "NATIVE_GATEWAY_DENY_PORT", value: "8791" },
         ],
         wakeupProbe: { path: "/readyz", port: READY_PORT },
         volumeMounts: [{ name: "tmp", mountPath: "/tmp" }, actorMetadataMount],
@@ -36,7 +37,7 @@ describe("nativeTemplate", () => {
     expect(template.name).toMatch(/^wardby-native-[0-9a-f]{16}$/);
   });
 
-  it("names a new template for any change of image, size, gateway or selector, and the same one otherwise", () => {
+  it("names a new template for any change of image, size, gateway, deny port or selector, and the same one otherwise", () => {
     const variants = [
       NATIVE_CONFIG,
       { ...NATIVE_CONFIG, image: "registry.example/wardby-native-worker@sha256:" + "b".repeat(64) },
@@ -44,6 +45,7 @@ describe("nativeTemplate", () => {
       { ...NATIVE_CONFIG, memoryMb: 1024 },
       { ...NATIVE_CONFIG, gatewayUrl: "http://other-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/call" },
       { ...NATIVE_CONFIG, workerSelector: { pool: "native" } },
+      { ...NATIVE_CONFIG, denyPort: 9901 },
     ].map((config) => nativeTemplate(config).name);
     expect(new Set(variants).size).toBe(variants.length);
     expect(nativeTemplate({ ...NATIVE_CONFIG })).toEqual(nativeTemplate({ ...NATIVE_CONFIG }));

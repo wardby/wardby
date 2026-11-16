@@ -83,6 +83,7 @@ export function buildNativeSandboxExecutor(options: {
               gatewayUrl: config.gatewayUrl,
               cpus: config.cpus,
               memoryMb: config.memoryMb,
+              denyPort: config.denyPort,
               ...(config.substrate.workerSelector ? { workerSelector: config.substrate.workerSelector } : {}),
             },
             // The worker idles after its finish: the session's status is how its exit is seen.

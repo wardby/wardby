@@ -2,7 +2,7 @@ import { createServer as createHttpServer, type Server as HttpServer } from "nod
 import { createServer as createNetServer, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NATIVE_PROBE_OUTSIDE_TARGETS } from "./protocol.js";
-import { createEgressProbe, observeEgress, runNativeCanary, type EgressObservation } from "./substrate-canary.js";
+import { connectionOpens, runNativeCanary } from "./substrate-canary.js";
 
 const GATEWAY_URL = "http://wardby-native-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/call";
 const GATEWAY_HOST = "wardby-native-gateway.wardby.svc.cluster.local";
@@ -108,52 +108,21 @@ describe("runNativeCanary", () => {
   });
 });
 
-describe("createEgressProbe", () => {
-  const DENIAL = "403\nforbidden by egress policy";
-  const http = (status: number, body: string): EgressObservation => ({ kind: "http", status, body });
-
-  it("connection-level outcomes need no reference", async () => {
-    const observe = vi.fn(async (host: string): Promise<EgressObservation> =>
-      host === "10.0.0.1" ? { kind: "denied" } : { kind: "open" },
+describe("runNativeCanary deny port", () => {
+  it("probes the configured deny port, not the default", async () => {
+    const { fetch } = fakeFetch();
+    const connect = vi.fn(reachable(`${GATEWAY_HOST}:8791`));
+    expect(await runNativeCanary(GATEWAY_URL, ACTOR, { fetch, connect, denyPort: 9901 })).toBe("pass");
+    expect(connect.mock.calls[0]).toEqual([GATEWAY_HOST, 9901]);
+    expect(connect.mock.calls.some((c) => c[1] === 8791)).toBe(false);
+    const open = reachable(`${GATEWAY_HOST}:9901`);
+    expect(await runNativeCanary(GATEWAY_URL, ACTOR, { fetch, connect: open, denyPort: 9901 })).toBe(
+      "deny_port_reachable",
     );
-    const connect = createEgressProbe({ observe });
-    expect(await connect("10.0.0.1", 80)).toBe(false);
-    expect(await connect("10.0.0.2", 80)).toBe(true);
-    expect(observe.mock.calls.map((c) => c[0])).toEqual(["10.0.0.1", "10.0.0.2"]);
-  });
-
-  it("counts an HTTP answer equal to the reference denial (after naming the target) as denied", async () => {
-    const observe = vi.fn(async (host: string, port: number): Promise<EgressObservation> => {
-      if (host === "192.0.2.1") return http(403, `denied: 192.0.2.1:${port} is not allowed`);
-      return http(403, `denied: ${host}:${port} is not allowed`);
-    });
-    const connect = createEgressProbe({ observe });
-    expect(await connect("169.254.169.254", 80)).toBe(false);
-    expect(await connect("169.254.170.23", 80)).toBe(false);
-    // The reference is asked once per port.
-    expect(observe.mock.calls.filter((c) => c[0] === "192.0.2.1")).toEqual([["192.0.2.1", 80]]);
-  });
-
-  it.each([
-    ["a different status", http(200, "denied: <x> is not allowed")],
-    ["a different body", http(403, '{"Code":"Success","Token":"metadata"}')],
-  ])("counts %s from the target as reachable", async (_name, answer) => {
-    const observe = async (host: string, port: number): Promise<EgressObservation> =>
-      host === "192.0.2.1" ? http(403, `denied: 192.0.2.1:${port} is not allowed`) : answer;
-    expect(await createEgressProbe({ observe })("169.254.169.254", 80)).toBe(true);
-  });
-
-  it.each([
-    ["no answer at all", { kind: "denied" }],
-    ["an open connection with no answer", { kind: "open" }],
-  ])("counts any HTTP answer as reachable when the reference gives %s", async (_name, reference) => {
-    const observe = async (host: string): Promise<EgressObservation> =>
-      host === "192.0.2.1" ? reference : http(403, DENIAL);
-    expect(await createEgressProbe({ observe })("1.1.1.1", 443)).toBe(true);
   });
 });
 
-describe("observeEgress", () => {
+describe("connectionOpens (the default probe)", () => {
   const servers: (HttpServer | NetServer)[] = [];
   const sockets: Socket[] = [];
   afterEach(async () => {
@@ -166,34 +135,46 @@ describe("observeEgress", () => {
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
     return (server.address() as AddressInfo).port;
   };
+  const answering = (status: number, body: string) =>
+    createHttpServer((_req, res) => {
+      res.writeHead(status);
+      res.end(body);
+    });
 
-  it("is denied for a refused connection", async () => {
+  it("is denied only for a connection that never opens (refused)", async () => {
     const port = await listen(createNetServer());
     await new Promise((done) => servers.pop()?.close(done));
-    expect(await observeEgress("127.0.0.1", port)).toEqual({ kind: "denied" });
+    expect(await connectionOpens("127.0.0.1", port)).toBe(false);
   });
 
-  it("is open for a connection that is accepted and then reset", async () => {
-    const port = await listen(createNetServer((socket) => socket.destroy()));
-    expect(await observeEgress("127.0.0.1", port)).toEqual({ kind: "open" });
+  it.each([
+    ["accepted and then dropped", () => createNetServer((socket) => socket.destroy())],
+    ["accepted and silent", () => createNetServer(() => {})],
+    ["answering 403 forbidden by egress policy", () => answering(403, "forbidden by egress policy")],
+    ["answering 502 Bad Gateway", () => answering(502, "<html>502 Bad Gateway</html>")],
+  ])("is reachable for a connection %s", async (_name, server) => {
+    const port = await listen(server());
+    expect(await connectionOpens("127.0.0.1", port, 500)).toBe(true);
   });
 
-  it("is open for a connection that answers nothing in time", async () => {
-    const port = await listen(createNetServer(() => {}));
-    expect(await observeEgress("127.0.0.1", port, 100)).toEqual({ kind: "open" });
-  });
-
-  it("reads an HTTP answer's status and body", async () => {
-    const port = await listen(
-      createHttpServer((_req, res) => {
-        res.writeHead(403);
-        res.end("forbidden by egress policy");
-      }),
-    );
-    expect(await observeEgress("127.0.0.1", port)).toEqual({
-      kind: "http",
-      status: 403,
-      body: "forbidden by egress policy",
-    });
+  it.each([
+    ["accepts and drops", () => createNetServer((socket) => socket.destroy())],
+    ["answers HTTP 502", () => answering(502, "<html>502 Bad Gateway</html>")],
+    ["answers HTTP 403", () => answering(403, "forbidden by egress policy")],
+  ])("fails the canary with deny_port_reachable when the deny port %s", async (_name, server) => {
+    const denyPort = await listen(server());
+    const { fetch } = (() => {
+      const f = (async (url: string | URL) =>
+        String(url).endsWith("/healthz")
+          ? json({ ok: true })
+          : new Response(null, { status: 204 })) as unknown as typeof globalThis.fetch;
+      return { fetch: f };
+    })();
+    // The outside targets are not dialled for real here: only the gateway host is.
+    const connect = (host: string, port: number) =>
+      host === "127.0.0.1" ? connectionOpens(host, port, 500) : Promise.resolve(false);
+    expect(
+      await runNativeCanary("http://127.0.0.1:8790/native-gateway/v1/call", ACTOR, { fetch, connect, denyPort }),
+    ).toBe("deny_port_reachable");
   });
 });

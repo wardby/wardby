@@ -549,7 +549,10 @@ or the server running upkeep is not up.
 | `KUBERNETES_PLATFORM`                   | Kubernetes | No       | none                                                                                                            | `gke-autopilot` conforms worker pod resources to Autopilot's rules and requires the gVisor runtime class; `eks` targets EKS with a gVisor node group and also requires it. Shared with coding runs. |
 
 Gateway-side variables (`NATIVE_GATEWAY_LISTEN`, `NATIVE_GATEWAY_DENY_PORT`) are
-set on the gateway, not the server.
+set on the gateway, not the server. One exception: with
+`NATIVE_SANDBOX_LAUNCHER=substrate`, if you change `NATIVE_GATEWAY_DENY_PORT`
+from its default `8791`, set the same value on the server too. The server
+gives it to the worker template, and the startup check probes that port.
 
 The gateway also records sandbox runs' steps (see
 [Run steps](debugging-agent-runs.md#run-steps)), so when you change

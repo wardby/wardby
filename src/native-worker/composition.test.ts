@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { loadNativeSandboxConfig } from "../config/providers.js";
 import type { NativeRunProviders } from "../core/runner.js";
 import { buildNativeSandboxExecutor } from "./composition.js";
+import type { ActorTemplateSpec } from "../providers/substrate/api.js";
 import { FakeSubstrateApi } from "../providers/substrate/fake-api.js";
 import { FakeKubernetesApi } from "../providers/jobs/fake-kubernetes-api.js";
 import { NativeSandboxExecutor } from "./sandbox-executor.js";
@@ -239,6 +240,7 @@ describe("native sandbox on Substrate", () => {
       warmPoolSize: 0,
       warmMaxAgeMs: 1_800_000,
       goldenWaitSec: 60,
+      denyPort: 8791,
       substrate: {
         apiUrl: SUBSTRATE.SUBSTRATE_API_URL,
         tokenFile: SUBSTRATE.SUBSTRATE_TOKEN_FILE,
@@ -246,6 +248,17 @@ describe("native sandbox on Substrate", () => {
         credentialsNamespace: "wardby-run-secrets",
       },
     });
+  });
+
+  it("reads the gateway's deny port for the startup canary (NATIVE_GATEWAY_DENY_PORT)", () => {
+    expect(loadNativeSandboxConfig({ ...SUBSTRATE, NATIVE_GATEWAY_DENY_PORT: "9901" })).toMatchObject({
+      denyPort: 9901,
+    });
+    for (const bad of ["0", "65536", "port"]) {
+      expect(() => loadNativeSandboxConfig({ ...SUBSTRATE, NATIVE_GATEWAY_DENY_PORT: bad })).toThrow(
+        /NATIVE_GATEWAY_DENY_PORT/,
+      );
+    }
   });
 
   it("uses the native worker selector over the shared one", () => {
@@ -322,6 +335,19 @@ describe("native sandbox on Substrate", () => {
     expect(launcher.gatewayUrl).toBe(GATEWAY_URL);
     // Nothing is called at build time.
     expect(fake.templates.size).toBe(0);
+  });
+
+  it("gives the worker template the configured deny port", () => {
+    const executor = buildNativeSandboxExecutor({
+      db: {} as never,
+      providers: {} as NativeRunProviders,
+      env: { ...SUBSTRATE, NATIVE_GATEWAY_DENY_PORT: "9901" },
+      substrateApi: new FakeSubstrateApi({ workers: 1 }),
+      kubernetesApi: new FakeKubernetesApi(),
+    });
+    const launcher = (executor as unknown as { options: { launcher: { template: ActorTemplateSpec } } }).options
+      .launcher;
+    expect(launcher.template.containers[0].env).toContainEqual({ name: "NATIVE_GATEWAY_DENY_PORT", value: "9901" });
   });
 
   it("fails at startup for a size that rounds to nothing", () => {

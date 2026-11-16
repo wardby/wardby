@@ -18,9 +18,13 @@
  * That trust is proven once per process and template by a startup canary (D1): an actor resumed from
  * the same template, under the run's rule minus the credential (nativeCanaryEgress), probes the
  * gateway, its deny port and the outside (substrate-canary.ts) and posts its verdict to the gateway,
- * which records it (NativeCanaryStore). Until the canary passes no run launches; a failed verdict or
- * no verdict in time refuses every launch with native_sandbox_network_unenforced until the process
- * restarts, and a failed call is tried again by the next launch. A resume refused for room is
+ * which records it (NativeCanaryStore). Until the canary passes no run launches. An isolation failure
+ * (deny_port_reachable, outside_reachable) refuses every launch with native_sandbox_network_unenforced
+ * until the process restarts. An outcome that says nothing about the policy (gateway_unreachable,
+ * canary_timeout, or a failed call) refuses that launch the same way, and the next launch runs a new
+ * canary. Under low-power mode the canary runs only from a launch, after the launch has woken the
+ * gateway, never from `start` (the gateway may be scaled to zero then). A canary left by a process
+ * that died mid-canary is swept from its row before the next one runs. A resume refused for room is
  * retried while the template's golden snapshot may still be building (`goldenWaitMs` after its first
  * ensure by this process, unless Substrate reports it ready); past that it is native_sandbox_capacity.
  * Any failure deletes what the launch made; a delete that fails there is reported, and the ended
@@ -64,7 +68,7 @@ import { NATIVE_SANDBOX_CAPACITY, NATIVE_SANDBOX_NETWORK_UNENFORCED } from "./ku
 import { NATIVE_SANDBOX_LAUNCH_ABANDONED, type WorkerHandle, type WorkerLaunchOptions } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import type { ManagedWorkerLauncher } from "./sandbox-executor.js";
-import type { NativeCanaryStore } from "./substrate-canary-store.js";
+import { CANARY_REPORT_WINDOW_MS, type NativeCanaryStore } from "./substrate-canary-store.js";
 import {
   nativeCanaryEgress,
   nativeEgress,
@@ -143,8 +147,9 @@ class CanaryCallFailed extends Error {
 }
 
 /**
- * The startup canary's outcome: its verdict, `canary_timeout`, or `<call>_failed`. `final` is false
- * only for a failed call, which the next launch tries again; anything else stands until restart.
+ * The startup canary's outcome: its verdict, `canary_timeout`, or `<call>_failed`. `final` is true
+ * only for pass and the isolation failures, which stand until restart; anything else (the gateway
+ * down or asleep, no verdict in time, a failed call) is tried again by the next launch.
  */
 interface CanaryOutcome {
   result: string;
@@ -156,6 +161,10 @@ interface CanaryOutcome {
 /** How often the launcher reads the canary's verdict. */
 const CANARY_POLL_MS = 1_000;
 const DEFAULT_CANARY_TIMEOUT_MS = 120_000;
+/** Verdicts that prove or disprove the policy: kept for the life of the process. */
+const FINAL_VERDICTS: ReadonlySet<string> = new Set(["pass", "deny_port_reachable", "outside_reachable"]);
+/** Added to a canary's longest possible run before its row counts as left by a dead process. */
+const CANARY_SWEEP_MARGIN_MS = 60_000;
 
 /** The run error for a failed launch: a fixed code and enums, never a message from Substrate or Kubernetes. */
 function launchError(error: unknown): Error {
@@ -182,7 +191,7 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
    */
   private readonly firstEnsuredAt = new Map<string, number>();
   private preparing: Promise<void> | undefined;
-  /** The startup canary, run once per process; cleared after a failed call, so the next launch retries. */
+  /** The startup canary, kept once final; cleared after any other outcome, so the next launch retries. */
   private canary: Promise<CanaryOutcome> | undefined;
 
   constructor(private readonly options: SubstrateNativeWorkerLauncherOptions) {
@@ -243,7 +252,11 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     else if (info?.goldenSnapshotFailed || !this.firstEnsuredAt.has(name)) this.firstEnsuredAt.set(name, this.now());
   }
 
-  /** Ensures the template, then runs the canary; a failure is logged with fixed fields only. */
+  /**
+   * Ensures the template, then runs the canary; a failure is logged with fixed fields only. Under
+   * low-power mode the gateway may be asleep, so the canary waits for the first launch, which wakes
+   * it first (a canary against a sleeping gateway proves nothing).
+   */
   private async prepare(): Promise<void> {
     const call: NamedCall = async (name, fn) => {
       try {
@@ -262,6 +275,7 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
       // Logged above; the next launch ensures it again (and then runs the canary).
       return;
     }
+    if (this.power.enabled) return;
     await this.prove();
   }
 
@@ -278,13 +292,15 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
   }
 
   /**
-   * One canary: its row, an actor from the run template with the credential-free rule, the resume
-   * (with a run's golden-window retry), then the verdict, read every second up to canaryTimeoutMs.
-   * The actor (with its policy) and the row are then deleted, best effort. Never throws; the one log
-   * line is the template and the outcome.
+   * One canary: first the sweep of any left by a dead process; then its row, an actor from the run
+   * template with the credential-free rule, the resume (with a run's golden-window retry), then the
+   * verdict, read every second up to canaryTimeoutMs. The actor (with its policy) and then the row
+   * are deleted, best effort; the row stays when the actor delete fails, so a later sweep retries.
+   * Never throws; the one log line is the template and the outcome.
    */
   private async runCanary(): Promise<CanaryOutcome> {
     const { canaries, config } = this.options;
+    await this.sweepCanaries();
     const template = this.template.name;
     const actor = nativeCanaryActorName(randomBytes(16).toString("hex"));
     const call: NamedCall = async (name, fn, recoverable) => {
@@ -318,12 +334,50 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
       else if (error instanceof NoRoom) outcome = { result: "resumeActor_failed", final: false, noRoom: true };
       else outcome = { result: "canary_failed", final: false };
     }
-    if (actorMade) await deleteActorWithPolicy(this.api, this.atespace, actor).catch(() => {});
-    if (rowMade) await canaries.delete(actor).catch(() => {});
+    let actorGone = true;
+    if (actorMade) {
+      actorGone = await deleteActorWithPolicy(this.api, this.atespace, actor).then(
+        () => true,
+        () => false,
+      );
+    }
+    if (rowMade && actorGone) await canaries.delete(actor).catch(() => {});
     if (outcome.result === "pass")
       substrateNativeLog.info({ template, result: outcome.result }, "native substrate canary");
     else substrateNativeLog.warn({ template, result: outcome.result }, "native substrate canary");
     return outcome;
+  }
+
+  /**
+   * Deletes the actor, policy and row of every canary whose row is older than any canary can run
+   * (its golden wait plus its verdict timeout, at least the report window, plus a margin): only a
+   * process that died mid-canary, or a failed actor delete, leaves one. Best effort and never
+   * throws; a row whose actor cannot be deleted stays for the next sweep. Logs fixed fields only.
+   */
+  private async sweepCanaries(): Promise<void> {
+    const { canaries } = this.options;
+    const longest = Math.max(
+      CANARY_REPORT_WINDOW_MS,
+      this.options.goldenWaitMs + (this.options.canaryTimeoutMs ?? DEFAULT_CANARY_TIMEOUT_MS),
+    );
+    let stale: string[];
+    try {
+      stale = await canaries.stale(new Date(this.now() - longest - CANARY_SWEEP_MARGIN_MS));
+    } catch {
+      substrateNativeLog.warn({ result: "listCanaries_failed" }, "native substrate canary sweep");
+      return;
+    }
+    for (const actor of stale) {
+      try {
+        await deleteActorWithPolicy(this.api, this.atespace, actor);
+        await canaries.delete(actor);
+      } catch (error) {
+        substrateNativeLog.warn(
+          { result: "sweep_failed", errorCode: substrateErrorCode(error) },
+          "native substrate canary sweep",
+        );
+      }
+    }
   }
 
   /** The canary's verdict, read every second; canary_timeout once canaryTimeoutMs passes without one. */
@@ -334,9 +388,10 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     const deadline = this.now() + (this.options.canaryTimeoutMs ?? DEFAULT_CANARY_TIMEOUT_MS);
     for (;;) {
       const result = await store("readCanary", () => this.options.canaries.result(actor));
-      // A verdict is final: a denial seen once is not retried away.
-      if (result) return { result, final: true };
-      if (this.now() >= deadline) return { result: "canary_timeout", final: true };
+      // An isolation failure seen once is not retried away; gateway_unreachable says nothing about
+      // the policy (the gateway was down, asleep or rolling), so the next launch tries again.
+      if (result) return { result, final: FINAL_VERDICTS.has(result) };
+      if (this.now() >= deadline) return { result: "canary_timeout", final: false };
       await this.sleep(CANARY_POLL_MS);
     }
   }

@@ -257,8 +257,13 @@ export const NativeCanaryReportSchema = z
   .object({ actor: z.string().regex(/^wr-[0-9a-f]{20}-canary$/), result: z.enum(NATIVE_CANARY_RESULTS) })
   .strict();
 export type NativeCanaryReport = z.infer<typeof NativeCanaryReportSchema>;
-/** The gateway's witness port (docker-isolation.ts NATIVE_GATEWAY_DENY_PORT, re-declared for the worker image). */
+/** The gateway's default witness port (docker-isolation.ts NATIVE_GATEWAY_DENY_PORT, re-declared for the worker image). */
 export const NATIVE_CANARY_DENY_PORT = 8791;
+/**
+ * The Substrate worker template's env var naming the gateway's deny port (the operator's
+ * NATIVE_GATEWAY_DENY_PORT), which the startup canary probes.
+ */
+export const NATIVE_DENY_PORT_ENV = "NATIVE_GATEWAY_DENY_PORT";
 /**
  * kubernetes-isolation.ts NATIVE_PROBE_OUTSIDE, re-declared for the worker image, which cannot load
  * providers/jobs/ (kubernetes-isolation.test.ts keeps them equal): the internet, and the cloud

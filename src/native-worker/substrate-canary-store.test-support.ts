@@ -50,4 +50,16 @@ export function canaryStoreContract(make: () => NativeCanaryStore): void {
     expect(await store.report(actor, "pass", new Date())).toBe(false);
     await expect(store.delete(actor)).resolves.toBeUndefined();
   });
+
+  it("lists a row created before a time as stale, whatever its result, and not one created after", async () => {
+    const store = make();
+    const actor = canaryActor();
+    await store.create(actor, TEMPLATE);
+    expect(await store.stale(new Date(Date.now() - 60_000))).not.toContain(actor);
+    expect(await store.stale(new Date(Date.now() + 60_000))).toContain(actor);
+    await store.report(actor, "pass", new Date());
+    expect(await store.stale(new Date(Date.now() + 60_000))).toContain(actor);
+    await store.delete(actor);
+    expect(await store.stale(new Date(Date.now() + 60_000))).not.toContain(actor);
+  });
 }

@@ -14,6 +14,7 @@ import {
   platformProfile,
   type KubernetesPlatform,
 } from "../providers/jobs/kubernetes-platform.js";
+import { NATIVE_GATEWAY_DENY_PORT } from "../native-worker/docker-isolation.js";
 import { CODING_PROXY_PORT } from "../providers/jobs/docker-isolation.js";
 import type { BlobStoreConfig } from "../providers/storage/index.js";
 import {
@@ -494,6 +495,11 @@ export interface SubstrateNativeSandboxConfig extends NativeSandboxCommonConfig 
   substrate: SubstrateConnectionConfig;
   /** SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC (0..600, default 60). */
   goldenWaitSec: number;
+  /**
+   * NATIVE_GATEWAY_DENY_PORT (1..65535, default 8791): the gateway's deny port, read here too so the
+   * startup canary probes the port the gateway really listens on. Set it to the gateway's value.
+   */
+  denyPort: number;
 }
 
 export type NativeSandboxConfig =
@@ -583,7 +589,14 @@ export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): N
         0,
         600,
       ) ?? 60;
-    return { launcher, ...common, gatewayUrl, substrate, goldenWaitSec };
+    const denyPort =
+      optionalBoundedInteger(
+        env.NATIVE_GATEWAY_DENY_PORT?.trim() || undefined,
+        "NATIVE_GATEWAY_DENY_PORT",
+        1,
+        65_535,
+      ) ?? NATIVE_GATEWAY_DENY_PORT;
+    return { launcher, ...common, gatewayUrl, substrate, goldenWaitSec, denyPort };
   }
   if (launcher === "kubernetes") {
     // A cluster pulls by registry digest; a local image id means nothing to it.

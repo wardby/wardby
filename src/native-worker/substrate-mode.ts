@@ -20,6 +20,8 @@ import { createHttpTransport, fetchSandboxInput } from "./http-transport.js";
 import {
   GatewayError,
   GatewayInputResponseSchema,
+  NATIVE_CANARY_DENY_PORT,
+  NATIVE_DENY_PORT_ENV,
   NATIVE_GATEWAY_INPUT_PATH,
   NATIVE_PLACEHOLDER_CAPABILITY,
   nativeGatewayRouteUrl,
@@ -75,6 +77,15 @@ function requireGatewayUrl(env: NodeJS.ProcessEnv): string {
   throw new Error("native_substrate_env_missing");
 }
 
+/** The deny port the template names (NATIVE_GATEWAY_DENY_PORT); unset is the default 8791. */
+function denyPortFrom(env: NodeJS.ProcessEnv): number {
+  const raw = env[NATIVE_DENY_PORT_ENV];
+  if (raw === undefined) return NATIVE_CANARY_DENY_PORT;
+  const port = /^[0-9]{1,5}$/.test(raw) ? Number(raw) : NaN;
+  if (port >= 1 && port <= 65_535) return port;
+  throw new Error("native_substrate_env_missing");
+}
+
 /** The input route's URL from NATIVE_GATEWAY_URL (the call route's URL), keeping any path prefix. */
 export function gatewayInputUrl(gatewayUrl: string): string {
   return nativeGatewayRouteUrl(gatewayUrl, NATIVE_GATEWAY_INPUT_PATH);
@@ -111,6 +122,7 @@ async function runNamed(gatewayUrl: string, log: Logger, options: SubstrateModeO
     if (options.canary) await options.canary(gatewayUrl);
     else
       await runNativeCanary(gatewayUrl, `${token}${CANARY_SUFFIX}`, {
+        denyPort: denyPortFrom(options.env),
         ...(options.fetch ? { fetch: options.fetch } : {}),
         ...(options.sleep ? { sleep: options.sleep } : {}),
         ...(options.connect ? { connect: options.connect } : {}),
