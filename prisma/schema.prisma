@@ -652,6 +652,14 @@ model CodingRun {
   /// never a value or a hash of one. Transcript capture compares it with the versions current then
   /// and stores nothing when they differ. Null = not recorded (then no transcript is stored).
   launchSecretVersions  Json?
+  /// Plan documents: the worker returns the plan folder (PLAN_FOLDER_PATH) and the control plane stores it.
+  collectPlanFiles      Boolean             @default(false)
+  /// What happened to the returned plan folder (a fixed code; see PlanFilesRecorder). Null: not collected.
+  planFilesStatus       String?
+  /// Paths of returned plan files withheld because they held a token-shaped value; never their content.
+  planFilesWithheld     Json?
+  /// Paths the worker skipped (symlinks, non-UTF-8, unsafe names), and how many were left unnamed.
+  planFilesSkipped      Json?
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
   proxySession          CodingProxySession?
@@ -667,6 +675,7 @@ model CodingRun {
   continuations   CodingRun[] @relation("CodingRunContinuation")
 
   repositories             CodingRunRepository[]
+  planFiles                CodingRunPlanFile[]
   registryAllowances       RegistryAllowance[]
   registryFetches          RegistryFetch[]
   registryApprovedVersions RegistryApprovedVersion[]
@@ -1658,6 +1667,22 @@ model CodingRunRepository {
   @@unique([runId, name])
   @@index([provider, repository, pullRequestNumber])
   @@index([mergeOrder])
+}
+
+/// A coding run's plan files: "input" ones are written to the plan folder before the agent starts;
+/// "output" ones are what the run left there (or, for store "repository", in its plan path), redacted.
+model CodingRunPlanFile {
+  id        String    @id @default(cuid())
+  runId     String
+  codingRun CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  /// "input" or "output".
+  direction String
+  path      String
+  content   String
+  createdAt DateTime  @default(now())
+
+  @@unique([runId, direction, path])
+  @@index([runId])
 }
 
 /// A pull-request review deferred because its head's CI was still pending
