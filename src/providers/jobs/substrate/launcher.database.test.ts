@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../../../core/db.js";
 import { createSubstrateRunFixture } from "../../coding-proxy/substrate/substrate-fixture.test-support.js";
-import type { SubstrateApi } from "./api.js";
+import type { SubstrateApi } from "../../substrate/api.js";
 import { makeHarness } from "./launcher.test-support.js";
 import { BLOB } from "./names.js";
 import { PrismaSubstrateRunStore, type SubstrateRunRecord } from "./run-store.js";

@@ -14,6 +14,7 @@ import {
   loadCodingRunRepositoryLimit,
   loadShutdownDrainSeconds,
   loadKubernetesJobConfig,
+  loadSubstrateConnectionConfig,
   loadSubstrateJobConfig,
   loadJiraConfig,
   loadSlackConfig,
@@ -843,5 +844,25 @@ describe("loadCodingResultBundleMaxBytes (#536)", () => {
     expect(() => loadCodingConcurrencyConfig({ CODING_MAX_RESULT_BUNDLE_MB: "0" })).toThrow(
       "CODING_MAX_RESULT_BUNDLE_MB must be a positive integer.",
     );
+  });
+});
+
+describe("loadSubstrateConnectionConfig", () => {
+  const base = {
+    SUBSTRATE_API_URL: "https://api.ate.example:443",
+    SUBSTRATE_TOKEN_FILE: "/var/run/token",
+    SUBSTRATE_ATESPACE: "wardby-runs",
+  };
+
+  it("names the setting that requires it, and needs no proxy host", () => {
+    expect(loadSubstrateConnectionConfig(base, "NATIVE_SANDBOX_LAUNCHER=substrate")).toEqual({
+      apiUrl: "https://api.ate.example:443",
+      tokenFile: "/var/run/token",
+      atespace: "wardby-runs",
+      credentialsNamespace: "wardby-run-secrets",
+    });
+    expect(() =>
+      loadSubstrateConnectionConfig({ ...base, SUBSTRATE_API_URL: "" }, "NATIVE_SANDBOX_LAUNCHER=substrate"),
+    ).toThrow("SUBSTRATE_API_URL is required when NATIVE_SANDBOX_LAUNCHER=substrate.");
   });
 });

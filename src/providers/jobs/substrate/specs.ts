@@ -1,7 +1,9 @@
 // Pure builders for the Substrate launcher: actor templates, egress policies and the per-run
-// Secret. Templates are shared across runs and logged by Substrate's API server, so nothing
-// here may carry a secret or a per-run value; the capability lives only in the per-run Secret,
-// which the egress gateway reads to inject the header.
+// Secret. The pieces shared with the native sandbox launcher (sizes, the actor metadata volume,
+// the Secret shape, credential URIs) live in src/providers/substrate/. Templates are shared across
+// runs and logged by Substrate's API server, so nothing here may carry a secret or a per-run value;
+// the capability lives only in the per-run Secret, which the egress gateway reads to inject the
+// header.
 //
 // A run with extra repositories gets one more durable volume, `repos`, mounted at /repos on the
 // workspace holder only (the tool actor, or a Codex run's one actor; never Claude's agent). The
@@ -23,7 +25,16 @@ import { SERVICE_SHM_MIB } from "../docker-services.js";
 import { SERVICE_SCRATCH_MIB } from "../kubernetes-isolation.js";
 import type { JobSpec } from "../types.js";
 import { REPOSITORY_MOUNT_ROOT } from "../storage-init.js";
-import type { ActorTemplateSpec, ContainerSpec, EgressRule } from "./api.js";
+import type { ActorTemplateSpec, ContainerSpec, EgressRule } from "../../substrate/api.js";
+import { credentialUri, substrateSecret } from "../../substrate/secret.js";
+import {
+  READY_PORT,
+  actorMetadataMount,
+  actorMetadataVolume,
+  sortedSelector,
+  toSize,
+  type Size,
+} from "../../substrate/templates.js";
 import { MCP_TOKEN_EGRESS_HEADER, TOOL_ACTOR_JWT_HEADER, templateName } from "./names.js";
 import { SERVICES_ROOT, SERVICE_SCRIPT_DIR, servicesInOrder } from "./service-script.js";
 
@@ -68,8 +79,6 @@ interface TemplateService {
   dataPath: string;
 }
 
-const READY_PORT = 8080;
-const ACTOR_METADATA_DIR = "/run/ate/actor";
 const TOOL_JWT_AUDIENCE = "wardby-coding-proxy";
 const TOOL_JWT_SECONDS = 600;
 
@@ -80,19 +89,6 @@ export function workerEnv(config: SubstrateLaunchConfig): { name: string; value:
     // Not a per-run value: the same for every run of a deployment with warm rounds on.
     ...(config.warmRounds ? [{ name: WARM_ROUNDS_ENV, value: "1" }] : []),
   ];
-}
-
-interface Size {
-  cpuMillicores: number;
-  memoryBytes: number;
-}
-
-// Refuse rather than resize: the Kubernetes launcher's split is the policy, so a run whose share
-// rounds to nothing is a configuration error, not something to paper over.
-function toSize(cpus: number, memoryMb: number): Size {
-  const size = { cpuMillicores: Math.round(cpus * 1000), memoryBytes: Math.round(memoryMb * 2 ** 20) };
-  if (size.cpuMillicores <= 0 || size.memoryBytes <= 0) throw new Error("substrate_limits_too_small");
-  return size;
 }
 
 // Same split as the Kubernetes launcher, so a run has the same total size on both backends.
@@ -137,9 +133,7 @@ function templateVariant(
   role: keyof typeof BRIDGE_COMMANDS,
   options: { repos?: boolean; services?: TemplateService[] } = {},
 ): string {
-  const selector = Object.fromEntries(
-    Object.entries(config.workerSelector ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-  );
+  const selector = sortedSelector(config.workerSelector);
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -153,9 +147,8 @@ function templateVariant(
     .digest("hex");
 }
 
-// The files name/atespace/uid appear at the volume root, so the mount path is the directory.
-const actorVolume = { name: "actor", actorMetadata: { path: "" } } as const;
-const actorMount = { name: "actor", mountPath: ACTOR_METADATA_DIR };
+const actorVolume = actorMetadataVolume;
+const actorMount = actorMetadataMount;
 
 /**
  * The workspace holder's volumes and mounts: the run directory, /workspace, and, only for a run
@@ -307,7 +300,7 @@ export const RUN_SECRET_MCP_TOKEN_KEY = "mcpToken";
  * the gateway replaces a header only when the request carries it, so non-MCP requests are unchanged.
  */
 export function agentEgress(token: string, config: SubstrateLaunchConfig, options?: { mcp?: boolean }): EgressRule[] {
-  const secretUri = (key: string) => `ate-secret://k8s.io/default/${config.credentialsNamespace}/${token}/${key}`;
+  const secretUri = (key: string) => credentialUri(config.credentialsNamespace, token, key);
   return [
     {
       kind: "http",
@@ -347,14 +340,10 @@ export function runSecret(
   config: SubstrateLaunchConfig,
   mcpToken?: string,
 ): V1Secret {
-  return {
-    apiVersion: "v1",
-    kind: "Secret",
-    metadata: {
-      name: token,
-      namespace: config.credentialsNamespace,
-      labels: { "wardby.dev/substrate-run": token },
-    },
-    stringData: mcpToken === undefined ? { capability } : { capability, [RUN_SECRET_MCP_TOKEN_KEY]: mcpToken },
-  };
+  return substrateSecret({
+    name: token,
+    namespace: config.credentialsNamespace,
+    label: { key: "wardby.dev/substrate-run", value: token },
+    data: mcpToken === undefined ? { capability } : { capability, [RUN_SECRET_MCP_TOKEN_KEY]: mcpToken },
+  });
 }

@@ -11,7 +11,7 @@ import type { BlobInfo } from "../../storage/types.js";
 import { KubernetesAlreadyExistsError } from "../kubernetes-api.js";
 import type { ServiceStateUpdate } from "../service-state.js";
 import type { JobSpec } from "../types.js";
-import { FakeSubstrateApi, type FakeSubstrateOptions } from "./fake-api.js";
+import { FakeSubstrateApi, type FakeSubstrateOptions } from "../../substrate/fake-api.js";
 import {
   SubstrateJobLauncher,
   type SubstrateCallFailure,

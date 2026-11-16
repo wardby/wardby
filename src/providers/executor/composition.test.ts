@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeKubernetesApi } from "../jobs/fake-kubernetes-api.js";
-import { FakeSubstrateApi } from "../jobs/substrate/fake-api.js";
+import { FakeSubstrateApi } from "../substrate/fake-api.js";
 import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
 import { PrismaSubstrateTemplateStore } from "../jobs/substrate/template-store.js";
 import {

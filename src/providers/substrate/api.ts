@@ -1,6 +1,7 @@
-// Typed surface over Agent Substrate's control API. The job launcher depends only on this
-// interface; client.ts adapts the build-time-generated gRPC client to it and fake-api.ts is
-// the in-memory double used by tests.
+// Typed surface over Agent Substrate's control API. Both launchers (the coding job launcher in
+// src/providers/jobs/substrate/ and the native sandbox launcher) depend only on this interface;
+// client.ts adapts the build-time-generated gRPC client to it and fake-api.ts is the in-memory
+// double used by tests.
 
 export type ActorState =
   "RESUMING" | "RUNNING" | "SUSPENDING" | "SUSPENDED" | "CRASHED" | "DELETING" | "REVERTING" | "UNKNOWN";

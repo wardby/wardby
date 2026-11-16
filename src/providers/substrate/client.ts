@@ -53,7 +53,7 @@ import {
   ActorJwtSourceSchema,
   type EgressRule as WireEgressRule,
   type Volume as WireVolume,
-} from "../../../generated/substrate/substrate/ateapi/v1/ateapi_pb.js";
+} from "../../generated/substrate/substrate/ateapi/v1/ateapi_pb.js";
 import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,

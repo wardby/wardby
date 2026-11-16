@@ -21,7 +21,7 @@ import {
   type DeleteActorTemplateRequest,
   type GetActorTemplateRequest,
   type CreateActorEgressPolicyRequest,
-} from "../../../generated/substrate/substrate/ateapi/v1/ateapi_pb.js";
+} from "../../generated/substrate/substrate/ateapi/v1/ateapi_pb.js";
 import {
   SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
