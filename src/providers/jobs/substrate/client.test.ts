@@ -98,16 +98,14 @@ describe("createSubstrateApi (Connect adapter)", () => {
     expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
     reply = golden({ goldenTag: create(ObjectRefSchema, { atespace: "s", name: "" }) });
     expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
-    // No golden-snapshot status at all: unknown.
-    for (const none of [
-      create(ActorTemplateSchema, {}),
-      create(ActorTemplateSchema, { status: create(ActorTemplateStatusSchema, {}) }),
-    ]) {
-      reply = none;
-      const info = await api.getActorTemplate("s", "t");
-      expect(info).toEqual({ goldenSnapshotFailed: false });
-      expect(info).not.toHaveProperty("goldenSnapshotReady");
-    }
+    // A status with no golden-snapshot status yet: still building, not ready (not a failure).
+    reply = create(ActorTemplateSchema, { status: create(ActorTemplateStatusSchema, {}) });
+    expect(await api.getActorTemplate("s", "t")).toEqual({ goldenSnapshotFailed: false, goldenSnapshotReady: false });
+    // No status at all: unknown.
+    reply = create(ActorTemplateSchema, {});
+    const info = await api.getActorTemplate("s", "t");
+    expect(info).toEqual({ goldenSnapshotFailed: false });
+    expect(info).not.toHaveProperty("goldenSnapshotReady");
   });
 
   it("deletes a template by name; a missing one is success", async () => {

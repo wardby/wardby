@@ -805,6 +805,10 @@ describe("SubstrateJobLauncher", () => {
       deleted.push(name);
       return deleteTemplate(atespace, name);
     };
+    // The launch that rebuilds requeues: it never resumes against the rebuilding template.
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("requeued");
+    expect([...h.api.actors.keys()]).toEqual([]);
     await h.launcher.launch(h.spec);
     expect(deleted).toEqual([agent.name]);
     expect(await h.api.getActorTemplate(CONFIG.atespace, agent.name)).toEqual({ goldenSnapshotFailed: false });
@@ -821,8 +825,8 @@ describe("SubstrateJobLauncher", () => {
     r.api.deleteActorTemplate = async () => {
       deletes += 1;
     };
-    await r.launcher.launch(r.spec);
-    expect(deletes).toBe(2); // one per template (agent and tool), never repeated
+    await expect(r.launcher.launch(r.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect(deletes).toBe(1); // the agent's rebuild requeues the launch: never repeated, nothing resumed
   });
 
   it("rejects what Phase A does not support, before any side effect", async () => {
@@ -2321,6 +2325,16 @@ describe("template record and readiness", () => {
   const EVENT_FIELDS = ["event", "name", "role", "failures", "reason", "ageSec"];
 
   /** Another run's spec on the same launcher: its own input and workspace, the same templates. */
+  /**
+   * A launch that counts a golden failure and rebuilds the template requeues (never resumes against
+   * the rebuilding template); the relaunch after the backoff then sees the new build.
+   */
+  async function launchAfterRebuild(h: Harness, spec: JobSpec): ReturnType<Harness["launcher"]["launch"]> {
+    await expect(h.launcher.launch(spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect((await h.runs.get(spec.runId))?.phase).toBe("requeued");
+    return h.launcher.launch(spec);
+  }
+
   async function secondRun(h: Harness, runId: string): Promise<JobSpec> {
     await mkdir(join(h.workspaceRoot, runId, "workspace"), { recursive: true });
     await writeFile(join(h.workspaceRoot, runId, "workspace", "README.md"), "# hello\n");
@@ -2432,7 +2446,7 @@ describe("template record and readiness", () => {
       if (phase === "running") beforeRunning = await h.templates.get(agent.name);
       return setPhase(runId, phase, from, deadline);
     };
-    await h.launcher.launch(h.spec);
+    await launchAfterRebuild(h, h.spec);
     expect(beforeRunning).toMatchObject({ goldenFailures: 1, lastFailureAt: new Date(T0) });
     expect(beforeRunning).not.toHaveProperty("readyAt");
     expect(await h.templates.get(agent.name)).toMatchObject({
@@ -2455,7 +2469,7 @@ describe("template record and readiness", () => {
     await h.api.ensureActorTemplate(agent);
     h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
     const deletes = countTemplateDeletes(h);
-    await h.launcher.launch(h.spec);
+    await launchAfterRebuild(h, h.spec);
     expect(deletes.names).toEqual([agent.name]);
     expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
     // One warn line, fixed fields only: readiness counting is off while the store cannot be written.
@@ -2486,19 +2500,21 @@ describe("template record and readiness", () => {
     const results = await Promise.allSettled([h.launcher.launch(h.spec), h.launcher.launch(run2)]);
     expect(readers).toBe(2);
     const rejected = results.filter((r) => r.status === "rejected");
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toBeInstanceOf(JobCapacityError);
+    // Neither resumes against the template being rebuilt: the rebuilder and the other both requeue.
+    expect(rejected).toHaveLength(2);
+    for (const r of rejected) expect(r.reason).toBeInstanceOf(JobCapacityError);
     const phases = [(await h.runs.get(h.spec.runId))?.phase, (await h.runs.get("run-2"))?.phase].sort();
-    expect(phases).toEqual(["requeued", "running"]);
+    expect(phases).toEqual(["requeued", "requeued"]);
     expect(deletes.names).toEqual([agent.name]);
     expect(await h.templates.get(agent.name)).toMatchObject({ goldenFailures: 1, lastFailureAt: new Date(T0 + 2000) });
     expect(h.templateEvents).toEqual([
       { event: "substrate_template_golden_failed", name: agent.name, role: "agent", failures: 1 },
     ]);
-    // The requeued run relaunches on the rebuilt template and runs.
-    const requeued = (await h.runs.get(h.spec.runId))?.phase === "requeued" ? h.spec : run2;
-    await h.launcher.launch(requeued);
-    expect((await h.runs.get(requeued.runId))?.phase).toBe("running");
+    // The requeued runs relaunch on the rebuilt template and run.
+    for (const requeued of [h.spec, run2]) {
+      await h.launcher.launch(requeued);
+      expect((await h.runs.get(requeued.runId))?.phase).toBe("running");
+    }
     expect(deletes.names).toEqual([agent.name]);
   });
 
@@ -2507,7 +2523,7 @@ describe("template record and readiness", () => {
     const agent = agentTemplate(h.spec, CONFIG);
     await h.api.ensureActorTemplate(agent);
     h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
-    await h.launcher.launch(h.spec);
+    await launchAfterRebuild(h, h.spec);
     expect((await h.runs.get(h.spec.runId))?.phase).toBe("running");
     h.api.failGoldenSnapshot(CONFIG.atespace, agent.name);
     return agent.name;
@@ -2557,7 +2573,7 @@ describe("template record and readiness", () => {
     expect(await h.templates.get(name)).toMatchObject({ goldenFailures: 3, lastFailureAt: new Date(T0) });
     const deletes = countTemplateDeletes(h);
     h.setNow(T0 + 10 * MINUTE + 1000);
-    await h.launcher.launch(await secondRun(h, "run-4"));
+    await launchAfterRebuild(h, await secondRun(h, "run-4"));
     expect(deletes.names).toEqual([name]);
     expect((await h.runs.get("run-4"))?.phase).toBe("running");
     expect(await h.templates.get(name)).toMatchObject({
@@ -2565,6 +2581,24 @@ describe("template record and readiness", () => {
       lastFailureAt: new Date(T0 + 10 * MINUTE + 1000),
       readyAt: new Date(T0 + 10 * MINUTE + 1000),
     });
+  });
+
+  it("requeues uncounted a refused start on a new template whose status has no golden-snapshot status yet", async () => {
+    const h = await makeHarness();
+    const agent = agentTemplate(h.spec, CONFIG);
+    const getTemplate = h.api.getActorTemplate.bind(h.api);
+    // Substrate reports a status but no goldenSnapshotStatus while the first build runs.
+    h.api.getActorTemplate = async (atespace, name) => {
+      const info = await getTemplate(atespace, name);
+      return info ? { ...info, goldenSnapshotReady: false } : info;
+    };
+    h.api.resumeActor = async () => {
+      throw new SubstrateUnavailableError("substrate_unavailable");
+    };
+    await expect(h.launcher.launch(h.spec)).rejects.toBeInstanceOf(JobCapacityError);
+    expect((await h.runs.get(h.spec.runId))?.phase).toBe("requeued");
+    expect(await h.templates.get(agent.name)).toMatchObject({ goldenFailures: 0 });
+    expect(h.templateEvents).toEqual([]);
   });
 
   it("fails a never-ready template that builds past the ready window while workers have room", async () => {
@@ -3055,7 +3089,7 @@ describe("template record and readiness", () => {
     h.api.deleteActorTemplate = deleteActorTemplate;
     // A later run on the same (still failed) build rebuilds it instead of failing as image_unready.
     h.setNow(T0 + 2 * MINUTE);
-    await h.launcher.launch(await secondRun(h, "run-2"));
+    await launchAfterRebuild(h, await secondRun(h, "run-2"));
     expect((await h.runs.get("run-2"))?.phase).toBe("running");
     expect(await h.templates.get(agent.name)).toMatchObject({ goldenFailures: 1, lastFailureAt: new Date(T0) });
   });

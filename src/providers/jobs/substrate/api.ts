@@ -67,9 +67,9 @@ export interface TemplateInfo {
   /**
    * The template's golden snapshot is built (Substrate's status.goldenSnapshotStatus.goldenTag is
    * set, which it documents as set after tagging the snapshot and deleting the temporary golden
-   * actor). False while the template has a golden-snapshot status without a tag yet; undefined when
-   * Substrate reports no golden-snapshot status at all (the launcher then falls back to its own
-   * readiness record). Only whether the tag is set: the tag itself is never carried.
+   * actor). False (building) while the template has a status with no golden-snapshot status yet, or
+   * one without a tag yet; undefined when Substrate reports no status at all (the launcher then
+   * falls back to its own readiness record). Only whether the tag is set: the tag itself is never carried.
    */
   goldenSnapshotReady?: boolean;
 }

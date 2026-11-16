@@ -1164,6 +1164,9 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       return;
     }
     await this.countGoldenFailure(template, role, call);
+    // Rebuilt just now: this launch never resumes against the rebuilding template. It requeues, and
+    // the relaunch after the backoff sees the new build's outcome.
+    throw new TemplateRebuildingError();
   }
 
   /**
@@ -1194,7 +1197,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     // Gone: a sweep removed it, not a failed build.
     if (!info) return undefined;
     if (!info.goldenSnapshotFailed) {
-      // Only a reported status without a tag: no status at all (undefined) says nothing either way.
+      // Only a reported status without a golden tag (or without a golden-snapshot status): no status at all (undefined) says nothing either way.
       if (info.goldenSnapshotReady !== false) return undefined;
       try {
         const row = await this.templates.get(template.name);

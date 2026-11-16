@@ -273,7 +273,9 @@ class GrpcSubstrateApi implements SubstrateApi {
         // Only whether the build failed or is done: neither the error message nor the tag is read out.
         const golden = template.status?.goldenSnapshotStatus;
         const info: TemplateInfo = { goldenSnapshotFailed: (golden?.errorMessage ?? "") !== "" };
-        if (golden) info.goldenSnapshotReady = (golden.goldenTag?.name ?? "") !== "";
+        // A status without a golden-snapshot status is a template still building (Substrate reports
+        // none until its build has a result): not ready. No status at all stays unknown (undefined).
+        if (template.status) info.goldenSnapshotReady = (golden?.goldenTag?.name ?? "") !== "";
         return info;
       },
       { [Code.NotFound]: () => undefined },

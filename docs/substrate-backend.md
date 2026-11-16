@@ -431,12 +431,13 @@ park or adoption last used it.
   Substrate often refuses a run's actor start as unavailable while the golden
   build is failing, before its status says so; Wardby then reads the template's
   status again. A failed build counts as a golden-snapshot failure rather than
-  [`substrate_unavailable`](../help/errors/substrate-unavailable.md). A status
-  with no tag yet, on a template no actor has started from, is not counted and
+  [`substrate_unavailable`](../help/errors/substrate-unavailable.md). A template
+  still building (a status with no golden snapshot or no tag yet), on one no actor has started from, is not counted and
   the template is not rebuilt: the run goes back to the queue, and a broken
   build has reported its failure by the time the run is retried, when it is
-  counted. A run whose start counted the first failure goes back to the queue
-  while the template is rebuilt.
+  counted. A run that counts the first failure, at its start or after a refused start,
+  goes back to the queue while the template is rebuilt, and is launched again
+  after the backoff.
   A second one within `SUBSTRATE_TEMPLATE_RETRY_SEC` fails the run with
   [`substrate_image_unready`](../help/errors/substrate-image-unready.md)
   instead, and so does a template that never becomes ready within
@@ -445,8 +446,8 @@ park or adoption last used it.
   new template spent waiting for capacity does not count; a control plane
   restart starts the count again. Wardby judges ready from Substrate's template
   status when Substrate reports it: a template whose golden snapshot is tagged
-  is ready (its runs only ever wait for room), and one whose status has no tag
-  yet is not. A template an actor has already started from is always ready: it
+  is ready (its runs only ever wait for room), and one still building (no
+  golden-snapshot status or no tag yet) is not. A template an actor has already started from is always ready: it
   never fails this way, whatever its status says later, and Wardby does not
   read the status again for it. When Substrate reports no golden-snapshot
   status, a template counts as ready once an actor from it has started. A
