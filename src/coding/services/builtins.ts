@@ -6,7 +6,8 @@
  *
  * Each image is the official Docker Hub image pinned by its multi-architecture
  * index digest, resolved with
- * `docker buildx imagetools inspect docker.io/library/<name>:<tag>`.
+ * `docker buildx imagetools inspect docker.io/library/<name>:<tag>`; `redis`
+ * uses Valkey's official image (see its entry).
  *
  * A sidecar runs as the run pod's non-root uid with a read-only root
  * filesystem, so each entry names every directory its image writes to: the
@@ -57,11 +58,14 @@ export const BUILTIN_CODING_SERVICES: readonly CodingServiceDefinition[] = Objec
   postgres("15", "sha256:724292da1f2e50bdccfc3302ce75bbba7f4a6076701b588cc795fcac65683550"),
   postgres("16", "sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54"),
   postgres("17", "sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f"),
+  // `redis` "7" runs Valkey 8.1 (BSD-3), the Linux Foundation fork of Redis 7.2: the same protocol,
+  // commands and clients, and its image ships `redis-cli`/`redis-server`. Redis itself left BSD at 7.4
+  // (RSALv2/SSPLv1). Resolved with `docker buildx imagetools inspect docker.io/valkey/valkey:8`.
   {
     name: "redis",
     version: "7",
     kind: "sidecar",
-    image: "docker.io/library/redis@sha256:c6eabf748fc7a61dbb5a705c78bcf3d6377b1127a97d0ce965c11c44ba46896f",
+    image: "docker.io/valkey/valkey@sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809",
     port: 6379,
     serviceEnv: {},
     testEnv: { REDIS_URL: "redis://127.0.0.1:6379/0", REDIS_HOST: "127.0.0.1", REDIS_PORT: "6379" },
