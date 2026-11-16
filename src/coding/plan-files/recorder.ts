@@ -1,7 +1,8 @@
-import type { PrismaClient } from "#prisma";
-import { redactExactSecretValues } from "../../core/secret-spans.js";
+import { Prisma, type PrismaClient } from "#prisma";
+import { redactExactSecretValues, withEscapedForms } from "../../core/secret-spans.js";
 import { sameSecretVersions, type SecretVersion } from "../../core/secret-versions.js";
-import { MAX_PLAN_FILES_WIRE_BYTES, parsePlanFilesOutputJson, redactTokenShapedValues } from "../protocol.js";
+import { MAX_PLAN_FILES_WIRE_BYTES, parsePlanFilesOutputJson } from "../protocol.js";
+import { REDACTED, redactSecrets } from "../redact.js";
 import { assertPlanFilesWithinLimits, type PlanFile } from "./store.js";
 
 export type PlanFilesStatus =
@@ -16,6 +17,16 @@ export type PlanFilesStatus =
   | "secrets_unavailable";
 
 export type { PlanFile };
+
+/**
+ * The stored shape of CodingRun.planFilesWithheld and CodingRun.planFilesSkipped: the paths that can be
+ * named, and how many were left unnamed (a path that itself holds a secret value or a token-shaped
+ * value is never stored, only counted).
+ */
+export interface PlanFilesPathList {
+  paths: string[];
+  unnamed: number;
+}
 
 export interface PlanFilesRecorderDeps {
   db: Pick<PrismaClient, "codingRun" | "codingRunPlanFile" | "$transaction">;
@@ -35,9 +46,12 @@ const DECODER = new TextDecoder("utf-8", { fatal: true });
 
 /**
  * Stores a coding run's returned plan folder. The worker's file is untrusted: parsed and bounded
- * again; each file is redacted by exact value against the agent's secret values, and a file that
- * still holds a token-shaped value is withheld (its path recorded, never its text). Nothing is
- * stored when a delivered secret changed while the run ran. Never throws, never logs content.
+ * again; each file is redacted by exact value against the agent's secret values (and their JSON-escaped
+ * forms, as RunTranscriptRecorder does), and a file that still holds a token-shaped value (redactSecrets:
+ * the run's rrp_/rrg_/rmt_ tokens and Bearer values included) is withheld (its path recorded, never its
+ * text). A path that holds a secret or token-shaped value is never stored, only counted. Nothing is
+ * stored when a delivered secret changed while the run ran; every outcome other than "stored" removes
+ * the run's stored output files. Never throws, never logs content.
  */
 export class PlanFilesRecorder {
   constructor(private readonly deps: PlanFilesRecorderDeps) {}
@@ -53,7 +67,9 @@ export class PlanFilesRecorder {
     files: PlanFile[],
     skipped: string[],
   ): Promise<PlanFilesStatus> {
-    const status = await this.redactAndStore(input, files, skipped).catch((): PlanFilesStatus => "plan_files_failed");
+    const status = await this.redactAndStore(input, files, { paths: skipped, unnamed: 0 }).catch(
+      (): PlanFilesStatus => "plan_files_failed",
+    );
     if (status !== "stored") await this.writeStatus(input.runId, status).catch(() => undefined);
     return status;
   }
@@ -86,13 +102,13 @@ export class PlanFilesRecorder {
         undecodable.push(file.path);
       }
     }
-    return this.redactAndStore(input, files, parsed.skipped, undecodable);
+    return this.redactAndStore(input, files, { paths: parsed.skipped, unnamed: parsed.skippedUnnamed }, undecodable);
   }
 
   private async redactAndStore(
     input: Omit<RecordPlanFilesInput, "read">,
     files: PlanFile[],
-    skipped: string[],
+    skipped: PlanFilesPathList,
     alreadyWithheld: string[] = [],
   ): Promise<PlanFilesStatus> {
     try {
@@ -115,13 +131,26 @@ export class PlanFilesRecorder {
       return "secrets_unavailable";
     }
     if (!sameSecretVersions(input.launchSecretVersions, current)) return "secrets_changed";
+    // As RunTranscriptRecorder: every value in its raw and JSON-escaped forms, however short.
+    const escaped = withEscapedForms(secrets);
+    const holdsSecret = (text: string): boolean => redactSecrets(text, escaped) !== text;
     const kept: PlanFile[] = [];
-    const withheld = [...alreadyWithheld];
+    const withheld: PlanFilesPathList = { paths: [], unnamed: 0 };
+    const withhold = (path: string): void => {
+      if (holdsSecret(path)) withheld.unnamed += 1;
+      else withheld.paths.push(path);
+    };
+    alreadyWithheld.forEach(withhold);
     for (const file of files) {
-      const redacted = redactExactSecretValues(file.content, secrets);
-      if (redactTokenShapedValues(redacted) !== redacted) withheld.push(file.path);
+      const redacted = redactExactSecretValues(file.content, escaped, { marker: REDACTED, minLength: 1 });
+      if (holdsSecret(file.path) || redactSecrets(redacted) !== redacted) withhold(file.path);
       else kept.push({ path: file.path, content: redacted });
     }
+    const skippedNamed = skipped.paths.filter((path) => !holdsSecret(path));
+    const skippedList: PlanFilesPathList = {
+      paths: skippedNamed,
+      unnamed: skipped.unnamed + skipped.paths.length - skippedNamed.length,
+    };
     await this.deps.db.$transaction([
       this.deps.db.codingRunPlanFile.deleteMany({ where: { runId: input.runId, direction: "output" } }),
       this.deps.db.codingRunPlanFile.createMany({
@@ -129,13 +158,24 @@ export class PlanFilesRecorder {
       }),
       this.deps.db.codingRun.update({
         where: { runId: input.runId },
-        data: { planFilesStatus: "stored", planFilesWithheld: withheld, planFilesSkipped: skipped },
+        data: {
+          planFilesStatus: "stored",
+          planFilesWithheld: { ...withheld },
+          planFilesSkipped: { ...skippedList },
+        },
       }),
     ]);
     return "stored";
   }
 
+  /** A non-stored outcome: no output files (and no path lists) from an earlier record survive it. */
   private async writeStatus(runId: string, status: PlanFilesStatus): Promise<void> {
-    await this.deps.db.codingRun.update({ where: { runId }, data: { planFilesStatus: status } });
+    await this.deps.db.$transaction([
+      this.deps.db.codingRunPlanFile.deleteMany({ where: { runId, direction: "output" } }),
+      this.deps.db.codingRun.update({
+        where: { runId },
+        data: { planFilesStatus: status, planFilesWithheld: Prisma.DbNull, planFilesSkipped: Prisma.DbNull },
+      }),
+    ]);
   }
 }

@@ -2,7 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { createPrismaClient } from "../../core/db.js";
 import type { SecretVersion } from "../../core/secret-versions.js";
 import { PlanFilesRecorder } from "./recorder.js";
-import { loadPlanFiles } from "./store.js";
+import { assertPlanFilesWithinLimits, loadPlanFiles } from "./store.js";
+import { PLAN_FILES_LIMITS } from "../protocol.js";
 
 /** Every line the shared logger receives (the container.test.ts `logged` pattern): proves no content is logged. */
 const logged = vi.hoisted(() => [] as { level: string; payload: Record<string, unknown>; message: string }[]);
@@ -31,15 +32,25 @@ beforeEach(() => {
 
 const FAKE_SECRET = "wardby-fake-secret-value-7f3a9c";
 const FAKE_TOKEN = "ghp_" + "Z".repeat(36);
+/** The run's registry token shape (coding-worker/credentials.ts): rrg_ + 43 base64url characters. */
+const FAKE_REGISTRY_TOKEN = "rrg_" + "fakeRegistryToken0123456789_-abcdefghijklmn".slice(0, 43);
+/** A secret JSON escaping changes: a quote, a backslash and a newline. */
+const FAKE_ESCAPING_SECRET = 'fake"quote\\back\nline-9d2e';
+const FAKE_SHORT_SECRET = "q7Zx";
 const b64 = (s: string) => Buffer.from(s).toString("base64");
-const output = (runId: string, files: { path: string; content: string }[]) =>
+const output = (
+  runId: string,
+  files: { path: string; content: string }[],
+  skipped: string[] = [],
+  skippedUnnamed = 0,
+) =>
   JSON.stringify({
     schemaVersion: 1,
     runId,
     status: "ok",
     files: files.map((f) => ({ path: f.path, contentBase64: b64(f.content) })),
-    skipped: [],
-    skippedUnnamed: 0,
+    skipped,
+    skippedUnnamed,
   });
 
 describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
@@ -103,7 +114,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     expect(stored).toEqual([{ path: "plan.md", content: "# Plan\nThe key is [REDACTED].\n" }]);
     const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
     expect(run.planFilesStatus).toBe("stored");
-    expect(run.planFilesWithheld).toEqual(["leak.md"]);
+    expect(run.planFilesWithheld).toEqual({ paths: ["leak.md"], unnamed: 0 });
+    expect(run.planFilesSkipped).toEqual({ paths: [], unnamed: 0 });
     const everything = JSON.stringify({ stored, run, logs: logged });
     expect(everything).not.toContain(FAKE_SECRET);
     expect(everything).not.toContain(FAKE_TOKEN);
@@ -171,7 +183,188 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     });
     expect(status).toBe("stored");
     const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
-    expect(run.planFilesWithheld).toEqual(["bin.md"]);
+    expect(run.planFilesWithheld).toEqual({ paths: ["bin.md"], unnamed: 0 });
     expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
+  });
+  const base = () => ({ runId, agentId, launchSecretVersions: versions });
+  const storeOne = async () => {
+    expect(
+      await recorder().record({ ...base(), read: async () => output(runId, [{ path: "a.md", content: "a" }]) }),
+    ).toBe("stored");
+    expect(await loadPlanFiles(db, runId, "output")).toHaveLength(1);
+  };
+
+  it("withholds a file holding the run's registry token (rrg_)", async () => {
+    expect(FAKE_REGISTRY_TOKEN).toHaveLength(47);
+    const status = await recorder().record({
+      ...base(),
+      read: async () =>
+        output(runId, [
+          { path: "ok.md", content: "fine\n" },
+          { path: "registry.md", content: `npm token ${FAKE_REGISTRY_TOKEN}\n` },
+        ]),
+    });
+    expect(status).toBe("stored");
+    const stored = await loadPlanFiles(db, runId, "output");
+    expect(stored).toEqual([{ path: "ok.md", content: "fine\n" }]);
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesWithheld).toEqual({ paths: ["registry.md"], unnamed: 0 });
+    expect(JSON.stringify({ stored, run, logs: logged })).not.toContain(FAKE_REGISTRY_TOKEN);
+  });
+
+  it("redacts JSON-escaped forms of a secret and secrets of any length", async () => {
+    const escapedOnce = JSON.stringify(FAKE_ESCAPING_SECRET).slice(1, -1);
+    const status = await recorder({
+      secretValues: async () => [FAKE_ESCAPING_SECRET, FAKE_SHORT_SECRET],
+    }).record({
+      ...base(),
+      read: async () =>
+        output(runId, [
+          { path: "config.md", content: `{"key": "${escapedOnce}"}\n` },
+          { path: "short.md", content: `pin ${FAKE_SHORT_SECRET} here\n` },
+        ]),
+    });
+    expect(status).toBe("stored");
+    const stored = await loadPlanFiles(db, runId, "output");
+    expect(stored).toEqual([
+      { path: "config.md", content: '{"key": "[REDACTED]"}\n' },
+      { path: "short.md", content: "pin [REDACTED] here\n" },
+    ]);
+    const everything = JSON.stringify({ stored, logs: logged });
+    expect(everything).not.toContain(escapedOnce);
+    expect(JSON.stringify(stored.map((f) => f.content))).not.toContain(FAKE_SHORT_SECRET);
+  });
+
+  it("never stores or lists a path that holds a secret or token-shaped value, only counts it", async () => {
+    const tokenPath = `ghp_${"Y".repeat(36)}.md`;
+    const secretPath = `${FAKE_SECRET}.md`;
+    const status = await recorder().record({
+      ...base(),
+      read: async () =>
+        output(
+          runId,
+          [
+            { path: "plan.md", content: "plan\n" },
+            { path: secretPath, content: "harmless\n" },
+            { path: tokenPath, content: "harmless\n" },
+          ],
+          ["ok-skipped.md", `notes/${FAKE_SECRET}`],
+          1,
+        ),
+    });
+    expect(status).toBe("stored");
+    const stored = await loadPlanFiles(db, runId, "output");
+    expect(stored).toEqual([{ path: "plan.md", content: "plan\n" }]);
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesWithheld).toEqual({ paths: [], unnamed: 2 });
+    expect(run.planFilesSkipped).toEqual({ paths: ["ok-skipped.md"], unnamed: 2 });
+    const everything = JSON.stringify({ stored, run, logs: logged });
+    expect(everything).not.toContain(FAKE_SECRET);
+    expect(everything).not.toContain("Y".repeat(36));
+  });
+
+  it("round-trips the worker's skipped paths and unnamed count", async () => {
+    const status = await recorder().record({
+      ...base(),
+      read: async () => output(runId, [{ path: "a.md", content: "a" }], ["link.md", "bin.md"], 3),
+    });
+    expect(status).toBe("stored");
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesSkipped).toEqual({ paths: ["link.md", "bin.md"], unnamed: 3 });
+  });
+
+  it("a later non-stored outcome removes the stored output files and path lists", async () => {
+    await storeOne();
+    const status = await recorder({
+      secretVersions: async () => [{ id: "s1", name: "API_KEY", updatedAt: "2026-11-16T12:00:00.000Z" }],
+    }).record({ ...base(), read: async () => output(runId, [{ path: "b.md", content: "b" }]) });
+    expect(status).toBe("secrets_changed");
+    expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesStatus).toBe("secrets_changed");
+    expect(run.planFilesWithheld).toBeNull();
+    expect(run.planFilesSkipped).toBeNull();
+  });
+
+  it("records secrets_unavailable when values or versions can't be read", async () => {
+    const read = async () => output(runId, [{ path: "a.md", content: "a" }]);
+    await storeOne();
+    expect(
+      await recorder({
+        secretValues: async () => {
+          throw new Error("vault down");
+        },
+      }).record({ ...base(), read }),
+    ).toBe("secrets_unavailable");
+    expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
+    expect(
+      await recorder({
+        secretVersions: async () => {
+          throw new Error("vault down");
+        },
+      }).record({ ...base(), read }),
+    ).toBe("secrets_unavailable");
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesStatus).toBe("secrets_unavailable");
+  });
+
+  it("treats missing launch secret versions as changed", async () => {
+    await storeOne();
+    const status = await recorder().record({
+      runId,
+      agentId,
+      read: async () => output(runId, [{ path: "a.md", content: "a" }]),
+    });
+    expect(status).toBe("secrets_changed");
+    expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
+  });
+
+  it("storeChecked redacts, withholds and stores files the control plane already holds", async () => {
+    const status = await recorder().storeChecked(
+      base(),
+      [
+        { path: "plan.md", content: `key ${FAKE_SECRET}\n` },
+        { path: "leak.md", content: `t ${FAKE_TOKEN}\n` },
+      ],
+      ["skipped.md", `${FAKE_SECRET}.md`],
+    );
+    expect(status).toBe("stored");
+    const stored = await loadPlanFiles(db, runId, "output");
+    expect(stored).toEqual([{ path: "plan.md", content: "key [REDACTED]\n" }]);
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesStatus).toBe("stored");
+    expect(run.planFilesWithheld).toEqual({ paths: ["leak.md"], unnamed: 0 });
+    expect(run.planFilesSkipped).toEqual({ paths: ["skipped.md"], unnamed: 1 });
+    const everything = JSON.stringify({ stored, run, logs: logged });
+    expect(everything).not.toContain(FAKE_SECRET);
+    expect(everything).not.toContain(FAKE_TOKEN);
+  });
+
+  it("re-checks limits and paths on decoded content itself", async () => {
+    const big = "x".repeat(PLAN_FILES_LIMITS.maxFileBytes + 1);
+    expect(() => assertPlanFilesWithinLimits([{ path: "big.md", content: big }])).toThrow("plan_too_large");
+    expect(() =>
+      assertPlanFilesWithinLimits([
+        { path: "a.md", content: "1" },
+        { path: "a.md", content: "2" },
+      ]),
+    ).toThrow("plan_path_invalid");
+    expect(() => assertPlanFilesWithinLimits([{ path: "../escape.md", content: "1" }])).toThrow("plan_path_invalid");
+
+    await storeOne();
+    expect(await recorder().storeChecked(base(), [{ path: "big.md", content: big }], [])).toBe("plan_too_large");
+    expect(await loadPlanFiles(db, runId, "output")).toEqual([]);
+    expect(
+      await recorder().storeChecked(
+        base(),
+        [
+          { path: "a.md", content: "1" },
+          { path: "a.md", content: "2" },
+        ],
+        [],
+      ),
+    ).toBe("plan_files_failed");
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesStatus).toBe("plan_files_failed");
   });
 });

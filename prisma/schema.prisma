@@ -656,9 +656,12 @@ model CodingRun {
   collectPlanFiles      Boolean             @default(false)
   /// What happened to the returned plan folder (a fixed code; see PlanFilesRecorder). Null: not collected.
   planFilesStatus       String?
-  /// Paths of returned plan files withheld because they held a token-shaped value; never their content.
+  /// Returned plan files withheld (a token-shaped value, or not UTF-8), as { paths, unnamed }
+  /// (PlanFilesPathList): a path that itself holds a secret or token-shaped value is only counted in
+  /// unnamed. Never their content. Null unless planFilesStatus is "stored".
   planFilesWithheld     Json?
-  /// Paths the worker skipped (symlinks, non-UTF-8, unsafe names), and how many were left unnamed.
+  /// Paths the worker skipped (symlinks, non-UTF-8, unsafe names) as { paths, unnamed }: unnamed is the
+  /// worker's skippedUnnamed plus every skipped path that holds a secret or token-shaped value.
   planFilesSkipped      Json?
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
