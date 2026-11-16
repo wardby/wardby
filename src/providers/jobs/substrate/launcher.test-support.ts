@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { V1Secret } from "@kubernetes/client-node";
+import { BUILTIN_CODING_SERVICES } from "../../../coding/services/builtins.js";
+import { resolvedFromDefinition, type ResolvedCodingService } from "../../../coding/services/catalog.js";
 import { MemoryRelayStore } from "../../coding-proxy/substrate/memory-relay-store.js";
 import { LocalBlobStore } from "../../storage/local.js";
 import type { BlobInfo } from "../../storage/types.js";
@@ -257,3 +259,30 @@ export async function allBlobs(h: Harness): Promise<Map<string, string>> {
   await walk(join(h.root, "blobs"), "");
   return out;
 }
+
+/** A fake service (no substrateImage): every catalog value that must stay out of a template is a marker. */
+export const FAKE_SERVICE: ResolvedCodingService = {
+  name: "fakedb",
+  version: "1",
+  image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,
+  port: 5999,
+  serviceEnv: { FAKEDB_PASSWORD: "FAKE_SERVICE_ENV_VALUE_0001" },
+  testEnv: {},
+  readiness: {
+    command: ["fakedb-ping", "FAKE_READINESS_ARG_0001"],
+    periodSeconds: 1,
+    timeoutSeconds: 1,
+    failureThreshold: 3,
+  },
+  startCommand: ["fakedb-serve", "--fake-start-arg-0001"],
+  resources: { cpuMillicores: 250, memoryMib: 256, diskMib: 128 },
+  dataPath: "/var/lib/fakedb",
+  writablePaths: ["/tmp"],
+};
+
+/** The built-in postgres 16 entry, as dispatch snapshots it (with its substrateImage). */
+export const POSTGRES_16_SERVICE: ResolvedCodingService = (() => {
+  const definition = BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16");
+  if (!definition) throw new Error("no built-in postgres 16");
+  return resolvedFromDefinition(definition);
+})();

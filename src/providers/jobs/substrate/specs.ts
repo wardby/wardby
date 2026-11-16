@@ -9,14 +9,22 @@
 //
 // Every template sets the bridge's command (BRIDGE_COMMANDS), standard and custom images alike,
 // and the command is part of its name: an image's ENTRYPOINT is never used.
+//
+// A run with services gets, in its workspace holder's template only, one container per service: the
+// catalog image, the fixed SERVICE_WAIT_SCRIPT and two volumes of its own (its script volume and its
+// data volume); nothing of the entry but its name, digest and data path is in the template (the
+// variant), and the holder's size includes the services'.
 
 import { createHash } from "node:crypto";
 import type { V1Secret } from "@kubernetes/client-node";
+import { substrateServiceImage, type ResolvedCodingService } from "../../../coding/services/catalog.js";
 import { claudeToolLimits } from "../docker-isolation.js";
+import { serviceMemoryMib } from "../docker-services.js";
 import type { JobSpec } from "../types.js";
 import { REPOSITORY_MOUNT_ROOT } from "../storage-init.js";
-import type { ActorTemplateSpec, EgressRule } from "./api.js";
+import type { ActorTemplateSpec, ContainerSpec, EgressRule } from "./api.js";
 import { MCP_TOKEN_EGRESS_HEADER, TOOL_ACTOR_JWT_HEADER, templateName } from "./names.js";
+import { SERVICES_ROOT, SERVICE_SCRIPT_DIR, servicesInOrder } from "./service-script.js";
 
 export interface SubstrateLaunchConfig {
   atespace: string;
@@ -44,6 +52,20 @@ export const BRIDGE_COMMANDS = {
   tool: ["node", "/opt/wardby/substrate-bridge/tool.js"],
   codex: ["node", "/opt/wardby/substrate-bridge/codex.js"],
 } as const satisfies Record<"agent" | "tool" | "codex", readonly string[]>;
+
+/**
+ * A service container's command (the template's only service-specific code, and no value): wait for
+ * the run's start script in its own script volume, then run it. The golden snapshot holds this wait.
+ */
+export const SERVICE_WAIT_SCRIPT =
+  "while [ ! -f /run/wardby-svc/start.sh ]; do sleep 0.2 2>/dev/null || sleep 1; done; exec /bin/sh /run/wardby-svc/start.sh";
+
+/** One service as the template variant hashes it: the only catalog values a template carries. */
+interface TemplateService {
+  name: string;
+  image: string;
+  dataPath: string;
+}
 
 const READY_PORT = 8080;
 const ACTOR_METADATA_DIR = "/run/ate/actor";
@@ -83,14 +105,35 @@ function toolSize(spec: JobSpec): Size {
   return toSize(tool.cpus, tool.memoryMb);
 }
 
+function add(a: Size, b: Size): Size {
+  return { cpuMillicores: a.cpuMillicores + b.cpuMillicores, memoryBytes: a.memoryBytes + b.memoryBytes };
+}
+
+// Docker's serviceMemoryMib (catalog memory, its disk, SERVICE_SCRATCH_MIB per writable path and
+// /dev/shm): rootfs writes count against the actor's memory under gVisor (durableDir writes do not),
+// so the service's share includes its disk and writable paths as on Docker.
+function substrateServiceMemoryMib(service: ResolvedCodingService): number {
+  return serviceMemoryMib(service);
+}
+
+/** What the run's services add to the workspace holder's size (zero without services). */
+function servicesShare(spec: JobSpec): Size {
+  const services = spec.services ?? [];
+  return {
+    cpuMillicores: services.reduce((sum, s) => sum + s.resources.cpuMillicores, 0),
+    memoryBytes: services.reduce((sum, s) => sum + substrateServiceMemoryMib(s) * 2 ** 20, 0),
+  };
+}
+
 // Digest of every template field that is not image or size, with worker selector keys sorted so
 // the same selector always hashes the same way. The role's bridge command is hashed in, so a change
 // to it renames the template. `repos` (the /repos volume) is hashed in only when set, so a template
-// without it keeps one name whether or not repositories exist anywhere.
+// without it keeps one name whether or not repositories exist anywhere. `services` likewise: only a
+// template with services hashes them (with the wait script), so a spec without services keeps its name.
 function templateVariant(
   config: SubstrateLaunchConfig,
   role: keyof typeof BRIDGE_COMMANDS,
-  options: { repos?: boolean } = {},
+  options: { repos?: boolean; services?: TemplateService[] } = {},
 ): string {
   const selector = Object.fromEntries(
     Object.entries(config.workerSelector ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
@@ -102,6 +145,7 @@ function templateVariant(
         workerSelector: selector,
         command: BRIDGE_COMMANDS[role],
         ...(options.repos ? { repos: true } : {}),
+        ...(options.services?.length ? { services: { wait: SERVICE_WAIT_SCRIPT, entries: options.services } } : {}),
       }),
     )
     .digest("hex");
@@ -113,29 +157,54 @@ const actorMount = { name: "actor", mountPath: ACTOR_METADATA_DIR };
 
 /**
  * The workspace holder's volumes and mounts: the run directory, /workspace, and, only for a run
- * with extra repositories, /repos (no name in it), then the actor metadata.
+ * with extra repositories, /repos (no name in it); then, for service i (in name order), its script
+ * volume at /run/wardby-services/<i> and its data volume (holder: no mount); then the actor metadata.
  */
 function holderStorage(spec: JobSpec): {
   volumes: ActorTemplateSpec["volumes"];
   volumeMounts: { name: string; mountPath: string }[];
   repos: boolean;
+  services: TemplateService[];
 } {
   const repos = spec.repositories !== undefined;
+  const services = servicesInOrder(spec.services ?? []);
   return {
     volumeMounts: [
       { name: "run", mountPath: "/run/wardby" },
       { name: "workspace", mountPath: "/workspace" },
       ...(repos ? [{ name: "repos", mountPath: REPOSITORY_MOUNT_ROOT }] : []),
+      ...services.map((_, i) => ({ name: `svc-${i}`, mountPath: `${SERVICES_ROOT}/${i}` })),
       actorMount,
     ],
     volumes: [
       { name: "run", durableDir: true as const },
       { name: "workspace", durableDir: true as const },
       ...(repos ? [{ name: "repos", durableDir: true as const }] : []),
+      ...services.flatMap((_, i) => [
+        { name: `svc-${i}`, durableDir: true as const },
+        { name: `svc-${i}-data`, durableDir: true as const },
+      ]),
       actorVolume,
     ],
     repos,
+    services: services.map((s) => ({ name: s.name, image: substrateServiceImage(s), dataPath: s.dataPath })),
   };
+}
+
+/**
+ * One container per service, in name order: its image, the fixed wait script, and only its own two
+ * volumes (script and data). No env and no wakeup probe: values reach it only through start.sh.
+ */
+function serviceContainers(spec: JobSpec): ContainerSpec[] {
+  return servicesInOrder(spec.services ?? []).map((service, i) => ({
+    name: `svc-${service.name}`,
+    image: substrateServiceImage(service),
+    command: ["/bin/sh", "-c", SERVICE_WAIT_SCRIPT],
+    volumeMounts: [
+      { name: `svc-${i}`, mountPath: SERVICE_SCRIPT_DIR },
+      { name: `svc-${i}-data`, mountPath: service.dataPath },
+    ],
+  }));
 }
 
 export function agentTemplate(spec: JobSpec, config: SubstrateLaunchConfig): ActorTemplateSpec {
@@ -166,7 +235,7 @@ export function agentTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Act
  * Never the warm-rounds env: Codex rounds always start cold, so the bridge never stays for one.
  */
 export function codexTemplate(spec: JobSpec, config: SubstrateLaunchConfig): ActorTemplateSpec {
-  const size = toSize(spec.limits.cpus, spec.limits.memoryMb);
+  const size = add(toSize(spec.limits.cpus, spec.limits.memoryMb), servicesShare(spec));
   const cold = { ...config, warmRounds: false };
   const storage = holderStorage(spec);
   return {
@@ -176,7 +245,7 @@ export function codexTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Act
       spec.image,
       size.cpuMillicores,
       size.memoryBytes,
-      templateVariant(cold, "codex", { repos: storage.repos }),
+      templateVariant(cold, "codex", { repos: storage.repos, services: storage.services }),
     ),
     ...(config.workerSelector ? { workerSelector: config.workerSelector } : {}),
     containers: [
@@ -188,6 +257,7 @@ export function codexTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Act
         wakeupProbe: { path: "/readyz", port: READY_PORT },
         volumeMounts: storage.volumeMounts,
       },
+      ...serviceContainers(spec),
     ],
     volumes: storage.volumes,
     ...size,
@@ -197,7 +267,7 @@ export function codexTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Act
 
 export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): ActorTemplateSpec {
   if (!spec.toolImage) throw new Error("substrate_tool_image_missing");
-  const size = toolSize(spec);
+  const size = add(toolSize(spec), servicesShare(spec));
   const storage = holderStorage(spec);
   return {
     atespace: config.atespace,
@@ -206,7 +276,7 @@ export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Acto
       spec.toolImage,
       size.cpuMillicores,
       size.memoryBytes,
-      templateVariant(config, "tool", { repos: storage.repos }),
+      templateVariant(config, "tool", { repos: storage.repos, services: storage.services }),
     ),
     ...(config.workerSelector ? { workerSelector: config.workerSelector } : {}),
     containers: [
@@ -218,6 +288,7 @@ export function toolTemplate(spec: JobSpec, config: SubstrateLaunchConfig): Acto
         wakeupProbe: { path: "/readyz", port: READY_PORT },
         volumeMounts: storage.volumeMounts,
       },
+      ...serviceContainers(spec),
     ],
     volumes: storage.volumes,
     ...size,

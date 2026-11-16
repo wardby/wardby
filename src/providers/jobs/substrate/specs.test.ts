@@ -2,9 +2,13 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
 import type { JobSpec } from "../types.js";
+import { serviceMemoryMib } from "../docker-services.js";
+import { FAKE_SERVICE, POSTGRES_16_SERVICE } from "./launcher.test-support.js";
 import { templateName } from "./names.js";
+import { SERVICE_SCRIPT_DIR } from "./service-script.js";
 import {
   BRIDGE_COMMANDS,
+  SERVICE_WAIT_SCRIPT,
   agentEgress,
   agentTemplate,
   codexTemplate,
@@ -52,6 +56,9 @@ const REPOSITORIES: NonNullable<JobSpec["repositories"]> = [
 ];
 const REPOS_SPEC: JobSpec = { ...fakeClaudeSpec(), repositories: REPOSITORIES };
 const REPOS_CODEX_SPEC: JobSpec = { ...fakeCodexSpec(), repositories: REPOSITORIES };
+const SVC: JobSpec = { ...fakeClaudeSpec(), services: [POSTGRES_16_SERVICE, FAKE_SERVICE] };
+const SVC_CODEX: JobSpec = { ...fakeCodexSpec(), services: [POSTGRES_16_SERVICE] };
+const POSTGRES_16_SUBSTRATE_IMAGE = POSTGRES_16_SERVICE.substrateImage!;
 
 describe("substrate spec builders", () => {
   it("pins the agent, tool and Codex template names (with the bridge command)", () => {
@@ -164,6 +171,181 @@ describe("substrate spec builders", () => {
     expect(t.memoryBytes).toBe(plain.memoryBytes);
   });
 
+  describe("services", () => {
+    const run = { name: "run", mountPath: "/run/wardby" };
+    const workspace = { name: "workspace", mountPath: "/workspace" };
+    const actor = { name: "actor", mountPath: "/run/ate/actor" };
+
+    it("adds one container per service to the tool template, in name order", () => {
+      const t = toolTemplate(SVC, CONFIG);
+      expect(t.containers.map((c) => c.name)).toEqual(["tool", "svc-fakedb", "svc-postgres"]);
+      expect(t.containers[1]).toEqual({
+        name: "svc-fakedb",
+        image: FAKE_SERVICE.image,
+        command: ["/bin/sh", "-c", SERVICE_WAIT_SCRIPT],
+        volumeMounts: [
+          { name: "svc-0", mountPath: "/run/wardby-svc" },
+          { name: "svc-0-data", mountPath: "/var/lib/fakedb" },
+        ],
+      });
+      expect(t.containers[2]).toEqual({
+        name: "svc-postgres",
+        image: POSTGRES_16_SUBSTRATE_IMAGE,
+        command: ["/bin/sh", "-c", SERVICE_WAIT_SCRIPT],
+        volumeMounts: [
+          { name: "svc-1", mountPath: "/run/wardby-svc" },
+          { name: "svc-1-data", mountPath: "/var/lib/postgresql/data" },
+        ],
+      });
+      for (const c of t.containers.slice(1)) {
+        expect(c).not.toHaveProperty("env");
+        expect(c).not.toHaveProperty("wakeupProbe");
+      }
+    });
+
+    it("adds the service containers to the Codex template the same way", () => {
+      const t = codexTemplate(SVC_CODEX, CONFIG);
+      expect(t.containers.map((c) => c.name)).toEqual(["agent", "svc-postgres"]);
+      expect(t.containers[1]).toEqual({
+        name: "svc-postgres",
+        image: POSTGRES_16_SUBSTRATE_IMAGE,
+        command: ["/bin/sh", "-c", SERVICE_WAIT_SCRIPT],
+        volumeMounts: [
+          { name: "svc-0", mountPath: "/run/wardby-svc" },
+          { name: "svc-0-data", mountPath: "/var/lib/postgresql/data" },
+        ],
+      });
+    });
+
+    it("runs a service's substrateImage and names the template by it", () => {
+      const fakeSubstrate = {
+        ...FAKE_SERVICE,
+        substrateImage: `registry.example/fakedb-substrate@sha256:${"c".repeat(64)}`,
+      };
+      const plain = toolTemplate({ ...fakeClaudeSpec(), services: [FAKE_SERVICE] }, CONFIG);
+      const t = toolTemplate({ ...fakeClaudeSpec(), services: [fakeSubstrate] }, CONFIG);
+      expect(plain.containers[1]?.image).toBe(FAKE_SERVICE.image);
+      expect(t.containers[1]?.image).toBe(fakeSubstrate.substrateImage);
+      expect(JSON.stringify(t)).not.toContain(FAKE_SERVICE.image);
+      expect(t.name).not.toBe(plain.name);
+      const otherSubstrate = {
+        ...fakeSubstrate,
+        substrateImage: `registry.example/fakedb-substrate@sha256:${"d".repeat(64)}`,
+      };
+      expect(toolTemplate({ ...fakeClaudeSpec(), services: [otherSubstrate] }, CONFIG).name).not.toBe(t.name);
+      // With a substrateImage set, the Docker/Kubernetes image is not in the template at all.
+      const otherImage = { ...fakeSubstrate, image: `registry.example/fakedb@sha256:${"e".repeat(64)}` };
+      expect(toolTemplate({ ...fakeClaudeSpec(), services: [otherImage] }, CONFIG)).toEqual(t);
+    });
+
+    it("mounts each script volume in the holder", () => {
+      const t = toolTemplate(SVC, CONFIG);
+      expect(t.containers[0]?.volumeMounts).toEqual([
+        run,
+        workspace,
+        { name: "svc-0", mountPath: "/run/wardby-services/0" },
+        { name: "svc-1", mountPath: "/run/wardby-services/1" },
+        actor,
+      ]);
+      expect(t.volumes).toEqual([
+        { name: "run", durableDir: true },
+        { name: "workspace", durableDir: true },
+        { name: "svc-0", durableDir: true },
+        { name: "svc-0-data", durableDir: true },
+        { name: "svc-1", durableDir: true },
+        { name: "svc-1-data", durableDir: true },
+        { name: "actor", actorMetadata: { path: "" } },
+      ]);
+      const repos = toolTemplate({ ...SVC, repositories: REPOSITORIES }, CONFIG);
+      expect(repos.containers[0]?.volumeMounts?.map((m) => m.name)).toEqual([
+        "run",
+        "workspace",
+        "repos",
+        "svc-0",
+        "svc-1",
+        "actor",
+      ]);
+      expect(repos.volumes.map((v) => v.name)).toEqual([
+        "run",
+        "workspace",
+        "repos",
+        "svc-0",
+        "svc-0-data",
+        "svc-1",
+        "svc-1-data",
+        "actor",
+      ]);
+    });
+
+    it("mounts only a service's own two volumes", () => {
+      const templates = [
+        toolTemplate(SVC, CONFIG),
+        codexTemplate(SVC_CODEX, CONFIG),
+        toolTemplate({ ...SVC, repositories: REPOSITORIES }, CONFIG),
+        codexTemplate(
+          { ...SVC_CODEX, services: [POSTGRES_16_SERVICE, FAKE_SERVICE], repositories: REPOSITORIES },
+          CONFIG,
+        ),
+      ];
+      for (const t of templates) {
+        const services = t.containers.filter((c) => c.name.startsWith("svc-"));
+        expect(services.length).toBeGreaterThan(0);
+        for (const [i, c] of services.entries()) {
+          expect(c.volumeMounts?.map((m) => m.name)).toEqual([`svc-${i}`, `svc-${i}-data`]);
+        }
+        for (const c of t.containers.filter((c) => !c.name.startsWith("svc-"))) {
+          for (const m of c.volumeMounts ?? []) expect(m.name).not.toMatch(/^svc-\d+-data$/);
+        }
+      }
+    });
+
+    it("never mounts services on the agent template", () => {
+      expect(agentTemplate(SVC, CONFIG)).toEqual(agentTemplate(fakeClaudeSpec(), CONFIG));
+    });
+
+    it("sizes the holder with its services", () => {
+      // serviceMemoryMib: catalog memory + disk + 64 MiB per writable path + 64 MiB /dev/shm.
+      expect(serviceMemoryMib(POSTGRES_16_SERVICE)).toBe(1728);
+      expect(serviceMemoryMib(FAKE_SERVICE)).toBe(512);
+      const plain = toolTemplate(fakeClaudeSpec(), CONFIG);
+      const t = toolTemplate(SVC, CONFIG);
+      expect(t.cpuMillicores - plain.cpuMillicores).toBe(750);
+      expect(t.memoryBytes - plain.memoryBytes).toBe((1728 + 512) * 2 ** 20);
+      const codexPlain = codexTemplate(fakeCodexSpec(), CONFIG);
+      const codex = codexTemplate(SVC_CODEX, CONFIG);
+      expect(codex.cpuMillicores - codexPlain.cpuMillicores).toBe(500);
+      expect(codex.memoryBytes - codexPlain.memoryBytes).toBe(1728 * 2 ** 20);
+    });
+
+    it("names a services template by its set", () => {
+      const name = (spec: JobSpec) => toolTemplate(spec, CONFIG).name;
+      const base = name(SVC);
+      expect(base).not.toBe(name(fakeClaudeSpec()));
+      expect(base).not.toBe(name({ ...SVC, services: [POSTGRES_16_SERVICE] }));
+      const otherDigest = {
+        ...POSTGRES_16_SERVICE,
+        substrateImage: `ghcr.io/cloudnative-pg/postgresql@sha256:${"0".repeat(64)}`,
+      };
+      expect(base).not.toBe(name({ ...SVC, services: [otherDigest, FAKE_SERVICE] }));
+      const fakeOtherDigest = { ...FAKE_SERVICE, image: `registry.example/fakedb@sha256:${"0".repeat(64)}` };
+      expect(base).not.toBe(name({ ...SVC, services: [POSTGRES_16_SERVICE, fakeOtherDigest] }));
+      expect(name({ ...SVC, services: [FAKE_SERVICE, POSTGRES_16_SERVICE] })).toBe(base);
+      const changed = {
+        ...FAKE_SERVICE,
+        serviceEnv: { FAKEDB_PASSWORD: "something-else" },
+        readiness: { ...FAKE_SERVICE.readiness, command: ["other-ping"] },
+        startCommand: ["other-serve"],
+      };
+      expect(name({ ...SVC, services: [POSTGRES_16_SERVICE, changed] })).toBe(base);
+      expect(name({ ...SVC, services: [POSTGRES_16_SERVICE, { ...FAKE_SERVICE, serviceEnv: {} }] })).toBe(base);
+      expect(codexTemplate(SVC_CODEX, CONFIG).name).not.toBe(codexTemplate(fakeCodexSpec(), CONFIG).name);
+    });
+
+    it("keeps the wait script in step with the script directory", () => {
+      expect(SERVICE_WAIT_SCRIPT.split(`${SERVICE_SCRIPT_DIR}/start.sh`).length - 1).toBe(2);
+    });
+  });
+
   it("never puts a secret in a template, env or egress policy", () => {
     const spec = fakeClaudeSpec();
     const templates = [
@@ -176,6 +358,10 @@ describe("substrate spec builders", () => {
       agentTemplate({ ...spec, mcpTools: true }, CONFIG),
       toolTemplate({ ...spec, mcpTools: true }, CONFIG),
       codexTemplate({ ...fakeCodexSpec(), mcpTools: true }, CONFIG),
+      // Services: only each entry's name, image digest and data path may reach a template.
+      toolTemplate(SVC, CONFIG),
+      codexTemplate(SVC_CODEX, CONFIG),
+      agentTemplate(SVC, CONFIG),
     ];
     // Templates are shared across runs: no run id or run token either (the egress policy names the
     // per-run Secret by token, so that check is for templates only).
@@ -201,6 +387,17 @@ describe("substrate spec builders", () => {
     expect(all).not.toContain("WARDBY_RUN_CAPABILITY");
     expect(all).not.toContain("extra-alpha");
     expect(all).not.toContain("/runs/");
+    for (const value of [
+      "FAKE_SERVICE_ENV_VALUE_0001",
+      "FAKE_READINESS_ARG_0001",
+      "--fake-start-arg-0001",
+      "POSTGRES_PASSWORD",
+      "-ptest",
+      "docker-entrypoint.sh",
+      "pg_isready",
+    ]) {
+      expect(all).not.toContain(value);
+    }
   });
 
   it("puts the capability only in the per-run Secret", () => {
