@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { link, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -111,6 +111,17 @@ describe("plan folder", () => {
     const collected = await collectPlanFolder(root);
     expect(collected).toMatchObject({ status: "ok", skipped: ["linked.md"] });
     expect(collected.status === "ok" && collected.files.map((f) => f.path)).toEqual(["plain.md"]);
+  });
+
+  // Mode 000 makes a read fail: only a total check made before the read reports plan_too_large.
+  it.skipIf(process.getuid?.() === 0)("a file that would pass maxTotalBytes is never read", async () => {
+    await mkdir(root);
+    const full = Math.floor(PLAN_LIMITS.maxTotalBytes / PLAN_LIMITS.maxFileBytes);
+    for (let i = 0; i < full; i++) await writeFile(join(root, `a${i}.md`), Buffer.alloc(PLAN_LIMITS.maxFileBytes, 97));
+    const last = join(root, "zz.md");
+    await writeFile(last, Buffer.alloc(PLAN_LIMITS.maxTotalBytes - full * PLAN_LIMITS.maxFileBytes + 1, 97));
+    await chmod(last, 0o000);
+    expect(await collectPlanFolder(root)).toEqual({ status: "error", error: "plan_too_large" });
   });
 
   it("total bytes over maxTotalBytes is plan_too_large", async () => {

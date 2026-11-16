@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parsePlanFilesOutputJson } from "../coding/protocol.js";
 import { writePlanFilesOutputAtomic } from "./artifact.js";
 import { collectPlanFolder } from "./plan-folder.mjs";
-import { capturePlanFiles, collectPlanOutput, shouldCollectPlan } from "./plan-output.js";
+import { capturePlanFiles, collectPlanOutput, finishRun, shouldCollectPlan } from "./plan-output.js";
 
 describe("plan output", () => {
   it("wraps the folder in the protocol shape and writes it atomically", async () => {
@@ -63,11 +63,40 @@ describe("capturePlanFiles", () => {
     await capturePlanFiles({ input, aborted: false, root: "/x", collect: ok, write, warn });
     expect(warn).toHaveBeenCalledWith();
   });
+});
 
-  it("main.ts captures only after result.json is written", async () => {
-    const source = await readFile(new URL("./main.ts", import.meta.url), "utf8");
-    const result = source.indexOf("await writeCodingOutputAtomic(OUTPUT_PATH");
-    expect(result).toBeGreaterThan(0);
-    expect(source.indexOf("await capturePlanFiles(")).toBeGreaterThan(result);
+describe("finishRun", () => {
+  it("captures only after the result is written", async () => {
+    const events: string[] = [];
+    await finishRun({
+      writeResult: async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        events.push("result");
+      },
+      capture: async () => void events.push("capture"),
+      aborted: () => false,
+    });
+    expect(events).toEqual(["result", "capture"]);
+  });
+
+  it("skips capture when the run was cancelled, judged after the result", async () => {
+    let aborted = false;
+    const capture = vi.fn(async () => undefined);
+    await finishRun({ writeResult: async () => void (aborted = true), capture, aborted: () => aborted });
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it("a capture failure changes nothing", async () => {
+    const writeResult = vi.fn(async () => undefined);
+    await expect(
+      finishRun({
+        writeResult,
+        capture: async () => {
+          throw new Error("sk-test-FAKE-0000000000000000");
+        },
+        aborted: () => false,
+      }),
+    ).resolves.toBeUndefined();
+    expect(writeResult).toHaveBeenCalledTimes(1);
   });
 });

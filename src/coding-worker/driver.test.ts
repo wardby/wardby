@@ -1381,9 +1381,9 @@ describe("runCodingWorker plan files", () => {
     await expect(stat(join(workspace, "plan.md"))).rejects.toThrow();
   });
 
-  it("uses PLAN_FOLDER_PATH when no planRoot is given", async () => {
+  // Never touches a folder this test did not create.
+  it.skipIf(existsSync(PLAN_FOLDER_PATH))("uses PLAN_FOLDER_PATH when no planRoot is given", async () => {
     const workspace = await tempWorkspace();
-    await rm(PLAN_FOLDER_PATH, { recursive: true, force: true });
     const seen: string[] = [];
     const output = JSON.stringify({
       schemaVersion: 1,

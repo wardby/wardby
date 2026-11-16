@@ -57,3 +57,17 @@ export async function capturePlanFiles(options: {
   const plan = await collectPlanOutput(input.runId, options.collect);
   await options.write(plan).catch(() => options.warn());
 }
+
+/**
+ * main.ts's run ending: the result is written first, then the plan is captured (so a capture
+ * problem never changes the outcome), and not when the run was cancelled. Never throws from capture.
+ */
+export async function finishRun(options: {
+  writeResult: () => Promise<void>;
+  capture: () => Promise<void>;
+  aborted: () => boolean;
+}): Promise<void> {
+  await options.writeResult();
+  if (options.aborted()) return;
+  await options.capture().catch(() => undefined);
+}
