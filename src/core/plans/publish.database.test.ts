@@ -377,10 +377,15 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     );
   });
 
-  it("R11 hook: a revision run (threads sent with it) publishes nothing; another run publishes the set", async () => {
+  it("R11 hook: a revision run (given input plan files) publishes nothing; another run publishes the set", async () => {
     const hook = planRunFinishedHook(() => ({ db, cipher, origin: null }));
     const agentId = await planner();
     const revision = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n" }]);
+    await db.codingRunPlanFile.create({
+      data: { runId: revision, direction: "input", path: "plan.md", content: "# Plan\n" },
+    });
+    // Its threads were re-stamped to a reconcile run already (startReconcileRun): none names it any more.
+    const reconcile = await makeRun(agentId, []);
     const doc = await createDocument(db, cipher, { ownerId: owner.id, title: "T", markdown: "x", agentId });
     await db.commentThread.create({
       data: {
@@ -388,7 +393,7 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
         number: 1,
         versionId: doc.versionId,
         anchor: { type: "text", quote: "x" },
-        sentRunId: revision,
+        sentRunId: reconcile,
       },
     });
     // The hook's promise settles when its work is done (callers never await it, R10d).

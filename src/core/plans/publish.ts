@@ -74,6 +74,11 @@ export interface PlanPublishDeps {
   cipher: SecretCipher;
   origin: string | null;
   clock?: PlanPublishClock;
+  /**
+   * A revision's own document (B8: the one its threads are on), published by the caller. It is never
+   * marked removed here, and with `skip` (its edit was not applied) it gets no write at all.
+   */
+  threadsDocument?: { id: string; skip: boolean };
 }
 
 const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
@@ -309,15 +314,37 @@ function contentOf(doc: PlanLayoutDocument): VersionContent {
     : { format: "boards-v1", files: doc.files! };
 }
 
-/** Whether the file, prepared as a publish would prepare it, is the document's current content. */
-function sameContent(
+/**
+ * Whether the file, prepared as a publish would prepare it, is the document's current content.
+ * Preparing is not idempotent on a stored design (a second pass can add a line break), so the stored
+ * content is also compared prepared once more: a file handed back untouched (already prepared once
+ * when it was stored) matches it, as does a raw file that matches the stored one.
+ */
+async function sameContent(
+  db: PrismaClient,
   kind: "document" | "design",
-  current: { contentHash: string } | null,
+  current: { id: string; contentHash: string; format: string; markdown: string | null } | null,
   content: VersionContent,
   secrets: string[],
-): boolean {
+): Promise<boolean> {
   if (!current) return false;
-  return contentHash(formatFor(kind).prepare(content, secrets).content) === current.contentHash;
+  const fmt = formatFor(kind);
+  const ours = contentHash(fmt.prepare(content, secrets).content);
+  if (ours === current.contentHash) return true;
+  try {
+    return ours === contentHash(fmt.prepare(await loadContent(db, current), secrets).content);
+  } catch {
+    return false;
+  }
+}
+
+/** The change a document this publish does not write is reported with (R21: archived never reads as approved). */
+function keptChange(reviewState: string): PlanDocumentChange {
+  return reviewState === "approved"
+    ? "approved_unchanged"
+    : reviewState === "archived"
+      ? "archived_unchanged"
+      : "unchanged";
 }
 
 const asKind = (kind: string): "document" | "design" => (kind === "design" ? "design" : "document");
@@ -408,15 +435,22 @@ export async function publishPlanFromRun(
   }
 }
 
+/** A revision run whose input files no longer pass the layout: what it was given is unknown. */
+const GIVEN_UNREADABLE = "unreadable";
+
 /**
  * A revision run's input (B8: the set's documents it was given in the plan folder) by path; null for a
- * run that was given none (a planner run writing the plan).
+ * run that was given none (a planner run writing the plan); GIVEN_UNREADABLE when its input files do
+ * not pass the layout, so every existing document is treated as moved on (never written or removed).
  */
-async function givenDocuments(db: PrismaClient, runId: string): Promise<Map<string, PlanLayoutDocument> | null> {
+async function givenDocuments(
+  db: PrismaClient,
+  runId: string,
+): Promise<Map<string, PlanLayoutDocument> | typeof GIVEN_UNREADABLE | null> {
   const inputs = await loadPlanFiles(db, runId, "input");
   if (inputs.length === 0) return null;
   const layout = parsePlanLayout(inputs);
-  return new Map(layout.ok ? layout.documents.map((d) => [d.path, d] as const) : []);
+  return layout.ok ? new Map(layout.documents.map((d) => [d.path, d] as const)) : GIVEN_UNREADABLE;
 }
 
 async function publishSet(
@@ -428,7 +462,7 @@ async function publishSet(
   set: PlanSetRef,
   layoutDocuments: readonly PlanLayoutDocument[],
   ignored: string[],
-  given: Map<string, PlanLayoutDocument> | null,
+  given: Map<string, PlanLayoutDocument> | typeof GIVEN_UNREADABLE | null,
 ): Promise<PublishedPlan> {
   const { coding, setting, number, ownerId } = planner;
   // Renewed before every step and before the marker: a lost lease stops the publish (PlanLeaseLost).
@@ -494,15 +528,22 @@ async function publishSet(
       await report(created.id, doc, "created");
       return;
     }
-    if (existing.removedFromPlan) {
-      await db.document.update({ where: { id: existing.id }, data: { removedFromPlan: false } });
-    }
     // R11: one writer per version. A version this run already wrote (B8's revision publish, or an
     // earlier attempt of this publish) is left alone; a document still in draft is submitted now.
     const own = await db.documentVersion.findFirst({
       where: { documentId: existing.id, runId },
       select: { number: true },
     });
+    // A revision whose input is unreadable treats every document as moved on; the threads' document
+    // whose edit was not applied is the caller's (B8) and gets no write here.
+    const kept = given === GIVEN_UNREADABLE || (deps.threadsDocument?.skip && existing.id === deps.threadsDocument.id);
+    if (kept && !own) {
+      await report(existing.id, doc, keptChange(existing.reviewState));
+      return;
+    }
+    if (existing.removedFromPlan) {
+      await db.document.update({ where: { id: existing.id }, data: { removedFromPlan: false } });
+    }
     if (own) {
       if (existing.reviewState === "draft") await submit(existing.id);
       await linkToRun(existing.id, doc.path);
@@ -518,7 +559,7 @@ async function publishSet(
       await report(existing.id, doc, "archived_unchanged");
       return;
     }
-    if (sameContent(doc.kind, existing.currentVersion, content, secrets)) {
+    if (await sameContent(db, doc.kind, existing.currentVersion, content, secrets)) {
       await report(existing.id, doc, "unchanged");
       return;
     }
@@ -526,7 +567,7 @@ async function publishSet(
     // was given; a document a person moved on meanwhile is never overwritten (reported as not updated).
     // Every side is prepared with the same secret values, so a value that became a secret since the
     // version was published (redacted in what the run was given) does not read as a change.
-    const sent = given?.get(doc.path);
+    const sent = given instanceof Map ? given.get(doc.path) : undefined;
     if (sent && existing.currentVersion) {
       const prepared = (c: VersionContent): string => {
         try {
@@ -579,10 +620,16 @@ async function publishSet(
     }
   }
   for (const gone of byPath.values()) {
-    // A revision removes only a document it was given; one added after it started is not its to remove.
-    if (given && !given.has(gone.planPath!)) continue;
+    // A revision removes only a document it was given; one added after it started is not its to remove,
+    // and with an unreadable input it removes none.
+    if (given !== null && (given === GIVEN_UNREADABLE || !given.has(gone.planPath!))) continue;
     await hold();
     try {
+      // Never removed: an approved or archived document (read-only), or a revision's threads' document.
+      if (gone.reviewState === "approved" || gone.reviewState === "archived" || gone.id === deps.threadsDocument?.id) {
+        await report(gone.id, { kind: asKind(gone.kind), path: gone.planPath! }, keptChange(gone.reviewState));
+        continue;
+      }
       if (!gone.removedFromPlan) {
         await db.document.update({ where: { id: gone.id }, data: { removedFromPlan: true } });
       }
@@ -673,8 +720,10 @@ export async function planSummaryForRun(
               : "unchanged";
     documents.push(describeRow(row, doc, change));
   }
+  // Not in this run's files: removed, unless the publish kept it (approved or archived, never removed).
   for (const row of byPath.values()) {
-    documents.push(describeRow(row, { kind: asKind(row.kind), path: row.planPath! }, "removed"));
+    const change = row.removedFromPlan ? "removed" : keptChange(row.reviewState);
+    documents.push(describeRow(row, { kind: asKind(row.kind), path: row.planPath! }, change));
   }
   const { skippedReviewers } = await planReviewers(db, { id: agentId, ownerId }, set.accessAgentId ?? agentId, setting);
   return {

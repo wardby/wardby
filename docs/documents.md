@@ -228,7 +228,9 @@ event.
 - **The lock**: an approved or archived document takes no new version by any
   route (editor, board saves, `publish_version`, restore, agent edits), and its
   threads cannot be sent to an agent: all are refused with `document_locked`.
-  Comments stay open. A page open when the lock lands turns read-only in place,
+  A document its planner removed from the plan is read-only to agents too: its
+  threads cannot be sent to an agent (`document_locked`) until a later revision
+  of the plan writes its file again. Comments stay open. A page open when the lock lands turns read-only in place,
   with no reload; edits not yet saved are kept ("Read only: approved · unsaved
   changes"). After a reopen they show as "Unsaved changes" and are saved with
   the next edit, never on a timer; a Markdown page

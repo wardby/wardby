@@ -40,11 +40,11 @@ import { atLeast, effectiveAccess } from "../grants.js";
 import { TERMINAL_RUN_STATUSES } from "../host-status.js";
 import { logger } from "../logger.js";
 import { parsePlanLayout } from "../plans/layout.js";
-import { publishPlanFromRun, withPlanSetLease } from "../plans/publish.js";
+import { publishPlanFromRun, withPlanSetLease, type PlanPublishClock } from "../plans/publish.js";
 import { PlanRefusedError } from "../plans/refusal.js";
 import { planSetInputFiles } from "../plans/revision.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
-import { redactExactSecretValues } from "../secret-spans.js";
+import { redactExactSecretValues, withEscapedForms } from "../secret-spans.js";
 import { composeTaskOverride, MAX_UNTRUSTED_BODY_CHARS } from "../untrusted-content.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
 import {
@@ -141,6 +141,8 @@ export interface DocumentAgentDeps {
   /** Counts sends per document; default: the Postgres limiter over one-hour windows. */
   rateLimiter?: RateLimiter;
   selfDefects?: DispatchRunOptions["selfDefects"];
+  /** The plan set's publish-lease clock (a test seam; default the real one). */
+  planClock?: PlanPublishClock;
 }
 
 /** Rate-limit keys: a domain-separated hash of bucket, document id and window (no secret involved). */
@@ -243,18 +245,21 @@ type SendableLink = {
  */
 async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer): Promise<SendableLink> {
   const doc = await requireDocumentAccess(db, documentId, viewer, "write");
-  if (isLocked(doc.reviewState)) throw new Error("document_locked");
+  // A document removed from its plan is read-only, like an approved or archived one.
+  if (isLocked(doc.reviewState) || doc.removedFromPlan) throw new Error("document_locked");
   if (viewer.kind !== "principal") throw new Error("document_access_denied");
   // A document of a "wardby" plan set is linked to its planner only: its files go in the plan folder (spec §5).
   const set = doc.planSetId
     ? await db.planSet.findUnique({
         where: { id: doc.planSetId },
-        select: { id: true, store: true, repository: true, number: true },
+        select: { id: true, store: true, repository: true, number: true, agentId: true },
       })
     : null;
   const plan = set?.store === "wardby" && doc.planPath ? set : null;
   const repository = plan ? plan.repository : doc.repository;
   if (!doc.agentId || !repository || (!plan && !doc.path)) throw new Error("document_not_agent_linked");
+  // A revision is the set's planner's run: a document linked to any other agent is not sendable.
+  if (plan && doc.agentId !== plan.agentId) throw new Error("document_not_agent_linked");
   const agent = await db.agent.findUnique({
     where: { id: doc.agentId },
     select: {
@@ -300,7 +305,8 @@ async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer
  */
 async function taskSecretValues(db: PrismaClient, cipher: Cipher, agentId: string): Promise<string[]> {
   try {
-    return withHtmlEscapedForms((await loadAgentSecretValues(db, cipher, agentId)).flatMap((e) => e.values));
+    const values = (await loadAgentSecretValues(db, cipher, agentId)).flatMap((e) => e.values);
+    return withHtmlEscapedForms(withEscapedForms(values));
   } catch (err) {
     throw new Error("document_send_failed", { cause: err });
   }
@@ -667,17 +673,29 @@ export async function onDocumentRunFinished(db: PrismaClient, deps: DocumentAgen
     }
 
     const planSetId = await revisedPlanSet(db, threads[0].documentId);
+    let edit: RunEdit | undefined;
     try {
-      const edit = planSetId
+      edit = planSetId
         ? await publishPlanRunEdit(db, deps, runId, threads, planSetId, secretValues)
         : await publishRunEdit(db, deps, runId, threads, run.codingRun?.result, secretValues);
       await answerEdit(db, deps, { runId, threads, edit, finalText: run.finalText, secretValues, reply });
     } finally {
       // R11: a plan revision's other changed files (the set's other documents, new ones) are published
       // last, after the threads' document and its replies, whatever their outcome. The run-end plan hook
-      // skips this run, and publishPlanFromRun leaves a document this run already versioned alone.
+      // skips this run, and publishPlanFromRun leaves a document this run already versioned alone. The
+      // threads' document is never removed by it, and is left alone entirely when its edit was not
+      // applied (failed, or the set's lease was busy): the replies already said so.
       if (planSetId) {
-        await publishPlanFromRun(db, { cipher: deps.cipher, origin: null }, runId).catch((err: unknown) => {
+        await publishPlanFromRun(
+          db,
+          {
+            cipher: deps.cipher,
+            origin: null,
+            ...(deps.planClock ? { clock: deps.planClock } : {}),
+            threadsDocument: { id: threads[0].documentId, skip: edit === undefined || edit.kind === "failed" },
+          },
+          runId,
+        ).catch((err: unknown) => {
           log.warn({ runId, code: codeOf(err) }, "could not publish the rest of the revised plan");
         });
       }
@@ -878,7 +896,7 @@ async function publishRunEdit(
  */
 async function publishPlanRunEdit(
   db: PrismaClient,
-  deps: Pick<DocumentAgentDeps, "cipher">,
+  deps: Pick<DocumentAgentDeps, "cipher" | "planClock">,
   runId: string,
   threads: ClaimedThread[],
   planSetId: string,
@@ -894,27 +912,33 @@ async function publishPlanRunEdit(
     const sentVersion = sentVersionOf(threads);
     if (sentVersion === null) return { kind: "failed" };
     const layout = parsePlanLayout(await loadPlanFiles(db, runId, "output"));
-    const outcome = await withPlanSetLease(db, planSetId, runId, async (): Promise<RunEdit> => {
-      // Read under the lease, so a set publish that held it is seen.
-      const doc = await db.document.findUnique({ where: { id: documentId }, include: { currentVersion: true } });
-      if (!doc?.planPath || !doc.currentVersion || !layout.ok) return { kind: "failed" };
-      const file = layout.documents.find((d) => d.path === doc.planPath && d.kind === doc.kind);
-      if (!file) return { kind: "failed" };
-      const edited: VersionContent =
-        file.kind === "document"
-          ? { format: "markdown", markdown: file.markdown! }
-          : { format: "boards-v1", files: file.files! };
-      return applyRunEdit(db, deps.cipher, {
-        runId,
-        threads,
-        doc,
-        current: doc.currentVersion,
-        edited,
-        place: { planRun: runId },
-        sentVersion,
-        secretValues,
-      });
-    });
+    const outcome = await withPlanSetLease(
+      db,
+      planSetId,
+      runId,
+      async (): Promise<RunEdit> => {
+        // Read under the lease, so a set publish that held it is seen.
+        const doc = await db.document.findUnique({ where: { id: documentId }, include: { currentVersion: true } });
+        if (!doc?.planPath || !doc.currentVersion || !layout.ok) return { kind: "failed" };
+        const file = layout.documents.find((d) => d.path === doc.planPath && d.kind === doc.kind);
+        if (!file) return { kind: "failed" };
+        const edited: VersionContent =
+          file.kind === "document"
+            ? { format: "markdown", markdown: file.markdown! }
+            : { format: "boards-v1", files: file.files! };
+        return applyRunEdit(db, deps.cipher, {
+          runId,
+          threads,
+          doc,
+          current: doc.currentVersion,
+          edited,
+          place: { planRun: runId },
+          sentVersion,
+          secretValues,
+        });
+      },
+      deps.planClock,
+    );
     return outcome === "busy" ? { kind: "failed" } : outcome;
   } catch (err) {
     log.warn({ runId, documentId, code: codeOf(err) }, "could not publish the agent's plan edit");
@@ -988,13 +1012,25 @@ async function applyRunEdit(
     place,
   });
 
+  // Whether the edit is the current version's content. Preparing is not idempotent on a stored design
+  // (a second pass can add a line break), so the stored content is also compared prepared once more:
+  // an untouched design the run hands back (already prepared once when it was stored) matches it.
+  const preparedHash = contentHash(prepared);
+  const isCurrentContent = async (): Promise<boolean> => {
+    if (preparedHash === input.current.contentHash) return true;
+    try {
+      return preparedHash === contentHash(fmt.prepare(await loadContent(db, input.current), secretValues).content);
+    } catch {
+      return false;
+    }
+  };
   // Approved or archived while the agent worked: nothing is published, merged or reconciled.
-  if (isLocked(doc.reviewState) && contentHash(prepared) !== input.current.contentHash) {
+  if (isLocked(doc.reviewState) && !(await isCurrentContent())) {
     return { kind: "locked", state: doc.reviewState, place };
   }
   let current = input.current;
   if (current.number === sentVersion) {
-    if (contentHash(prepared) === current.contentHash) return { kind: "unchanged" };
+    if (await isCurrentContent()) return { kind: "unchanged" };
     const out = await publish(prepared, sentVersion, `Agent edit for comment threads ${numbers}`);
     if (out === "published") return { kind: "published" };
     if (out === "locked") return locked();

@@ -26,9 +26,15 @@ export function planRunFinishedHook(
       Promise.resolve()
         .then(async () => {
           const { db, cipher, origin, postIssueNotice } = deps();
-          // R11: a revision (a document run: its threads were sent with this run) is published by
-          // B8's onDocumentRunFinished, which then calls publishPlanFromRun for the rest of the set.
-          if (await db.commentThread.findFirst({ where: { sentRunId: runId }, select: { id: true } })) return;
+          // R11: a revision (a run given the set's files as input plan files) is published by B8's
+          // onDocumentRunFinished, which then calls publishPlanFromRun for the rest of the set. Its input
+          // files are written with the run, so this holds even after startReconcileRun re-stamps the
+          // threads' sentRunId to a reconcile run.
+          const revision = await db.codingRunPlanFile.findFirst({
+            where: { runId, direction: "input" },
+            select: { path: true },
+          });
+          if (revision) return;
           const published = await publishPlanFromRun(db, { cipher, origin }, runId);
           if (!published || !postIssueNotice) return;
           const run = await db.run.findUnique({
