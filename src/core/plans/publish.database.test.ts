@@ -7,6 +7,7 @@ import { createDocument, publishVersion } from "../documents/service.js";
 import { principalGranteeKey } from "../grants.js";
 import { attachSecret, createSecret } from "../secrets.js";
 import { planRunFinishedHook } from "./hooks.js";
+import { planReplyLines, planSummaryLines } from "./wording.js";
 import {
   PLAN_PUBLISH_LEASE_MS,
   PLAN_PUBLISH_WAIT_MS,
@@ -400,6 +401,37 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     expect(await planSummaryForRun(db, runId, null)).toMatchObject({
       documents: [{ path: "plan.md", change: "created", reviewState: "in_review" }],
     });
+  });
+
+  it("R25: a planner run with no lead gets its reply on the issue; a delegated one and a failed publish follow the rules", async () => {
+    const notices: { issueKey: string | null; text: string }[] = [];
+    const postIssueNotice = vi.fn(async (set: { issueKey: string | null }, text: string) => {
+      notices.push({ issueKey: set.issueKey, text });
+    });
+    const hook = planRunFinishedHook(() => ({ db, cipher, origin: null, postIssueNotice }));
+    const agentId = await planner();
+    const name = `PLAN_NOTICE_KEY_${s}`;
+    await createSecret(name, FAKE_SECRET, owner.id, cipher, db);
+    await attachSecret(agentId, name, owner.id, db);
+    const runId = await makeRun(agentId, [{ path: "plan.md", content: `# Plan\n\ntoken ${FAKE_SECRET}\n` }]);
+    await hook(runId);
+    const summary = await planSummaryForRun(db, runId, null);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].issueKey).toBe("o/r#12");
+    expect(notices[0].text).toBe(planSummaryLines(summary!).join("\n"));
+    expect(notices[0].text).toBe(planReplyLines(summary as PublishedPlan).join("\n"));
+    expect(notices[0].text).not.toContain(FAKE_SECRET);
+    // A delegated planner: its lead replies, so nothing is posted here.
+    const lead = await makeRun(await makeAgent("native"), []);
+    const child = await makeRun(await planner(), [{ path: "plan.md", content: "# Plan\n" }], { parentRunId: lead });
+    await hook(child);
+    expect(notices).toHaveLength(1);
+    expect(await marker(child)).toBe("published");
+    // A failed publish posts the failure line.
+    const bad = await makeRun(await planner(), [], { planFilesStatus: "plan_too_large" });
+    await hook(bad);
+    expect(notices).toHaveLength(2);
+    expect(notices[1].text).toBe(planSummaryLines({ number: 12, error: "plan_too_large" }).join("\n"));
   });
 
   it("two concurrent first publishes on a one-connection pool make one set and one document per path", async () => {

@@ -1,4 +1,5 @@
 import { PLAN_FOLDER_PATH } from "../../coding/protocol.js";
+import type { PlanSummary, PublishedPlan } from "./publish.js";
 
 /** The layout a planner (or a revision) writes, shared by both notes. */
 export const PLAN_LAYOUT_RULES = [
@@ -24,4 +25,43 @@ export function planRevisionNote(): string {
 /** The request with plan sections after it: stored as the run's request, so every composer keeps them. */
 export function withPlanSections(request: string, sections: readonly string[]): string {
   return [request, ...sections].join("\n\n");
+}
+
+const STATE_WORDS: Record<string, string> = {
+  draft: "draft",
+  in_review: "in review",
+  changes_requested: "changes requested",
+  approved: "approved",
+  archived: "archived",
+};
+
+/** A published plan's reply: file names, states and links only, never a document's text or a reviewer's name. */
+export function planReplyLines(plan: PublishedPlan): string[] {
+  const lines = [`Plan ${plan.number}:`];
+  for (const doc of plan.documents) {
+    const state =
+      doc.change === "removed" ? "removed from the plan" : (STATE_WORDS[doc.reviewState] ?? doc.reviewState);
+    const note =
+      doc.change === "approved_unchanged"
+        ? "; not changed, reopen it first"
+        : doc.change === "archived_unchanged"
+          ? "; not changed, it is archived"
+          : "";
+    lines.push(`- ${doc.path} (${state}${note}): ${doc.url ?? doc.pagePath}`);
+  }
+  if (plan.withheld.length > 0) {
+    lines.push(`Not published, because it held a token-shaped value: ${plan.withheld.join(", ")}`);
+  }
+  if (plan.ignored.length > 0) lines.push(`Ignored: ${plan.ignored.join(", ")}`);
+  if (plan.skippedReviewers.length > 0) {
+    lines.push(`Not asked to review (no longer has access to the agent): ${plan.skippedReviewers.length} people`);
+  }
+  return lines;
+}
+
+/** planReplyLines for a published plan; one line for a failure or a publish still running. */
+export function planSummaryLines(plan: PlanSummary): string[] {
+  if ("error" in plan) return [`Plan ${plan.number}: not published (${plan.error}).`];
+  if ("pending" in plan) return [`Plan ${plan.number}: being published.`];
+  return planReplyLines(plan);
 }

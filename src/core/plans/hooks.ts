@@ -7,6 +7,7 @@ import type { PrismaClient } from "#prisma";
 import { outsideRunContext } from "../async-context.js";
 import { logger } from "../logger.js";
 import { publishPlanFromRun, type SecretCipher } from "./publish.js";
+import { planSummaryLines } from "./wording.js";
 
 const plansLog = logger.child({ module: "plans" });
 
@@ -24,11 +25,22 @@ export function planRunFinishedHook(
     outsideRunContext(() =>
       Promise.resolve()
         .then(async () => {
-          const { db, cipher, origin } = deps();
+          const { db, cipher, origin, postIssueNotice } = deps();
           // R11: a revision (a document run: its threads were sent with this run) is published by
           // B8's onDocumentRunFinished, which then calls publishPlanFromRun for the rest of the set.
           if (await db.commentThread.findFirst({ where: { sentRunId: runId }, select: { id: true } })) return;
-          await publishPlanFromRun(db, { cipher, origin }, runId);
+          const published = await publishPlanFromRun(db, { cipher, origin }, runId);
+          if (!published || !postIssueNotice) return;
+          const run = await db.run.findUnique({
+            where: { id: runId },
+            select: {
+              parentRunId: true,
+              codingRun: { select: { repository: true, issueProvider: true, issueKey: true } },
+            },
+          });
+          // A planner without a lead (spec §4): its reply goes on the issue. A delegated one's lead replies.
+          if (!run?.codingRun?.issueKey || run.parentRunId) return;
+          await postIssueNotice(run.codingRun, planSummaryLines(published).join("\n"));
         })
         .catch((err: unknown) => {
           plansLog.warn({ runId, errorName: err instanceof Error ? err.name : typeof err }, "plan hook failed");

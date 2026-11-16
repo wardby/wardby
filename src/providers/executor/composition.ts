@@ -24,6 +24,8 @@ import { outsideRunContext } from "../../core/async-context.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { onDocumentRunFinished } from "../../core/documents/agent-loop.js";
 import { planRunFinishedHook } from "../../core/plans/hooks.js";
+import { planSummaryForRun } from "../../core/plans/publish.js";
+import { planSummaryLines } from "../../core/plans/wording.js";
 import { httpOrigin } from "../../mcp/tools/documents.js";
 import type { SelfDefectSink } from "../../core/self-defects.js";
 import { startDeferredForRequest } from "../../core/host-events.js";
@@ -406,6 +408,10 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   const coding = new ContainerExecutor({
     transcripts,
     planFiles,
+    planSummary: async (runId) => {
+      const s = await planSummaryForRun(options.db, runId, origin);
+      return s ? planSummaryLines(s) : [];
+    },
     ...(options.runSteps ? { runSteps: options.runSteps } : {}),
     store: new PrismaContainerExecutionStore(options.db, {
       maxConcurrent: concurrency.maxConcurrent,

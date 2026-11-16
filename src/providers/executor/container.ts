@@ -1741,6 +1741,8 @@ export class RunCapabilityVault {
 }
 
 export interface ContainerExecutorOptions {
+  /** Plan documents: the run's plan lines (names, states and links only) for its pull request's final comment. */
+  planSummary?: (runId: string) => Promise<string[]>;
   /** Session resume: stores a run's transcript before its job is removed. Absent = never captured. */
   transcripts?: Pick<RunTranscriptRecorder, "record">;
   /** Plan documents: stores a collecting run's returned plan folder before it is made terminal. Absent = never stored. */
@@ -2933,6 +2935,12 @@ export class ContainerExecutor implements Executor {
       // A run another process launched has no workspace here; its pull request still gets the final status.
       const target = workspace ?? this.continuationTargetOf(run);
       if (target) {
+        // The publish hook may still be running, so this can be the "being published" line (R10d).
+        const planLines =
+          this.options.planSummary && outcome === "succeeded"
+            ? await this.options.planSummary(run.runId).catch(() => [] as string[])
+            : [];
+        if (planLines.length > 0) finishedSummary = [finishedSummary, ...planLines].filter(Boolean).join("\n\n");
         await this.options.vcs.notifyContinuationFinished?.(target, outcome, {
           summary: finishedSummary,
           agentName: run.agentName,

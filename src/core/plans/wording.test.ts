@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { composeCodingTask, MAX_CODING_TASK_BYTES, PLAN_FOLDER_PATH } from "../../coding/protocol.js";
-import { PLAN_LAYOUT_RULES, planRevisionNote, plannerTaskNote, withPlanSections } from "./wording.js";
+import {
+  PLAN_LAYOUT_RULES,
+  planReplyLines,
+  planRevisionNote,
+  plannerTaskNote,
+  planSummaryLines,
+  withPlanSections,
+} from "./wording.js";
 
 describe("plannerTaskNote", () => {
   it("store wardby: writes under the plan folder, never the repository", () => {
@@ -38,5 +45,67 @@ describe("plannerTaskNote", () => {
     expect(Buffer.byteLength(composed)).toBeLessThanOrEqual(MAX_CODING_TASK_BYTES);
     const dropped = composeCodingTask("Be careful.", request, undefined, { render: () => undefined });
     expect(dropped).toContain(note);
+  });
+});
+
+describe("plan reply lines", () => {
+  it("carry names, states and links, never text", () => {
+    const lines = planReplyLines({
+      number: 12,
+      planSetId: "ps1",
+      documents: [
+        {
+          id: "d1",
+          pagePath: "/d/d1",
+          url: "https://x/d/d1",
+          kind: "document",
+          path: "plan.md",
+          reviewState: "in_review",
+          versionNumber: 1,
+          change: "created",
+        },
+        {
+          id: "d2",
+          pagePath: "/d/d2",
+          url: "https://x/d/d2",
+          kind: "design",
+          path: "screens/",
+          reviewState: "approved",
+          versionNumber: 2,
+          change: "approved_unchanged",
+        },
+      ],
+      ignored: ["notes.txt"],
+      withheld: ["leak.md"],
+      skippedReviewers: ["p9", "p10"],
+    });
+    expect(lines).toEqual([
+      "Plan 12:",
+      "- plan.md (in review): https://x/d/d1",
+      "- screens/ (approved; not changed, reopen it first): https://x/d/d2",
+      "Not published, because it held a token-shaped value: leak.md",
+      "Ignored: notes.txt",
+      "Not asked to review (no longer has access to the agent): 2 people",
+    ]);
+    expect(lines.join("\n")).not.toContain("p9");
+  });
+
+  it("a document without a url shows its page path; failures and pending have one line", () => {
+    const base = { number: 12, planSetId: "ps1", ignored: [], withheld: [], skippedReviewers: [] };
+    const doc = {
+      id: "d1",
+      pagePath: "/d/d1",
+      kind: "document" as const,
+      path: "plan.md",
+      reviewState: "in_review",
+      versionNumber: 1,
+      change: "created" as const,
+    };
+    expect(planReplyLines({ ...base, documents: [doc] })).toEqual(["Plan 12:", "- plan.md (in review): /d/d1"]);
+    expect(planSummaryLines({ number: 12, error: "plan_too_large" })).toEqual([
+      "Plan 12: not published (plan_too_large).",
+    ]);
+    expect(planSummaryLines({ number: 12, documents: [], pending: true })).toEqual(["Plan 12: being published."]);
+    expect(planSummaryLines({ ...base, documents: [doc] })).toEqual(planReplyLines({ ...base, documents: [doc] }));
   });
 });

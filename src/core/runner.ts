@@ -145,6 +145,7 @@ import { dispatchRunStepsLevel } from "./run-steps/config.js";
 import { ReviewReadLedger } from "./review-reads.js";
 import { refusalOf } from "./plans/refusal.js";
 import { MAX_PLAN_NUMBER } from "./plans/number.js";
+import { planSummaryForRun, type PlanSummary } from "./plans/publish.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { loadBudgetEvent, ownerBudgetSentence, type BudgetEventView } from "./budget-events.js";
 
@@ -754,6 +755,8 @@ export function codingChildResult(
   budgetEvent?: { event: BudgetEventView; agentName: string } | null,
   /** The results stored on the child's writable extra repositories' rows (#537), in set order. */
   extraResults: readonly unknown[] = [],
+  /** The planner child's plan (planSummaryForRun): ids, page paths, links, states and names only. */
+  plan?: PlanSummary | null,
 ): string {
   // Checked before the "refused" branch: a continuation whose PR closed
   // before the run ever spent anything is stored as "refused" (a preflight
@@ -780,6 +783,26 @@ export function codingChildResult(
     ...(errorCode ? { errorCode } : {}),
     ...(budget ? { budget } : {}),
     ...pullRequestsOf(codingResult, extraResults),
+    ...(plan
+      ? {
+          plan:
+            "error" in plan || "pending" in plan
+              ? plan
+              : {
+                  number: plan.number,
+                  documents: plan.documents.map(({ id, pagePath, url, kind, reviewState }) => ({
+                    id,
+                    pagePath,
+                    ...(url ? { url } : {}),
+                    kind,
+                    reviewState,
+                  })),
+                  ignored: plan.ignored,
+                  withheld: plan.withheld,
+                  skippedReviewers: plan.skippedReviewers.length,
+                },
+        }
+      : {}),
   });
 }
 
@@ -812,6 +835,12 @@ function pullRequestsOf(
 }
 
 /** The results stored on a coding run's writable extra repositories' rows, in set order. Empty on a read failure. */
+/** The planner child's plan for the lead's result; null for any other run, and when it cannot be read. */
+async function planSummaryOf(db: RunnerDb, runId: string): Promise<PlanSummary | null> {
+  // RunnerDb is the real client at runtime; planSummaryForRun reads plan tables RunnerDb does not name.
+  return planSummaryForRun(db as unknown as PrismaClient, runId, null).catch(() => null);
+}
+
 async function extraRepositoryResults(db: Pick<RunnerDb, "codingRunRepository">, runId: string): Promise<unknown[]> {
   try {
     const rows = await db.codingRunRepository.findMany({
@@ -1358,6 +1387,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
         stored?.result,
         await loadBudgetEvent(db, childRunId),
         await extraRepositoryResults(db, childRunId),
+        await planSummaryOf(db, childRunId),
       );
     }
     return nativeChildResult(waited.run, wait.mergeOrderNote);
@@ -2497,6 +2527,7 @@ export async function durableDelegate(
           stored?.result,
           await loadBudgetEvent(db, childRunId),
           await extraRepositoryResults(db, childRunId),
+          await planSummaryOf(db, childRunId),
         ),
       );
     }
