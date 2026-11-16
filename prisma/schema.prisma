@@ -741,33 +741,37 @@ model RunStep {
 /// wardby release. `kind` is "sidecar" (a fresh instance in each run's pod);
 /// "external" is reserved.
 model CodingService {
-  id            String   @id @default(cuid())
-  name          String
-  version       String
-  kind          String   @default("sidecar")
+  id             String   @id @default(cuid())
+  name           String
+  version        String
+  kind           String   @default("sidecar")
   /// Digest-pinned image reference (repo@sha256:...).
-  image         String
-  port          Int
+  image          String
+  /// Digest-pinned image the Substrate job launcher runs instead of `image` (with startCommand, as that
+  /// image's entrypoint is not used); null: Substrate runs `image`. Docker and Kubernetes never read it.
+  substrateImage String?
+  port           Int
   /// Environment for the service container itself: throwaway per-run values, never secrets.
-  serviceEnv    Json     @default("{}")
+  serviceEnv     Json     @default("{}")
   /// Variables the agent's shells receive (DATABASE_URL, PG*, REDIS_URL, ...).
-  testEnv       Json     @default("{}")
+  testEnv        Json     @default("{}")
   /// { command, periodSeconds, timeoutSeconds, failureThreshold }: the sidecar's startup probe.
-  readiness     Json
-  /// The argv that starts the service (its image's ENTRYPOINT + CMD). Used only by the Substrate job
-  /// launcher, which overrides the container command; null: the entry cannot run there.
-  startCommand  Json?
+  readiness      Json
+  /// The argv that starts the service on the Substrate job launcher, which overrides the container
+  /// command: the image's ENTRYPOINT + CMD, or with substrateImage a script that initialises and runs
+  /// the service as that image's non-root user; null: the entry cannot run there.
+  startCommand   Json?
   /// { cpuMillicores, memoryMib, diskMib }: requests equal limits.
-  resources     Json
+  resources      Json
   /// Where the service writes its data: an emptyDir in the run pod.
-  dataPath      String
+  dataPath       String
   /// Further directories the image writes to (socket directory, /tmp): each an emptyDir.
-  writablePaths Json     @default("[]")
-  builtin       Boolean  @default(false)
+  writablePaths  Json     @default("[]")
+  builtin        Boolean  @default(false)
   /// The admin who created it. Audit only, no FK; null for built-ins.
-  createdById   String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   @@unique([name, version])
 }
@@ -2343,34 +2347,34 @@ model HostProviderTrustedAccount {
 }
 
 model Document {
-  id               String              @id @default(cuid())
+  id                       String                @id @default(cuid())
   /// "document" | "design"
-  kind             String              @default("document")
-  title            String
-  ownerId          String
-  owner            Principal           @relation("DocumentOwner", fields: [ownerId], references: [id])
-  agentId          String?
-  agent            Agent?              @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  kind                     String                @default("document")
+  title                    String
+  ownerId                  String
+  owner                    Principal             @relation("DocumentOwner", fields: [ownerId], references: [id])
+  agentId                  String?
+  agent                    Agent?                @relation(fields: [agentId], references: [id], onDelete: SetNull)
   /// e.g. "owner/repo" or "local:/abs/path"; with path, enables send-to-agent
-  repository       String?
+  repository               String?
   /// repo-relative Markdown file (documents) or design directory (designs)
-  path             String?
-  baseRef          String?
+  path                     String?
+  baseRef                  String?
   /// draft | in_review | changes_requested | approved | archived (src/core/documents/review-state.ts)
   reviewState              String                @default("draft")
   /// the state when it was archived; unarchive returns to it
   reviewStateBeforeArchive String?
   /// a principal id (plain text, like DocumentVersion.createdById): may force approve
   finalApproverId          String?
-  currentVersionId String?             @unique
-  createdAt        DateTime            @default(now())
-  updatedAt        DateTime            @updatedAt
-  versions         DocumentVersion[]   @relation("DocumentVersions")
-  currentVersion   DocumentVersion?    @relation("CurrentVersion", fields: [currentVersionId], references: [id])
-  threads          CommentThread[]
-  shareLinks       DocumentShareLink[]
-  contents         DocumentContent[]
-  exports          DocumentExport[]
+  currentVersionId         String?               @unique
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+  versions                 DocumentVersion[]     @relation("DocumentVersions")
+  currentVersion           DocumentVersion?      @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  threads                  CommentThread[]
+  shareLinks               DocumentShareLink[]
+  contents                 DocumentContent[]
+  exports                  DocumentExport[]
   reviewers                DocumentReviewer[]
   reviewEvents             DocumentReviewEvent[]
 
@@ -2379,12 +2383,12 @@ model Document {
 }
 
 model DocumentVersion {
-  id          String    @id @default(cuid())
+  id          String         @id @default(cuid())
   documentId  String
-  document    Document  @relation("DocumentVersions", fields: [documentId], references: [id], onDelete: Cascade)
+  document    Document       @relation("DocumentVersions", fields: [documentId], references: [id], onDelete: Cascade)
   number      Int
   /// "markdown" | "boards-v1"
-  format      String    @default("markdown")
+  format      String         @default("markdown")
   /// Markdown versions only (<= 1 MiB, checked in code); design versions keep their files in DocumentFile
   markdown    String?
   /// kind check, sanitiser, size and fidelity warnings (src/core/documents/warnings.ts)
@@ -2397,8 +2401,8 @@ model DocumentVersion {
   createdById String?
   runId       String?
   summary     String?
-  createdAt   DateTime  @default(now())
-  currentOf   Document? @relation("CurrentVersion")
+  createdAt   DateTime       @default(now())
+  currentOf   Document?      @relation("CurrentVersion")
 
   @@unique([documentId, number])
 }
@@ -2528,13 +2532,13 @@ model DocumentShareLink {
 }
 
 model DocumentGuest {
-  id          String            @id @default(cuid())
+  id          String             @id @default(cuid())
   shareLinkId String
-  shareLink   DocumentShareLink @relation(fields: [shareLinkId], references: [id], onDelete: Cascade)
+  shareLink   DocumentShareLink  @relation(fields: [shareLinkId], references: [id], onDelete: Cascade)
   name        String
   email       String?
-  createdAt   DateTime          @default(now())
-  lastUsedAt  DateTime          @default(now())
+  createdAt   DateTime           @default(now())
+  lastUsedAt  DateTime           @default(now())
   comments    Comment[]
   sessions    WebSession[]
   reviewers   DocumentReviewer[]

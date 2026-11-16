@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { BUILTIN_CODING_SERVICES } from "./builtins.js";
+import { spawnSync } from "node:child_process";
+import { BUILTIN_CODING_SERVICES, MYSQL_SUBSTRATE_SCRIPT, POSTGRES_SUBSTRATE_SCRIPT } from "./builtins.js";
 import {
   CodingServiceDefinitionSchema,
   StoredCodingServicesSchema,
@@ -9,6 +10,7 @@ import {
   resolvedFromDefinition,
   storedServiceLabels,
   storedServiceNames,
+  substrateServiceImage,
   workerServices,
 } from "./catalog.js";
 
@@ -41,11 +43,48 @@ describe("built-in coding services", () => {
     expect(postgres16.testEnv.DATABASE_URL).toBe("postgres://test:test@127.0.0.1:5432/test");
   });
 
-  it("start each image the way its digest's config does", () => {
-    const cmd: Record<string, string> = { postgres: "postgres", redis: "redis-server", mysql: "mysqld" };
+  it("run a non-root image on Substrate for postgres and mysql, each started by its own script", () => {
+    const cnpg: Record<string, string> = {
+      "15": "sha256:11274300143f02d369ea2ff6082b028b6b662915f06bf59f26b808b53823475a",
+      "16": "sha256:34cd4159d07b3410a1b29da35072e2e927a0905e717a61afa3814624a2e8859a",
+      "17": "sha256:70664ebcfa1100361b5bdc28bbf06fdbe08db2dc4ad7bd14de33c5e05fe8ea8e",
+    };
     for (const service of BUILTIN_CODING_SERVICES) {
-      expect(service.startCommand).toEqual(["docker-entrypoint.sh", cmd[service.name]]);
+      if (service.name === "postgres") {
+        expect(service.substrateImage).toBe(`ghcr.io/cloudnative-pg/postgresql@${cnpg[service.version]}`);
+        expect(service.startCommand).toEqual(["/bin/sh", "-c", POSTGRES_SUBSTRATE_SCRIPT]);
+      } else if (service.name === "mysql") {
+        expect(service.substrateImage).toBe(
+          "docker.io/percona/percona-server@sha256:e95917e6dc1242a773e35a1d93f2ede275c9b48eab4354c446d64cefe6bb79be",
+        );
+        expect(service.startCommand).toEqual(["/bin/sh", "-c", MYSQL_SUBSTRATE_SCRIPT]);
+      } else {
+        expect(service.substrateImage).toBeUndefined();
+        expect(service.startCommand).toEqual(["redis-server", "--dir", "/data"]);
+      }
     }
+  });
+
+  it("start scripts that are valid sh and read the service's variables by name only", () => {
+    for (const service of BUILTIN_CODING_SERVICES) {
+      const [shell, flag, script] = service.startCommand ?? [];
+      if (shell !== "/bin/sh") continue;
+      expect(flag).toBe("-c");
+      const check = spawnSync("/bin/sh", ["-n", "-c", script], { encoding: "utf8" });
+      expect(check.stderr).toBe("");
+      expect(check.status).toBe(0);
+      // Every serviceEnv value is a fixed fixture; none is written into the script itself.
+      for (const value of new Set(Object.values(service.serviceEnv))) {
+        expect(script).not.toMatch(new RegExp(`['"=]${value}['"; ]`));
+      }
+      for (const name of Object.keys(service.serviceEnv).filter((key) => key.includes("PASSWORD"))) {
+        expect(script).toContain(`"$${name}"`);
+      }
+    }
+    expect(MYSQL_SUBSTRATE_SCRIPT.startsWith("export PERCONA_TELEMETRY_DISABLE=1;")).toBe(true);
+    // The password reaches initdb through a file, never an argument, and the file goes at once.
+    expect(POSTGRES_SUBSTRATE_SCRIPT).toContain('--pwfile="$pw"');
+    expect(POSTGRES_SUBSTRATE_SCRIPT).toContain('rm -f "$pw"');
   });
 });
 
@@ -80,7 +119,7 @@ describe("CodingServiceDefinitionSchema", () => {
   });
 
   it("accepts a start command and leaves it out when absent", () => {
-    const { startCommand: _startCommand, ...withoutStart } = postgres16;
+    const { startCommand: _startCommand, substrateImage: _substrateImage, ...withoutStart } = postgres16;
     const withStart = CodingServiceDefinitionSchema.parse({
       ...withoutStart,
       startCommand: ["docker-entrypoint.sh", "postgres"],
@@ -90,12 +129,48 @@ describe("CodingServiceDefinitionSchema", () => {
     expect("startCommand" in parsed).toBe(false);
   });
 
+  it("accepts a Substrate image with a start command, and refuses one without", () => {
+    const substrateImage = `registry.example/fakedb-nonroot@sha256:${"c".repeat(64)}`;
+    expect(CodingServiceDefinitionSchema.parse({ ...postgres16, substrateImage }).substrateImage).toBe(substrateImage);
+    const { startCommand: _startCommand, ...withoutStart } = postgres16;
+    const refused = CodingServiceDefinitionSchema.safeParse({ ...withoutStart, substrateImage });
+    expect(refused.success).toBe(false);
+    expect(refused.error?.issues).toContainEqual(
+      expect.objectContaining({
+        path: ["startCommand"],
+        message: "is required with substrateImage (that image's own entrypoint is not used)",
+      }),
+    );
+    const { substrateImage: _image, ...plain } = postgres16;
+    expect("substrateImage" in CodingServiceDefinitionSchema.parse(plain)).toBe(false);
+  });
+
+  it.each([
+    ["a tag", "postgres:16"],
+    ["a short digest", `ghcr.io/cloudnative-pg/postgresql@sha256:${"a".repeat(63)}`],
+    ["an empty string", ""],
+  ])("refuses a Substrate image that is %s", (_label, substrateImage) => {
+    const result = CodingServiceDefinitionSchema.safeParse({ ...postgres16, substrateImage });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toContainEqual(
+      expect.objectContaining({
+        path: ["substrateImage"],
+        message: "must be a registry digest (repo@sha256:<64 hex>)",
+      }),
+    );
+  });
+
+  it("accepts a start-script argument of up to 4096 bytes", () => {
+    const startCommand = ["/bin/sh", "-c", "x".repeat(4096)];
+    expect(CodingServiceDefinitionSchema.safeParse({ ...postgres16, startCommand }).success).toBe(true);
+  });
+
   it.each([
     ["empty", []],
     ["17 arguments", Array.from({ length: 17 }, () => "a")],
     ["an empty argument", [""]],
     ["a multi-line argument", ["a\nb"]],
-    ["an argument over 256 bytes", ["x".repeat(257)]],
+    ["an argument over 4096 bytes", ["x".repeat(4097)]],
     ["a string", "docker-entrypoint.sh"],
     ["not strings", [1]],
   ])("refuses a start command that is %s", (_label, startCommand) => {
@@ -106,7 +181,7 @@ describe("CodingServiceDefinitionSchema", () => {
     const result = CodingServiceDefinitionSchema.safeParse({ ...postgres16, startCommand: ["a\nb"] });
     expect(result.success).toBe(false);
     expect(result.error?.issues).toContainEqual(
-      expect.objectContaining({ path: ["startCommand", 0], message: "must be one line of at most 256 bytes" }),
+      expect.objectContaining({ path: ["startCommand", 0], message: "must be one line of at most 4096 bytes" }),
     );
   });
 });
@@ -129,16 +204,36 @@ describe("stored services", () => {
   });
 
   it("parses a snapshot from before startCommand existed", () => {
-    const { startCommand: _startCommand, ...before } = resolved;
+    // An entry from then had no substrateImage either (it needs a startCommand).
+    const { startCommand: _startCommand, substrateImage: _substrateImage, ...before } = resolved;
     const [parsed] = StoredCodingServicesSchema.parse([before]);
     expect(parsed).toBeDefined();
     expect("startCommand" in parsed).toBe(false);
-    const fromRow = catalogEntryFromRow({ ...postgres16, startCommand: null });
+    const fromRow = catalogEntryFromRow({ ...postgres16, substrateImage: null, startCommand: null });
     expect("startCommand" in fromRow).toBe(false);
+  });
+
+  it("carries the Substrate image into the snapshot, and the Substrate launcher runs it", () => {
+    expect(resolved.substrateImage).toBe(postgres16.substrateImage);
+    expect(parseStoredServices([resolved])[0]?.substrateImage).toBe(postgres16.substrateImage);
+    expect(substrateServiceImage(resolved)).toBe(postgres16.substrateImage);
+    const redis = resolvedFromDefinition(BUILTIN_CODING_SERVICES.find((s) => s.name === "redis")!);
+    expect(substrateServiceImage(redis)).toBe(redis.image);
+  });
+
+  it("parses a snapshot from before substrateImage existed", () => {
+    const { substrateImage: _substrateImage, ...before } = resolved;
+    const [parsed] = StoredCodingServicesSchema.parse([before]);
+    expect(parsed).toBeDefined();
+    expect("substrateImage" in parsed).toBe(false);
+    expect(substrateServiceImage(parsed)).toBe(postgres16.image);
+    const fromRow = catalogEntryFromRow({ startCommand: null, ...postgres16, substrateImage: null });
+    expect("substrateImage" in fromRow).toBe(false);
   });
 
   it("hands the worker only name, version and test variables", () => {
     expect(workerServices([resolved])).toEqual([{ name: "postgres", version: "16", testEnv: postgres16.testEnv }]);
+    expect(JSON.stringify(workerServices([resolved]))).not.toContain("cloudnative-pg");
   });
 });
 

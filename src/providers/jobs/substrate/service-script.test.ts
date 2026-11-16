@@ -3,7 +3,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { BUILTIN_CODING_SERVICES } from "../../../coding/services/builtins.js";
+import {
+  BUILTIN_CODING_SERVICES,
+  MYSQL_SUBSTRATE_SCRIPT,
+  POSTGRES_SUBSTRATE_SCRIPT,
+} from "../../../coding/services/builtins.js";
 import {
   ResolvedCodingServiceSchema,
   resolvedFromDefinition,
@@ -33,7 +37,7 @@ const PINNED_POSTGRES =
     "export POSTGRES_DB='test'",
     "export POSTGRES_PASSWORD='test'",
     "export POSTGRES_USER='test'",
-    "'docker-entrypoint.sh' 'postgres' &",
+    `'/bin/sh' '-c' ${shellQuote(POSTGRES_SUBSTRATE_SCRIPT)} &`,
     "pid=$!",
     'if command -v timeout >/dev/null 2>&1; then t="timeout 2"; else t=""; fi',
     "n=0",
@@ -58,7 +62,7 @@ const PINNED_REDIS =
     'st() { printf \'%s\\n\' "$1" > "$dir/state.tmp" && mv -f "$dir/state.tmp" "$dir/state"; }',
     "idle() { while :; do sleep 3600; done; }",
     "st 'state=starting'",
-    "'docker-entrypoint.sh' 'redis-server' &",
+    "'redis-server' '--dir' '/data' &",
     "pid=$!",
     'if command -v timeout >/dev/null 2>&1; then t="timeout 2"; else t=""; fi',
     "n=0",
@@ -87,7 +91,7 @@ const PINNED_MYSQL =
     "export MYSQL_PASSWORD='test'",
     "export MYSQL_ROOT_PASSWORD='test'",
     "export MYSQL_USER='test'",
-    "'docker-entrypoint.sh' 'mysqld' &",
+    `'/bin/sh' '-c' ${shellQuote(MYSQL_SUBSTRATE_SCRIPT)} &`,
     "pid=$!",
     'if command -v timeout >/dev/null 2>&1; then t="timeout 3"; else t=""; fi',
     "n=0",
@@ -353,6 +357,15 @@ describe("substrateServiceProblems", () => {
     expect(substrateServiceProblems([builtin("postgres", "16"), builtin("redis", "7"), builtin("mysql", "8")])).toEqual(
       [],
     );
+  });
+
+  it("fits every built-in's start script, JSON-escaped, inside the per-service and per-run bounds", () => {
+    const sizes = BUILTIN_CODING_SERVICES.map((definition) =>
+      Buffer.byteLength(JSON.stringify(serviceStartScript(resolvedFromDefinition(definition)))),
+    );
+    for (const size of sizes) expect(size).toBeLessThanOrEqual(MAX_SERVICE_SCRIPT_BYTES);
+    expect(sizes.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(MAX_SERVICE_SCRIPTS_BYTES);
+    expect(substrateServiceProblems(BUILTIN_CODING_SERVICES.map((d) => resolvedFromDefinition(d)))).toEqual([]);
   });
 
   it("flags a missing start command", () => {

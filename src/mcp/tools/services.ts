@@ -32,6 +32,7 @@ const UpdateSchema = z
     name: codingServiceNameSchema,
     version: codingServiceVersionSchema,
     image: z.unknown().optional(),
+    substrateImage: z.unknown().optional(),
     port: z.unknown().optional(),
     serviceEnv: z.unknown().optional(),
     testEnv: z.unknown().optional(),
@@ -57,13 +58,18 @@ function parse<Output>(schema: z.ZodType<Output, unknown>, label: string, value:
   return result.data;
 }
 
-function audit(ctx: McpRequestContext, action: "create" | "update" | "delete", entry: Key & { image?: string }): void {
+function audit(
+  ctx: McpRequestContext,
+  action: "create" | "update" | "delete",
+  entry: Key & { image?: string; substrateImage?: string },
+): void {
   servicesLog.info(
     {
       event: `coding.service_catalog.${action}`,
       name: entry.name,
       version: entry.version,
       ...(entry.image ? { image: entry.image } : {}),
+      ...(entry.substrateImage ? { substrateImage: entry.substrateImage } : {}),
       by: ctx.principal.id,
     },
     "coding service catalog changed",
@@ -95,6 +101,11 @@ const keyJsonSchema = {
 const definitionProperties = {
   ...keyJsonSchema,
   image: { type: "string", description: "Registry digest to run: repo@sha256:<64 hex>. Tags are refused." },
+  substrateImage: {
+    type: "string",
+    description:
+      "Optional registry digest (repo@sha256:<64 hex>) the Substrate job launcher runs instead of image, for a service whose usual image cannot start there (Substrate runs it as the image's default user, without the capabilities a chown or user-switching entrypoint needs). Requires startCommand, since that image's own entrypoint is not used. Docker and Kubernetes ignore it. To remove it, delete and re-create the entry.",
+  },
   port: {
     type: "integer",
     minimum: 1,
@@ -131,7 +142,7 @@ const definitionProperties = {
     maxItems: 16,
     items: { type: "string" },
     description:
-      'The argv that starts the service: its image\'s ENTRYPOINT + CMD (e.g. ["docker-entrypoint.sh", "postgres"]). Required on the Substrate job launcher, which refuses an entry without it at dispatch; Docker and Kubernetes run the image\'s own entrypoint and ignore it. Each argument is one line of at most 256 bytes. To remove it, delete and re-create the entry.',
+      'The argv that starts the service on the Substrate job launcher: its image\'s ENTRYPOINT + CMD (e.g. ["redis-server", "--dir", "/data"]), or with substrateImage, a script (["/bin/sh", "-c", "..."]) that initialises and runs the service as that image\'s user. Required on the Substrate job launcher, which refuses an entry without it at dispatch; Docker and Kubernetes run the image\'s own entrypoint and ignore it. Each argument is one line of at most 4096 bytes. To remove it, delete and re-create the entry.',
   },
   resources: {
     type: "object",
@@ -162,7 +173,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "list_services",
     scope: "agents:read",
     description:
-      "The coding-run service catalog (name, version, image, built in or not): the names a coding agent's codingProfile.services can allow.",
+      "The coding-run service catalog (name, version, image, substrateImage when set, built in or not): the names a coding agent's codingProfile.services can allow.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
       const rows = await ctx.db.codingService.findMany({ orderBy: [{ name: "asc" }, { version: "asc" }] });
@@ -172,6 +183,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
           version: row.version,
           kind: row.kind,
           image: row.image,
+          ...(row.substrateImage ? { substrateImage: row.substrateImage } : {}),
           port: row.port,
           builtin: row.builtin,
         })),
@@ -183,7 +195,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "get_service",
     scope: "agents:read",
     description:
-      "One catalog entry in full, including the variables (testEnv) a run's shells receive — the contract a repository's tests rely on — and its startCommand, if set (used only on the Substrate job launcher).",
+      "One catalog entry in full, including the variables (testEnv) a run's shells receive — the contract a repository's tests rely on — and its startCommand and substrateImage, if set (used only on the Substrate job launcher).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
