@@ -1659,6 +1659,9 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       (await createDocument(db, cipher, { ownerId: owner.id, title: "Review me", markdown: "hello world" })).id;
     const post = (id: string, who: { jar: Jar; csrf: string }, body: object) =>
       call(`/d/api/${id}/review`, { method: "POST", jar: who.jar, csrf: who.csrf, body });
+    /** Names a reviewer, which gives them comment access. */
+    const submitAs = (id: string, who: { jar: Jar; csrf: string }, reviewer: string) =>
+      post(id, who, { action: "submit", reviewers: [reviewer] });
 
     it("adds the review to the page payload and runs the review actions", async () => {
       const id = await newDoc();
@@ -1717,6 +1720,32 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(review.reviewers[0]).not.toHaveProperty("ref");
       expect(review.reviewers[0].me).toBe(false);
       expect(JSON.stringify(review)).not.toContain(member.id);
+    });
+
+    it("lets only the owner make a comment link from the page; its path is answered once and works", async () => {
+      const id = await newDoc();
+      const o = await session(owner.id);
+      const m = await session(member.id);
+      const res = await call(`/d/api/${id}/share-links`, { method: "POST", jar: o.jar, csrf: o.csrf, body: {} });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const made = (await res.json()) as any;
+      expect(made.path).toMatch(/^\/s\/[A-Za-z0-9_-]{43}$/);
+      const row = await db.documentShareLink.findUniqueOrThrow({ where: { id: made.id } });
+      expect([row.documentId, row.permission, row.createdById]).toEqual([id, "comment", owner.id]);
+      // Only the hash is stored.
+      expect(JSON.stringify(row)).not.toContain(made.path.slice(3));
+      // A member without ownership, an outsider and a request without CSRF are refused.
+      await submitAs(id, o, member.id);
+      expect(
+        (await call(`/d/api/${id}/share-links`, { method: "POST", jar: m.jar, csrf: m.csrf, body: {} })).status,
+      ).toBe(403);
+      const out = await session(outsider.id);
+      expect(
+        (await call(`/d/api/${id}/share-links`, { method: "POST", jar: out.jar, csrf: out.csrf, body: {} })).status,
+      ).toBe(404);
+      expect((await call(`/d/api/${id}/share-links`, { method: "POST", jar: o.jar, body: {} })).status).toBe(403);
+      expect(await db.documentShareLink.count({ where: { documentId: id } })).toBe(1);
     });
 
     it("answers the review codes with their statuses and refuses malformed bodies", async () => {
