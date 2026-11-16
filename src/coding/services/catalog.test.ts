@@ -27,7 +27,7 @@ describe("built-in coding services", () => {
   it("are valid catalog entries, pinned to an official image digest, probing and pointing at 127.0.0.1", () => {
     for (const service of BUILTIN_CODING_SERVICES) {
       expect(CodingServiceDefinitionSchema.parse(service)).toEqual(service);
-      expect(service.image).toMatch(/^docker\.io\/library\/(postgres|redis|mysql)@sha256:[a-f0-9]{64}$/);
+      expect(service.image).toMatch(/^docker\.io\/(library\/(postgres|mysql)|valkey\/valkey)@sha256:[a-f0-9]{64}$/);
       expect(service.readiness.command).toContain("127.0.0.1");
       expect(Object.values(service.testEnv).join(" ")).not.toContain("localhost");
     }
