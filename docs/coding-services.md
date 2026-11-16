@@ -194,6 +194,12 @@ An entry has:
 wardby ships these entries, pinned to the official images by digest. They
 change only with a wardby release and cannot be updated or deleted over MCP.
 
+`redis` `7` runs [Valkey](https://valkey.io) 8.1 (BSD-3 licence), the Linux
+Foundation's fork of Redis 7.2. It speaks the same protocol and commands, and
+its image includes `redis-cli` and `redis-server`, so Redis clients and tests
+work unchanged. Redis itself is under RSALv2/SSPLv1 from 7.4 on. To run Redis
+instead, add your own catalog entry with `create_service`.
+
 | Service                     | Variables the agent's shells receive                                                                                                   |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `postgres` `15`, `16`, `17` | `DATABASE_URL=postgres://test:test@127.0.0.1:5432/test`, `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`                      |

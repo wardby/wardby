@@ -3,7 +3,21 @@ id: document-review
 title: Review and approve documents and designs - states, reviewers, force approve, lock and wait_for_review
 summary: Submit a document or design for review by named people or comment-link guests, collect approvals, force approve with a note, lock approved versions, and make an agent session wait for approval.
 audience: operator
-tags: [documents, designs, review, approve, submit_for_review, review_document, wait_for_review, force approve]
+tags:
+  [
+    documents,
+    designs,
+    review,
+    approve,
+    reviewers,
+    add reviewers,
+    start review,
+    comment link,
+    submit_for_review,
+    review_document,
+    wait_for_review,
+    force approve,
+  ]
 appliesTo: ">=0.10.0"
 ---
 
@@ -25,7 +39,7 @@ Only verdicts on the **current version** count, so publishing a new version whil
 
 ## Roles
 
-- **Reviewers**: the people the owner names: members, or guests of this document's comment share links who gave a name. Naming a member gives them comment access if they lack it. The owner is a reviewer only if listed.
+- **Reviewers**: the people the owner names: members with access to the document, or guests of this document's comment share links who gave a name. Naming a member gives them comment access if they lack it. The owner is a reviewer only if listed.
 - **Owner**: submits, changes the reviewer list, names the final approver, archives, and can always force approve.
 - **Final approver** (optional, one person): can force approve; gives verdicts only if also listed as a reviewer.
 - **Writers** (write access) reopen an approved document for review: that creates a new version, a copy of the approved one, and puts it in review. Anyone else, a guest included, is told in the Review tab to ask someone who can edit it.
@@ -50,7 +64,15 @@ A document or design page that is open when the document is approved or archived
 
 ## The page and the Viewer
 
-Every document and design page shows a banner with the state and the approval count (for example "In review · v4 · 1 of 3 approved") and a **Review** tab with the reviewers, their verdicts, the history, and the actions you may take: Submit for review, Edit reviewers, Approve, Request changes, Force approve, Reopen for review, Archive, Unarchive. The Documents tab of the desktop Viewer lists each document's state as a chip.
+Every document and design page shows a banner with the state and the approval count (for example "In review · v4 · 1 of 3 approved") and a **Review** tab with the reviewers, their verdicts, the history, and the actions you may take: Start review, Edit reviewers, Approve, Request changes, Force approve, Reopen for review, Archive, Unarchive. The Documents tab of the desktop Viewer lists each document's state as a chip.
+
+### Choose the reviewers on the page
+
+**Start review** (on a draft) and **Edit reviewers** (in review or changes requested) open the same picker:
+
+- It lists the members with access to this document and the guests of its live comment links who gave a name ("(guest)"). Type in **Find people** to filter by name.
+- For someone without access, **Create comment link** makes a comment share link (default expiry). It is shown once: copy it and send it. After they open it and give a name, **Refresh list** lists them.
+- **Submit for review** (or **Save reviewers**) confirms the list; you may also pick a final approver.
 
 ## MCP tools
 
