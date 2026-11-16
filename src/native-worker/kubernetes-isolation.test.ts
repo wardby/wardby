@@ -6,11 +6,13 @@ import {
   buildNativeWarmNetworkPolicy,
   buildNativeWarmPod,
   NATIVE_INPUT_FILE,
+  NATIVE_PROBE_OUTSIDE,
   nativeEnforcementProbe,
   nativeKubernetesNames,
   nativeRunLabels,
 } from "./kubernetes-isolation.js";
-import type { WorkerInput } from "./protocol.js";
+import { NATIVE_GATEWAY_DENY_PORT } from "./docker-isolation.js";
+import { NATIVE_CANARY_DENY_PORT, NATIVE_PROBE_OUTSIDE_TARGETS, type WorkerInput } from "./protocol.js";
 
 const runId = "cmrun_k8s_1";
 const image = `registry.local:5001/wardby-native-worker@sha256:${"a".repeat(64)}`;
@@ -209,5 +211,12 @@ describe("native warm pool Kubernetes objects", () => {
     expect(policy.egress).toEqual(runPolicy.egress);
     expect(policy.policyTypes).toEqual(runPolicy.policyTypes);
     expect(policy.podSelector?.matchLabels).toEqual(warm().metadata!.labels);
+  });
+});
+
+describe("the Substrate startup canary's targets", () => {
+  it("are the Kubernetes probe's, re-declared for the worker image", () => {
+    expect(NATIVE_PROBE_OUTSIDE_TARGETS).toEqual(NATIVE_PROBE_OUTSIDE);
+    expect(NATIVE_CANARY_DENY_PORT).toBe(NATIVE_GATEWAY_DENY_PORT);
   });
 });

@@ -20,6 +20,14 @@ export function nativeActorName(token: string): string {
 }
 
 /**
+ * A startup canary's actor name: a run-shaped token of `canary|<nonce>` plus `-canary`. The nonce is
+ * random, so the name is unguessable: the gateway's unauthenticated canary route accepts only it.
+ */
+export function nativeCanaryActorName(nonce: string): string {
+  return `${substrateRunToken(`canary|${nonce}`)}${CANARY_ACTOR_SUFFIX}`;
+}
+
+/**
  * Template name derived from its content: `wardby-<role>-` + 16 hex chars. `variant` is a stable
  * digest of everything else in the template (env, worker selector), so two templates that differ
  * in any field never share a name.

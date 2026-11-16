@@ -12,6 +12,10 @@
  *                                  the session's snapshot input (no gateway, no secrets) for a worker that
  *                                  starts without it (Substrate)
  *
+ *   POST /native-gateway/v1/canary body { actor, result } (at most MAX_CANARY_REQUEST_BYTES), no auth → 204, or 400 { ok: false }:
+ *                                  a Substrate startup canary's verdict (substrate-canary.ts). 404 when the
+ *                                  listener was started without a canary store.
+ *
  *   POST /coding-mcp               a coding run's MCP calls, forwarded by the coding proxy's /mcp route
  *                                  (src/core/coding-mcp.ts); its own auth: the run's MCP token, not a
  *                                  gateway capability. 404 when the listener was started without it.
@@ -29,9 +33,12 @@ import {
   GatewayError,
   MAX_MESSAGE_BYTES,
   NATIVE_GATEWAY_CALL_PATH,
+  NATIVE_GATEWAY_CANARY_PATH,
   NATIVE_GATEWAY_INPUT_PATH,
+  NativeCanaryReportSchema,
   toGatewayError,
 } from "./protocol.js";
+import type { NativeCanaryStore } from "./substrate-canary-store.js";
 
 /** The HTTP listener's own log. Exported so tests can watch it. */
 export const httpLog = logger.child({ module: "native-gateway-http" });
@@ -59,6 +66,67 @@ function drainBounded(req: IncomingMessage, limit: number): { readonly cutOff: b
     }
   });
   return state;
+}
+
+/** The canary route's body is one actor name and one enum value; anything longer is refused. */
+export const MAX_CANARY_REQUEST_BYTES = 1024;
+
+/** The body, or undefined once it passes `limit` bytes (the rest is not kept) or the request fails. */
+function readSmallBody(req: IncomingMessage, limit: number): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    let size = 0;
+    let settled = false;
+    const chunks: Buffer[] = [];
+    const settle = (value: string | undefined) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    req.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      size += chunk.length;
+      if (size > limit) settle(undefined);
+      else chunks.push(chunk);
+    });
+    req.on("end", () => settle(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", () => settle(undefined));
+  });
+}
+
+/**
+ * POST /native-gateway/v1/canary: a Substrate startup canary's verdict. Unauthenticated, because the
+ * canary actor holds no credential; what limits it is the store (a report counts only for a random
+ * actor name that already has a row, once, within 10 minutes of its creation) and the schema (that
+ * name's shape and a fixed enum). Every valid body gets 204 whether or not a row took it, so the
+ * route tells a caller nothing (no oracle). The body is never logged; the log line is the result
+ * enum and whether it was recorded. No header is read.
+ */
+async function serveCanary(req: IncomingMessage, res: ServerResponse, canaries: NativeCanaryStore): Promise<void> {
+  const text = await readSmallBody(req, MAX_CANARY_REQUEST_BYTES);
+  let parsed: ReturnType<typeof NativeCanaryReportSchema.safeParse> | undefined;
+  if (text !== undefined) {
+    try {
+      parsed = NativeCanaryReportSchema.safeParse(JSON.parse(text));
+    } catch {
+      parsed = undefined;
+    }
+  }
+  if (!parsed?.success) {
+    res.setHeader("content-type", "application/json");
+    if (text === undefined) {
+      // Cut off: answer, then drop the connection rather than read the rest.
+      res.setHeader("connection", "close");
+      res.on("finish", () => req.destroy());
+    }
+    res.writeHead(400);
+    res.end(JSON.stringify({ ok: false }));
+    return;
+  }
+  const { actor, result } = parsed.data;
+  const recorded = await canaries.report(actor, result, new Date()).catch(() => false);
+  httpLog.info({ result, recorded }, "native substrate canary reported");
+  res.writeHead(204);
+  res.end();
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -107,6 +175,10 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
         if (response.kind === "json") send(response.status, response.body);
         // The route only ever answers JSON; anything else is a fault, answered rather than left hanging.
         else send(500, { ok: false, error: { code: "internal", message: GATEWAY_INTERNAL_MESSAGE } });
+        return;
+      }
+      if (req.method === "POST" && req.url === NATIVE_GATEWAY_CANARY_PATH && deps.canaries) {
+        await serveCanary(req, res, deps.canaries);
         return;
       }
       if (req.method !== "POST" || req.url !== NATIVE_GATEWAY_PATH) {

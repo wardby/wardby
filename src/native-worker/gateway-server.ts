@@ -49,6 +49,7 @@ import {
   type GatewayMethod,
   type GatewayParams,
 } from "./protocol.js";
+import type { NativeCanaryStore } from "./substrate-canary-store.js";
 
 /** Output tokens reserved for a model call that names no maxTokens (as the coding proxy does). */
 export const GATEWAY_DEFAULT_RESERVE_OUTPUT_TOKENS = 4_096;
@@ -64,6 +65,8 @@ export interface GatewayServerDeps {
   pollWindowMs?: number;
   /** Serves POST /coding-mcp on the same listener (remote MCP servers for coding runs); unset → 404. */
   codingMcp?: CodingMcpDeps;
+  /** Serves POST /native-gateway/v1/canary (Substrate startup canaries' verdicts); unset → 404. */
+  canaries?: NativeCanaryStore;
 }
 
 /** What a request gets back: one JSON value, or a stream of model events. */

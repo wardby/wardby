@@ -54,6 +54,7 @@ import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/ind
 import { DeferredExecutor, drainDeferredRuns } from "./providers/executor/deferred.js";
 import { resolveDeferredCodingRun } from "./core/deferred-coding.js";
 import { parseGatewayListen, startGatewayServer } from "./native-worker/http-server.js";
+import { PrismaNativeCanaryStore } from "./native-worker/substrate-canary-store.js";
 import { NATIVE_GATEWAY_DENY_PORT } from "./native-worker/docker-isolation.js";
 import { startDenyPortListener } from "./providers/coding-proxy/deny-port.js";
 import { buildSharedSubstrateApi } from "./providers/substrate/composition.js";
@@ -1140,6 +1141,8 @@ async function nativeGateway(): Promise<void> {
     providers,
     // Coding runs' MCP calls, forwarded by the coding proxy's /mcp route (its own token auth).
     codingMcp: { db: prisma, cipher: secrets, log: logger.child({ module: "coding-mcp" }) },
+    // Substrate startup canaries' verdicts (NATIVE_SANDBOX_LAUNCHER=substrate); no auth, see the route.
+    canaries: new PrismaNativeCanaryStore(prisma),
   });
   // The deny port (NATIVE_GATEWAY_DENY_PORT, default 8791) serves nothing: a worker that can reach the
   // gateway port but not this one proves its NetworkPolicy is programmed and port-scoped.

@@ -1,6 +1,6 @@
 import type { AddressInfo } from "node:net";
 import { inspect } from "node:util";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { LlmStreamEvent } from "../providers/llm/types.js";
 
 // Obviously fake, and code-shaped on purpose: a token like this passes causeCodeOf on its own.
@@ -33,8 +33,10 @@ vi.mock("./gateway-server.js", () => ({
   },
 }));
 
-const { createGatewayServer, httpLog, MAX_INPUT_REQUEST_BYTES, NATIVE_GATEWAY_PATH } = await import("./http-server.js");
-const { GATEWAY_INTERNAL_MESSAGE, GatewayError, NATIVE_GATEWAY_INPUT_PATH } = await import("./protocol.js");
+const { createGatewayServer, httpLog, MAX_CANARY_REQUEST_BYTES, MAX_INPUT_REQUEST_BYTES, NATIVE_GATEWAY_PATH } =
+  await import("./http-server.js");
+const { GATEWAY_INTERNAL_MESSAGE, GatewayError, NATIVE_GATEWAY_CANARY_PATH, NATIVE_GATEWAY_INPUT_PATH } =
+  await import("./protocol.js");
 
 let close: (() => Promise<void>) | undefined;
 afterEach(async () => {
@@ -46,8 +48,8 @@ afterEach(async () => {
   inputRoute.calls = 0;
 });
 
-async function listenOn(): Promise<string> {
-  const server = createGatewayServer({} as never);
+async function listenOn(deps: object = {}): Promise<string> {
+  const server = createGatewayServer(deps as never);
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   close = () =>
     new Promise<void>((done) => {
@@ -158,5 +160,82 @@ describe("native gateway HTTP listener, input route", () => {
       (err: unknown) => (err instanceof Error && err.name === "TimeoutError" ? "timeout" : "closed"),
     );
     expect(outcome).toBe("closed");
+  });
+});
+
+describe("native gateway HTTP listener, canary route", () => {
+  // Obviously fake: a run capability a caller might send. The route must never read or log it.
+  const FAKE_NATIVE_CAP = "fake_native_capability_" + "0".repeat(21);
+  const ACTOR = "wr-0123456789abcdef0123-canary";
+
+  function store(recorded = true) {
+    return { report: vi.fn(async () => recorded), create: vi.fn(), result: vi.fn(), delete: vi.fn() };
+  }
+  const post = (base: string, body: string, headers: Record<string, string> = {}) =>
+    fetch(`${base}${NATIVE_GATEWAY_CANARY_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body,
+      signal: AbortSignal.timeout(5_000),
+    });
+
+  it("records a valid verdict and answers 204, logging only the result and whether it was recorded", async () => {
+    const canaries = store();
+    const lines: unknown[] = [];
+    const spy = vi.spyOn(httpLog, "info").mockImplementation((obj: unknown) => void lines.push(obj));
+    try {
+      const base = await listenOn({ canaries });
+      const response = await post(base, JSON.stringify({ actor: ACTOR, result: "pass" }), {
+        authorization: `Bearer ${FAKE_NATIVE_CAP}`,
+      });
+      expect(response.status).toBe(204);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(canaries.report).toHaveBeenCalledWith(ACTOR, "pass", expect.any(Date));
+    expect(lines).toEqual([{ result: "pass", recorded: true }]);
+    for (const line of lines)
+      expect(Object.keys(line as object).every((k) => ["result", "recorded"].includes(k))).toBe(true);
+    expect(inspect(lines, { depth: 10 })).not.toContain(FAKE_NATIVE_CAP);
+    expect(inspect(lines, { depth: 10 })).not.toContain(ACTOR);
+  });
+
+  it("answers 204 whether or not a row took the report (no oracle)", async () => {
+    const canaries = store(false);
+    const spy = vi.spyOn(httpLog, "info").mockImplementation(() => {});
+    onTestFinished(() => spy.mockRestore());
+    const base = await listenOn({ canaries });
+    const response = await post(base, JSON.stringify({ actor: ACTOR, result: "outside_reachable" }));
+    expect(response.status).toBe(204);
+    canaries.report.mockRejectedValueOnce(new Error("database down"));
+    expect((await post(base, JSON.stringify({ actor: ACTOR, result: "pass" }))).status).toBe(204);
+  });
+
+  it.each([
+    ["an extra field", JSON.stringify({ actor: ACTOR, result: "pass", extra: 1 })],
+    ["a run actor's name", JSON.stringify({ actor: "wr-0123456789abcdef0123-native", result: "pass" })],
+    ["an unknown result", JSON.stringify({ actor: ACTOR, result: "maybe" })],
+    ["a body that is not JSON", "pass"],
+    ["a 2 KiB body", JSON.stringify({ actor: ACTOR, result: "pass", pad: "x".repeat(2 * MAX_CANARY_REQUEST_BYTES) })],
+  ])("refuses %s with 400 and records nothing", async (_name, body) => {
+    const canaries = store();
+    const lines: unknown[] = [];
+    const spy = vi.spyOn(httpLog, "info").mockImplementation((obj: unknown) => void lines.push(obj));
+    try {
+      const base = await listenOn({ canaries });
+      const response = await post(base, body);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ ok: false });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(canaries.report).not.toHaveBeenCalled();
+    expect(lines).toEqual([]);
+  });
+
+  it("is not served without a canary store", async () => {
+    const base = await listenOn();
+    const response = await post(base, JSON.stringify({ actor: ACTOR, result: "pass" }));
+    expect(response.status).toBe(404);
   });
 });

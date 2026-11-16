@@ -4,7 +4,8 @@ import { RecordingSecrets } from "../providers/jobs/substrate/launcher.test-supp
 import type { SubstrateApi } from "../providers/substrate/api.js";
 import { FakeSubstrateApi, type FakeSubstrateOptions } from "../providers/substrate/fake-api.js";
 import { nativeActorName, substrateRunToken } from "../providers/substrate/names.js";
-import type { WorkerInput } from "./protocol.js";
+import type { NativeCanaryResult, WorkerInput } from "./protocol.js";
+import { MemoryNativeCanaryStore, type NativeCanaryStore } from "./substrate-canary-store.js";
 import {
   SubstrateNativeWorkerLauncher,
   type NativeSubstrateCallFailure,
@@ -64,14 +65,24 @@ const METHODS = [
 ] as const satisfies readonly (keyof SubstrateApi)[];
 type Method = (typeof METHODS)[number];
 
+/** Whether a call is about a startup canary actor (an argument names `wr-…-canary`). */
+const isCanaryCall = (args: unknown[]) => args.some((arg) => typeof arg === "string" && arg.endsWith("-canary"));
+
 /**
  * The in-memory fake with every call recorded (`calls`, with its arguments, for leak checks; `order`,
  * shared with the Secrets, for call order) and per-method hooks: `before[m]` runs before the fake
  * answers and may throw (or wait) instead.
+ *
+ * A call about the startup canary's actor is kept apart (`canaryCalls`, `canaryBefore`), so a run's
+ * calls, order and failure hooks are the same with the canary as without it. `onCanaryResumed` runs
+ * after a canary actor resumes: the harness reports its verdict there, as the worker would.
  */
 export class RecordingSubstrateApi extends FakeSubstrateApi {
   readonly calls: { method: Method; args: unknown[] }[] = [];
   readonly before: Partial<Record<Method, (...args: unknown[]) => Promise<void>>> = {};
+  readonly canaryCalls: { method: Method; args: unknown[] }[] = [];
+  readonly canaryBefore: Partial<Record<Method, (...args: unknown[]) => Promise<void>>> = {};
+  onCanaryResumed: ((actor: string) => Promise<void>) | undefined;
   constructor(
     options: FakeSubstrateOptions,
     readonly order: string[],
@@ -80,6 +91,13 @@ export class RecordingSubstrateApi extends FakeSubstrateApi {
     for (const method of METHODS) {
       const real = (this[method] as (...args: unknown[]) => Promise<unknown>).bind(this);
       (this as unknown as Record<Method, unknown>)[method] = async (...args: unknown[]) => {
+        if (isCanaryCall(args)) {
+          this.canaryCalls.push({ method, args: structuredClone(args) });
+          await this.canaryBefore[method]?.(...args);
+          const out = await real(...args);
+          if (method === "resumeActor") await this.onCanaryResumed?.(args[1] as string);
+          return out;
+        }
         this.calls.push({ method, args: structuredClone(args) });
         this.order.push(method);
         await this.before[method]?.(...args);
@@ -99,6 +117,24 @@ export class RecordingSubstrateApi extends FakeSubstrateApi {
       await previous?.(...args);
     };
   }
+}
+
+/** The canary's `method` throws `error` for its next `times` calls. */
+export function failNextCanary(
+  api: RecordingSubstrateApi,
+  method: Method,
+  error: Error | (() => Error),
+  times = 1,
+): void {
+  let left = times;
+  const previous = api.canaryBefore[method];
+  api.canaryBefore[method] = async (...args) => {
+    if (left > 0) {
+      left -= 1;
+      throw typeof error === "function" ? error() : error;
+    }
+    await previous?.(...args);
+  };
 }
 
 /** RecordingSecrets whose calls also go to the shared order. */
@@ -122,6 +158,10 @@ export interface NativeHarnessOptions {
   goldenWaitMs?: number;
   power?: Power;
   launcher?: Partial<SubstrateNativeWorkerLauncherOptions>;
+  /** The verdict the fake canary worker reports when its actor resumes, or "silent" for none. Default pass. */
+  canaryVerdict?: NativeCanaryResult | "silent";
+  /** Default: a MemoryNativeCanaryStore. */
+  canaries?: NativeCanaryStore;
 }
 
 export function nativeHarness(options: NativeHarnessOptions = {}) {
@@ -133,12 +173,19 @@ export function nativeHarness(options: NativeHarnessOptions = {}) {
   const sleeps: number[] = [];
   const failures: NativeSubstrateCallFailure[] = [];
   const config = { ...NATIVE_CONFIG, ...options.config };
+  const canaries = options.canaries ?? new MemoryNativeCanaryStore();
+  const harness = { canaryVerdict: options.canaryVerdict ?? "pass" };
+  // The canary worker: probes, then posts its verdict through the gateway's route (the store).
+  api.onCanaryResumed = async (actor) => {
+    if (harness.canaryVerdict !== "silent") await canaries.report(actor, harness.canaryVerdict, new Date());
+  };
   const launcher = new SubstrateNativeWorkerLauncher({
     api,
     secrets,
     config,
     sessionActive: async (runId) => sessions.get(runId) ?? false,
     goldenWaitMs: options.goldenWaitMs ?? 60_000,
+    canaries,
     pollMs: 5,
     now: () => clock,
     sleep: async (ms) => {
@@ -158,6 +205,9 @@ export function nativeHarness(options: NativeHarnessOptions = {}) {
     sessions,
     launcher,
     config,
+    canaries,
+    /** Set `canaryVerdict` to change what the next canary reports. */
+    harness,
     order,
     sleeps,
     failures,

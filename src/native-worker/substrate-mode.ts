@@ -15,19 +15,20 @@
 
 import type { Server } from "node:http";
 import { startReadyServer, stderrLogger, waitForRunActor, type Logger } from "../substrate-bridge/common.js";
-import { DEFAULT_METADATA_DIR, DEFAULT_READY_PORT } from "../substrate-bridge/constants.js";
+import { CANARY_SUFFIX, DEFAULT_METADATA_DIR, DEFAULT_READY_PORT } from "../substrate-bridge/constants.js";
 import { createHttpTransport, fetchSandboxInput } from "./http-transport.js";
 import {
   GatewayError,
   GatewayInputResponseSchema,
-  NATIVE_GATEWAY_CALL_PATH,
   NATIVE_GATEWAY_INPUT_PATH,
   NATIVE_PLACEHOLDER_CAPABILITY,
+  nativeGatewayRouteUrl,
   WorkerInputSchema,
   type GatewayErrorCode,
   type WorkerInput,
 } from "./protocol.js";
 import { rememberSecretValue } from "./stderr-redaction.js";
+import { runNativeCanary } from "./substrate-canary.js";
 import { runNativeWorker, type GatewayTransport } from "./worker.js";
 
 export { NATIVE_SUBSTRATE_ENV } from "./protocol.js";
@@ -45,8 +46,10 @@ export interface SubstrateModeOptions {
   pollMs?: number;
   /** Tests: replaces runNativeWorker. */
   run?: (input: WorkerInput, transport: GatewayTransport) => Promise<void>;
-  /** Tests: replaces the canary (Task 7). Until then a canary name fails with native_substrate_canary_unsupported. */
+  /** Tests: replaces the canary. Default: runNativeCanary with this actor's name (and `fetch`, `sleep`, `connect`). */
   canary?: (gatewayUrl: string) => Promise<void>;
+  /** Tests: replaces the default canary's egress probe. */
+  connect?: (host: string, port: number) => Promise<boolean>;
 }
 
 /** The gateway error codes a worker knows; any other code from an answer is reported as `internal`. */
@@ -72,18 +75,9 @@ function requireGatewayUrl(env: NodeJS.ProcessEnv): string {
   throw new Error("native_substrate_env_missing");
 }
 
-/**
- * The input route's URL from NATIVE_GATEWAY_URL (the call route's URL): the same origin and any path
- * prefix in front of the call route, then NATIVE_GATEWAY_INPUT_PATH.
- */
+/** The input route's URL from NATIVE_GATEWAY_URL (the call route's URL), keeping any path prefix. */
 export function gatewayInputUrl(gatewayUrl: string): string {
-  const url = new URL(gatewayUrl);
-  const path = url.pathname.replace(/\/+$/, "");
-  const prefix = path.endsWith(NATIVE_GATEWAY_CALL_PATH) ? path.slice(0, -NATIVE_GATEWAY_CALL_PATH.length) : path;
-  url.pathname = `${prefix}${NATIVE_GATEWAY_INPUT_PATH}`;
-  url.search = "";
-  url.hash = "";
-  return url.href;
+  return nativeGatewayRouteUrl(gatewayUrl, NATIVE_GATEWAY_INPUT_PATH);
 }
 
 /**
@@ -106,13 +100,21 @@ async function fetchInput(gatewayUrl: string, options: SubstrateModeOptions): Pr
 
 /** Waits for the actor's name, then runs the canary or the run. */
 async function runNamed(gatewayUrl: string, log: Logger, options: SubstrateModeOptions): Promise<void> {
-  const { role } = await waitForRunActor(options.metadataDir ?? DEFAULT_METADATA_DIR, ["native", "canary"], {
+  const { token, role } = await waitForRunActor(options.metadataDir ?? DEFAULT_METADATA_DIR, ["native", "canary"], {
     log,
     ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
   });
   if (role === "canary") {
-    if (!options.canary) throw new Error("native_substrate_canary_unsupported");
-    await options.canary(gatewayUrl);
+    // The canary probes, posts its verdict and then idles like a finished run, pass or fail: the
+    // launcher reads the verdict from the gateway and deletes the actor. A verdict it could not post
+    // throws (exit 1).
+    if (options.canary) await options.canary(gatewayUrl);
+    else
+      await runNativeCanary(gatewayUrl, `${token}${CANARY_SUFFIX}`, {
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+        ...(options.sleep ? { sleep: options.sleep } : {}),
+        ...(options.connect ? { connect: options.connect } : {}),
+      });
     return;
   }
   const raw = await fetchInput(gatewayUrl, options);

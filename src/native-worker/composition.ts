@@ -17,12 +17,13 @@ import { SANDBOX_RUN_MAX_SEC } from "../core/runner.js";
 import { NativeSandboxExecutor, type ManagedWorkerLauncher } from "./sandbox-executor.js";
 import type { SubstrateApi } from "../providers/substrate/api.js";
 import { createSubstrateApiFor } from "../providers/substrate/composition.js";
+import { PrismaNativeCanaryStore, type NativeCanaryDb } from "./substrate-canary-store.js";
 import { SubstrateNativeWorkerLauncher } from "./substrate-launcher.js";
 import { PooledWorkerLauncher, type WarmWorkerLauncher } from "./warm-pool.js";
 import { PrismaWarmPoolLedger, type WarmPoolDb } from "./warm-pool-ledger.js";
 
 export function buildNativeSandboxExecutor(options: {
-  db: RunnerDb & GatewayLedgerDb & WarmPoolDb;
+  db: RunnerDb & GatewayLedgerDb & WarmPoolDb & NativeCanaryDb;
   /** Read at call time: the composition root patches `executor` on after wrapping this one. */
   providers: NativeRunProviders;
   env?: NodeJS.ProcessEnv;
@@ -89,6 +90,8 @@ export function buildNativeSandboxExecutor(options: {
               (await options.db.nativeGatewaySession.findUnique({ where: { runId }, select: { status: true } }))
                 ?.status === "active",
             goldenWaitMs: config.goldenWaitSec * 1000,
+            // The startup canary's verdict, recorded by the gateway's canary route.
+            canaries: new PrismaNativeCanaryStore(options.db),
             power: options.power ?? DISABLED_POWER,
           }));
   // The pool also starts with size 0 when the launcher can run one: its first tick removes workers

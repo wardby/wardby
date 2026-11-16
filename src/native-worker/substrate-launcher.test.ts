@@ -5,8 +5,16 @@ import {
   SubstrateUnavailableError,
 } from "../providers/substrate/api.js";
 import { NATIVE_SANDBOX_LAUNCH_ABANDONED } from "./launch.js";
-import { FAKE_NATIVE_CAP, FAKE_PROMPT, fakePower, nativeHarness } from "./substrate-launcher.test-support.js";
-import { nativeEgress, nativeTemplate } from "./substrate-specs.js";
+import type { MemoryNativeCanaryStore } from "./substrate-canary-store.js";
+import {
+  FAKE_NATIVE_CAP,
+  FAKE_PROMPT,
+  failNextCanary,
+  fakePower,
+  NATIVE_CONFIG,
+  nativeHarness,
+} from "./substrate-launcher.test-support.js";
+import { nativeCanaryEgress, nativeEgress, nativeTemplate } from "./substrate-specs.js";
 
 const substrateWarn = vi.hoisted(() => vi.fn());
 vi.mock("../core/logger.js", async (importOriginal) => {
@@ -455,5 +463,111 @@ describe("SubstrateNativeWorkerLauncher state", () => {
     expect(await h.launcher.listWorkers()).toEqual([]);
     await expect(h.launcher.removeByWorkerName("x")).resolves.toBeUndefined();
     expect(h.order).toEqual([]);
+  });
+});
+
+describe("SubstrateNativeWorkerLauncher startup canary", () => {
+  const UNENFORCED = (reason: string) =>
+    `native_sandbox_network_unenforced: the Substrate egress policy could not be proven for this worker template (${reason}).`;
+  const canaryActors = (h: ReturnType<typeof nativeHarness>) => [
+    ...new Set(h.api.canaryCalls.filter((c) => c.method === "createActor").map((c) => c.args[1] as string)),
+  ];
+
+  it("proves the template once, then launches runs", async () => {
+    const h = nativeHarness();
+    await h.launcher.start();
+    await h.launcher.launch(h.input());
+    const [actor] = canaryActors(h);
+    expect(actor).toMatch(/^wr-[0-9a-f]{20}-canary$/);
+    const create = h.api.canaryCalls.find((c) => c.method === "createActor");
+    expect(create?.args).toEqual([NATIVE_CONFIG.atespace, actor, nativeTemplate(NATIVE_CONFIG).name]);
+    const policy = h.api.canaryCalls.find((c) => c.method === "putEgressPolicy");
+    expect(policy?.args).toEqual([NATIVE_CONFIG.atespace, actor, nativeCanaryEgress(NATIVE_CONFIG)]);
+    expect(JSON.stringify(policy?.args)).not.toContain("replaceHeaders");
+    expect(h.api.canaryCalls.map((c) => c.method)).toEqual([
+      "createActor",
+      "putEgressPolicy",
+      "resumeActor",
+      "deleteEgressPolicy",
+      "deleteActor",
+    ]);
+    // Deleted with its policy and its row.
+    expect(h.api.actors.has(`${NATIVE_CONFIG.atespace}/${actor}`)).toBe(false);
+    expect(h.api.egressPolicies.has(`${NATIVE_CONFIG.atespace}/${actor}`)).toBe(false);
+    expect((h.canaries as MemoryNativeCanaryStore).rows.size).toBe(0);
+    // The run itself launched as usual.
+    expect(h.api.actors.get(h.actorKey)?.state).toBe("RUNNING");
+    // A second launch makes no second canary.
+    await h.launcher.launch(h.input({ runId: "run-2" }));
+    expect(canaryActors(h)).toHaveLength(1);
+  });
+
+  it("runs the canary on the first launch when start was not called, before the run's Secret", async () => {
+    const h = nativeHarness();
+    h.api.canaryBefore.createActor = async () => {
+      expect(h.secrets.calls).toEqual([]);
+    };
+    await h.launcher.launch(h.input());
+    expect(canaryActors(h)).toHaveLength(1);
+    expect(h.api.actors.get(h.actorKey)?.state).toBe("RUNNING");
+  });
+
+  it.each([
+    ["deny_port_reachable", { canaryVerdict: "deny_port_reachable" as const }],
+    ["outside_reachable", { canaryVerdict: "outside_reachable" as const }],
+    ["gateway_unreachable", { canaryVerdict: "gateway_unreachable" as const }],
+    ["canary_timeout", { canaryVerdict: "silent" as const, launcher: { canaryTimeoutMs: 5_000 } }],
+  ])("refuses every launch after a %s canary, with no second canary", async (reason, options) => {
+    const h = nativeHarness(options);
+    await expect(h.launcher.launch(h.input())).rejects.toThrow(UNENFORCED(reason));
+    expect(h.secrets.calls).toEqual([]);
+    // The verdict is final: the next launch is refused the same way, and no canary runs again.
+    h.harness.canaryVerdict = "pass";
+    const err = (await h.launcher.launch(h.input({ runId: "run-2" })).catch((e: unknown) => e)) as Error;
+    expect(err.message).toBe(UNENFORCED(reason));
+    expect(h.secrets.calls).toEqual([]);
+    expect(canaryActors(h)).toHaveLength(1);
+    expect(h.api.actors.size).toBe(0);
+    // The canary's one log line: the template and the result.
+    expect(substrateWarn).toHaveBeenCalledWith(
+      { template: nativeTemplate(NATIVE_CONFIG).name, result: reason },
+      "native substrate canary",
+    );
+  });
+
+  it("waits a second between reads of the verdict, up to canaryTimeoutMs", async () => {
+    const h = nativeHarness({ canaryVerdict: "silent", launcher: { canaryTimeoutMs: 3_000 } });
+    await expect(h.launcher.launch(h.input())).rejects.toThrow(UNENFORCED("canary_timeout"));
+    expect(h.sleeps).toEqual([1_000, 1_000, 1_000]);
+  });
+
+  it("retries the canary after a failed call", async () => {
+    const h = nativeHarness();
+    failNextCanary(h.api, "createActor", new SubstrateUnavailableError("quoting " + FAKE_NATIVE_CAP));
+    const err = (await h.launcher.launch(h.input()).catch((e: unknown) => e)) as Error;
+    expect(err.message).toBe(UNENFORCED("createActor_failed"));
+    expect(h.secrets.calls).toEqual([]);
+    await h.launcher.launch(h.input());
+    expect(canaryActors(h)).toHaveLength(2);
+    expect(h.api.actors.get(h.actorKey)?.state).toBe("RUNNING");
+    expect(JSON.stringify(substrateWarn.mock.calls)).not.toContain(FAKE_NATIVE_CAP);
+  });
+
+  it("refuses for room when the canary finds none, and tries again next launch", async () => {
+    const h = nativeHarness({ goldenWaitMs: 0 });
+    failNextCanary(h.api, "resumeActor", () => new SubstrateExhaustedError("no room"));
+    await expect(h.launcher.launch(h.input())).rejects.toThrow(CAPACITY);
+    expect(h.secrets.calls).toEqual([]);
+    await h.launcher.launch(h.input());
+    expect(canaryActors(h)).toHaveLength(2);
+  });
+
+  it("never gives the canary a credential", async () => {
+    const h = nativeHarness();
+    await h.launcher.launch(h.input());
+    const canary = JSON.stringify([h.api.canaryCalls, nativeTemplate(NATIVE_CONFIG)]);
+    expect(canary).not.toContain("credentialUri");
+    expect(canary).not.toContain(FAKE_NATIVE_CAP);
+    expect(JSON.stringify(h.secrets.calls)).not.toContain("-canary");
   });
 });

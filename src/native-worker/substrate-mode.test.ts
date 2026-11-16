@@ -280,11 +280,31 @@ describe("runSubstrateMode", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("refuses a canary name until the canary exists", async () => {
-    const { options, recorded, name } = setup();
+  it("a canary name runs the canary: one POST to the canary route, no input fetch, then idles", async () => {
+    const recorded = recordingFetch([() => json({ ok: true }), () => new Response(null, { status: 204 })]);
+    const connect = vi.fn(async () => false);
+    const { options, run, name } = setup({ fetch: recorded.fetch, connect });
+    const { done, port } = await start(options);
+    name("wr-0123456789abcdef0123-canary");
+    await done;
+    expect(recorded.calls.map((c) => [c.init?.method ?? "GET", c.url])).toEqual([
+      ["GET", "http://wardby-native-gateway.wardby.svc.cluster.local:8790/healthz"],
+      ["POST", "http://wardby-native-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/canary"],
+    ]);
+    expect(JSON.parse(recorded.calls[1].init?.body as string)).toEqual({
+      actor: "wr-0123456789abcdef0123-canary",
+      result: "pass",
+    });
+    expect(recorded.calls.some((c) => c.url === INPUT_URL)).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+    expect(await readyz(port)).toBe(200);
+  });
+
+  it("fails a canary whose verdict cannot be posted", async () => {
+    const recorded = recordingFetch([() => json({ ok: true }), () => new Response(null, { status: 500 })]);
+    const { options, name } = setup({ fetch: recorded.fetch, connect: async () => false });
     const { done } = await start(options);
     name("wr-0123456789abcdef0123-canary");
-    await expect(done).rejects.toThrow("native_substrate_canary_unsupported");
-    expect(recorded.calls).toHaveLength(0);
+    await expect(done).rejects.toThrow("native_substrate_canary_unreported");
   });
 });

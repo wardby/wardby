@@ -13,8 +13,14 @@
  * A launch, in order: wake the gateway (low-power mode); ensure the template; check for room; the
  * Secret; the actor (a stale one under the name is deleted and created again, never taken over);
  * its egress policy; then resume. Every policy exists before the resume, so the session is ready at
- * launch (`networkReadyAtLaunch`, D1): nothing runs in the actor before its egress is pinned (the
- * canary, Task 7, proves the template's denials once per template). A resume refused for room is
+ * launch (`networkReadyAtLaunch`, D1): nothing runs in the actor before its egress is pinned.
+ *
+ * That trust is proven once per process and template by a startup canary (D1): an actor resumed from
+ * the same template, under the run's rule minus the credential (nativeCanaryEgress), probes the
+ * gateway, its deny port and the outside (substrate-canary.ts) and posts its verdict to the gateway,
+ * which records it (NativeCanaryStore). Until the canary passes no run launches; a failed verdict or
+ * no verdict in time refuses every launch with native_sandbox_network_unenforced until the process
+ * restarts, and a failed call is tried again by the next launch. A resume refused for room is
  * retried while the template's golden snapshot may still be building (`goldenWaitMs` after its first
  * ensure by this process, unless Substrate reports it ready); past that it is native_sandbox_capacity.
  * Any failure deletes what the launch made; a delete that fails there is reported, and the ended
@@ -33,6 +39,7 @@
  * the executor sweeps from session rows (`listsWorkers = false`).
  */
 
+import { randomBytes } from "node:crypto";
 import { logger } from "../core/logger.js";
 import { DISABLED_POWER, wakeTimeoutMs, type Power } from "../core/power.js";
 import {
@@ -42,6 +49,7 @@ import {
 } from "../providers/jobs/kubernetes-api.js";
 import {
   createFreshActor,
+  deleteActorWithPolicy,
   ensureTemplate,
   SubstrateGoldenSnapshotFailedError,
   substrateErrorCode,
@@ -49,14 +57,21 @@ import {
   type SubstrateCall,
 } from "../providers/substrate/actors.js";
 import { SubstrateExhaustedError, type ActorTemplateSpec, type SubstrateApi } from "../providers/substrate/api.js";
-import { nativeActorName, substrateRunToken } from "../providers/substrate/names.js";
+import { nativeActorName, nativeCanaryActorName, substrateRunToken } from "../providers/substrate/names.js";
 import { canPlaceAll, type Room } from "../providers/substrate/placement.js";
 import type { NativeWorkerState } from "./docker-launcher.js";
-import { NATIVE_SANDBOX_CAPACITY } from "./kubernetes-launcher.js";
+import { NATIVE_SANDBOX_CAPACITY, NATIVE_SANDBOX_NETWORK_UNENFORCED } from "./kubernetes-launcher.js";
 import { NATIVE_SANDBOX_LAUNCH_ABANDONED, type WorkerHandle, type WorkerLaunchOptions } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import type { ManagedWorkerLauncher } from "./sandbox-executor.js";
-import { nativeEgress, nativeRunSecret, nativeTemplate, type NativeSubstrateLaunchConfig } from "./substrate-specs.js";
+import type { NativeCanaryStore } from "./substrate-canary-store.js";
+import {
+  nativeCanaryEgress,
+  nativeEgress,
+  nativeRunSecret,
+  nativeTemplate,
+  type NativeSubstrateLaunchConfig,
+} from "./substrate-specs.js";
 
 const substrateNativeLog = logger.child({ module: "native-substrate-launcher" });
 
@@ -79,6 +94,10 @@ export interface SubstrateNativeWorkerLauncherOptions {
   sessionActive: (runId: string) => Promise<boolean>;
   /** SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC in ms. */
   goldenWaitMs: number;
+  /** Where the gateway records the startup canary's verdict (composition: Prisma). */
+  canaries: NativeCanaryStore;
+  /** How long the startup canary may take to report, default 120 000. */
+  canaryTimeoutMs?: number;
   power?: Power;
   /** inspect polling, default 1000. */
   pollMs?: number;
@@ -110,10 +129,39 @@ const ABANDONED_MESSAGE = `${NATIVE_SANDBOX_LAUNCH_ABANDONED}: the run ended whi
 /** The run ended while the launch waited for room. */
 class Abandoned extends Error {}
 
+const unenforcedMessage = (reason: string) =>
+  `${NATIVE_SANDBOX_NETWORK_UNENFORCED}: the Substrate egress policy could not be proven for this worker template (${reason}).`;
+
+/** The template's startup canary did not pass: the run is refused with this fixed message. */
+class Unenforced extends Error {}
+
+/** A call of the startup canary failed: only its name is kept (`<call>_failed`), never the error. */
+class CanaryCallFailed extends Error {
+  constructor(readonly call: string) {
+    super(`${call}_failed`);
+  }
+}
+
+/**
+ * The startup canary's outcome: its verdict, `canary_timeout`, or `<call>_failed`. `final` is false
+ * only for a failed call, which the next launch tries again; anything else stands until restart.
+ */
+interface CanaryOutcome {
+  result: string;
+  final: boolean;
+  /** Its resume was refused for room past the golden window (result resumeActor_failed). */
+  noRoom?: boolean;
+}
+
+/** How often the launcher reads the canary's verdict. */
+const CANARY_POLL_MS = 1_000;
+const DEFAULT_CANARY_TIMEOUT_MS = 120_000;
+
 /** The run error for a failed launch: a fixed code and enums, never a message from Substrate or Kubernetes. */
 function launchError(error: unknown): Error {
   if (error instanceof NoRoom) return new Error(CAPACITY_MESSAGE);
   if (error instanceof Abandoned) return new Error(ABANDONED_MESSAGE);
+  if (error instanceof Unenforced) return new Error(error.message);
   if (error instanceof NamedCallFailed) {
     // A Kubernetes error is never a Substrate one, so a Secret failure is always `unexpected`.
     return new Error(`${NATIVE_SANDBOX_SUBSTRATE_FAILED}: ${error.call}: ${substrateErrorCode(error.original)}`);
@@ -134,6 +182,8 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
    */
   private readonly firstEnsuredAt = new Map<string, number>();
   private preparing: Promise<void> | undefined;
+  /** The startup canary, run once per process; cleared after a failed call, so the next launch retries. */
+  private canary: Promise<CanaryOutcome> | undefined;
 
   constructor(private readonly options: SubstrateNativeWorkerLauncherOptions) {
     // Built once, so a size that rounds to nothing fails at startup (substrate_limits_too_small).
@@ -193,7 +243,7 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     else if (info?.goldenSnapshotFailed || !this.firstEnsuredAt.has(name)) this.firstEnsuredAt.set(name, this.now());
   }
 
-  /** Ensures the template (and, Task 7, runs the canary); a failure is logged with fixed fields only. */
+  /** Ensures the template, then runs the canary; a failure is logged with fixed fields only. */
   private async prepare(): Promise<void> {
     const call: NamedCall = async (name, fn) => {
       try {
@@ -209,7 +259,85 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     try {
       await this.ensure(call);
     } catch {
-      // Logged above; the next launch ensures it again.
+      // Logged above; the next launch ensures it again (and then runs the canary).
+      return;
+    }
+    await this.prove();
+  }
+
+  /** The startup canary's outcome: shared while it runs, kept once final, cleared after a failed call. */
+  private prove(): Promise<CanaryOutcome> {
+    if (!this.canary) {
+      const running = this.runCanary().then((outcome) => {
+        if (!outcome.final && this.canary === running) this.canary = undefined;
+        return outcome;
+      });
+      this.canary = running;
+    }
+    return this.canary;
+  }
+
+  /**
+   * One canary: its row, an actor from the run template with the credential-free rule, the resume
+   * (with a run's golden-window retry), then the verdict, read every second up to canaryTimeoutMs.
+   * The actor (with its policy) and the row are then deleted, best effort. Never throws; the one log
+   * line is the template and the outcome.
+   */
+  private async runCanary(): Promise<CanaryOutcome> {
+    const { canaries, config } = this.options;
+    const template = this.template.name;
+    const actor = nativeCanaryActorName(randomBytes(16).toString("hex"));
+    const call: NamedCall = async (name, fn, recoverable) => {
+      try {
+        return await fn();
+      } catch (error) {
+        if (recoverable?.(error) || error instanceof CanaryCallFailed) throw error;
+        throw new CanaryCallFailed(name);
+      }
+    };
+    const store = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+      try {
+        return await fn();
+      } catch {
+        throw new CanaryCallFailed(name);
+      }
+    };
+    let rowMade = false;
+    let actorMade = false;
+    let outcome: CanaryOutcome;
+    try {
+      await store("recordCanary", () => canaries.create(actor, template));
+      rowMade = true;
+      actorMade = true;
+      await createFreshActor(this.api, this.atespace, actor, template, call);
+      await call("putEgressPolicy", () => this.api.putEgressPolicy(this.atespace, actor, nativeCanaryEgress(config)));
+      await this.resume(undefined, actor, call);
+      outcome = await this.awaitVerdict(actor, store);
+    } catch (error) {
+      if (error instanceof CanaryCallFailed) outcome = { result: error.message, final: false };
+      else if (error instanceof NoRoom) outcome = { result: "resumeActor_failed", final: false, noRoom: true };
+      else outcome = { result: "canary_failed", final: false };
+    }
+    if (actorMade) await deleteActorWithPolicy(this.api, this.atespace, actor).catch(() => {});
+    if (rowMade) await canaries.delete(actor).catch(() => {});
+    if (outcome.result === "pass")
+      substrateNativeLog.info({ template, result: outcome.result }, "native substrate canary");
+    else substrateNativeLog.warn({ template, result: outcome.result }, "native substrate canary");
+    return outcome;
+  }
+
+  /** The canary's verdict, read every second; canary_timeout once canaryTimeoutMs passes without one. */
+  private async awaitVerdict(
+    actor: string,
+    store: <T>(name: string, fn: () => Promise<T>) => Promise<T>,
+  ): Promise<CanaryOutcome> {
+    const deadline = this.now() + (this.options.canaryTimeoutMs ?? DEFAULT_CANARY_TIMEOUT_MS);
+    for (;;) {
+      const result = await store("readCanary", () => this.options.canaries.result(actor));
+      // A verdict is final: a denial seen once is not retried away.
+      if (result) return { result, final: true };
+      if (this.now() >= deadline) return { result: "canary_timeout", final: true };
+      await this.sleep(CANARY_POLL_MS);
     }
   }
 
@@ -245,6 +373,11 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     try {
       await this.ensure(call);
       if (!(await this.hasRoom(runId))) throw new NoRoom();
+      // Before anything of the run exists: no Secret, no actor until the template is proven. A
+      // canary that found no room says so for the run too (and is tried again by the next launch).
+      const proof = await this.prove();
+      if (proof.noRoom) throw new NoRoom();
+      if (proof.result !== "pass") throw new Unenforced(unenforcedMessage(proof.result));
       secretMade = true;
       await this.createSecret(runId, token, capability);
       actorMade = true;
@@ -301,7 +434,7 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
    * window: no room.
    */
   private async resume(
-    runId: string,
+    runId: string | undefined,
     actor: string,
     call: NamedCall,
     stillWanted?: () => Promise<boolean>,
@@ -315,7 +448,8 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
         if (!exhausted(error)) throw error;
         const since = this.firstEnsuredAt.get(this.template.name) ?? this.now();
         if (this.now() - since >= this.options.goldenWaitMs) {
-          this.report({ runId, substrateCall: "resumeActor", errorCode: substrateErrorCode(error) });
+          // The canary (no run id) reports through its own outcome.
+          if (runId) this.report({ runId, substrateCall: "resumeActor", errorCode: substrateErrorCode(error) });
           throw new NoRoom();
         }
       }

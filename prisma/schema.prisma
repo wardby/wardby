@@ -901,6 +901,21 @@ model NativeGatewaySession {
   @@index([workerRemovedAt])
 }
 
+/// A Substrate native sandbox startup canary (NATIVE_SANDBOX_LAUNCHER=substrate): one probe actor
+/// per worker template and process, whose verdict the gateway records. No credential, no run data.
+model NativeSubstrateCanary {
+  /// The canary actor's name (wr-<20 hex>-canary): random, and the only key the gateway accepts.
+  actor      String    @id
+  /// The worker template it proves (wardby-native-<16 hex>).
+  template   String
+  /// pass | gateway_unreachable | deny_port_reachable | outside_reachable; null until reported.
+  result     String?
+  createdAt  DateTime  @default(now())
+  reportedAt DateTime?
+
+  @@index([createdAt])
+}
+
 /// One worker of the native sandbox warm pool (native sandbox phase 6): an
 /// isolated worker started before any run exists, holding no run data or
 /// capability. A run claims an idle one with a compare-and-swap on this row

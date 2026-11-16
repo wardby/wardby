@@ -237,6 +237,57 @@ export const NATIVE_GATEWAY_CALL_PATH = "/native-gateway/v1/call";
  */
 export const NATIVE_PLACEHOLDER_CAPABILITY = "wardby_native_placeholder_injected_by_egress_gateway";
 
+/**
+ * Where a Substrate startup canary posts its verdict (POST, no credential): the canary actor never
+ * holds a capability, so the route is unauthenticated. What makes that safe is on the gateway side:
+ * the actor name is random and must already have a row, the result is a fixed enum, each row takes
+ * one write within 10 minutes of its creation, and every valid body gets the same answer.
+ */
+export const NATIVE_GATEWAY_CANARY_PATH = "/native-gateway/v1/canary";
+/** A canary's verdicts: pass, or the first probe that failed, in the Kubernetes probe's order. */
+export const NATIVE_CANARY_RESULTS = [
+  "pass",
+  "gateway_unreachable",
+  "deny_port_reachable",
+  "outside_reachable",
+] as const;
+export type NativeCanaryResult = (typeof NATIVE_CANARY_RESULTS)[number];
+/** The canary route's body. */
+export const NativeCanaryReportSchema = z
+  .object({ actor: z.string().regex(/^wr-[0-9a-f]{20}-canary$/), result: z.enum(NATIVE_CANARY_RESULTS) })
+  .strict();
+export type NativeCanaryReport = z.infer<typeof NativeCanaryReportSchema>;
+/** The gateway's witness port (docker-isolation.ts NATIVE_GATEWAY_DENY_PORT, re-declared for the worker image). */
+export const NATIVE_CANARY_DENY_PORT = 8791;
+/**
+ * kubernetes-isolation.ts NATIVE_PROBE_OUTSIDE, re-declared for the worker image, which cannot load
+ * providers/jobs/ (kubernetes-isolation.test.ts keeps them equal): the internet, and the cloud
+ * metadata endpoints.
+ */
+export const NATIVE_PROBE_OUTSIDE_TARGETS: readonly { host: string; port: number }[] = Object.freeze([
+  Object.freeze({ host: "1.1.1.1", port: 443 }),
+  Object.freeze({ host: "169.254.169.254", port: 80 }),
+  Object.freeze({ host: "169.254.170.23", port: 80 }),
+  Object.freeze({ host: "fd00:ec2::254", port: 80 }),
+  Object.freeze({ host: "fd00:ec2::23", port: 80 }),
+]);
+
+/**
+ * A gateway route's URL from NATIVE_GATEWAY_URL (the call route's URL): the same origin and any path
+ * prefix in front of the call route, then `path`.
+ */
+export function nativeGatewayRouteUrl(gatewayUrl: string, path: string): string {
+  const url = new URL(gatewayUrl);
+  const current = url.pathname.replace(/\/+$/, "");
+  const prefix = current.endsWith(NATIVE_GATEWAY_CALL_PATH)
+    ? current.slice(0, -NATIVE_GATEWAY_CALL_PATH.length)
+    : current;
+  url.pathname = `${prefix}${path}`;
+  url.search = "";
+  url.hash = "";
+  return url.href;
+}
+
 /** The input route's result: the session's snapshot input, which never holds a gateway or a secret. */
 export const GatewayInputResponseSchema = z.object({ input: WorkerInputSchema.omit({ gateway: true }) }).strict();
 

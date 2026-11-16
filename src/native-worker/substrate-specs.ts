@@ -109,6 +109,15 @@ export function nativeEgress(token: string, config: NativeSubstrateLaunchConfig)
   ];
 }
 
+/**
+ * The startup canary's rule: the gateway host and port, like a run's, with no header replaced. The
+ * canary holds no credential and needs none (the gateway's /healthz and canary route are open).
+ */
+export function nativeCanaryEgress(config: NativeSubstrateLaunchConfig): EgressRule[] {
+  const { host, port } = gatewayTarget(config.gatewayUrl);
+  return [{ kind: "http", hostnames: [host], ports: [port] }];
+}
+
 /** The per-run Secret (name = token, key capability, label wardby.dev/substrate-native-run). Never log it. */
 export function nativeRunSecret(token: string, capability: string, config: NativeSubstrateLaunchConfig): V1Secret {
   return substrateSecret({
