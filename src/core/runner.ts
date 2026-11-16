@@ -144,6 +144,7 @@ import { trackRun } from "./in-flight-runs.js";
 import { dispatchRunStepsLevel } from "./run-steps/config.js";
 import { ReviewReadLedger } from "./review-reads.js";
 import { refusalOf } from "./plans/refusal.js";
+import { MAX_PLAN_NUMBER } from "./plans/number.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { loadBudgetEvent, ownerBudgetSentence, type BudgetEventView } from "./budget-events.js";
 
@@ -279,7 +280,7 @@ const DelegateArgs = z
       .optional(),
     repository: z.string().min(1).max(300).optional(),
     repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
-    planNumber: z.number().int().min(1).max(2_147_483_647).optional(),
+    planNumber: z.number().int().min(1).max(MAX_PLAN_NUMBER).optional(),
   })
   .strict();
 

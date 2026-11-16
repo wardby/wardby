@@ -239,6 +239,48 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       expect((await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } })).planNumber).toBe(345);
     });
 
+    it("keeps an explicit planNumber across a continuation that has no issue", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const first = await dispatchRun({ db, executor, agentId, codingTask: "plan", planNumber: 9 });
+      await db.run.update({ where: { id: first!.run.id }, data: { status: "succeeded" } });
+      await db.codingRun.update({
+        where: { runId: first!.run.id },
+        data: {
+          result: {
+            schemaVersion: 1,
+            outcome: "pull_request_opened",
+            repository: "acme/fork",
+            baseRef: "main",
+            headRef: `wardby/run-${first!.run.id}`,
+            commitSha: "a".repeat(40),
+            pullRequestUrl: "https://github.com/acme/fork/pull/1",
+            pullRequestNumber: 1,
+            summary: "Opened the PR",
+            tests: [],
+            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+          },
+        },
+      });
+      const second = await dispatchRun({
+        db,
+        executor,
+        agentId,
+        codingTask: "plan",
+        continuesCodingRunId: first!.run.id,
+      });
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: second!.run.id } })).planNumber).toBe(9);
+    });
+
+    it("treats a malformed stored planDocument as no plan setting", async () => {
+      const { agentId } = await codingAgent();
+      await db.codingAgentProfile.update({ where: { agentId }, data: { planDocument: { store: 42 } } });
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({ db, executor, agentId, codingTask: "plan" });
+      expect(result!.run.status).not.toBe("refused");
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } })).planNumber).toBeNull();
+    });
+
     it("commits a refused run for a scheduled planner with no number", async () => {
       const agentId = await planner();
       const { executor } = fakeExecutor();

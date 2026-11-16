@@ -1075,8 +1075,19 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   // Plan documents (spec §2): the number and the planner check are decided here, before the
   // transaction, so a refusal leaves no Run row behind. attributeRun runs inside the transaction,
   // after the Run row exists, so the issue is read the way resolvePlanNumber does.
-  const planSetting =
-    preview?.kind === "coding" ? readPlanDocument(preview.codingProfile?.planDocument, preview.ownerId ?? null) : null;
+  // A malformed stored setting is treated as no plan setting (logged by agent id only, never the
+  // value) so a bad row cannot stop every dispatch of the agent.
+  let planSetting: ReturnType<typeof readPlanDocument> = null;
+  if (preview?.kind === "coding") {
+    try {
+      planSetting = readPlanDocument(preview.codingProfile?.planDocument, preview.ownerId ?? null);
+    } catch {
+      dispatchLog.warn(
+        { agentId: options.agentId },
+        "stored planDocument is malformed; dispatching without plan documents",
+      );
+    }
+  }
   const planNumber =
     preview?.kind === "coding" && (planSetting || preview.codingProfile?.buildFromPlan)
       ? await resolvePlanNumber(options.db, options)

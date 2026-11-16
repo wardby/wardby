@@ -3,7 +3,7 @@ import type { AttributionIntent } from "../attribution.js";
 import { GITHUB_ISSUE_KEY, ISSUE_KEY } from "../../providers/issue-tracker/types.js";
 
 /** The CodingRun.planNumber column is a Postgres integer. */
-const MAX_PLAN_NUMBER = 2_147_483_647;
+export const MAX_PLAN_NUMBER = 2_147_483_647;
 
 export function planNumberFromIssueKey(
   provider: string | null | undefined,
@@ -43,8 +43,10 @@ export async function resolvePlanNumber(
     if (inherited) return planNumberFromIssueKey(inherited.workItem.provider, inherited.workItem.key);
     const coding = await db.codingRun.findUnique({
       where: { runId: ancestorId },
-      select: { issueProvider: true, issueKey: true },
+      select: { planNumber: true, issueProvider: true, issueKey: true },
     });
+    // A planner started with an explicit planNumber has no issue; its continuation keeps the number.
+    if (coding?.planNumber != null) return coding.planNumber;
     if (coding?.issueKey) return planNumberFromIssueKey(coding.issueProvider, coding.issueKey);
   }
   return undefined;

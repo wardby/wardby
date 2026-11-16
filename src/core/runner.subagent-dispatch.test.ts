@@ -3161,6 +3161,24 @@ describe("delegating to a coding sub-agent with a repository list", () => {
       expect(await childrenOf(db, parentRun.id)).toEqual([]);
     });
 
+    it("returns a plan refusal to the model as JSON, starting nothing", async () => {
+      const { db, parentRun, results } = await runLead({
+        calls: [fix(undefined)],
+        agents: [
+          leadAgent(),
+          fixerAgent({ codingProfile: { ...profile, planDocument: { store: "wardby", reviewers: ["u1"] } } as never }),
+        ],
+        links: [],
+      });
+      expect(results[0]).toContain(
+        JSON.stringify({
+          error: "plan_number_missing",
+          message: "plan_number_missing: a planner run needs an issue or a planNumber",
+        }),
+      );
+      expect(await childrenOf(db, parentRun.id)).toEqual([]);
+    });
+
     it("returns coding_repositories_unsupported to the model when the executor cannot resolve extras", async () => {
       const { db, parentRun, results } = await runLead({
         calls: [fix(SERVICE_A, { repositories: ["base"] })],
