@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createHttpTransport } from "./http-transport.js";
-import type { GatewayRequest } from "./protocol.js";
+import { createHttpTransport, fetchSandboxInput } from "./http-transport.js";
+import { GatewayError, type GatewayRequest } from "./protocol.js";
 
 const request = { v: 1, runId: "r", callId: "c-1", method: "llm.countTokens", params: {} } as unknown as GatewayRequest;
 const json = (body: unknown, status = 200) =>
@@ -91,6 +91,73 @@ describe("createHttpTransport", () => {
       sleep: async () => {},
     });
     await expect(transport.call(request)).rejects.toMatchObject({ code: "not_allowed" });
+    expect(calls()).toBe(1);
+  });
+});
+
+describe("fetchSandboxInput", () => {
+  const URL_ = "http://gw:8790/native-gateway/v1/input";
+  const CAP = "fake_native_capability_for_input_0001";
+
+  it("posts to the given URL with the bearer and no body", async () => {
+    const seen: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const fetch = (async (url: string, init?: RequestInit) => {
+      seen.push({ url, init });
+      return json({ ok: true, result: { input: { runId: "r" } } });
+    }) as unknown as typeof globalThis.fetch;
+    expect(await fetchSandboxInput({ url: URL_, capability: CAP, fetch })).toEqual({ input: { runId: "r" } });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toBe(URL_);
+    expect(seen[0].init?.method).toBe("POST");
+    expect(seen[0].init?.headers).toEqual({ authorization: `Bearer ${CAP}` });
+    expect(seen[0].init?.body).toBeUndefined();
+  });
+
+  it("retries a connection failure, then succeeds", async () => {
+    const { fetch, calls } = scripted([
+      () => {
+        throw new TypeError("fetch failed");
+      },
+      () => json({ ok: true, result: 7 }),
+    ]);
+    expect(await fetchSandboxInput({ url: URL_, capability: CAP, fetch, sleep: async () => {} })).toBe(7);
+    expect(calls()).toBe(2);
+  });
+
+  it("retries not_ready", async () => {
+    const { fetch, calls } = scripted([notReady, () => json({ ok: true, result: 8 })]);
+    expect(await fetchSandboxInput({ url: URL_, capability: CAP, fetch, sleep: async () => {} })).toBe(8);
+    expect(calls()).toBe(2);
+  });
+
+  it("gives up with internal once its retry window passes", async () => {
+    const { fetch, calls } = scripted([
+      () => {
+        throw new TypeError("fetch failed");
+      },
+    ]);
+    const err = await fetchSandboxInput({
+      url: URL_,
+      capability: CAP,
+      fetch,
+      retryForMs: 30,
+      sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GatewayError);
+    expect((err as GatewayError).code).toBe("internal");
+    expect(calls()).toBeGreaterThan(1);
+  });
+
+  it("gives up at once on a 401", async () => {
+    const { fetch, calls } = scripted([
+      () => json({ ok: false, error: { code: "unauthorized", message: "Unknown gateway capability." } }, 401),
+      () => json({ ok: true, result: 1 }),
+    ]);
+    const err = await fetchSandboxInput({ url: URL_, capability: CAP, fetch, sleep: async () => {} }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(GatewayError);
+    expect((err as GatewayError).code).toBe("unauthorized");
     expect(calls()).toBe(1);
   });
 });

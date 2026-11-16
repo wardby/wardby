@@ -1,7 +1,10 @@
 /**
- * Native sandbox worker process entry. Reads its WorkerInput as the first line
- * on stdin, runs the run's engine against the gateway on stdin/stdout
- * (stdio.ts), and exits 0 once it has sent its result. stdout carries only
+ * Native sandbox worker process entry. The run's WorkerInput comes from one of three sources: the
+ * first line on stdin (Docker, local), a file named by NATIVE_WORKER_INPUT_FILE (a Kubernetes pod,
+ * or a warm worker that waits for it), or, in substrate mode (WARDBY_NATIVE_SUBSTRATE=1,
+ * substrate-mode.ts), the gateway's input route once the actor's name appears. It runs the run's
+ * engine against the gateway (on stdin/stdout, stdio.ts, or over HTTP) and exits 0 once it has sent
+ * its result; in substrate mode it idles instead, with /readyz still answering. stdout carries only
  * protocol frames; diagnostics (and the shared logger) go to stderr, without any secret value the
  * worker received (stderr-redaction.ts).
  */
@@ -11,6 +14,7 @@ import { parseMessage, WorkerInputSchema } from "./protocol.js";
 import { createHttpTransport } from "./http-transport.js";
 import { createStdioTransport } from "./stdio.js";
 import { flushStderrRedaction, installStderrRedaction, rememberSecretValue } from "./stderr-redaction.js";
+import { NATIVE_SUBSTRATE_ENV, runSubstrateMode } from "./substrate-mode.js";
 import { WARM_WORKER_UNCLAIMED_EXIT } from "./warm-delivery.js";
 import { runNativeWorker } from "./worker.js";
 
@@ -65,6 +69,11 @@ async function readInput(): Promise<string> {
 }
 
 async function main(): Promise<void> {
+  if (process.env[NATIVE_SUBSTRATE_ENV] === "1") {
+    await runSubstrateMode({ env: process.env });
+    // After its result the actor stays up until the launcher deletes it: idle, /readyz still answering.
+    await new Promise<never>(() => {});
+  }
   const input = parseMessage(await readInput(), WorkerInputSchema);
   if (input.gateway) rememberSecretValue(input.gateway.capability);
   // The gateway answers only after the worker asks, so choosing the transport after the input

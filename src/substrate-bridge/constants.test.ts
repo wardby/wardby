@@ -7,6 +7,8 @@ import {
   REGISTRY_TOKEN_SHAPE,
   AGENT_SUFFIX,
   ACTOR_JWT_HEADER,
+  CANARY_SUFFIX,
+  NATIVE_SUFFIX,
   DIAGNOSTICS_TAIL,
   MAX_CODING_OUTPUT_ISSUES as BRIDGE_MAX_CODING_OUTPUT_ISSUES,
   SAFE_CODING_OUTPUT_ISSUE as BRIDGE_SAFE_CODING_OUTPUT_ISSUE,
@@ -19,6 +21,7 @@ import {
   TOOL_SUFFIX,
 } from "./constants.js";
 import { RESULT_BUNDLE_FILE } from "../providers/jobs/workspace-swap.js";
+import { CANARY_ACTOR_SUFFIX, NATIVE_ACTOR_SUFFIX } from "../providers/substrate/names.js";
 import {
   agentActorName,
   PLACEHOLDER_CAPABILITY as LAUNCHER_CAPABILITY,
@@ -63,6 +66,11 @@ it("matches the launcher's names", () => {
   expect(toolActorName(token)).toBe(`${token}${TOOL_SUFFIX}`);
   expect(GATEWAY_ACTOR_JWT_PLACEHOLDER).toBe("placeholder");
   expect(ACTOR_JWT_HEADER).toBe(TOOL_ACTOR_JWT_HEADER.toLowerCase());
+});
+
+it("matches the native launcher's actor suffixes", () => {
+  expect(NATIVE_SUFFIX).toBe(NATIVE_ACTOR_SUFFIX);
+  expect(CANARY_SUFFIX).toBe(CANARY_ACTOR_SUFFIX);
 });
 
 it("renders collect exclusions as the repository does", () => {

@@ -9,6 +9,16 @@ export function substrateRunToken(runId: string): string {
   return `wr-${hex(runId, 20)}`;
 }
 
+/** A native sandbox run's actor: the run token and this suffix (substrate-bridge/constants.ts NATIVE_SUFFIX). */
+export const NATIVE_ACTOR_SUFFIX = "-native";
+/** The native template's canary actor (substrate-bridge/constants.ts CANARY_SUFFIX). */
+export const CANARY_ACTOR_SUFFIX = "-canary";
+
+/** The actor name of a native sandbox run: `<token>-native`. */
+export function nativeActorName(token: string): string {
+  return `${token}${NATIVE_ACTOR_SUFFIX}`;
+}
+
 /**
  * Template name derived from its content: `wardby-<role>-` + 16 hex chars. `variant` is a stable
  * digest of everything else in the template (env, worker selector), so two templates that differ

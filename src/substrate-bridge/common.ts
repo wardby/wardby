@@ -5,12 +5,14 @@ import {
   AGENT_SUFFIX,
   BRIDGE_PROTOCOL,
   BRIDGE_PROTOCOL_HEADER,
+  CANARY_SUFFIX,
   DIAGNOSTICS_TAIL,
   INJECTED_MCP_TOKEN_PLACEHOLDER,
   MCP_TOKEN_ENV,
   MCP_TOKEN_HEADER,
   MCP_TOKEN_HEADER_ENV,
   MCP_TOOLS_INPUT_HEADER,
+  NATIVE_SUFFIX,
   RUN_TOKEN_PATTERN,
   TOOL_SUFFIX,
 } from "./constants.js";
@@ -32,7 +34,7 @@ export function proxyHeaders(credential: Record<string, string>): Record<string,
   return { ...credential, [BRIDGE_PROTOCOL_HEADER]: String(BRIDGE_PROTOCOL) };
 }
 
-/** Any run actor's name: the run token and a role suffix. */
+/** A coding run actor's name: the run token and the agent or tool suffix. */
 const RUN_ACTOR_NAME = new RegExp(`^${RUN_TOKEN_PATTERN.source.slice(1, -1)}(${AGENT_SUFFIX}|${TOOL_SUFFIX})$`);
 export const DEFAULT_IDENTITY_POLL_MS = 200;
 
@@ -42,6 +44,41 @@ export interface IdentityWaitOptions {
   pollMs?: number;
   /** Ends the wait with substrate_bridge_stopped. */
   signal?: AbortSignal;
+}
+
+/**
+ * Re-reads `<dir>/name` until `match` returns a value for it, and returns that value. A name `match`
+ * does not take (or no file yet) means keep waiting, with no timeout; `match` may throw to end the wait.
+ */
+async function pollActorName<T>(
+  metadataDir: string,
+  match: (name: string) => T | undefined,
+  options: IdentityWaitOptions,
+): Promise<T> {
+  const pollMs = options.pollMs ?? DEFAULT_IDENTITY_POLL_MS;
+  let logged = false;
+  for (;;) {
+    if (options.signal?.aborted) throw new BridgeError("substrate_bridge_stopped");
+    const name = await readFile(`${metadataDir}/name`, "utf8").then(
+      (text) => text.trim(),
+      () => "",
+    );
+    const found = match(name);
+    if (found !== undefined) return found;
+    if (!logged) {
+      options.log("substrate_bridge_waiting_for_identity");
+      logged = true;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(done, pollMs);
+      function done(): void {
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", done);
+        resolve();
+      }
+      options.signal?.addEventListener("abort", done, { once: true });
+    });
+  }
 }
 
 /**
@@ -59,33 +96,48 @@ export async function waitForRunToken(
   options: IdentityWaitOptions,
 ): Promise<string> {
   const suffix = role === "agent" ? AGENT_SUFFIX : TOOL_SUFFIX;
-  const pollMs = options.pollMs ?? DEFAULT_IDENTITY_POLL_MS;
-  let logged = false;
-  for (;;) {
-    if (options.signal?.aborted) throw new BridgeError("substrate_bridge_stopped");
-    const name = await readFile(`${metadataDir}/name`, "utf8").then(
-      (text) => text.trim(),
-      () => "",
-    );
-    const match = RUN_ACTOR_NAME.exec(name);
-    if (match) {
+  return pollActorName(
+    metadataDir,
+    (name) => {
+      const match = RUN_ACTOR_NAME.exec(name);
+      if (!match) return undefined;
       if (match[1] !== suffix) throw new BridgeError("substrate_bridge_identity_invalid");
       return name.slice(0, -suffix.length);
-    }
-    if (!logged) {
-      options.log("substrate_bridge_waiting_for_identity");
-      logged = true;
-    }
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(done, pollMs);
-      function done(): void {
-        clearTimeout(timer);
-        options.signal?.removeEventListener("abort", done);
-        resolve();
-      }
-      options.signal?.addEventListener("abort", done, { once: true });
-    });
-  }
+    },
+    options,
+  );
+}
+
+/** Every run actor's role and its name's suffix. */
+export type RunActorRole = "agent" | "tool" | "native" | "canary";
+const ROLE_SUFFIX: Record<RunActorRole, string> = {
+  agent: AGENT_SUFFIX,
+  tool: TOOL_SUFFIX,
+  native: NATIVE_SUFFIX,
+  canary: CANARY_SUFFIX,
+};
+const TOKEN_PREFIX = new RegExp(`^${RUN_TOKEN_PATTERN.source.slice(1, -1)}`);
+
+/**
+ * Waits until `<dir>/name` is `wr-<20 hex>` plus one of `roles`' suffixes, and returns the token and
+ * the role. Any other name (the golden actor's, a role not in `roles`, or none yet) means keep
+ * waiting, as waitForRunToken.
+ */
+export async function waitForRunActor(
+  metadataDir: string,
+  roles: readonly RunActorRole[],
+  options: IdentityWaitOptions,
+): Promise<{ token: string; role: RunActorRole }> {
+  return pollActorName(
+    metadataDir,
+    (name) => {
+      const token = TOKEN_PREFIX.exec(name)?.[0];
+      if (!token) return undefined;
+      const role = roles.find((candidate) => name === `${token}${ROLE_SUFFIX[candidate]}`);
+      return role ? { token, role } : undefined;
+    },
+    options,
+  );
 }
 
 export function requireProxyUrl(env: NodeJS.ProcessEnv): string {

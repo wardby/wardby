@@ -23,6 +23,7 @@ const FORBIDDEN = [
   "providers/datastore/",
   "providers/executor/",
   "providers/jobs/",
+  "providers/substrate/",
   "providers/llm/routing.ts",
   "providers/llm/anthropic.ts",
   "providers/llm/openai.ts",
@@ -56,6 +57,8 @@ it("the native sandbox worker's runtime import graph has no database, provider c
   const graph = runtimeGraph("native-worker/main.ts");
   expect(graph).toContain("native-worker/http-transport.ts");
   expect(graph).toContain("core/engine-native.ts");
+  expect(graph).toContain("native-worker/substrate-mode.ts");
+  expect(graph).toContain("substrate-bridge/common.ts");
   expect(graph.filter((file) => FORBIDDEN.some((prefix) => file.startsWith(prefix)))).toEqual([]);
 });
 

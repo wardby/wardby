@@ -51,6 +51,12 @@ describe("native worker entry", () => {
     expect(stderr).toContain("message_invalid");
   }, 30_000);
 
+  it("in substrate mode, fails fast with a fixed code when NATIVE_GATEWAY_URL is missing", () => {
+    const result = runWorker({ WARDBY_NATIVE_SUBSTRATE: "1" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("native_substrate_env_missing");
+  });
+
   it("as a warm worker, exits 75 when no run claims it within the wait", () => {
     const file = join(mkdtempSync(join(tmpdir(), "native-warm-")), "input.json");
     const result = runWorker({ NATIVE_WORKER_INPUT_FILE: file, NATIVE_WORKER_INPUT_WAIT_MS: "300" });
