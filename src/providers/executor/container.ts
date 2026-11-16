@@ -148,7 +148,8 @@ import type {
   VcsPrepareInput,
   VcsProvider,
 } from "../vcs/types.js";
-import { countWorkspaceEntries } from "../vcs/git.js";
+import { countWorkspaceEntries, protectedPathMatcher } from "../vcs/git.js";
+import { collectPlanFolder, type PlanFolderResult } from "../../coding-worker/plan-folder.mjs";
 import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
 import { ISSUE_KEY, issueReference } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
@@ -806,6 +807,8 @@ export interface ContainerRunSnapshot {
   launchSecretVersions?: WarmSecretVersion[];
   /** CodingRun.collectPlanFiles: the run returns its plan folder, stored when it ends. */
   collectPlanFiles?: boolean;
+  /** CodingRun.planRepositoryPath: the repository folder a "repository"-stored plan is read from after the push. */
+  planRepositoryPath?: string;
   /** The run's input plan files (CodingRunPlanFile, direction "input"); written into input.json only when there are some. */
   planInputFiles?: PlanFile[];
 }
@@ -1031,7 +1034,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     // them). A failed read leaves them unknown: never warm, and no transcript stored.
     const secretVersions =
       (row.codingRun.provider === "claude-code" && (this.options.warmRounds === true || row.codingRun.sessionResume)) ||
-      row.codingRun.collectPlanFiles
+      row.codingRun.collectPlanFiles ||
+      row.codingRun.planRepositoryPath
         ? await agentSecretVersions(this.db, row.agentId).catch(() => undefined)
         : undefined;
     const launchSecretVersions = parseSecretVersions(row.codingRun.launchSecretVersions);
@@ -1103,6 +1107,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       ...(secretVersions ? { secretVersions } : {}),
       ...(launchSecretVersions ? { launchSecretVersions } : {}),
       collectPlanFiles: row.codingRun.collectPlanFiles,
+      ...(row.codingRun.planRepositoryPath ? { planRepositoryPath: row.codingRun.planRepositoryPath } : {}),
       planInputFiles,
     };
   }
@@ -1739,7 +1744,7 @@ export interface ContainerExecutorOptions {
   /** Session resume: stores a run's transcript before its job is removed. Absent = never captured. */
   transcripts?: Pick<RunTranscriptRecorder, "record">;
   /** Plan documents: stores a collecting run's returned plan folder before it is made terminal. Absent = never stored. */
-  planFiles?: Pick<PlanFilesRecorder, "record" | "markFailed">;
+  planFiles?: Pick<PlanFilesRecorder, "record" | "markFailed" | "storeChecked">;
   /**
    * The run-steps writer: a continuation on a launcher with warm rounds gets one fixed step line
    * saying whether it resumed the previous round (warm-start-wording.ts). Absent = no line.
@@ -2144,7 +2149,10 @@ export class ContainerExecutor implements Executor {
         if (launchFingerprint) await this.recordLaunchFingerprint(runId, launchFingerprint);
         // The secret versions the run launches with (identity and version only), for transcript and
         // plan file capture; kept on this snapshot too, as a run that ends before the next poll is not reloaded.
-        if (((run.provider === "claude-code" && run.sessionResume) || run.collectPlanFiles) && run.secretVersions) {
+        if (
+          ((run.provider === "claude-code" && run.sessionResume) || run.collectPlanFiles || run.planRepositoryPath) &&
+          run.secretVersions
+        ) {
           const versions = run.secretVersions;
           if (await this.recordLaunchSecretVersions(runId, versions)) run = { ...run, launchSecretVersions: versions };
         }
@@ -2799,6 +2807,9 @@ export class ContainerExecutor implements Executor {
 
       const pushed = await this.pushChanges(run, handle, current, output, output.summary, existingWorkspace);
       const { finalized, workspace } = pushed;
+      // Plan documents stored in the repository: read from the workspace the push left, before the
+      // terminal write (store.complete fires the publish hook, which needs the stored rows).
+      if (run.planRepositoryPath) await this.recordRepositoryPlan(run, workspace.workspacePath, run.planRepositoryPath);
       // An empty diff pushes nothing, so it refreshes the description the way a
       // worker no_changes does, before complete (the terminal hook reads the body).
       const description =
@@ -4678,6 +4689,96 @@ export class ContainerExecutor implements Executor {
         await recorder.markFailed(run.runId).catch(() => undefined);
         containerLog.info({ runId: run.runId, planFiles: "plan_files_failed" }, "plan files not stored: timed out");
       } else if (result !== "stored") {
+        containerLog.info({ runId: run.runId, planFiles: result }, "plan files not stored");
+      }
+    } catch {
+      // never changes the run's outcome
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Plan documents stored in the repository: reads the plan folder from the run's workspace and stores it
+   * through the recorder's checked path. Never throws, never changes the run's outcome; only a fixed
+   * status code is logged, never content. Bounded by PLAN_FILES_RECORD_TIMEOUT_MS like recordPlanFiles.
+   *
+   * The folder is refused (the run's plan outcome is the fixed plan_files_failed, nothing is read) when it
+   * is outside the workspace after symlinks resolve, is under .git/, or holds a path the agent's
+   * protectedPaths (with the .wardby/** baseline) cover: protectedPathMatcher is the helper the push
+   * itself enforces, probed with a file inside the folder, because the PLAN_PATH shape also allows
+   * folders such as .git/{n}/ or .github/workflows/{n}/ that a run must not be able to read from.
+   */
+  private async recordRepositoryPlan(
+    run: ContainerRunSnapshot,
+    workspacePath: string,
+    relative: string,
+  ): Promise<void> {
+    const recorder = this.options.planFiles;
+    if (!recorder) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const reading = Promise.resolve()
+        .then(async () => {
+          const trimmed = relative.replace(/\/+$/, "");
+          const protectedByRun = protectedPathMatcher(
+            Array.isArray(run.protectedPaths)
+              ? run.protectedPaths.filter((p): p is string => typeof p === "string")
+              : [],
+          );
+          if (
+            trimmed.split("/")[0] === ".git" ||
+            protectedByRun(`${trimmed}/plan.md`) ||
+            protectedByRun(`${trimmed}/x`)
+          ) {
+            return "plan_folder_refused" as const;
+          }
+          const base = await realpath(workspacePath);
+          const resolved = resolve(base, trimmed);
+          if (!resolved.startsWith(`${base}${sep}`)) return "plan_folder_invalid" as const;
+          // A missing folder is an empty plan (collectPlanFolder), not an error; the deepest folder that
+          // exists must still resolve inside the workspace, so a symlinked parent cannot point elsewhere.
+          let probe = resolved;
+          let real = await realpath(probe).catch(() => undefined);
+          while (real === undefined && probe !== base) {
+            probe = dirname(probe);
+            real = await realpath(probe).catch(() => undefined);
+          }
+          if (real === undefined || (real !== base && !real.startsWith(`${base}${sep}`))) {
+            return "plan_folder_invalid" as const;
+          }
+          const read: PlanFolderResult = await collectPlanFolder(probe === resolved ? real : resolved).catch(
+            (): PlanFolderResult => ({ status: "error", error: "plan_folder_invalid" }),
+          );
+          if (read.status !== "ok") return read.error;
+          const files = read.files.map((f) => ({
+            path: f.path,
+            content: Buffer.from(f.contentBase64, "base64").toString("utf8"),
+          }));
+          return recorder.storeChecked(
+            {
+              runId: run.runId,
+              agentId: run.agentId,
+              ...(run.launchSecretVersions ? { launchSecretVersions: run.launchSecretVersions } : {}),
+            },
+            files,
+            read.skipped,
+          );
+        })
+        .catch(() => "plan_files_failed" as const);
+      const timeout = new Promise<"timeout">((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout("timeout"), PLAN_FILES_RECORD_TIMEOUT_MS);
+        timer.unref();
+      });
+      const result = await Promise.race([reading, timeout]);
+      if (result === "timeout") {
+        await recorder.markFailed(run.runId).catch(() => undefined);
+        containerLog.info({ runId: run.runId, planFiles: "plan_files_failed" }, "plan files not stored: timed out");
+      } else if (result !== "stored") {
+        // Nothing was stored: a refused or unreadable folder leaves the fixed failed outcome, not a null one.
+        if (result === "plan_folder_refused" || result === "plan_folder_invalid" || result === "plan_too_large") {
+          await recorder.markFailed(run.runId).catch(() => undefined);
+        }
         containerLog.info({ runId: run.runId, planFiles: result }, "plan files not stored");
       }
     } catch {

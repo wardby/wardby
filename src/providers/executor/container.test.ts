@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -837,6 +837,7 @@ describe("ContainerExecutor", () => {
             return "stored";
           },
           markFailed: async () => "plan_files_failed" as const,
+          storeChecked: async () => "stored" as const,
         },
       });
       holder.created = created;
@@ -900,6 +901,77 @@ describe("ContainerExecutor", () => {
       expect(JSON.stringify(logged)).not.toContain(FAKE_SECRET);
     });
 
+    describe("store repository", () => {
+      async function repositoryRun(overrides: Partial<ContainerRunSnapshot>, writeFolder: (workspace: string) => void) {
+        const stored: { files: { path: string; content: string }[]; terminalWrites: number }[] = [];
+        const failed: string[] = [];
+        const created = await harness(
+          { planRepositoryPath: "docs/plans/issue-12/", ...overrides },
+          IMAGE,
+          undefined,
+          undefined,
+          {
+            planFiles: {
+              record: async () => "stored",
+              markFailed: async (runId) => {
+                failed.push(runId);
+                return "plan_files_failed" as const;
+              },
+              storeChecked: async (_input, files) => {
+                // R3: stored before store.complete, which fires the publish hook.
+                stored.push({ files, terminalWrites: created.store.completions.length });
+                return "stored";
+              },
+            },
+          },
+        );
+        created.vcs.onFinalize = (slot) => {
+          if (slot !== undefined || !created.vcs.workspace) return;
+          writeFolder(created.vcs.workspace.workspacePath);
+        };
+        await created.executor.start("run-1");
+        return { created, stored, failed };
+      }
+
+      it("reads the plan folder from the run's workspace and stores it checked, before the terminal write", async () => {
+        const { stored } = await repositoryRun({}, (workspace) => {
+          const folder = join(workspace, "docs/plans/issue-12");
+          mkdirSync(folder, { recursive: true });
+          writeFileSync(join(folder, "plan.md"), "# Plan\n");
+        });
+        expect(stored).toEqual([{ files: [{ path: "plan.md", content: "# Plan\n" }], terminalWrites: 0 }]);
+      });
+
+      it("refuses a folder under .git/ and one the agent's protected paths cover, reading nothing", async () => {
+        for (const [path, protectedPaths] of [
+          [".git/12/", ["CODEOWNERS"]],
+          [".github/workflows/12/", [".github/workflows/**"]],
+        ] as const) {
+          const { stored, failed } = await repositoryRun(
+            { planRepositoryPath: path, protectedPaths: [...protectedPaths] },
+            (workspace) => {
+              mkdirSync(join(workspace, path), { recursive: true });
+              writeFileSync(join(workspace, path, "plan.md"), "# Plan\n");
+            },
+          );
+          expect(stored).toEqual([]);
+          expect(failed).toEqual(["run-1"]);
+        }
+      });
+
+      it("refuses a folder that leaves the workspace through a symlink", async () => {
+        const { stored, failed } = await repositoryRun({}, (workspace) => {
+          const outside = join(workspace, "..", "outside-plans");
+          mkdirSync(outside, { recursive: true });
+          writeFileSync(join(outside, "plan.md"), "# Not mine\n");
+          mkdirSync(join(workspace, "docs"), { recursive: true });
+          symlinkSync(outside, join(workspace, "docs/plans"));
+        });
+        expect(stored).toEqual([]);
+        expect(failed).toEqual(["run-1"]);
+      });
+    });
+
     it("a hung plan read is abandoned after the timeout: the run still goes terminal and a late result stores nothing", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       try {
@@ -927,6 +999,7 @@ describe("ContainerExecutor", () => {
               writeOnce("plan_files_failed", []);
               return "plan_files_failed" as const;
             },
+            storeChecked: async () => "stored" as const,
           },
         });
         // Never resolves until the test says so.
