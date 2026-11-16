@@ -11,10 +11,16 @@ import {
   hostCall,
   hostCallTimeoutMs,
   runSecretValues,
+  serveGatewayInput,
   serveGatewayRequest,
   streamModel,
 } from "./gateway-server.js";
-import { GATEWAY_INTERNAL_MESSAGE, GatewayError } from "./protocol.js";
+import {
+  GATEWAY_INTERNAL_MESSAGE,
+  GatewayError,
+  GatewayInputResponseSchema,
+  NATIVE_PLACEHOLDER_CAPABILITY,
+} from "./protocol.js";
 import { gatewayLog } from "./gateway.js";
 
 type Ctx = Parameters<typeof streamModel>[0];
@@ -551,5 +557,118 @@ describe("streamModel run steps", () => {
     await expect(
       drain(streamModel(ctx, fakeLedger() as unknown as Ledger, "call_9", withResult, steps)),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("serveGatewayInput", () => {
+  const FAKE_NATIVE_CAP = "fake_native_capability_value_0007";
+  const INPUT = {
+    v: 1,
+    runId: "run-1",
+    agent: { systemPrompt: "p", model: "m", budgetUsd: 1, maxTurns: 4 },
+    tools: [],
+    builtinTools: [],
+    userTools: {},
+    runsConcurrently: [],
+    pricing: {
+      provider: "x",
+      modelId: "m",
+      encoding: "cl100k_base",
+      inputPerMTok: 1,
+      outputPerMTok: 2,
+      cachedInputPerMTok: 0.1,
+      cacheWritePerMTok: 1.25,
+      efforts: [],
+      thinkingMode: "none",
+    },
+  };
+  type Row = Record<string, unknown>;
+  const session = (over: Row = {}): Row => ({
+    id: "sess-1",
+    runId: "run-1",
+    status: "active",
+    deadlineAt: new Date(Date.now() + 60_000),
+    budgetUsd: 1,
+    snapshot: { input: INPUT, loaded: {} },
+    networkReadyAt: new Date(),
+    ...over,
+  });
+  const depsFor = (row: Row | null, runStatus = "running") => {
+    const findUnique = vi.fn(async (_args: unknown) => row);
+    const deps = {
+      db: {
+        nativeGatewaySession: { findUnique },
+        run: { findUnique: async () => ({ status: runStatus }) },
+        task: { findFirst: async () => null },
+      },
+      providers: {},
+    } as unknown as Parameters<typeof serveGatewayInput>[0];
+    return { deps, findUnique };
+  };
+  const errorOf = (r: Awaited<ReturnType<typeof serveGatewayInput>>) =>
+    (r as { body: { error: { code: string; message: string } } }).body.error;
+
+  it("refuses a request without a bearer", async () => {
+    const { deps, findUnique } = depsFor(session());
+    const response = await serveGatewayInput(deps, undefined);
+    expect(response).toMatchObject({ kind: "json", status: 401 });
+    expect(errorOf(response).message).toBe("A gateway capability is required.");
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+
+  it("answers the public placeholder capability 401 by looking it up by hash only", async () => {
+    const { deps, findUnique } = depsFor(null);
+    const response = await serveGatewayInput(deps, `Bearer ${NATIVE_PLACEHOLDER_CAPABILITY}`);
+    expect(response).toMatchObject({ status: 401 });
+    expect(errorOf(response).message).toBe("Unknown gateway capability.");
+    expect(JSON.stringify(findUnique.mock.calls)).not.toContain(NATIVE_PLACEHOLDER_CAPABILITY);
+  });
+
+  it.each([
+    ["a cancelled session", { status: "cancelled" }],
+    ["a session past its deadline", { deadlineAt: new Date(Date.now() - 1) }],
+  ])("refuses %s with run_not_drivable", async (_label, over) => {
+    const response = await serveGatewayInput(depsFor(session(over)).deps, "Bearer cap");
+    expect(response).toMatchObject({ status: 409 });
+    expect(errorOf(response).code).toBe("run_not_drivable");
+  });
+
+  it("refuses a run that is no longer running", async () => {
+    const response = await serveGatewayInput(depsFor(session(), "succeeded").deps, "Bearer cap");
+    expect(response).toMatchObject({ status: 409 });
+    expect(errorOf(response).code).toBe("run_not_drivable");
+  });
+
+  it("answers not_ready until the network is proven", async () => {
+    const response = await serveGatewayInput(depsFor(session({ networkReadyAt: null })).deps, "Bearer cap");
+    expect(response).toMatchObject({ status: 503 });
+    expect(errorOf(response).code).toBe("not_ready");
+  });
+
+  it("serves the snapshot input, with no gateway", async () => {
+    const response = await serveGatewayInput(depsFor(session()).deps, "Bearer cap");
+    expect(response).toMatchObject({ kind: "json", status: 200, body: { ok: true, result: { input: INPUT } } });
+    const result = (response as { body: { result: { input: Record<string, unknown> } } }).body.result;
+    expect(result.input).toEqual(INPUT);
+    expect(result.input).not.toHaveProperty("gateway");
+    expect(GatewayInputResponseSchema.parse(result)).toEqual({ input: INPUT });
+  });
+
+  it("keeps the capability out of a failure's body and log", async () => {
+    const logged: unknown[] = [];
+    const spy = vi.spyOn(gatewayLog, "error").mockImplementation((obj: unknown) => void logged.push(obj));
+    const deps = {
+      db: { nativeGatewaySession: { findUnique: async () => Promise.reject(new Error(FAKE_NATIVE_CAP)) } },
+      providers: {},
+    } as unknown as Parameters<typeof serveGatewayInput>[0];
+    let response;
+    try {
+      response = await serveGatewayInput(deps, `Bearer ${FAKE_NATIVE_CAP}`);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(response).toMatchObject({ status: 500 });
+    expect(JSON.stringify(response)).not.toContain(FAKE_NATIVE_CAP);
+    expect(JSON.stringify(logged)).not.toContain(FAKE_NATIVE_CAP);
   });
 });

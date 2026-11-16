@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "#prisma";
 import { mcpTokenHash, mintMcpToken } from "../coding/mcp-token.js";
@@ -105,6 +106,7 @@ describe("handleCodingMcpRequest: authentication", () => {
     ["malformed", "Bearer rmt_short"],
     ["a run capability", `Bearer rrp_${"a".repeat(43)}`],
     ["unknown", `Bearer ${mintMcpToken()}`],
+    ["a native sandbox capability", `Bearer ${randomBytes(32).toString("base64url")}`],
   ])("refuses a %s bearer with 401 and no WWW-Authenticate", async (_label, auth) => {
     const { db } = fakeDb();
     const { res } = await call(db, rpc("tools/list"), auth);
@@ -125,6 +127,13 @@ describe("handleCodingMcpRequest: authentication", () => {
     expect((await call(db, rpc("tools/list"), `Bearer ${TOKEN}`, () => deadlineAt)).res.status).toBe(401);
     const before = new Date(deadlineAt.getTime() - 1);
     expect((await call(db, rpc("tools/list"), `Bearer ${TOKEN}`, () => before)).res.status).toBe(200);
+  });
+
+  it("refuses a native capability without looking it up", async () => {
+    const { db } = fakeDb();
+    const { res } = await call(db, rpc("tools/list"), `Bearer ${randomBytes(32).toString("base64url")}`);
+    expect(res.status).toBe(401);
+    expect(db.codingProxySession.findUnique).not.toHaveBeenCalled();
   });
 
   it("looks the token up by its hash only", async () => {

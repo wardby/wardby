@@ -221,6 +221,18 @@ export const WorkerInputSchema = z
   .strict();
 export type WorkerInput = z.infer<typeof WorkerInputSchema>;
 
+/** Where a worker that starts without its input fetches it (POST, same bearer auth as a call). */
+export const NATIVE_GATEWAY_INPUT_PATH = "/native-gateway/v1/input";
+
+/**
+ * The bearer a Substrate worker sends (substrate mode): public, fixed, and replaced by the egress
+ * gateway with the run's capability. Reaching the gateway as-is, it hashes to no session: 401.
+ */
+export const NATIVE_PLACEHOLDER_CAPABILITY = "wardby_native_placeholder_injected_by_egress_gateway";
+
+/** The input route's result: the session's snapshot input, which never holds a gateway or a secret. */
+export const GatewayInputResponseSchema = z.object({ input: WorkerInputSchema.omit({ gateway: true }) }).strict();
+
 const UsageTotalsSchema = z.object({ tokensIn: z.number(), tokensOut: z.number(), costUsd: z.number() }).strict();
 
 /** Each gateway method and its params. */

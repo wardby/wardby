@@ -6,6 +6,9 @@
  * in-process path uses — so any control-plane replica can serve any call, and a
  * replica restart is only a retry for the worker.
  *
+ * Besides calls, POST /native-gateway/v1/input answers a worker that starts without its input
+ * (serveGatewayInput): the session's snapshot input, behind the same authentication.
+ *
  * Authority stays here: a model call reserves its worst case against the
  * session budget before the provider is called and settles at the provider's
  * reported usage; the worker's own usage numbers are never read.
@@ -108,6 +111,35 @@ export async function serveGatewayRequest(
     return await handle(deps, authorization, body, scope);
   } catch (err) {
     return failureResponse(err, scope.secretValues);
+  }
+}
+
+/**
+ * POST /native-gateway/v1/input: the same auth as a call (hash, active, deadline, ready, drivable),
+ * then the session's snapshot input: no gateway, no secret values. Never throws; nothing of the
+ * response is logged, and a failure is checked against the capability only.
+ */
+export async function serveGatewayInput(
+  deps: GatewayServerDeps,
+  authorization: string | undefined,
+): Promise<GatewayResponse> {
+  const token = /^Bearer (\S+)$/.exec(authorization ?? "")?.[1];
+  if (!token) return fail(401, "unauthorized", "A gateway capability is required.");
+  try {
+    const session = await new PrismaGatewayLedger(deps.db).findSessionByCapabilityHash(sandboxCapabilityHash(token));
+    if (!session) return fail(401, "unauthorized", "Unknown gateway capability.");
+    if (session.status !== "active" || Date.now() >= session.deadlineAt.getTime()) {
+      throw new GatewayError("run_not_drivable", "This run's gateway session has ended.");
+    }
+    if (!session.networkReadyAt) {
+      throw new GatewayError("not_ready", "This run's network isolation is not proven yet; retry shortly.");
+    }
+    if ((await runDrivability(deps.db, session.runId)) !== "drivable") {
+      throw new GatewayError("run_not_drivable", "This run is no longer running.");
+    }
+    return ok({ input: (session.snapshot as SandboxSessionSnapshot).input });
+  } catch (err) {
+    return failureResponse(err, async () => [token]);
   }
 }
 

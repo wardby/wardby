@@ -8,6 +8,10 @@
  *   → application/json            { ok: true, result } | { ok: false, error: { code, message } }
  *   → application/x-ndjson        (llm.stream) { event } … then { end: true } or { error: { code, message, causeCode? } }
  *
+ *   POST /native-gateway/v1/input  no body; the same bearer auth as a call → { ok: true, result: { input } }:
+ *                                  the session's snapshot input (no gateway, no secrets) for a worker that
+ *                                  starts without it (Substrate)
+ *
  *   POST /coding-mcp               a coding run's MCP calls, forwarded by the coding proxy's /mcp route
  *                                  (src/core/coding-mcp.ts); its own auth: the run's MCP token, not a
  *                                  gateway capability. 404 when the listener was started without it.
@@ -19,8 +23,8 @@ import { parseListenAddress, type ListenAddress } from "../core/listen-address.j
 import { logger } from "../core/logger.js";
 import { HTTP_LIMITS, HttpBoundaryError, readBody as readLimitedBody } from "../mcp/transport/http-limits.js";
 import { logUnexpectedError } from "./gateway.js";
-import { serveGatewayRequest, type GatewayServerDeps } from "./gateway-server.js";
-import { GatewayError, MAX_MESSAGE_BYTES, toGatewayError } from "./protocol.js";
+import { serveGatewayInput, serveGatewayRequest, type GatewayServerDeps } from "./gateway-server.js";
+import { GatewayError, MAX_MESSAGE_BYTES, NATIVE_GATEWAY_INPUT_PATH, toGatewayError } from "./protocol.js";
 
 /** The HTTP listener's own log. Exported so tests can watch it. */
 export const httpLog = logger.child({ module: "native-gateway-http" });
@@ -71,6 +75,12 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
       }
       if (new URL(req.url ?? "/", "http://gateway").pathname === CODING_MCP_PATH && deps.codingMcp) {
         await serveCodingMcp(req, res, deps.codingMcp);
+        return;
+      }
+      if (req.method === "POST" && req.url === NATIVE_GATEWAY_INPUT_PATH) {
+        req.resume();
+        const response = await serveGatewayInput(deps, req.headers.authorization);
+        if (response.kind === "json") send(response.status, response.body);
         return;
       }
       if (req.method !== "POST" || req.url !== NATIVE_GATEWAY_PATH) {
