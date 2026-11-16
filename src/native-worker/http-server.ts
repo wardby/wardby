@@ -8,7 +8,7 @@
  *   → application/json            { ok: true, result } | { ok: false, error: { code, message } }
  *   → application/x-ndjson        (llm.stream) { event } … then { end: true } or { error: { code, message, causeCode? } }
  *
- *   POST /native-gateway/v1/input  no body; the same bearer auth as a call → { ok: true, result: { input } }:
+ *   POST /native-gateway/v1/input  no body (more than MAX_INPUT_REQUEST_BYTES is cut off); the same bearer auth as a call → { ok: true, result: { input } }:
  *                                  the session's snapshot input (no gateway, no secrets) for a worker that
  *                                  starts without it (Substrate)
  *
@@ -24,7 +24,13 @@ import { logger } from "../core/logger.js";
 import { HTTP_LIMITS, HttpBoundaryError, readBody as readLimitedBody } from "../mcp/transport/http-limits.js";
 import { logUnexpectedError } from "./gateway.js";
 import { serveGatewayInput, serveGatewayRequest, type GatewayServerDeps } from "./gateway-server.js";
-import { GatewayError, MAX_MESSAGE_BYTES, NATIVE_GATEWAY_INPUT_PATH, toGatewayError } from "./protocol.js";
+import {
+  GATEWAY_INTERNAL_MESSAGE,
+  GatewayError,
+  MAX_MESSAGE_BYTES,
+  NATIVE_GATEWAY_INPUT_PATH,
+  toGatewayError,
+} from "./protocol.js";
 
 /** The HTTP listener's own log. Exported so tests can watch it. */
 export const httpLog = logger.child({ module: "native-gateway-http" });
@@ -36,6 +42,22 @@ export type NativeGatewayListen = ListenAddress;
 /** Parses NATIVE_GATEWAY_LISTEN ("host:port" or ":port"); undefined when unset. */
 export function parseGatewayListen(value: string | undefined): NativeGatewayListen | undefined {
   return parseListenAddress("NATIVE_GATEWAY_LISTEN", value);
+}
+
+/** The input route reads no body; a client that sends more than this is cut off. */
+export const MAX_INPUT_REQUEST_BYTES = 1024;
+
+/** Discards a request body it does not need, destroying the request once it passes `limit` bytes. */
+function drainBounded(req: IncomingMessage, limit: number): { readonly cutOff: boolean } {
+  const state = { cutOff: false, size: 0 };
+  req.on("data", (chunk: Buffer) => {
+    state.size += chunk.length;
+    if (state.size > limit && !state.cutOff) {
+      state.cutOff = true;
+      req.destroy();
+    }
+  });
+  return state;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -78,9 +100,12 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
         return;
       }
       if (req.method === "POST" && req.url === NATIVE_GATEWAY_INPUT_PATH) {
-        req.resume();
+        const drain = drainBounded(req, MAX_INPUT_REQUEST_BYTES);
         const response = await serveGatewayInput(deps, req.headers.authorization);
+        if (drain.cutOff) return;
         if (response.kind === "json") send(response.status, response.body);
+        // The route only ever answers JSON; anything else is a fault, answered rather than left hanging.
+        else send(500, { ok: false, error: { code: "internal", message: GATEWAY_INTERNAL_MESSAGE } });
         return;
       }
       if (req.method !== "POST" || req.url !== NATIVE_GATEWAY_PATH) {

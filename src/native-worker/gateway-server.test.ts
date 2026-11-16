@@ -654,6 +654,23 @@ describe("serveGatewayInput", () => {
     expect(GatewayInputResponseSchema.parse(result)).toEqual({ input: INPUT });
   });
 
+  it("drops a gateway or capability field from the answer even if the stored input held one", async () => {
+    const stored = {
+      ...INPUT,
+      gateway: { url: "http://gw:8790", capability: FAKE_NATIVE_CAP },
+      capability: FAKE_NATIVE_CAP,
+    };
+    const response = await serveGatewayInput(
+      depsFor(session({ snapshot: { input: stored, loaded: {} } })).deps,
+      "Bearer cap",
+    );
+    expect(response).toMatchObject({ kind: "json", status: 200 });
+    const result = (response as { body: { result: { input: Record<string, unknown> } } }).body.result;
+    expect(result.input).toEqual(INPUT);
+    expect(JSON.stringify(response)).not.toContain(FAKE_NATIVE_CAP);
+    expect(GatewayInputResponseSchema.parse(result)).toEqual({ input: INPUT });
+  });
+
   it("keeps the capability out of a failure's body and log", async () => {
     const logged: unknown[] = [];
     const spy = vi.spyOn(gatewayLog, "error").mockImplementation((obj: unknown) => void logged.push(obj));

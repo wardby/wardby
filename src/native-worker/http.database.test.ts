@@ -455,11 +455,14 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox gateway over HTTP (da
       expect((await post(`Bearer ${NATIVE_PLACEHOLDER_CAPABILITY}`)).status).toBe(401);
       expect((await post(undefined)).status).toBe(401);
       expect((await post(`Bearer ${live.capability}`, "GET")).status).toBe(404);
+      await ledger.endSession(live.sessionId, "finished");
+      const ended = await post(`Bearer ${live.capability}`);
+      expect(ended.status).toBe(409);
+      expect(await ended.text()).not.toContain(live.capability);
+      // Checked after the last request, so the 409 path's logging is covered too.
       const logged = JSON.stringify(spies.flatMap((spy) => spy.mock.calls));
       expect(logged).not.toContain(live.capability);
       expect(logged).not.toContain(live.input.agent.systemPrompt);
-      await ledger.endSession(live.sessionId, "finished");
-      expect((await post(`Bearer ${live.capability}`)).status).toBe(409);
     } finally {
       for (const spy of spies) spy.mockRestore();
     }

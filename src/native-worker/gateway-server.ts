@@ -137,7 +137,16 @@ export async function serveGatewayInput(
     if ((await runDrivability(deps.db, session.runId)) !== "drivable") {
       throw new GatewayError("run_not_drivable", "This run is no longer running.");
     }
-    return ok({ input: (session.snapshot as SandboxSessionSnapshot).input });
+    // The stored snapshot never holds a gateway (only the capability's hash is stored), but the
+    // answer drops any gateway or capability field itself rather than rely on how it was written.
+    const {
+      gateway: _gateway,
+      capability: _capability,
+      ...input
+    } = (session.snapshot as SandboxSessionSnapshot).input as SandboxSessionSnapshot["input"] & {
+      capability?: unknown;
+    };
+    return ok({ input });
   } catch (err) {
     return failureResponse(err, async () => [token]);
   }

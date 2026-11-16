@@ -70,7 +70,9 @@ function fakeDb(session: Partial<FakeSession> = {}) {
 
 function fakeLog() {
   const info = vi.fn();
-  return { log: { info, warn: vi.fn(), error: vi.fn() } as unknown as Logger, info };
+  const warn = vi.fn();
+  const error = vi.fn();
+  return { log: { info, warn, error } as unknown as Logger, info, logged: () => [info, warn, error] };
 }
 
 const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
@@ -83,9 +85,9 @@ function call(
   now?: () => Date,
 ) {
   const auth = authorization === NO_AUTH ? undefined : authorization;
-  const { log, info } = fakeLog();
+  const { log, info, logged } = fakeLog();
   const raw = typeof body === "string" ? body : JSON.stringify(body);
-  return handleCodingMcpRequest(auth, raw, { db, cipher, log, now }).then((res) => ({ res, info }));
+  return handleCodingMcpRequest(auth, raw, { db, cipher, log, now }).then((res) => ({ res, info, logged }));
 }
 
 const rpc = (method: string, params?: unknown, id: number | string = 1) => ({ jsonrpc: "2.0", id, method, params });
@@ -129,11 +131,15 @@ describe("handleCodingMcpRequest: authentication", () => {
     expect((await call(db, rpc("tools/list"), `Bearer ${TOKEN}`, () => before)).res.status).toBe(200);
   });
 
-  it("refuses a native capability without looking it up", async () => {
+  it("refuses a native capability without looking it up, and keeps it out of the answer and the log", async () => {
     const { db } = fakeDb();
-    const { res } = await call(db, rpc("tools/list"), `Bearer ${randomBytes(32).toString("base64url")}`);
+    const nativeCapability = randomBytes(32).toString("base64url");
+    const { res, logged } = await call(db, rpc("tools/list"), `Bearer ${nativeCapability}`);
     expect(res.status).toBe(401);
     expect(db.codingProxySession.findUnique).not.toHaveBeenCalled();
+    expect(res.body).not.toContain(nativeCapability);
+    const lines = logged().flatMap((spy) => spy.mock.calls);
+    expect(JSON.stringify(lines)).not.toContain(nativeCapability);
   });
 
   it("looks the token up by its hash only", async () => {
