@@ -403,6 +403,23 @@ image built `FROM` it keeps it; do not remove it. The Claude agent container
 itself stays git-free. See
 [`worker_git_unavailable`](../help/errors/worker-git-unavailable.md).
 
+## Plan documents need a current driver and tool runner
+
+A planner run ([plan documents](coding-agent-setup.md#plan-documents)) adds a
+`planFiles` key to the run input when it has files to start from, and reads
+`plan-files.json` from the run's output. Wardby writes the key only on such
+runs, so every other run works as before. A Codex worker built on a driver
+older than `driver-v37` rejects that input (`worker_input_failed`) and never
+returns the plan folder. A Claude Code `workerImageRef` tool runner built from
+an older release has no plan tools: a planner run's plan is not stored
+(`plan_tool_unavailable`), and a run that starts from plan files (a revision,
+or a builder given approved designs) fails with `worker_plan_files_failed`.
+Rebuild a Codex `workerImageRef` image on a current
+`driver-vN` digest, and a Claude Code tool runner on the current release's
+`wardby-claude-tool-runner` image, before you give the agent a plan document
+setting. The plan folder is `/tmp/wardby-plan`: keep `/tmp` writable in a
+custom image, as the reference images do.
+
 ## What this doesn't cover
 
 wardby does not re-validate the contents of your built image beyond the
