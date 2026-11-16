@@ -159,7 +159,9 @@ describe("Codex bridge, end to end without Substrate", () => {
         }
         if (
           method === "POST" &&
-          ["result", "workspace", "workspace-failed", "exit", "diagnostics", "image-incomplete"].includes(path)
+          ["result", "plan-files", "workspace", "workspace-failed", "exit", "diagnostics", "image-incomplete"].includes(
+            path,
+          )
         ) {
           return response.writeHead(200, { "content-type": "application/json" }).end("{}");
         }
@@ -386,6 +388,34 @@ describe("Codex bridge, end to end without Substrate", () => {
     // No warm rounds for Codex, whatever the template's env says.
     expect(requests.filter((r) => r.path.startsWith("input"))).toHaveLength(1);
     for (const value of forbidden) expect(logs.join("\n")).not.toContain(value);
+  });
+
+  it("uploads the worker's plan files before the result", async () => {
+    await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
+    const planFilesPath = join(dir, "out", "plan-files.json");
+    handle = await start(
+      () => ({
+        exited: (async () => {
+          await writeFile(planFilesPath, '{"schemaVersion":1}');
+          await writeFile(resultPath(), JSON.stringify({ summary: "done" }));
+          return 0;
+        })(),
+      }),
+      undefined,
+      {},
+      false,
+      { planFilesPath },
+    );
+    expect(await handle.collected).toBe("ok");
+    expect(order()).toEqual([
+      "GET tool-setup",
+      "GET seed",
+      "GET input",
+      "POST plan-files",
+      "POST result",
+      "POST workspace",
+    ]);
+    expect(posted("plan-files")[0].body.toString()).toBe('{"schemaVersion":1}');
   });
 
   it("names protocol 1 on every request", async () => {

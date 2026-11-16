@@ -53,6 +53,7 @@ import {
   REPOSITORY_MOUNT_ROOT,
   REGISTRY_TOKEN_SHAPE,
   WORKER_PLACEHOLDERS,
+  PLAN_FILES_OUTPUT_PATH,
 } from "./constants.js";
 import { pipeRedacted, type LineSink } from "./diagnostics.js";
 import { checkImage, ImageIncompleteError, type ImageCheck } from "./image-check.js";
@@ -98,6 +99,8 @@ export interface CodexOptions {
   signal?: AbortSignal;
   inputPath?: string;
   resultPath?: string;
+  /** Where the worker writes its plan-files.json (default PLAN_FILES_OUTPUT_PATH). */
+  planFilesPath?: string;
   /**
    * Starts the worker with this environment. The default spawns `node /opt/wardby/coding-worker/main.js`
    * in its own process group, its output redacted against `secrets` (the bridge's live list).
@@ -209,6 +212,7 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
   const tar = options.tarCommand ?? "tar";
   const inputPath = options.inputPath ?? "/run/wardby/input/input.json";
   const resultPath = options.resultPath ?? "/run/wardby/output/result.json";
+  const planFilesPath = options.planFilesPath ?? PLAN_FILES_OUTPUT_PATH;
   // 1. The readiness server first: Substrate's wake-up probe must answer for the golden actor too,
   // which never gets a run actor's name (see waitForRunToken). Nothing touches the network before it.
   const ready = await startReadyServer(options.readyPort ?? DEFAULT_READY_PORT);
@@ -364,6 +368,7 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
     token,
     headers,
     resultPath,
+    planFilesPath,
     tail: diagnostics,
     policy,
     log,

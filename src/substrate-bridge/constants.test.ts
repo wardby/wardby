@@ -15,6 +15,8 @@ import {
   IMAGE_ITEMS,
   PLACEHOLDER_CAPABILITY,
   RESULT_BUNDLE_FILE as BRIDGE_RESULT_BUNDLE_FILE,
+  PLAN_FILES_OUTPUT_PATH,
+  PLAN_FOLDER,
   RUN_TOKEN_PATTERN,
   TOOL_SUFFIX,
 } from "./constants.js";
@@ -37,6 +39,8 @@ import {
 import { collectExclusions, tarExcludeArgs } from "../coding/collect-exclude.js";
 import {
   MAX_CODING_OUTPUT_ISSUES as PROTOCOL_MAX_CODING_OUTPUT_ISSUES,
+  PLAN_FILES_ARTIFACT,
+  PLAN_FOLDER_PATH,
   SAFE_CODING_OUTPUT_ISSUE as PROTOCOL_SAFE_CODING_OUTPUT_ISSUE,
 } from "../coding/protocol.js";
 import {
@@ -51,6 +55,11 @@ import { parseWorkerDiagnosticLine as bridgeParseWorkerDiagnosticLine } from "./
 
 it("names the image check's items as the launcher does", () => {
   expect([...IMAGE_ITEMS]).toEqual([...SUBSTRATE_IMAGE_ITEMS]);
+});
+
+it("re-declares the plan-files output path and the plan folder unchanged", () => {
+  expect(PLAN_FILES_OUTPUT_PATH).toBe(`/run/wardby/output/${PLAN_FILES_ARTIFACT}`);
+  expect(PLAN_FOLDER).toBe(PLAN_FOLDER_PATH);
 });
 
 it("matches the launcher's names", () => {

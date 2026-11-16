@@ -83,6 +83,8 @@ export const BLOB = {
   seed: (t: string) => `substrate/runs/${t}/seed.tar`,
   result: (t: string, round?: number) => perRound(t, "result", "json", round),
   transcript: (t: string, round?: number) => perRound(t, "transcript", "jsonl", round),
+  /** The worker's plan-files.json (coding/protocol.ts PLAN_FILES_ARTIFACT), uploaded by the bridge before the result. */
+  planFiles: (t: string, round?: number) => perRound(t, "plan-files", "json", round),
   workspace: (t: string, round?: number) => perRound(t, "workspace", "tar", round),
   exit: (t: string, round?: number) => perRound(t, "exit", "json", round),
   done: (t: string, round?: number) => perRound(t, "done", "json", round),
@@ -130,7 +132,16 @@ export const REPO_BLOB = {
 };
 
 /** The BLOB keys that exist once per round (warm rounds, SUBSTRATE_WARM_ROUNDS). */
-export const ROUND_BLOBS = ["input", "result", "transcript", "workspace", "exit", "done", "started"] as const;
+export const ROUND_BLOBS = [
+  "input",
+  "result",
+  "transcript",
+  "planFiles",
+  "workspace",
+  "exit",
+  "done",
+  "started",
+] as const;
 
 /**
  * Warm rounds only: `{"round": n}`, the round the actors of this token are on, written by the

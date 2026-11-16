@@ -189,6 +189,12 @@ must arrive within ten minutes of being authenticated.
 - Codex coding runs, with the same features: the package registry, run steps,
   stop, run deadlines, the budget stop, `codingProfile.gitHistory` runs and
   capacity requeue. See [Codex runs](#codex-runs).
+- Plan documents (`codingProfile.planDocument`, `buildFromPlan`): input plan
+  files travel in the run input, and the bridge uploads the worker's
+  `plan-files.json` before the result, up to the protocol's plan limit (no
+  setting). A bridge image from an earlier release does not upload it, so a
+  planner run on it stores no plan (`planFilesStatus` `plan_files_missing`):
+  use the bridge images from the same release as the proxy.
 - `codingProfile.gitHistory` runs (see [Git history](#git-history)).
 - Coding runs with remote MCP tools, for Claude Code and Codex (see
   [MCP tools](#mcp-tools)).
