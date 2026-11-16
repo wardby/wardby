@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { logger, setLogLineFilter } from "../../../core/logger.js";
+import { MAX_CODING_INPUT_BYTES } from "../../../coding/protocol.js";
 import { jobLauncherContract } from "../contract-suite.js";
 import { hostTarArchive } from "../kubernetes.js";
 import { createSubstrateRoutes } from "../../coding-proxy/substrate/routes.js";
@@ -859,7 +860,7 @@ describe("SubstrateJobLauncher", () => {
 
   it("fails the launch when the input artifact is too large", async () => {
     const h = await makeHarness();
-    await writeFile(h.spec.inputArtifact, Buffer.alloc(512 * 1024 + 1));
+    await writeFile(h.spec.inputArtifact, Buffer.alloc(MAX_CODING_INPUT_BYTES + 1));
     await expect(h.launcher.launch(h.spec)).rejects.toThrow("substrate_input_artifact_invalid");
   });
 

@@ -86,7 +86,7 @@ import {
   CodingTaskInputSchema,
   COMMIT_SHA,
   GitHistoryInputSchema,
-  MAX_CODING_INPUT_BYTES,
+  MAX_CODING_BASE_INPUT_BYTES,
   RESERVED_REPOSITORY_NAME,
   isLocalRepository,
   parseCodingWorkerOutputJson,
@@ -4555,13 +4555,13 @@ export class ContainerExecutor implements Executor {
       });
     // The content limits bound bytes, but JSON escaping can grow them up to sixfold (a control
     // character becomes \u00XX), so a hostile repository could still push input.json past
-    // MAX_CODING_INPUT_BYTES and fail the launch. Drop context files from the tail (skills, then the
+    // MAX_CODING_BASE_INPUT_BYTES and fail the launch. Drop context files from the tail (skills, then the
     // deepest imports; the root instructions go last) until the serialized input fits.
     const contextFiles = [...(claudeContext?.files ?? [])];
     const skipped = [...(claudeContext?.skipped ?? [])];
     let skippedOverflow = claudeContext?.skippedOverflow ?? 0;
     let serialized = JSON.stringify(build(contextFiles));
-    while (contextFiles.length > 0 && Buffer.byteLength(serialized) > MAX_CODING_INPUT_BYTES) {
+    while (contextFiles.length > 0 && Buffer.byteLength(serialized) > MAX_CODING_BASE_INPUT_BYTES) {
       const dropped = contextFiles.pop()!;
       if (skipped.length < MAX_RECORDED_SKIPS) skipped.push({ path: dropped.path, reason: "limit" });
       else skippedOverflow++;
