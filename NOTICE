@@ -146,6 +146,37 @@ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
+Third-party software used by the server (documents, designs and exports)
+
+These packages run in the control plane and the renderer, not in the browser
+bundles. They are installed under node_modules/ in the images, each with its
+own licence file:
+
+- marked 17.0.6 (MIT): Markdown for PDF export
+  Copyright (c) 2018+, MarkedJS; Copyright (c) 2011-2018, Christopher Jeffrey
+- dompurify 3.4.17 (MPL-2.0 OR Apache-2.0; used under Apache-2.0): board
+  HTML sanitising. Copyright Cure53 and other contributors
+- jsdom 31.0.0 (MIT): server-side board parsing
+  Copyright (c) 2010 Elijah Insua
+- @csstools/css-tokenizer 4.0.2 (MIT): board CSS checks
+  Copyright 2022 Romain Menke, Antonio Laguna
+- postcss 8.5.32 (MIT)
+  Copyright 2013 Andrey Sitnik
+- postcss-value-parser 4.2.0 (MIT)
+  Copyright (c) Bogdan Chadkin
+- pdf-lib 1.17.1 (MIT): PDF export, with pako (MIT AND Zlib)
+  Copyright (c) 2019 Andrew Dillon; pako Copyright (C) 2014-2017 by Vitaly
+  Puzrin and Andrei Tuputcyn
+- playwright-core 1.63.0 (Apache-2.0): drives the renderer's browser
+  Copyright (c) Microsoft Corporation; contains code derived from Puppeteer
+  (Apache-2.0). Its NOTICE and ThirdPartyNotices.txt ship in the package.
+
+The renderer image also installs the Chromium headless shell through
+playwright-core (BSD 3-Clause, Copyright The Chromium Authors, with the
+third-party components it carries under their own licences) and Debian
+bookworm packages (fonts and libraries), each with its copyright file under
+/usr/share/doc/.
+
 This product includes a TypeScript client generated at build time from the
 Agent Substrate API definition (api/ateapi/v1/ateapi.proto),
 Copyright 2026 The Agent Substrate Authors, licensed under the Apache
