@@ -27,6 +27,8 @@ export const MAX_SERVICE_SCRIPT_BYTES = 16 * 1024;
 export const MAX_SERVICE_SCRIPTS_BYTES = 64 * 1024;
 /** How long a service may go without writing its first state after start.sh is written (start_failed). */
 export const SERVICE_START_MARKER_MS = 30_000;
+/** The longest wait the bridges accept (servicesWaitMs never exceeds it, whatever the startup timeout). */
+export const MAX_SERVICES_WAIT_MS = 3_600_000;
 
 /**
  * An entry with substrateImage runs its own setup script (builtins.ts), which starts the daemon in
@@ -146,5 +148,5 @@ export function servicesWaitMs(services: readonly ResolvedCodingService[], capMs
       sum + readiness.failureThreshold * (readiness.periodSeconds + readiness.timeoutSeconds) * 1000,
     0,
   );
-  return Math.min(SERVICE_START_MARKER_MS + probing, capMs);
+  return Math.min(SERVICE_START_MARKER_MS + probing, capMs, MAX_SERVICES_WAIT_MS);
 }

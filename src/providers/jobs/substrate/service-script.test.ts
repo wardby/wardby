@@ -535,6 +535,14 @@ describe("servicesWaitMs", () => {
     expect(servicesWaitMs([], 300_000)).toBe(30_000);
   });
 
+  it("never exceeds the longest wait the bridges accept, even under a longer startup timeout", () => {
+    const many = Array.from({ length: 5 }, () => ({
+      ...builtin("mysql", "8"),
+      readiness: { command: ["true"], periodSeconds: 60, timeoutSeconds: 60, failureThreshold: 100 },
+    }));
+    expect(servicesWaitMs(many, 7_200_000)).toBe(3_600_000);
+  });
+
   it("accepts a cap exactly at the marker bound", () => {
     expect(servicesWaitMs([], 30_000)).toBe(30_000);
   });

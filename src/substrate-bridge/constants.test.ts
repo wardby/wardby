@@ -170,6 +170,7 @@ it("matches the launcher's service paths and bounds", async () => {
   const protocol = await import("../coding/protocol.js");
   expect(bridge.SERVICES_ROOT).toBe(script.SERVICES_ROOT);
   expect(bridge.SERVICE_START_MARKER_MS).toBe(script.SERVICE_START_MARKER_MS);
+  expect(bridge.MAX_SERVICES_WAIT_MS).toBe(script.MAX_SERVICES_WAIT_MS);
   expect(bridge.MAX_SERVICE_SCRIPT_BYTES).toBe(script.MAX_SERVICE_SCRIPT_BYTES);
   expect(bridge.MAX_SETUP_SERVICES).toBe(protocol.MAX_CODING_SERVICES);
   expect(bridge.SERVICE_NAME.source).toBe(protocol.CODING_SERVICE_NAME.source);

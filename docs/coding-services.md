@@ -85,11 +85,11 @@ same variables as on the other launchers.
   services also waits in the queue while Substrate pulls the images and builds
   that template's golden snapshot; later runs reuse it.
 - **Size.** The workspace actor's CPU and memory include every service's: its
-  catalog CPU, and as memory its catalog memory plus its disk (`diskMib`) plus
-  64 MiB for each writable path plus 64 MiB, the same formula as on Docker,
-  because files a service writes outside its data volume count against memory.
-  `diskMib` is not enforced as a disk limit, and no service has a CPU or memory
-  limit of its own inside the actor.
+  catalog CPU, and as memory its catalog memory plus 64 MiB for each writable
+  path plus 64 MiB. Writes to the data path do not count against the actor's
+  memory; files a service writes anywhere else do. `diskMib` is neither
+  counted nor enforced, and no service has a CPU or memory limit of its own
+  inside the actor.
 - **Warm rounds.** A run with services is never kept between
   [warm rounds](substrate-backend.md#warm-rounds); the next round starts fresh,
   with empty services.
@@ -105,15 +105,15 @@ directly. Docker and Kubernetes keep the official images.
 
 #### Differences between launchers
 
-|                            | Kubernetes                    | Docker                   | Substrate                        |
-| -------------------------- | ----------------------------- | ------------------------ | -------------------------------- |
-| Service exits during a run | restarted                     | not restarted            | not restarted                    |
-| Runs as                    | uid 10001                     | uid 10001                | the image's default user         |
-| Image                      | `image`                       | `image`                  | `substrateImage`, else `image`   |
-| Disk limit (`diskMib`)     | enforced                      | enforced (memory-backed) | not enforced (counted in memory) |
-| `startCommand`             | ignored                       | ignored                  | required                         |
-| Start-up bound             | `KUBERNETES_READY_TIMEOUT_MS` | 120 seconds, fixed       | `SUBSTRATE_STARTUP_TIMEOUT_SEC`  |
-| Warm rounds                | n/a                           | n/a                      | never kept                       |
+|                            | Kubernetes                    | Docker                   | Substrate                       |
+| -------------------------- | ----------------------------- | ------------------------ | ------------------------------- |
+| Service exits during a run | restarted                     | not restarted            | not restarted                   |
+| Runs as                    | uid 10001                     | uid 10001                | the image's default user        |
+| Image                      | `image`                       | `image`                  | `substrateImage`, else `image`  |
+| Disk limit (`diskMib`)     | enforced                      | enforced (memory-backed) | not enforced, not counted       |
+| `startCommand`             | ignored                       | ignored                  | required                        |
+| Start-up bound             | `KUBERNETES_READY_TIMEOUT_MS` | 120 seconds, fixed       | `SUBSTRATE_STARTUP_TIMEOUT_SEC` |
+| Warm rounds                | n/a                           | n/a                      | never kept                      |
 
 ## Declaring services in a repository
 

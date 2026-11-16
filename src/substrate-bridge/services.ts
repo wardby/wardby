@@ -16,7 +16,13 @@
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { postCapped, type Logger } from "./common.js";
-import { MAX_SERVICE_SCRIPT_BYTES, MAX_SETUP_SERVICES, SERVICE_NAME, SERVICE_START_MARKER_MS } from "./constants.js";
+import {
+  MAX_SERVICE_SCRIPT_BYTES,
+  MAX_SERVICES_WAIT_MS,
+  MAX_SETUP_SERVICES,
+  SERVICE_NAME,
+  SERVICE_START_MARKER_MS,
+} from "./constants.js";
 import { abortableSleep, BridgeError, type RetryPolicy } from "./http.js";
 
 export interface SetupService {
@@ -36,7 +42,6 @@ interface Report {
 }
 
 const SETUP_SERVICE_KEYS = new Set(["name", "script"]);
-const MAX_WAIT_MS = 3_600_000;
 const DEFAULT_POLL_MS = 250;
 /** How many times the final (failed) report is posted before the bridge idles without it. */
 const FINAL_REPORT_ATTEMPTS = 5;
@@ -64,7 +69,9 @@ export function parseSetupServices(value: unknown): SetupService[] | undefined {
 
 /** A servicesWaitMs value: an integer 1..3_600_000, else undefined. */
 export function parseServicesWaitMs(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_WAIT_MS ? value : undefined;
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_SERVICES_WAIT_MS
+    ? value
+    : undefined;
 }
 
 /** The state file's line (service-script.ts SERVICE_STATE_LINE), as a report; undefined for anything else. */
