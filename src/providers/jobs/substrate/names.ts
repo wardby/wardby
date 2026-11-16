@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isCodingRepositoryName } from "../../../coding/protocol.js";
+import type { ServiceFailureReason, ServiceState } from "../service-state.js";
 import type { SubstrateActorShape } from "./run-store.js";
 
 const hex = (input: string, length: number): string =>
@@ -99,6 +100,12 @@ export const BLOB = {
    * The launcher fails the run with substrate_image_incomplete:<item>. Once per run.
    */
   imageIncomplete: (t: string) => `substrate/runs/${t}/image-incomplete.json`,
+  /**
+   * Written (replaced) by the proxy from the holder bridge's `POST services`: the validated
+   * `{"services": [...]}` (parseServicesReport), never the request body. Round 1 only (a run with
+   * services never parks). The launcher waits on it in launch().
+   */
+  services: (t: string) => `substrate/runs/${t}/services.json`,
 };
 
 /** The fixed items a bridge's image check may report (substrate-bridge/constants.ts IMAGE_ITEMS). */
@@ -108,6 +115,76 @@ export type SubstrateImageItem = (typeof SUBSTRATE_IMAGE_ITEMS)[number];
 /** Whether `value` is one of SUBSTRATE_IMAGE_ITEMS (never any other string: the report carries no free text). */
 export function isSubstrateImageItem(value: unknown): value is SubstrateImageItem {
   return typeof value === "string" && (SUBSTRATE_IMAGE_ITEMS as readonly string[]).includes(value);
+}
+
+/** The largest services report the proxy accepts. */
+export const MAX_SERVICES_REPORT_BYTES = 4096;
+/** The most readiness probes a report may count (the start script writes at most 5 digits). */
+const MAX_REPORTED_ATTEMPTS = 10_000;
+// Record-typed so a value added to service-state.ts fails to compile here until it is listed.
+const SERVICE_STATE_SET: Record<ServiceState, true> = { pending: true, probing: true, ready: true, failed: true };
+const SERVICE_FAILURE_REASON_SET: Record<ServiceFailureReason, true> = {
+  image_unavailable: true,
+  start_failed: true,
+  exited: true,
+  probe_failed: true,
+  timed_out: true,
+};
+const SERVICE_STATES = Object.keys(SERVICE_STATE_SET) as ServiceState[];
+const SERVICE_FAILURE_REASONS = Object.keys(SERVICE_FAILURE_REASON_SET) as ServiceFailureReason[];
+
+/** One service's state as the holder's bridge reports it (service-state.ts values only). */
+export interface SubstrateServiceReport {
+  name: string;
+  state: ServiceState;
+  attempts?: number;
+  reason?: ServiceFailureReason;
+}
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * `{ services: [...] }` exactly: 1..allowed.length entries, each `{ name, state, attempts?, reason? }`
+ * with name in `allowed` (no name twice), state a ServiceState, attempts an integer 0..10000, reason a
+ * ServiceFailureReason and only with state "failed"; no other key anywhere. Rebuilt field by field, so
+ * nothing of the input but these enum values, validated names and the integer is kept. Undefined for
+ * anything else.
+ */
+export function parseServicesReport(value: unknown, allowed: readonly string[]): SubstrateServiceReport[] | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const top = Object.keys(value);
+  if (top.length !== 1 || top[0] !== "services") return undefined;
+  const entries = value.services;
+  if (!Array.isArray(entries) || entries.length < 1 || entries.length > allowed.length) return undefined;
+  const seen = new Set<string>();
+  const out: SubstrateServiceReport[] = [];
+  for (const entry of entries as unknown[]) {
+    if (!isPlainObject(entry)) return undefined;
+    if (Object.keys(entry).some((key) => key !== "name" && key !== "state" && key !== "attempts" && key !== "reason"))
+      return undefined;
+    const { name, state, attempts, reason } = entry;
+    if (typeof name !== "string" || !allowed.includes(name) || seen.has(name)) return undefined;
+    if (typeof state !== "string" || !(SERVICE_STATES as readonly string[]).includes(state)) return undefined;
+    if (
+      attempts !== undefined &&
+      (typeof attempts !== "number" || !Number.isInteger(attempts) || attempts < 0 || attempts > MAX_REPORTED_ATTEMPTS)
+    )
+      return undefined;
+    if (reason !== undefined) {
+      if (state !== "failed") return undefined;
+      if (typeof reason !== "string" || !(SERVICE_FAILURE_REASONS as readonly string[]).includes(reason))
+        return undefined;
+    }
+    seen.add(name);
+    out.push({
+      name,
+      state: state as ServiceState,
+      ...(attempts !== undefined ? { attempts } : {}),
+      ...(reason !== undefined ? { reason: reason as ServiceFailureReason } : {}),
+    });
+  }
+  return out;
 }
 
 /** An extra repository's name, refused unless it is a link name (never `workspace`, never a path). */

@@ -50,6 +50,7 @@ export async function resolveRunServices(
   if (declared.length === 0) return { services: [] };
   const rows = await catalog.findMany({ where: { OR: declared.map(({ name, version }) => ({ name, version })) } });
   const entries = new Map(rows.map((row) => [keyOf(row), catalogEntryFromRow(row)]));
+  const rowsByKey = new Map(rows.map((row) => [keyOf(row), row]));
   for (const service of declared) {
     if (!entries.has(keyOf(service))) {
       return { refusal: serviceRefusal("service_unknown", unknownServiceSentence(service.name, service.version)) };
@@ -61,7 +62,10 @@ export async function resolveRunServices(
       return { refusal: serviceRefusal("service_not_allowed", notAllowedServiceSentence(service.name)) };
     }
   }
-  const services = declared.map((service) => resolvedFromDefinition(entries.get(keyOf(service))!));
+  const services = declared.map((service) => {
+    const row = rowsByKey.get(keyOf(service))!;
+    return resolvedFromDefinition(entries.get(keyOf(service))!, { id: row.id, updatedAt: row.updatedAt });
+  });
   const note = servicesInstructionNote(services);
   if (note !== undefined) {
     try {

@@ -456,6 +456,29 @@ describe("Substrate custom image help", () => {
   });
 });
 
+describe("Substrate services help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (query: string) =>
+      searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    const found = [...top3("substrate services"), ...top3("postgres substrate")];
+    expect(found).toContain("coding-services");
+    expect(found).toContain("job-launcher-substrate");
+    expect(
+      top3("startCommand").some((id) => id === "errors/service-launcher-unsupported" || id === "coding-services"),
+    ).toBe(true);
+    expect(top3("substrateImage")).toContain("coding-services");
+    expect(top3("WARDBY_SERVICE_SETUP_DONE")).toContain("errors/service-unready");
+    expect(top3("substrate_bridge_service_unready")).toContain("errors/service-unready");
+    expect(top3("coding_service_unready")).toContain("errors/service-unready");
+    expect(top3("substrate_feature_unsupported")).toContain("errors/substrate-feature-unsupported");
+  });
+});
+
 describe("pnpm and yarn help", () => {
   it("is found for the obvious queries", async () => {
     const { buildHelpCatalog } = await import("./catalog.js");

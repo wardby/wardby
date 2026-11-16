@@ -3,10 +3,13 @@ import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { V1Secret } from "@kubernetes/client-node";
+import { BUILTIN_CODING_SERVICES } from "../../../coding/services/builtins.js";
+import { resolvedFromDefinition, type ResolvedCodingService } from "../../../coding/services/catalog.js";
 import { MemoryRelayStore } from "../../coding-proxy/substrate/memory-relay-store.js";
 import { LocalBlobStore } from "../../storage/local.js";
 import type { BlobInfo } from "../../storage/types.js";
 import { KubernetesAlreadyExistsError } from "../kubernetes-api.js";
+import type { ServiceStateUpdate } from "../service-state.js";
 import type { JobSpec } from "../types.js";
 import { FakeSubstrateApi, type FakeSubstrateOptions } from "./fake-api.js";
 import {
@@ -16,7 +19,7 @@ import {
   type WarmEvent,
   type WarmRoundsOptions,
 } from "./launcher.js";
-import { substrateRunToken } from "./names.js";
+import { BLOB, substrateRunToken, type SubstrateServiceReport } from "./names.js";
 import { MemorySubstrateRunStore, type SubstrateRunStore } from "./run-store.js";
 import type { SubstrateLaunchConfig } from "./specs.js";
 import { MemorySubstrateTemplateStore, type SubstrateTemplateStore } from "./template-store.js";
@@ -122,6 +125,10 @@ export interface Harness {
   templates: SubstrateTemplateStore;
   /** Every template event the launcher reported. */
   templateEvents: TemplateEvent[];
+  /** Every coding-service display state the launcher reported (onServiceState). */
+  serviceStates: ServiceStateUpdate[];
+  /** How many times the launcher slept (each sleep advances the clock by its ms). */
+  sleeps: () => number;
   root: string;
 }
 
@@ -153,6 +160,10 @@ export async function makeHarness(
      * (`# <name>`), and the spec lists it with that folder as its host path.
      */
     repositories?: { name: string; access: "read" | "write" }[];
+    /** The run's coding services (JobSpec.services). */
+    services?: ResolvedCodingService[];
+    /** Called on each launcher sleep, after the clock advanced (write a services report here). */
+    onSleep?: (h: Harness) => Promise<void> | void;
   } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "wardby-substrate-launcher-"));
@@ -182,6 +193,10 @@ export async function makeHarness(
   const warmEvents: WarmEvent[] = [];
   const templates = options.templates ?? new MemorySubstrateTemplateStore();
   const templateEvents: TemplateEvent[] = [];
+  const serviceStates: ServiceStateUpdate[] = [];
+  let sleeps = 0;
+  // Set once the harness exists: a sleep hands it to onSleep.
+  const ref: { harness?: Harness } = {};
   const blobs = new ClockedBlobStore(join(root, "blobs"), () => now);
   const relay = new MemoryRelayStore();
   relay.register(substrateRunToken(runId), 1 << 20);
@@ -205,6 +220,14 @@ export async function makeHarness(
     ...(options.collectGraceMs !== undefined ? { collectGraceMs: options.collectGraceMs } : {}),
     ...(options.startupTimeoutMs !== undefined ? { startupTimeoutMs: options.startupTimeoutMs } : {}),
     ...(options.warmRounds ? { warmRounds: options.warmRounds, onWarmEvent: (event) => warmEvents.push(event) } : {}),
+    onServiceState: async (update) => {
+      serviceStates.push(update);
+    },
+    sleep: async (ms) => {
+      sleeps++;
+      now += ms;
+      if (ref.harness) await options.onSleep?.(ref.harness);
+    },
   });
   const spec: JobSpec = {
     kind: "coding-agent",
@@ -221,8 +244,9 @@ export async function makeHarness(
     limits: { cpus: 1, memoryMb: 1024, pids: 256, diskMb: 64 },
     labels: {},
     ...(options.repositories ? { repositories } : {}),
+    ...(options.services ? { services: options.services } : {}),
   };
-  return {
+  const harness: Harness = {
     launcher,
     api,
     runs,
@@ -240,8 +264,17 @@ export async function makeHarness(
     warmEvents,
     templates,
     templateEvents,
+    serviceStates,
+    sleeps: () => sleeps,
     root,
   };
+  ref.harness = harness;
+  return harness;
+}
+
+/** Writes the holder bridge's services report (as the proxy stores it) for the harness's run. */
+export async function reportServices(h: Harness, entries: SubstrateServiceReport[]): Promise<void> {
+  await h.blobs.put(BLOB.services(h.token), Buffer.from(JSON.stringify({ services: entries })));
 }
 
 /** Every file the blob store holds, with its contents. */
@@ -257,3 +290,30 @@ export async function allBlobs(h: Harness): Promise<Map<string, string>> {
   await walk(join(h.root, "blobs"), "");
   return out;
 }
+
+/** A fake service (no substrateImage): every catalog value that must stay out of a template is a marker. */
+export const FAKE_SERVICE: ResolvedCodingService = {
+  name: "fakedb",
+  version: "1",
+  image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,
+  port: 5999,
+  serviceEnv: { FAKEDB_PASSWORD: "FAKE_SERVICE_ENV_VALUE_0001" },
+  testEnv: {},
+  readiness: {
+    command: ["fakedb-ping", "FAKE_READINESS_ARG_0001"],
+    periodSeconds: 1,
+    timeoutSeconds: 1,
+    failureThreshold: 3,
+  },
+  startCommand: ["fakedb-serve", "--fake-start-arg-0001"],
+  resources: { cpuMillicores: 250, memoryMib: 256, diskMib: 128 },
+  dataPath: "/var/lib/fakedb",
+  writablePaths: ["/tmp"],
+};
+
+/** The built-in postgres 16 entry, as dispatch snapshots it (with its substrateImage). */
+export const POSTGRES_16_SERVICE: ResolvedCodingService = (() => {
+  const definition = BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16");
+  if (!definition) throw new Error("no built-in postgres 16");
+  return resolvedFromDefinition(definition);
+})();

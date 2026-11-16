@@ -13,7 +13,9 @@ import {
   DECLARATION_UNAVAILABLE_SENTENCE,
   LAUNCHER_UNSUPPORTED_SENTENCE,
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
+  unstartableServiceSentence,
 } from "../coding/services/wording.js";
+import type { UnstartableService } from "../providers/jobs/types.js";
 import type { AttributionIntent } from "./attribution.js";
 import {
   checkContinuation,
@@ -2116,9 +2118,14 @@ describe("coding-run services", () => {
     };
   }
 
-  function servicesExecutor(declaration: string | null | Error, supports = true) {
+  function servicesExecutor(
+    declaration: string | null | Error,
+    supports = true,
+    unstartable: UnstartableService[] = [],
+  ) {
     const reads: Array<{ repository: string; baseRef: string }> = [];
     const start = vi.fn(async () => {});
+    const unstartableCodingServices = vi.fn((_services: readonly unknown[]) => unstartable);
     const executor: Executor = {
       start,
       async stop() {},
@@ -2128,8 +2135,9 @@ describe("coding-run services", () => {
         return declaration;
       },
       supportsCodingServices: () => supports,
+      unstartableCodingServices,
     };
-    return { executor, reads, start };
+    return { executor, reads, start, unstartableCodingServices };
   }
 
   it("resolves the base branch's declaration, snapshots the service, and tells the builder about it", async () => {
@@ -2141,7 +2149,7 @@ describe("coding-run services", () => {
 
     expect(reads).toEqual([{ repository: "openai/wardby", baseRef: "main" }]);
     expect(result?.run.status).toBe("pending");
-    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16)]);
+    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
     expect(state.codingRuns[0].task).toContain("Services for this run:");
     expect(state.codingRuns[0].task).toContain("- postgres 16: DATABASE_URL=postgres://test:test@127.0.0.1:5432/test");
     expect(state.codingRuns[0].task).toMatch(/\n\nRequest:\nRun the tests$/);
@@ -2310,7 +2318,7 @@ describe("coding-run services", () => {
         vcs.readRepositoryFile({ ...input, ref: input.baseRef, path: ".wardby/services.yaml", maxBytes: 8192 });
       const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
       expect(result?.run.status).toBe("pending");
-      expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16)]);
+      expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2334,6 +2342,58 @@ describe("coding-run services", () => {
       status: "refused",
       error: `service_launcher_unsupported: ${LAUNCHER_UNSUPPORTED_SENTENCE}`,
     });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("refuses a service the launcher can't start, naming it", async () => {
+    const agent = servicesAgent();
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const problem: UnstartableService = { name: "postgres", reason: "start_command_missing" };
+    const { executor, start, unstartableCodingServices } = servicesExecutor(DECLARATION, true, [problem]);
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(result?.run).toMatchObject({
+      status: "refused",
+      error: `service_launcher_unsupported: ${unstartableServiceSentence(problem)}`,
+    });
+    expect(state.codingRuns).toEqual([]);
+    expect(start).not.toHaveBeenCalled();
+    expect(unstartableCodingServices).toHaveBeenCalledWith([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
+  });
+
+  it("dispatches when the launcher can start every service", async () => {
+    const agent = servicesAgent();
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const { executor, start, unstartableCodingServices } = servicesExecutor(DECLARATION, true, []);
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(result?.run.status).toBe("pending");
+    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
+    expect(unstartableCodingServices).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(result?.run.id);
+  });
+
+  it("never asks a launcher without the hook", async () => {
+    const agent = servicesAgent();
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const { executor, start } = servicesExecutor(DECLARATION);
+    delete executor.unstartableCodingServices;
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(result?.run.status).toBe("pending");
+    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
+    expect(start).toHaveBeenCalledWith(result?.run.id);
+  });
+
+  it.each([
+    ["an unknown service", servicesAgent(), 'services:\n  postgres: "99"\n', "service_unknown: "],
+    ["a disallowed service", servicesAgent(["redis"]), DECLARATION, "service_not_allowed: "],
+  ])("refuses %s before asking the launcher", async (_label, agent, declaration, prefix) => {
+    const state = fakeDb(agent, [], {}, CATALOG);
+    const { executor, start, unstartableCodingServices } = servicesExecutor(declaration, true, [
+      { name: "postgres", reason: "setup_too_large" },
+    ]);
+    const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+    expect(result?.run.status).toBe("refused");
+    expect(result?.run.error?.startsWith(prefix)).toBe(true);
+    expect(unstartableCodingServices).not.toHaveBeenCalled();
     expect(start).not.toHaveBeenCalled();
   });
 
@@ -2384,7 +2444,10 @@ describe("coding-run services", () => {
       expect(result?.run.error).toBe(`service_launcher_unsupported: ${LAUNCHER_UNSUPPORTED_SENTENCE}`);
       expect(start).not.toHaveBeenCalled();
     } else {
-      expect(state.codingRuns[0]).toMatchObject({ provider, services: [resolvedFromDefinition(POSTGRES_16)] });
+      expect(state.codingRuns[0]).toMatchObject({
+        provider,
+        services: [resolvedFromDefinition(POSTGRES_16, CATALOG[0])],
+      });
     }
   });
 

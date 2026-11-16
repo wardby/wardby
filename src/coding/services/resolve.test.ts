@@ -5,7 +5,7 @@ import { BUILTIN_CODING_SERVICES } from "./builtins.js";
 import { resolvedFromDefinition } from "./catalog.js";
 import { resolveRunServices } from "./resolve.js";
 
-const rows = BUILTIN_CODING_SERVICES.map((service) => ({ ...service }));
+const rows = BUILTIN_CODING_SERVICES.map((service) => ({ startCommand: null, ...service }));
 function catalog(entries: Array<(typeof rows)[number] | Record<string, unknown>> = rows) {
   const findMany = vi.fn(async ({ where }: { where: { OR: Array<{ name: string; version: string }> } }) =>
     (entries as typeof rows).filter((row) =>
@@ -29,6 +29,17 @@ describe("resolveRunServices", () => {
       "Add a joke.",
     );
     expect(result).toEqual({ services: [byKey("redis", "7"), byKey("postgres", "16")] });
+  });
+
+  it("snapshots the start command when the catalog has one", async () => {
+    const custom = { ...rows[1], name: "fakedb", startCommand: ["serve"] };
+    const result = await resolveRunServices(
+      catalog([custom]),
+      [{ name: "fakedb", version: "16" }],
+      ["fakedb"],
+      "Add a joke.",
+    );
+    expect(result).toMatchObject({ services: [{ name: "fakedb", startCommand: ["serve"] }] });
   });
 
   it("asks the catalog nothing when the repository declares nothing", async () => {

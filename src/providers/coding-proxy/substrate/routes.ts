@@ -61,6 +61,16 @@
  * BLOB.imageIncomplete, from which the launcher fails the run as substrate_image_incomplete:<item>.
  * It never writes `done`, drops the relay or touches the setup state. The route line's `item` field is
  * set only after the body was validated.
+ *
+ * Services (coding-run services): `POST services` is holder-only, and only for a run whose row lists
+ * services (SubstrateRun.services, read with the shape in the same lookup); any other run answers 404
+ * before any body is read. The body is `{"services": [...]}` with each entry's name one the row lists,
+ * its state and failure reason enum values (service-state.ts) and attempts an integer: a strict schema,
+ * no free text from the service (anything else is 400 substrate_services_report_invalid). The proxy
+ * stores the object it rebuilt from the validated fields, never the request body, in BLOB.services,
+ * replaced on each post; the launcher reads it. It never ends the run: it never writes `done`, drops
+ * the relay or touches the setup state. Nothing of the body is logged; the route line gets no field
+ * from it.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline, Transform } from "node:stream";
@@ -75,10 +85,13 @@ import {
   BRIDGE_PROTOCOL_RANGE,
   isSubstrateImageItem,
   MAX_ROUND,
+  MAX_SERVICES_REPORT_BYTES,
   parseRound,
+  parseServicesReport,
   REPO_BLOB,
   roundBlob,
   type SubstrateImageItem,
+  type SubstrateServiceReport,
   TOOL_ACTOR_JWT_HEADER,
   toolActorSubject,
 } from "../../jobs/substrate/names.js";
@@ -128,9 +141,9 @@ export interface SubstrateRouteOptions {
    */
   tokenForRun: (runId: string) => string | Promise<string>;
   /**
-   * The run's actor shape and extra repositories, by its token (one SubstrateRun row read); undefined
-   * when the token has no row (treated as a pair with no repositories, and asked again next time).
-   * Absent: every run is a pair with no repositories.
+   * The run's actor shape, extra repositories and services, by its token (one SubstrateRun row read);
+   * undefined when the token has no row (treated as a pair with no repositories or services, and asked
+   * again next time). Absent: every run is a pair with no repositories or services.
    */
   runLayoutForToken?: (token: string) => Promise<SubstrateRunLayout | undefined>;
   /**
@@ -169,7 +182,8 @@ type RouteName =
   | "diagnostics"
   | "repos.seed"
   | "repos.workspace"
-  | "image-incomplete";
+  | "image-incomplete"
+  | "services";
 
 interface Matched {
   name: RouteName;
@@ -241,6 +255,8 @@ function match(method: string, rest: string): Matched | undefined {
       return { name: "diagnostics", caller: "agent" };
     case "POST image-incomplete":
       return { name: "image-incomplete", caller: "holder" };
+    case "POST services":
+      return { name: "services", caller: "holder" };
     default:
       return undefined;
   }
@@ -344,9 +360,9 @@ export function createSubstrateRoutes(
   /** `<run token>/<round>/<side>` whose diagnostics were logged: a repeat is answered but not logged again. */
   const diagnosticsSeen = new Set<string>();
   /**
-   * The layout of every token whose row was found: a token's row, its shape and its repositories are
-   * set when the row is created and never change. A token with no row is not remembered, so a row not
-   * yet visible is never pinned.
+   * The layout of every token whose row was found: a token's row, its shape, its repositories and its
+   * services are set when the row is created and never change. A token with no row is not remembered,
+   * so a row not yet visible is never pinned.
    */
   const knownLayouts = new Map<string, SubstrateRunLayout>();
 
@@ -359,6 +375,7 @@ export function createSubstrateRoutes(
     const layout: SubstrateRunLayout = {
       shape: found.shape === "single" ? "single" : "pair",
       ...(found.repositories ? { repositories: found.repositories } : {}),
+      ...(found.services ? { services: found.services } : {}),
     };
     knownLayouts.set(token, layout);
     if (knownLayouts.size > KNOWN_LAYOUTS_MAX) {
@@ -557,6 +574,30 @@ export function createSubstrateRoutes(
     if (keys.length !== 1 || keys[0] !== "item" || !isSubstrateImageItem(item))
       throw new RouteError(400, "bad_request");
     return item;
+  }
+
+  /**
+   * The holder's services report, validated against the run's service names (parseServicesReport) and
+   * rebuilt. Content-Length required, at most MAX_SERVICES_REPORT_BYTES; anything else is 400
+   * substrate_services_report_invalid (the body is never logged or echoed).
+   */
+  async function readServicesReport(
+    request: IncomingMessage,
+    allowed: readonly string[],
+  ): Promise<SubstrateServiceReport[]> {
+    const length = request.headers["content-length"];
+    if (length === undefined) throw new RouteError(411, "length_required");
+    if (!/^\d+$/.test(length) || Number(length) > MAX_SERVICES_REPORT_BYTES) throw new RouteError(413, "too_large");
+    const raw = await readBody(request, MAX_SERVICES_REPORT_BYTES, AbortSignal.timeout(HTTP_LIMITS.requestMs));
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      throw new RouteError(400, "substrate_services_report_invalid");
+    }
+    const report = parseServicesReport(value, allowed);
+    if (!report) throw new RouteError(400, "substrate_services_report_invalid");
+    return report;
   }
 
   /** A diagnostics tail: Content-Length required, at most MAX_DIAGNOSTICS_BYTES, read as UTF-8 text. */
@@ -889,6 +930,18 @@ export function createSubstrateRoutes(
               contentType: "application/json",
             });
           }
+          sendJson(response, 200, {});
+          return;
+        }
+        case "services": {
+          // Before the body is read: a run without services has nothing to report (404, connection closed).
+          // Replaced on each post; never writes `done`, drops the relay or touches setupDeleted.
+          const allowed = layout.services;
+          if (!allowed) throw new RouteError(404, "not_found");
+          const report = await readServicesReport(request, allowed);
+          await blobs.put(BLOB.services(token), Buffer.from(JSON.stringify({ services: report })), {
+            contentType: "application/json",
+          });
           sendJson(response, 200, {});
           return;
         }

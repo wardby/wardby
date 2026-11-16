@@ -115,7 +115,14 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveDeferredCodingRun (database)"
     expect(spies.readCodingServiceDeclaration).toHaveBeenCalledWith({ repository: "openai/example", baseRef: "main" });
     const coding = await codingRunOf(run.id);
     expect(coding).toMatchObject({ workerImage: WORKER, toolImage: TOOL });
-    expect(coding.services).toEqual([resolvedFromDefinition(POSTGRES_16)]);
+    // The snapshot names its catalog row (id and last update) for the warm-round fingerprint.
+    expect(coding.services).toEqual([
+      {
+        ...resolvedFromDefinition(POSTGRES_16),
+        catalogId: "builtin-postgres-16",
+        catalogUpdatedAt: expect.any(String),
+      },
+    ]);
     expect(coding.task).toMatch(/^Standing instructions for this coding agent:\nRun the tests first\./);
     expect(coding.task).toContain("Services for this run:");
     expect(coding.task).toMatch(/\n- postgres 16: .*DATABASE_URL=postgres:\/\/test:test@127\.0\.0\.1:5432\/test/);

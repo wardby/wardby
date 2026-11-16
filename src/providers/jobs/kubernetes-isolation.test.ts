@@ -1109,6 +1109,9 @@ describe("buildRunPod with services", () => {
   it("runs the catalog's digest-pinned image as-is, non-root, read-only, with nothing privileged", () => {
     const c = sidecar(p(), "postgres");
     expect(c.image).toBe(POSTGRES.image);
+    // The Substrate-only image is never what Kubernetes runs.
+    expect(POSTGRES.substrateImage).toBeDefined();
+    expect(c.image).not.toBe(POSTGRES.substrateImage);
     expect(c.command).toBeUndefined();
     expect(c.args).toBeUndefined();
     expect(c.securityContext).toEqual({

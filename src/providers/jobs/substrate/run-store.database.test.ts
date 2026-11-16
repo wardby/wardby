@@ -41,12 +41,16 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaSubstrateRunStore (PostgreSQL)
       phase: "provisioning" as const,
       deadlineAt: new Date(Date.now() + 60_000),
       repositories: [{ name: "extra-alpha", access: "write" as const }],
+      services: ["postgres"],
     };
     const first = await store.claim(record);
     expect(first.created).toBe(true);
-    expect(
-      (await db.substrateRun.findUnique({ where: { runId }, select: { repositories: true } }))?.repositories,
-    ).toEqual([{ name: "extra-alpha", access: "write" }]);
+    const columns = await db.substrateRun.findUnique({
+      where: { runId },
+      select: { repositories: true, services: true },
+    });
+    expect(columns?.repositories).toEqual([{ name: "extra-alpha", access: "write" }]);
+    expect(columns?.services).toEqual(["postgres"]);
     const second = await store.claim({ ...record, specHash: "other" });
     expect(second.created).toBe(false);
     expect(second.record).toEqual(first.record);
@@ -89,6 +93,16 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaSubstrateRunStore (PostgreSQL)
     const readable = await store.getByToken(unreadableToken);
     expect(readable?.repositories).toEqual([{ name: "extra-alpha", access: "read" }]);
     expect(readable).not.toHaveProperty("repositoriesUnreadable");
+  });
+
+  it("marks a row whose services do not parse", async () => {
+    await createSubstrateRunFixture(db, unreadableToken);
+    const store = new PrismaSubstrateRunStore(db);
+    expect(await store.get(unreadableRunId)).not.toHaveProperty("servicesUnreadable");
+    await db.$executeRaw`UPDATE "SubstrateRun" SET "services" = '"x"'::jsonb WHERE "runId" = ${unreadableRunId}`;
+    const record = await store.get(unreadableRunId);
+    expect(record?.servicesUnreadable).toBe(true);
+    expect(record).not.toHaveProperty("services");
   });
 });
 

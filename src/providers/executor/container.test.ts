@@ -1306,6 +1306,30 @@ describe("ContainerExecutor", () => {
       expect(created.executor.supportsCodingServices("claude-code")).toBe(false);
     });
 
+    it("asks the job launcher which services it cannot start", async () => {
+      const service = {
+        name: "fakedb",
+        version: "1",
+        image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,
+        port: 5999,
+        serviceEnv: { FAKEDB_PASSWORD: "FAKE_SERVICE_ENV_VALUE_0001" },
+        testEnv: {},
+        readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 3 },
+        resources: { cpuMillicores: 100, memoryMib: 64, diskMib: 64 },
+        dataPath: "/var/lib/fakedb",
+        writablePaths: [],
+      };
+      const created = await harness();
+      // A launcher without the hook (Docker, Kubernetes): every service can start.
+      expect(created.executor.unstartableCodingServices([service])).toEqual([]);
+      const unstartableServices = vi.fn(() => [{ name: "fakedb", reason: "setup_too_large" as const }]);
+      (created.jobs as { unstartableServices?: unknown }).unstartableServices = unstartableServices;
+      expect(created.executor.unstartableCodingServices([service])).toEqual([
+        { name: "fakedb", reason: "setup_too_large" },
+      ]);
+      expect(unstartableServices).toHaveBeenCalledWith([service]);
+    });
+
     it("delegates warmUp to its job launcher", async () => {
       const created = await harness();
       await created.executor.warmUp();
@@ -6838,6 +6862,39 @@ describe("ContainerExecutor warm rounds", () => {
       ]);
       expect(created.jobs.removals).toBe(0);
       expect(created.events).toContain("retain");
+    });
+
+    it("fingerprints a run's services", async () => {
+      const postgres = resolvedFromDefinition(
+        BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+      );
+      const supports = (created: Awaited<ReturnType<typeof warmHarness>>) => {
+        (created.jobs as { supportsServicesFor?: (provider: string) => boolean }).supportsServicesFor = () => true;
+      };
+      const plain = await warmHarness();
+      await plain.executor.start("run-1");
+      const withServices = await warmHarness({ services: [postgres] });
+      supports(withServices);
+      await withServices.executor.start("run-1");
+      const none = await warmHarness({ services: [] });
+      await none.executor.start("run-1");
+      const fingerprint = (created: Awaited<ReturnType<typeof warmHarness>>) => created.fingerprints[0]?.[1];
+      expect(fingerprint(plain)).toBe(fingerprintFor());
+      expect(fingerprint(withServices)).toMatch(/^[0-9a-f]{64}$/);
+      expect(fingerprint(withServices)).not.toBe(fingerprint(plain));
+      expect(fingerprint(none)).toBe(fingerprint(plain));
+    });
+
+    it("never retains a delivered run with services (one with services never parks)", async () => {
+      const postgres = resolvedFromDefinition(
+        BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+      );
+      const created = await warmHarness({ services: [postgres] });
+      (created.jobs as { supportsServicesFor?: (provider: string) => boolean }).supportsServicesFor = () => true;
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.warm!.calls.retains).toEqual([]);
+      expect(created.jobs.removals).toBe(1);
     });
 
     it("retains a pushed branch (a local repository) too", async () => {

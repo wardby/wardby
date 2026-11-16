@@ -113,9 +113,11 @@ export interface Executor {
   authorizeCodingRepository?(input: AuthorizeUseInput): Promise<RepoAccessDecision>;
   /**
    * Whether this executor can start coding-run services for a run of `provider`: its job launcher
-   * says so (Kubernetes and Docker, for Codex and Claude Code).
+   * says so (Kubernetes, Docker and Substrate, for Codex and Claude Code).
    */
   supportsCodingServices?(provider: CodingProvider): boolean;
+  /** The run's services this executor's job launcher cannot start (Substrate: see unstartableServices); [] or absent: none. */
+  unstartableCodingServices?(services: readonly ResolvedCodingService[]): UnstartableService[];
   /**
    * Whether this executor can run sandbox-mode native runs (a native sandbox executor is composed
    * in). MCP refuses to set an agent to sandbox mode where it cannot (docs/native-sandbox.md).
@@ -128,4 +130,6 @@ export interface Executor {
   defersCodingResolution?: boolean;
 }
 import type { CodingProvider } from "../../coding/provider.js";
+import type { ResolvedCodingService } from "../../coding/services/catalog.js";
+import type { UnstartableService } from "../jobs/types.js";
 import type { AuthorizeUseInput, RepoAccessDecision } from "../../core/repo-access.js";

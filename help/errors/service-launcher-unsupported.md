@@ -1,27 +1,45 @@
 ---
 id: errors/service-launcher-unsupported
 title: Services are not available to this run
-summary: Wardby refused the coding run because the repository declares services and this deployment cannot start them.
+summary: Wardby refused the coding run because the repository declares services and this deployment cannot start them, or, on Substrate, one entry has no startCommand, a reserved data path, or a start script that is too large.
 audience: operator
-tags: [error, coding-agents, services, kubernetes, docker, refusal]
+tags: [error, coding-agents, services, kubernetes, docker, substrate, startCommand, refusal]
 appliesTo: >=0.2.1
 ---
 
 # Services are not available to this run
 
 `service_launcher_unsupported` means the repository declares services, but this
-deployment cannot start them. Services need a job launcher that starts them:
+deployment cannot start them. The refusal's sentence says which case applies.
 
-- `JOB_LAUNCHER=kubernetes` and `JOB_LAUNCHER=docker` start them for Codex and
+## The launcher cannot start services
+
+"This repository asks for services, which this wardby deployment can't start:
+services need the Kubernetes, Docker or Substrate job launcher."
+
+- `JOB_LAUNCHER=kubernetes`, `JOB_LAUNCHER=docker` and the experimental
+  `JOB_LAUNCHER=substrate` (from release 0.10.1) start them for Codex and
   Claude Code agents;
-- a deployment with `JOB_LAUNCHER=local` cannot start them at all, and the
-  experimental `JOB_LAUNCHER=substrate` does not support them yet (see
-  `substrate_feature_unsupported`).
+- a deployment with `JOB_LAUNCHER=local` cannot start them at all.
 
-1. Run the coding agent on a deployment that uses the Kubernetes or Docker job
-   launcher, or
+1. Run the coding agent on a deployment that uses the Kubernetes, Docker or
+   Substrate job launcher, or
 2. remove `.wardby/services.yaml` from the base branch if the repository's
    tests do not need the services.
+
+## The Substrate launcher cannot start one service
+
+"This repository asks for `<name>`, which this wardby deployment can't start:
+`<reason>`." Substrate runs each service from its catalog entry's
+`startCommand`, so it checks each entry the run uses at dispatch:
+
+| Reason                                                                                  | What to do                                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| its service catalog entry has no start command                                          | Add a `startCommand` (the image's ENTRYPOINT + CMD) with `update_service`. If that entrypoint runs `chown` or switches user, also set a `substrateImage`; see [Coding services](../coding-services.md#substrate-launcher). |
+| its service catalog entry's data path overlaps a directory the job launcher reserves    | The `dataPath` is `/run/wardby-svc`, inside it, or a parent of it (such as `/run`). Use another data path.                                                                                                                 |
+| its service catalog entry's environment and commands are too large for the job launcher | The start script, with the entry's `serviceEnv`, is over 16 KiB for the service or 64 KiB for the run's services together (JSON-escaped). Trim the entry's `serviceEnv` or `startCommand`.                                 |
+
+Built-in entries have a start command and pass these checks.
 
 This error only applies to an agent that already allows at least one service
 (`codingProfile.services` is non-empty): wardby reads a repository's

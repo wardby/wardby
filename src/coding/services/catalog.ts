@@ -26,6 +26,8 @@ const MAX_PATH_BYTES = 255;
 const SERVICE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const ABSOLUTE_PATH = /^\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 const FORBIDDEN_ROOTS = ["/proc", "/sys", "/dev"];
+/** One startCommand argument's largest size: room for a `/bin/sh -c` start script (one line). */
+export const MAX_START_ARG_BYTES = 4096;
 
 const singleLine = (max: number) =>
   z
@@ -85,21 +87,57 @@ export const CodingServiceResourcesSchema = z
   })
   .strict();
 
+const imageDigestSchema = z
+  .string()
+  .max(512)
+  .refine(isRepositoryDigest, "must be a registry digest (repo@sha256:<64 hex>)");
+
 const serviceFields = {
   name: codingServiceNameSchema,
   version: codingServiceVersionSchema,
-  image: z.string().max(512).refine(isRepositoryDigest, "must be a registry digest (repo@sha256:<64 hex>)"),
+  image: imageDigestSchema,
+  /**
+   * The image the Substrate launcher runs instead of `image` (Docker and Kubernetes never read it):
+   * for a service whose usual image cannot start there, as Substrate runs a service container as
+   * the image's default user without the capabilities a chown/gosu entrypoint needs. An entry that
+   * sets it also sets startCommand, since that image's own entrypoint is not used.
+   */
+  substrateImage: imageDigestSchema.optional(),
   port: z.number().int().min(1).max(65_535),
   serviceEnv: serviceEnvSchema.default({}),
   testEnv: CodingServiceTestEnvSchema.default({}),
   readiness: CodingServiceReadinessSchema,
+  /**
+   * The argv that starts the service on the Substrate launcher, which overrides the container's
+   * command: the image's ENTRYPOINT + CMD, or for an entry with substrateImage, a script that
+   * initialises and runs the service as that image's non-root user. Docker and Kubernetes run the
+   * image's own entrypoint and ignore it. Each argument is one line of at most MAX_START_ARG_BYTES.
+   */
+  startCommand: z
+    .array(singleLine(MAX_START_ARG_BYTES).refine((value) => value.length > 0, "must not be empty"))
+    .min(1)
+    .max(16)
+    .optional(),
   resources: CodingServiceResourcesSchema,
   dataPath: pathSchema,
   writablePaths: z.array(pathSchema).max(MAX_WRITABLE_PATHS).default([]),
 };
 
-/** Every mount is its own emptyDir, so no two may be the same directory or nest. */
-function checkMounts(value: { dataPath: string; writablePaths: string[] }, ctx: z.RefinementCtx): void {
+/**
+ * Every mount is its own emptyDir, so no two may be the same directory or nest; and a Substrate-only
+ * image comes with the start command that replaces its entrypoint.
+ */
+function checkEntry(
+  value: { dataPath: string; writablePaths: string[]; substrateImage?: string; startCommand?: string[] },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.substrateImage !== undefined && value.startCommand === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["startCommand"],
+      message: "is required with substrateImage (that image's own entrypoint is not used)",
+    });
+  }
   const paths = [value.dataPath, ...value.writablePaths];
   for (const [index, a] of paths.entries()) {
     for (const b of paths.slice(index + 1)) {
@@ -111,13 +149,21 @@ function checkMounts(value: { dataPath: string; writablePaths: string[] }, ctx: 
 }
 
 /** One run's snapshot of an entry: what dispatch stores on CodingRun.services and the launcher reads. */
-export const ResolvedCodingServiceSchema = z.object(serviceFields).strict().superRefine(checkMounts);
+export const ResolvedCodingServiceSchema = z
+  .object({
+    ...serviceFields,
+    /** The catalog row's id and updatedAt (ISO 8601) when the snapshot was taken: identity and version for the warm fingerprint. */
+    catalogId: z.string().max(64).optional(),
+    catalogUpdatedAt: z.string().max(40).optional(),
+  })
+  .strict()
+  .superRefine(checkEntry);
 
 /** A catalog entry, as create_service takes it and the CodingService table holds it. */
 export const CodingServiceDefinitionSchema = z
   .object({ ...serviceFields, kind: z.enum(CODING_SERVICE_KINDS).default("sidecar") })
   .strict()
-  .superRefine(checkMounts);
+  .superRefine(checkEntry);
 
 export type ResolvedCodingService = z.output<typeof ResolvedCodingServiceSchema>;
 export type CodingServiceDefinition = z.output<typeof CodingServiceDefinitionSchema>;
@@ -126,14 +172,18 @@ export const StoredCodingServicesSchema = z.array(ResolvedCodingServiceSchema).m
 
 /** The columns of a CodingService row the definition is read from. */
 export interface CodingServiceRow {
+  id?: string;
+  updatedAt?: Date;
   name: string;
   version: string;
   kind: string;
   image: string;
+  substrateImage?: string | null;
   port: number;
   serviceEnv: unknown;
   testEnv: unknown;
   readiness: unknown;
+  startCommand: unknown;
   resources: unknown;
   dataPath: string;
   writablePaths: unknown;
@@ -146,10 +196,12 @@ export function catalogEntryFromRow(row: CodingServiceRow): CodingServiceDefinit
     version: row.version,
     kind: row.kind,
     image: row.image,
+    ...(row.substrateImage === null || row.substrateImage === undefined ? {} : { substrateImage: row.substrateImage }),
     port: row.port,
     serviceEnv: row.serviceEnv,
     testEnv: row.testEnv,
     readiness: row.readiness,
+    ...(row.startCommand === null || row.startCommand === undefined ? {} : { startCommand: row.startCommand }),
     resources: row.resources,
     dataPath: row.dataPath,
     writablePaths: row.writablePaths,
@@ -159,9 +211,21 @@ export function catalogEntryFromRow(row: CodingServiceRow): CodingServiceDefinit
 }
 
 /** The per-run snapshot of an entry. */
-export function resolvedFromDefinition(definition: CodingServiceDefinition): ResolvedCodingService {
+export function resolvedFromDefinition(
+  definition: CodingServiceDefinition,
+  catalog?: { id?: string; updatedAt?: Date },
+): ResolvedCodingService {
   const { kind: _kind, ...service } = definition;
-  return service;
+  return {
+    ...service,
+    ...(catalog?.id === undefined ? {} : { catalogId: catalog.id }),
+    ...(catalog?.updatedAt === undefined ? {} : { catalogUpdatedAt: catalog.updatedAt.toISOString() }),
+  };
+}
+
+/** The image the Substrate launcher runs for a service: its substrateImage when set, else its image. */
+export function substrateServiceImage(service: ResolvedCodingService): string {
+  return service.substrateImage ?? service.image;
 }
 
 /** CodingRun.services, parsed; a run from before services existed has []. Throws on anything else. */
