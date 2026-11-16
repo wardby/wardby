@@ -2149,7 +2149,7 @@ describe("coding-run services", () => {
 
     expect(reads).toEqual([{ repository: "openai/wardby", baseRef: "main" }]);
     expect(result?.run.status).toBe("pending");
-    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16)]);
+    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
     expect(state.codingRuns[0].task).toContain("Services for this run:");
     expect(state.codingRuns[0].task).toContain("- postgres 16: DATABASE_URL=postgres://test:test@127.0.0.1:5432/test");
     expect(state.codingRuns[0].task).toMatch(/\n\nRequest:\nRun the tests$/);
@@ -2318,7 +2318,7 @@ describe("coding-run services", () => {
         vcs.readRepositoryFile({ ...input, ref: input.baseRef, path: ".wardby/services.yaml", maxBytes: 8192 });
       const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
       expect(result?.run.status).toBe("pending");
-      expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16)]);
+      expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2357,7 +2357,7 @@ describe("coding-run services", () => {
     });
     expect(state.codingRuns).toEqual([]);
     expect(start).not.toHaveBeenCalled();
-    expect(unstartableCodingServices).toHaveBeenCalledWith([resolvedFromDefinition(POSTGRES_16)]);
+    expect(unstartableCodingServices).toHaveBeenCalledWith([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
   });
 
   it("dispatches when the launcher can start every service", async () => {
@@ -2366,7 +2366,7 @@ describe("coding-run services", () => {
     const { executor, start, unstartableCodingServices } = servicesExecutor(DECLARATION, true, []);
     const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
     expect(result?.run.status).toBe("pending");
-    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16)]);
+    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
     expect(unstartableCodingServices).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith(result?.run.id);
   });
@@ -2378,7 +2378,7 @@ describe("coding-run services", () => {
     delete executor.unstartableCodingServices;
     const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
     expect(result?.run.status).toBe("pending");
-    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16)]);
+    expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
     expect(start).toHaveBeenCalledWith(result?.run.id);
   });
 
@@ -2444,7 +2444,10 @@ describe("coding-run services", () => {
       expect(result?.run.error).toBe(`service_launcher_unsupported: ${LAUNCHER_UNSUPPORTED_SENTENCE}`);
       expect(start).not.toHaveBeenCalled();
     } else {
-      expect(state.codingRuns[0]).toMatchObject({ provider, services: [resolvedFromDefinition(POSTGRES_16)] });
+      expect(state.codingRuns[0]).toMatchObject({
+        provider,
+        services: [resolvedFromDefinition(POSTGRES_16, CATALOG[0])],
+      });
     }
   });
 
