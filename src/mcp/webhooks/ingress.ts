@@ -92,6 +92,8 @@ export async function handleWebhookIngress(
           ...(result.code !== "invalid_repositories" ? { error_description: result.code } : {}),
         },
       };
+    case "plan_refused":
+      return { status: 400, body: { error: result.code } };
     case "repository_ref_unreadable":
       return { status: 400, body: { error: "repository_ref_unreadable" } };
     case "not_found":

@@ -143,6 +143,7 @@ import { ModelUnavailableError } from "../providers/llm/catalog-types.js";
 import { trackRun } from "./in-flight-runs.js";
 import { dispatchRunStepsLevel } from "./run-steps/config.js";
 import { ReviewReadLedger } from "./review-reads.js";
+import { refusalOf } from "./plans/refusal.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { loadBudgetEvent, ownerBudgetSentence, type BudgetEventView } from "./budget-events.js";
 
@@ -246,6 +247,12 @@ export function delegateToolDef(
             "Give dependencies lower numbers than the changes that use them (e.g. a service 1, the API that calls it 2, the client 3); " +
             "equal numbers have no order between them. Set it whenever one change spans several repositories.",
         },
+        planNumber: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "The plan this coding sub-agent writes or builds from, when there is no issue (usually the issue number). Needed by a planner with plan documents; a builder with buildFromPlan checks that plan is approved.",
+        },
         ...repositoryProperty,
         ...repositoriesProperty,
       },
@@ -272,6 +279,7 @@ const DelegateArgs = z
       .optional(),
     repository: z.string().min(1).max(300).optional(),
     repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
+    planNumber: z.number().int().min(1).max(2_147_483_647).optional(),
   })
   .strict();
 
@@ -1668,6 +1676,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 codingTask: args.task,
                 continuesCodingRunId: args.continuePriorRun,
                 mergeOrder: args.mergeOrder,
+                planNumber: args.planNumber,
                 codingRepository: delegation.repository,
                 codingRepositories: args.repositories,
                 requireExplicitRepository: true,
@@ -1692,6 +1701,8 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
               if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
                 return repositorySetRefusal(err);
               }
+              const planRefusal = refusalOf(err);
+              if (planRefusal) return JSON.stringify(planRefusal);
               // A continuation this deployment cannot make (the run id came from
               // a pull request another deployment opened, say) is the model's to
               // report, not a reason to fail the whole run.
@@ -2401,6 +2412,7 @@ export async function durableDelegate(
               codingTask: dispatchArgs.task,
               continuesCodingRunId: dispatchArgs.continuePriorRun,
               mergeOrder: dispatchArgs.mergeOrder,
+              planNumber: dispatchArgs.planNumber,
               codingRepository: delegation.repository,
               codingRepositories: dispatchArgs.repositories,
               requireExplicitRepository: true,
@@ -2426,6 +2438,8 @@ export async function durableDelegate(
       if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
         return finish(repositorySetRefusal(err));
       }
+      const planRefusal = refusalOf(err);
+      if (planRefusal) return finish(JSON.stringify(planRefusal));
       if (err instanceof ContinuationRefusedError) {
         return finish(
           JSON.stringify({

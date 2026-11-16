@@ -94,6 +94,7 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
   async function cleanup(): Promise<void> {
     const agents = { agentId: { startsWith: PREFIX } };
     await db.run.deleteMany({ where: agents });
+    await db.workItem.deleteMany({ where: { provider: "jira", scopeKey: { startsWith: `T${suffix}` } } });
     await db.agent.deleteMany({ where: { id: { startsWith: PREFIX } } });
     await db.principal.deleteMany({ where: { id: { startsWith: PREFIX } } });
   }
@@ -172,6 +173,79 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     await expect(attempt).rejects.toBeInstanceOf(PlanRefusedError);
     await expect(attempt).rejects.toThrow("plan_too_large");
     expect(await runsOf(agentId)).toEqual([]);
+  });
+
+  describe("plan numbers", () => {
+    async function planner() {
+      const { agentId } = await codingAgent();
+      await db.codingAgentProfile.update({
+        where: { agentId },
+        data: { planDocument: { store: "wardby", reviewers: [owner] } },
+      });
+      return agentId;
+    }
+
+    it("refuses a planner with no number, leaving no run", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      await expect(dispatchRun({ db, executor, agentId, codingTask: "plan" })).rejects.toThrow("plan_number_missing");
+      expect(await runsOf(agentId)).toEqual([]);
+    });
+
+    it("stores planNumber from the call", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({ db, executor, agentId, codingTask: "plan", planNumber: 7 });
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } })).planNumber).toBe(7);
+    });
+
+    it("reads the number from the attribution intent", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({
+        db,
+        executor,
+        agentId,
+        codingTask: "plan",
+        attribution: {
+          source: "issue_event",
+          item: { provider: "github", key: "o/r#12", scopeKey: "o/r", snapshot: null },
+        },
+      });
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } })).planNumber).toBe(12);
+    });
+
+    it("reads the number from the parent run's issue (delegated)", async () => {
+      const agentId = await planner();
+      const parentId = `${PREFIX}parent-${suffix}-${++counter}`;
+      const parentAgent = `${PREFIX}pagent-${suffix}-${counter}`;
+      await db.agent.create({
+        data: {
+          id: parentAgent,
+          name: parentAgent,
+          systemPrompt: "p",
+          model: "gpt-5.6-luna",
+          budgetUsd: 1,
+          ownerId: owner,
+        },
+      });
+      await db.run.create({ data: { id: parentId, agentId: parentAgent, trigger: "manual", status: "running" } });
+      const item = await db.workItem.create({
+        data: { provider: "jira", key: `T${suffix.toUpperCase()}-345`, scopeKey: `T${suffix}` },
+      });
+      await db.runAttribution.create({ data: { runId: parentId, workItemId: item.id, source: "issue_event" } });
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({ db, executor, agentId, codingTask: "plan", parentRunId: parentId });
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } })).planNumber).toBe(345);
+    });
+
+    it("commits a refused run for a scheduled planner with no number", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({ db, executor, agentId, codingTask: "plan", trigger: "scheduled" });
+      expect(result!.run.status).toBe("refused");
+      expect(result!.run.error).toMatch(/^plan_number_missing:/);
+    });
   });
 
   it("refuses an unlisted name before any run exists", async () => {

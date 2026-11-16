@@ -38,6 +38,8 @@ import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInp
 import { logger } from "./logger.js";
 import { assertPlanFilesWithinLimits, savePlanInputFiles, type PlanFile } from "../coding/plan-files/store.js";
 import { PlanRefusedError } from "./plans/refusal.js";
+import { resolvePlanNumber } from "./plans/number.js";
+import { readPlanDocument } from "../coding/profile.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
 import {
   resolveRunPullRequest,
@@ -74,6 +76,7 @@ export type DispatchDb = Pick<
   | "run"
   | "runHostCheck"
   | "codingRun"
+  | "runAttribution"
   | "codingRunRepository"
   | "task"
   | "webhook"
@@ -217,6 +220,8 @@ export interface DispatchRunOptions {
   planInputFiles?: PlanFile[];
   /** The coding run returns its plan folder, stored when it ends. Coding agents only. */
   collectPlanFiles?: boolean;
+  /** The plan this coding run writes or builds from, when it is not the attributed issue's number. */
+  planNumber?: number;
 }
 
 export interface DispatchRunResult {
@@ -976,7 +981,15 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       ownerId: true,
       budgetGroupId: true,
       codingProfile: {
-        select: { repository: true, baseRef: true, services: true, gitHistoryDepth: true, gitHistoryFull: true },
+        select: {
+          repository: true,
+          baseRef: true,
+          services: true,
+          gitHistoryDepth: true,
+          gitHistoryFull: true,
+          planDocument: true,
+          buildFromPlan: true,
+        },
       },
     },
   });
@@ -999,7 +1012,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   // A continuation takes its root's rows instead, and a deferred run resolves them when it starts.
   const setRefusalOf = (err: unknown): string | undefined =>
     options.trigger === "scheduled" &&
-    (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError)
+    (err instanceof RepositorySetRefusedError ||
+      err instanceof RepositoryRefUnreadableError ||
+      err instanceof PlanRefusedError)
       ? err.message
       : undefined;
   let previewPlan: PlannedRunRepository[] | undefined;
@@ -1056,6 +1071,21 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       throw new PlanRefusedError("plan_too_large", "the plan's input files exceed the plan limits");
     }
     throw err;
+  }
+  // Plan documents (spec §2): the number and the planner check are decided here, before the
+  // transaction, so a refusal leaves no Run row behind. attributeRun runs inside the transaction,
+  // after the Run row exists, so the issue is read the way resolvePlanNumber does.
+  const planSetting =
+    preview?.kind === "coding" ? readPlanDocument(preview.codingProfile?.planDocument, preview.ownerId ?? null) : null;
+  const planNumber =
+    preview?.kind === "coding" && (planSetting || preview.codingProfile?.buildFromPlan)
+      ? await resolvePlanNumber(options.db, options)
+      : undefined;
+  let planRefusal: string | undefined;
+  if (planSetting && planNumber === undefined) {
+    const err = new PlanRefusedError("plan_number_missing", "a planner run needs an issue or a planNumber");
+    planRefusal = setRefusalOf(err);
+    if (planRefusal === undefined) throw err;
   }
   const persistOnce = () =>
     options.db.$transaction(
@@ -1141,13 +1171,13 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             if ("refusal" in resolved) servicesRefusal = resolved.refusal;
             else services = resolved.services;
           }
-          if (!modelFailure && !servicesRefusal && !extrasRefusal && !inTxSetRefusal) {
+          if (!modelFailure && !servicesRefusal && !extrasRefusal && !inTxSetRefusal && !planRefusal) {
             codingBudget = await reserveCodingBudget(tx, agent, now, options);
           }
         }
         const refusal = modelFailure
           ? undefined
-          : (servicesRefusal ?? inTxSetRefusal ?? extrasRefusal ?? codingBudget?.refusal);
+          : (servicesRefusal ?? inTxSetRefusal ?? extrasRefusal ?? planRefusal ?? codingBudget?.refusal);
 
         const run = await tx.run.create({
           data: {
@@ -1256,6 +1286,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           await tx.codingRun.create({
             data: {
               runId: run.id,
+              planNumber: planNumber ?? null,
               budgetLimitedBy: codingBudget.limitedBy ?? null,
               issueProvider: attributed?.provider ?? null,
               issueKey: attributed?.key ?? null,

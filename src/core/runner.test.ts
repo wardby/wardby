@@ -9,6 +9,7 @@ import {
   createRun,
   executeRun,
   loseNativeRun,
+  parseDelegateArgs,
   runAgent,
   RunCancelledError,
   RunOwnershipLostError,
@@ -1953,5 +1954,15 @@ describe("a native run's final text and error are masked at the terminal write",
     const engine = fakeEngine({ status: "succeeded", finalText: `plain ${FAKE_KEY}`, turns: 1, usage });
     const finished = await executeRun(run.id, providersWith(engine), db);
     expect(finished.finalText).toBe(`plain ${FAKE_KEY}`);
+  });
+});
+
+describe("parseDelegateArgs planNumber", () => {
+  it("accepts a positive integer", () => {
+    const parsed = parseDelegateArgs('{"task":"t","planNumber":3}');
+    expect("args" in parsed && parsed.args.planNumber).toBe(3);
+  });
+  it("refuses zero", () => {
+    expect("refusal" in parseDelegateArgs('{"task":"t","planNumber":0}')).toBe(true);
   });
 });

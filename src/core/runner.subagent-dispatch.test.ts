@@ -2930,6 +2930,12 @@ describe("delegating to a coding sub-agent with a repository list", () => {
               "Give dependencies lower numbers than the changes that use them (e.g. a service 1, the API that calls it 2, the client 3); " +
               "equal numbers have no order between them. Set it whenever one change spans several repositories.",
           },
+          planNumber: {
+            type: "integer",
+            minimum: 1,
+            description:
+              "The plan this coding sub-agent writes or builds from, when there is no issue (usually the issue number). Needed by a planner with plan documents; a builder with buildFromPlan checks that plan is approved.",
+          },
         },
         required: ["task"],
         additionalProperties: false,

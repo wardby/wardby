@@ -10,3 +10,8 @@ export class PlanRefusedError extends Error {
     this.name = "PlanRefusedError";
   }
 }
+
+/** What a caller that maps RepositorySetRefusedError returns for a plan refusal. */
+export function refusalOf(err: unknown): { error: string; message: string } | undefined {
+  return err instanceof PlanRefusedError ? { error: err.code, message: err.message } : undefined;
+}
