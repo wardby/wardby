@@ -7,7 +7,14 @@ import { createDocument, publishVersion } from "../documents/service.js";
 import { principalGranteeKey } from "../grants.js";
 import { attachSecret, createSecret } from "../secrets.js";
 import { planRunFinishedHook } from "./hooks.js";
-import { planSummaryForRun, publishPlanFromRun, type PublishedPlan } from "./publish.js";
+import {
+  PLAN_PUBLISH_LEASE_MS,
+  PLAN_PUBLISH_WAIT_MS,
+  planSummaryForRun,
+  publishPlanFromRun,
+  type PlanPublishClock,
+  type PublishedPlan,
+} from "./publish.js";
 
 vi.mock("../documents/review.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../documents/review.js")>();
@@ -395,15 +402,101 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     });
   });
 
-  it("two concurrent first publishes for the same set make one set and one document per path", async () => {
+  it("two concurrent first publishes on a one-connection pool make one set and one document per path", async () => {
+    // A publish holds no connection while it works or waits for the lease: with a pool of one, both finish.
+    const small = createPrismaClient(undefined, { poolMax: 1 });
+    try {
+      const agentId = await planner();
+      const a = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n\na\n" }]);
+      const b = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n\nb\n" }]);
+      // A frozen clock: the lease never expires and the wait never runs out; the waiter only yields.
+      const t = Date.now();
+      const clock: PlanPublishClock = { now: () => t, sleep: () => new Promise((resolve) => setImmediate(resolve)) };
+      const [planA, planB] = await Promise.all([
+        publishPlanFromRun(small, { ...deps, clock }, a),
+        publishPlanFromRun(small, { ...deps, clock }, b),
+      ]);
+      expect(published(planA).planSetId).toBe(published(planB).planSetId);
+      expect(await db.planSet.count({ where: { agentId } })).toBe(1);
+      const set = await db.planSet.findFirstOrThrow({ where: { agentId } });
+      expect(set).toMatchObject({ publishLeaseRunId: null, publishLeaseUntil: null });
+      expect(await db.document.count({ where: { planSetId: set.id, planPath: "plan.md" } })).toBe(1);
+      expect([await marker(a), await marker(b)]).toEqual(["published", "published"]);
+    } finally {
+      await small.$disconnect();
+    }
+  });
+
+  it("an expired lease is taken over: the old publisher stops and never writes published", async () => {
     const agentId = await planner();
-    const a = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n\na\n" }]);
-    const b = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n\nb\n" }]);
-    const [planA, planB] = await Promise.all([publishPlanFromRun(db, deps, a), publishPlanFromRun(db, deps, b)]);
-    expect(published(planA).planSetId).toBe(published(planB).planSetId);
-    expect(await db.planSet.count({ where: { agentId } })).toBe(1);
-    expect(await db.document.count({ where: { planSetId: published(planA).planSetId, planPath: "plan.md" } })).toBe(1);
-    expect([await marker(a), await marker(b)]).toEqual(["published", "published"]);
+    const files = (tag: string) => [
+      { path: "plan.md", content: `# Plan\n\n${tag}\n` },
+      { path: "api.md", content: `# API\n\n${tag}\n` },
+    ];
+    const a = await makeRun(agentId, files("a"));
+    const b = await makeRun(agentId, files("b"));
+    let t = Date.now();
+    const clock: PlanPublishClock = {
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+    };
+    const { submitForReview: realSubmit } =
+      await vi.importActual<typeof import("../documents/review.js")>("../documents/review.js");
+    let planB: Awaited<ReturnType<typeof publishPlanFromRun>> = null;
+    // a stalls in its first submit (plan.md) past its lease; b takes the set over and finishes.
+    vi.mocked(submitForReview).mockImplementationOnce(async (...args) => {
+      t += PLAN_PUBLISH_LEASE_MS + 1;
+      planB = await publishPlanFromRun(db, { ...deps, clock }, b);
+      return realSubmit(...args);
+    });
+    expect(await publishPlanFromRun(db, { ...deps, clock }, a)).toEqual({ number: 12, error: "plan_publish_busy" });
+    expect(
+      published(planB)
+        .documents.map((d) => d.path)
+        .sort(),
+    ).toEqual(["api.md", "plan.md"]);
+    expect(await marker(b)).toBe("published");
+    expect(await marker(a)).toBe("plan_publish_busy");
+    expect(await planSummaryForRun(db, a, null)).toEqual({ number: 12, error: "plan_publish_busy" });
+    const set = await db.planSet.findFirstOrThrow({ where: { agentId } });
+    expect(set).toMatchObject({ publishLeaseRunId: null, publishLeaseUntil: null });
+    // a stopped before api.md: b made it, and no document has a version from a past its first step.
+    const docs = await db.document.findMany({ where: { planSetId: set.id }, select: { id: true, planPath: true } });
+    expect(docs.map((d) => d.planPath).sort()).toEqual(["api.md", "plan.md"]);
+    const api = docs.find((d) => d.planPath === "api.md")!;
+    expect(await db.documentVersion.count({ where: { documentId: api.id, runId: a } })).toBe(0);
+  });
+
+  it("a lease another publish keeps renewing: the waiter gives up at the bound with plan_publish_busy", async () => {
+    const agentId = await planner();
+    const first = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n" }]);
+    published(await publishPlanFromRun(db, deps, first));
+    let t = Date.now();
+    let waited = 0;
+    const clock: PlanPublishClock = {
+      now: () => t,
+      sleep: async (ms) => {
+        waited += ms;
+        t += ms;
+      },
+    };
+    const set = await db.planSet.findFirstOrThrow({ where: { agentId } });
+    const until = new Date(t + 10 * PLAN_PUBLISH_WAIT_MS);
+    await db.planSet.update({ where: { id: set.id }, data: { publishLeaseRunId: first, publishLeaseUntil: until } });
+    const runId = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n\nchanged\n" }]);
+    expect(await publishPlanFromRun(db, { ...deps, clock }, runId)).toEqual({ number: 12, error: "plan_publish_busy" });
+    expect(waited).toBeGreaterThanOrEqual(PLAN_PUBLISH_WAIT_MS);
+    expect(waited).toBeLessThan(PLAN_PUBLISH_WAIT_MS + 5_000);
+    expect(await marker(runId)).toBe("plan_publish_busy");
+    expect(await planSummaryForRun(db, runId, null)).toEqual({ number: 12, error: "plan_publish_busy" });
+    expect(await db.documentVersion.count({ where: { runId } })).toBe(0);
+    // The holder's lease is untouched.
+    expect(await db.planSet.findUniqueOrThrow({ where: { id: set.id } })).toMatchObject({
+      publishLeaseRunId: first,
+      publishLeaseUntil: until,
+    });
   });
 
   it("a submit that fails mid-set: the rest still publish, the failure is recorded, and a retry leaves no draft", async () => {

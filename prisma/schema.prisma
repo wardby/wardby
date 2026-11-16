@@ -2432,29 +2432,32 @@ model Document {
 
 /// A planner's plan for one repository and number (docs/private spec §4): its documents are Documents with planSetId.
 model PlanSet {
-  id             String     @id @default(cuid())
+  id                String     @id @default(cuid())
   /// The planner agent whose runs write the plan.
-  agentId        String
-  agent          Agent      @relation("PlanSetPlanner", fields: [agentId], references: [id], onDelete: Cascade)
-  repository     String
-  number         Int
+  agentId           String
+  agent             Agent      @relation("PlanSetPlanner", fields: [agentId], references: [id], onDelete: Cascade)
+  repository        String
+  number            Int
   /// "wardby" or "repository" (the planner's planDocument.store when the set was made).
-  store          String
+  store             String
   /// The agent whose run started the work (the planner, or the lead that delegated): its owner and grantees comment.
-  accessAgentId  String?
-  accessAgent    Agent?     @relation("PlanSetAccess", fields: [accessAgentId], references: [id], onDelete: SetNull)
-  createdByRunId String
+  accessAgentId     String?
+  accessAgent       Agent?     @relation("PlanSetAccess", fields: [accessAgentId], references: [id], onDelete: SetNull)
+  createdByRunId    String
   /// The issue the plan answers (CodingRun.issueProvider/issueKey of the first run), for notices and the build chain.
-  issueProvider  String?
-  issueKey       String?
+  issueProvider     String?
+  issueKey          String?
   /// Set when the last counted document became approved; cleared by a reopen (C2).
-  approvedAt     DateTime?
+  approvedAt        DateTime?
   /// Build chain (§7b "build"): the ticket running or next, and why it stopped.
-  chainTicket    Int?
-  chainStopped   String?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
-  documents      Document[]
+  chainTicket       Int?
+  chainStopped      String?
+  /// The run whose publish holds the set (one publish per set at a time), and until when; both null when free.
+  publishLeaseRunId String?
+  publishLeaseUntil DateTime?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  documents         Document[]
 
   @@unique([agentId, repository, number])
   @@index([accessAgentId])

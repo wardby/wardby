@@ -5,8 +5,7 @@
  * already redacted when they were recorded. Nothing here logs or returns file content: results
  * carry ids, paths, states and version numbers only.
  */
-import { createHash } from "node:crypto";
-import type { PrismaClient } from "#prisma";
+import { Prisma, type PrismaClient } from "#prisma";
 import { readPlanDocument } from "../../coding/profile.js";
 import { loadPlanFiles } from "../../coding/plan-files/store.js";
 import { contentHash, type VersionContent } from "../documents/content.js";
@@ -21,9 +20,17 @@ import { parsePlanLayout, type PlanLayoutDocument } from "./layout.js";
 
 export type SecretCipher = Parameters<typeof loadAgentSecretValues>[1];
 
-/** plan_publish_failed: the publish threw partway (CodingRun.planPublishStatus); never the error's text. */
+/**
+ * plan_publish_failed: the publish threw partway; plan_publish_busy: another publish held the set past the
+ * wait bound, or took it over (CodingRun.planPublishStatus). Fixed codes, never an error's text.
+ */
 export type PlanPublishError =
-  "plan_too_large" | "plan_empty" | "plan_files_unsupported" | "plan_not_stored" | "plan_publish_failed";
+  | "plan_too_large"
+  | "plan_empty"
+  | "plan_files_unsupported"
+  | "plan_not_stored"
+  | "plan_publish_failed"
+  | "plan_publish_busy";
 export type PlanDocumentChange =
   "created" | "updated" | "unchanged" | "removed" | "approved_unchanged" | "archived_unchanged";
 
@@ -57,42 +64,83 @@ export interface PlanPending {
   pending: true;
 }
 export type PlanSummary = PublishedPlan | PlanPublishFailure | PlanPending;
+/** The clock the set's publish lease uses; a test seam (the default is the real one). */
+export interface PlanPublishClock {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
 export interface PlanPublishDeps {
   cipher: SecretCipher;
   origin: string | null;
+  clock?: PlanPublishClock;
 }
 
 const TERMINAL = new Set<string>(TERMINAL_RUN_STATUSES);
 
-/** CodingRun.planPublishStatus once a publish finished, or once one threw (a fixed code, never error text). */
+/** CodingRun.planPublishStatus once a publish finished, or once one stopped (a fixed code, never error text). */
 export const PLAN_PUBLISHED = "published";
 export const PLAN_PUBLISH_FAILED = "plan_publish_failed";
+export const PLAN_PUBLISH_BUSY = "plan_publish_busy";
 
 /**
- * The lock transaction holds one pool connection for the whole publish (the writes run on others, as the
- * document service opens its own transactions). A waiter gives up after the lock timeout, and the
- * transaction timeout bounds the holder: up to 20 documents, each a few small reads and writes.
+ * One publish per set at a time: a lease on the PlanSet row (publishLeaseRunId, publishLeaseUntil), taken
+ * by one conditional update and renewed before every step. Nothing holds a connection while it waits or
+ * works. A lease not renewed within PLAN_PUBLISH_LEASE_MS (a publisher that died or stalled) may be taken
+ * over; the old publisher then sees it lost at its next step and stops. A waiter gives up after
+ * PLAN_PUBLISH_WAIT_MS with plan_publish_busy.
  */
-const PLAN_PUBLISH_LOCK_TIMEOUT_MS = 120_000;
-const PLAN_PUBLISH_TRANSACTION_TIMEOUT_MS = 300_000;
-const PLAN_PUBLISH_MAX_WAIT_MS = 10_000;
+export const PLAN_PUBLISH_LEASE_MS = 60_000;
+export const PLAN_PUBLISH_WAIT_MS = 120_000;
+const PLAN_PUBLISH_BACKOFF_MS = [50, 100, 250, 500, 1_000, 2_000] as const;
 
-/** A stable advisory-lock key for one plan set (agent, repository, number). */
-export function planSetLockKey(agentId: string, repository: string, number: number): bigint {
-  const digest = createHash("sha256").update(`wardby:plan-set:${agentId}\u0000${repository}\u0000${number}`).digest();
-  return digest.readBigInt64BE(0);
+const realClock: PlanPublishClock = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/** The set's lease was taken over by another publish: this one stops and writes no "published". */
+class PlanLeaseLost extends Error {
+  override name = "PlanLeaseLost";
 }
 
-/** Runs fn while holding the plan set's advisory transaction lock: one publish per set at a time. */
-async function withPlanSetLock<T>(db: PrismaClient, key: bigint, fn: () => Promise<T>): Promise<T> {
-  return db.$transaction(
-    async (tx) => {
-      await tx.$executeRaw`SELECT set_config('lock_timeout', ${`${PLAN_PUBLISH_LOCK_TIMEOUT_MS}ms`}, true)`;
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${key})`;
-      return fn();
+/** Takes or renews the lease for runId: free, expired, or already this run's. */
+async function takeLease(db: PrismaClient, clock: PlanPublishClock, setId: string, runId: string): Promise<boolean> {
+  const now = clock.now();
+  const { count } = await db.planSet.updateMany({
+    where: {
+      id: setId,
+      OR: [{ publishLeaseRunId: null }, { publishLeaseUntil: { lt: new Date(now) } }, { publishLeaseRunId: runId }],
     },
-    { timeout: PLAN_PUBLISH_TRANSACTION_TIMEOUT_MS, maxWait: PLAN_PUBLISH_MAX_WAIT_MS },
-  );
+    data: { publishLeaseRunId: runId, publishLeaseUntil: new Date(now + PLAN_PUBLISH_LEASE_MS) },
+  });
+  return count === 1;
+}
+
+/** Waits for the lease with backoff, holding no connection in between; false once the wait bound passes. */
+async function acquireLease(db: PrismaClient, clock: PlanPublishClock, setId: string, runId: string) {
+  const deadline = clock.now() + PLAN_PUBLISH_WAIT_MS;
+  for (let attempt = 0; ; attempt++) {
+    if (await takeLease(db, clock, setId, runId)) return true;
+    if (clock.now() >= deadline) return false;
+    await clock.sleep(PLAN_PUBLISH_BACKOFF_MS[Math.min(attempt, PLAN_PUBLISH_BACKOFF_MS.length - 1)]);
+  }
+}
+
+/** Extends the lease only while it is still this run's; throws PlanLeaseLost otherwise. */
+async function renewLease(db: PrismaClient, clock: PlanPublishClock, setId: string, runId: string): Promise<void> {
+  const { count } = await db.planSet.updateMany({
+    where: { id: setId, publishLeaseRunId: runId },
+    data: { publishLeaseUntil: new Date(clock.now() + PLAN_PUBLISH_LEASE_MS) },
+  });
+  if (count !== 1) throw new PlanLeaseLost();
+}
+
+/** Frees the lease, only if it is still this run's. */
+async function releaseLease(db: PrismaClient, setId: string, runId: string): Promise<void> {
+  await db.planSet.updateMany({
+    where: { id: setId, publishLeaseRunId: runId },
+    data: { publishLeaseRunId: null, publishLeaseUntil: null },
+  });
 }
 
 async function markPublish(db: PrismaClient, runId: string, status: string | null): Promise<void> {
@@ -253,12 +301,49 @@ function sameContent(
 
 const asKind = (kind: string): "document" | "design" => (kind === "design" ? "design" : "document");
 
+type PlannerRun = NonNullable<Awaited<ReturnType<typeof readPlannerRun>>>;
+type PlanSetRef = { id: string; accessAgentId: string | null };
+
+/** The run's plan set, made on the first run; a concurrent first publish's set is used when it won the insert. */
+async function findOrCreateSet(db: PrismaClient, runId: string, planner: PlannerRun): Promise<PlanSetRef> {
+  const { coding, number } = planner;
+  const agentId = coding.run.agentId;
+  const where = { agentId_repository_number: { agentId, repository: coding.repository, number } };
+  const select = { id: true, accessAgentId: true } as const;
+  const existing = await db.planSet.findUnique({ where, select });
+  if (existing) return existing;
+  const accessAgentId = (await topRunAgent(db, coding.run.parentRunId)) ?? agentId;
+  try {
+    return await db.planSet.create({
+      data: {
+        agentId,
+        repository: coding.repository,
+        number,
+        // The store this run wrote to (B4 sets planRepositoryPath only for store "repository").
+        store: coding.planRepositoryPath ? "repository" : "wardby",
+        accessAgentId,
+        createdByRunId: runId,
+        issueProvider: coding.issueProvider,
+        issueKey: coding.issueKey,
+      },
+      select,
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return db.planSet.findUniqueOrThrow({ where, select });
+    }
+    throw err;
+  }
+}
+
 /**
  * Publishes a succeeded planner run's stored plan files as its plan set: creates the set and its
  * documents on the first run, the next version of each changed document on a later one. null: the
- * run is not a planner run (or did not succeed). One publish per set at a time (an advisory lock).
- * When a step throws, the other documents are still published, CodingRun.planPublishStatus records
- * plan_publish_failed, and the first error is thrown; a retry of the same run finishes the set.
+ * run is not a planner run (or did not succeed). One publish per set at a time (a lease on the set):
+ * a publish that cannot get it within PLAN_PUBLISH_WAIT_MS, or loses it to a takeover, stops with
+ * plan_publish_busy and writes no "published". When a step throws, the other documents are still
+ * published, CodingRun.planPublishStatus records plan_publish_failed, and the first error is thrown;
+ * a retry of the same run finishes the set.
  */
 export async function publishPlanFromRun(
   db: PrismaClient,
@@ -271,51 +356,58 @@ export async function publishPlanFromRun(
   if (coding.planFilesStatus !== "stored") return { number, error: publishErrorOf(coding.planFilesStatus) };
   const layout = parsePlanLayout(await loadPlanFiles(db, runId, "output"));
   if (!layout.ok) return { number, error: layout.error };
-  const lockKey = planSetLockKey(coding.run.agentId, coding.repository, number);
+  const clock = deps.clock ?? realClock;
+  let set: PlanSetRef | undefined;
+  let held = false;
   try {
-    return await withPlanSetLock(db, lockKey, () =>
-      publishSet(db, deps, runId, planner, layout.documents, layout.ignored),
-    );
+    set = await findOrCreateSet(db, runId, planner);
+    if (!(await acquireLease(db, clock, set.id, runId))) {
+      await markPublish(db, runId, PLAN_PUBLISH_BUSY);
+      return { number, error: "plan_publish_busy" };
+    }
+    held = true;
+    return await publishSet(db, deps, clock, runId, planner, set, layout.documents, layout.ignored);
   } catch (err) {
+    if (err instanceof PlanLeaseLost && set) {
+      held = false;
+      // The new holder owns the set. This run's marker says busy, unless the holder is this same run
+      // (another publish of it), which writes the marker itself.
+      const holder = await db.planSet
+        .findUnique({ where: { id: set.id }, select: { publishLeaseRunId: true } })
+        .catch(() => null);
+      if (holder?.publishLeaseRunId !== runId) await markPublish(db, runId, PLAN_PUBLISH_BUSY).catch(() => undefined);
+      return { number, error: "plan_publish_busy" };
+    }
     // Best effort: the marker must not hide the publish's own error.
     await markPublish(db, runId, PLAN_PUBLISH_FAILED).catch(() => undefined);
     throw err;
+  } finally {
+    if (held && set) await releaseLease(db, set.id, runId).catch(() => undefined);
   }
 }
 
 async function publishSet(
   db: PrismaClient,
   deps: PlanPublishDeps,
+  clock: PlanPublishClock,
   runId: string,
-  planner: NonNullable<Awaited<ReturnType<typeof readPlannerRun>>>,
+  planner: PlannerRun,
+  set: PlanSetRef,
   layoutDocuments: readonly PlanLayoutDocument[],
   ignored: string[],
 ): Promise<PublishedPlan> {
   const { coding, setting, number, ownerId } = planner;
+  // Renewed before every step and before the marker: a lost lease stops the publish (PlanLeaseLost).
+  const hold = () => renewLease(db, clock, set.id, runId);
   await markPublish(db, runId, null);
   const agentId = coding.run.agentId;
   // The store this run wrote to (B4 sets planRepositoryPath only for store "repository").
   const repositoryPath = coding.planRepositoryPath;
-  const accessAgentId = (await topRunAgent(db, coding.run.parentRunId)) ?? agentId;
-  const set = await db.planSet.upsert({
-    where: { agentId_repository_number: { agentId, repository: coding.repository, number } },
-    create: {
-      agentId,
-      repository: coding.repository,
-      number,
-      store: repositoryPath ? "repository" : "wardby",
-      accessAgentId,
-      createdByRunId: runId,
-      issueProvider: coding.issueProvider,
-      issueKey: coding.issueKey,
-    },
-    update: {},
-    include: {
-      documents: {
-        orderBy: { planPath: "asc" },
-        include: { currentVersion: { select: { number: true, contentHash: true } } },
-      },
-    },
+  // Read under the lease, so an earlier publish's documents are seen.
+  const documents = await db.document.findMany({
+    where: { planSetId: set.id },
+    orderBy: { planPath: "asc" },
+    include: { currentVersion: { select: { number: true, contentHash: true } } },
   });
   const review = await planReviewers(db, { id: agentId, ownerId }, set.accessAgentId ?? agentId, setting);
   const submit = (documentId: string) =>
@@ -334,7 +426,7 @@ async function publishSet(
     });
   };
   const secrets = await documentSecretValues(db, deps.cipher, agentId);
-  const byPath = new Map(set.documents.flatMap((d) => (d.planPath ? [[d.planPath, d] as const] : [])));
+  const byPath = new Map(documents.flatMap((d) => (d.planPath ? [[d.planPath, d] as const] : [])));
   const results: PublishedPlanDocument[] = [];
   let failure: Error | undefined;
   const asError = (err: unknown) => (err instanceof Error ? err : new Error(PLAN_PUBLISH_FAILED));
@@ -423,6 +515,7 @@ async function publishSet(
 
   // A step that throws does not abandon the rest of the set: the first error is thrown at the end.
   for (const doc of layoutDocuments) {
+    await hold();
     try {
       await publishOne(doc);
     } catch (err) {
@@ -430,6 +523,7 @@ async function publishSet(
     }
   }
   for (const gone of byPath.values()) {
+    await hold();
     try {
       if (!gone.removedFromPlan) {
         await db.document.update({ where: { id: gone.id }, data: { removedFromPlan: true } });
@@ -440,6 +534,7 @@ async function publishSet(
     }
   }
   if (failure) throw failure;
+  await hold();
   await markPublish(db, runId, PLAN_PUBLISHED);
   return {
     number,
@@ -472,6 +567,7 @@ export async function planSummaryForRun(
   if (!layout.ok) return { number, error: layout.error };
   // This run's publish has not finished (or not started): pending, never an earlier run's states.
   if (coding.planPublishStatus === null) return pending;
+  if (coding.planPublishStatus === PLAN_PUBLISH_BUSY) return { number, error: "plan_publish_busy" };
   if (coding.planPublishStatus !== PLAN_PUBLISHED) return { number, error: "plan_publish_failed" };
   const agentId = coding.run.agentId;
   const set = await db.planSet.findUnique({
