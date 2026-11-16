@@ -2,7 +2,7 @@ FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4
 WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
-COPY tsconfig.json tsconfig.build.json prisma.config.ts ./
+COPY tsconfig.json tsconfig.build.json prisma.config.ts NOTICE ./
 COPY prisma ./prisma
 COPY scripts ./scripts
 COPY help ./help

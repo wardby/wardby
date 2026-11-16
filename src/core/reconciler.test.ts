@@ -10,6 +10,8 @@ vi.mock("./merge-order-check.js", () => ({ sweepMergeOrderChecks: vi.fn(async ()
 import { sweepMergeOrderChecks } from "./merge-order-check.js";
 vi.mock("./host-events.js", () => ({ startDeferredReviews: vi.fn(async () => []) }));
 import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
+vi.mock("./documents/agent-loop.js", () => ({ sweepUnansweredDocumentRuns: vi.fn(async () => 0) }));
+import { sweepUnansweredDocumentRuns, type DocumentSweepDeps } from "./documents/agent-loop.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
 import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 
@@ -106,6 +108,34 @@ describe("reconcileOnce", () => {
     expect(runs[0].status).toBe("lost");
     expect(runs[0].error).toMatch(/Orphaned/);
     expect(runs[0].finishedAt).toEqual(NOW);
+  });
+
+  it("answers comment threads of ended runs after the lost marking, only when given the document deps", async () => {
+    const sweep = vi.mocked(sweepUnansweredDocumentRuns);
+    sweep.mockClear();
+    await reconcileOnce(fakeDb([baseRun({ heartbeatAt: STALE })]), NOW, HEARTBEAT_TIMEOUT_MS);
+    expect(sweep).not.toHaveBeenCalled();
+
+    const documentRuns = { db: {}, cipher: {}, executor: {} } as unknown as DocumentSweepDeps;
+    const runs = [baseRun({ heartbeatAt: STALE })];
+    const order: string[] = [];
+    sweep.mockImplementationOnce(async () => {
+      order.push(`sweep:${runs[0].status}`);
+      return 0;
+    });
+    await reconcileOnce(
+      fakeDb(runs),
+      NOW,
+      HEARTBEAT_TIMEOUT_MS,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      documentRuns,
+    );
+    expect(sweep).toHaveBeenCalledWith(documentRuns, NOW);
+    // The run this pass marked lost is already lost when the sweep looks.
+    expect(order).toEqual(["sweep:lost"]);
   });
 
   describe("children of a lead marked lost", () => {

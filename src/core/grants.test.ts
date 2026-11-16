@@ -47,9 +47,27 @@ describe("grant levels", () => {
   });
 
   it("caps everyone grants at write for agents and below write for the rest", () => {
-    expect(EVERYONE_MAX).toEqual({ agent: "write", tool: "use", budget_group: "use", mcp_server: "use" });
-    expect(SHAREABLE_TYPES).toEqual(["agent", "mcp_server"]);
+    expect(EVERYONE_MAX).toEqual({
+      agent: "write",
+      tool: "use",
+      budget_group: "use",
+      mcp_server: "use",
+      document: "comment",
+    });
+    expect(SHAREABLE_TYPES).toEqual(["agent", "mcp_server", "document"]);
     expect(LEVELS.mcp_server).toEqual(["read", "use", "write"]);
+    expect(LEVELS.document).toEqual(["read", "comment", "write"]);
+  });
+
+  it("ranks document levels read < comment < write < owner", () => {
+    expect(atLeast("document", "comment", "read")).toBe(true);
+    expect(atLeast("document", "read", "comment")).toBe(false);
+    expect(atLeast("document", "write", "comment")).toBe(true);
+    expect(atLeast("document", "owner", "write")).toBe(true);
+  });
+
+  it("treats document as shareable", () => {
+    expect(SHAREABLE_TYPES).toContain("document");
   });
 });
 

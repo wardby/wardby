@@ -4,6 +4,8 @@ import { MobileDisabledError, type SelfHostedAuthProvider } from "../../../provi
 import { PostgresRateLimiter, RateLimitError } from "./rate-limit.js";
 import { logger } from "../../../core/logger.js";
 import { PAGE_STYLE } from "../../shared/page-style.js";
+import { selfHostedCookieNames } from "./cookies.js";
+import { isSafeReturnTo } from "../../../web/return-to.js";
 
 const authLog = logger.child({ module: "self-hosted-oauth" });
 
@@ -23,6 +25,14 @@ function escape(value: string) {
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
   );
 }
+/**
+ * A wrong, unknown, revoked or expired login key, or a disabled user: one
+ * answer for all of them, so nothing says whether a user exists. The sign-in
+ * challenge is single-use, so the page asks for a reload before trying again.
+ */
+export const LOGIN_KEY_INVALID = "login_key_invalid";
+export const LOGIN_KEY_INVALID_TEXT = "That login key isn't valid. Reload this page and try again.";
+const INVALID_CREDENTIALS = "Invalid credentials.";
 // CORS-mode same-origin fetch retains Origin under no-referrer, unlike native form POSTs.
 const FORM_SCRIPT = `document.addEventListener('submit', async (event) => {
   const form = event.target;
@@ -32,6 +42,10 @@ const FORM_SCRIPT = `document.addEventListener('submit', async (event) => {
     const response = await fetch(form.action, { method: 'POST', mode: 'cors', credentials: 'same-origin', headers: { 'accept': 'application/json' }, body });
     const data = await response.json();
     if (response.ok && typeof data.redirect === 'string') { location.assign(data.redirect); return; }
+    if (data && data.error_description === ${JSON.stringify(LOGIN_KEY_INVALID)}) {
+      document.getElementById('auth-error').textContent = ${JSON.stringify(LOGIN_KEY_INVALID_TEXT)};
+      return;
+    }
   } catch {}
   document.getElementById('auth-error').textContent = 'Unable to complete the request. Reload this page and try again.';
 });`;
@@ -77,9 +91,7 @@ function hidden(name: string, value: string) {
 
 export function browserHandler(provider: SelfHostedAuthProvider) {
   const canonical = new URL(provider.config.canonicalUri);
-  const secure = canonical.protocol === "https:";
-  const sessionName = secure ? "__Host-wardby-session" : "wardby-dev-session";
-  const loginName = secure ? "__Host-wardby-login" : "wardby-dev-login";
+  const { secure, session: sessionName, login: loginName } = selfHostedCookieNames(provider.config.canonicalUri);
   const limiter = new PostgresRateLimiter(provider.db, provider.credentials);
   const cookie = (name: string, value: string, sameSite: string, age: number) =>
     `${name}=${value}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=${age}${secure ? "; Secure" : ""}`;
@@ -186,6 +198,8 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
       }
       if (req.method === "GET" && url.pathname === "/login") {
         const interaction = url.searchParams.get("interaction") ?? "";
+        // A document page asking to come back after sign-in (/web/login): only a safe /d/ or /s/ path.
+        const back = url.searchParams.get("return") ?? "";
         const nonce = provider.credentials.create("rvb").token;
         const challenge = await provider.sessions.challenge("login", null, nonce + ":" + interaction);
         res.setHeader("set-cookie", cookie(loginName, nonce, "Strict", 600));
@@ -194,6 +208,7 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
           '<h1>Sign in to wardby</h1><form method="post" action="/login">' +
             hidden("interaction", interaction) +
             hidden("csrf", challenge) +
+            (!interaction && isSafeReturnTo(back) ? hidden("return", back) : "") +
             '<label>Login key<input type="password" name="login_key" required autocomplete="off"></label><button>Sign in</button></form>',
         );
         return true;
@@ -226,7 +241,16 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
           cookie(sessionName, session, "Lax", 30 * 86400),
           cookie(loginName, "", "Strict", 0),
         ]);
-        redirect(res, interaction ? "/consent?interaction=" + encodeURIComponent(interaction) : "/logout", req);
+        const back = p.get("return") ?? "";
+        redirect(
+          res,
+          interaction
+            ? "/consent?interaction=" + encodeURIComponent(interaction)
+            : isSafeReturnTo(back)
+              ? back
+              : "/logout",
+          req,
+        );
         return true;
       }
       if (req.method === "GET" && url.pathname === "/consent") {
@@ -329,7 +353,12 @@ export function browserHandler(provider: SelfHostedAuthProvider) {
           { id, path: url.pathname, reason: err instanceof Error ? err.message || "unspecified" : "unspecified" },
           "self-hosted OAuth request rejected",
         );
-        json(res, 400, { error: url.pathname === "/token" ? "invalid_grant" : "invalid_request", id });
+        const badKey = url.pathname === "/login" && err instanceof Error && err.message === INVALID_CREDENTIALS;
+        json(res, 400, {
+          error: url.pathname === "/token" ? "invalid_grant" : "invalid_request",
+          ...(badKey ? { error_description: LOGIN_KEY_INVALID } : {}),
+          id,
+        });
       }
     }
     return true;

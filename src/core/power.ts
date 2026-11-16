@@ -10,7 +10,7 @@ import { logger } from "./logger.js";
 
 const powerLog = logger.child({ module: "power" });
 
-export type PowerTarget = "proxy" | "gateway";
+export type PowerTarget = "proxy" | "gateway" | "renderer";
 export const LOW_POWER_WAKE_TIMEOUT = "low_power_wake_timeout";
 export const LOW_POWER_SCALE_FORBIDDEN = "low_power_scale_forbidden";
 export const LOW_POWER_DISABLED = "low_power_disabled";
@@ -36,8 +36,12 @@ export interface PowerOptions {
   /** Required when config.enabled. */
   api?: KubernetesApi;
   namespace: string;
-  /** Deployment name per target; each has the same name as its Service. */
-  deployments: Record<PowerTarget, string>;
+  /**
+   * Deployment name per target; each has the same name as its Service. The renderer is optional:
+   * absent means it is not deployed here, so it is not a target (status, sleepIfIdle and sleepNow
+   * skip it; ensureAwake("renderer") throws low_power_disabled).
+   */
+  deployments: { proxy: string; gateway: string; renderer?: string };
   /** Whether the target has had work since `since` (used by sleepIfIdle). */
   busy?: (target: PowerTarget, since: Date) => Promise<boolean>;
   /** Run ids keeping the target busy right now (active or queued; ignores recent finishes). Needed by sleepNow. */
@@ -113,7 +117,8 @@ function scaleError(error: unknown, name: string, access = "patch Deployment"): 
 
 export function createPower(options: PowerOptions): Power {
   if (!options.config.enabled) return DISABLED_POWER;
-  const { api, namespace, deployments } = options;
+  const { api, namespace } = options;
+  const deployments: Partial<Record<PowerTarget, string>> = options.deployments;
   if (!api) throw new Error("Low-power mode needs a Kubernetes API client.");
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -125,6 +130,14 @@ export function createPower(options: PowerOptions): Power {
   // start: a stamp left from before a restart (or none at all) never sleeps a target sooner.
   const startedAt = now().getTime();
   let lastSweep: number | undefined;
+
+  /** The Deployment a target scales; a target this deployment does not have is low_power_disabled. */
+  const nameOf = (target: PowerTarget): string => {
+    const name = deployments[target];
+    if (!name) throw new Error(`${LOW_POWER_DISABLED}: ${target} is not deployed here.`);
+    return name;
+  };
+  const targetsDeployed = () => (Object.keys(deployments) as PowerTarget[]).filter((t) => deployments[t]);
 
   const readDeployment = async (name: string) => {
     try {
@@ -144,7 +157,7 @@ export function createPower(options: PowerOptions): Power {
 
   async function sleepTarget(target: PowerTarget, at: number): Promise<void> {
     if (!api || !busy) return;
-    const name = deployments[target];
+    const name = nameOf(target);
     const dep = await readDeployment(name);
     if (!dep || (dep.spec?.replicas ?? 1) === 0) return;
     const stamped = Date.parse(dep.metadata?.annotations?.[POWER_WOKE_AT] ?? "");
@@ -162,7 +175,7 @@ export function createPower(options: PowerOptions): Power {
     enabled: true,
 
     async ensureAwake(target, { timeoutMs, runId }) {
-      const name = deployments[target];
+      const name = nameOf(target);
       const dep = await readDeployment(name);
       if (!dep) throw new Error(`${LOW_POWER_WAKE_TIMEOUT}: Deployment "${name}" not found in "${namespace}".`);
       if ((dep.spec?.replicas ?? 1) === 0) {
@@ -188,14 +201,14 @@ export function createPower(options: PowerOptions): Power {
     },
 
     async isAsleep(target) {
-      return ((await readDeployment(deployments[target]))?.spec?.replicas ?? 1) === 0;
+      return ((await readDeployment(nameOf(target)))?.spec?.replicas ?? 1) === 0;
     },
 
     async sleepIfIdle() {
       const at = now().getTime();
       if (lastSweep !== undefined && at - lastSweep < SLEEP_SWEEP_INTERVAL_MS) return;
       lastSweep = at;
-      for (const target of Object.keys(deployments) as PowerTarget[]) {
+      for (const target of targetsDeployed()) {
         try {
           await sleepTarget(target, at);
         } catch (err) {
@@ -206,8 +219,8 @@ export function createPower(options: PowerOptions): Power {
 
     async status() {
       const targets: PowerTargetStatus[] = [];
-      for (const target of Object.keys(deployments) as PowerTarget[]) {
-        const name = deployments[target];
+      for (const target of targetsDeployed()) {
+        const name = nameOf(target);
         const dep = await readDeployment(name);
         if (!dep) continue;
         targets.push({
@@ -226,7 +239,9 @@ export function createPower(options: PowerOptions): Power {
       if (!blockers) throw new Error("power: sleepNow needs a blockers check.");
       const result: SleepNowResult = { slept: [], blocked: [] };
       for (const target of targets) {
+        // A target this deployment does not have is neither slept nor blocked.
         const name = deployments[target];
+        if (!name) continue;
         const dep = await readDeployment(name);
         if (!dep) continue;
         if ((dep.spec?.replicas ?? 1) === 0) {
@@ -253,7 +268,7 @@ export function createPower(options: PowerOptions): Power {
 
     async checkAccess() {
       const missing: string[] = [];
-      for (const name of Object.values(deployments)) {
+      for (const name of targetsDeployed().map(nameOf)) {
         for (const verb of ["get", "patch"]) {
           if (!(await api.canI(namespace, verb, "apps", "deployments", name)))
             missing.push(`${verb} deployments/${name}`);

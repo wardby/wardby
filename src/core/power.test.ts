@@ -427,3 +427,87 @@ describe("power (sleep now and status)", () => {
     );
   });
 });
+
+describe("power (renderer target)", () => {
+  const rendererName = "wardby-renderer";
+  const wokeAt = "2026-10-11T11:00:00Z";
+
+  /** Proxy and renderer Deployments, both awake past the idle window; the renderer is a target only when `withRenderer`. */
+  function rendererSetup(opts: { withRenderer: boolean; rendererReplicas?: number; busy?: PowerTarget[] }) {
+    const api = new FakeKubernetesApi();
+    for (const name of [names.proxy, rendererName]) {
+      api.put("deployment", NS, {
+        metadata: { name, annotations: { [POWER_WOKE_AT]: wokeAt } },
+        spec: { replicas: name === rendererName ? (opts.rendererReplicas ?? 1) : 1, selector: {}, template: {} },
+      });
+    }
+    let t = Date.parse("2026-10-11T11:00:00Z");
+    const power = createPower({
+      config: { enabled: true, idleMinutes: 30 },
+      api,
+      namespace: NS,
+      deployments: { ...names, ...(opts.withRenderer ? { renderer: rendererName } : {}) },
+      busy: async (target) => (opts.busy ?? []).includes(target),
+      blockers: async (target) => (target === "renderer" ? ["exp_1"] : []),
+      now: () => new Date(t),
+      sleep: async (ms) => {
+        t += ms;
+        api.put("endpoints", NS, { metadata: { name: rendererName }, subsets: [{ addresses: [{ ip: "10.0.0.9" }] }] });
+      },
+      pollMs: 1000,
+    });
+    t = Date.parse("2026-10-11T12:00:00Z");
+    return { api, power };
+  }
+
+  it("status lists the renderer when it is a target, and not otherwise", async () => {
+    const on = rendererSetup({ withRenderer: true });
+    expect((await on.power.status()).targets?.map((x) => x.target)).toEqual(["proxy", "renderer"]);
+    expect((await on.power.status()).targets?.[1]?.blockers).toEqual(["exp_1"]);
+    const off = rendererSetup({ withRenderer: false });
+    expect((await off.power.status()).targets?.map((x) => x.target)).toEqual(["proxy"]);
+  });
+
+  it("sleepIfIdle scales an idle renderer to 0 and leaves a busy one", async () => {
+    const idle = rendererSetup({ withRenderer: true });
+    await idle.power.sleepIfIdle();
+    expect(idle.api.deploymentPatches).toContainEqual({ name: rendererName, replicas: 0 });
+    const busy = rendererSetup({ withRenderer: true, busy: ["renderer"] });
+    await busy.power.sleepIfIdle();
+    expect(busy.api.deploymentPatches.some((p) => p.name === rendererName)).toBe(false);
+  });
+
+  it("ensureAwake wakes a sleeping renderer and waits for its endpoint", async () => {
+    const { api, power } = rendererSetup({ withRenderer: true, rendererReplicas: 0 });
+    await power.ensureAwake("renderer", { timeoutMs: 10_000, runId: "exp_1" });
+    expect(api.deploymentPatches.at(-1)).toMatchObject({ name: rendererName, replicas: 1 });
+    expect(await power.isAsleep("renderer")).toBe(false);
+  });
+
+  it("without a renderer deployment, ensureAwake rejects with low_power_disabled and sleepNow skips it", async () => {
+    const { api, power } = rendererSetup({ withRenderer: false });
+    await expect(power.ensureAwake("renderer", { timeoutMs: 1000, runId: "exp_1" })).rejects.toThrow(
+      /^low_power_disabled: renderer is not deployed here/,
+    );
+    expect(await power.sleepNow(["renderer"])).toEqual({ slept: [], blocked: [] });
+    expect(api.deploymentPatches).toEqual([]);
+    expect(await power.checkAccess()).not.toContain("get deployments/undefined");
+  });
+
+  it("sleepNow over every target (power_sleep with no target) skips a renderer that is not deployed", async () => {
+    const { api, power } = rendererSetup({ withRenderer: false });
+    const result = await power.sleepNow(["proxy", "gateway", "renderer"]);
+    expect(result.slept).toContain("proxy");
+    expect(result.slept).not.toContain("renderer");
+    expect(result.blocked).toEqual([]);
+    expect(api.deploymentPatches.some((p) => p.name === rendererName)).toBe(false);
+  });
+
+  it("sleepNow refuses a renderer with queued or running exports", async () => {
+    const { power } = rendererSetup({ withRenderer: true });
+    expect(await power.sleepNow(["renderer"])).toEqual({
+      slept: [],
+      blocked: [{ target: "renderer", runIds: ["exp_1"] }],
+    });
+  });
+});

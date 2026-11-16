@@ -15,6 +15,8 @@ export function triggerLabel(trigger: GraphRun["trigger"]): string {
       return `⎇ ${trigger.repository}${trigger.number === null ? "" : `#${trigger.number}`} ${trigger.event}`;
     case "host_event":
       return "host event";
+    case "comment":
+      return "comment";
     case "subagent":
       return "sub-agent";
   }

@@ -98,6 +98,7 @@ export type DispatchTx = Pick<
   | "workItem"
   | "localPullRequest"
   | "runAttribution"
+  | "commentThread"
   | "$queryRaw"
   | "$executeRawUnsafe"
 >;

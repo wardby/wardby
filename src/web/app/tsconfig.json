@@ -1,0 +1,15 @@
+{
+  // The browser app (bundled by scripts/build-web.mjs with esbuild): DOM types, bundler resolution, no emit.
+  // The root tsconfig.json and tsconfig.build.json exclude src/web/app/**; `npm run typecheck` checks it here.
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": [],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "declaration": false,
+    "noEmit": true
+  },
+  "include": ["./**/*.ts"],
+  "exclude": []
+}

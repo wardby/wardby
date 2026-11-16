@@ -46,6 +46,8 @@ Use the same database and credential hash key for provisioning and the server:
 ```sh
 node dist/cli.js auth user create --subject user-identifier
 node dist/cli.js auth user create --subject operator-identifier --role admin
+node dist/cli.js auth user create --subject user-identifier --name "Ana Ruiz"
+node dist/cli.js auth user name --subject user-identifier --name "Ana Ruiz"
 node dist/cli.js auth user list
 node dist/cli.js auth user grant --subject user-identifier --role package-approver
 node dist/cli.js auth user grant --subject user-identifier --revoke-role package-approver
@@ -61,13 +63,17 @@ Creation prints the complete high-entropy login key once. Distribute it out of
 band through a secure channel; plaintext cannot be recovered from the database.
 Login keys expire after one year. For a lost key, create a replacement and
 revoke the old public key ID. Revocation also revokes the user's existing
-sessions and OAuth families. Disable is terminal through the CLI; reactivation
+sessions and OAuth families, and signs them out of document pages. Disabling a
+user, or changing their roles, signs them out of document pages at once too. Disable is terminal through the CLI; reactivation
 requires a separately reviewed operator workflow.
 
 The CLI rejects any flag a command does not take, for example
 `auth key create --role admin`. It also rejects any unknown role name.
 `auth user grant` changes only an existing user and never creates one. Both
-`--role` and `--revoke-role` can be repeated.
+`--role` and `--revoke-role` can be repeated. `--name` (at most 80
+characters) sets the display name shown on documents and comments; without
+one, the user's linked GitHub login is shown, or else `user·` followed by the
+first four characters of the subject's last segment.
 
 ## Roles and privileged operations
 
@@ -738,6 +744,28 @@ or secrets. Codex agents get only tools the server marks `readOnlyHint: true`
 | `WARDBY_MCP_GATEWAY_URL`       | the coding proxy                                                                                         | unset         | The native sandbox gateway's base URL, for example `http://<gateway host>:<port>`. The proxy's `/mcp` route, which a coding run's worker uses as its MCP server, forwards each request to the gateway's `/coding-mcp` route; the proxy never sees an MCP server's URL or credentials. Unset, coding runs get no MCP tools: `/mcp` answers `503` with [`mcp_unavailable`](../help/errors/mcp-unavailable.md). An `http` or `https` URL without credentials, query or fragment; any other value stops start-up. |
 | `WARDBY_MCP_TOKEN`             | the coding worker                                                                                        | set by Wardby | Don't set it. Wardby gives each coding run whose agent has MCP tools its own MCP token in this worker variable. It is valid only for the proxy's `/mcp` route, and only while the run is active and before its deadline; only its hash is stored, and it is never logged. On the Substrate launcher it holds a fixed placeholder; the token itself is injected on the wire.                                                                                                                                   |
 | `WARDBY_MCP_TOKEN_HEADER`      | the coding worker                                                                                        | set by Wardby | Don't set it. Set only on the Substrate launcher, for a run with MCP tools: the worker sends its MCP token in this header (`x-wardby-mcp-token`) instead of `Authorization`.                                                                                                                                                                                                                                                                                                                                  |
+
+## Documents, designs and the export renderer
+
+This applies to Wardby 0.10.0 and later; the full behaviour is in
+[Documents and designs](documents.md#security).
+
+- **Page policy.** Document pages use a strict Content-Security-Policy with
+  scripts only from the same origin or a per-request nonce. A design page also
+  allows inline styles (`style-src 'unsafe-inline'`) and `data:` fonts, because
+  its editor renders board CSS in `<style>` elements; it never needs
+  `unsafe-eval`, and scripts still cannot run in boards. Bundle script tags carry
+  Subresource Integrity hashes, and the editor's telemetry is off.
+- **Boards.** Every board is sanitised on every write and is only shown in
+  `srcdoc` frames with a `sandbox` that never includes `allow-scripts`. There is
+  no separate content origin for boards yet.
+- **Renderer.** The optional PNG/PDF renderer (`WARDBY_RENDERER_URL`) runs
+  Chromium with its own sandbox off, because the container runtime's default
+  seccomp profile blocks user namespaces. Isolation rests on gVisor, a non-root
+  user, a read-only root filesystem, dropped capabilities, no egress and no
+  database or secrets. On local Docker and kind (runc) only the container
+  settings apply: keep a local renderer on localhost. It takes 500m CPU and
+  2 GiB of memory on Kubernetes.
 
 ## Slack workflow notifications
 

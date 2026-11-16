@@ -45,6 +45,9 @@ export interface GraphSnapshot {
         }
       | {
           kind: "host_event";
+        }
+      | {
+          kind: "comment";
         };
     turns: number;
     tokensIn: number;
@@ -152,6 +155,9 @@ export interface RunDetail {
       }
     | {
         kind: "host_event";
+      }
+    | {
+        kind: "comment";
       };
   turns: number;
   tokensIn: number;
@@ -220,6 +226,14 @@ export interface RunDetail {
   }[];
   stepsOmitted: number;
   stepsDropped: number;
+  /**
+   * Untrusted text: what the run was asked to do (its task from a caller, webhook, issue or lead), without the agent's standing instructions. The agent's secret values and token-shaped values are masked. At most the first 8,000 characters; see requestTruncated. Null when the run has none or it can't be checked for secrets. Absent from servers older than 0.9.6.
+   */
+  request?: string | null;
+  /**
+   * True when request is only the first 8,000 characters of a longer text.
+   */
+  requestTruncated?: boolean;
   coding: {
     provider: string;
     repository: string;
@@ -304,4 +318,24 @@ export interface InfraInfo {
       warmWorkerLabel: string;
     } | null;
   } | null;
+}
+
+export interface DocumentList {
+  documents: {
+    id: string;
+    title: string;
+    kind: "document" | "design";
+    mine: boolean;
+    agent: {
+      id: string;
+      name: string;
+    } | null;
+    repository: string | null;
+    path: string | null;
+    updatedAt: string;
+    latestVersion: number;
+    reviewState: "draft" | "in_review" | "changes_requested" | "approved" | "archived";
+    pagePath: string;
+  }[];
+  truncated: boolean;
 }

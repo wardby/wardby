@@ -8,6 +8,7 @@ import { ServerDialog } from "./chrome/ServerDialog";
 import { ServerMenu } from "./chrome/ServerMenu";
 import { SignInGate } from "./chrome/SignInGate";
 import { TopBar, type InfraBar, type Tab } from "./chrome/TopBar";
+import { DocumentsScreen } from "./documents/DocumentsScreen";
 import { InfraScreen } from "./infra/InfraScreen";
 import { runSha } from "./infra/runSha";
 import { windowSpend } from "./format/spend";
@@ -146,6 +147,8 @@ function Dashboard({
       onClearRange={() => setRange(null)}
     />
   );
+
+  if (tab === "documents") return <DocumentsScreen server={server} topBar={() => topBar()} />;
 
   if (tab === "infra") {
     return (

@@ -1,0 +1,16 @@
+---
+id: errors/document-not-agent-linked
+title: Document not linked to a coding agent (document_not_agent_linked)
+summary: Send to agent needs a repository, a file path and a coding agent.
+audience: operator
+tags: [error, documents, document_not_agent_linked]
+appliesTo: ">=0.10.0"
+---
+
+# Document not linked to a coding agent
+
+`document_not_agent_linked` (HTTP 400). Sending comment threads to an agent works only on a document linked to a file in a repository and to a coding agent: `create_document` with `agentId`, `repository` and `path` together. A document without those, or linked to a native agent, returns this. The same code is returned by `create_document` when you pass `repository` but not an agent, or the other way round.
+
+Link it with `link_document` (the document's owner), or edit the document yourself. A repository the agent cannot choose for this run (not linked, no longer authorized for the agent, or refused by its policy) also returns this, and so does a design linked without a `baseRef`.
+
+See [Documents](../documents.md).

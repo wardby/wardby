@@ -1,5 +1,5 @@
-# Low-power mode only: lets the control plane scale the coding proxy and the
-# native gateway between 0 and 1 (src/core/power.ts), and read their Endpoints
+# Low-power mode only: lets the control plane scale the coding proxy, the native
+# gateway and the optional export renderer between 0 and 1 (src/core/power.ts), and read their Endpoints
 # to tell when a woken target is ready. Named objects only; it cannot touch its
 # own Deployment or anything else.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -8,11 +8,11 @@ metadata: { name: wardby-power, namespace: wardby-coding }
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    resourceNames: ["wardby-coding-proxy", "wardby-native-gateway"]
+    resourceNames: ["wardby-coding-proxy", "wardby-native-gateway", "wardby-renderer"]
     verbs: ["get", "patch"]
   - apiGroups: [""]
     resources: ["endpoints"]
-    resourceNames: ["wardby-coding-proxy", "wardby-native-gateway"]
+    resourceNames: ["wardby-coding-proxy", "wardby-native-gateway", "wardby-renderer"]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

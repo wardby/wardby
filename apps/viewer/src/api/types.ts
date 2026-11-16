@@ -1,7 +1,8 @@
 // Stable names for the generated API types (see generated.ts; do not edit that file).
-import type { GraphSnapshot, RunDetail, ViewerEvent, InfraInfo } from "./generated";
+import type { GraphSnapshot, RunDetail, ViewerEvent, InfraInfo, DocumentList } from "./generated";
 
-export type { GraphSnapshot, RunDetail, ViewerEvent, InfraInfo };
+export type { GraphSnapshot, RunDetail, ViewerEvent, InfraInfo, DocumentList };
+export type ListedDocument = DocumentList["documents"][number];
 
 export type GraphRun = GraphSnapshot["runs"][number];
 export type Outcome = GraphRun["outcomes"][number];

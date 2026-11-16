@@ -1,9 +1,10 @@
-# Low-power adjustment of the GKE quota (../gke-autopilot/quota.yaml: 11 CPU,
-# 20Gi, 26 pods). A namespace ResourceQuota counts every pod in wardby-coding,
+# Low-power adjustment of the GKE quota (../gke-autopilot/quota.yaml: 11.5 CPU,
+# 22Gi, 27 pods, the export renderer's share included). A namespace
+# ResourceQuota counts every pod in wardby-coding,
 # the control plane included. Low-power frees the headroom pod (0.25 CPU /
 # 0.5Gi, 1 pod) and one gateway replica (0.35 CPU / 0.625Gi, 1 pod), and adds
 # a possible second control-plane replica (1.1 CPU / 2.125Gi, 1 pod):
-# net +0.5 CPU, +1Gi, -1 pod. The pod limit stays at 26 (one pod of slack).
+# net +0.5 CPU, +1Gi, -1 pod. The pod limit stays at 27 (one pod of slack).
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -11,8 +12,8 @@ metadata:
   namespace: wardby-coding
 spec:
   hard:
-    pods: "26"
-    requests.cpu: "12"
-    requests.memory: 21Gi
-    limits.cpu: "12"
-    limits.memory: 21Gi
+    pods: "27"
+    requests.cpu: "12.5"
+    requests.memory: 23Gi
+    limits.cpu: "12.5"
+    limits.memory: 23Gi

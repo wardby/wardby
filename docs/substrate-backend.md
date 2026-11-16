@@ -263,6 +263,11 @@ actor (Claude Code) or the Codex actor, never in Claude's agent actor.
   `0555`, and setuid, setgid and sticky bits are cleared. A command can still
   change its own copy's permissions, but a read repository's content is never
   uploaded or collected.
+- **Repositories root.** After seeding, the bridge sets `/repos` to `0755`,
+  or else adds the sticky bit, when it is allowed to. On a root-owned mount
+  it is not, and the root keeps its mode; the bridge logs
+  `substrate_bridge_repos_root_not_hardened` and the run continues. A write
+  repository's folder is re-checked before collect either way.
 - **Disk.** The default repository and every extra are seeded as tars into one
   budget, the run's disk (`workspaceDiskMb`, else `CODING_DISK_MB`). Over it,
   the run fails at launch with
