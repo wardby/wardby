@@ -335,7 +335,24 @@ export async function mentionCandidates(
   });
   const ids = new Set<string>([doc.ownerId]);
   for (const g of grants) if (g.granteeKind === "principal" && g.granteePrincipalId) ids.add(g.granteePrincipalId);
-  if (grants.some((g) => g.granteeKind === "everyone")) {
+  let everyone = grants.some((g) => g.granteeKind === "everyone");
+  // A plan document: the triggered agent's owner and grantees can comment too (spec §6, R24), so offer them.
+  const plan = await db.document.findUnique({
+    where: { id: documentId },
+    select: { planSet: { select: { accessAgent: { select: { id: true, ownerId: true } } } } },
+  });
+  const agent = plan?.planSet?.accessAgent;
+  if (agent) {
+    if (agent.ownerId) ids.add(agent.ownerId);
+    const agentGrants = await db.resourceGrant.findMany({
+      where: { resourceType: "agent", resourceId: agent.id },
+      select: { granteeKind: true, granteePrincipalId: true },
+    });
+    for (const g of agentGrants)
+      if (g.granteeKind === "principal" && g.granteePrincipalId) ids.add(g.granteePrincipalId);
+    everyone ||= agentGrants.some((g) => g.granteeKind === "everyone");
+  }
+  if (everyone) {
     for (const p of await db.principalProfile.findMany({ select: { principalId: true } })) ids.add(p.principalId);
   }
   const names = await principalNames(db, [...ids]);
