@@ -1106,11 +1106,13 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   // Plan sections ride in the stored request (R9), never the knowledge slot: a deferred composer
   // (deferred-coding.ts) composes coding.task from the request later.
   const planSections: string[] = [];
+  const planRepositoryFolder =
+    planSetting?.store === "repository" && planNumber !== undefined ? planFolderFor(planSetting, planNumber) : null;
   if (planSetting && planNumber !== undefined && options.planInputFiles === undefined) {
     planSections.push(
       plannerTaskNote({
         store: planSetting.store,
-        folder: planSetting.store === "wardby" ? PLAN_FOLDER_PATH : planFolderFor(planSetting, planNumber),
+        folder: planSetting.store === "wardby" ? PLAN_FOLDER_PATH : (planRepositoryFolder as string),
         number: planNumber,
       }),
     );
@@ -1122,7 +1124,11 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         withPlanSections(options.codingTask ?? preview?.codingProfile?.defaultTask ?? "", planSections),
       );
     } catch {
-      throw new PlanRefusedError("plan_too_large", "the plan instructions do not fit the coding task limit");
+      // Refused like a missing number: a scheduled planner commits a refused run rather than
+      // throwing on every tick.
+      const err = new PlanRefusedError("plan_too_large", "the plan instructions do not fit the coding task limit");
+      planRefusal = setRefusalOf(err);
+      if (planRefusal === undefined) throw err;
     }
   }
   const persistOnce = () =>
@@ -1373,10 +1379,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               collectPlanFiles:
                 planSetting?.store !== "repository" &&
                 (options.collectPlanFiles === true || planSetting?.store === "wardby"),
-              planRepositoryPath:
-                planSetting?.store === "repository" && planNumber !== undefined
-                  ? planFolderFor(planSetting, planNumber)
-                  : null,
+              planRepositoryPath: planRepositoryFolder,
             },
           });
           await savePlanInputFiles(tx, run.id, options.planInputFiles ?? []);

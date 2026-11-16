@@ -6,6 +6,7 @@ import type { PlanDocument, PlanDocumentInput } from "../../coding/profile.js";
 export type PlanSettingsDb = Pick<PrismaClient, "principal" | "agent" | "resourceGrant">;
 
 export function planFolderFor(setting: Pick<PlanDocument, "path">, n: number): string {
+  // PlanDocumentSchema guarantees a path for store "repository"; this guards a malformed stored setting.
   if (!setting.path) throw new Error("plan_path_missing");
   return setting.path.replace("{n}", String(n));
 }

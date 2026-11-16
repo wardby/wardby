@@ -12,7 +12,7 @@ import { createPrismaClient } from "./db.js";
 import { setLogLineFilter } from "./logger.js";
 import { checkContinuation, ContinuationRefusedError, dispatchRun } from "./dispatch.js";
 import { loadPlanFiles } from "../coding/plan-files/store.js";
-import { PLAN_FOLDER_PATH } from "../coding/protocol.js";
+import { MAX_CODING_TASK_BYTES, PLAN_FOLDER_PATH } from "../coding/protocol.js";
 import { PlanRefusedError } from "./plans/refusal.js";
 import { createRepoAccessGate } from "./repo-access.js";
 import { claimDueRun, findDueCandidates } from "./scheduler.js";
@@ -325,6 +325,36 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
         expect(row.request).not.toMatch(WRITE);
         expect(row.collectPlanFiles).toBe(true);
       });
+    });
+
+    it("refuses a planner whose note overflows the task limit, leaving no run", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const attempt = dispatchRun({
+        db,
+        executor,
+        agentId,
+        codingTask: "x".repeat(MAX_CODING_TASK_BYTES),
+        planNumber: 3,
+      });
+      await expect(attempt).rejects.toBeInstanceOf(PlanRefusedError);
+      await expect(attempt).rejects.toThrow("plan_too_large");
+      expect(await runsOf(agentId)).toEqual([]);
+    });
+
+    it("commits a refused run for a scheduled planner whose note overflows the task limit", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({
+        db,
+        executor,
+        agentId,
+        codingTask: "x".repeat(MAX_CODING_TASK_BYTES),
+        planNumber: 3,
+        trigger: "scheduled",
+      });
+      expect(result!.run.status).toBe("refused");
+      expect(result!.run.error).toMatch(/^plan_too_large:/);
     });
 
     it("commits a refused run for a scheduled planner with no number", async () => {
