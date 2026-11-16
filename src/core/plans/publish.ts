@@ -9,6 +9,7 @@ import { Prisma, type PrismaClient } from "#prisma";
 import { readPlanDocument } from "../../coding/profile.js";
 import { loadPlanFiles } from "../../coding/plan-files/store.js";
 import { contentHash, type VersionContent } from "../documents/content.js";
+import { loadContent } from "../documents/files.js";
 import { formatFor } from "../documents/formats/index.js";
 import { documentSecretValues } from "../documents/redact.js";
 import { submitForReview } from "../documents/review.js";
@@ -141,6 +142,26 @@ async function releaseLease(db: PrismaClient, setId: string, runId: string): Pro
     where: { id: setId, publishLeaseRunId: runId },
     data: { publishLeaseRunId: null, publishLeaseUntil: null },
   });
+}
+
+/**
+ * Runs `work` while holding the set's publish lease for runId (one publish per set at a time), so a
+ * revision's own publish (B8, agent-loop.ts) cannot interleave with a set publish. "busy": the lease
+ * was not free within PLAN_PUBLISH_WAIT_MS; nothing ran. The lease is released after `work`.
+ */
+export async function withPlanSetLease<T>(
+  db: PrismaClient,
+  setId: string,
+  runId: string,
+  work: () => Promise<T>,
+  clock: PlanPublishClock = realClock,
+): Promise<T | "busy"> {
+  if (!(await acquireLease(db, clock, setId, runId))) return "busy";
+  try {
+    return await work();
+  } finally {
+    await releaseLease(db, setId, runId).catch(() => undefined);
+  }
 }
 
 async function markPublish(db: PrismaClient, runId: string, status: string | null): Promise<void> {
@@ -356,6 +377,7 @@ export async function publishPlanFromRun(
   if (coding.planFilesStatus !== "stored") return { number, error: publishErrorOf(coding.planFilesStatus) };
   const layout = parsePlanLayout(await loadPlanFiles(db, runId, "output"));
   if (!layout.ok) return { number, error: layout.error };
+  const given = await givenDocuments(db, runId);
   const clock = deps.clock ?? realClock;
   let set: PlanSetRef | undefined;
   let held = false;
@@ -366,7 +388,7 @@ export async function publishPlanFromRun(
       return { number, error: "plan_publish_busy" };
     }
     held = true;
-    return await publishSet(db, deps, clock, runId, planner, set, layout.documents, layout.ignored);
+    return await publishSet(db, deps, clock, runId, planner, set, layout.documents, layout.ignored, given);
   } catch (err) {
     if (err instanceof PlanLeaseLost && set) {
       held = false;
@@ -386,6 +408,17 @@ export async function publishPlanFromRun(
   }
 }
 
+/**
+ * A revision run's input (B8: the set's documents it was given in the plan folder) by path; null for a
+ * run that was given none (a planner run writing the plan).
+ */
+async function givenDocuments(db: PrismaClient, runId: string): Promise<Map<string, PlanLayoutDocument> | null> {
+  const inputs = await loadPlanFiles(db, runId, "input");
+  if (inputs.length === 0) return null;
+  const layout = parsePlanLayout(inputs);
+  return new Map(layout.ok ? layout.documents.map((d) => [d.path, d] as const) : []);
+}
+
 async function publishSet(
   db: PrismaClient,
   deps: PlanPublishDeps,
@@ -395,6 +428,7 @@ async function publishSet(
   set: PlanSetRef,
   layoutDocuments: readonly PlanLayoutDocument[],
   ignored: string[],
+  given: Map<string, PlanLayoutDocument> | null,
 ): Promise<PublishedPlan> {
   const { coding, setting, number, ownerId } = planner;
   // Renewed before every step and before the marker: a lost lease stops the publish (PlanLeaseLost).
@@ -407,7 +441,9 @@ async function publishSet(
   const documents = await db.document.findMany({
     where: { planSetId: set.id },
     orderBy: { planPath: "asc" },
-    include: { currentVersion: { select: { number: true, contentHash: true } } },
+    include: {
+      currentVersion: { select: { id: true, number: true, contentHash: true, format: true, markdown: true } },
+    },
   });
   const review = await planReviewers(db, { id: agentId, ownerId }, set.accessAgentId ?? agentId, setting);
   const submit = (documentId: string) =>
@@ -486,6 +522,26 @@ async function publishSet(
       await report(existing.id, doc, "unchanged");
       return;
     }
+    // A revision (spec §5): only a file the run changed becomes a version, and only onto the version it
+    // was given; a document a person moved on meanwhile is never overwritten (reported as not updated).
+    // Every side is prepared with the same secret values, so a value that became a secret since the
+    // version was published (redacted in what the run was given) does not read as a change.
+    const sent = given?.get(doc.path);
+    if (sent && existing.currentVersion) {
+      const prepared = (c: VersionContent): string => {
+        try {
+          return contentHash(formatFor(doc.kind).prepare(c, secrets).content);
+        } catch {
+          return contentHash(c);
+        }
+      };
+      const sentHash = prepared(contentOf(sent));
+      const movedOn = prepared(await loadContent(db, existing.currentVersion)) !== sentHash;
+      if (movedOn || prepared(content) === sentHash) {
+        await report(existing.id, doc, "unchanged");
+        return;
+      }
+    }
     try {
       await publishVersion(db, deps.cipher, {
         documentId: existing.id,
@@ -523,6 +579,8 @@ async function publishSet(
     }
   }
   for (const gone of byPath.values()) {
+    // A revision removes only a document it was given; one added after it started is not its to remove.
+    if (given && !given.has(gone.planPath!)) continue;
     await hold();
     try {
       if (!gone.removedFromPlan) {
