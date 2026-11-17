@@ -24,6 +24,7 @@ import {
 } from "./attribution.js";
 import { headStoppedAtBudget, pushingRunInFlight } from "./budget-stopped-head.js";
 import { checkContinuation, dispatchRun, type DispatchTx } from "./dispatch.js";
+import { planChainHook } from "./plans/approval.js";
 import { PlanRefusedError } from "./plans/refusal.js";
 import { planRefusedReply } from "./plans/wording.js";
 import { rootFollowUpInFlight } from "./run-pull-request.js";
@@ -1543,9 +1544,14 @@ async function releaseRequestHead(
 export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps): Promise<RouteResult> {
   const none: RouteResult = { runIds: [], followUps: [] };
   if (event.kind === "pr_closed") {
-    // Bookkeeping only: no agent runs, so no repository link is consulted.
+    // Bookkeeping, plus the next ticket of a plan's build chain (Task C3): no repository link is consulted.
     await handlePullRequestClosed(deps.db, deps.issueTrackers, {
       codeProvider: event.provider,
+      repository: event.repository,
+      number: event.prNumber,
+      merged: event.merged,
+    });
+    await planChainHook()?.onMerged(deps.db, {
       repository: event.repository,
       number: event.prNumber,
       merged: event.merged,

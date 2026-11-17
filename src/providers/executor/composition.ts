@@ -25,9 +25,11 @@ import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { onDocumentRunFinished } from "../../core/documents/agent-loop.js";
 import { planRunFinishedHook } from "../../core/plans/hooks.js";
 import {
+  createPlanChainHook,
   createPlanReviewHook,
   issueNoticePoster,
   runningPlanTicket,
+  setPlanChainHook,
   setPlanReviewHook,
   type PlanApprovalDeps,
 } from "../../core/plans/approval.js";
@@ -450,6 +452,8 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   };
   // Without the cipher no notice can be redacted, so no plan approval hook runs (as for the run hooks).
   setPlanReviewHook(cipher ? createPlanReviewHook(planDeps) : undefined);
+  // The build chain (C3): a merged ticket PR starts the next ticket; a failed ticket run stops it.
+  setPlanChainHook(cipher ? createPlanChainHook(planDeps) : undefined);
   const transcripts = new RunTranscriptRecorder({
     db: options.db,
     blobs: blobStoreConfig && cipher ? createBlobStore(blobStoreConfig) : undefined,

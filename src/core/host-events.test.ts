@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
 import type { RepoAccessDecision, RepoAccessGate } from "./repo-access.js";
 import {
@@ -28,6 +28,7 @@ vi.mock("./mark-ready.js", () => ({ maybeMarkReady: vi.fn(async () => "off") }))
 import { maybeMarkReady } from "./mark-ready.js";
 import { mentionDeclinedBody, mentionTaskText, siblingContinuationHints } from "./host-events.js";
 import { isIssueMentionTask } from "./host-status.js";
+import { setPlanChainHook, type PlanChainHook } from "./plans/approval.js";
 import { PlanRefusedError } from "./plans/refusal.js";
 import { planRefusedReply } from "./plans/wording.js";
 
@@ -1096,6 +1097,18 @@ describe("routeHostEvent pr_closed", () => {
     });
     expect((d.db as any).agentRepository.findMany).not.toHaveBeenCalled();
     expect(dispatchRun).not.toHaveBeenCalled();
+  });
+
+  afterEach(() => setPlanChainHook(undefined));
+
+  it("hands a merged PR to the plan build chain once", async () => {
+    const onMerged = vi.fn<PlanChainHook["onMerged"]>(async () => undefined);
+    setPlanChainHook({ onMerged, onTicketFinished: vi.fn(), buildTicketFromComment: vi.fn() });
+    const d = deps([]);
+    (d.db as any).issuePullRequest = { findMany: vi.fn(async () => []) };
+    await routeHostEvent(closed, d);
+    expect(onMerged).toHaveBeenCalledTimes(1);
+    expect(onMerged).toHaveBeenCalledWith(d.db, { repository: REPO, number: 7, merged: true });
   });
 
   it("propagates a failed lookup of the linked issues, so the ingress rolls back the delivery", async () => {

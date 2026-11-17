@@ -6,6 +6,7 @@ import { submitForReview } from "../documents/review.js";
 import { createDocument, publishVersion } from "../documents/service.js";
 import { principalGranteeKey } from "../grants.js";
 import { attachSecret, createSecret } from "../secrets.js";
+import { setPlanChainHook } from "./approval.js";
 import { planRunFinishedHook } from "./hooks.js";
 import { codingChildResult } from "../runner.js";
 import { planReplyLines, planSummaryLines } from "./wording.js";
@@ -407,6 +408,26 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     expect(await planSummaryForRun(db, runId, null)).toMatchObject({
       documents: [{ path: "plan.md", change: "created", reviewState: "in_review" }],
     });
+  });
+
+  it("C3 hook: every run end goes to the build chain first, a revision run's too", async () => {
+    const onTicketFinished = vi.fn(async () => undefined);
+    setPlanChainHook({ onMerged: vi.fn(), onTicketFinished, buildTicketFromComment: vi.fn() });
+    try {
+      const hook = planRunFinishedHook(() => ({ db, cipher, origin: null }));
+      const agentId = await planner();
+      const revision = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n" }]);
+      await db.codingRunPlanFile.create({
+        data: { runId: revision, direction: "input", path: "plan.md", content: "# Plan\n" },
+      });
+      await hook(revision);
+      expect(onTicketFinished).toHaveBeenCalledTimes(1);
+      const [calledDb, calledRunId] = onTicketFinished.mock.calls[0] as unknown[];
+      expect(calledDb).toBe(db);
+      expect(calledRunId).toBe(revision);
+    } finally {
+      setPlanChainHook(undefined);
+    }
   });
 
   it("R25: a planner run with no lead gets its reply on the issue; a delegated one and a failed publish follow the rules", async () => {

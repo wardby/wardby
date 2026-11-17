@@ -70,6 +70,15 @@ export interface PlanChainHook {
 }
 
 let hook: PlanReviewHook | undefined;
+let chainHook: PlanChainHook | undefined;
+
+export function setPlanChainHook(next: PlanChainHook | undefined): void {
+  chainHook = next;
+}
+
+export function planChainHook(): PlanChainHook | undefined {
+  return chainHook;
+}
 
 export function setPlanReviewHook(next: PlanReviewHook | undefined): void {
   hook = next;
@@ -200,6 +209,23 @@ export async function reportTicketStart(
 }
 
 /**
+ * A start that found another ticket of the set already pending or running (R16): the chain follows that
+ * ticket, so its merge (not the one asked for) moves the chain on.
+ */
+async function followRunningTicket(
+  db: Pick<PrismaClient, "planSet">,
+  planSetId: string,
+  asked: number,
+  started: StartTicketResult,
+): Promise<void> {
+  if (!("running" in started) || started.running === asked) return;
+  await db.planSet.updateMany({
+    where: { id: planSetId, chainTicket: asked },
+    data: { chainTicket: started.running },
+  });
+}
+
+/**
  * The issue notice poster (R25, C2): a GitHub issue gets a comment from the App; a Jira issue gets one
  * only through an issue-project link with write access of one of `agentIds`, with that link's comment
  * visibility, as every other Jira reply does. Posts the text as given (callers redact and defuse).
@@ -247,6 +273,9 @@ export async function planSetChanged(db: PrismaClient, planSetId: string): Promi
   if (any) await current(db, any.id, null);
 }
 
+/** Bounds for the set's row-lock transaction: a wait for the lock counts toward its timeout. */
+const PLAN_TX = { maxWait: 5_000, timeout: 20_000 } as const;
+
 type ApprovedSet = NonNullable<Awaited<ReturnType<typeof claimApproval>>>;
 
 /**
@@ -288,7 +317,7 @@ async function claimApproval(db: PrismaClient, planSetId: string) {
     if (set.approvedAt) return null;
     await tx.planSet.update({ where: { id: set.id }, data: { approvedAt: new Date() } });
     return set;
-  });
+  }, PLAN_TX);
 }
 
 /** What follows a claimed approval: a notice ("notify"), or the builder check and ticket 1 ("build"). */
@@ -361,6 +390,7 @@ async function afterApproval(
       );
       return { refused: "start_failed" };
     });
+  await followRunningTicket(db, set.id, 1, started);
   const starterName = actorId ? ((await principalNames(db, [actorId])).get(actorId) ?? null) : null;
   await reportTicketStart(db, deps, row, 1, started, starterName, planApprovedNotice(set.number, versions, null));
 }
@@ -384,5 +414,114 @@ export function createPlanReviewHook(deps: PlanApprovalDeps): PlanReviewHook {
       // Never throws: a review verdict is never undone by its plan follow-up.
       logFailure({ documentId })(err);
     }
+  };
+}
+
+/** RunStatus values (schema.prisma `enum RunStatus`) that end a ticket run without success. */
+const STOPPING_STATUSES = new Set<string>(["failed", "refused", "lost", "budget_exhausted", "cancelled"]);
+
+/**
+ * The build chain (spec §7b, R13): a merged PR of the chain's current ticket starts the next ticket
+ * (never while another ticket run of the set is pending or running), and a ticket run that ends
+ * without success, or a reopen (claimApproval), stops it. Each step is claimed with a conditional
+ * update on the set's chain fields, so a repeated delivery acts once. Notices hold plan and ticket
+ * numbers and a status only: never a ticket title. Never throws.
+ */
+export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
+  const guard = async (what: string, work: () => Promise<void>) => {
+    try {
+      await work();
+    } catch (err) {
+      planLog.warn({ errorName: err instanceof Error ? err.name : typeof err }, `plan chain ${what} failed`);
+    }
+  };
+  return {
+    onMerged: (db, pr) =>
+      guard("merge", async () => {
+        if (!pr.merged) return;
+        const coding = await db.codingRun.findFirst({
+          where: {
+            repository: pr.repository,
+            planSetId: { not: null },
+            planTicket: { not: null },
+            result: { path: ["pullRequestNumber"], equals: pr.number },
+          },
+          orderBy: { run: { startedAt: "desc" } },
+          select: { planTicket: true, planSetId: true },
+        });
+        if (!coding?.planSetId || coding.planTicket === null) return;
+        const ticket = coding.planTicket;
+        const set = await db.planSet.findUnique({
+          where: { id: coding.planSetId },
+          include: {
+            documents: {
+              where: { removedFromPlan: false, planPath: "plan.md" },
+              include: { currentVersion: { select: { markdown: true } } },
+            },
+            agent: { select: { ownerId: true, codingProfile: { select: { planDocument: true } } } },
+          },
+        });
+        if (!set || set.chainTicket !== ticket || set.chainStopped !== null || !set.approvedAt) return;
+        if ((await runningPlanTicket(db, set.id)) !== null) return;
+        const { documents, agent, ...row } = set;
+        const tickets = ticketTitles(documents[0]?.currentVersion?.markdown ?? "");
+        const next = ticket + 1;
+        if (!tickets.has(next)) {
+          const cleared = await db.planSet.updateMany({
+            where: { id: set.id, chainTicket: ticket, chainStopped: null },
+            data: { chainTicket: null },
+          });
+          if (cleared.count === 1)
+            await postPlanNotice(deps, row, `Plan ${set.number}: all ${tickets.size} tickets built.`);
+          return;
+        }
+        const claimed = await db.planSet.updateMany({
+          where: { id: set.id, chainTicket: ticket, chainStopped: null, approvedAt: { not: null } },
+          data: { chainTicket: next },
+        });
+        if (claimed.count !== 1) return;
+        let builderAgentId: string | undefined;
+        try {
+          builderAgentId = readPlanDocument(agent.codingProfile?.planDocument, agent.ownerId)?.builderAgentId;
+        } catch {
+          builderAgentId = undefined;
+        }
+        const started: StartTicketResult = builderAgentId
+          ? await deps
+              .startTicket({ builderAgentId, set: row, ticket: next, starterId: null, trigger: "plan_approved" })
+              .catch((err: unknown): StartTicketResult => {
+                planLog.warn(
+                  { planSetId: set.id, errorName: err instanceof Error ? err.name : typeof err },
+                  "ticket start failed",
+                );
+                return { refused: "start_failed" };
+              })
+          : { refused: "plan_builder_invalid" };
+        await followRunningTicket(db, set.id, next, started);
+        await reportTicketStart(db, deps, row, next, started, null);
+      }),
+    onTicketFinished: (db, runId) =>
+      guard("finish", async () => {
+        const coding = await db.codingRun.findUnique({
+          where: { runId },
+          select: { planTicket: true, planSetId: true, run: { select: { status: true } } },
+        });
+        if (!coding?.planSetId || coding.planTicket === null || !STOPPING_STATUSES.has(coding.run.status)) return;
+        const stopped = await db.planSet.updateMany({
+          where: { id: coding.planSetId, chainTicket: coding.planTicket, chainStopped: null },
+          data: { chainStopped: coding.run.status },
+        });
+        if (stopped.count !== 1) return;
+        const set = await db.planSet.findUniqueOrThrow({ where: { id: coding.planSetId } });
+        // The `build ticket <t>` command is a GitHub mention (C4): a Jira issue's notice has no hint.
+        const handle = set.issueProvider === "github" ? await deps.mentionHandle().catch(() => null) : null;
+        await postPlanNotice(
+          deps,
+          set,
+          `Plan ${set.number} stopped at ticket ${coding.planTicket} (${coding.run.status}).${hint(handle, String(coding.planTicket), "to continue")}`,
+        );
+      }),
+    // `@<handle> build ticket <t>` (C4).
+    buildTicketFromComment: async () => "none",
   };
 }

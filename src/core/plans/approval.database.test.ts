@@ -11,6 +11,7 @@ import { documentSecretValues } from "../documents/redact.js";
 import { reopenDocument, reviewDocument, submitForReview } from "../documents/review.js";
 import { attachSecret, createSecret } from "../secrets.js";
 import {
+  createPlanChainHook,
   createPlanReviewHook,
   defuseNotice,
   issueNoticePoster,
@@ -504,6 +505,185 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     expect(await runningPlanTicket(db, planSetId)).toBe(2);
     await db.run.update({ where: { id: run.id }, data: { status: "succeeded" } });
     expect(await runningPlanTicket(db, planSetId)).toBeNull();
+  });
+
+  describe("build chain", () => {
+    const chain = () => createPlanChainHook(deps);
+    let pr = 4000;
+    /** A ticket run of the builder on the set, with the PR it opened (when given). */
+    async function ticketRun(
+      builder: string,
+      planSetId: string | null,
+      planTicket: number | null,
+      status: "pending" | "running" | "succeeded" | "failed" | "cancelled",
+      prNumber?: number,
+    ) {
+      const run = await db.run.create({ data: { agentId: builder, status, trigger: "plan_approved" } });
+      await db.codingRun.create({
+        data: {
+          runId: run.id,
+          task: "t",
+          repository,
+          baseRef: "main",
+          headRef: `wardby/run-${run.id}`,
+          provider: "codex",
+          model: "m",
+          timeoutSec: 60,
+          protectedPaths: [],
+          budgetReservedUsd: 0.1,
+          planSetId,
+          planTicket,
+          ...(prNumber !== undefined ? { result: { pullRequestNumber: prNumber } } : {}),
+        },
+      });
+      return run.id;
+    }
+    /** A "build" plan approved with ticket 1 started; the notices and starts of the approval cleared. */
+    async function building() {
+      const builder = await makeAgent({ buildFromPlan: true });
+      const made = await makeSet({ onApproved: "build", builderAgentId: builder });
+      await approveAll(made.documentIds);
+      expect(await setRow(made.planSetId)).toMatchObject({ chainTicket: 1, chainStopped: null });
+      notices = [];
+      starts = [];
+      return { builder, ...made };
+    }
+    const merged = (number: number, isMerged = true) => chain().onMerged(db, { repository, number, merged: isMerged });
+
+    it("ticket 1 merged starts ticket 2; ticket 2 merged ends the chain", async () => {
+      const { builder, planSetId } = await building();
+      const first = ++pr;
+      await ticketRun(builder, planSetId, 1, "succeeded", first);
+      await merged(first);
+      expect(starts).toHaveLength(1);
+      expect(starts[0]).toMatchObject({
+        builderAgentId: builder,
+        ticket: 2,
+        trigger: "plan_approved",
+        starterId: null,
+      });
+      expect(starts[0].set).toMatchObject({ id: planSetId, number: 12 });
+      expect((await setRow(planSetId)).chainTicket).toBe(2);
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 2."]);
+
+      notices = [];
+      starts = [];
+      const second = ++pr;
+      await ticketRun(builder, planSetId, 2, "succeeded", second);
+      await merged(second);
+      expect(starts).toEqual([]);
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: all 2 tickets built."]);
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: null, chainStopped: null });
+      // A repeat delivery of the last merge posts nothing more.
+      await merged(second);
+      expect(notices).toHaveLength(1);
+      // Notices never carry a ticket title or plan text.
+      for (const notice of notices) {
+        expect(notice.text).not.toContain("Feed");
+        expect(notice.text).not.toContain(FAKE_SECRET);
+      }
+    });
+
+    it("a closed but unmerged PR does nothing", async () => {
+      const { builder, planSetId } = await building();
+      const number = ++pr;
+      await ticketRun(builder, planSetId, 1, "succeeded", number);
+      await merged(number, false);
+      expect(starts).toEqual([]);
+      expect(notices).toEqual([]);
+      expect((await setRow(planSetId)).chainTicket).toBe(1);
+    });
+
+    it("two deliveries of the same merge start one run", async () => {
+      const { builder, planSetId } = await building();
+      const number = ++pr;
+      await ticketRun(builder, planSetId, 1, "succeeded", number);
+      await Promise.all([merged(number), merged(number)]);
+      expect(starts).toHaveLength(1);
+      expect(notices).toHaveLength(1);
+      expect((await setRow(planSetId)).chainTicket).toBe(2);
+    });
+
+    it("a failed ticket run stops the chain; a later merge of its PR starts nothing", async () => {
+      const { builder, planSetId } = await building();
+      const number = ++pr;
+      const runId = await ticketRun(builder, planSetId, 1, "failed", number);
+      await chain().onTicketFinished(db, runId);
+      expect(notices.map((x) => x.text)).toEqual([
+        "Plan 12 stopped at ticket 1 (failed). Comment `@wardby build ticket 1` to continue.",
+      ]);
+      expect((await setRow(planSetId)).chainStopped).toBe("failed");
+      // A second terminal call (a repeat) posts nothing more.
+      await chain().onTicketFinished(db, runId);
+      expect(notices).toHaveLength(1);
+      await merged(number);
+      expect(starts).toEqual([]);
+      expect(notices).toHaveLength(1);
+    });
+
+    it("a stop without an App handle has no hint; a succeeded or non-ticket run does nothing", async () => {
+      const { builder, planSetId } = await building();
+      const succeeded = await ticketRun(builder, planSetId, 1, "succeeded");
+      await chain().onTicketFinished(db, succeeded);
+      const planless = await ticketRun(builder, null, null, "failed");
+      await chain().onTicketFinished(db, planless);
+      const noTicket = await ticketRun(builder, planSetId, null, "failed");
+      await chain().onTicketFinished(db, noTicket);
+      expect(notices).toEqual([]);
+      expect((await setRow(planSetId)).chainStopped).toBeNull();
+
+      handle = null;
+      const cancelled = await ticketRun(builder, planSetId, 1, "cancelled");
+      await chain().onTicketFinished(db, cancelled);
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12 stopped at ticket 1 (cancelled)."]);
+    });
+
+    it("a reopen of any document stops the chain before its next ticket", async () => {
+      const { builder, planSetId, documentIds } = await building();
+      const number = ++pr;
+      await ticketRun(builder, planSetId, 1, "succeeded", number);
+      await reopenDocument(db, cipher, { documentId: documentIds["api.md"], viewer: as(owner) });
+      expect((await setRow(planSetId)).chainStopped).toBe("reopened");
+      await merged(number);
+      expect(starts).toEqual([]);
+      expect(notices).toEqual([]);
+      expect((await setRow(planSetId)).chainTicket).toBe(1);
+    });
+
+    it("never more than one run at a time: a pending ticket run of the set holds the next start", async () => {
+      const { builder, planSetId } = await building();
+      const number = ++pr;
+      await ticketRun(builder, planSetId, 1, "succeeded", number);
+      await ticketRun(builder, planSetId, 2, "pending");
+      await merged(number);
+      expect(starts).toEqual([]);
+      expect(notices).toEqual([]);
+      expect((await setRow(planSetId)).chainTicket).toBe(1);
+    });
+
+    it("an approval that finds ticket 2 already running follows that ticket: its merge ends the chain", async () => {
+      const builder = await makeAgent({ buildFromPlan: true });
+      startResult = { running: 2 };
+      const { planSetId, documentIds } = await makeSet({ onApproved: "build", builderAgentId: builder });
+      await approveAll(documentIds);
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: null });
+      notices = [];
+      const number = ++pr;
+      await ticketRun(builder, planSetId, 2, "succeeded", number);
+      await merged(number);
+      expect(starts).toHaveLength(1);
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: all 2 tickets built."]);
+    });
+
+    it("a next start that throws or is refused stops the chain with a notice", async () => {
+      const { builder, planSetId } = await building();
+      const number = ++pr;
+      await ticketRun(builder, planSetId, 1, "succeeded", number);
+      vi.spyOn(deps, "startTicket").mockRejectedValueOnce(new Error(`boom ${FAKE_SECRET}`));
+      await merged(number);
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: "start_failed" });
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (start_failed)."]);
+    });
   });
 
   it("issueNoticePoster: GitHub comments on the key's issue; Jira only through a write link, with its visibility", async () => {
