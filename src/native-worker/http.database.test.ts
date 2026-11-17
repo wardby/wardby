@@ -3,7 +3,7 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "../core/db.js";
 import { NativeEngine } from "../core/engine-native.js";
 import { executeRun, type NativeRunProviders } from "../core/runner.js";
@@ -24,7 +24,9 @@ import {
   TOOL_CODE,
   usage,
 } from "./fixtures.test-support.js";
-import { createGatewayServer, NATIVE_GATEWAY_PATH } from "./http-server.js";
+import { createGatewayServer, httpLog, NATIVE_GATEWAY_PATH } from "./http-server.js";
+import { gatewayLog } from "./gateway.js";
+import { NATIVE_GATEWAY_INPUT_PATH, NATIVE_PLACEHOLDER_CAPABILITY } from "./protocol.js";
 import { createSecret } from "../core/secrets.js";
 import { fakeMcpServer, textResult } from "../core/mcp-tools.test-support.js";
 import { processWorkerLauncher, startSandboxRun } from "./launch.js";
@@ -420,6 +422,50 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox gateway over HTTP (da
       body: "x".repeat(17 * 1024 * 1024),
     }).catch(() => null);
     expect(oversized === null || oversized.status === 400).toBe(true);
+  });
+
+  it("serves a sandbox session's input once authenticated, and nothing else", async () => {
+    const run = await db.run.create({ data: { agentId, nativeExecutionMode: "sandbox", status: "running" } });
+    const { createSandboxSession } = await import("../core/runner.js");
+    const { PrismaGatewayLedger } = await import("./ledger.js");
+    const ledger = new PrismaGatewayLedger(db);
+    const live = await createSandboxSession({ runId: run.id, providers, db, ledger, gatewayUrl: serviceUrl });
+    if (live.kind !== "started") throw new Error("expected a session");
+    await ledger.markNetworkReadyForRun(run.id);
+    const post = (authorization?: string, method = "POST") =>
+      fetch(`${urlB}${NATIVE_GATEWAY_INPUT_PATH}`, { method, headers: authorization ? { authorization } : {} });
+    const spies = [
+      vi.spyOn(httpLog, "info"),
+      vi.spyOn(httpLog, "warn"),
+      vi.spyOn(httpLog, "error"),
+      vi.spyOn(gatewayLog, "info"),
+      vi.spyOn(gatewayLog, "warn"),
+      vi.spyOn(gatewayLog, "error"),
+    ];
+    try {
+      const first = await post(`Bearer ${live.capability}`);
+      const text = await first.text();
+      expect(first.status).toBe(200);
+      const body = JSON.parse(text) as { ok: boolean; result: { input: { runId: string } } };
+      expect(body.result.input.runId).toBe(run.id);
+      expect(body.result.input).not.toHaveProperty("gateway");
+      expect(text).not.toContain(live.capability);
+      expect(text).not.toContain("s3cret-value-123");
+      expect(await (await post(`Bearer ${live.capability}`)).text()).toBe(text);
+      expect((await post(`Bearer ${NATIVE_PLACEHOLDER_CAPABILITY}`)).status).toBe(401);
+      expect((await post(undefined)).status).toBe(401);
+      expect((await post(`Bearer ${live.capability}`, "GET")).status).toBe(404);
+      await ledger.endSession(live.sessionId, "finished");
+      const ended = await post(`Bearer ${live.capability}`);
+      expect(ended.status).toBe(409);
+      expect(await ended.text()).not.toContain(live.capability);
+      // Checked after the last request, so the 409 path's logging is covered too.
+      const logged = JSON.stringify(spies.flatMap((spy) => spy.mock.calls));
+      expect(logged).not.toContain(live.capability);
+      expect(logged).not.toContain(live.input.agent.systemPrompt);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 
   it("ends a run budget_exhausted when the gateway refuses a model call it cannot cover", async () => {

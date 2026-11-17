@@ -21,7 +21,7 @@ import {
   SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type WorkerInfo,
-} from "./api.js";
+} from "../../substrate/api.js";
 import {
   DEFAULT_STARTUP_TIMEOUT_MS,
   DEFAULT_TEMPLATE_TTL_MS,

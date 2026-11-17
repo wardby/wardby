@@ -59,8 +59,8 @@ import { assertPlatformConfig, platformProfile } from "../jobs/kubernetes-platfo
 import { preflightCanaryImage, runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
 import { CODING_WORKER_IMAGES_REQUIRED } from "../../coding/docker-preflight.js";
 import { KubernetesJobLauncher } from "../jobs/kubernetes.js";
-import { createSubstrateApi } from "../jobs/substrate/client.js";
-import type { SubstrateApi } from "../jobs/substrate/api.js";
+import { createSubstrateApiFor } from "../substrate/composition.js";
+import type { SubstrateApi } from "../substrate/api.js";
 import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
 import { PrismaSubstrateRunStore } from "../jobs/substrate/run-store.js";
 import { PrismaSubstrateTemplateStore } from "../jobs/substrate/template-store.js";
@@ -173,7 +173,7 @@ export interface ConfiguredExecutorOptions {
   providerConfig?: ProviderConfig;
   /** Tests only: replaces the kubeconfig-backed client when JOB_LAUNCHER=kubernetes. */
   kubernetesApi?: KubernetesApi;
-  /** Tests only: replaces the gRPC client when JOB_LAUNCHER=substrate. */
+  /** The process's shared SubstrateApi (buildSharedSubstrateApi); built from the config when absent. */
   substrateApi?: SubstrateApi;
   /** Repository authorization for coding runs; built from the configured review hosts when absent. */
   repoAccess?: RepoAccessGate;
@@ -249,14 +249,7 @@ export function buildSubstrateJobLauncher(options: {
   const blobStoreConfig = loadBlobStoreConfig(options.env);
   if (!blobStoreConfig) throw new Error("BLOB_STORE is required when JOB_LAUNCHER=substrate.");
   return new SubstrateJobLauncher({
-    api:
-      options.substrateApi ??
-      createSubstrateApi({
-        baseUrl: substrate.apiUrl,
-        tokenFile: substrate.tokenFile,
-        ...(substrate.caFile ? { caFile: substrate.caFile } : {}),
-        ...(substrate.serverName ? { serverName: substrate.serverName } : {}),
-      }),
+    api: options.substrateApi ?? createSubstrateApiFor(substrate),
     runs: new PrismaSubstrateRunStore(options.db),
     templates: new PrismaSubstrateTemplateStore(options.db),
     relay: new PrismaRelayStore(options.db),

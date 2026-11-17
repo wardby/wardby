@@ -387,6 +387,22 @@ describe("Substrate MCP help", () => {
   });
 });
 
+describe("Native sandbox on Substrate help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (query: string) =>
+      searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    for (const query of ["substrate native", "native sandbox substrate"]) {
+      expect(top3(query), query).toContain("native-sandbox");
+    }
+    expect(top3("native_sandbox_substrate_failed")).toContain("errors/native-sandbox-substrate-failed");
+  });
+});
+
 describe("Substrate multi-repository help", () => {
   it("is found for the obvious queries", async () => {
     const { buildHelpCatalog } = await import("./catalog.js");

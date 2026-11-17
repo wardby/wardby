@@ -67,6 +67,18 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaGatewayLedger (database)", () 
     expect(restored.toJSON().fileReads[`o/r@${head}`]?.sort()).toEqual(["src/b.ts", "src/c.ts"]);
   });
 
+  it("records a worker's exit code once, and reads it by run", async () => {
+    const { run, created } = await session();
+    expect(await ledger.workerExitCode(run.id)).toBeUndefined();
+    expect(await ledger.recordWorkerExit(created.id, 137)).toBe(true);
+    expect(await ledger.workerExitCode(run.id)).toBe(137);
+    // Once: a later report changes nothing, even after the session ended.
+    await ledger.endSession(created.id, "finished");
+    expect(await ledger.recordWorkerExit(created.id, 0)).toBe(false);
+    expect(await ledger.workerExitCode(run.id)).toBe(137);
+    expect(await ledger.workerExitCode(`no-such-run-${tag}`)).toBeUndefined();
+  });
+
   it("finds an active session by capability hash, and no longer once it is finished", async () => {
     const { hash, created } = await session();
     expect((await ledger.findSessionByCapabilityHash(hash))?.id).toBe(created.id);

@@ -44,6 +44,7 @@ import { startModelCatalog } from "../providers/llm/catalog-store.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
 import { PostgresAgentMemory } from "../providers/memory/index.js";
 import { buildConfiguredExecutor, buildExecutor } from "../providers/executor/index.js";
+import { buildSharedSubstrateApi } from "../providers/substrate/composition.js";
 import { buildNativeSandboxExecutor } from "../native-worker/composition.js";
 import { buildSecretCipher } from "../providers/secrets/index.js";
 import { buildIssueTrackers } from "../providers/issue-tracker/index.js";
@@ -284,7 +285,10 @@ export function buildMcpProviders(): McpProviderComposition {
   const nativeExecutor = buildExecutor(providerConfig, nativeProviders, prisma);
   // One Power for the process, shared by both executors (wake) and the scheduler leader (sleep).
   const power = buildPower({ env: process.env, db: prisma });
+  // One Substrate client for the process, shared by the job launcher and the native sandbox.
+  const substrateApi = buildSharedSubstrateApi(process.env);
   const executor = buildConfiguredExecutor({
+    substrateApi,
     native: nativeExecutor,
     db: prisma,
     providerConfig,
@@ -293,7 +297,7 @@ export function buildMcpProviders(): McpProviderComposition {
     secretCipher: secrets,
     runSteps,
     // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
-    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders, power }),
+    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders, power, substrateApi }),
   });
   nativeProviders.executor = executor;
 

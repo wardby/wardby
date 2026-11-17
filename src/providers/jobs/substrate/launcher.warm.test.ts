@@ -20,8 +20,8 @@ import {
   TOOL_IMAGE,
   type Harness,
 } from "./launcher.test-support.js";
-import { SubstrateExhaustedError } from "./api.js";
-import type { Room } from "./placement.js";
+import { SubstrateExhaustedError } from "../../substrate/api.js";
+import type { Room } from "../../substrate/placement.js";
 import type { SubstrateRunRecord } from "./run-store.js";
 import { SubstrateJobLauncher, type WarmRoundsOptions } from "./launcher.js";
 import { deriveSnapshotKey, newBlobKey } from "../../coding-proxy/dependency-cache/key.js";

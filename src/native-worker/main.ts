@@ -1,16 +1,24 @@
 /**
- * Native sandbox worker process entry. Reads its WorkerInput as the first line
- * on stdin, runs the run's engine against the gateway on stdin/stdout
- * (stdio.ts), and exits 0 once it has sent its result. stdout carries only
+ * Native sandbox worker process entry. The run's WorkerInput comes from one of three sources: the
+ * first line on stdin (Docker, local), a file named by NATIVE_WORKER_INPUT_FILE (a Kubernetes pod,
+ * or a warm worker that waits for it), or, in substrate mode (WARDBY_NATIVE_SUBSTRATE=1,
+ * substrate-mode.ts), the gateway's input route once the actor's name appears. It runs the run's
+ * engine against the gateway (on stdin/stdout, stdio.ts, or over HTTP) and exits 0 once it has sent
+ * its result; in substrate mode it idles instead, with /readyz still answering. In substrate mode
+ * this entry first runs as PID 1, a supervisor (substrate-supervisor.ts) that starts the same entry
+ * again as the worker (WARDBY_NATIVE_SUPERVISED=1) and reports its exit to the gateway, since
+ * Substrate's actor state never shows one. stdout carries only
  * protocol frames; diagnostics (and the shared logger) go to stderr, without any secret value the
  * worker received (stderr-redaction.ts).
  */
 
 import { readFile, stat } from "node:fs/promises";
-import { parseMessage, WorkerInputSchema } from "./protocol.js";
+import { NATIVE_SUPERVISED_ENV, parseMessage, WorkerInputSchema } from "./protocol.js";
 import { createHttpTransport } from "./http-transport.js";
 import { createStdioTransport } from "./stdio.js";
 import { flushStderrRedaction, installStderrRedaction, rememberSecretValue } from "./stderr-redaction.js";
+import { NATIVE_SUBSTRATE_ENV, runSubstrateMode } from "./substrate-mode.js";
+import { superviseCrashed, superviseSubstrateWorker } from "./substrate-supervisor.js";
 import { WARM_WORKER_UNCLAIMED_EXIT } from "./warm-delivery.js";
 import { runNativeWorker } from "./worker.js";
 
@@ -65,6 +73,15 @@ async function readInput(): Promise<string> {
 }
 
 async function main(): Promise<void> {
+  if (process.env[NATIVE_SUBSTRATE_ENV] === "1" && process.env[NATIVE_SUPERVISED_ENV] !== "1") {
+    // PID 1: the worker runs as this process's child; its exit is reported, then this idles.
+    await superviseSubstrateWorker({ env: process.env, entry: process.argv[1] ?? "" });
+  }
+  if (process.env[NATIVE_SUBSTRATE_ENV] === "1") {
+    await runSubstrateMode({ env: process.env });
+    // After its result the actor stays up until the launcher deletes it: idle, /readyz still answering.
+    await new Promise<never>(() => {});
+  }
   const input = parseMessage(await readInput(), WorkerInputSchema);
   if (input.gateway) rememberSecretValue(input.gateway.capability);
   // The gateway answers only after the worker asks, so choosing the transport after the input
@@ -75,7 +92,15 @@ async function main(): Promise<void> {
   await runNativeWorker(input, transport);
 }
 
-const fail = (err: unknown): never => {
+const isSupervisor = (): boolean =>
+  process.env[NATIVE_SUBSTRATE_ENV] === "1" && process.env[NATIVE_SUPERVISED_ENV] !== "1";
+
+const fail = (err: unknown): never | void => {
+  if (isSupervisor()) {
+    // PID 1 must not exit: that would end the actor without a report. The error's text is not logged.
+    void superviseCrashed({ env: process.env, entry: process.argv[1] ?? "" });
+    return;
+  }
   // Anything still buffered for its line's end goes out first, so the failure line stands alone.
   flushStderrRedaction();
   if (err instanceof UnclaimedError) {

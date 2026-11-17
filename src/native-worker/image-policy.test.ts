@@ -16,6 +16,10 @@ describe("native worker image policy", () => {
     expect(dockerfile).toContain("test ! -e");
     // Never the server: no Prisma client, config, or provider adapters in the image.
     expect(dockerfile).not.toMatch(/dist\/(generated|config|providers\/(secrets|datastore|executor|jobs))/);
+    // Substrate mode: the four bridge modules it loads, and nothing of the server's Substrate client.
+    expect(dockerfile).toContain("./substrate-bridge/");
+    expect(dockerfile).toContain('"substrate-mode"');
+    expect(dockerfile).not.toMatch(/dist\/providers\/substrate/);
   });
 
   it("pins its runtime dependencies exactly, at the versions the server's own lockfile resolves", async () => {

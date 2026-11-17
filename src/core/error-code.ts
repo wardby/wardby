@@ -165,6 +165,7 @@ export const CHILD_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
   "native_sandbox_platform_unsupported",
   "native_sandbox_recovery_unavailable",
   "native_sandbox_requires_catalog",
+  "native_sandbox_substrate_failed",
   "native_sandbox_warm_delivery_failed",
   "native_sandbox_worker_exited",
   "native_sandbox_worker_lost",

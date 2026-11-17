@@ -104,6 +104,12 @@ Native sandbox requires Wardby 0.6.0 or later.
 Native agents run in the server process by default. A native agent set to
 `nativeExecutionMode=sandbox` instead runs its turn loop and user tools in a
 single-use credential-free container whose only path out is a separate native
-gateway, enabled with `NATIVE_SANDBOX_LAUNCHER=docker` or `kubernetes` (a pod
-per run, including on GKE Autopilot under gVisor; independent of
-`JOB_LAUNCHER`). See [native-sandbox.md](native-sandbox.md).
+gateway, enabled with `NATIVE_SANDBOX_LAUNCHER=docker`, `kubernetes` (a pod
+per run, including on GKE Autopilot under gVisor) or, experimentally,
+`substrate`; the setting is independent of `JOB_LAUNCHER`. On Substrate each run
+is one gVisor actor resumed from its template's golden snapshot, so there is no
+warm pool. The worker never holds the run's capability: Substrate's egress
+gateway adds it to the worker's requests to the native gateway, the actor's
+only destination, and a startup canary per template proves that Substrate
+enforces that egress policy before any run launches. See
+[native-sandbox.md](native-sandbox.md).

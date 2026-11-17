@@ -6,6 +6,11 @@
  * in-process path uses — so any control-plane replica can serve any call, and a
  * replica restart is only a retry for the worker.
  *
+ * Besides calls, POST /native-gateway/v1/input answers a worker that starts without its input
+ * (serveGatewayInput): the session's snapshot input, behind the same authentication; and
+ * POST /native-gateway/v1/exit records a Substrate worker's exit code, from its supervisor
+ * (serveWorkerExit), behind the same authentication.
+ *
  * Authority stays here: a model call reserves its worst case against the
  * session budget before the provider is called and settles at the provider's
  * reported usage; the worker's own usage numbers are never read.
@@ -46,6 +51,7 @@ import {
   type GatewayMethod,
   type GatewayParams,
 } from "./protocol.js";
+import type { NativeCanaryStore } from "./substrate-canary-store.js";
 
 /** Output tokens reserved for a model call that names no maxTokens (as the coding proxy does). */
 export const GATEWAY_DEFAULT_RESERVE_OUTPUT_TOKENS = 4_096;
@@ -61,6 +67,8 @@ export interface GatewayServerDeps {
   pollWindowMs?: number;
   /** Serves POST /coding-mcp on the same listener (remote MCP servers for coding runs); unset → 404. */
   codingMcp?: CodingMcpDeps;
+  /** Serves POST /native-gateway/v1/canary (Substrate startup canaries' verdicts); unset → 404. */
+  canaries?: NativeCanaryStore;
 }
 
 /** What a request gets back: one JSON value, or a stream of model events. */
@@ -73,12 +81,7 @@ const ok = (result: unknown): GatewayResponse => ({
   status: 200,
   body: { ok: true, result: result ?? null },
 });
-const fail = (
-  status: number,
-  code: GatewayErrorCode | "unauthorized",
-  message: string,
-  causeCode?: string,
-): GatewayResponse => ({
+const fail = (status: number, code: GatewayErrorCode, message: string, causeCode?: string): GatewayResponse => ({
   kind: "json",
   status,
   body: { ok: false, error: { code, message, ...(causeCode ? { causeCode } : {}) } },
@@ -108,6 +111,73 @@ export async function serveGatewayRequest(
     return await handle(deps, authorization, body, scope);
   } catch (err) {
     return failureResponse(err, scope.secretValues);
+  }
+}
+
+/**
+ * POST /native-gateway/v1/input: the same auth as a call (hash, active, deadline, ready, drivable),
+ * then the session's snapshot input: no gateway, no secret values. Never throws; nothing of the
+ * response is logged, and a failure is checked against the capability only.
+ */
+export async function serveGatewayInput(
+  deps: GatewayServerDeps,
+  authorization: string | undefined,
+): Promise<GatewayResponse> {
+  const token = /^Bearer (\S+)$/.exec(authorization ?? "")?.[1];
+  if (!token) return fail(401, "unauthorized", "A gateway capability is required.");
+  try {
+    const session = await new PrismaGatewayLedger(deps.db).findSessionByCapabilityHash(sandboxCapabilityHash(token));
+    if (!session) return fail(401, "unauthorized", "Unknown gateway capability.");
+    if (session.status !== "active" || Date.now() >= session.deadlineAt.getTime()) {
+      throw new GatewayError("run_not_drivable", "This run's gateway session has ended.");
+    }
+    if (!session.networkReadyAt) {
+      throw new GatewayError("not_ready", "This run's network isolation is not proven yet; retry shortly.");
+    }
+    if ((await runDrivability(deps.db, session.runId)) !== "drivable") {
+      throw new GatewayError("run_not_drivable", "This run is no longer running.");
+    }
+    // The stored snapshot never holds a gateway (only the capability's hash is stored), but the
+    // answer drops any gateway or capability field itself rather than rely on how it was written.
+    const {
+      gateway: _gateway,
+      capability: _capability,
+      ...input
+    } = (session.snapshot as SandboxSessionSnapshot).input as SandboxSessionSnapshot["input"] & {
+      capability?: unknown;
+    };
+    return ok({ input });
+  } catch (err) {
+    return failureResponse(err, async () => [token]);
+  }
+}
+
+/**
+ * POST /native-gateway/v1/exit: a Substrate worker's supervisor reports the worker's exit code. The
+ * same bearer auth as the input route (the egress gateway puts the run's capability on the request;
+ * the actor holds only the placeholder): an unknown or missing capability is 401. The session's
+ * status is not checked: an exit after the run ended is still the worker's exit. The code is
+ * recorded once per session (a repeat is answered the same way, and changes nothing). `code` is
+ * the schema-checked integer; the one log line is the run id and the code. Never throws; a failure
+ * is checked against the capability only.
+ */
+export async function serveWorkerExit(
+  deps: GatewayServerDeps,
+  authorization: string | undefined,
+  code: number,
+): Promise<GatewayResponse> {
+  const token = /^Bearer (\S+)$/.exec(authorization ?? "")?.[1];
+  if (!token) return fail(401, "unauthorized", "A gateway capability is required.");
+  try {
+    const ledger = new PrismaGatewayLedger(deps.db);
+    const session = await ledger.findSessionByCapabilityHash(sandboxCapabilityHash(token));
+    if (!session) return fail(401, "unauthorized", "Unknown gateway capability.");
+    if (await ledger.recordWorkerExit(session.id, code)) {
+      gatewayLog.info({ runId: session.runId, code }, "native worker exit reported");
+    }
+    return { kind: "json", status: 200, body: { ok: true, result: null } };
+  } catch (err) {
+    return failureResponse(err, async () => [token]);
   }
 }
 

@@ -54,8 +54,10 @@ import { buildConfiguredExecutor, buildExecutor } from "./providers/executor/ind
 import { DeferredExecutor, drainDeferredRuns } from "./providers/executor/deferred.js";
 import { resolveDeferredCodingRun } from "./core/deferred-coding.js";
 import { parseGatewayListen, startGatewayServer } from "./native-worker/http-server.js";
+import { PrismaNativeCanaryStore } from "./native-worker/substrate-canary-store.js";
 import { NATIVE_GATEWAY_DENY_PORT } from "./native-worker/docker-isolation.js";
 import { startDenyPortListener } from "./providers/coding-proxy/deny-port.js";
+import { buildSharedSubstrateApi } from "./providers/substrate/composition.js";
 import { buildNativeSandboxExecutor } from "./native-worker/composition.js";
 import type { Executor } from "./providers/executor/types.js";
 import { PostgresDatastore } from "./providers/datastore/index.js";
@@ -1019,7 +1021,10 @@ async function scheduler(args: string[]): Promise<void> {
   loadToolMaxTimeoutMs();
   loadMcpServersMode();
   loadMcpMaxCallsPerRun();
+  // One Substrate client for the process, shared by the job launcher and the native sandbox.
+  const substrateApi = buildSharedSubstrateApi(process.env);
   const executor = buildConfiguredExecutor({
+    substrateApi,
     native: nativeExecutor,
     db: prisma,
     providerConfig: config,
@@ -1028,7 +1033,7 @@ async function scheduler(args: string[]): Promise<void> {
     secretCipher: nativeProviders.secrets,
     runSteps,
     // Sandbox-mode native runs (docs/native-sandbox.md); undefined when NATIVE_SANDBOX_LAUNCHER is unset.
-    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders, power }),
+    nativeSandbox: buildNativeSandboxExecutor({ db: prisma, providers: nativeProviders, power, substrateApi }),
   });
   nativeProviders.executor = executor;
   await executor.launch?.();
@@ -1148,6 +1153,8 @@ async function nativeGateway(): Promise<void> {
     providers,
     // Coding runs' MCP calls, forwarded by the coding proxy's /mcp route (its own token auth).
     codingMcp: { db: prisma, cipher: secrets, log: logger.child({ module: "coding-mcp" }) },
+    // Substrate startup canaries' verdicts (NATIVE_SANDBOX_LAUNCHER=substrate), each with its own capability.
+    canaries: new PrismaNativeCanaryStore(prisma),
   });
   // The deny port (NATIVE_GATEWAY_DENY_PORT, default 8791) serves nothing: a worker that can reach the
   // gateway port but not this one proves its NetworkPolicy is programmed and port-scoped.

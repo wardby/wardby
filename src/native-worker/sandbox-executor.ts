@@ -13,7 +13,11 @@
  *   discarded, never reused), and stops its open delegations.
  * - recover: answers the reconciler from the worker's container state, and
  *   never launches one.
- * - launch: the janitor removes workers whose runs have ended.
+ * - launch: the janitor removes workers whose runs have ended. A launcher that lists its workers
+ *   (Docker, Kubernetes) is swept from that list. One that cannot (Substrate) is swept from the
+ *   sessions where `workerRemovedAt` is null and the run ended or the deadline passed, at launch
+ *   and on an interval. The executor sets `workerRemovedAt` after every successful remove, on every
+ *   launcher; a failed remove (or a failed launch) leaves it null, which is the sweep's signal.
  */
 
 import { logger } from "../core/logger.js";
@@ -51,6 +55,8 @@ export interface ManagedWorkerLauncher extends DetachedWorkerLauncher {
   resolveGatewayUrl?(): Promise<string>;
   /** Background upkeep the long-lived process runs from the executor's `launch()` (the warm pool's). */
   start?(): Promise<void>;
+  /** False when the launcher cannot list its workers (Substrate): the executor sweeps from session rows instead. */
+  readonly listsWorkers?: false;
 }
 
 export interface NativeSandboxExecutorOptions {
@@ -66,12 +72,21 @@ export interface NativeSandboxExecutorOptions {
   stopGraceMs?: number;
   /** How often a launching run's heartbeat is refreshed (default a third of HEARTBEAT_TIMEOUT_MS). */
   heartbeatIntervalMs?: number;
+  /** How often a launcher that lists no workers is swept from session rows (default NATIVE_SANDBOX_SWEEP_INTERVAL_MS). */
+  sweepIntervalMs?: number;
+  /** How many session rows one row sweep pass takes (default NATIVE_SANDBOX_SWEEP_BATCH_SIZE). */
+  sweepBatchSize?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
 
 /** A stopped sandbox run's worker exits at its next (refused) gateway call; past this it is killed. */
 export const NATIVE_SANDBOX_STOP_GRACE_MS = 5_000;
+
+/** The sweep interval for a launcher that lists no workers. */
+export const NATIVE_SANDBOX_SWEEP_INTERVAL_MS = 60_000;
+/** The rows one row sweep pass takes. */
+export const NATIVE_SANDBOX_SWEEP_BATCH_SIZE = 100;
 
 export const NATIVE_SANDBOX_WORKER_EXITED = "native_sandbox_worker_exited";
 export const NATIVE_SANDBOX_DEADLINE = "native_sandbox_deadline_exceeded";
@@ -80,6 +95,7 @@ export class NativeSandboxExecutor implements Executor {
   private readonly ledger: PrismaGatewayLedger;
   private readonly watching = new Map<string, ReturnType<typeof setTimeout> | undefined>();
   private readonly deadlineKilled = new Set<string>();
+  private sweepTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly options: NativeSandboxExecutorOptions) {
     this.ledger = new PrismaGatewayLedger(options.db);
@@ -223,8 +239,17 @@ export class NativeSandboxExecutor implements Executor {
     }
     this.deadlineKilled.delete(runId);
     await this.endSession(runId, "finished");
-    await this.options.launcher.remove(runId).catch((err: unknown) => {
+    await this.removeWorker(runId).catch((err: unknown) => {
       executorLog.warn({ err, runId }, "removing a native sandbox worker failed; the janitor will retry");
+    });
+  }
+
+  /** Removes the run's worker, then records it. A failed remove throws and leaves `workerRemovedAt` null for the sweep. */
+  private async removeWorker(runId: string): Promise<void> {
+    await this.options.launcher.remove(runId);
+    await this.options.db.nativeGatewaySession.updateMany({
+      where: { runId, workerRemovedAt: null },
+      data: { workerRemovedAt: new Date(this.now()) },
     });
   }
 
@@ -257,7 +282,7 @@ export class NativeSandboxExecutor implements Executor {
       }
     }
     // Removed, never returned to a warm pool: a claimed pool worker is discarded with its row.
-    await this.options.launcher.remove(runId).catch(() => {});
+    await this.removeWorker(runId).catch(() => {});
   }
 
   /** Waits up to stopGraceMs for the run's worker to exit or be gone; false when it still runs. Never throws. */
@@ -290,7 +315,7 @@ export class NativeSandboxExecutor implements Executor {
     if (state.state === "running") {
       if (runEnded) {
         await launcher.kill(runId).catch(() => {});
-        await launcher.remove(runId).catch(() => {});
+        await this.removeWorker(runId).catch(() => {});
         return { state: "terminal" };
       }
       // Re-attach (a restarted server): watch its exit and deadline from here.
@@ -314,10 +339,25 @@ export class NativeSandboxExecutor implements Executor {
     await this.options.launcher
       .start?.()
       .catch((err: unknown) => executorLog.warn({ err }, "native warm pool failed to start"));
+    if (this.options.launcher.listsWorkers === false && !this.sweepTimer) {
+      this.sweepTimer = setInterval(
+        () => void this.sweep().catch((err: unknown) => executorLog.warn({ err }, "native sandbox janitor failed")),
+        this.options.sweepIntervalMs ?? NATIVE_SANDBOX_SWEEP_INTERVAL_MS,
+      );
+      // Never hold the process open for the janitor.
+      this.sweepTimer.unref?.();
+    }
+  }
+
+  /** Stops the interval sweep a launcher with no worker list runs. */
+  async close(): Promise<void> {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = undefined;
   }
 
   async sweep(): Promise<number> {
     const { db, launcher } = this.options;
+    if (launcher.listsWorkers === false) return this.sweepRecorded();
     const workers = await launcher.listWorkers();
     if (workers.length === 0) return 0;
     const sessions = await db.nativeGatewaySession.findMany({
@@ -336,6 +376,40 @@ export class NativeSandboxExecutor implements Executor {
       if (live) continue;
       await launcher.removeByWorkerName(worker.name);
       removed += 1;
+    }
+    return removed;
+  }
+
+  /** The sweep for a launcher that lists no workers: removes those of sessions that ended or passed their deadline and are not yet recorded removed. */
+  private async sweepRecorded(): Promise<number> {
+    const { db } = this.options;
+    const due = await db.nativeGatewaySession.findMany({
+      where: {
+        workerRemovedAt: null,
+        OR: [
+          { status: { not: "active" } },
+          { deadlineAt: { lte: new Date(this.now()) } },
+          { run: { status: { notIn: ["pending", "running"] } } },
+        ],
+      },
+      select: { runId: true },
+      // Least recently tried first: a failed remove touches its row (below), so rows that keep
+      // failing go to the back and never hold a whole page against newer ones.
+      orderBy: [{ updatedAt: "asc" }, { runId: "asc" }],
+      take: this.options.sweepBatchSize ?? NATIVE_SANDBOX_SWEEP_BATCH_SIZE,
+    });
+    let removed = 0;
+    for (const { runId } of due) {
+      try {
+        await this.removeWorker(runId);
+        removed += 1;
+      } catch (err) {
+        // Left null: the next pass tries again, after the rows it has not tried yet.
+        executorLog.warn({ err, runId }, "removing a native sandbox worker failed; the next sweep will retry");
+        await db.nativeGatewaySession
+          .updateMany({ where: { runId, workerRemovedAt: null }, data: { updatedAt: new Date() } })
+          .catch(() => {});
+      }
     }
     return removed;
   }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CHILD_RUN_FAILURE_CODES, declaredCodeOf } from "../core/error-code.js";
 import {
   causeCodeOf,
   GATEWAY_CAUSE_CODES,
@@ -188,6 +189,16 @@ describe("workerGatewayError", () => {
       expect(err.causeCode).toBe(code);
     },
   );
+
+  it("declares the Substrate launcher's failure code, whatever call and Substrate code follow it", () => {
+    expect(CHILD_RUN_FAILURE_CODES.has("native_sandbox_substrate_failed")).toBe(true);
+    expect(
+      declaredCodeOf(
+        new Error("native_sandbox_substrate_failed: createActor: substrate_unavailable"),
+        CHILD_RUN_FAILURE_CODES,
+      ),
+    ).toBe("native_sandbox_substrate_failed");
+  });
 
   it("sends no cause code it could not check", async () => {
     expect((await workerGatewayError(new Error("coding_execution_not_configured"))).causeCode).toBeUndefined();

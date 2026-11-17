@@ -1,9 +1,9 @@
 ---
 id: native-sandbox
 title: Run native agents in a sandbox
-summary: Turn on sandbox mode so a native agent's turn loop and tools run in a single-use, credential-free Docker container or Kubernetes pod behind a native gateway.
+summary: Turn on sandbox mode so a native agent's turn loop and tools run in a single-use, credential-free Docker container, Kubernetes pod or Agent Substrate actor (substrate, experimental) behind a native gateway.
 audience: operator
-tags: [native-agents, sandbox, isolation, docker, kubernetes, native-gateway, security, warm-pool]
+tags: [native-agents, sandbox, isolation, docker, kubernetes, substrate, native-gateway, security, warm-pool]
 appliesTo: ">=0.6.0"
 ---
 
@@ -11,8 +11,8 @@ appliesTo: ">=0.6.0"
 
 By default a native agent runs inside the Wardby server. Set its
 `nativeExecutionMode` to `sandbox` and its whole turn loop and user tools run in
-a single-use Docker container or Kubernetes pod (the `wardby-native-worker`
-image) instead. The
+a single-use Docker container, Kubernetes pod or Agent Substrate actor (the
+`wardby-native-worker` image) instead. The
 container has no credentials, no database access, no Docker socket, and no
 network except the **native gateway**, a separate trusted container that holds
 the LLM credentials and enforces each tool attachment's grants. The server and
@@ -74,10 +74,56 @@ A start past the concurrent cap or the namespace quota fails with
 The full procedure, topology, and local compose overlay are in
 [Native sandbox](../docs/native-sandbox.md).
 
+### Agent Substrate (experimental)
+
+Wardby 0.10.1 and later. Set `NATIVE_SANDBOX_LAUNCHER=substrate` to run each
+sandbox run as one gVisor actor on Agent Substrate. Pick it when you already run
+Substrate (for example for `JOB_LAUNCHER=substrate` coding runs) and want gVisor
+and a worker that never holds the run's capability: Substrate's egress gateway
+adds it to the worker's requests to the native gateway, the worker's only
+destination. Pick Kubernetes when you need the warm pool or a platform Substrate
+does not support, such as GKE Autopilot; Docker for a single host.
+
+- On the server set `NATIVE_SANDBOX_WORKER_IMAGE` (a registry digest),
+  `NATIVE_GATEWAY_URL` (required, `http://`, the gateway by hostname, not an IP
+  address) and the `SUBSTRATE_*` connection variables shared with
+  `JOB_LAUNCHER=substrate` (`SUBSTRATE_API_URL`, `SUBSTRATE_TOKEN_FILE`,
+  `SUBSTRATE_ATESPACE`, and optionally `SUBSTRATE_CREDENTIALS_NAMESPACE`,
+  `SUBSTRATE_KUBE_CONTEXT`, `SUBSTRATE_CA_FILE`, `SUBSTRATE_SERVER_NAME`,
+  `SUBSTRATE_WORKER_SELECTOR`). Optional: `NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR`
+  (native actors on other workers) and `SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC`
+  (default 60). The gateway's NetworkPolicy admits Substrate's egress gateway
+  pods on 8790 and on the deny port. If the deny port is not 8791, set
+  `NATIVE_GATEWAY_DENY_PORT` on the server too. `NATIVE_SANDBOX_WARM_POOL_SIZE`
+  must be 0: every run resumes from the template's golden snapshot instead, and
+  the first runs after a template change wait while it builds.
+- The gateway's NetworkPolicy must admit Substrate's egress gateway pods on 8790.
+  Apply the migrations `20261130000000_native_gateway_worker_removed`,
+  `20261130000001_native_substrate_canary`,
+  `20261130000002_native_substrate_canary_capability` and
+  `20261130000003_native_gateway_worker_exit` with
+  `prisma migrate deploy`, then
+  start the gateway and server of the same release.
+- Before any run launches, a startup canary per template proves that Substrate
+  enforces the egress policy. If it finds the deny port or the outside
+  reachable, every run is refused with
+  [native_sandbox_network_unenforced](errors/native-sandbox-network-unenforced.md)
+  until the server restarts. Substrate does not show a worker's exit, so the
+  worker runs under a small supervisor that reports its exit code to the
+  gateway (`native_sandbox_worker_exited` then carries that code). Launch
+  failures are
+  `native_sandbox_substrate_failed` (article
+  `errors/native-sandbox-substrate-failed`, Wardby 0.10.1 and later).
+- Old templates are not removed automatically; delete them with Substrate's
+  tooling. `GET /admin/api/infra` names the current one.
+
+Details are in
+[Set up with Agent Substrate](../docs/native-sandbox.md#set-up-with-agent-substrate-experimental).
+
 ### Warm pool
 
 Set `NATIVE_SANDBOX_WARM_POOL_SIZE` (0 to 50, default 0 = off) to keep that many
-idle, already-isolated workers ready, with either launcher. A run claims one
+idle, already-isolated workers ready, with the Docker or Kubernetes launcher. A run claims one
 atomically through the database; its input and one-time gateway capability are
 delivered over exec stdin only after the claim, and the worker is still
 single-use. `NATIVE_SANDBOX_WARM_MAX_AGE_MS` (60000 to 21600000, default 1800000) replaces idle workers older than that. With no idle worker, or one that
@@ -145,6 +191,8 @@ codes:
 - [native_sandbox_capacity](errors/native-sandbox-capacity.md)
 - [native_sandbox_warm_delivery_failed](errors/native-sandbox-warm-delivery-failed.md)
 - [native_sandbox_requires_catalog](errors/native-sandbox-requires-catalog.md)
+- `native_sandbox_substrate_failed` (Substrate; article
+  `errors/native-sandbox-substrate-failed`, Wardby 0.10.1 and later)
 
 See also [Use native agents, tools, and data](native-capabilities.md) and
 [Understand Wardby security boundaries](security.md).

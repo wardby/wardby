@@ -20,6 +20,9 @@ import { overlapsSecretValue } from "../sandbox/host-functions.js";
 export { causeCodeOf, GATEWAY_CAUSE_CODES };
 
 export const NATIVE_WORKER_PROTOCOL_VERSION = 1;
+
+/** Set to "1" in a Substrate native actor's env: the worker runs in substrate mode (substrate-mode.ts). */
+export const NATIVE_SUBSTRATE_ENV = "WARDBY_NATIVE_SUBSTRATE";
 /** Above the sandbox's 12 MiB bridge-result cap, plus envelope. */
 export const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 
@@ -51,6 +54,8 @@ export type GatewayErrorCode =
   | "budget_exhausted"
   /** The worker's network isolation is not proven yet: retry shortly. */
   | "not_ready"
+  /** No capability, or one that names no active session (HTTP 401; never sent over stdio). */
+  | "unauthorized"
   | "internal";
 
 export class GatewayError extends Error {
@@ -220,6 +225,89 @@ export const WorkerInputSchema = z
   })
   .strict();
 export type WorkerInput = z.infer<typeof WorkerInputSchema>;
+
+/** Where a worker that starts without its input fetches it (POST, same bearer auth as a call). */
+export const NATIVE_GATEWAY_INPUT_PATH = "/native-gateway/v1/input";
+/**
+ * Where a Substrate worker's supervisor reports the worker's exit (POST { code }, the same bearer auth
+ * as the input route): Substrate's actor state never shows a process exit, so the gateway records it.
+ */
+export const NATIVE_GATEWAY_EXIT_PATH = "/native-gateway/v1/exit";
+/** The exit route's body: the worker's exit code (a signal is 128 + its number). */
+export const NativeWorkerExitSchema = z.object({ code: z.number().int().min(0).max(255) }).strict();
+/**
+ * Set by the Substrate supervisor (substrate-supervisor.ts, PID 1) on the worker it starts, so the
+ * same entry runs the worker rather than another supervisor. Never a secret.
+ */
+export const NATIVE_SUPERVISED_ENV = "WARDBY_NATIVE_SUPERVISED";
+/** The gateway's call route (http-server.ts NATIVE_GATEWAY_PATH): NATIVE_GATEWAY_URL ends with it. */
+export const NATIVE_GATEWAY_CALL_PATH = "/native-gateway/v1/call";
+
+/**
+ * The bearer a Substrate worker sends (substrate mode): public, fixed, and replaced by the egress
+ * gateway with the run's capability. Reaching the gateway as-is, it hashes to no session: 401.
+ */
+export const NATIVE_PLACEHOLDER_CAPABILITY = "wardby_native_placeholder_injected_by_egress_gateway";
+
+/**
+ * Where a Substrate startup canary posts its verdict (POST). The canary actor sends the public
+ * placeholder as its bearer, and the egress gateway replaces it with the canary's own short-lived
+ * capability (its Secret), as for a run. The gateway accepts that capability once, for that actor,
+ * within its report window (substrate-canary-store.ts); every valid body gets the same answer,
+ * whether or not it was taken, so the route is no oracle for capabilities.
+ */
+export const NATIVE_GATEWAY_CANARY_PATH = "/native-gateway/v1/canary";
+/** A canary's verdicts: pass, or the first probe that failed, in the Kubernetes probe's order. */
+export const NATIVE_CANARY_RESULTS = [
+  "pass",
+  "gateway_unreachable",
+  "deny_port_reachable",
+  "outside_reachable",
+] as const;
+export type NativeCanaryResult = (typeof NATIVE_CANARY_RESULTS)[number];
+/** The canary route's body. */
+export const NativeCanaryReportSchema = z
+  .object({ actor: z.string().regex(/^wr-[0-9a-f]{20}-canary$/), result: z.enum(NATIVE_CANARY_RESULTS) })
+  .strict();
+export type NativeCanaryReport = z.infer<typeof NativeCanaryReportSchema>;
+/** The gateway's default witness port (docker-isolation.ts NATIVE_GATEWAY_DENY_PORT, re-declared for the worker image). */
+export const NATIVE_CANARY_DENY_PORT = 8791;
+/**
+ * The Substrate worker template's env var naming the gateway's deny port (the operator's
+ * NATIVE_GATEWAY_DENY_PORT), which the startup canary probes.
+ */
+export const NATIVE_DENY_PORT_ENV = "NATIVE_GATEWAY_DENY_PORT";
+/**
+ * kubernetes-isolation.ts NATIVE_PROBE_OUTSIDE, re-declared for the worker image, which cannot load
+ * providers/jobs/ (kubernetes-isolation.test.ts keeps them equal): the internet, and the cloud
+ * metadata endpoints.
+ */
+export const NATIVE_PROBE_OUTSIDE_TARGETS: readonly { host: string; port: number }[] = Object.freeze([
+  Object.freeze({ host: "1.1.1.1", port: 443 }),
+  Object.freeze({ host: "169.254.169.254", port: 80 }),
+  Object.freeze({ host: "169.254.170.23", port: 80 }),
+  Object.freeze({ host: "fd00:ec2::254", port: 80 }),
+  Object.freeze({ host: "fd00:ec2::23", port: 80 }),
+]);
+
+/**
+ * A gateway route's URL from NATIVE_GATEWAY_URL (the call route's URL): the same origin and any path
+ * prefix in front of the call route, then `path`.
+ */
+export function nativeGatewayRouteUrl(gatewayUrl: string, path: string): string {
+  const url = new URL(gatewayUrl);
+  const current = url.pathname.replace(/\/+$/, "");
+  const prefix = current.endsWith(NATIVE_GATEWAY_CALL_PATH)
+    ? current.slice(0, -NATIVE_GATEWAY_CALL_PATH.length)
+    : current;
+  url.pathname = `${prefix}${path}`;
+  url.search = "";
+  url.hash = "";
+  return url.href;
+}
+
+/** The input route's result: the session's snapshot input, which never holds a gateway or a secret. */
+export const GatewayInputResponseSchema = z.object({ input: WorkerInputSchema.omit({ gateway: true }) }).strict();
 
 const UsageTotalsSchema = z.object({ tokensIn: z.number(), tokensOut: z.number(), costUsd: z.number() }).strict();
 

@@ -6,6 +6,7 @@
  * code change. The `assembleProviders` factory (which constructs the concrete
  * adapters) is added once the adapters exist.
  */
+import { isIP } from "node:net";
 import { MAX_RUN_REPOSITORIES_IN_INPUT } from "../coding/protocol.js";
 import {
   GVISOR_RUNTIME_CLASS,
@@ -13,6 +14,8 @@ import {
   platformProfile,
   type KubernetesPlatform,
 } from "../providers/jobs/kubernetes-platform.js";
+import { NATIVE_GATEWAY_DENY_PORT } from "../native-worker/docker-isolation.js";
+import { SUBSTRATE_NATIVE_GOLDEN_WAIT_MAX_SEC } from "../native-worker/substrate-canary-store.js";
 import { CODING_PROXY_PORT } from "../providers/jobs/docker-isolation.js";
 import type { BlobStoreConfig } from "../providers/storage/index.js";
 import {
@@ -479,21 +482,43 @@ export interface KubernetesNativeSandboxConfig extends NativeSandboxCommonConfig
 /** The native gateway Service (and Deployment) name when NATIVE_GATEWAY_SERVICE is unset. */
 export const DEFAULT_NATIVE_GATEWAY_SERVICE = "wardby-native-gateway";
 
-export type NativeSandboxConfig = DockerNativeSandboxConfig | KubernetesNativeSandboxConfig;
+/**
+ * NATIVE_SANDBOX_LAUNCHER=substrate: worker actors on a Substrate cluster, one golden snapshot per
+ * image. A separate setting from JOB_LAUNCHER (any combination works). It reads the shared
+ * SUBSTRATE_* connection variables; the warm pool is refused (golden snapshots replace it), and
+ * NATIVE_SANDBOX_PIDS is read but has no effect.
+ */
+export interface SubstrateNativeSandboxConfig extends NativeSandboxCommonConfig {
+  launcher: "substrate";
+  /** NATIVE_GATEWAY_URL, required: an http:// URL whose host is a hostname (egress rules match hostnames). */
+  gatewayUrl: string;
+  /** The shared SUBSTRATE_* connection; workerSelector is NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR when set. */
+  substrate: SubstrateConnectionConfig;
+  /** SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC (0..600, default 60). */
+  goldenWaitSec: number;
+  /**
+   * NATIVE_GATEWAY_DENY_PORT (1..65535, default 8791): the gateway's deny port, read here too so the
+   * startup canary probes the port the gateway really listens on. Set it to the gateway's value.
+   */
+  denyPort: number;
+}
+
+export type NativeSandboxConfig =
+  DockerNativeSandboxConfig | KubernetesNativeSandboxConfig | SubstrateNativeSandboxConfig;
 
 /** Undefined when NATIVE_SANDBOX_LAUNCHER is unset (sandbox-mode runs then fail closed). Throws on a bad configuration. */
 export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): NativeSandboxConfig | undefined {
   const launcher = env.NATIVE_SANDBOX_LAUNCHER?.trim();
   if (!launcher) return undefined;
-  if (launcher !== "docker" && launcher !== "kubernetes") {
-    throw new Error(`NATIVE_SANDBOX_LAUNCHER must be "docker" or "kubernetes" (got "${launcher}").`);
+  if (launcher !== "docker" && launcher !== "kubernetes" && launcher !== "substrate") {
+    throw new Error(`NATIVE_SANDBOX_LAUNCHER must be "docker", "kubernetes" or "substrate" (got "${launcher}").`);
   }
   const workerImage = imageVariable(env.NATIVE_SANDBOX_WORKER_IMAGE);
   if (!workerImage)
     throw new Error(`NATIVE_SANDBOX_WORKER_IMAGE is required when NATIVE_SANDBOX_LAUNCHER=${launcher}.`);
   const gatewayUrl = env.NATIVE_GATEWAY_URL?.trim();
   if (gatewayUrl && !/^https?:\/\/[^\s]+$/.test(gatewayUrl)) {
-    throw new Error(`NATIVE_GATEWAY_URL must be an http(s) URL (got "${gatewayUrl}").`);
+    throw new Error(`NATIVE_GATEWAY_URL must be an http(s) URL.`);
   }
   const common = {
     workerImage,
@@ -520,6 +545,60 @@ export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): N
         21_600_000,
       ) ?? 1_800_000,
   };
+  if (launcher === "substrate") {
+    if (!/@sha256:[0-9a-f]{64}$/.test(workerImage)) {
+      throw new Error(
+        "NATIVE_SANDBOX_WORKER_IMAGE must be a registry digest (repo@sha256:...) when NATIVE_SANDBOX_LAUNCHER=substrate.",
+      );
+    }
+    if (!gatewayUrl) {
+      throw new Error(
+        "NATIVE_GATEWAY_URL is required when NATIVE_SANDBOX_LAUNCHER=substrate: the egress rule names the gateway by hostname.",
+      );
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(gatewayUrl);
+    } catch {
+      throw new Error("NATIVE_GATEWAY_URL must be a valid http:// URL.");
+    }
+    if (parsed.protocol !== "http:") {
+      throw new Error(
+        "NATIVE_GATEWAY_URL must be an http:// URL when NATIVE_SANDBOX_LAUNCHER=substrate: the egress gateway injects the capability into plain HTTP.",
+      );
+    }
+    if (isIP(parsed.hostname.replace(/^\[|\]$/g, "")) !== 0) {
+      throw new Error(
+        "NATIVE_GATEWAY_URL must name the gateway by hostname when NATIVE_SANDBOX_LAUNCHER=substrate: egress rules match hostnames, not addresses.",
+      );
+    }
+    if (common.warmPoolSize > 0) {
+      throw new Error(
+        "NATIVE_SANDBOX_WARM_POOL_SIZE must be 0 when NATIVE_SANDBOX_LAUNCHER=substrate: golden snapshots replace the warm pool.",
+      );
+    }
+    const connection = loadSubstrateConnectionConfig(env, "NATIVE_SANDBOX_LAUNCHER=substrate");
+    const workerSelector =
+      parseWorkerSelector(env.NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR, "NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR") ??
+      connection.workerSelector;
+    const substrate: SubstrateConnectionConfig = { ...connection };
+    if (workerSelector) substrate.workerSelector = workerSelector;
+    const goldenWaitSec =
+      optionalBoundedInteger(
+        env.SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC?.trim() || undefined,
+        "SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC",
+        0,
+        SUBSTRATE_NATIVE_GOLDEN_WAIT_MAX_SEC,
+      ) ?? 60;
+    const denyPort =
+      optionalBoundedInteger(
+        env.NATIVE_GATEWAY_DENY_PORT?.trim() || undefined,
+        "NATIVE_GATEWAY_DENY_PORT",
+        1,
+        65_535,
+      ) ?? NATIVE_GATEWAY_DENY_PORT;
+    return { launcher, ...common, gatewayUrl, substrate, goldenWaitSec, denyPort };
+  }
   if (launcher === "kubernetes") {
     // A cluster pulls by registry digest; a local image id means nothing to it.
     if (!/@sha256:[0-9a-f]{64}$/.test(workerImage)) {
@@ -725,8 +804,8 @@ export function loadKubernetesJobConfig(env: NodeJS.ProcessEnv = process.env): K
   return config;
 }
 
-/** JOB_LAUNCHER=substrate (experimental): the Substrate API, where run Secrets go, and how actors reach the coding proxy. */
-export interface SubstrateJobConfig {
+/** The Substrate API and where run Secrets go: what every Substrate launcher needs. */
+export interface SubstrateConnectionConfig {
   apiUrl: string;
   tokenFile: string;
   caFile?: string;
@@ -734,9 +813,13 @@ export interface SubstrateJobConfig {
   atespace: string;
   credentialsNamespace: string;
   kubeContext?: string;
+  workerSelector?: Record<string, string>;
+}
+
+/** JOB_LAUNCHER=substrate (experimental): the connection, and how actors reach the coding proxy. */
+export interface SubstrateJobConfig extends SubstrateConnectionConfig {
   proxyHost: string;
   proxyPort: number;
-  workerSelector?: Record<string, string>;
   /** SUBSTRATE_COLLECT_GRACE_SEC: after the worker exits, how long the workspace may take (launcher default 120 s). */
   collectGraceSec?: number;
   /** SUBSTRATE_STARTUP_TIMEOUT_SEC: how long the actors may take to reach the coding proxy (launcher default 300 s). */
@@ -763,14 +846,17 @@ export interface SubstrateJobConfig {
 
 const DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE = "wardby-run-secrets";
 
-function requiredEnv(env: NodeJS.ProcessEnv, name: string): string {
+function requiredEnv(env: NodeJS.ProcessEnv, name: string, use = "JOB_LAUNCHER=substrate"): string {
   const value = env[name]?.trim();
-  if (!value) throw new Error(`${name} is required when JOB_LAUNCHER=substrate.`);
+  if (!value) throw new Error(`${name} is required when ${use}.`);
   return value;
 }
 
 /** `k=v,k=v` into a map; errors name the variable, never the value. */
-function parseWorkerSelector(raw: string | undefined): Record<string, string> | undefined {
+function parseWorkerSelector(
+  raw: string | undefined,
+  name = "SUBSTRATE_WORKER_SELECTOR",
+): Record<string, string> | undefined {
   const text = raw?.trim();
   if (!text) return undefined;
   const selector: Record<string, string> = {};
@@ -778,7 +864,7 @@ function parseWorkerSelector(raw: string | undefined): Record<string, string> | 
     const index = pair.indexOf("=");
     const key = index > 0 ? pair.slice(0, index).trim() : "";
     const value = index > 0 ? pair.slice(index + 1).trim() : "";
-    if (!key || !value) throw new Error("SUBSTRATE_WORKER_SELECTOR must be comma-separated key=value pairs.");
+    if (!key || !value) throw new Error(`${name} must be comma-separated key=value pairs.`);
     selector[key] = value;
   }
   return selector;
@@ -801,24 +887,23 @@ export function substrateProxyPort(env: NodeJS.ProcessEnv = process.env): number
 /** The longest SUBSTRATE_PARK_TTL_SEC accepts; the template sweep floor is based on it. */
 export const MAX_PARK_TTL_SEC = 86_400;
 
-export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): SubstrateJobConfig {
-  const apiUrl = requiredEnv(env, "SUBSTRATE_API_URL");
+/** `use` names the setting that requires it in every error ("JOB_LAUNCHER=substrate"). */
+export function loadSubstrateConnectionConfig(env: NodeJS.ProcessEnv, use: string): SubstrateConnectionConfig {
+  const apiUrl = requiredEnv(env, "SUBSTRATE_API_URL", use);
   try {
     new URL(apiUrl);
   } catch {
     throw new Error("SUBSTRATE_API_URL must be a valid URL.");
   }
-  const tokenFile = requiredEnv(env, "SUBSTRATE_TOKEN_FILE");
-  const proxyHost = requiredEnv(env, "SUBSTRATE_PROXY_HOST");
-  const proxyPort = substrateProxyPort(env);
+  const tokenFile = requiredEnv(env, "SUBSTRATE_TOKEN_FILE", use);
   // Required, no default: the coding proxy uses the same variable as its on/off switch.
-  const atespace = dnsLabel(requiredEnv(env, "SUBSTRATE_ATESPACE"), "SUBSTRATE_ATESPACE", "");
+  const atespace = dnsLabel(requiredEnv(env, "SUBSTRATE_ATESPACE", use), "SUBSTRATE_ATESPACE", "");
   const credentialsNamespace = dnsLabel(
     env.SUBSTRATE_CREDENTIALS_NAMESPACE?.trim() || undefined,
     "SUBSTRATE_CREDENTIALS_NAMESPACE",
     DEFAULT_SUBSTRATE_CREDENTIALS_NAMESPACE,
   );
-  const config: SubstrateJobConfig = { apiUrl, tokenFile, atespace, credentialsNamespace, proxyHost, proxyPort };
+  const config: SubstrateConnectionConfig = { apiUrl, tokenFile, atespace, credentialsNamespace };
   const caFile = env.SUBSTRATE_CA_FILE?.trim();
   if (caFile) config.caFile = caFile;
   const serverName = env.SUBSTRATE_SERVER_NAME?.trim();
@@ -827,6 +912,14 @@ export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): Su
   if (kubeContext) config.kubeContext = kubeContext;
   const workerSelector = parseWorkerSelector(env.SUBSTRATE_WORKER_SELECTOR);
   if (workerSelector) config.workerSelector = workerSelector;
+  return config;
+}
+
+export function loadSubstrateJobConfig(env: NodeJS.ProcessEnv = process.env): SubstrateJobConfig {
+  const connection = loadSubstrateConnectionConfig(env, "JOB_LAUNCHER=substrate");
+  const proxyHost = requiredEnv(env, "SUBSTRATE_PROXY_HOST");
+  const proxyPort = substrateProxyPort(env);
+  const config: SubstrateJobConfig = { ...connection, proxyHost, proxyPort };
   const collectGraceSec = optionalBoundedInteger(
     env.SUBSTRATE_COLLECT_GRACE_SEC?.trim() || undefined,
     "SUBSTRATE_COLLECT_GRACE_SEC",

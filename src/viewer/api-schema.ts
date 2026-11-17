@@ -277,7 +277,7 @@ export const InfraInfoSchema = z.object({
   /** How sandbox-mode native agents run; null when NATIVE_SANDBOX_LAUNCHER is unset. */
   native: z
     .object({
-      launcher: z.enum(["docker", "kubernetes"]),
+      launcher: z.enum(["docker", "kubernetes", "substrate"]),
       /** Idle workers kept ready for runs to claim (0 = no pool). */
       warmPoolSize: z.number().int(),
       kubernetes: z
@@ -290,6 +290,8 @@ export const InfraInfoSchema = z.object({
           warmWorkerLabel: z.string(),
         })
         .nullable(),
+      /** NATIVE_SANDBOX_LAUNCHER=substrate: the atespace and the worker template's name; null otherwise. */
+      substrate: z.object({ atespace: z.string(), template: z.string() }).nullable(),
     })
     .nullable(),
 });

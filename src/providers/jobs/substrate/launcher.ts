@@ -6,6 +6,9 @@
  * runs the unchanged Codex worker and holds the workspace, with the agent's egress rule only. Codex
  * runs never park or adopt (warm rounds are Claude Code only).
  *
+ * The Substrate client, the call and error vocabulary, the template and actor steps and the Secret
+ * shape both launchers share live in src/providers/substrate/.
+ *
  * - The capability lives only in a per-run Kubernetes Secret, which Substrate's egress gateway reads
  *   to inject the agent's X-Api-Key on its way to the coding proxy. The tool actor authenticates with
  *   its own actor JWT, also injected by the gateway. Neither actor ever holds a wardby secret.
@@ -131,15 +134,23 @@ import {
 import { workerDiagnosticOf, type WorkerDiagnostic } from "../worker-diagnostic.js";
 import { replaceDirectoryFromStaging, takeResultBundle } from "../workspace-swap.js";
 import {
-  SubstrateAlreadyExistsError,
   SubstrateExhaustedError,
-  SubstrateNotFoundError,
   SubstrateTemplateMissingError,
   SubstrateUnavailableError,
   type ActorTemplateSpec,
   type SubstrateApi,
   type TemplateInfo,
-} from "./api.js";
+} from "../../substrate/api.js";
+import {
+  createFreshActor,
+  ensureTemplate as ensureSubstrateTemplate,
+  namedCall,
+  reportCallFailure,
+  substrateErrorCode,
+  type NamedCall,
+  type SubstrateCall,
+  type SubstrateCallFailure,
+} from "../../substrate/actors.js";
 import {
   BLOB,
   REPO_BLOB,
@@ -155,7 +166,7 @@ import {
   templateRoleOf,
   toolActorName,
 } from "./names.js";
-import { canPlaceAll, type Room } from "./placement.js";
+import { canPlaceAll, type Room } from "../../substrate/placement.js";
 import {
   SERVICE_START_MARKER_MS,
   serviceStartScript,
@@ -351,23 +362,8 @@ const SERVICES_GRACE_MS = 15_000;
 export const DEFAULT_COLLECT_GRACE_MS = 120_000;
 export const DEFAULT_STARTUP_TIMEOUT_MS = 300_000;
 
-/** The Substrate calls a launch makes, by SubstrateApi method name. */
-export type SubstrateCall =
-  | "ensureActorTemplate"
-  | "getActorTemplate"
-  | "deleteActorTemplate"
-  | "createActor"
-  | "putEgressPolicy"
-  | "resumeActor"
-  | "suspendActor"
-  | "deleteEgressPolicy";
-
-/** Fixed fields only: the run, which call failed, and the error's fixed code. Never a request or message. */
-export interface SubstrateCallFailure {
-  runId: string;
-  substrateCall: SubstrateCall;
-  errorCode: string;
-}
+// The call names and failure shape live with the shared actor steps (src/providers/substrate/actors.ts).
+export type { SubstrateCall, SubstrateCallFailure };
 
 const substrateLog = logger.child({ module: "substrate-jobs" });
 
@@ -482,25 +478,6 @@ const STOP_ACTORS_ON: readonly SubstratePhase[] = [
   "bridge_incompatible",
   "image_incomplete",
 ];
-
-/** The fixed code of a failed Substrate call; any other error is "unexpected" (its message is never read). */
-function substrateErrorCode(error: unknown): string {
-  if (
-    error instanceof SubstrateAlreadyExistsError ||
-    error instanceof SubstrateExhaustedError ||
-    error instanceof SubstrateNotFoundError ||
-    error instanceof SubstrateTemplateMissingError ||
-    error instanceof SubstrateUnavailableError
-  ) {
-    return error.code;
-  }
-  return "unexpected";
-}
-
-/** createActor's answer when the template is gone: FailedPrecondition from Substrate, or NotFound. */
-function isTemplateGone(error: unknown): boolean {
-  return error instanceof SubstrateTemplateMissingError || error instanceof SubstrateNotFoundError;
-}
 
 function isPhaseConflict(error: unknown): boolean {
   return error instanceof Error && error.message === "substrate_phase_conflict";
@@ -976,20 +953,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     // Each Substrate call is named when it fails, so a refusal is diagnosable from wardby's log.
     // An error `recoverable` names is rethrown without a report: the caller recovers from it, and
     // reports only if that fails.
-    const call = async <T>(
-      name: SubstrateCall,
-      fn: () => Promise<T>,
-      recoverable?: (error: unknown) => boolean,
-    ): Promise<T> => {
-      try {
-        return await fn();
-      } catch (error) {
-        if (!recoverable?.(error)) {
-          this.reportCallFailure({ runId: spec.runId, substrateCall: name, errorCode: substrateErrorCode(error) });
-        }
-        throw error;
-      }
-    };
+    const call = namedCall(spec.runId, (failure) => this.reportCallFailure(failure));
     // The template of the actor being resumed, so a refusal names the one refused (neverReady).
     let resuming: ActorTemplateSpec | undefined;
     // The template of the actor being created or resumed: a Substrate failure there may be its
@@ -1028,39 +992,16 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       // launch fails (substrate_already_exists) and nothing ever resumes it.
       const templateOf = (name: string): ActorTemplateSpec =>
         name !== agent && templates.shape === "pair" ? templates.tool : templates.agent;
-      const createActor = (name: string, template: ActorTemplateSpec, retriable = false) =>
-        call(
-          "createActor",
-          async () => {
-            try {
-              await this.api.createActor(atespace, name, template.name);
-            } catch (error) {
-              if (!(error instanceof SubstrateAlreadyExistsError)) throw error;
-              try {
-                await this.api.deleteEgressPolicy(atespace, name);
-                await this.api.deleteActor(atespace, name);
-              } catch {
-                throw error;
-              }
-              await this.api.createActor(atespace, name, template.name);
-            }
-          },
-          retriable ? isTemplateGone : undefined,
-        );
       for (const name of actorNamesFor(token, shape)) {
         const template = templateOf(name);
         starting = template;
-        try {
-          await createActor(name, template, true);
-        } catch (error) {
-          // The cleanup sweep removed the template between its ensure and here (its row went just
-          // before a concurrent bump): Substrate answers FailedPrecondition (or NotFound). Ensure it
-          // once more (recorded again) and retry, once. A second such answer fails the launch.
-          if (!isTemplateGone(error)) throw error;
-          // Not reported above: only a failed retry is a failed Substrate call.
-          await this.ensureTemplate(template, call);
-          await createActor(name, template);
-        }
+        // If the cleanup sweep removed the template between its ensure and here (its row went just
+        // before a concurrent bump), Substrate answers FailedPrecondition (or NotFound): ensure it
+        // once more (recorded again) and create once more. A second such answer fails the launch.
+        // The first answer is not reported: only a failed retry is a failed Substrate call.
+        await createFreshActor(this.api, atespace, name, template.name, call, () =>
+          this.ensureTemplate(template, call),
+        );
         starting = undefined;
       }
       // After the actors: an egress policy belongs to its actor (a foreign key in Substrate). Every
@@ -1338,26 +1279,40 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    * name is derived from its image, size and settings, so the one deleted is this same spec.
    * Substrate's failure message is never read (the client maps only goldenSnapshotFailed).
    */
-  private async ensureTemplate(
-    template: ActorTemplateSpec,
-    call: <T>(name: SubstrateCall, fn: () => Promise<T>) => Promise<T>,
-  ): Promise<void> {
+  private async ensureTemplate(template: ActorTemplateSpec, call: NamedCall): Promise<void> {
     const { name, atespace } = template;
     const role = templateRoleOf(name);
     // Every name templatesFor builds has a role; one without is a broken invariant, never a Prisma write.
     if (!role) throw new Error("substrate_template_name_invalid");
     await this.templates.touch({ name, atespace, role, image: template.containers[0].image }, new Date(this.now()));
-    await call("ensureActorTemplate", () => this.api.ensureActorTemplate(template));
-    const info = await call("getActorTemplate", () => this.api.getActorTemplate(atespace, name));
-    if (!info?.goldenSnapshotFailed) {
-      // Substrate says its golden snapshot is built: the template is ready (best effort).
-      if (info?.goldenSnapshotReady === true) await this.markTemplateReady(name);
-      return;
+    let count: GoldenFailureCount | undefined;
+    let recorded = false;
+    let deleted = false;
+    const tracked: NamedCall = async (callName, fn, recoverable) => {
+      const result = await call(callName, fn, recoverable);
+      if (callName === "deleteActorTemplate") deleted = true;
+      return result;
+    };
+    let info: TemplateInfo | undefined;
+    try {
+      info = await ensureSubstrateTemplate(this.api, template, tracked, async () => {
+        count = await this.recordGoldenFailure(template, role);
+        recorded = true;
+      });
+    } catch (error) {
+      // No rebuild was tried (the delete failed), so this launch's count must not make a later one
+      // fail as unready for a build that never happened: take it back (best effort; the window's
+      // anchor stays).
+      if (recorded && !deleted && count) {
+        await this.templates.withdrawGoldenFailure(name, count.failures).catch(() => undefined);
+      }
+      throw error;
     }
-    await this.countGoldenFailure(template, role, call);
     // Rebuilt just now: this launch never resumes against the rebuilding template. It requeues, and
     // the relaunch after the backoff sees the new build's outcome.
-    throw new TemplateRebuildingError();
+    if (recorded) throw new TemplateRebuildingError();
+    // Substrate says its golden snapshot is built: the template is ready (best effort).
+    if (info?.goldenSnapshotReady === true) await this.markTemplateReady(name);
   }
 
   /**
@@ -1374,7 +1329,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
    */
   private async goldenFailureAfter(
     template: ActorTemplateSpec,
-    call: <T>(name: SubstrateCall, fn: () => Promise<T>) => Promise<T>,
+    call: NamedCall,
   ): Promise<TemplateUnreadyError | TemplateRebuildingError | TemplateBuildingError | undefined> {
     const role = templateRoleOf(template.name);
     if (!role) return undefined;
@@ -1411,17 +1366,16 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * Counts a golden-snapshot failure of `template` in its row's window and acts on it (see
-   * ensureTemplate): the same build throws TemplateRebuildingError; a second failure throws
-   * TemplateUnreadyError; a first one deletes the template and creates it again (a failed delete
-   * takes the count back and throws the delete's error).
+   * Records a golden-snapshot failure of `template` in its row's window and refuses a rebuild when it
+   * should not happen: the same build throws TemplateRebuildingError, a second failure throws
+   * TemplateUnreadyError. Otherwise returns the count (undefined when it cannot be written: counts as
+   * no earlier failure), and the caller deletes the template and creates it again.
    */
-  private async countGoldenFailure(
+  private async recordGoldenFailure(
     template: ActorTemplateSpec,
     role: SubstrateTemplateRole,
-    call: <T>(name: SubstrateCall, fn: () => Promise<T>) => Promise<T>,
-  ): Promise<void> {
-    const { name, atespace } = template;
+  ): Promise<GoldenFailureCount | undefined> {
+    const { name } = template;
     let count: GoldenFailureCount | undefined;
     try {
       count = await this.templates.recordGoldenFailure(
@@ -1440,6 +1394,21 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       this.templateEvent({ event: "substrate_template_unready", name, role, reason: "golden_failed" });
       throw new TemplateUnreadyError();
     }
+    return count;
+  }
+
+  /**
+   * Counts a golden-snapshot failure of `template` and acts on it (see ensureTemplate and
+   * recordGoldenFailure): a first one deletes the template and creates it again (a failed delete
+   * takes the count back and throws the delete's error).
+   */
+  private async countGoldenFailure(
+    template: ActorTemplateSpec,
+    role: SubstrateTemplateRole,
+    call: NamedCall,
+  ): Promise<void> {
+    const { name, atespace } = template;
+    const count = await this.recordGoldenFailure(template, role);
     try {
       await call("deleteActorTemplate", () => this.api.deleteActorTemplate(atespace, name));
     } catch (error) {
@@ -1513,12 +1482,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   private reportCallFailure(failure: SubstrateCallFailure): void {
-    try {
-      if (this.options.onSubstrateCallFailed) this.options.onSubstrateCallFailed(failure);
-      else substrateLog.warn({ ...failure }, "substrate_call_failed");
-    } catch {
-      // Reporting never changes the launch's outcome.
-    }
+    reportCallFailure(failure, this.options.onSubstrateCallFailed, substrateLog);
   }
 
   /** Stages the worker input and returns what was staged (stageSetup reads its git history). */
@@ -2280,14 +2244,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
         steps[name] = Math.round(performance.now() - clock);
       }
     };
-    const call = async <T>(name: SubstrateCall, fn: () => Promise<T>): Promise<T> => {
-      try {
-        return await fn();
-      } catch (error) {
-        this.reportCallFailure({ runId: spec.runId, substrateCall: name, errorCode: substrateErrorCode(error) });
-        throw error;
-      }
-    };
+    const call = namedCall(spec.runId, (failure) => this.reportCallFailure(failure));
     const clock = performance.now();
     try {
       const capability = await this.options.resolveCapability(spec.runId);

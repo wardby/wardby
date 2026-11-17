@@ -133,6 +133,24 @@ export class PrismaGatewayLedger {
     }, LEDGER_TX);
   }
 
+  /**
+   * Records the worker's exit code (a Substrate worker's supervisor reports it), once per session:
+   * whether this call recorded it.
+   */
+  async recordWorkerExit(sessionId: string, code: number, at: Date = new Date()): Promise<boolean> {
+    const { count } = await this.db.nativeGatewaySession.updateMany({
+      where: { id: sessionId, workerExitCode: null },
+      data: { workerExitCode: code, workerExitedAt: at },
+    });
+    return count === 1;
+  }
+
+  /** The exit code recorded for the run's worker, or undefined for none (or no session). */
+  async workerExitCode(runId: string): Promise<number | undefined> {
+    const row = await this.db.nativeGatewaySession.findUnique({ where: { runId }, select: { workerExitCode: true } });
+    return row?.workerExitCode ?? undefined;
+  }
+
   async endSession(sessionId: string, status: "finished" | "cancelled"): Promise<void> {
     await this.db.nativeGatewaySession.updateMany({ where: { id: sessionId, status: "active" }, data: { status } });
   }

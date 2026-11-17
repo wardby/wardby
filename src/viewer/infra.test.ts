@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { InfraInfoSchema } from "./api-schema.js";
+import { nativeTemplate } from "../native-worker/substrate-specs.js";
 import { buildInfraInfo } from "./infra.js";
 
 describe("buildInfraInfo", () => {
@@ -73,6 +74,7 @@ describe("buildInfraInfo", () => {
         warmPoolLabel: { "wardby.io/pool": "warm" },
         warmWorkerLabel: "wardby.io/warm-worker",
       },
+      substrate: null,
     });
   });
 
@@ -85,7 +87,37 @@ describe("buildInfraInfo", () => {
     expect(info).toEqual({
       launcher: "local",
       kubernetes: null,
-      native: { launcher: "docker", warmPoolSize: 0, kubernetes: null },
+      native: { launcher: "docker", warmPoolSize: 0, kubernetes: null, substrate: null },
+    });
+  });
+
+  it("describes a substrate sandbox launcher for native agents", () => {
+    const image = `ghcr.io/example/native@sha256:${"a".repeat(64)}`;
+    const info = buildInfraInfo({
+      NATIVE_SANDBOX_LAUNCHER: "substrate",
+      NATIVE_SANDBOX_WORKER_IMAGE: image,
+      NATIVE_GATEWAY_URL: "http://wardby-native-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/call",
+      SUBSTRATE_API_URL: "https://substrate.example:8443",
+      SUBSTRATE_TOKEN_FILE: "/var/run/secrets/substrate/token",
+      SUBSTRATE_ATESPACE: "wardby-runs",
+    });
+    expect(InfraInfoSchema.parse(info)).toEqual(info);
+    expect(info.native).toEqual({
+      launcher: "substrate",
+      warmPoolSize: 0,
+      kubernetes: null,
+      substrate: {
+        atespace: "wardby-runs",
+        template: nativeTemplate({
+          atespace: "wardby-runs",
+          credentialsNamespace: "wardby-run-secrets",
+          image,
+          gatewayUrl: "http://wardby-native-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/call",
+          cpus: 1,
+          memoryMb: 512,
+          denyPort: 8791,
+        }).name,
+      },
     });
   });
 });

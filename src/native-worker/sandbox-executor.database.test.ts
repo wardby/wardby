@@ -17,7 +17,7 @@ import { PrismaWarmPoolLedger } from "./warm-pool-ledger.js";
 import { lockWarmPoolTable, LOCK_WAIT_MS } from "./warm-pool-lock.test-support.js";
 
 /** A launcher whose workers exit only when the test says so. */
-function fakeLauncher() {
+function fakeLauncher(options: { listsWorkers?: false } = {}) {
   const launched: WorkerInput[] = [];
   const killed: string[] = [];
   const removed: string[] = [];
@@ -30,7 +30,11 @@ function fakeLauncher() {
       exits.get(runId)?.(137);
     },
   });
+  const listWorkers = vi.fn(async () =>
+    [...states.keys()].map((runId) => ({ name: nativeIsolationNames(runId).worker, runHash: nativeRunLabel(runId) })),
+  );
   const launcher: ManagedWorkerLauncher = {
+    ...(options.listsWorkers === false ? { listsWorkers: false as const } : {}),
     async launch(input) {
       launched.push(input);
       states.set(input.runId, { state: "running" });
@@ -40,12 +44,11 @@ function fakeLauncher() {
     inspect: async (runId) => states.get(runId) ?? { state: "missing" },
     kill: async (runId) => void killed.push(runId),
     remove: async (runId) => void removed.push(runId),
-    listWorkers: async () =>
-      [...states.keys()].map((runId) => ({ name: nativeIsolationNames(runId).worker, runHash: nativeRunLabel(runId) })),
+    listWorkers,
     removeByWorkerName: async (name) => void removed.push(name),
   };
   const exit = (runId: string, code: number) => exits.get(runId)?.(code);
-  return { launcher, launched, killed, removed, states, exit };
+  return { launcher, launched, killed, removed, states, exit, listWorkers };
 }
 
 describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", () => {
@@ -389,6 +392,185 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     await db.run.update({ where: { id: ended.id }, data: { status: "succeeded" } });
     expect(await executor.sweep()).toBe(1);
     expect(fake.removed).toEqual([nativeIsolationNames(ended.id).worker]);
+  });
+
+  const removedAt = async (runId: string) =>
+    (await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId } })).workerRemovedAt;
+
+  it("records workerRemovedAt after a successful remove, on every launcher", async () => {
+    const fake = fakeLauncher();
+    const run = await sandboxRun();
+    await executorWith(fake.launcher).start(run.id);
+    expect(await removedAt(run.id)).toBeNull();
+    fake.exit(run.id, 1);
+    await vi.waitFor(async () => expect(await removedAt(run.id)).toBeInstanceOf(Date));
+
+    const failing = fakeLauncher();
+    const failingLauncher = { ...failing.launcher, remove: vi.fn().mockRejectedValue(new Error("delete failed")) };
+    const other = await sandboxRun();
+    await executorWith(failingLauncher).start(other.id);
+    failing.exit(other.id, 1);
+    await vi.waitFor(async () =>
+      expect((await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId: other.id } })).status).toBe("finished"),
+    );
+    await vi.waitFor(() => expect(failingLauncher.remove).toHaveBeenCalled());
+    expect(await removedAt(other.id)).toBeNull();
+  });
+
+  it("leaves workerRemovedAt null for a launch that failed", async () => {
+    const fake = fakeLauncher();
+    const failing = {
+      ...fake.launcher,
+      launch: async () => {
+        throw new Error("native_sandbox_substrate_failed: launch");
+      },
+    };
+    const run = await sandboxRun();
+    await expect(executorWith(failing).start(run.id)).rejects.toThrow(/launch/);
+    const session = await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId: run.id } });
+    expect(session.status).not.toBe("active");
+    expect(session.workerRemovedAt).toBeNull();
+  });
+
+  it("sets it after a stop and after recovering an ended run", async () => {
+    const fake = fakeLauncher();
+    const executor = executorWith(fake.launcher);
+    const stopped = await sandboxRun();
+    await executor.start(stopped.id);
+    await executor.stop(stopped.id, "operator cancelled");
+    expect(await removedAt(stopped.id)).toBeInstanceOf(Date);
+
+    const ended = await sandboxRun();
+    await executor.start(ended.id);
+    await db.run.update({ where: { id: ended.id }, data: { status: "succeeded" } });
+    await executorWith(fake.launcher).recover({ runId: ended.id, backend: "native-sandbox", id: ended.id });
+    expect(await removedAt(ended.id)).toBeInstanceOf(Date);
+
+    const exited = await sandboxRun();
+    await executor.start(exited.id);
+    fake.states.set(exited.id, { state: "exited", exitCode: 2 });
+    await executorWith(fake.launcher).recover({ runId: exited.id, backend: "native-sandbox", id: exited.id });
+    expect(await removedAt(exited.id)).toBeInstanceOf(Date);
+  });
+
+  it("sweeps from rows when the launcher lists no workers", async () => {
+    const fake = fakeLauncher({ listsWorkers: false });
+    const executor = executorWith(fake.launcher);
+    const live = await sandboxRun();
+    const ended = await sandboxRun();
+    const expired = await sandboxRun();
+    const done = await sandboxRun();
+    for (const run of [live, ended, expired, done]) await executor.start(run.id);
+    await db.run.update({ where: { id: ended.id }, data: { status: "succeeded" } });
+    await db.nativeGatewaySession.update({
+      where: { runId: expired.id },
+      data: { deadlineAt: new Date(Date.now() - 1000) },
+    });
+    await db.run.update({ where: { id: done.id }, data: { status: "succeeded" } });
+    await db.nativeGatewaySession.update({ where: { runId: done.id }, data: { workerRemovedAt: new Date() } });
+
+    // Other test files write sessions to the same table, so assert on this test's runs only.
+    await executor.sweep();
+    expect(fake.removed).toEqual(expect.arrayContaining([ended.id, expired.id]));
+    expect(fake.removed).not.toContain(live.id);
+    expect(fake.removed).not.toContain(done.id);
+    expect(await removedAt(ended.id)).toBeInstanceOf(Date);
+    expect(await removedAt(expired.id)).toBeInstanceOf(Date);
+    expect(await removedAt(live.id)).toBeNull();
+    expect(fake.listWorkers).not.toHaveBeenCalled();
+  });
+
+  it("leaves a row whose remove fails for the next pass", async () => {
+    const fake = fakeLauncher({ listsWorkers: false });
+    const run = await sandboxRun();
+    let failing = true;
+    const remove = vi.fn(async (runId: string) => {
+      if (failing && runId === run.id) throw new Error("delete failed");
+      fake.removed.push(runId);
+    });
+    const executor = executorWith({ ...fake.launcher, remove });
+    await executor.start(run.id);
+    await db.run.update({ where: { id: run.id }, data: { status: "succeeded" } });
+    await executor.sweep();
+    expect(remove).toHaveBeenCalledWith(run.id);
+    expect(fake.removed).not.toContain(run.id);
+    expect(await removedAt(run.id)).toBeNull();
+    failing = false;
+    await executor.sweep();
+    expect(fake.removed).toContain(run.id);
+    expect(await removedAt(run.id)).toBeInstanceOf(Date);
+  });
+
+  it("moves a row whose remove fails behind the others, so failing rows never starve newer ones", async () => {
+    const fake = fakeLauncher({ listsWorkers: false });
+    const stuck = await sandboxRun();
+    const newer = await sandboxRun();
+    const remove = vi.fn(async (runId: string) => {
+      if (runId === stuck.id) throw new Error("delete failed");
+      fake.removed.push(runId);
+    });
+    // One row a pass stands in for a full page of rows that always fail.
+    const executor = new NativeSandboxExecutor({
+      db,
+      providers,
+      launcher: { ...fake.launcher, remove },
+      gatewayUrl,
+      stopGraceMs: 0,
+      sweepBatchSize: 1,
+    });
+    for (const run of [stuck, newer]) {
+      await executor.start(run.id);
+      await db.run.update({ where: { id: run.id }, data: { status: "succeeded" } });
+    }
+    // The two oldest rows in the shared table, stuck first, whatever other test files wrote.
+    await db.nativeGatewaySession.update({ where: { runId: stuck.id }, data: { updatedAt: new Date(1_000) } });
+    await db.nativeGatewaySession.update({ where: { runId: newer.id }, data: { updatedAt: new Date(2_000) } });
+    await executor.sweep();
+    expect(remove).toHaveBeenCalledWith(stuck.id);
+    expect(await removedAt(stuck.id)).toBeNull();
+    await executor.sweep();
+    expect(fake.removed).toContain(newer.id);
+    expect(await removedAt(newer.id)).toBeInstanceOf(Date);
+    expect(await removedAt(stuck.id)).toBeNull();
+  });
+
+  it("sweeps every interval only when the launcher lists no workers", async () => {
+    const fake = fakeLauncher({ listsWorkers: false });
+    const executor = new NativeSandboxExecutor({
+      db,
+      providers,
+      launcher: fake.launcher,
+      gatewayUrl,
+      sweepIntervalMs: 50,
+    });
+    const run = await sandboxRun();
+    await executor.start(run.id);
+    await executor.launch();
+    await db.run.update({ where: { id: run.id }, data: { status: "succeeded" } });
+    await vi.waitFor(async () => expect(await removedAt(run.id)).toBeInstanceOf(Date), { timeout: 500 });
+    expect(fake.removed).toContain(run.id);
+    await executor.close();
+    const other = await sandboxRun();
+    await executor.start(other.id);
+    await db.run.update({ where: { id: other.id }, data: { status: "succeeded" } });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(await removedAt(other.id)).toBeNull();
+
+    // A launcher that lists workers is never swept from rows.
+    const listing = fakeLauncher();
+    const spy = vi.spyOn(db.nativeGatewaySession, "findMany");
+    const listed = new NativeSandboxExecutor({
+      db,
+      providers,
+      launcher: listing.launcher,
+      gatewayUrl,
+      sweepIntervalMs: 20,
+    });
+    await listed.launch();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await listed.close();
+    expect(spy.mock.calls.some(([args]) => args?.where && "workerRemovedAt" in args.where)).toBe(false);
+    spy.mockRestore();
   });
 
   it("launch() sweeps, then starts the launcher's upkeep; a failing upkeep never fails it", async () => {

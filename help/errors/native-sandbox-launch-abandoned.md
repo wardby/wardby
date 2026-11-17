@@ -3,13 +3,13 @@ id: errors/native-sandbox-launch-abandoned
 title: Native worker launch abandoned
 summary: A sandbox run ended while its worker was launching (usually stopped during a low-power gateway wake), so no worker pod was created.
 audience: operator
-tags: [error, native-agents, sandbox, kubernetes, low-power, native_sandbox_launch_abandoned]
+tags: [error, native-agents, sandbox, kubernetes, substrate, low-power, native_sandbox_launch_abandoned]
 appliesTo: ">=0.7.0"
 ---
 
 # Native worker launch abandoned
 
-`native_sandbox_launch_abandoned` means a sandbox run ended while its worker was being launched, so Wardby did not create the worker pod. Most often the run was stopped (`stop_run`, or its parent run was cancelled) while the native gateway was waking in low-power mode, which can take a few minutes on a cold node.
+`native_sandbox_launch_abandoned` means a sandbox run ended while its worker was being launched, so Wardby did not create the worker pod. Most often the run was stopped (`stop_run`, or its parent run was cancelled) while the native gateway was waking in low-power mode, which can take a few minutes on a cold node. With `NATIVE_SANDBOX_LAUNCHER=substrate`, it can also be stopped during the golden-snapshot wait or the startup canary; Wardby then creates no actor, or removes the actor, its egress policy and its Secret before the launch returns.
 
 The run already has its own final status, such as `cancelled`. This code only appears in the control-plane log, as the reason the launch stopped. Nothing is left to clean up.
 

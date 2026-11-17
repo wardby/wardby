@@ -1,15 +1,10 @@
-import { createHash } from "node:crypto";
 import { isCodingRepositoryName } from "../../../coding/protocol.js";
 import type { ServiceFailureReason, ServiceState } from "../service-state.js";
+import { hex } from "../../substrate/names.js";
 import type { SubstrateActorShape } from "./run-store.js";
 
-const hex = (input: string, length: number): string =>
-  createHash("sha256").update(input).digest("hex").slice(0, length);
-
-/** Stable, label-safe token for a wardby run: "wr-" + 20 hex chars of sha256(runId). */
-export function substrateRunToken(runId: string): string {
-  return `wr-${hex(runId, 20)}`;
-}
+// Shared with the native sandbox launcher, so they live in src/providers/substrate/names.ts.
+export { substrateRunToken, templateName } from "../../substrate/names.js";
 
 export function agentActorName(token: string): string {
   return `${token}-agent`;
@@ -44,21 +39,6 @@ export const MCP_TOKEN_EGRESS_HEADER = "X-Wardby-Mcp-Token";
 
 export function toolActorSubject(atespace: string, token: string): string {
   return `actor/${atespace}/${toolActorName(token)}`;
-}
-
-/**
- * Template name derived from its content: `wardby-<role>-` + 16 hex chars. `variant` is a stable
- * digest of everything else in the template (env, worker selector), so two templates that differ
- * in any field never share a name.
- */
-export function templateName(
-  role: "agent" | "tool" | "codex",
-  image: string,
-  cpuMillicores: number,
-  memoryBytes: number,
-  variant: string,
-): string {
-  return `wardby-${role}-${hex(`${role}|${image}|${cpuMillicores}|${memoryBytes}|${variant}`, 16)}`;
 }
 
 const TEMPLATE_NAME = /^wardby-(agent|tool|codex)-[0-9a-f]{16}$/;

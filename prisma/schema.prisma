@@ -917,6 +917,15 @@ model NativeGatewaySession {
   /// probe; a Docker run's network exists before its container). The gateway
   /// serves nothing before this is set.
   networkReadyAt    DateTime?
+  /// When the run's worker was removed (the executor sets it after a successful remove, on every
+  /// launcher). A launcher that cannot list its workers (Substrate) is swept from the sessions where
+  /// this is null and the run ended or the deadline passed.
+  workerRemovedAt   DateTime?
+  /// The worker's exit code, as its supervisor reported it (Substrate, whose actor state never shows
+  /// an exit); recorded once. Null until then, and always on the other launchers.
+  workerExitCode    Int?
+  /// When workerExitCode was recorded.
+  workerExitedAt    DateTime?
   /// What the run's review tools have read (ReviewReadsState), saved between gateway requests
   /// for repo_publish_review's unread_files check. Null until the run reads a pull request.
   reviewReads       Json?
@@ -926,6 +935,27 @@ model NativeGatewaySession {
 
   /// NATIVE_SANDBOX_MAX_CONCURRENT counts the active sessions on every start.
   @@index([status])
+  /// The row sweep scans the sessions whose worker was not recorded as removed.
+  @@index([workerRemovedAt])
+}
+
+/// A Substrate native sandbox startup canary (NATIVE_SANDBOX_LAUNCHER=substrate): one probe actor
+/// per worker template and process, whose verdict the gateway records. No credential (only its
+/// capability's hash), no run data.
+model NativeSubstrateCanary {
+  /// The canary actor's name (wr-<20 hex>-canary): random; a report names it and carries its capability.
+  actor          String    @id
+  /// The worker template it proves (wardby-native-<16 hex>).
+  template       String
+  /// pass | gateway_unreachable | deny_port_reachable | outside_reachable; null until reported.
+  result         String?
+  createdAt      DateTime  @default(now())
+  reportedAt     DateTime?
+  /// SHA-256 hex of the canary's one-use capability (held only by its Secret); the report must carry
+  /// it. Null on rows from before it existed, which then take no report.
+  capabilityHash String?
+
+  @@index([createdAt])
 }
 
 /// One worker of the native sandbox warm pool (native sandbox phase 6): an

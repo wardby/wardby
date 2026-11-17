@@ -22,6 +22,9 @@ export const BRIDGE_PROTOCOL_HEADER = "x-wardby-bridge-protocol";
 export const IMAGE_ITEMS = ["user", "runner", "tar", "workspace", "run_dir"] as const;
 export const AGENT_SUFFIX = "-agent";
 export const TOOL_SUFFIX = "-tool";
+/** providers/substrate/names.ts NATIVE_ACTOR_SUFFIX and CANARY_ACTOR_SUFFIX (constants.test.ts keeps them equal). */
+export const NATIVE_SUFFIX = "-native";
+export const CANARY_SUFFIX = "-canary";
 /** substrateRunToken: "wr-" + 20 hex chars. */
 export const RUN_TOKEN_PATTERN = /^wr-[0-9a-f]{20}$/;
 
