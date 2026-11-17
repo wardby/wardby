@@ -43,6 +43,11 @@ Otherwise use `kubernetes` (or `docker`): they support every coding feature. A
 run that needs a feature the Substrate backend lacks fails with
 [substrate_feature_unsupported](errors/substrate-feature-unsupported.md).
 
+Sandbox-mode native agents can run on Substrate too
+(`NATIVE_SANDBOX_LAUNCHER=substrate`, Wardby 0.10.1 and later), sharing the same
+`SUBSTRATE_*` connection; see the `native-sandbox` help article and
+[Run native agents in a sandbox](native-sandbox.md).
+
 ## Set up
 
 1. Install Substrate with a gVisor WorkerPool, the credential provider, router

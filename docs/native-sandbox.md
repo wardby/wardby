@@ -8,7 +8,8 @@ LLM credentials, and every other agent's runs. **Sandbox mode** moves the whole
 turn loop and the agent's user tools into a single-use worker that holds no
 credentials, no database access, no container-runtime access, and no network
 except one path to a separate **native gateway**. The worker is a Docker
-container or, on a Kubernetes cluster, a pod; you choose with
+container, a pod on a Kubernetes cluster, or (experimental) an actor on
+[Agent Substrate](#set-up-with-agent-substrate-experimental); you choose with
 `NATIVE_SANDBOX_LAUNCHER`.
 
 Use it when a native agent runs tool code or prompts you do not fully trust, for
@@ -21,13 +22,13 @@ isolation model; see [Coding-worker isolation](coding-worker-isolation.md).
 
 ## What is isolated and what is not
 
-| Component                 | Trusted? | Where it runs                            |
-| ------------------------- | -------- | ---------------------------------------- |
-| Wardby server / scheduler | Yes      | Your host, VM, or cluster                |
-| Native gateway            | Yes      | A separate container or Deployment       |
-| Postgres, LLM provider    | Yes      | Reachable only from server/gateway       |
-| Agent turn loop (worker)  | No       | Single-use container or pod, one per run |
-| User tool code (worker)   | No       | The same worker                          |
+| Component                 | Trusted? | Where it runs                                    |
+| ------------------------- | -------- | ------------------------------------------------ |
+| Wardby server / scheduler | Yes      | Your host, VM, or cluster                        |
+| Native gateway            | Yes      | A separate container or Deployment               |
+| Postgres, LLM provider    | Yes      | Reachable only from server/gateway               |
+| Agent turn loop (worker)  | No       | Single-use container, pod, or actor, one per run |
+| User tool code (worker)   | No       | The same worker                                  |
 
 The Docker worker container:
 
@@ -45,13 +46,20 @@ On Kubernetes the worker is a pod with the same posture; see
 [Set up with Kubernetes](#set-up-with-kubernetes) for what the pod and its
 NetworkPolicy contain and how the isolation is proven before the run starts.
 
+On Agent Substrate the worker is an actor that runs under gVisor and never
+holds the run's capability at all: it sends a fixed placeholder, and
+Substrate's egress gateway puts the real capability on its requests to the
+native gateway. Its only allowed destination is the native gateway; see
+[Set up with Agent Substrate](#set-up-with-agent-substrate-experimental).
+
 Everything the worker needs from the outside world (model calls, the built-in
 tools, and tool access to datastores, secrets, and outbound fetch) goes through
 the gateway, which enforces each tool attachment's grants. A worker can only
 ask for what the agent's attachments already allow.
 
 Containers are defense in depth, not a virtual-machine boundary. On Kubernetes,
-set a sandboxing runtime class such as gVisor where you have one. Run the Docker
+set a sandboxing runtime class such as gVisor where you have one; Substrate
+actors run under gVisor. Run the Docker
 host on a machine that holds no production credentials beyond what the server
 and gateway need.
 
@@ -98,9 +106,11 @@ socket, because workers can reach it.
   the server.
 - **Kubernetes launcher:** a cluster whose CNI enforces `NetworkPolicy`, a
   namespace holding the native gateway, and a server identity with the
-  permissions in [Server permissions](#server-permissions).
+  permissions in [Server permissions](#3-server-permissions).
+- **Substrate launcher (experimental):** see
+  [Set up with Agent Substrate](#set-up-with-agent-substrate-experimental).
 - The `wardby-native-worker` image, pinned by digest (Docker also accepts a
-  local image id; Kubernetes requires a registry digest).
+  local image id; Kubernetes and Substrate require a registry digest).
 - A running `wardby serve` or `wardby scheduler`. Sub-agents of a sandboxed run
   are started by the scheduler leader (see [Sub-agents](#sub-agents)).
 
@@ -181,8 +191,9 @@ NATIVE_GATEWAY_CONTAINER=wardby-native-gateway
 ```
 
 See [Configuration reference](#configuration-reference) for every variable,
-including the Kubernetes ones. A missing required variable, or a launcher other
-than `docker` or `kubernetes`, stops the server at startup with a message naming the variable. When
+including the Kubernetes and Substrate ones. A missing required variable, or a
+launcher other than `docker`, `kubernetes` or `substrate`, stops the server at
+startup with a message naming the variable. When
 `NATIVE_SANDBOX_LAUNCHER` is unset, sandbox mode is off and any sandbox-mode
 run fails closed (see [Failure modes](#failure-modes)).
 
@@ -418,6 +429,226 @@ room for another worker pod. Raise the ResourceQuota together with
 `NATIVE_SANDBOX_MAX_CONCURRENT` (and `CODING_MAX_CONCURRENT`, which shares the
 namespace): each worker pod needs its CPU and memory limits from the quota.
 
+## Set up with Agent Substrate (experimental)
+
+> **Experimental. Requires Wardby 0.10.1 or later.** Its configuration and
+> behaviour may change between releases.
+
+With `NATIVE_SANDBOX_LAUNCHER=substrate` each sandbox run is one actor on
+[Agent Substrate](https://github.com/agent-substrate), a Kubernetes add-on that
+runs sandboxed actors under gVisor. The setting is independent of
+`JOB_LAUNCHER`: coding agents can use `JOB_LAUNCHER=substrate`
+([Substrate job launcher](substrate-backend.md)), another launcher, or none.
+
+```
+ Substrate worker (gVisor)              Substrate              native gateway
+ +--------------------------------+     egress gateway         (Deployment, :8790)
+ | actor <token>-native           |     +--------------+       +----------------+
+ | wardby-native-worker           +---->| adds the run +------>| LLM keys, DB,  |--> LLM provider
+ | Authorization: placeholder     |     | capability   |       | SECRET_APP_KEY |--> Postgres
+ | egress: gateway host:port only |     +--------------+       +----------------+
+ +--------------------------------+
+```
+
+How a run starts:
+
+- Wardby creates one Substrate actor template for the worker image, size,
+  gateway URL, deny port and worker selector, and Substrate builds a **golden
+  snapshot** of it. Every run's actor is resumed from that snapshot, so there is
+  no warm pool on this launcher.
+- For each run Wardby creates a per-run Kubernetes Secret holding the run's
+  capability (in `SUBSTRATE_CREDENTIALS_NAMESPACE`), the actor
+  (`<token>-native`, where the token is `wr-` and the first 20 hex characters of
+  the SHA-256 of the run id), and the actor's egress policy, then resumes the
+  actor. The policy allows one destination, the native gateway's hostname and
+  port, and tells Substrate's egress gateway to put `Bearer <capability>` from
+  the Secret in each request's `Authorization` header.
+- The worker holds only a fixed, public placeholder bearer. It fetches its input
+  from the gateway (`POST /native-gateway/v1/input`, the same authentication as
+  a call) once its actor is running. Neither the template nor the policy
+  carries anything of a run, and nothing secret: Substrate logs both.
+- When the run ends Wardby deletes the policy, the actor and the Secret.
+
+### Substrate requirements
+
+The [Substrate job launcher's requirements](substrate-backend.md#requirements)
+apply, except the coding proxy, the blob store and the bridge images, which
+native runs do not use:
+
+- Kubernetes with **Agent Substrate 1.0 or later**, with a gVisor `WorkerPool`
+  that has room for one actor per concurrent sandbox run, plus one more for the
+  startup check below. On Google Cloud, use GKE Standard: Substrate's workers
+  are not supported on Autopilot.
+- The Substrate **credential provider**, granted read access to
+  `SUBSTRATE_CREDENTIALS_NAMESPACE` for the atespace Wardby uses, and the
+  Substrate **router** and **egress gateway**, with the native gateway's
+  hostname reachable as an egress destination.
+- A Substrate API token with the audience `api.ate-system.svc`, mounted as a
+  file for the server (`SUBSTRATE_TOKEN_FILE`), and a Kubernetes identity for
+  the server that can create and delete Secrets in
+  `SUBSTRATE_CREDENTIALS_NAMESPACE` (`SUBSTRATE_KUBE_CONTEXT`).
+- The `wardby-native-worker` image of this release or later, by registry digest
+  (`repo@sha256:...`), the same image the other launchers use. An older image
+  has no Substrate mode.
+- The native gateway, from the same release as the server, deployed in the
+  cluster as a Deployment with the environment and the lack of cluster access
+  described for [Kubernetes](#2-deploy-the-native-gateway), and reachable from
+  Substrate's egress gateway by a hostname, such as its Service's cluster DNS
+  name. Actor traffic reaches it from Substrate's egress gateway pods, not from
+  `wardby.io/component: native-run` pods, so the gateway's NetworkPolicy needs
+  an ingress rule that admits the egress gateway pods on 8790. No 8791 rule is
+  needed for Substrate.
+- This release's migrations, applied with `prisma migrate deploy`
+  (`npm run prisma:migrate`) before the new gateway and server start:
+  `20261128000000_native_gateway_worker_removed` (used by every launcher; it
+  records when a run's worker was removed) and
+  `20261128000001_native_substrate_canary` (the startup check's results, written
+  by the gateway). Then start the new gateway, then the new server.
+
+### Configure the server for Substrate
+
+```dotenv
+NATIVE_SANDBOX_LAUNCHER=substrate
+NATIVE_SANDBOX_WORKER_IMAGE=registry.example.com/wardby-native-worker@sha256:replace-with-digest
+NATIVE_GATEWAY_URL=http://wardby-native-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/call
+SUBSTRATE_API_URL=https://substrate-api.example.internal
+SUBSTRATE_TOKEN_FILE=/var/run/secrets/substrate/token
+SUBSTRATE_ATESPACE=wardby
+```
+
+- `NATIVE_GATEWAY_URL` is required, must be `http://` (the egress gateway adds
+  the capability to plain HTTP on its way to the gateway), and must name the
+  gateway by hostname, not an IP address (egress rules match hostnames).
+- The `SUBSTRATE_*` connection variables are the same ones `JOB_LAUNCHER=substrate`
+  reads (`SUBSTRATE_API_URL`, `SUBSTRATE_TOKEN_FILE`, `SUBSTRATE_ATESPACE`,
+  `SUBSTRATE_CREDENTIALS_NAMESPACE`, `SUBSTRATE_KUBE_CONTEXT`,
+  `SUBSTRATE_CA_FILE`, `SUBSTRATE_SERVER_NAME`, `SUBSTRATE_WORKER_SELECTOR`),
+  so coding and native runs share one atespace and one credentials namespace
+  when you use both. `NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR` sends native
+  actors to other workers than coding actors.
+- `NATIVE_SANDBOX_CPUS` and `NATIVE_SANDBOX_MEMORY_MB` set each actor's size.
+  `NATIVE_SANDBOX_PIDS` has no effect.
+- `NATIVE_SANDBOX_WARM_POOL_SIZE` must be `0` (the default); a larger value
+  stops the server at startup.
+- If the gateway's deny port is not the default `8791`, set
+  `NATIVE_GATEWAY_DENY_PORT` to the same value on the server as on the gateway.
+  The server writes it into the worker template, and the startup check probes
+  it.
+
+Each refusal (a missing or non-`http://` gateway URL, an IP address in it, an
+image that is not a registry digest, a pool size above 0, a missing
+`SUBSTRATE_*` variable) stops the server at startup with a message naming the
+variable. See [Configuration reference](#configuration-reference) for every
+variable.
+
+The worker template sets the worker's command and three environment values:
+`WARDBY_NATIVE_SUBSTRATE=1` (Substrate mode), `NATIVE_GATEWAY_URL` and
+`NATIVE_GATEWAY_DENY_PORT`. Any change to the image, CPU, memory, gateway URL,
+deny port or worker selector names a new template, which needs a new golden
+snapshot.
+
+### Startup isolation check
+
+Kubernetes proves each pod's isolation before its run starts. On Substrate each
+run's egress policy is in place before its actor resumes, and Wardby proves once
+per server process and template that Substrate enforces such a policy:
+
+1. It creates a **canary** actor (`wr-<20 hex>-canary`) from the same template,
+   with the run's egress rule minus the credential, and resumes it.
+2. Inside, the canary checks that the gateway's `/healthz` answers, that the
+   gateway's deny port (`NATIVE_GATEWAY_DENY_PORT`, default 8791), an outside
+   address and the cloud metadata endpoints are all denied, and that the
+   gateway still answers afterwards. A target counts as denied only when its
+   connection never opens: any connection that opens counts as reachable,
+   whatever comes back.
+3. It posts the verdict to the gateway (`POST /native-gateway/v1/canary`, no
+   credential), which records it in the database. The server reads it, then
+   deletes the canary actor.
+
+No sandbox run launches until the check passes: a launch while it runs waits
+for it. A check that does not pass refuses the run with
+[`native_sandbox_network_unenforced`](../help/errors/native-sandbox-network-unenforced.md)
+before any Secret or actor of the run exists, and the message ends with the
+reason:
+
+| Reason                             | Meaning                                                                                                                                   | Next launch                       |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| `deny_port_reachable`              | The canary reached the gateway's deny port: the egress policy is not scoped to the gateway's port.                                        | Refused until the server restarts |
+| `outside_reachable`                | The canary reached an outside address or a metadata endpoint: the egress policy is not enforced.                                          | Refused until the server restarts |
+| `gateway_unreachable`              | The gateway's `/healthz` did not answer, before or after the probes. This says nothing about the policy.                                  | Runs a new check                  |
+| `canary_timeout`                   | No verdict within 2 minutes.                                                                                                              | Runs a new check                  |
+| `<call>_failed` or `canary_failed` | A call the check needed failed, such as `createActor_failed` (`recordCanary` and `readCanary` are the database), or something unexpected. | Runs a new check                  |
+
+A check whose actor could not start for lack of room fails the run with
+[`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md) instead,
+and the next launch runs a new check.
+
+The check runs when the server starts. In low-power mode (`WARDBY_LOW_POWER=1`)
+the gateway may be asleep then, so the check runs on the first sandbox launch
+instead, after that launch has woken the gateway. Each server process runs its
+own check; a passed one holds until the process restarts, and so does a
+`deny_port_reachable` or `outside_reachable` verdict.
+
+The server logs one line per check, `native substrate canary`, with the
+template and the result (info on a pass, warn otherwise). A canary actor left
+behind by a server that stopped mid-check is deleted by the next check any
+server process runs (at the latest, after a restart), once it is older than any
+check can take; failures there log `native substrate canary sweep`. In rare
+cases, such as a rolling update that raises `SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC`,
+that clean-up can remove a check that is still running; that check then ends
+`canary_timeout`, and the next launch runs a new one.
+
+### Start latency
+
+A run whose template's golden snapshot is ready starts by resuming its actor
+from the snapshot. A new template (the first start, or any change to its
+settings) needs a new golden snapshot first. While it builds, Substrate refuses
+actor starts for lack of room, and Wardby retries a run's start every 2 seconds
+for up to `SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC` (default 60, 0 to 600) from when
+the server process first used the template. So the first runs after a template
+change, and after a server restart before Substrate reports the snapshot ready,
+can wait up to that long. Past it, the run fails with
+[`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md). A run
+stopped during the wait gets no actor
+([`native_sandbox_launch_abandoned`](../help/errors/native-sandbox-launch-abandoned.md)).
+
+If the golden snapshot fails, the waiting run fails with
+`native_sandbox_substrate_failed: getActorTemplate: golden_snapshot_failed`, and
+the next launch rebuilds the template. An image that cannot snapshot (for
+example one Substrate's workers cannot pull) is rebuilt by every launch, and
+each run waits for the build and then fails the same way; fix the image or
+`NATIVE_SANDBOX_WORKER_IMAGE` rather than retrying.
+
+Start times depend on your Substrate installation, image size and workers;
+measure them on your own cluster.
+
+### Substrate capacity
+
+`NATIVE_SANDBOX_MAX_CONCURRENT` caps sandbox runs across all server replicas as
+on the other launchers. Before creating anything, Wardby also checks that a
+Substrate worker matching the worker selector has free CPU and memory for the
+actor's size; if none has, the run fails at once with
+[`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md). It is not
+queued.
+
+### Substrate clean-up
+
+When a run ends, Wardby deletes its egress policy, then its actor, then its
+Secret. Each step is tried even when an earlier one fails, so a failed actor
+delete still removes the Secret holding the capability (with the policy gone
+the actor has no network). Wardby records when a run's worker was removed;
+every server process with the sandbox configured sweeps, at startup and every
+minute, the runs that ended or passed their deadline without that record, and
+removes what is left. A failure there logs
+`removing a native sandbox worker failed; the next sweep will retry`.
+
+Old templates are **not** removed automatically: after a change to the image,
+size, gateway URL, deny port or worker selector, the previous
+`wardby-native-<16 hex>` template and its golden snapshot stay in Substrate,
+costing storage. `GET /admin/api/infra` reports the current template under
+`native.substrate.template` ([viewer API](viewer-api.md#get-adminapiinfra));
+delete the others with Substrate's own tooling once no actor uses them.
+
 ## Warm pool
 
 By default every sandbox run starts its own worker, so a run waits for the
@@ -425,6 +656,12 @@ worker to be created and, on Kubernetes, for pod scheduling, the image pull, and
 the in-pod isolation proof. The warm pool keeps a few idle, already-isolated
 workers ready so a run can take one instead. It works with both
 `NATIVE_SANDBOX_LAUNCHER=docker` and `kubernetes`.
+
+The warm pool does not apply to `NATIVE_SANDBOX_LAUNCHER=substrate`, where
+every run resumes from the template's golden snapshot instead (see
+[Start latency](#start-latency)). With that launcher
+`NATIVE_SANDBOX_WARM_POOL_SIZE` must be `0`; a larger value stops the server at
+startup.
 
 ### Enable it
 
@@ -527,26 +764,37 @@ or the server running upkeep is not up.
 
 ## Configuration reference
 
-| Variable                                | Launcher   | Required | Default                                                                                                         | Purpose                                                                                                                                                                                             |
-| --------------------------------------- | ---------- | -------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NATIVE_SANDBOX_LAUNCHER`               | both       | Yes      | unset (sandbox off)                                                                                             | `docker` or `kubernetes`. Independent of `JOB_LAUNCHER`.                                                                                                                                            |
-| `NATIVE_SANDBOX_WORKER_IMAGE`           | both       | Yes      |                                                                                                                 | Pinned worker image. Docker: `repo@sha256:...` or a local image id. Kubernetes: a registry digest `repo@sha256:...` only.                                                                           |
-| `NATIVE_GATEWAY_CONTAINER`              | Docker     | Yes      |                                                                                                                 | Name of the running gateway container the server connects to each run's network.                                                                                                                    |
-| `NATIVE_SANDBOX_NAMESPACE`              | Kubernetes | No       | `KUBERNETES_NAMESPACE`, else `wardby-coding`                                                                    | Namespace for run pods and the gateway.                                                                                                                                                             |
-| `KUBERNETES_CONTEXT`                    | Kubernetes | No       | in-cluster or current context                                                                                   | Kubeconfig context the server uses.                                                                                                                                                                 |
-| `NATIVE_SANDBOX_RUNTIME_CLASS`          | Kubernetes | No       | `KUBERNETES_RUNTIME_CLASS`, else none                                                                           | RuntimeClass for run pods (for example gVisor).                                                                                                                                                     |
-| `NATIVE_GATEWAY_SERVICE`                | Kubernetes | No       | `wardby-native-gateway`                                                                                         | Name of the gateway Service in the run namespace.                                                                                                                                                   |
-| `NATIVE_GATEWAY_URL`                    | both       | No       | Docker: `http://wardby-native-gateway:8790/native-gateway/v1/call`; Kubernetes: the Service's ClusterIP on 8790 | What workers dial. Change only if the gateway is reachable another way. Must be an `http(s)` URL.                                                                                                   |
-| `NATIVE_SANDBOX_CPUS`                   | both       | No       | `1`                                                                                                             | CPU limit per worker (Kubernetes: request and limit).                                                                                                                                               |
-| `NATIVE_SANDBOX_MEMORY_MB`              | both       | No       | `512`                                                                                                           | Memory limit per worker (Docker: swap disabled; Kubernetes: request and limit).                                                                                                                     |
-| `NATIVE_SANDBOX_PIDS`                   | Docker     | No       | `128`                                                                                                           | Process limit per worker. Docker only: Kubernetes has no per-pod process limit.                                                                                                                     |
-| `NATIVE_SANDBOX_MAX_CONCURRENT`         | both       | No       | unset (no cap)                                                                                                  | At most this many sandbox runs at once across all replicas (counts active gateway sessions). A start past it fails with `native_sandbox_capacity`.                                                  |
-| `NATIVE_SANDBOX_WARM_POOL_SIZE`         | both       | No       | `0` (no pool; range 0-50)                                                                                       | Idle, already-isolated workers kept ready for runs to claim. See [Warm pool](#warm-pool). On Kubernetes, size the ResourceQuota for this many extra pods. Must be `0` when `WARDBY_LOW_POWER=1`.    |
-| `NATIVE_SANDBOX_WARM_MAX_AGE_MS`        | both       | No       | `1800000` (range 60000-21600000)                                                                                | An idle pool worker older than this is replaced and never claimed.                                                                                                                                  |
-| `NATIVE_SANDBOX_READY_TIMEOUT_MS`       | Kubernetes | No       | `120000` (range 1000-1800000)                                                                                   | How long a worker pod may take to start running. Use about `600000` on GKE Autopilot, where a cold gVisor node takes about two minutes.                                                             |
-| `NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS` | Kubernetes | No       | `30000` (range 1000-600000)                                                                                     | How long the in-pod isolation proof may take.                                                                                                                                                       |
-| `NATIVE_SANDBOX_PRIORITY_CLASS`         | Kubernetes | No       | `KUBERNETES_RUN_PRIORITY_CLASS`, else none                                                                      | PriorityClass for worker pods. Must not be a `system-` class.                                                                                                                                       |
-| `KUBERNETES_PLATFORM`                   | Kubernetes | No       | none                                                                                                            | `gke-autopilot` conforms worker pod resources to Autopilot's rules and requires the gVisor runtime class; `eks` targets EKS with a gVisor node group and also requires it. Shared with coding runs. |
+| Variable                                   | Launcher           | Required       | Default                                                                                                         | Purpose                                                                                                                                                                                                              |
+| ------------------------------------------ | ------------------ | -------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NATIVE_SANDBOX_LAUNCHER`                  | all                | Yes            | unset (sandbox off)                                                                                             | `docker`, `kubernetes` or `substrate`. Independent of `JOB_LAUNCHER`.                                                                                                                                                |
+| `NATIVE_SANDBOX_WORKER_IMAGE`              | all                | Yes            |                                                                                                                 | Pinned worker image. Docker: `repo@sha256:...` or a local image id. Kubernetes and Substrate: a registry digest `repo@sha256:...` only.                                                                              |
+| `NATIVE_GATEWAY_CONTAINER`                 | Docker             | Yes            |                                                                                                                 | Name of the running gateway container the server connects to each run's network.                                                                                                                                     |
+| `NATIVE_SANDBOX_NAMESPACE`                 | Kubernetes         | No             | `KUBERNETES_NAMESPACE`, else `wardby-coding`                                                                    | Namespace for run pods and the gateway.                                                                                                                                                                              |
+| `KUBERNETES_CONTEXT`                       | Kubernetes         | No             | in-cluster or current context                                                                                   | Kubeconfig context the server uses.                                                                                                                                                                                  |
+| `NATIVE_SANDBOX_RUNTIME_CLASS`             | Kubernetes         | No             | `KUBERNETES_RUNTIME_CLASS`, else none                                                                           | RuntimeClass for run pods (for example gVisor).                                                                                                                                                                      |
+| `NATIVE_GATEWAY_SERVICE`                   | Kubernetes         | No             | `wardby-native-gateway`                                                                                         | Name of the gateway Service in the run namespace.                                                                                                                                                                    |
+| `NATIVE_GATEWAY_URL`                       | all                | Substrate: Yes | Docker: `http://wardby-native-gateway:8790/native-gateway/v1/call`; Kubernetes: the Service's ClusterIP on 8790 | What workers dial. Must be an `http(s)` URL. Substrate: required, `http://` only, and the gateway named by hostname, not an IP address.                                                                              |
+| `NATIVE_SANDBOX_CPUS`                      | all                | No             | `1`                                                                                                             | CPU limit per worker (Kubernetes: request and limit; Substrate: the actor's size).                                                                                                                                   |
+| `NATIVE_SANDBOX_MEMORY_MB`                 | all                | No             | `512`                                                                                                           | Memory limit per worker (Docker: swap disabled; Kubernetes: request and limit; Substrate: the actor's size).                                                                                                         |
+| `NATIVE_SANDBOX_PIDS`                      | Docker             | No             | `128`                                                                                                           | Process limit per worker. Docker only: Kubernetes and Substrate have no per-worker process limit.                                                                                                                    |
+| `NATIVE_SANDBOX_MAX_CONCURRENT`            | all                | No             | unset (no cap)                                                                                                  | At most this many sandbox runs at once across all replicas (counts active gateway sessions). A start past it fails with `native_sandbox_capacity`.                                                                   |
+| `NATIVE_SANDBOX_WARM_POOL_SIZE`            | Docker, Kubernetes | No             | `0` (no pool; range 0-50)                                                                                       | Idle, already-isolated workers kept ready for runs to claim. See [Warm pool](#warm-pool). On Kubernetes, size the ResourceQuota for this many extra pods. Must be `0` when `WARDBY_LOW_POWER=1`, and with Substrate. |
+| `NATIVE_SANDBOX_WARM_MAX_AGE_MS`           | Docker, Kubernetes | No             | `1800000` (range 60000-21600000)                                                                                | An idle pool worker older than this is replaced and never claimed.                                                                                                                                                   |
+| `NATIVE_SANDBOX_READY_TIMEOUT_MS`          | Kubernetes         | No             | `120000` (range 1000-1800000)                                                                                   | How long a worker pod may take to start running. Use about `600000` on GKE Autopilot, where a cold gVisor node takes about two minutes.                                                                              |
+| `NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS`    | Kubernetes         | No             | `30000` (range 1000-600000)                                                                                     | How long the in-pod isolation proof may take.                                                                                                                                                                        |
+| `NATIVE_SANDBOX_PRIORITY_CLASS`            | Kubernetes         | No             | `KUBERNETES_RUN_PRIORITY_CLASS`, else none                                                                      | PriorityClass for worker pods. Must not be a `system-` class.                                                                                                                                                        |
+| `KUBERNETES_PLATFORM`                      | Kubernetes         | No             | none                                                                                                            | `gke-autopilot` conforms worker pod resources to Autopilot's rules and requires the gVisor runtime class; `eks` targets EKS with a gVisor node group and also requires it. Shared with coding runs.                  |
+| `SUBSTRATE_API_URL`                        | Substrate          | Yes            |                                                                                                                 | Substrate Control API URL. Shared with `JOB_LAUNCHER=substrate`.                                                                                                                                                     |
+| `SUBSTRATE_TOKEN_FILE`                     | Substrate          | Yes            |                                                                                                                 | File holding the Substrate API token (audience `api.ate-system.svc`), read on each call. Shared.                                                                                                                     |
+| `SUBSTRATE_ATESPACE`                       | Substrate          | Yes            |                                                                                                                 | The atespace the actors live in (a DNS label). Shared.                                                                                                                                                               |
+| `SUBSTRATE_CREDENTIALS_NAMESPACE`          | Substrate          | No             | `wardby-run-secrets`                                                                                            | Namespace for the per-run Secrets; the credential provider must be able to read it. Shared.                                                                                                                          |
+| `SUBSTRATE_KUBE_CONTEXT`                   | Substrate          | No             | default context                                                                                                 | Kubernetes context used to create and delete the per-run Secrets. Shared.                                                                                                                                            |
+| `SUBSTRATE_CA_FILE`                        | Substrate          | No             | system trust                                                                                                    | CA bundle that verifies the Substrate API's certificate. Shared.                                                                                                                                                     |
+| `SUBSTRATE_SERVER_NAME`                    | Substrate          | No             | from the URL                                                                                                    | TLS server name to verify, when it differs from the host in `SUBSTRATE_API_URL`. Shared.                                                                                                                             |
+| `SUBSTRATE_WORKER_SELECTOR`                | Substrate          | No             | any worker                                                                                                      | Comma-separated `key=value` worker labels for the actors and the room check. Shared.                                                                                                                                 |
+| `NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR` | Substrate          | No             | `SUBSTRATE_WORKER_SELECTOR`                                                                                     | The same, for native actors only, so they can use other workers than coding actors.                                                                                                                                  |
+| `SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC`         | Substrate          | No             | `60` (range 0-600)                                                                                              | How long a run waits for room while a new template's golden snapshot may still be building. See [Start latency](#start-latency).                                                                                     |
+| `NATIVE_GATEWAY_DENY_PORT`                 | Substrate          | No             | `8791` (range 1-65535)                                                                                          | Set on the server only when the gateway's deny port is not the default: the same value as on the gateway. The startup isolation check probes it.                                                                     |
 
 Gateway-side variables (`NATIVE_GATEWAY_LISTEN`, `NATIVE_GATEWAY_DENY_PORT`) are
 set on the gateway, not the server. One exception: with
@@ -562,10 +810,17 @@ the gateway as well as the server.
 ## Limits and deadline
 
 - Each worker is limited by `NATIVE_SANDBOX_CPUS`, `NATIVE_SANDBOX_MEMORY_MB`,
-  and (Docker only) `NATIVE_SANDBOX_PIDS`, with a 64 MiB `/tmp`. Raise the
-  limits if tools run out of memory or processes.
+  and (Docker only) `NATIVE_SANDBOX_PIDS`, with a 64 MiB `/tmp` on Docker and
+  Kubernetes. Raise the limits if tools run out of memory or processes.
+- On Substrate there is no process limit, and `/tmp` is a directory on the
+  actor's own storage rather than a 64 MiB volume: Wardby sets no size for it,
+  so the storage Substrate gives each actor bounds it.
 - A sandbox run has a maximum lifetime of 60 minutes. Past it the worker is
-  stopped and the run fails with `native_sandbox_deadline_exceeded`.
+  stopped and the run fails with `native_sandbox_deadline_exceeded`. On
+  Substrate the actor has no platform deadline of its own (Kubernetes pods get
+  `activeDeadlineSeconds`): the gateway refuses every call after the run's
+  deadline, the server stops the actor, and if no server is watching then,
+  recovery and the clean-up sweep remove it.
 - The agent's own turn and budget limits still apply as for any native agent.
 - Each tool call has the tool's own time limit (`timeoutMs`, default 10
   seconds, capped by `WARDBY_TOOL_MAX_TIMEOUT_MS`). The worker enforces it; the
@@ -649,22 +904,23 @@ because nothing was generated.
 
 ## Failure modes
 
-| Error code                                                                                     | Meaning                                                                                                                                                                                                                                                                                                                                                 | What to do                                                                                                                                       |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`native_sandbox_unavailable`](../help/errors/native-sandbox-unavailable.md)                   | Agent is in `sandbox` mode but the server has no native sandbox. Fails before any spend.                                                                                                                                                                                                                                                                | Configure the sandbox (steps above) or set the agent back to `control-plane`.                                                                    |
-| [`native_sandbox_worker_exited`](../help/errors/native-sandbox-worker-exited.md)               | The worker ended without producing a result.                                                                                                                                                                                                                                                                                                            | Check the tool code and the worker's memory and PID limits; run again.                                                                           |
-| [`native_sandbox_deadline_exceeded`](../help/errors/native-sandbox-deadline-exceeded.md)       | The run passed its 60-minute maximum; the worker was stopped.                                                                                                                                                                                                                                                                                           | Split the work into smaller runs or sub-agents.                                                                                                  |
-| [`native_sandbox_worker_lost`](../help/errors/native-sandbox-worker-lost.md)                   | The worker container or pod disappeared (for example its host or node restarted). It is never relaunched.                                                                                                                                                                                                                                               | Trigger the run again; check the Docker host or node stability.                                                                                  |
-| [`native_sandbox_image_not_pinned`](../help/errors/native-sandbox-image-not-pinned.md)         | `NATIVE_SANDBOX_WORKER_IMAGE` is a mutable tag.                                                                                                                                                                                                                                                                                                         | Use a `repo@sha256:...` digest or a local image id.                                                                                              |
-| [`native_sandbox_docker_failed`](../help/errors/native-sandbox-docker-failed.md)               | A Docker command (pull, network create, connect, run) failed.                                                                                                                                                                                                                                                                                           | Read the message, then check the Docker daemon, image availability, and gateway name.                                                            |
-| [`native_sandbox_network_unenforced`](../help/errors/native-sandbox-network-unenforced.md)     | Kubernetes: the pod's egress isolation could not be proven in time; the pod was removed.                                                                                                                                                                                                                                                                | Check that the CNI enforces NetworkPolicy and the gateway Service exposes 8790 and 8791.                                                         |
-| [`native_sandbox_isolation_mismatch`](../help/errors/native-sandbox-isolation-mismatch.md)     | Kubernetes: the stored pod or NetworkPolicy differs from what Wardby built (an admission change).                                                                                                                                                                                                                                                       | Exempt the run namespace's native-run pods from mutating policies.                                                                               |
-| [`native_sandbox_gateway_unavailable`](../help/errors/native-sandbox-gateway-unavailable.md)   | Kubernetes: the gateway Service is missing or has no ClusterIP.                                                                                                                                                                                                                                                                                         | Create the Service (ClusterIP, not headless) or fix `NATIVE_GATEWAY_SERVICE`.                                                                    |
-| [`native_sandbox_worker_unready`](../help/errors/native-sandbox-worker-unready.md)             | Kubernetes: the worker pod did not reach Running in time.                                                                                                                                                                                                                                                                                               | Check image pull, quotas, and scheduling with `kubectl describe pod`.                                                                            |
-| [`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md)                         | `NATIVE_SANDBOX_MAX_CONCURRENT` runs are already active, or the namespace ResourceQuota is full. Not queued.                                                                                                                                                                                                                                            | Wait and retry, or raise the cap together with the ResourceQuota.                                                                                |
-| [`native_sandbox_warm_delivery_failed`](../help/errors/native-sandbox-warm-delivery-failed.md) | A claimed warm worker could not receive the run's input and could not be confirmed stopped within 30 seconds.                                                                                                                                                                                                                                           | Trigger the run again; check the node or Docker host and pod exec access.                                                                        |
-| [`native_sandbox_requires_catalog`](../help/errors/native-sandbox-requires-catalog.md)         | No model catalog entry was recorded for the run: the process running it does not use the catalog-backed model router.                                                                                                                                                                                                                                   | Run it on a standard `wardby serve`/`scheduler`/`mcp` process, or keep the agent on `control-plane`.                                             |
-| [`native_sandbox_gateway_error`](../help/errors/native-sandbox-gateway-error.md)               | The worker's call to the gateway failed with an error the run could not continue from (`native_sandbox_gateway_error: <code>: <message>`; for `internal`, only `native_sandbox_gateway_error: internal: <cause code>`, never the message; the cause code is one of wardby's declared codes and never one that matches a secret value the run can read). | Read the code and message; for `internal` (`internal: <cause code>` when the gateway named one), read the gateway's logs. Trigger the run again. |
+| Error code                                                                                     | Meaning                                                                                                                                                                                                                                                                                                                                                 | What to do                                                                                                                                                               |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`native_sandbox_unavailable`](../help/errors/native-sandbox-unavailable.md)                   | Agent is in `sandbox` mode but the server has no native sandbox. Fails before any spend.                                                                                                                                                                                                                                                                | Configure the sandbox (steps above) or set the agent back to `control-plane`.                                                                                            |
+| [`native_sandbox_worker_exited`](../help/errors/native-sandbox-worker-exited.md)               | The worker ended without producing a result.                                                                                                                                                                                                                                                                                                            | Check the tool code and the worker's memory and PID limits; run again.                                                                                                   |
+| [`native_sandbox_deadline_exceeded`](../help/errors/native-sandbox-deadline-exceeded.md)       | The run passed its 60-minute maximum; the worker was stopped.                                                                                                                                                                                                                                                                                           | Split the work into smaller runs or sub-agents.                                                                                                                          |
+| [`native_sandbox_worker_lost`](../help/errors/native-sandbox-worker-lost.md)                   | The worker container or pod disappeared (for example its host or node restarted). It is never relaunched.                                                                                                                                                                                                                                               | Trigger the run again; check the Docker host or node stability.                                                                                                          |
+| [`native_sandbox_image_not_pinned`](../help/errors/native-sandbox-image-not-pinned.md)         | `NATIVE_SANDBOX_WORKER_IMAGE` is a mutable tag.                                                                                                                                                                                                                                                                                                         | Use a `repo@sha256:...` digest or a local image id.                                                                                                                      |
+| [`native_sandbox_docker_failed`](../help/errors/native-sandbox-docker-failed.md)               | A Docker command (pull, network create, connect, run) failed.                                                                                                                                                                                                                                                                                           | Read the message, then check the Docker daemon, image availability, and gateway name.                                                                                    |
+| [`native_sandbox_network_unenforced`](../help/errors/native-sandbox-network-unenforced.md)     | Kubernetes: the pod's egress isolation could not be proven in time; the pod was removed. Substrate: the template's startup isolation check did not pass; the message ends with its reason.                                                                                                                                                              | Kubernetes: check that the CNI enforces NetworkPolicy and the gateway Service exposes 8790 and 8791. Substrate: see [Startup isolation check](#startup-isolation-check). |
+| [`native_sandbox_isolation_mismatch`](../help/errors/native-sandbox-isolation-mismatch.md)     | Kubernetes: the stored pod or NetworkPolicy differs from what Wardby built (an admission change).                                                                                                                                                                                                                                                       | Exempt the run namespace's native-run pods from mutating policies.                                                                                                       |
+| [`native_sandbox_gateway_unavailable`](../help/errors/native-sandbox-gateway-unavailable.md)   | Kubernetes: the gateway Service is missing or has no ClusterIP.                                                                                                                                                                                                                                                                                         | Create the Service (ClusterIP, not headless) or fix `NATIVE_GATEWAY_SERVICE`.                                                                                            |
+| [`native_sandbox_worker_unready`](../help/errors/native-sandbox-worker-unready.md)             | Kubernetes: the worker pod did not reach Running in time.                                                                                                                                                                                                                                                                                               | Check image pull, quotas, and scheduling with `kubectl describe pod`.                                                                                                    |
+| [`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md)                         | `NATIVE_SANDBOX_MAX_CONCURRENT` runs are already active, the namespace ResourceQuota is full, or (Substrate) no worker has room, including after the golden-snapshot wait. Not queued.                                                                                                                                                                  | Wait and retry, or raise the cap together with the ResourceQuota (Substrate: the `WorkerPool`).                                                                          |
+| [`native_sandbox_substrate_failed`](../help/errors/native-sandbox-substrate-failed.md)         | Substrate: a Substrate or Secret call of the launch failed (`native_sandbox_substrate_failed: <call>: <code>`, a fixed code, never Substrate's message).                                                                                                                                                                                                | Read the call and code in the help article; check the Substrate API, the egress gateway and the credentials namespace.                                                   |
+| [`native_sandbox_warm_delivery_failed`](../help/errors/native-sandbox-warm-delivery-failed.md) | A claimed warm worker could not receive the run's input and could not be confirmed stopped within 30 seconds.                                                                                                                                                                                                                                           | Trigger the run again; check the node or Docker host and pod exec access.                                                                                                |
+| [`native_sandbox_requires_catalog`](../help/errors/native-sandbox-requires-catalog.md)         | No model catalog entry was recorded for the run: the process running it does not use the catalog-backed model router.                                                                                                                                                                                                                                   | Run it on a standard `wardby serve`/`scheduler`/`mcp` process, or keep the agent on `control-plane`.                                                                     |
+| [`native_sandbox_gateway_error`](../help/errors/native-sandbox-gateway-error.md)               | The worker's call to the gateway failed with an error the run could not continue from (`native_sandbox_gateway_error: <code>: <message>`; for `internal`, only `native_sandbox_gateway_error: internal: <cause code>`, never the message; the cause code is one of wardby's declared codes and never one that matches a secret value the run can read). | Read the code and message; for `internal` (`internal: <cause code>` when the gateway named one), read the gateway's logs. Trigger the run again.                         |
 
 A run's error appears in its `error` field in `get_run` and `list_runs`.
 
@@ -721,6 +977,29 @@ skipped unless its script sets its flag:
   `kubectl get pods -n <namespace> -l wardby.io/component=native-run`.
   The server removes finished pods (with their Secret and NetworkPolicy) and,
   at startup, sweeps leftovers whose runs have ended or passed their deadline.
+- **Substrate: find a run's actor.** A run's actor is `<token>-native`, where
+  the token is `wr-` and the first 20 hex characters of the SHA-256 of the run
+  id:
+  `node -e "console.log('wr-'+require('crypto').createHash('sha256').update(process.argv[1]).digest('hex').slice(0,20)+'-native')" <run-id>`.
+  Look it up in the atespace with Substrate's CLI or Control API. Its Secret in
+  `SUBSTRATE_CREDENTIALS_NAMESPACE` is named by the token and labelled
+  `wardby.dev/substrate-native-run=<token>`. Startup-check actors end in
+  `-canary`.
+- **Substrate: a worker exited non-zero.** The server logs
+  `native worker exited non-zero` with `stderrTailOmitted: "not_available"`:
+  Substrate gives the server no output to tail. The worker's own redacted
+  output is in the actor's log in Substrate.
+- **Substrate: call failures.** Failed Substrate calls log
+  `substrate_call_failed` (module `native-substrate-launcher`) with the run id,
+  the call and a fixed error code, never Substrate's message. A template that
+  could not be prepared at startup logs `native substrate template not prepared`;
+  the next launch tries again.
+- **Substrate: every launch fails after an API-server outage.** Restart
+  Substrate's egress gateway: after the API server was unavailable it can stay
+  unable to apply egress policies until restarted (as for
+  [coding runs](substrate-backend.md#troubleshooting)).
+- **Substrate: old templates.** Templates are never removed automatically; see
+  [Substrate clean-up](#substrate-clean-up).
 - **Kubernetes: gateway health.** `kubectl get deploy,svc,endpoints -n <namespace> wardby-native-gateway`;
   the Service must list ports 8790 and 8791 and have ready endpoints.
 - **Check a run.** Call `get_run` for the run's status and error code, then use

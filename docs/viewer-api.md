@@ -152,7 +152,7 @@ invalid_limit`. Titles are text people wrote: show them as data.
 ### `GET /admin/api/infra`
 
 How this deployment runs coding jobs, for clients that show its Kubernetes
-footprint: `launcher` (`local`, `docker` or `kubernetes`) and, for the
+footprint: `launcher` (`local`, `docker`, `kubernetes` or `substrate`) and, for the
 Kubernetes launcher, the namespace, the platform (`KUBERNETES_PLATFORM`), the
 runtime class (or `null`), the coding proxy's Service name, and the labels on
 coding-run pods. `runLabel` holds the first `runLabelHashChars` hex characters
@@ -161,13 +161,20 @@ knows. The response never includes credentials, the server's kube context, or
 image references. `kubernetes` is `null` for the other launchers.
 
 `native` describes how sandbox-mode native agents run, and is `null` when
-`NATIVE_SANDBOX_LAUNCHER` is unset: `launcher` (`docker` or `kubernetes`),
+`NATIVE_SANDBOX_LAUNCHER` is unset: `launcher` (`docker`, `kubernetes` or `substrate`),
 `warmPoolSize` (`NATIVE_SANDBOX_WARM_POOL_SIZE`), and for Kubernetes the
 namespace their pods run in, the runtime class (or `null`), and the labels on
 their pods: `componentLabel` on every sandbox pod, `runLabel` (the same run-id
 hash as coding runs) on a run's own pod, and `warmPoolLabel` plus the
 `warmWorkerLabel` key on warm pool pods, which have no run label even after a
-run claims them.
+run claims them. `kubernetes` is `null` for the other launchers.
+
+`native.substrate` is `null` unless `launcher` is `substrate` (Wardby 0.10.1 and
+later), when it holds `atespace` (`SUBSTRATE_ATESPACE`) and `template`, the
+name of the Substrate actor template that runs use now. Templates from earlier
+settings are not removed automatically, so a client can use `template` to tell
+the current one from old ones. Older servers leave `substrate` out: treat a
+missing field as `null`.
 
 ### `GET /admin/api/events`
 

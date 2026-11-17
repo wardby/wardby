@@ -206,6 +206,7 @@ const INTERNAL_ENV: Record<string, string> = {
   WARDBY_UV_SHIM_ACTIVE: "the uv shim's marker that it is already running (nested runs)",
   NATIVE_WORKER_INPUT_FILE: "set by the native sandbox launcher for the worker it starts",
   NATIVE_WORKER_INPUT_WAIT_MS: "set by the native sandbox launcher for a warm-pool worker",
+  WARDBY_NATIVE_SUBSTRATE: "set by the Substrate native launcher on the worker template it creates",
   WARDBY_CANARY_PROXY_IP: "set by the Kubernetes preflight for its own canary pod",
   WARDBY_DOCKER_SEED_DEBUG: "test-only: read only when NODE_ENV=test",
   WARDBY_MERGE_STATE_MSG: "not a variable: the name of a file in a git directory",

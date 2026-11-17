@@ -652,6 +652,18 @@ A run with coding services is not offered for keeping at all: its actors are
 removed when it finishes, as with warm rounds off, and its next round starts
 fresh with empty services.
 
+## Native agents
+
+Sandbox-mode native agents can run on Substrate too, with
+`NATIVE_SANDBOX_LAUNCHER=substrate` (experimental, Wardby 0.10.1 and later).
+It is a separate setting from `JOB_LAUNCHER`, and reads the same `SUBSTRATE_*`
+connection variables, so coding and native runs share one atespace and
+credentials namespace (`NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR` can put
+native actors on other workers). Each native run is one actor resumed from a
+golden snapshot, whose only destination is the native gateway; it needs no
+coding proxy, blob store or bridge image. See
+[Set up with Agent Substrate](native-sandbox.md#set-up-with-agent-substrate-experimental).
+
 ## What is not supported
 
 - Suspend and resume between rounds is off by default: every round starts new
