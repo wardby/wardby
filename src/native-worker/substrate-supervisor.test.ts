@@ -8,7 +8,9 @@ import {
   EXIT_REPORT_ATTEMPTS,
   exitCodeOf,
   reportExit,
+  resetSupervisionForTest,
   SPAWN_FAILED_CODE,
+  superviseCrashed,
   superviseOnce,
   type SupervisorOptions,
 } from "./substrate-supervisor.js";
@@ -190,5 +192,39 @@ describe("reportExit", () => {
     const h = harness({ status: [0, 200] });
     expect(await reportExit(EXIT_URL, 3, h.options)).toBe("reported");
     expect(h.requests).toHaveLength(2);
+  });
+});
+
+describe("superviseCrashed", () => {
+  /** superviseCrashed never resolves: gives it a moment, then reports what it did. */
+  async function crash(h: ReturnType<typeof harness>) {
+    const outcome = await Promise.race([
+      superviseCrashed(h.options).then(() => "resolved"),
+      new Promise<string>((wait) => setTimeout(() => wait("idle"), 50)),
+    ]);
+    return outcome;
+  }
+
+  it("logs one fixed line, reports code 1 when the worker is gone, then idles", async () => {
+    resetSupervisionForTest({ childGone: true });
+    const h = harness();
+    expect(await crash(h)).toBe("idle");
+    expect(h.lines).toEqual(["native sandbox supervisor failed\n"]);
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0].url).toBe(EXIT_URL);
+    expect(h.requests[0].init?.body).toBe(JSON.stringify({ code: 1 }));
+    expect(JSON.stringify([h.lines, h.requests])).not.toContain(FAKE_SECRET);
+  });
+
+  it("reports nothing while the worker still runs, or once a report was begun", async () => {
+    resetSupervisionForTest({ childGone: false });
+    const running = harness();
+    expect(await crash(running)).toBe("idle");
+    expect(running.requests).toHaveLength(0);
+    resetSupervisionForTest({ childGone: true, reportStarted: true });
+    const reported = harness();
+    expect(await crash(reported)).toBe("idle");
+    expect(reported.requests).toHaveLength(0);
+    resetSupervisionForTest();
   });
 });

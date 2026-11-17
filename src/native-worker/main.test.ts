@@ -591,12 +591,16 @@ describe("warm input delivery", () => {
 
 describe("native worker entry in substrate mode", () => {
   /** Imports main.ts in process with substrate mode stubbed, under `env`; returns the stubs' calls. */
-  async function mainInProcess(env: Record<string, string>) {
-    const runSubstrateMode = vi.fn(async () => ({ server: {} }));
-    const superviseSubstrateWorker = vi.fn(() => new Promise<never>(() => {}));
+  async function mainInProcess(
+    env: Record<string, string>,
+    stubs: { supervise?: () => Promise<never>; runMode?: () => Promise<unknown> } = {},
+  ) {
+    const runSubstrateMode = vi.fn(stubs.runMode ?? (async () => ({ server: {} })));
+    const superviseSubstrateWorker = vi.fn(stubs.supervise ?? (() => new Promise<never>(() => {})));
+    const superviseCrashed = vi.fn(() => new Promise<never>(() => {}));
     vi.resetModules();
     vi.doMock("./substrate-mode.js", () => ({ NATIVE_SUBSTRATE_ENV: "WARDBY_NATIVE_SUBSTRATE", runSubstrateMode }));
-    vi.doMock("./substrate-supervisor.js", () => ({ superviseSubstrateWorker }));
+    vi.doMock("./substrate-supervisor.js", () => ({ superviseSubstrateWorker, superviseCrashed }));
     vi.doMock("./stderr-redaction.js", () => ({
       installStderrRedaction: () => {},
       flushStderrRedaction: () => {},
@@ -612,7 +616,9 @@ describe("native worker entry in substrate mode", () => {
     try {
       await import("./main.js");
       await new Promise((wait) => setTimeout(wait, 300));
-      return { runSubstrateMode, superviseSubstrateWorker, exit };
+      // Read before mockRestore (in finally) clears the calls.
+      const exitCalls = exit.mock.calls.map((call) => call[0]);
+      return { runSubstrateMode, superviseSubstrateWorker, superviseCrashed, exitCalls };
     } finally {
       for (const [key, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[key];
@@ -633,19 +639,39 @@ describe("native worker entry in substrate mode", () => {
   }
 
   it("idles after a successful run instead of exiting (the supervised worker)", async () => {
-    const { runSubstrateMode, superviseSubstrateWorker, exit } = await mainInProcess({
+    const { runSubstrateMode, superviseSubstrateWorker, exitCalls } = await mainInProcess({
       WARDBY_NATIVE_SUBSTRATE: "1",
       WARDBY_NATIVE_SUPERVISED: "1",
     });
     expect(runSubstrateMode).toHaveBeenCalledTimes(1);
     expect(superviseSubstrateWorker).not.toHaveBeenCalled();
-    expect(exit).not.toHaveBeenCalled();
+    expect(exitCalls).toEqual([]);
   });
 
   it("as PID 1 in substrate mode, only supervises: the worker runs in its child", async () => {
-    const { runSubstrateMode, superviseSubstrateWorker, exit } = await mainInProcess({ WARDBY_NATIVE_SUBSTRATE: "1" });
+    const { runSubstrateMode, superviseSubstrateWorker, exitCalls } = await mainInProcess({
+      WARDBY_NATIVE_SUBSTRATE: "1",
+    });
     expect(superviseSubstrateWorker).toHaveBeenCalledTimes(1);
     expect(runSubstrateMode).not.toHaveBeenCalled();
-    expect(exit).not.toHaveBeenCalled();
+    expect(exitCalls).toEqual([]);
+  });
+
+  it("as PID 1, an unexpected supervisor error is handled by the supervisor and never exits", async () => {
+    const { superviseCrashed, exitCalls } = await mainInProcess(
+      { WARDBY_NATIVE_SUBSTRATE: "1" },
+      { supervise: () => Promise.reject(new Error("boom with detail")) },
+    );
+    expect(superviseCrashed).toHaveBeenCalledTimes(1);
+    expect(exitCalls).toEqual([]);
+  });
+
+  it("as the supervised worker, an unexpected error still exits 1", async () => {
+    const { superviseCrashed, exitCalls } = await mainInProcess(
+      { WARDBY_NATIVE_SUBSTRATE: "1", WARDBY_NATIVE_SUPERVISED: "1" },
+      { runMode: () => Promise.reject(new Error("boom")) },
+    );
+    expect(superviseCrashed).not.toHaveBeenCalled();
+    expect(exitCalls).toEqual([1]);
   });
 });

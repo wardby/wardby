@@ -517,7 +517,7 @@ native runs do not use:
   `20261128000000_native_gateway_worker_removed` (used by every launcher; it
   records when a run's worker was removed),
   `20261128000001_native_substrate_canary` (the startup check's results, written
-  by the gateway) and `20261129000000_native_substrate_canary_capability` (the
+  by the gateway), `20261129000000_native_substrate_canary_capability` (the
   hash of each check's one-use capability) and
   `20261129000001_native_gateway_worker_exit` (a Substrate worker's exit code,
   reported by its supervisor). Then start the new gateway, then the new server.
@@ -656,9 +656,11 @@ measure them on your own cluster.
 `NATIVE_SANDBOX_MAX_CONCURRENT` caps sandbox runs across all server replicas as
 on the other launchers. Before creating anything, Wardby also checks that a
 Substrate worker matching the worker selector has free CPU and memory for the
-actor's size; if none has, the run fails at once with
+actor's size; if none has, the run fails with
 [`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md). It is not
-queued.
+queued. On a new worker template the check runs after the template's snapshot
+build and startup check (tens of seconds), so a size that fits no worker is
+reported only then; later runs fail without that wait.
 
 ### Substrate clean-up
 
@@ -844,6 +846,10 @@ the gateway as well as the server.
 - On Substrate there is no process limit, and `/tmp` is a directory on the
   actor's own storage rather than a 64 MiB volume: Wardby sets no size for it,
   so the storage Substrate gives each actor bounds it.
+- Each Substrate actor runs two Node processes: a supervisor (PID 1, which
+  reports the worker's exit) and the worker itself. Together they use roughly
+  140 to 215 MB, so a 512 MiB template leaves modest room for tools; raise
+  `NATIVE_SANDBOX_MEMORY_MB` if they need more.
 - A sandbox run has a maximum lifetime of 60 minutes. Past it the worker is
   stopped and the run fails with `native_sandbox_deadline_exceeded`. On
   Substrate the actor has no platform deadline of its own (Kubernetes pods get
@@ -1031,7 +1037,9 @@ skipped unless its script sets its flag:
   output is in the actor's log in Substrate, followed by the supervisor's line
   `native sandbox worker exited: code <n>, exit <outcome>`. The outcome is
   `reported` (the gateway recorded it, which logs
-  `native worker exit reported` with the run id and code), `refused`,
+  `native worker exit reported` with the run id and code), `refused` (the
+  gateway answered but declined the report, for example because the run's
+  capability was not valid; it is not retried),
   `unreported` (the gateway could not be reached after four tries: the run
   ends at its deadline instead), or `skipped` (a startup check actor, or no
   `NATIVE_GATEWAY_URL`).

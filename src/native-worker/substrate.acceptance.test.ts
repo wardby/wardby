@@ -52,6 +52,8 @@ async function until<T>(done: () => Promise<T | undefined>, timeoutMs: number): 
 
 describe.skipIf(!enabled)("native sandbox on Substrate (acceptance, launcher only)", () => {
   const launched: string[] = [];
+  /** Run ids the launcher asked for a recorded exit of (none is ever recorded for a refused worker). */
+  const recordedExitQueries: string[] = [];
   let api: SubstrateApi;
   let config: NativeSubstrateLaunchConfig;
   let kubeContext: string | undefined;
@@ -117,9 +119,14 @@ describe.skipIf(!enabled)("native sandbox on Substrate (acceptance, launcher onl
         api,
         secrets: new ClientNodeKubernetesApi({ context: kubeContext }),
         config,
-        // No session exists for these runs.
+        // The gateway refuses a worker holding an unknown capability: no session ever exists for these runs.
         sessionActive: async () => false,
-        workerExits: { exitCode: async () => undefined },
+        workerExits: {
+          exitCode: async (id: string) => {
+            recordedExitQueries.push(id);
+            return undefined;
+          },
+        },
         goldenWaitMs: GOLDEN_TIMEOUT_MS,
         canaries,
       });
@@ -148,19 +155,27 @@ describe.skipIf(!enabled)("native sandbox on Substrate (acceptance, launcher onl
   );
 
   it.skipIf(!CANARY_DATABASE_URL)(
-    "a worker with an unknown capability reaches the gateway, is refused, and crashes",
+    "a worker with an unknown capability is refused by the gateway, and its actor and Secret are removed",
     async () => {
       const runId = `nsub-${randomBytes(4).toString("hex")}`;
       launched.push(runId);
       await launcher.launch(input(runId));
+      const token = substrateRunToken(runId);
+      // The actor exists after launch (the launcher created it with its Secret).
+      expect(await api.getActor(config.atespace, nativeActorName(token))).toBeDefined();
+      expect(secretStatus(token)).toBe(0);
+      // The gateway refused the capability, so it never opened a session for this run: inspect (which
+      // reads the session as well as the actor) reaches exited, and no exit code was ever recorded
+      // (the supervisor's report is refused too), so the state is the session-ended exit 0, never a
+      // running worker.
       const state = await until(async () => {
         const s = await launcher.inspect(runId);
         return s.state === "exited" ? s : undefined;
       }, REFUSED_TIMEOUT_MS);
-      expect(state).toEqual({ state: "exited", exitCode: 1 });
+      expect(state).toEqual({ state: "exited", exitCode: 0 });
+      expect(recordedExitQueries.filter((id) => id === runId).length).toBeGreaterThan(0);
 
       await launcher.remove(runId);
-      const token = substrateRunToken(runId);
       expect(await api.getActor(config.atespace, nativeActorName(token))).toBeUndefined();
       // Only the exit status is looked at.
       expect(secretStatus(token)).not.toBe(0);

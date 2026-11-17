@@ -36,6 +36,9 @@ const EXIT_REPORT_TIMEOUT_MS = 10_000;
 /** The code reported when the child could not be started at all. */
 export const SPAWN_FAILED_CODE = 127;
 
+/** What a crash handler needs to know about the one supervision in this process. */
+const supervision = { childGone: false, reportStarted: false };
+
 const RUN_ACTOR = new RegExp(`^${RUN_TOKEN_PATTERN.source.slice(1, -1)}${NATIVE_SUFFIX}$`);
 
 export type ExitReport = "reported" | "refused" | "unreported" | "skipped";
@@ -142,7 +145,10 @@ export async function superviseOnce(options: SupervisorOptions): Promise<{ code:
       resolve(value);
     };
     child.once("error", () => settle(SPAWN_FAILED_CODE));
-    child.once("exit", (exitCode, signal) => settle(exitCodeOf(exitCode, signal)));
+    child.once("exit", (exitCode, signal) => {
+      supervision.childGone = true;
+      settle(exitCodeOf(exitCode, signal));
+    });
     // PID 1 gets no default signal handling: pass a stop on to the worker.
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
       signals.on(signal, () => {
@@ -150,11 +156,13 @@ export async function superviseOnce(options: SupervisorOptions): Promise<{ code:
       });
     }
   });
+  supervision.childGone = true;
   const url = exitUrl(options.env);
-  const report: ExitReport =
-    url && (await isRunActor(options.metadataDir ?? DEFAULT_METADATA_DIR))
-      ? await reportExit(url, code, options)
-      : "skipped";
+  let report: ExitReport = "skipped";
+  if (url && (await isRunActor(options.metadataDir ?? DEFAULT_METADATA_DIR))) {
+    supervision.reportStarted = true;
+    report = await reportExit(url, code, options);
+  }
   (options.write ?? ((line: string) => void process.stderr.write(line)))(
     `native sandbox worker exited: code ${code}, exit ${report}\n`,
   );
@@ -167,4 +175,30 @@ export async function superviseSubstrateWorker(options: SupervisorOptions): Prom
   // Nothing else keeps the event loop alive once the child is gone.
   setInterval(() => {}, 2 ** 30);
   return new Promise<never>(() => {});
+}
+
+/**
+ * An unexpected error in the supervisor itself (PID 1): never exits, which would end the actor
+ * without a report. Writes one fixed line (no error text), reports exit code 1 when the worker is
+ * already gone and no report was begun, then idles like after a normal report. Never resolves.
+ */
+export async function superviseCrashed(options: SupervisorOptions): Promise<never> {
+  try {
+    (options.write ?? ((line: string) => void process.stderr.write(line)))("native sandbox supervisor failed\n");
+    const url = exitUrl(options.env);
+    if (supervision.childGone && !supervision.reportStarted && url) {
+      supervision.reportStarted = true;
+      if (await isRunActor(options.metadataDir ?? DEFAULT_METADATA_DIR)) await reportExit(url, 1, options);
+    }
+  } catch {
+    // Nothing more to do: idle.
+  }
+  setInterval(() => {}, 2 ** 30);
+  return new Promise<never>(() => {});
+}
+
+/** Test seam: forgets the recorded supervision state. */
+export function resetSupervisionForTest(state: { childGone?: boolean; reportStarted?: boolean } = {}): void {
+  supervision.childGone = state.childGone ?? false;
+  supervision.reportStarted = state.reportStarted ?? false;
 }

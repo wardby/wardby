@@ -18,7 +18,7 @@ import { createHttpTransport } from "./http-transport.js";
 import { createStdioTransport } from "./stdio.js";
 import { flushStderrRedaction, installStderrRedaction, rememberSecretValue } from "./stderr-redaction.js";
 import { NATIVE_SUBSTRATE_ENV, runSubstrateMode } from "./substrate-mode.js";
-import { superviseSubstrateWorker } from "./substrate-supervisor.js";
+import { superviseCrashed, superviseSubstrateWorker } from "./substrate-supervisor.js";
 import { WARM_WORKER_UNCLAIMED_EXIT } from "./warm-delivery.js";
 import { runNativeWorker } from "./worker.js";
 
@@ -92,7 +92,15 @@ async function main(): Promise<void> {
   await runNativeWorker(input, transport);
 }
 
-const fail = (err: unknown): never => {
+const isSupervisor = (): boolean =>
+  process.env[NATIVE_SUBSTRATE_ENV] === "1" && process.env[NATIVE_SUPERVISED_ENV] !== "1";
+
+const fail = (err: unknown): never | void => {
+  if (isSupervisor()) {
+    // PID 1 must not exit: that would end the actor without a report. The error's text is not logged.
+    void superviseCrashed({ env: process.env, entry: process.argv[1] ?? "" });
+    return;
+  }
   // Anything still buffered for its line's end goes out first, so the failure line stands alone.
   flushStderrRedaction();
   if (err instanceof UnclaimedError) {

@@ -115,7 +115,7 @@ export function nativeEgress(token: string, config: NativeSubstrateLaunchConfig)
   ];
 }
 
-/** The label every startup canary's Secret carries (value: the canary's actor name), for a sweep to find them. */
+/** The label every startup canary's Secret carries (value: the canary's actor name), to tie a Secret to its actor. The sweep works from the canary rows, not this label. */
 export const NATIVE_CANARY_SECRET_LABEL = "wardby.dev/substrate-native-canary";
 
 /**
