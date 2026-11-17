@@ -514,12 +514,12 @@ native runs do not use:
   passes even when a run's egress policy is too broad.
 - This release's migrations, applied with `prisma migrate deploy`
   (`npm run prisma:migrate`) before the new gateway and server start:
-  `20261128000000_native_gateway_worker_removed` (used by every launcher; it
+  `20261130000000_native_gateway_worker_removed` (used by every launcher; it
   records when a run's worker was removed),
-  `20261128000001_native_substrate_canary` (the startup check's results, written
-  by the gateway), `20261129000000_native_substrate_canary_capability` (the
+  `20261130000001_native_substrate_canary` (the startup check's results, written
+  by the gateway), `20261130000002_native_substrate_canary_capability` (the
   hash of each check's one-use capability) and
-  `20261129000001_native_gateway_worker_exit` (a Substrate worker's exit code,
+  `20261130000003_native_gateway_worker_exit` (a Substrate worker's exit code,
   reported by its supervisor). Then start the new gateway, then the new server.
 
 ### Configure the server for Substrate

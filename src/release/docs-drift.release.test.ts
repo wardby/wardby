@@ -114,7 +114,7 @@ const KNOWN_UNDOCUMENTED_CODES = new Set<string>([
   ...["ci_pending", "unknown_tool", "host_api_error"],
   // Issue-tracker tool errors (jira_*).
   ...["project_not_linked", "transition_not_allowed", "field_not_allowed", "link_type_not_allowed"],
-  ...["tracker_not_configured", "invalid_link_type", "not_available", "issue_type_not_allowed"],
+  ...["tracker_not_configured", "invalid_link_type", "issue_type_not_allowed"],
   ...["issue_cap_reached", "invalid_jql", "tracker_not_found", "not_own_comment", "field_not_editable"],
   ...["tracker_api_error"],
   // Delegate tool errors (delegate_to_*).
@@ -207,6 +207,7 @@ const INTERNAL_ENV: Record<string, string> = {
   NATIVE_WORKER_INPUT_FILE: "set by the native sandbox launcher for the worker it starts",
   NATIVE_WORKER_INPUT_WAIT_MS: "set by the native sandbox launcher for a warm-pool worker",
   WARDBY_NATIVE_SUBSTRATE: "set by the Substrate native launcher on the worker template it creates",
+  WARDBY_NATIVE_SUPERVISED: "set by the Substrate supervisor on the worker child it starts",
   WARDBY_CANARY_PROXY_IP: "set by the Kubernetes preflight for its own canary pod",
   WARDBY_CAPABILITY_HEADER: "set by the Substrate bridges for the coding worker they start (credential mode)",
   WARDBY_REGISTRY_TOKEN: "set by the Substrate bridges for the coding worker they start (package registry)",
