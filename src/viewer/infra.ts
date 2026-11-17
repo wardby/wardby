@@ -1,4 +1,6 @@
 /** The read model behind GET /admin/api/infra (docs/viewer-api.md): built once at startup, no cluster reads. */
+import { launchConfigOf } from "../native-worker/composition.js";
+import { nativeTemplate } from "../native-worker/substrate-specs.js";
 import { loadKubernetesJobConfig, loadNativeSandboxConfig, loadProviderConfig } from "../config/providers.js";
 import {
   NATIVE_RUN_COMPONENT_LABEL,
@@ -53,6 +55,10 @@ function buildNativeInfo(env: NodeJS.ProcessEnv): InfraInfo["native"] {
             warmPoolLabel: { ...NATIVE_WARM_POOL_LABEL },
             warmWorkerLabel: NATIVE_WARM_TOKEN_LABEL,
           }
+        : null,
+    substrate:
+      config.launcher === "substrate"
+        ? { atespace: config.substrate.atespace, template: nativeTemplate(launchConfigOf(config)).name }
         : null,
   };
 }

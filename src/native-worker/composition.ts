@@ -3,7 +3,7 @@
  * or nothing when the native sandbox is not configured — sandbox-mode runs then fail closed.
  */
 
-import { loadNativeSandboxConfig } from "../config/providers.js";
+import { loadNativeSandboxConfig, type SubstrateNativeSandboxConfig } from "../config/providers.js";
 import { DISABLED_POWER, type Power } from "../core/power.js";
 import { lowPowerActive } from "../core/power-composition.js";
 import type { NativeRunProviders, RunnerDb } from "../core/runner.js";
@@ -19,8 +19,23 @@ import type { SubstrateApi } from "../providers/substrate/api.js";
 import { createSubstrateApiFor } from "../providers/substrate/composition.js";
 import { PrismaNativeCanaryStore, type NativeCanaryDb } from "./substrate-canary-store.js";
 import { SubstrateNativeWorkerLauncher } from "./substrate-launcher.js";
+import { type NativeSubstrateLaunchConfig } from "./substrate-specs.js";
 import { PooledWorkerLauncher, type WarmWorkerLauncher } from "./warm-pool.js";
 import { PrismaWarmPoolLedger, type WarmPoolDb } from "./warm-pool-ledger.js";
+
+/** The Substrate launcher's settings for a loaded NATIVE_SANDBOX_* config (the viewer names the template from the same mapping). */
+export function launchConfigOf(config: SubstrateNativeSandboxConfig): NativeSubstrateLaunchConfig {
+  return {
+    atespace: config.substrate.atespace,
+    credentialsNamespace: config.substrate.credentialsNamespace,
+    image: config.workerImage,
+    gatewayUrl: config.gatewayUrl,
+    cpus: config.cpus,
+    memoryMb: config.memoryMb,
+    denyPort: config.denyPort,
+    ...(config.substrate.workerSelector ? { workerSelector: config.substrate.workerSelector } : {}),
+  };
+}
 
 export function buildNativeSandboxExecutor(options: {
   db: RunnerDb & GatewayLedgerDb & WarmPoolDb & NativeCanaryDb;
@@ -76,16 +91,7 @@ export function buildNativeSandboxExecutor(options: {
         : new SubstrateNativeWorkerLauncher({
             api: options.substrateApi ?? createSubstrateApiFor(config.substrate),
             secrets: options.kubernetesApi ?? new ClientNodeKubernetesApi({ context: config.substrate.kubeContext }),
-            config: {
-              atespace: config.substrate.atespace,
-              credentialsNamespace: config.substrate.credentialsNamespace,
-              image: config.workerImage,
-              gatewayUrl: config.gatewayUrl,
-              cpus: config.cpus,
-              memoryMb: config.memoryMb,
-              denyPort: config.denyPort,
-              ...(config.substrate.workerSelector ? { workerSelector: config.substrate.workerSelector } : {}),
-            },
+            config: launchConfigOf(config),
             // The worker idles after its finish: the session's status is how its exit is seen.
             sessionActive: async (runId) =>
               (await options.db.nativeGatewaySession.findUnique({ where: { runId }, select: { status: true } }))

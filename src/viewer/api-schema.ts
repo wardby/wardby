@@ -288,6 +288,8 @@ export const InfraInfoSchema = z.object({
           warmWorkerLabel: z.string(),
         })
         .nullable(),
+      /** NATIVE_SANDBOX_LAUNCHER=substrate: the atespace and the worker template's name; null otherwise. */
+      substrate: z.object({ atespace: z.string(), template: z.string() }).nullable(),
     })
     .nullable(),
 });

@@ -132,12 +132,36 @@
                       "type": "null"
                     }
                   ]
+                },
+                "substrate": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "atespace": {
+                          "type": "string"
+                        },
+                        "template": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "atespace",
+                        "template"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
               },
               "required": [
                 "launcher",
                 "warmPoolSize",
-                "kubernetes"
+                "kubernetes",
+                "substrate"
               ],
               "additionalProperties": false
             },

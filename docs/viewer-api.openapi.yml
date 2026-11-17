@@ -1636,10 +1636,24 @@ components:
                         - warmWorkerLabel
                       additionalProperties: false
                     - type: "null"
+                substrate:
+                  anyOf:
+                    - type: object
+                      properties:
+                        atespace:
+                          type: string
+                        template:
+                          type: string
+                      required:
+                        - atespace
+                        - template
+                      additionalProperties: false
+                    - type: "null"
               required:
                 - launcher
                 - warmPoolSize
                 - kubernetes
+                - substrate
               additionalProperties: false
             - type: "null"
       required:
