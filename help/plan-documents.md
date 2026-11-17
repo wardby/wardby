@@ -46,6 +46,21 @@ Set it with `update_agent` (or `create_agent`) on a coding agent you own:
 
 `planDocument: null` turns it off.
 
+`create_agent` and `update_agent` check the setting when it is saved, and refuse
+it with:
+
+- `plan_reviewer_invalid`: a reviewer or the final approver does not exist, or
+  can't read the agent.
+- `plan_builder_invalid`: the builder is not a coding agent with
+  `buildFromPlan`; the planner's owner can't execute the builder or give it a
+  task; or the builder's owner can't execute the planner.
+- `plan_settings_invalid`: the setting could not be checked.
+
+With `create_agent` the agent is new, so nobody else has access to it yet: only
+you (its owner) can be a reviewer or the final approver, and the builder must be
+one you own. Add other reviewers, or a builder someone else owns, with
+`update_agent` after you share the planner with them.
+
 ## The plan number
 
 The plan number is the issue number when the run came from an issue or a comment
@@ -84,11 +99,15 @@ files in all. Over a limit, nothing is published
 
 Each document is submitted for review to the reviewers and approved on its own
 page ([Review and approve documents](document-review.md)). Sending comment
-threads to the agent ([Comment threads and agents](comment-threads-and-agents.md))
-starts the plan's own planner with the current version of every document still
-in the plan (not removed) in the plan folder. Only a document the planner changed, and nobody edited meanwhile, gets a
-new version; the others go through the usual reconcile. A reply to a revision
-never quotes the plan's text.
+threads to the agent
+([Comment threads and agents](comment-threads-and-agents.md)) starts the plan's
+own planner with the current version of every document still in the plan (not
+removed) in the plan folder. Only a document the planner changed, and nobody
+edited meanwhile, gets a new version; the others go through the usual reconcile.
+A reply to a revision never quotes the plan's text. This applies to a plan
+stored in Wardby: a document of a plan stored in the repository, or any other
+document linked to a planner, is edited like any linked document (an ordinary
+run on its file).
 
 ## The plan bar and links
 
@@ -118,8 +137,11 @@ A coding agent with `buildFromPlan: true` builds from an approved plan.
 
 ### The gate
 
-Each run of the builder looks up the plan for its repository and plan number
-(the issue number, or `planNumber` on a lead's delegate call):
+Each run of the builder that has an issue or a `planNumber` looks up the plan for
+its repository and plan number (the issue number, or `planNumber` on a lead's
+delegate call). A builder run with neither is not checked against any plan: a
+lead that delegates a build with no issue must pass `planNumber`, or the build
+is not gated.
 
 - Only a plan whose planner the builder's owner can execute counts. When several
   such plans share the repository and number, the newest one is used. The
@@ -152,16 +174,16 @@ approved. The planner's `onApproved` decides what happens:
 - `notify` (the default): Wardby posts "Plan N approved" on the plan's issue with
   the document versions. On GitHub the notice ends with a hint: comment
   `@<handle> build ticket <t>` to build.
-- `build`, with `builderAgentId`: Wardby checks the builder again and starts
-  ticket 1, recorded as started by the person whose approval completed the plan.
-  The issue gets "Plan N approved", then "building ticket 1". When the builder
-  can no longer build it, nothing starts and the notice says
-  `plan_builder_invalid`. When `plan.md` has no `## Tickets` section, nothing
-  starts and the notice says so.
+- `build`, with `builderAgentId`: on the plan's first approval, Wardby checks
+  the builder again and starts ticket 1, recorded as started by the person whose
+  approval completed the plan. The issue gets "Plan N approved", then "building
+  ticket 1". When the builder can no longer build it, nothing starts and the
+  notice says `plan_builder_invalid`. When `plan.md` has no `## Tickets`
+  section, nothing starts and the notice says so.
 
 The builder can no longer build when it is not a coding agent with
-`buildFromPlan`, or when the planner's owner can no longer execute it or give it
-a task.
+`buildFromPlan`, when the planner's owner can no longer execute it or give it a
+task, or when the builder's owner can no longer execute the planner.
 
 Reopening a document ends the approval. A later approval fires again.
 
@@ -185,8 +207,15 @@ tickets run one after another:
   - the next ticket does not start: the start fails (`start_failed`), the
     builder can no longer build (`plan_builder_invalid`), or the start is
     refused (its refusal code, such as `plan_not_approved`).
-- Reopening a document stops the chain before its next ticket (`reopened`),
-  without a notice.
+- Reopening a document stops the chain before its next ticket (`reopened`).
+  The issue gets "Plan N: a document was reopened; the build stops after ticket
+  t." The ticket run already going finishes, but its merge starts nothing.
+
+Only a plan's first approval starts the chain. When a plan whose chain ran
+before (stopped, reopened, or finished) is approved again, nothing starts: the
+notice names the ticket to build next (on GitHub, as a `build ticket <t>` hint),
+and after a finished chain it asks for any ticket. Use `build ticket <t>` to
+start again.
 
 On GitHub, the notice for a run or pull request that stopped the chain ends with
 a hint to continue with `build ticket <t>`.
@@ -221,7 +250,8 @@ trigger `comment`.
 
 ## Images and upgrades
 
-- A Codex worker needs an image built on `driver-v37` or later; a Claude Code
+- Planner, revision and builder runs (any run that writes or gets plan files)
+  need a Codex worker image built on `driver-v37` or later; a Claude Code
   `workerImageRef` tool runner must come from the current release. See
   [Build a worker image](build-worker-image.md) and
   [`coding-worker-byo-images.md`](../docs/coding-worker-byo-images.md#plan-documents-need-a-current-driver-and-tool-runner).

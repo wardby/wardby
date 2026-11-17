@@ -272,7 +272,8 @@ names here are examples: `planner`, `builder` and `delivery-lead` on
    approved, and each merged ticket starts the next. Use `"notify"`, still with
    `builderAgentId`, to get a notice instead, and start each ticket by
    commenting `@<app-slug> build ticket <t>` on the issue (GitHub only). The
-   planner's owner must be able to execute the builder.
+   planner's owner must be able to execute the builder, and the builder's owner
+   must be able to execute the planner.
 
 3. Without a lead, link the planner with `link_repository` (`access: "write"`,
    `triggers: ["mention"]`), so an `@<app-slug>` request on an issue starts it.
@@ -287,7 +288,9 @@ names here are examples: `planner`, `builder` and `delivery-lead` on
      number."
 
    A delegation from a run that came from an issue gets the issue's number by
-   itself; `planNumber` is required when there is no issue.
+   itself. When there is no issue, `planNumber` is required for the planner;
+   pass it to the builder too, or its build is not checked against the plan
+   (ungated).
 
 Ask the user to try one request on a test issue first. Search help for
 `plan-documents` for the ticket layout, the build chain and its stop codes.

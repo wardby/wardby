@@ -405,20 +405,27 @@ itself stays git-free. See
 
 ## Plan documents need a current driver and tool runner
 
-A planner run ([plan documents](coding-agent-setup.md#plan-documents)) adds a
-`planFiles` key to the run input when it has files to start from, and reads
-`plan-files.json` from the run's output. Wardby writes the key only on such
-runs, so every other run works as before. A Codex worker built on a driver
-older than `driver-v37` rejects that input (`worker_input_failed`) and never
-returns the plan folder. A Claude Code `workerImageRef` tool runner built from
-an older release has no plan tools: a planner run's plan is not stored
-(`plan_tool_unavailable`), and a run that starts from plan files (a revision,
-or a builder given approved designs) fails with `worker_plan_files_failed`.
-Rebuild a Codex `workerImageRef` image on a current
+Plan documents ([plan documents](coding-agent-setup.md#plan-documents)) need a
+`driver-v37`-or-later image for every run that writes or reads plan files:
+
+- a planner run, which returns its plan folder (`plan-files.json` in the run's
+  output);
+- a revision run (comment threads sent to a plan's planner), which starts from
+  the plan's current files;
+- a builder run with `buildFromPlan`, which gets the approved plan as files.
+
+Wardby adds a `planFiles` key to the run input of any run that starts from plan
+files, and writes it only on such runs, so every other run works as before. A
+Codex worker built on a driver older than `driver-v37` rejects that input
+(`worker_input_failed`) and never returns the plan folder. A Claude Code
+`workerImageRef` tool runner built from an older release has no plan tools: a
+planner run's plan is not stored (`plan_tool_unavailable`), and a run that starts
+from plan files (a revision or a builder run) fails with
+`worker_plan_files_failed`. Rebuild a Codex `workerImageRef` image on a current
 `driver-vN` digest, and a Claude Code tool runner on the current release's
-`wardby-claude-tool-runner` image, before you give the agent a plan document
-setting. The plan folder is `/tmp/wardby-plan`: keep `/tmp` writable in a
-custom image, as the reference images do.
+`wardby-claude-tool-runner` image, before you give a planner a plan document
+setting or a builder `buildFromPlan`. The plan folder is `/tmp/wardby-plan`:
+keep `/tmp` writable in a custom image, as the reference images do.
 
 ## What this doesn't cover
 
