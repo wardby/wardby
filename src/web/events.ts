@@ -95,6 +95,19 @@ export async function openDocumentStream(
   await requireDocumentAccess(deps.db, documentId, viewer, "read");
   const planSetId =
     (await deps.db.document.findUnique({ where: { id: documentId }, select: { planSetId: true } }))?.planSetId ?? null;
+  // The set's document ids, a cheap pre-filter ahead of the per-event check (which still decides). Refreshed
+  // on the stream's own events and each heartbeat, so a document that joins the set is followed soon after.
+  let setIds = new Set<string>();
+  const refreshSetIds = async () => {
+    if (!planSetId) return;
+    try {
+      const rows = await deps.db.document.findMany({ where: { planSetId }, select: { id: true } });
+      setIds = new Set(rows.map((r) => r.id));
+    } catch {
+      // Keep the previous snapshot.
+    }
+  };
+  await refreshSetIds();
   const sessionId = ctx.session.id;
   const open = streams.perSession.get(sessionId) ?? 0;
   if (open >= streams.maxPerSession) throw new Error("web_rate_limited");
@@ -103,6 +116,7 @@ export async function openDocumentStream(
     heartbeatMs: streams.heartbeatMs,
     maxBufferedBytes: streams.maxBufferedBytes,
     beforeHeartbeat: async () => {
+      void refreshSetIds();
       const now = await resolveContext(req, deps, { touch: false });
       if (now.kind === "none" || now.session.id !== sessionId) return false;
       return (await documentAccess(deps.db, documentId, await requestViewer(req, deps, now))) !== "none";
@@ -129,8 +143,13 @@ export async function openDocumentStream(
   };
   stream.onEnd(
     streams.bus.subscribe((event) => {
-      if (event.documentId === documentId) return enqueue(() => forward(event));
-      if (!planSetId || !SET_EVENT_KINDS.has(event.kind)) return;
+      if (event.documentId === documentId) {
+        return enqueue(async () => {
+          forward(event);
+          if (event.kind === "version") await refreshSetIds();
+        });
+      }
+      if (!planSetId || !SET_EVENT_KINDS.has(event.kind) || !setIds.has(event.documentId)) return;
       enqueue(async () => {
         if (await inSetAndReadable(deps, planSetId, event.documentId, viewer)) forward(event);
       });

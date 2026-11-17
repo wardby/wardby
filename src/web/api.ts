@@ -160,6 +160,7 @@ async function planPayload(
 ): Promise<{ planSet: PlanSetPayload; planLinks?: PlanLinksPayload } | null> {
   const set = await readablePlanSet(deps.db, planSetId, viewer);
   if (!set) return null;
+  const guest = viewer.kind === "guest";
   const counted = set.documents.filter((d) => !d.removed);
   const documents = [...set.documents]
     .sort((a, b) => Number(a.removed) - Number(b.removed))
@@ -171,15 +172,18 @@ async function planPayload(
       path: d.path,
       removed: d.removed,
       current: d.id === documentId,
-      pagePath: `/d/${d.id}`,
+      pagePath: guest ? "" : `/d/${d.id}`,
     }));
   const planSet: PlanSetPayload = {
     number: set.number,
     approved: counted.filter((d) => d.reviewState === "approved").length,
     counted: counted.length,
     documents,
+    ...(guest ? { partial: true } : {}),
   };
   if (markdown === null) return { planSet };
+  // A guest always sees a partial set; warned versus plain links would tell them which files are in it.
+  if (guest) return { planSet, planLinks: { links: [], unresolved: [] } };
   const inSet = await deps.db.document.findMany({
     where: { planSetId, removedFromPlan: false, planPath: { not: null } },
     select: { id: true, kind: true, planPath: true },

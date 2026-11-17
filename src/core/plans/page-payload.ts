@@ -9,6 +9,8 @@ export interface PlanSetPayload {
   approved: number;
   /** Documents of the set that count toward approval (not removed). */
   counted: number;
+  /** True when the viewer sees only part of the set (a share-link guest): the bar shows no count. */
+  partial?: boolean;
   documents: Array<{
     id: string;
     title: string;
@@ -17,7 +19,7 @@ export interface PlanSetPayload {
     path: string;
     removed: boolean;
     current: boolean;
-    pagePath: string; // "/d/<id>"
+    pagePath: string; // "/d/<id>"; empty for a guest (member routes): the chip has no link
   }>;
 }
 

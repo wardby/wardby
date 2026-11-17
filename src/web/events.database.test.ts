@@ -254,6 +254,40 @@ describe.skipIf(!process.env.DATABASE_URL)("document event stream (database)", {
     }
   });
 
+  it("tells a share-link guest on one plan document nothing about another document of the set", async () => {
+    const viewer = { kind: "principal" as const, principalId: owner.id };
+    const agent = await db.agent.create({
+      data: { name: `events-guest-planner-${s}`, systemPrompt: "p", model: "m", budgetUsd: 1, ownerId: owner.id },
+    });
+    const set = await db.planSet.create({
+      data: { agentId: agent.id, repository: `acme/events-g-${s}`, number: 13, store: "wardby", createdByRunId: "run" },
+    });
+    const make = async (title: string, planPath: string) => {
+      const id = (await createDocument(db, cipher, { ownerId: owner.id, title, markdown: "hello world" })).id;
+      await db.document.update({ where: { id }, data: { planSetId: set.id, planPath } });
+      return id;
+    };
+    const d1 = await make("Plan", "plan.md");
+    const d2 = await make("Api", "api.md");
+    try {
+      const link = await createShareLink(db, { documentId: d1, viewer, permission: "comment" });
+      const { guestId } = await registerGuest(db, { shareLinkId: link.id, name: `Gus ${s.slice(0, 8)}` });
+      const session = await createWebSession(db, { guestId, shareLinkId: link.id }, DEV);
+      const st = await liveStream(`wardby-dev-web=${session.token}`, d1);
+      await publishVersion(db, cipher, { documentId: d2, markdown: "hello world 2", via: "mcp" });
+      await submitForReview(db, { documentId: d2, viewer, reviewers: [outsider.id] });
+      await forceApprove(db, cipher, { documentId: d2, viewer, note: "ok" });
+      // A sentinel on the guest's own document: everything before it has been delivered.
+      await publishVersion(db, cipher, { documentId: d1, markdown: "hello world 3", via: "mcp" });
+      await st.waitFor(new RegExp(`"documentId":"${d1}","kind":"version"`));
+      expect(st.text()).not.toContain(d2);
+    } finally {
+      await db.document.deleteMany({ where: { id: { in: [d1, d2] } } });
+      await db.planSet.delete({ where: { id: set.id } });
+      await db.agent.delete({ where: { id: agent.id } });
+    }
+  });
+
   it("lets a guest stream, and ends the stream when the link is revoked", async () => {
     const ownerViewer = { kind: "principal" as const, principalId: owner.id };
     const link = await createShareLink(db, { documentId: docId, viewer: ownerViewer, permission: "comment" });

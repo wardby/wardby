@@ -19,10 +19,10 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
   if (!plan) return;
   const chip = (d: PlanSetPayload["documents"][number]) => {
     const link = h(
-      "a",
+      d.pagePath ? "a" : "span",
       {
         class: `plan-chip state-${d.reviewState}${d.current ? " current" : ""}`,
-        attrs: { href: d.pagePath, ...(d.current ? { "aria-current": "page" } : {}) },
+        attrs: { ...(d.pagePath ? { href: d.pagePath } : {}), ...(d.current ? { "aria-current": "page" } : {}) },
         title: `${d.path} (${d.kind})`,
       },
       h("span", { class: "plan-kind", aria: { hidden: "true" } }, KIND_ICON[d.kind]),
@@ -32,7 +32,11 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
     return h("li", {}, d.removed ? h("s", {}, link) : link);
   };
   host.append(
-    h("span", { class: "plan-count" }, `Plan ${plan.number} · ${plan.approved} of ${plan.counted} approved`),
+    h(
+      "span",
+      { class: "plan-count" },
+      plan.partial ? `Plan ${plan.number}` : `Plan ${plan.number} · ${plan.approved} of ${plan.counted} approved`,
+    ),
     h("ul", { class: "plan-chips" }, ...plan.documents.map(chip)),
   );
 }

@@ -1066,10 +1066,12 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       const shared = await visitor.newPage();
       await shared.goto(`${server.origin}${plan.sharePath!}`);
       const sharedBar = shared.getByRole("navigation", { name: "Plan" });
-      await expect
-        .poll(() => sharedBar.locator(".plan-count").textContent(), { timeout: 20_000 })
-        .toBe("Plan 12 · 0 of 1 approved");
-      expect(await sharedBar.locator("a").count()).toBe(1);
+      await expect.poll(() => sharedBar.locator(".plan-count").textContent(), { timeout: 20_000 }).toBe("Plan 12");
+      // No count, no link to any member route (not even the current chip), no unresolved-links warning.
+      expect(await sharedBar.locator("a").count()).toBe(0);
+      expect(await sharedBar.locator('[aria-current="page"]').getAttribute("href")).toBeNull();
+      expect(await shared.locator(".plan-warnings:not([hidden])").count()).toBe(0);
+      expect(await shared.locator(".editor a", { hasText: "the api" }).count()).toBe(0);
       expect(await shared.locator(`a[href="/d/${api}"]`).count()).toBe(0);
       expect(await shared.content()).not.toContain("Api title");
       await visitor.close();
