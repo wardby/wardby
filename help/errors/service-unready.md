@@ -3,7 +3,7 @@ id: errors/service-unready
 title: Service did not become ready
 summary: A coding run failed at launch because one of its services never passed its readiness check (coding_service_unready:<name>), on Kubernetes, Docker or Substrate.
 audience: operator
-tags: [error, coding-agents, services, kubernetes, docker, substrate, coding_service_unready, substrate_bridge_service_unready, WARDBY_SERVICE_SETUP_DONE]
+tags: [error, services, substrate, coding_service_unready, substrate_bridge_service_unready, WARDBY_SERVICE_SETUP_DONE]
 appliesTo: >=0.2.1
 ---
 
