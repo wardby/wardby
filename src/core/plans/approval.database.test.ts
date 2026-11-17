@@ -14,6 +14,7 @@ import {
   createPlanReviewHook,
   defuseNotice,
   issueNoticePoster,
+  planApprovedNotice,
   planBuildStartedNotice,
   runningPlanTicket,
   setPlanReviewHook,
@@ -25,6 +26,8 @@ import { createPlanSetFixture, type FixtureDocument } from "./build.test-support
 import { publishPlanFromRun } from "./publish.js";
 
 const FAKE_SECRET = "wardby-fake-approval-secret-9d3a";
+/** A fake secret with Markdown punctuation: escaping it before redaction would let it through. */
+const FAKE_NAME_SECRET = "abc_def_123_fake";
 const PLAN_MD = `# Plan\n\nkey ${FAKE_SECRET}\n\n## Tickets\n### Ticket 1: Login\n### Ticket 2: Feed\n`;
 const SCREENS = {
   "manifest.json": '{"boards":[{"id":"home","title":"Home"}]}',
@@ -46,6 +49,11 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
   let starts: StartTicketInput[];
   let startResult: StartTicketResult;
   let handle: string | null;
+  let background: Promise<void>[] = [];
+  /** Awaits the work the hook started in the background (the notice and the ticket start). */
+  const settle = async () => {
+    while (background.length > 0) await background.shift();
+  };
   const deps: PlanApprovalDeps = {
     postIssueNotice: async (set, text) => {
       notices.push({ issueKey: set.issueKey, text });
@@ -56,6 +64,9 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     },
     mentionHandle: async () => handle,
     secretValues: (agentId) => documentSecretValues(db, cipher, agentId),
+    track: (work) => {
+      background.push(work);
+    },
   };
 
   beforeAll(async () => {
@@ -63,6 +74,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     ada = await db.principal.create({ data: { subject: `appr-ada-${s}` } });
     await db.principalProfile.create({ data: { principalId: ada.id, displayName: "Ada", source: "oidc" } });
     await createSecret(`APPR_KEY_${s}`, FAKE_SECRET, owner.id, cipher, db);
+    await createSecret(`APPR_NAME_${s}`, FAKE_NAME_SECRET, owner.id, cipher, db);
     setPlanReviewHook(createPlanReviewHook(deps));
   });
   beforeEach(() => {
@@ -70,6 +82,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     starts = [];
     startResult = { runId: "run-1" };
     handle = "wardby";
+    background = [];
   });
   afterEach(() => vi.restoreAllMocks());
   afterAll(async () => {
@@ -115,6 +128,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
   ) {
     const plannerId = await makeAgent({ planDocument: { store: "wardby", reviewers: [ada.id], ...planDocument } });
     await attachSecret(plannerId, `APPR_KEY_${s}`, owner.id, db);
+    await attachSecret(plannerId, `APPR_NAME_${s}`, owner.id, db);
     const fixture = await createPlanSetFixture(db, { plannerId, ownerId: owner.id, repository, number: 12, documents });
     await db.planSet.update({
       where: { id: fixture.planSetId },
@@ -143,6 +157,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
       verdict: "approve",
       versionNumber: doc.currentVersion!.number,
     });
+    await settle();
   };
   const approveAll = async (ids: Record<string, string>) => {
     for (const id of Object.values(ids)) await approve(id);
@@ -182,6 +197,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
   /** Fires the hook directly, as another review event on the set would. */
   async function setPlanReviewHookCall(documentId: string) {
     await createPlanReviewHook(deps)(db, documentId, ada.id);
+    await settle();
   }
 
   it("notify without an App handle, or on a Jira issue (the command is a GitHub mention): no hint", async () => {
@@ -303,6 +319,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     });
     expect(notices).toEqual([]);
     await publishPlanFromRun(db, { cipher, origin: null }, run.id);
+    await settle();
     expect(notices.map((x) => x.text)).toEqual([
       "Plan 12 approved (plan.md v3, api.md v1). Comment `@wardby build ticket <t>` to build.",
     ]);
@@ -326,6 +343,141 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     expect(defuseNotice(planBuildStartedNotice(12, 1, "@eve `@x`\n*b* [l](u)"))).toBe(
       "Plan 12: building ticket 1, started by @\u200beve @\u200bx \\*b\\* \\[l\\](u).",
     );
+  });
+
+  it("secrets: an approver's name is redacted before it is escaped, so a secret with `_` never gets through", async () => {
+    await db.principalProfile.update({
+      where: { principalId: ada.id },
+      data: { displayName: `Ada ${FAKE_NAME_SECRET}` },
+    });
+    try {
+      const builder = await makeAgent({ buildFromPlan: true });
+      const { documentIds } = await makeSet({ onApproved: "build", builderAgentId: builder });
+      await approveAll(documentIds);
+      expect(notices).toHaveLength(1);
+      expect(notices[0].text).not.toContain(FAKE_NAME_SECRET);
+      expect(notices[0].text).not.toContain("abc\\_def\\_123\\_fake");
+      expect(notices[0].text).not.toContain("def");
+      expect(notices[0].text).toContain("started by Ada \\[REDACTED\\].");
+    } finally {
+      await db.principalProfile.update({ where: { principalId: ada.id }, data: { displayName: "Ada" } });
+    }
+  });
+
+  it("bare URLs in a name or a path are not autolinked", () => {
+    expect(planBuildStartedNotice(12, 1, "Eve https://evil.example/x www.evil.example HTTP://b.example")).toBe(
+      "Plan 12: building ticket 1, started by Eve https\u200b://evil.example/x www\u200b.evil.example HTTP\u200b://b.example.",
+    );
+    expect(
+      planApprovedNotice(
+        12,
+        [{ documentId: "d", path: "see-www.x.io/http://y.md", kind: "document", versionNumber: 1 }],
+        null,
+      ),
+    ).toBe("Plan 12 approved (see-www\u200b.x.io/http\u200b://y.md v1).");
+  });
+
+  it("two final verdicts on different documents at the same time: one notice, one ticket-1 start", async () => {
+    const builder = await makeAgent({ buildFromPlan: true });
+    const { planSetId, documentIds } = await makeSet({ onApproved: "build", builderAgentId: builder });
+    await approve(documentIds["plan.md"]);
+    await Promise.all([approve(documentIds["api.md"]), approve(documentIds["screens/"])]);
+    await settle();
+    expect(starts).toHaveLength(1);
+    expect(notices).toHaveLength(1);
+    expect((await setRow(planSetId)).approvedAt).not.toBeNull();
+  });
+
+  it("a hook decides on the state it sees under the set's row lock: a late clear never wipes a fresh approval", async () => {
+    const { planSetId, documentIds } = await makeSet({ onApproved: "notify" });
+    await approveAll(documentIds);
+    const approvedAt = (await setRow(planSetId)).approvedAt;
+    expect(approvedAt).not.toBeNull();
+    notices = [];
+
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => (locked = resolve));
+    const holder = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM "PlanSet" WHERE "id" = ${planSetId} FOR UPDATE`;
+        locked();
+        await released;
+      },
+      { timeout: 20_000 },
+    );
+    await isLocked;
+    // api.md is reopened and its hook starts, but must wait for the set's row.
+    await db.document.update({ where: { id: documentIds["api.md"] }, data: { reviewState: "in_review" } });
+    const late = createPlanReviewHook(deps)(db, documentIds["api.md"], null);
+    await waitForLockWaiter();
+    // Meanwhile api.md is approved again (its own hook found the set still approved: nothing to do).
+    await db.document.update({ where: { id: documentIds["api.md"] }, data: { reviewState: "approved" } });
+    release();
+    await holder;
+    await late;
+    await settle();
+    expect((await setRow(planSetId)).approvedAt).toEqual(approvedAt);
+    expect(notices).toEqual([]);
+  });
+
+  /** Until a session of this database waits on a row lock of PlanSet. */
+  async function waitForLockWaiter() {
+    for (let i = 0; i < 200; i++) {
+      const rows = await db.$queryRaw<{ n: bigint }[]>`
+        SELECT count(*) AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%PlanSet%'`;
+      if (Number(rows[0].n) > 0) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error("no hook waited on the set's row lock");
+  }
+
+  it("a reopen keeps a recorded stop code; it records reopened only when none is recorded", async () => {
+    const builder = await makeAgent({ buildFromPlan: true });
+    startResult = { refused: "plan_not_approved" };
+    const stopped = await makeSet({ onApproved: "build", builderAgentId: builder });
+    await approveAll(stopped.documentIds);
+    expect((await setRow(stopped.planSetId)).chainStopped).toBe("plan_not_approved");
+    await reopenDocument(db, cipher, { documentId: stopped.documentIds["api.md"], viewer: as(owner) });
+    expect(await setRow(stopped.planSetId)).toMatchObject({ approvedAt: null, chainStopped: "plan_not_approved" });
+
+    startResult = { runId: "run-2" };
+    const running = await makeSet({ onApproved: "build", builderAgentId: builder });
+    await approveAll(running.documentIds);
+    expect((await setRow(running.planSetId)).chainStopped).toBeNull();
+    await reopenDocument(db, cipher, { documentId: running.documentIds["api.md"], viewer: as(owner) });
+    expect(await setRow(running.planSetId)).toMatchObject({ approvedAt: null, chainStopped: "reopened" });
+  });
+
+  it("build: the approving request does not wait for the ticket start; a failed start still posts start_failed", async () => {
+    const builder = await makeAgent({ buildFromPlan: true });
+    const { planSetId, documentIds } = await makeSet({ onApproved: "build", builderAgentId: builder });
+    await approve(documentIds["plan.md"]);
+    await approve(documentIds["api.md"]);
+    let fail!: (err: Error) => void;
+    vi.spyOn(deps, "startTicket").mockImplementationOnce(
+      () => new Promise<StartTicketResult>((_resolve, reject) => (fail = reject)),
+    );
+    const doc = await db.document.findUniqueOrThrow({
+      where: { id: documentIds["screens/"] },
+      select: { currentVersion: { select: { number: true } } },
+    });
+    const review = reviewDocument(db, cipher, {
+      documentId: documentIds["screens/"],
+      viewer: as(ada),
+      verdict: "approve",
+      versionNumber: doc.currentVersion!.number,
+    }).then(() => "returned" as const);
+    const timeout = new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 3_000));
+    expect(await Promise.race([review, timeout])).toBe("returned");
+    expect(notices).toEqual([]);
+    await vi.waitFor(() => expect(fail).toBeDefined());
+    fail(new Error(`boom ${FAKE_SECRET}`));
+    await settle();
+    expect((await setRow(planSetId)).chainStopped).toBe("start_failed");
+    expect(notices.map((x) => x.text)).toEqual([`${APPROVED}\nPlan 12: ticket 1 did not start (start_failed).`]);
   });
 
   it("runningPlanTicket: a pending ticket run of the set, until it ends", async () => {

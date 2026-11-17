@@ -7,8 +7,10 @@
  *
  * Every notice holds plan numbers, plan paths, ticket numbers, refusal codes and (for a build) the
  * display name of the person whose verdict completed the approval: never a document's text or a
- * ticket title. Each is redacted by exact value against the planner's secret values, and its
- * @-mentions are defused, before it is posted. Nothing here throws into a review action.
+ * ticket title. Each people- or agent-written value in it (a name, a path) is redacted by exact value
+ * against the planner's secret values before it is escaped, the whole notice is redacted again, and
+ * its @-mentions and bare URLs are defused, before it is posted. Nothing here throws into a review
+ * action: the work after an approval (host calls, the ticket start) runs in the background.
  */
 import type { PlanSet, PrismaClient } from "#prisma";
 import { readPlanDocument, type PlanDocumentInput } from "../../coding/profile.js";
@@ -45,6 +47,8 @@ export interface PlanApprovalDeps {
   mentionHandle: () => Promise<string | null>;
   /** The planner's secret values: every notice is redacted against them before it is posted. */
   secretValues: (agentId: string) => Promise<readonly string[]>;
+  /** Given the background work an approval starts (its notice, the ticket start); tests await it. */
+  track?: (work: Promise<void>) => void;
 }
 
 export type PlanReviewHook = (db: PrismaClient, documentId: string, actorId: string | null) => Promise<void>;
@@ -83,18 +87,24 @@ export function defuseNotice(text: string): string {
     .join("");
 }
 
+/** A bare URL (`https://…`, `www.…`) with its scheme broken by a zero-width space, so nothing autolinks it. */
+const defuseAutolinks = (text: string) =>
+  text.replace(/(https?|ftp)(:\/\/)/gi, "$1\u200b$2").replace(/(www)(\.)/gi, "$1\u200b$2");
+
 /** A plan path in a notice: one line, never a code-span delimiter, a design without its trailing slash. */
-const shownPath = (path: string) => path.replace(/\/$/, "").replace(/[`\r\n]+/g, "");
+const shownPath = (path: string) => defuseAutolinks(path.replace(/\/$/, "").replace(/[`\r\n]+/g, ""));
 
 /**
  * A person's display name in a public notice: people-written, so one line, no backtick (which would
  * open a code span that defuseNotice leaves alone) and Markdown punctuation escaped.
  */
 export function shownName(name: string): string {
-  return name
-    .replace(/[\s`]+/g, " ")
-    .trim()
-    .replace(/[\\*_[\]<>|~#!]/g, (c) => `\\${c}`);
+  return defuseAutolinks(
+    name
+      .replace(/[\s`]+/g, " ")
+      .trim()
+      .replace(/[\\*_[\]<>|~#!]/g, (c) => `\\${c}`),
+  );
 }
 
 function hint(handle: string | null, ticket: string, purpose: string): string {
@@ -176,8 +186,10 @@ export async function reportTicketStart(
   starterName: string | null,
   prefix?: string,
 ): Promise<void> {
+  // Redacted raw, before shownName escapes it: an escaped secret (`a\\_b`) would no longer match.
+  const name = starterName === null ? null : redactExactSecretValues(starterName, await deps.secretValues(set.agentId));
   let text: string;
-  if ("runId" in started) text = planBuildStartedNotice(set.number, ticket, starterName);
+  if ("runId" in started) text = planBuildStartedNotice(set.number, ticket, name);
   else if ("running" in started) text = `Plan ${set.number}: already building ticket ${started.running}.`;
   else {
     const code = refusalCode(started.refused);
@@ -235,106 +247,142 @@ export async function planSetChanged(db: PrismaClient, planSetId: string): Promi
   if (any) await current(db, any.id, null);
 }
 
+type ApprovedSet = NonNullable<Awaited<ReturnType<typeof claimApproval>>>;
+
+/**
+ * Under the set's row lock, so review events on one set are decided one at a time on the states they
+ * see: ends the approval when a counted document is no longer approved, or claims it (approvedAt from
+ * null) when every one is. Returns the set only to the event that claimed it.
+ */
+async function claimApproval(db: PrismaClient, planSetId: string) {
+  return db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM "PlanSet" WHERE "id" = ${planSetId} FOR UPDATE`;
+    const set = await tx.planSet.findUnique({
+      where: { id: planSetId },
+      include: {
+        documents: {
+          where: { removedFromPlan: false, planPath: { not: null } },
+          include: { currentVersion: { select: { number: true, markdown: true } } },
+        },
+        agent: { select: { id: true, ownerId: true, codingProfile: { select: { planDocument: true } } } },
+      },
+    });
+    if (!set) return null;
+    const allApproved =
+      set.documents.length > 0 && set.documents.every((d) => d.reviewState === "approved" && d.currentVersion);
+    if (!allApproved) {
+      // A reopen (or a new waiting document) ends the approval; a running chain stops before its next
+      // ticket, unless it already stopped for a reason of its own (that code is kept).
+      if (set.approvedAt) {
+        await tx.planSet.update({
+          where: { id: set.id },
+          data: {
+            approvedAt: null,
+            ...(set.chainTicket !== null && set.chainStopped === null ? { chainStopped: "reopened" } : {}),
+          },
+        });
+      }
+      return null;
+    }
+    // Exactly once per approval: only the event that sets approvedAt from null goes on.
+    if (set.approvedAt) return null;
+    await tx.planSet.update({ where: { id: set.id }, data: { approvedAt: new Date() } });
+    return set;
+  });
+}
+
+/** What follows a claimed approval: a notice ("notify"), or the builder check and ticket 1 ("build"). */
+async function afterApproval(
+  db: PrismaClient,
+  deps: PlanApprovalDeps,
+  set: ApprovedSet,
+  actorId: string | null,
+): Promise<void> {
+  let setting: ReturnType<typeof readPlanDocument>;
+  try {
+    setting = readPlanDocument(set.agent.codingProfile?.planDocument, set.agent.ownerId);
+  } catch {
+    setting = null;
+  }
+  if (!setting) return;
+  // Agent-written paths are redacted raw, before shownPath reshapes them.
+  const secrets = await deps.secretValues(set.agentId);
+  const versions = planVersionsOf(set.documents).map((v) => ({ ...v, path: redactExactSecretValues(v.path, secrets) }));
+  // The `build ticket <t>` command is a GitHub mention (C4): a Jira issue's notice has no hint.
+  const handle = set.issueProvider === "github" ? await deps.mentionHandle().catch(() => null) : null;
+  if (setting.onApproved === "notify") {
+    await postPlanNotice(deps, set, planApprovedNotice(set.number, versions, handle));
+    return;
+  }
+  // R12, spec §7b: the builder is checked again now, against the access the owner has today.
+  // Reviewers are not re-checked here (publish checks them), so only the builder can fail.
+  const builderOnly: PlanDocumentInput = {
+    store: setting.store,
+    onApproved: setting.onApproved,
+    ...(setting.path ? { path: setting.path } : {}),
+    ...(setting.builderAgentId ? { builderAgentId: setting.builderAgentId } : {}),
+  };
+  try {
+    await checkPlanDocumentSetting(db, { id: set.agent.id, ownerId: set.agent.ownerId }, builderOnly);
+  } catch {
+    await db.planSet.update({ where: { id: set.id }, data: { chainStopped: "plan_builder_invalid" } });
+    await postPlanNotice(
+      deps,
+      set,
+      `Plan ${set.number} approved, but its builder cannot build it now (plan_builder_invalid).${hint(handle, "1", "once it is fixed")}`,
+    );
+    return;
+  }
+  const plan = set.documents.find((d) => d.planPath === "plan.md");
+  if (!ticketTitles(plan?.currentVersion?.markdown ?? "").has(1)) {
+    await postPlanNotice(
+      deps,
+      set,
+      `Plan ${set.number} approved, but plan.md has no \`## Tickets\` section with \`### Ticket <t>:\` headings.${hint(handle, "<t>", "to build one")}`,
+    );
+    return;
+  }
+  await db.planSet.update({ where: { id: set.id }, data: { chainTicket: 1, chainStopped: null } });
+  // The set's own row only: no document text goes to the start.
+  const { documents: _documents, agent: _agent, ...row } = set;
+  const started = await deps
+    .startTicket({
+      builderAgentId: setting.builderAgentId!,
+      set: row,
+      ticket: 1,
+      starterId: actorId,
+      trigger: "plan_approved",
+    })
+    .catch((err: unknown): StartTicketResult => {
+      // A start that threw (not a refusal) stops the chain with a notice instead of leaving it silent.
+      planLog.warn(
+        { planSetId: set.id, errorName: err instanceof Error ? err.name : typeof err },
+        "ticket start failed",
+      );
+      return { refused: "start_failed" };
+    });
+  const starterName = actorId ? ((await principalNames(db, [actorId])).get(actorId) ?? null) : null;
+  await reportTicketStart(db, deps, row, 1, started, starterName, planApprovedNotice(set.number, versions, null));
+}
+
+/** Only the error's name is logged: never its message, which could carry a document's text. */
+const logFailure = (fields: Record<string, string>) => (err: unknown) => {
+  planLog.warn({ ...fields, errorName: err instanceof Error ? err.name : typeof err }, "plan review hook failed");
+};
+
 export function createPlanReviewHook(deps: PlanApprovalDeps): PlanReviewHook {
   return async (db, documentId, actorId) => {
     try {
       const doc = await db.document.findUnique({ where: { id: documentId }, select: { planSetId: true } });
       if (!doc?.planSetId) return;
-      const set = await db.planSet.findUnique({
-        where: { id: doc.planSetId },
-        include: {
-          documents: {
-            where: { removedFromPlan: false, planPath: { not: null } },
-            include: { currentVersion: { select: { number: true, markdown: true } } },
-          },
-          agent: { select: { id: true, ownerId: true, codingProfile: { select: { planDocument: true } } } },
-        },
-      });
+      const set = await claimApproval(db, doc.planSetId);
       if (!set) return;
-      const allApproved =
-        set.documents.length > 0 && set.documents.every((d) => d.reviewState === "approved" && d.currentVersion);
-      if (!allApproved) {
-        // A reopen (or a new waiting document) ends the approval; a running chain stops before its next ticket.
-        if (set.approvedAt) {
-          await db.planSet.updateMany({
-            where: { id: set.id, approvedAt: { not: null } },
-            data: { approvedAt: null, ...(set.chainTicket !== null ? { chainStopped: "reopened" } : {}) },
-          });
-        }
-        return;
-      }
-      // Exactly once per approval: only the update that sets approvedAt from null goes on.
-      const claimed = await db.planSet.updateMany({
-        where: { id: set.id, approvedAt: null },
-        data: { approvedAt: new Date() },
-      });
-      if (claimed.count !== 1) return;
-      let setting: ReturnType<typeof readPlanDocument>;
-      try {
-        setting = readPlanDocument(set.agent.codingProfile?.planDocument, set.agent.ownerId);
-      } catch {
-        setting = null;
-      }
-      if (!setting) return;
-      const versions = planVersionsOf(set.documents);
-      // The `build ticket <t>` command is a GitHub mention (C4): a Jira issue's notice has no hint.
-      const handle = set.issueProvider === "github" ? await deps.mentionHandle().catch(() => null) : null;
-      if (setting.onApproved === "notify") {
-        await postPlanNotice(deps, set, planApprovedNotice(set.number, versions, handle));
-        return;
-      }
-      // R12, spec §7b: the builder is checked again now, against the access the owner has today.
-      // Reviewers are not re-checked here (publish checks them), so only the builder can fail.
-      const builderOnly: PlanDocumentInput = {
-        store: setting.store,
-        onApproved: setting.onApproved,
-        ...(setting.path ? { path: setting.path } : {}),
-        ...(setting.builderAgentId ? { builderAgentId: setting.builderAgentId } : {}),
-      };
-      try {
-        await checkPlanDocumentSetting(db, { id: set.agent.id, ownerId: set.agent.ownerId }, builderOnly);
-      } catch {
-        await db.planSet.update({ where: { id: set.id }, data: { chainStopped: "plan_builder_invalid" } });
-        await postPlanNotice(
-          deps,
-          set,
-          `Plan ${set.number} approved, but its builder cannot build it now (plan_builder_invalid).${hint(handle, "1", "once it is fixed")}`,
-        );
-        return;
-      }
-      const plan = set.documents.find((d) => d.planPath === "plan.md");
-      if (!ticketTitles(plan?.currentVersion?.markdown ?? "").has(1)) {
-        await postPlanNotice(
-          deps,
-          set,
-          `Plan ${set.number} approved, but plan.md has no \`## Tickets\` section with \`### Ticket <t>:\` headings.${hint(handle, "<t>", "to build one")}`,
-        );
-        return;
-      }
-      await db.planSet.update({ where: { id: set.id }, data: { chainTicket: 1, chainStopped: null } });
-      // The set's own row only: no document text goes to the start.
-      const { documents: _documents, agent: _agent, ...row } = set;
-      const started = await deps
-        .startTicket({
-          builderAgentId: setting.builderAgentId!,
-          set: row,
-          ticket: 1,
-          starterId: actorId,
-          trigger: "plan_approved",
-        })
-        .catch((err: unknown): StartTicketResult => {
-          // A start that threw (not a refusal) stops the chain with a notice instead of leaving it silent.
-          planLog.warn(
-            { planSetId: set.id, errorName: err instanceof Error ? err.name : typeof err },
-            "ticket start failed",
-          );
-          return { refused: "start_failed" };
-        });
-      const starterName = actorId ? ((await principalNames(db, [actorId])).get(actorId) ?? null) : null;
-      await reportTicketStart(db, deps, row, 1, started, starterName, planApprovedNotice(set.number, versions, null));
+      // The review action returns now; host calls and the ticket start follow in the background.
+      const work = afterApproval(db, deps, set, actorId).catch(logFailure({ documentId, planSetId: set.id }));
+      deps.track?.(work);
     } catch (err) {
-      // Never throws: a review verdict is never undone by its plan follow-up. Only the error's name is logged.
-      planLog.warn({ documentId, errorName: err instanceof Error ? err.name : typeof err }, "plan review hook failed");
+      // Never throws: a review verdict is never undone by its plan follow-up.
+      logFailure({ documentId })(err);
     }
   };
 }
