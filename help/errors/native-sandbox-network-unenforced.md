@@ -27,6 +27,8 @@ With `NATIVE_SANDBOX_LAUNCHER=substrate` (Wardby 0.10.1 and later) the message i
 - **`canary_timeout`**: no verdict within 2 minutes; often the gateway could not record it (it must be the same release as the server, with the `20261128000001_native_substrate_canary` migration applied). The next launch runs a new check.
 - **`<call>_failed`** or **`canary_failed`**: a call the check needed failed, for example `createActor_failed` or `resumeActor_failed` (Substrate), or `recordCanary_failed` and `readCanary_failed` (the database). The next launch runs a new check; the server's warn line `native substrate canary` has the template and result.
 
+The gateway's NetworkPolicy must admit Substrate's egress gateway pods on the deny port as well as 8790: if the deny port is closed by that policy, the check cannot tell a too-broad egress policy from a correct one.
+
 In low-power mode the check runs on the first sandbox launch, after the gateway is woken. See [Startup isolation check](../../docs/native-sandbox.md#startup-isolation-check).
 
 See [Run native agents in a sandbox](../native-sandbox.md) and the

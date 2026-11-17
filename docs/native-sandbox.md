@@ -496,8 +496,12 @@ native runs do not use:
   Substrate's egress gateway by a hostname, such as its Service's cluster DNS
   name. Actor traffic reaches it from Substrate's egress gateway pods, not from
   `wardby.io/component: native-run` pods, so the gateway's NetworkPolicy needs
-  an ingress rule that admits the egress gateway pods on 8790. No 8791 rule is
-  needed for Substrate.
+  an ingress rule that admits the egress gateway pods on 8790, and on the deny
+  port (8791, or `NATIVE_GATEWAY_DENY_PORT`). The deny-port rule is what makes
+  the startup isolation check meaningful: the check expects the deny port to be
+  unreachable through a run's egress policy, so the port must be reachable
+  without one. If it is closed by the gateway's own NetworkPolicy, the check
+  passes even when a run's egress policy is too broad.
 - This release's migrations, applied with `prisma migrate deploy`
   (`npm run prisma:migrate`) before the new gateway and server start:
   `20261128000000_native_gateway_worker_removed` (used by every launcher; it

@@ -92,7 +92,8 @@ does not support, such as GKE Autopilot; Docker for a single host.
   `SUBSTRATE_KUBE_CONTEXT`, `SUBSTRATE_CA_FILE`, `SUBSTRATE_SERVER_NAME`,
   `SUBSTRATE_WORKER_SELECTOR`). Optional: `NATIVE_SANDBOX_SUBSTRATE_WORKER_SELECTOR`
   (native actors on other workers) and `SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC`
-  (default 60). If the gateway's deny port is not 8791, set
+  (default 60). The gateway's NetworkPolicy admits Substrate's egress gateway
+  pods on 8790 and on the deny port. If the deny port is not 8791, set
   `NATIVE_GATEWAY_DENY_PORT` on the server too. `NATIVE_SANDBOX_WARM_POOL_SIZE`
   must be 0: every run resumes from the template's golden snapshot instead, and
   the first runs after a template change wait while it builds.
