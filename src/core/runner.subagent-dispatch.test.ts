@@ -30,6 +30,12 @@ vi.mock("./plans/publish.js", async (importOriginal) => {
   return { ...actual, planSummaryForRun: vi.fn(actual.planSummaryForRun) };
 });
 const { planSummaryForRun } = await import("./plans/publish.js");
+// Passes through; the buildFromPlan test below answers for an approved plan set.
+vi.mock("./plans/build.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./plans/build.js")>();
+  return { ...actual, resolveBuildPlan: vi.fn(actual.resolveBuildPlan) };
+});
+const { resolveBuildPlan } = await import("./plans/build.js");
 
 // End-to-end coverage of the delegate_to_<boundName> dispatch tool: a real
 // NativeEngine driven by a scripted LLM, actually exercising runSandboxTool
@@ -1326,6 +1332,91 @@ describe("delegate_to_<boundName> dispatch tool", () => {
       }>;
       const codingRun = await db.codingRun.findUnique({ where: { runId: child.id } });
       expect((codingRun as { mergeOrder: number | null } | null)?.mergeOrder).toBe(2);
+    });
+
+    describe("a buildFromPlan coding child delegated with planNumber (R15)", () => {
+      const builder = (): FakeAgent => ({
+        ...codingAgent("implement-agent"),
+        codingProfile: { ...codingProfile, buildFromPlan: true } as FakeCodingProfile,
+      });
+      const lead: FakeAgent = {
+        id: "dispatcher-agent",
+        name: "knock-knock-delivery",
+        systemPrompt: "You classify and delegate.",
+        model: "m",
+        budgetUsd: 5,
+        maxTurns: 10,
+      };
+      const edges = [{ parentAgentId: "dispatcher-agent", childAgentId: "implement-agent", boundName: "implement" }];
+      const args = JSON.stringify({ task: "build ticket 1", planNumber: 12 });
+
+      /** An approved plan set #12, answered only when the runner passed its secret cipher. */
+      function approvedPlan(cipher: SecretCipher) {
+        vi.mocked(resolveBuildPlan).mockImplementationOnce(async (_db, given, input) => {
+          if (given !== cipher) throw new Error("resolveBuildPlan: the runner's secret cipher was not passed");
+          expect(input.number).toBe(12);
+          return {
+            planSetId: "ps-12",
+            number: 12,
+            versions: [{ documentId: "d1", path: "plan.md", kind: "document", versionNumber: 3 }],
+            taskSection: "Approved plan 12.\n<plan>\n# Plan\n</plan>",
+            planInputFiles: [],
+          };
+        });
+      }
+      async function childCodingRun(db: RunnerDb, parentRunId: string) {
+        const [child] = (await db.run.findMany({ where: { parentRunId: { in: [parentRunId] } } })) as Array<{
+          id: string;
+          status: string;
+        }>;
+        const codingRun = (await db.codingRun.findUnique({ where: { runId: child.id } })) as {
+          planSetId?: string | null;
+        } | null;
+        return { child, codingRun };
+      }
+
+      it("is built from the plan on the in-process path: the runner passes providers.secrets", async () => {
+        const db = fakeDb([lead, builder()], edges);
+        const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+        const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.02 });
+        const given = providers(scriptedLlm([toolCall("delegate_to_implement", args), finalAnswer("done")]), executor);
+        approvedPlan(given.secrets);
+        await executeRun(parentRun.id, given, db);
+        const { child, codingRun } = await childCodingRun(db, parentRun.id);
+        expect(child.status).not.toBe("refused");
+        expect(codingRun?.planSetId).toBe("ps-12");
+      });
+
+      it("is built from the plan on the durableDelegate path too", async () => {
+        const db = fakeDb([lead, builder()], edges);
+        const parentRun = await db.run.create({ data: { agentId: "dispatcher-agent" } });
+        const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.02 });
+        const given = providers(scriptedLlm([]), executor);
+        approvedPlan(given.secrets);
+        const loaded = {
+          agentId: "dispatcher-agent",
+          subAgentEdges: [{ childAgentId: "implement-agent", boundName: "implement" }],
+        } as unknown as LoadedNativeRun;
+        const outcome = await durableDelegate(
+          {
+            runId: parentRun.id,
+            existingRun: parentRun,
+            loaded,
+            providers: given,
+            db,
+            issueTrackers: undefined,
+            ledger: fakeDelegationLedger(),
+            sessionId: "session-1",
+          },
+          "call-1",
+          "delegate_to_implement",
+          args,
+        );
+        expect("result" in outcome).toBe(true);
+        const { child, codingRun } = await childCodingRun(db, parentRun.id);
+        expect(child.status).not.toBe("refused");
+        expect(codingRun?.planSetId).toBe("ps-12");
+      });
     });
 
     describe("durableDelegate dispatch failure codes", () => {

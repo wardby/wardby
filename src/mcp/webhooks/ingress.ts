@@ -8,6 +8,7 @@ import type { PrismaClient } from "#prisma";
 import type { Executor } from "../../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../../providers/issue-tracker/types.js";
 import { resolveWebhookRun } from "../../core/webhooks.js";
+import type { SecretCipher } from "../../core/plans/publish.js";
 import { CodingTaskOverrideSchema } from "../../coding/protocol.js";
 
 export interface WebhookIngressRequest {
@@ -36,6 +37,8 @@ export async function handleWebhookIngress(
   db: PrismaClient,
   executor: Executor,
   issueTrackers?: IssueTrackerRegistry,
+  /** Reads a builder's secret values to redact its approved plan (spec §7). */
+  secretCipher?: SecretCipher,
 ): Promise<WebhookIngressResult> {
   const secret = extractSecret(req);
   if (!secret) {
@@ -74,6 +77,7 @@ export async function handleWebhookIngress(
     issueTrackers,
     repository,
     repositories: repositories as string[] | undefined,
+    secretCipher,
   });
   if (result.ok) {
     return { status: 202, body: { runId: result.runId } };

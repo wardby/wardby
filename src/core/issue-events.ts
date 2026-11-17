@@ -7,6 +7,7 @@
  * for another user needs Jira admin rights, which the bot must not hold.
  * See docs/private/2026-09-30-jira-issue-tracker-design.md §5.
  */
+import type { SecretCipher } from "./plans/publish.js";
 import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueEvent, IssueEventKind, IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
@@ -38,6 +39,8 @@ export interface RouteIssueEventDeps {
   db: IssueEventDb;
   executor: Executor;
   trackers: IssueTrackerRegistry;
+  /** Reads a builder's secret values to redact its approved plan (spec §7). */
+  secretCipher?: SecretCipher;
 }
 
 export interface RouteResult {
@@ -185,6 +188,7 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
+        secretCipher: deps.secretCipher,
         selfDefects: { db: deps.db, issueTrackers: deps.trackers },
         agentId: link.agentId,
         trigger: "host_event",

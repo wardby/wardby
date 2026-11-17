@@ -354,6 +354,7 @@ async function startDocumentRun(
       ...planOptions,
       db,
       executor: deps.executor,
+      secretCipher: deps.cipher,
       selfDefects: deps.selfDefects,
       agentId: doc.agentId,
       trigger: "comment",

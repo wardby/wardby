@@ -22,6 +22,7 @@ import { withPullRequestDescription } from "../../coding/pr-description-note.js"
 import { withLinkedIssue, type LinkedIssueText } from "../../coding/linked-issue-note.js";
 import { withOriginalRequest } from "../../coding/original-request-note.js";
 import { originalRequestOf } from "../../core/request-text.js";
+import { planPullRequestLine, readPlanVersions, type BuildPlan } from "../../core/plans/build.js";
 import { buildClaudeContext, MAX_RECORDED_SKIPS, type ClaudeContext } from "../../coding/claude-context.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
@@ -719,6 +720,10 @@ export interface ContainerRunSnapshot {
   /** The issue that triggered this run (CodingRun.issueProvider/issueKey); null when none. */
   issueProvider?: string | null;
   issueKey?: string | null;
+  /** The plan this run wrote or built from (CodingRun.planNumber); null when none. */
+  planNumber?: number | null;
+  /** The approved versions a build used (CodingRun.planVersions), for the PR body's plan line; null when none. */
+  planVersions?: BuildPlan["versions"] | null;
   /** Step in the delegating agent's declared merge order (CodingRun.mergeOrder); null = no order. */
   mergeOrder?: number | null;
   budgetUsd: number;
@@ -1063,6 +1068,8 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       rootCodingRunId: row.codingRun.rootCodingRunId,
       issueProvider: row.codingRun.issueProvider,
       issueKey: row.codingRun.issueKey,
+      planNumber: row.codingRun.planNumber,
+      planVersions: readPlanVersions(row.codingRun.planVersions),
       mergeOrder: row.codingRun.mergeOrder,
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       agentBudgetUsd: Number(row.agent.budgetUsd),
@@ -2545,6 +2552,13 @@ export class ContainerExecutor implements Executor {
     return issue ? { issue } : {};
   }
 
+  /** The PR body's plan line for a run built from an approved plan (names and version numbers only). */
+  private planLineFor(run: Pick<ContainerRunSnapshot, "planNumber" | "planVersions">): { planLine?: string } {
+    return run.planNumber && run.planVersions && run.planVersions.length > 0
+      ? { planLine: planPullRequestLine(run.planNumber, run.planVersions) }
+      : {};
+  }
+
   /**
    * The PR title/body's originating issue, whichever system it is in: the
    * CodingRun's tracker issue (issueFor), else the GitHub issue in the same
@@ -3103,6 +3117,7 @@ export class ContainerExecutor implements Executor {
       ...report,
       ...restoredDependenciesFor(output),
       ...(await this.issueSourceFor(current)),
+      ...this.planLineFor(current),
       ...(await this.relatedFor(current)),
       ...(descriptionState && "baseline" in descriptionState
         ? { description: { baseline: descriptionState.baseline } }
@@ -3501,6 +3516,7 @@ export class ContainerExecutor implements Executor {
       // The dependency cache restores the default repository's folders only.
       ...(slot.extra ? {} : restoredDependenciesFor(output)),
       ...(await this.issueSourceFor(view)),
+      ...this.planLineFor(view),
       ...(await this.relatedFor(latest, alsoPublished, { repository: view.repository, mergeOrder })),
       ...(descriptionState && "baseline" in descriptionState
         ? { description: { baseline: descriptionState.baseline } }
@@ -3976,6 +3992,7 @@ export class ContainerExecutor implements Executor {
           tag: output.tag,
           ...(await this.pullRequestRegistryReport(run)),
           ...(await this.issueSourceFor(run)),
+          ...this.planLineFor(run),
           description: { baseline: state.baseline },
         });
         return await this.recordDescription(run, state, outcome, name);
@@ -4005,6 +4022,7 @@ export class ContainerExecutor implements Executor {
         ...(await this.pullRequestRegistryReport(run)),
         ...restoredDependenciesFor(output),
         ...(await this.issueSourceFor(run)),
+        ...this.planLineFor(run),
         description: { baseline: state.baseline },
       };
       const outcome = await vcs.refreshPullRequestDescription(workspace, details);

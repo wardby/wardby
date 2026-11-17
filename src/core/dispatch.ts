@@ -39,6 +39,8 @@ import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInp
 import { logger } from "./logger.js";
 import { assertPlanFilesWithinLimits, savePlanInputFiles, type PlanFile } from "../coding/plan-files/store.js";
 import { PlanRefusedError } from "./plans/refusal.js";
+import { resolveBuildPlan, type BuildPlan } from "./plans/build.js";
+import type { SecretCipher } from "./plans/publish.js";
 import { resolvePlanNumber } from "./plans/number.js";
 import { planFolderFor } from "./plans/settings.js";
 import { plannerTaskNote, withPlanSections } from "./plans/wording.js";
@@ -84,6 +86,12 @@ export type DispatchDb = Pick<
   | "task"
   | "webhook"
   | "budgetGroup"
+  | "planSet"
+  | "documentFile"
+  | "resourceGrant"
+  | "agentSecret"
+  | "agentMcpServer"
+  | "secret"
   | "$transaction"
   | "$queryRaw"
 >;
@@ -225,6 +233,13 @@ export interface DispatchRunOptions {
   collectPlanFiles?: boolean;
   /** The plan this coding run writes or builds from, when it is not the attributed issue's number. */
   planNumber?: number;
+  /** The ticket of the plan a `buildFromPlan` run builds, stored on the run (spec §7). */
+  planTicket?: number;
+  /**
+   * Reads the builder's secret values, to redact an approved plan before it reaches the run (spec §7).
+   * Without it a `buildFromPlan` run with a plan set is refused (plan_not_approved): never unredacted.
+   */
+  secretCipher?: SecretCipher;
 }
 
 export interface DispatchRunResult {
@@ -1117,7 +1132,35 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       }),
     );
   }
-  if (planSections.length > 0) {
+  // Building from an approved plan (spec §7): decided before the transaction so a refusal leaves no
+  // Run row. Its section rides in the stored request (R9) and its files are input rows (R4, R14).
+  let buildPlan: BuildPlan | null = null;
+  // The run's repository: the resolved target, or (deferred) the requested or profile repository.
+  const buildRepository = previewTarget?.repository ?? options.codingRepository ?? preview?.codingProfile?.repository;
+  if (
+    preview?.kind === "coding" &&
+    preview.codingProfile?.buildFromPlan &&
+    planNumber !== undefined &&
+    buildRepository &&
+    planRefusal === undefined
+  ) {
+    try {
+      buildPlan = await resolveBuildPlan(options.db, options.secretCipher, {
+        builderAgentId: options.agentId,
+        builderOwnerId: preview.ownerId ?? null,
+        repository: buildRepository,
+        number: planNumber,
+        ...(options.planTicket !== undefined ? { ticket: options.planTicket } : {}),
+      });
+    } catch (err) {
+      if (!(err instanceof PlanRefusedError)) throw err;
+      planRefusal = setRefusalOf(err);
+      if (planRefusal === undefined) throw err;
+    }
+    if (buildPlan) planSections.push(buildPlan.taskSection);
+  }
+  const runPlanInputFiles = options.planInputFiles ?? buildPlan?.planInputFiles ?? [];
+  if (planSections.length > 0 && planRefusal === undefined) {
     try {
       composeCodingTask(
         preview?.systemPrompt,
@@ -1380,9 +1423,17 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
                 planSetting?.store !== "repository" &&
                 (options.collectPlanFiles === true || planSetting?.store === "wardby"),
               planRepositoryPath: planRepositoryFolder,
+              // The approved versions this run builds from (spec §7), names and numbers only.
+              ...(buildPlan
+                ? {
+                    planSetId: buildPlan.planSetId,
+                    planVersions: buildPlan.versions,
+                  }
+                : {}),
+              planTicket: options.planTicket ?? null,
             },
           });
-          await savePlanInputFiles(tx, run.id, options.planInputFiles ?? []);
+          await savePlanInputFiles(tx, run.id, runPlanInputFiles);
           // The run's repository set, fixed here with the CodingRun (#537 §2).
           if (rootCodingRunId) {
             await copyRootRepositoryRows(tx, rootCodingRunId, run.id);

@@ -477,6 +477,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       hosts: reviewHosts,
       repoAccess,
       issueTrackers,
+      secretCipher: cipher,
     })),
     onSlotReleased: () => {
       void drainCodingQueue({

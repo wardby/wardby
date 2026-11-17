@@ -1038,7 +1038,14 @@ async function scheduler(args: string[]): Promise<void> {
     executor,
     reviewHosts,
     issueTrackers,
-    deferredReviews: { db: prisma, executor, hosts: reviewHosts, repoAccess, issueTrackers },
+    deferredReviews: {
+      db: prisma,
+      executor,
+      hosts: reviewHosts,
+      repoAccess,
+      issueTrackers,
+      secretCipher: nativeProviders.secrets,
+    },
     // Comment threads sent to runs that ended unanswered (lost, failed to start, missed hook).
     documentRuns: {
       db: prisma,
@@ -1063,6 +1070,7 @@ async function scheduler(args: string[]): Promise<void> {
     db: prisma,
     scope,
     selfDefects,
+    secretCipher: nativeProviders.secrets,
     onLeaderTick: async () => {
       await drainCodingQueue({ db: prisma, executor, ...concurrency, selfDefects });
       // Runs the native sandbox gateway dispatched (or asked to stop): it holds no executor of its own.

@@ -10,6 +10,7 @@ import { maybePruneHostEventDeliveries } from "./deliveries.js";
 import { routeIssueEvent, type IssueEventDb } from "../../core/issue-events.js";
 import { logger } from "../../core/logger.js";
 import type { Executor } from "../../providers/executor/types.js";
+import type { SecretCipher } from "../../core/plans/publish.js";
 import { normalizeJiraEvent, verifyJiraSignature } from "../../providers/issue-tracker/jira-events.js";
 import type { IssueTrackerRegistry } from "../../providers/issue-tracker/types.js";
 
@@ -20,6 +21,8 @@ export interface JiraIngressDeps {
   db: IssueEventDb & Pick<PrismaClient, "hostEventDelivery">;
   executor: Executor;
   trackers: IssueTrackerRegistry;
+  /** Reads a builder's secret values to redact its approved plan (spec §7). */
+  secretCipher?: SecretCipher;
   webhookSecret: string;
   /** Epoch-ms clock; injected by tests. */
   now?: () => number;
@@ -94,7 +97,12 @@ export async function handleJiraEventIngress(
   // A routing failure must not leave the delivery permanently marked done:
   // un-record it and rethrow so Jira's retry is routed for real.
   try {
-    const routed = await routeIssueEvent(event, { db: deps.db, executor: deps.executor, trackers: deps.trackers });
+    const routed = await routeIssueEvent(event, {
+      db: deps.db,
+      executor: deps.executor,
+      trackers: deps.trackers,
+      ...(deps.secretCipher ? { secretCipher: deps.secretCipher } : {}),
+    });
     log.info({ kinds: event.kinds, deliveryId, runIds: routed.runIds }, "jira event routed");
     return {
       status: 202,

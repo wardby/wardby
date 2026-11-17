@@ -510,6 +510,8 @@ export type RunnerDb = Pick<
   | "workItem"
   | "deferredReview"
   | "runAttribution"
+  | "planSet"
+  | "documentFile"
 >;
 
 /** The providers a native run needs; `executor`, `reviewHosts` and `issueTrackers` are optional capabilities. */
@@ -1709,6 +1711,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
               dispatched = await dispatchRun({
                 db,
                 executor: providers.executor,
+                secretCipher: providers.secrets,
                 selfDefects: { db, issueTrackers },
                 agentId: edge.childAgentId,
                 trigger: "subagent",
@@ -1792,6 +1795,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
               dispatched = await dispatchRun({
                 db,
                 executor: providers.executor,
+                secretCipher: providers.secrets,
                 selfDefects: { db, issueTrackers },
                 agentId: edge.childAgentId,
                 trigger: "subagent",
@@ -2084,7 +2088,14 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
   // delegated nothing has no rows: one indexed lookup. Never throws.
   if (finished.parentRunId === null && providers.executor && reviewHosts && repoAccess) {
     await startDeferredForRequest(
-      { db, executor: providers.executor, hosts: reviewHosts, repoAccess, issueTrackers },
+      {
+        db,
+        executor: providers.executor,
+        hosts: reviewHosts,
+        repoAccess,
+        issueTrackers,
+        secretCipher: providers.secrets,
+      },
       runId,
     ).catch((err: unknown) => runnerLog.warn({ err, runId }, "could not start the reviews waiting for this run"));
   }
@@ -2095,6 +2106,7 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
       hosts: reviewHosts,
       repoAccess,
       issueTrackers,
+      secretCipher: providers.secrets,
     });
   }
   // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
@@ -2445,6 +2457,7 @@ export async function durableDelegate(
       dispatched = await dispatchRun({
         db,
         executor,
+        secretCipher: providers.secrets,
         selfDefects: { db, issueTrackers: ctx.issueTrackers },
         agentId: edge.childAgentId,
         trigger: "subagent",

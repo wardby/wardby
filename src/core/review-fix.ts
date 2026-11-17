@@ -12,6 +12,7 @@
  * (reReviewAfterNoChangeFix, from the coding run's terminal path): no push
  * means no new review would otherwise replace the failed check.
  */
+import type { SecretCipher } from "./plans/publish.js";
 import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
@@ -64,6 +65,8 @@ export interface ReviewFixDeps {
   hosts: ReviewHostRegistry;
   repoAccess: RepoAccessGate;
   issueTrackers?: IssueTrackerRegistry;
+  /** Reads a builder's secret values to redact its approved plan (spec §7). */
+  secretCipher?: SecretCipher;
 }
 
 export interface ReviewFixRequest {
@@ -271,6 +274,7 @@ export async function startReviewFixRound(req: ReviewFixRequest, deps: ReviewFix
   const dispatched = await dispatchRun({
     db: deps.db,
     executor: deps.executor,
+    secretCipher: deps.secretCipher,
     selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
     agentId: link.agentId,
     trigger: "host_event",

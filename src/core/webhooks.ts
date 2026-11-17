@@ -8,6 +8,7 @@
  * Comparison is constant-time (`timingSafeEqual` over the raw digest, which
  * is always 32 bytes, so there's no length-mismatch case to special-case).
  */
+import type { SecretCipher } from "./plans/publish.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { AgentKind, CodingAgentProfile, PrismaClient, Webhook } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
@@ -112,7 +113,14 @@ export async function resolveWebhookRun(
   db: PrismaClient,
   executor: Executor,
   codingTask?: string,
-  opts: { issue?: unknown; issueTrackers?: IssueTrackerRegistry; repository?: string; repositories?: string[] } = {},
+  opts: {
+    issue?: unknown;
+    issueTrackers?: IssueTrackerRegistry;
+    repository?: string;
+    repositories?: string[];
+    /** Reads a builder's secret values to redact its approved plan (spec §7). */
+    secretCipher?: SecretCipher;
+  } = {},
 ): Promise<ResolveWebhookRunResult> {
   const webhook = await db.webhook.findUnique({ where: { id } });
   if (!webhook) return { ok: false, reason: "not_found" };
@@ -155,6 +163,7 @@ export async function resolveWebhookRun(
     dispatched = await dispatchRun({
       db,
       executor,
+      secretCipher: opts.secretCipher,
       selfDefects: { db, issueTrackers: opts.issueTrackers },
       agentId: agent.id,
       trigger: "webhook",

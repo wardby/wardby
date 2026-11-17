@@ -110,6 +110,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
             hosts: reviewHosts,
             repoAccess: providers.repoAccess ?? createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
             ...(providers.issueTrackers ? { issueTrackers: providers.issueTrackers } : {}),
+            secretCipher: providers.secrets,
           },
         }
       : {}),
@@ -129,6 +130,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     executor: providers.executor,
     scope: options.scope,
     selfDefects,
+    secretCipher: providers.secrets,
     onLeaderTick: async () => {
       await drainCodingQueue({ db: prisma, executor: providers.executor, ...concurrency, selfDefects });
       // Runs the native sandbox gateway dispatched (or asked to stop): it holds no executor of its own.

@@ -524,6 +524,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
             hosts: reviewHosts,
             repoAccess: providers.repoAccess ?? createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
             ...(providers.issueTrackers ? { issueTrackers: providers.issueTrackers } : {}),
+            secretCipher: providers.secrets,
             webhookSecret: eventConfig.webhookSecret,
             appIdentity: (opts?: { fresh?: boolean }) => githubApp.appIdentity(opts),
             allowedAccounts: () => allowedAccounts,
@@ -540,6 +541,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
           db: prisma,
           executor: providers.executor,
           trackers: providers.issueTrackers,
+          secretCipher: providers.secrets,
           webhookSecret: jiraConfig.webhookSecret,
         }
       : undefined;

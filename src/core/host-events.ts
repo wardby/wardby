@@ -5,6 +5,7 @@
  * module decides which agents run. See
  * docs/private/2026-09-25-code-review-host-design.md §6.3.
  */
+import type { SecretCipher } from "./plans/publish.js";
 import { Prisma, type PrismaClient } from "#prisma";
 import { codeProviderOf, pullRequestWebUrl } from "../coding/code-host.js";
 import type { Executor } from "../providers/executor/types.js";
@@ -78,6 +79,13 @@ export type HostEventDb = Pick<
   | "workItem"
   | "runAttribution"
   | "agentIssueProject"
+  // A buildFromPlan builder's approved plan (dispatch, spec §7).
+  | "planSet"
+  | "documentFile"
+  | "resourceGrant"
+  | "agentSecret"
+  | "agentMcpServer"
+  | "secret"
   | "$transaction"
   | "$queryRaw"
 >;
@@ -98,6 +106,8 @@ export interface RouteHostEventDeps {
    * so a deployment may keep what is linked there to itself. Absent = true.
    */
   mentionExplanations?: boolean;
+  /** Reads a builder's secret values to redact its approved plan (spec §7); absent refuses a build from a plan. */
+  secretCipher?: SecretCipher;
 }
 
 /** What starting a review needs: everything routing needs except the mention handle. */
@@ -722,6 +732,7 @@ export async function startReviews(
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
+        secretCipher: deps.secretCipher,
         selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
         agentId: target.agentId,
         trigger: "host_event",
@@ -1612,6 +1623,7 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
           dispatched = await dispatchRun({
             db: deps.db,
             executor: deps.executor,
+            secretCipher: deps.secretCipher,
             selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
             agentId: watcher.agentId,
             trigger: "host_event",
@@ -1840,6 +1852,7 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
+        secretCipher: deps.secretCipher,
         selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
         agentId: allowed[0].agentId,
         trigger: "host_event",
