@@ -209,6 +209,38 @@ describe.skipIf(!process.env.DATABASE_URL)("PlanFilesRecorder", () => {
     expect(await loadPlanFiles(db, runId, "output")).toHaveLength(1);
   };
 
+  it("withholds a file whose content holds a NUL character, like a token-shaped one (Postgres text rejects NUL)", async () => {
+    const status = await recorder().record({
+      ...base(),
+      read: async () =>
+        output(runId, [
+          { path: "ok.md", content: "fine\n" },
+          { path: "nul.md", content: "before\u0000after\n" },
+        ]),
+    });
+    expect(status).toBe("stored");
+    expect(await loadPlanFiles(db, runId, "output")).toEqual([{ path: "ok.md", content: "fine\n" }]);
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(run.planFilesWithheld).toEqual({ paths: ["nul.md"], unnamed: 0 });
+  });
+
+  it("storeChecked withholds a NUL-holding file too; the rest of the plan is stored", async () => {
+    const status = await recorder().storeChecked(
+      base(),
+      [
+        { path: "plan.md", content: "# Plan\n" },
+        { path: "bad.md", content: "\u0000" },
+      ],
+      { paths: [], unnamed: 0 },
+    );
+    expect(status).toBe("stored");
+    expect(await loadPlanFiles(db, runId, "output")).toEqual([{ path: "plan.md", content: "# Plan\n" }]);
+    expect((await db.codingRun.findUniqueOrThrow({ where: { runId } })).planFilesWithheld).toEqual({
+      paths: ["bad.md"],
+      unnamed: 0,
+    });
+  });
+
   it("withholds a file holding the run's registry token (rrg_)", async () => {
     expect(FAKE_REGISTRY_TOKEN).toHaveLength(47);
     const status = await recorder().record({

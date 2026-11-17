@@ -62,7 +62,8 @@ const DECODER = new TextDecoder("utf-8", { fatal: true });
  * again; each file is redacted by exact value against the agent's secret values (and their JSON-escaped
  * forms, as RunTranscriptRecorder does), and a file that still holds a token-shaped value (redactSecrets:
  * the run's rrp_/rrg_/rmt_ tokens and Bearer values included) is withheld (its path recorded, never its
- * text). A path that holds a secret or token-shaped value is never stored, only counted. Nothing is
+ * text), as is one holding a NUL character (which Postgres can't store). A path that holds a secret, a
+ * token-shaped value or a NUL is never stored, only counted. Nothing is
  * stored when a delivered secret changed while the run ran; every outcome other than "stored" removes
  * the run's stored output files. An outcome is written once: nothing overwrites a recorded
  * planFilesStatus (see writeOnce). Never throws, never logs content.
@@ -159,7 +160,9 @@ export class PlanFilesRecorder {
     if (!sameSecretVersions(input.launchSecretVersions, current)) return "secrets_changed";
     // As RunTranscriptRecorder: every value in its raw and JSON-escaped forms, however short.
     const escaped = withEscapedForms(secrets);
-    const holdsSecret = (text: string): boolean => redactSecrets(text, escaped) !== text;
+    // A NUL character can't be stored (Postgres text and JSON reject it): such a file or path is
+    // withheld or counted like a token-shaped one, so it never fails the whole plan.
+    const holdsSecret = (text: string): boolean => text.includes("\u0000") || redactSecrets(text, escaped) !== text;
     const kept: PlanFile[] = [];
     const withheld: PlanFilesPathList = { paths: [], unnamed: 0 };
     const withhold = (path: string): void => {
@@ -169,8 +172,9 @@ export class PlanFilesRecorder {
     alreadyWithheld.forEach(withhold);
     for (const file of files) {
       const redacted = redactExactSecretValues(file.content, escaped, { marker: REDACTED, minLength: 1 });
-      if (holdsSecret(file.path) || redactSecrets(redacted) !== redacted) withhold(file.path);
-      else kept.push({ path: file.path, content: redacted });
+      if (holdsSecret(file.path) || redacted.includes("\u0000") || redactSecrets(redacted) !== redacted) {
+        withhold(file.path);
+      } else kept.push({ path: file.path, content: redacted });
     }
     const skippedNamed = skipped.paths.filter((path) => !holdsSecret(path));
     const skippedList: PlanFilesPathList = {
