@@ -143,6 +143,19 @@ export function isReviewCommand(body: string, mentionHandle: string): boolean {
   );
 }
 
+/**
+ * The ticket of a `@app build ticket <t>` outside code (spec §7b), or null. On an issue only: it
+ * builds a ticket of the issue's approved plan.
+ */
+export function parseBuildTicketCommand(body: string, mentionHandle: string): number | null {
+  const match = new RegExp(
+    `(^|[^\\w-])@${escapeRegExp(mentionHandle)}\\s+build\\s+ticket\\s+(\\d{1,4})(?![\\w-])`,
+    "i",
+  ).exec(withoutMarkdownCode(body));
+  // Tickets are numbered from 1 (`### Ticket <t>:`).
+  return match && Number(match[2]) >= 1 ? Number(match[2]) : null;
+}
+
 type PushEvent = Extract<HostEvent, { kind: "push" }>;
 const MAX_BUNDLE_FILES = 200;
 const BUNDLE_FILE_LINES = 2000;
@@ -1755,8 +1768,10 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const reviewCommand = event.isPullRequest && isReviewCommand(event.body, deps.mentionHandle);
       const responderLink = links.find((l) => l.access === "write" && l.triggers.includes("mention"));
       const candidates = reviewCommand ? reviewerLinks : responderLink ? [responderLink] : [];
+      // `build ticket <t>` on an issue starts the plan's builder (spec §7b), with no link of its own.
+      const buildTicket = event.isPullRequest ? null : parseBuildTicketCommand(event.body, deps.mentionHandle);
       // Explanations off and nothing to start: say nothing, and skip the author lookup.
-      if (candidates.length === 0 && deps.mentionExplanations === false) return none;
+      if (candidates.length === 0 && buildTicket === null && deps.mentionExplanations === false) return none;
       // H5-3: a mention drives a write-capable agent holding its owner's
       // tools and secrets, so its author needs real push access to the
       // repository (author_association, checked upstream, is only a
@@ -1793,6 +1808,17 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
             });
         };
         return { runIds: [], followUps: [refuse] };
+      }
+      // Only an author with write access gets here: the same gate as any mention that starts a run.
+      if (buildTicket !== null) {
+        const answer = await planChainHook()?.buildTicketFromComment(deps.db, {
+          repository: event.repository,
+          number: event.number,
+          ticket: buildTicket,
+          starterName: event.author,
+        });
+        // "started" and "refused" were answered on the issue by the hook; "none" goes on as a mention.
+        if (answer === "started" || answer === "refused") return { runIds: [], followUps: [react] };
       }
       // The author may use wardby here, so tell them why nothing started
       // instead of leaving the mention unanswered.

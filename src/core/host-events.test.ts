@@ -7,6 +7,7 @@ import {
   DEFERRED_REVIEW_MAX_WAIT_MS,
   isReviewCommand,
   NO_WRITE_ACCESS_BODY,
+  parseBuildTicketCommand,
   reviewTaskText,
   routeHostEvent,
   startDeferredForRequest,
@@ -823,6 +824,97 @@ describe("isReviewCommand", () => {
     expect(isReviewCommand("@wardby fix this; `@wardby review` re-reviews later", "wardby")).toBe(false);
     expect(isReviewCommand("@wardby fix\n\n```\n@wardby review\n```", "wardby")).toBe(false);
     expect(isReviewCommand("@wardby-dev review", "wardby")).toBe(false);
+  });
+});
+
+describe("parseBuildTicketCommand", () => {
+  it("reads the ticket number", () => {
+    expect(parseBuildTicketCommand("@wardby build ticket 2", "wardby")).toBe(2);
+    expect(parseBuildTicketCommand("please @Wardby  Build Ticket 12 now", "wardby")).toBe(12);
+  });
+  it("ignores code, other handles and other words", () => {
+    expect(parseBuildTicketCommand("`@wardby build ticket 2`", "wardby")).toBeNull();
+    expect(parseBuildTicketCommand("@wardbyx build ticket 2", "wardby")).toBeNull();
+    expect(parseBuildTicketCommand("@wardby build tickets", "wardby")).toBeNull();
+    expect(parseBuildTicketCommand("@wardby build ticket 2a", "wardby")).toBeNull();
+    expect(parseBuildTicketCommand("@wardby build ticket 0", "wardby")).toBeNull();
+    expect(parseBuildTicketCommand("@wardby-dev build ticket 2", "wardby")).toBeNull();
+  });
+});
+
+describe("routeHostEvent: build ticket <t> on an issue", () => {
+  const issueMention = (body: string, extra: Partial<Extract<HostEvent, { kind: "mention" }>> = {}): HostEvent => ({
+    kind: "mention",
+    provider: "github",
+    repository: REPO,
+    number: 12,
+    isPullRequest: false,
+    comment: { kind: "conversation", id: "9" },
+    body,
+    author: "octocat",
+    authorId: "2002",
+    ...extra,
+  });
+  const recording = (answer: "started" | "refused" | "none") => {
+    const buildTicketFromComment = vi.fn<PlanChainHook["buildTicketFromComment"]>(async () => answer);
+    setPlanChainHook({ onMerged: vi.fn(), onTicketFinished: vi.fn(), buildTicketFromComment });
+    return buildTicketFromComment;
+  };
+  afterEach(() => setPlanChainHook(undefined));
+
+  it.each(["started", "refused"] as const)(
+    "hands the command to the plan chain; %s: no responder run, a reaction on the comment",
+    async (answer) => {
+      vi.mocked(dispatchRun).mockClear();
+      const hook = recording(answer);
+      const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+      const result = await routeHostEvent(issueMention("@wardby build ticket 2"), d);
+      expect(hook).toHaveBeenCalledTimes(1);
+      expect(hook).toHaveBeenCalledWith(d.db, { repository: REPO, number: 12, ticket: 2, starterName: "octocat" });
+      expect(result.runIds).toEqual([]);
+      expect(dispatchRun).not.toHaveBeenCalled();
+      for (const f of result.followUps) await f();
+      expect(d.hosts.github.acknowledge).toHaveBeenCalledWith(REPO, { kind: "conversation", id: "9" });
+      expect(d.hosts.github.comment).not.toHaveBeenCalled();
+    },
+  );
+
+  it('"none": the mention goes on to the responder link as today', async () => {
+    vi.mocked(dispatchRun).mockClear();
+    const hook = recording("none");
+    const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    const result = await routeHostEvent(issueMention("@wardby build ticket 2"), d);
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(result.runIds).toEqual(["run-a3"]);
+    expect(dispatchRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("an author without write access never reaches the plan chain", async () => {
+    const hook = recording("started");
+    const d = deps(
+      [{ agentId: "a3", triggers: ["mention"], checkName: null }],
+      host(),
+      gate({ commenter: { ok: false, reason: "insufficient_permission", level: "none" } }),
+    );
+    expect(await routeHostEvent(issueMention("@wardby build ticket 2"), d)).toEqual({ runIds: [], followUps: [] });
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it("with no responder link and explanations off, the command still reaches the plan chain", async () => {
+    const hook = recording("started");
+    const d = { ...deps([]), mentionExplanations: false };
+    const result = await routeHostEvent(issueMention("@wardby build ticket 3"), d);
+    expect(d.repoAccess.authorizeHostUser).toHaveBeenCalledTimes(1);
+    expect(hook).toHaveBeenCalledWith(d.db, { repository: REPO, number: 12, ticket: 3, starterName: "octocat" });
+    expect(result.followUps).toHaveLength(1);
+  });
+
+  it("is not a plan command on a pull request, or in code", async () => {
+    const hook = recording("started");
+    const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    await routeHostEvent(issueMention("@wardby build ticket 2", { isPullRequest: true, number: 7 }), d);
+    await routeHostEvent(issueMention("see `@wardby build ticket 2` @wardby hi"), d);
+    expect(hook).not.toHaveBeenCalled();
   });
 });
 

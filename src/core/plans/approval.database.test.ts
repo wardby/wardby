@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { Principal } from "#prisma";
 import type { Executor } from "../../providers/executor/types.js";
 import { drainCodingQueue } from "../coding-queue.js";
+import { markRunFailedFromExecutorError } from "../dispatch.js";
 import { createPrismaClient } from "../db.js";
 import { documentSecretValues } from "../documents/redact.js";
 import { reopenDocument, reviewDocument, submitForReview } from "../documents/review.js";
@@ -19,6 +20,7 @@ import {
   issueNoticePoster,
   lockPlanSetForTicketStart,
   planApprovedNotice,
+  planTicketStartBlock,
   planBuildStartedNotice,
   runningPlanTicket,
   setPlanChainHook,
@@ -295,7 +297,10 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     notices = [];
     startResult = { running: 1 };
     const second = await makeSet({ onApproved: "build", builderAgentId: builder });
+    // The run the guard saw in flight: the chain follows it.
+    const inFlight = await ticketRun(builder, second.planSetId, 1, "running");
     await approveAll(second.documentIds);
+    expect((await setRow(second.planSetId)).chainRunId).toBe(inFlight);
     expect(notices.map((x) => x.text)).toEqual([`${APPROVED}\nPlan 12: already building ticket 1.`]);
 
     notices = [];
@@ -840,6 +845,183 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
       expect(notices.map((x) => x.text)).toEqual([
         "Plan 12 stopped at ticket 1 (failed). Comment `@wardby build ticket 1` to continue.",
       ]);
+    });
+
+    it("a ticket run whose executor start fails stops the chain with a notice", async () => {
+      setPlanChainHook(chain());
+      const { planSetId, run1 } = await building();
+      await db.run.update({ where: { id: run1 }, data: { status: "pending" } });
+      await markRunFailedFromExecutorError(db, run1, new Error("launch failed"));
+      await settle();
+      expect(await setRow(planSetId)).toMatchObject({ chainStopped: "failed", chainRunId: null });
+      expect(notices.map((x) => x.text)).toEqual([
+        "Plan 12 stopped at ticket 1 (failed). Comment `@wardby build ticket 1` to continue.",
+      ]);
+    });
+
+    it("a start that finds a run in flight that is gone by the time it follows it stops with start_failed", async () => {
+      const { planSetId, run1 } = await building();
+      const number = ++pr;
+      await finish(run1, "succeeded", number);
+      // The guard saw ticket 2 in flight; that run ended before the chain looked it up.
+      startResult = { running: 2 };
+      await merged(number);
+      expect(await setRow(planSetId)).toMatchObject({
+        chainTicket: 2,
+        chainStopped: "start_failed",
+        chainRunId: null,
+      });
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (start_failed)."]);
+    });
+
+    it("a merge while a fix round of the same ticket is in flight still starts the next ticket", async () => {
+      const { builder, planSetId, run1 } = await building();
+      const number = ++pr;
+      await finish(run1, "succeeded", number);
+      const fixRound = await ticketRun(builder, planSetId, 1, "running");
+      await db.codingRun.update({ where: { runId: fixRound }, data: { rootCodingRunId: run1 } });
+      expect(await runningPlanTicket(db, planSetId)).toBeNull();
+      await merged(number);
+      expect(starts.map((x) => x.ticket)).toEqual([2]);
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 2."]);
+      const row = await setRow(planSetId);
+      expect(row.chainTicket).toBe(2);
+      expect(row.chainRunId).not.toBe(fixRound);
+    });
+
+    it("a refused start never overwrites a stop recorded meanwhile (a reopen)", async () => {
+      const { planSetId, documentIds, run1 } = await building();
+      const number = ++pr;
+      await finish(run1, "succeeded", number);
+      vi.spyOn(deps, "startTicket").mockImplementationOnce(async () => {
+        await reopenDocument(db, cipher, { documentId: documentIds["api.md"], viewer: as(owner) });
+        return { refused: "plan_not_approved" };
+      });
+      await merged(number);
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: "reopened", chainRunId: null });
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (plan_not_approved)."]);
+    });
+
+    it("planTicketStartBlock: says what held a start back, as seen under the lock", async () => {
+      const builder = await makeAgent({ buildFromPlan: true });
+      const { planSetId, documentIds } = await makeSet({ onApproved: "notify" });
+      const block = () => db.$transaction((tx) => planTicketStartBlock(tx, planSetId));
+      expect(await block()).toEqual({ refused: "plan_not_approved" });
+      await approveAll(documentIds);
+      expect(await block()).toBeNull();
+      const pending = await ticketRun(builder, planSetId, 1, "pending");
+      expect(await block()).toEqual({ running: 1 });
+      await finish(pending, "failed");
+      expect(await block()).toBeNull();
+    });
+
+    describe("build ticket from a comment", () => {
+      // Every set here is the repository's plan 12: earlier tests' approved sets would answer first.
+      beforeEach(async () => {
+        await db.planSet.updateMany({ where: { repository }, data: { approvedAt: null } });
+      });
+      const build = (ticket: number, starterName = "octocat", number = 12) =>
+        chain()
+          .buildTicketFromComment(db, { repository, number, ticket, starterName })
+          .then(async (answer) => {
+            await settle();
+            return answer;
+          });
+      /** A plan approved by Ada whose planner names a builder; "notify", so the approval starts nothing. */
+      async function approvedNotify() {
+        const builder = await makeAgent({ buildFromPlan: true });
+        const made = await makeSet({ onApproved: "notify", builderAgentId: builder });
+        await approveAll(made.documentIds);
+        notices = [];
+        starts = [];
+        return { builder, ...made };
+      }
+
+      it("starts the planner's builder for the ticket, by the comment's author, and the chain follows it", async () => {
+        const { builder, planSetId } = await approvedNotify();
+        expect(await build(2)).toBe("started");
+        expect(starts).toHaveLength(1);
+        expect(starts[0]).toMatchObject({ builderAgentId: builder, ticket: 2, starterId: null, trigger: "comment" });
+        expect(starts[0].set).toMatchObject({ id: planSetId, number: 12 });
+        const row = await setRow(planSetId);
+        expect(row).toMatchObject({ chainTicket: 2, chainStopped: null });
+        expect(row.chainRunId).not.toBeNull();
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 2, started by octocat."]);
+        // Its merge moves the chain on: ticket 2 is the plan's last.
+        notices = [];
+        const number = ++pr;
+        await finish(row.chainRunId!, "succeeded", number);
+        await merged(number);
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: all 2 tickets built."]);
+      });
+
+      it("restarts a stopped chain from the ticket asked for", async () => {
+        const { planSetId, run1 } = await building();
+        await finish(run1, "failed");
+        await finished(run1);
+        expect((await setRow(planSetId)).chainStopped).toBe("failed");
+        notices = [];
+        expect(await build(1)).toBe("started");
+        const row = await setRow(planSetId);
+        expect(row).toMatchObject({ chainTicket: 1, chainStopped: null });
+        expect(row.chainRunId).not.toBe(run1);
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 1, started by octocat."]);
+      });
+
+      it("R16: while a ticket run of the set is pending it starts nothing and says so", async () => {
+        const { builder, planSetId } = await approvedNotify();
+        await ticketRun(builder, planSetId, 1, "pending");
+        expect(await build(2)).toBe("refused");
+        expect(starts).toEqual([]);
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: already building ticket 1."]);
+        expect((await setRow(planSetId)).chainTicket).toBeNull();
+      });
+
+      it('"none", posting nothing: a set not approved, a planner without a builder, no set, a Jira plan', async () => {
+        const builder = await makeAgent({ buildFromPlan: true });
+        await makeSet({ onApproved: "notify", builderAgentId: builder });
+        expect(await build(1)).toBe("none");
+        const plain = await makeSet({ onApproved: "notify" });
+        await approveAll(plain.documentIds);
+        notices = [];
+        expect(await build(1)).toBe("none");
+        expect(await build(1, "octocat", 13)).toBe("none");
+        const jira = await makeSet({ onApproved: "notify", builderAgentId: builder });
+        await db.planSet.update({
+          where: { id: jira.planSetId },
+          data: { issueProvider: "jira", issueKey: "PROJ-12" },
+        });
+        await approveAll(jira.documentIds);
+        notices = [];
+        expect(await build(1)).toBe("none");
+        expect(starts).toEqual([]);
+        expect(notices).toEqual([]);
+      });
+
+      it("a refused start stops the chain with the refusal's code", async () => {
+        const { planSetId } = await approvedNotify();
+        startResult = { refused: "plan_not_approved" };
+        expect(await build(2)).toBe("refused");
+        expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: "plan_not_approved" });
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (plan_not_approved)."]);
+      });
+
+      it("R12: a builder that cannot build any more is refused with plan_builder_invalid", async () => {
+        const { builder, planSetId } = await approvedNotify();
+        await db.codingAgentProfile.update({ where: { agentId: builder }, data: { buildFromPlan: false } });
+        expect(await build(2)).toBe("refused");
+        expect(starts).toEqual([]);
+        expect((await setRow(planSetId)).chainStopped).toBe("plan_builder_invalid");
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (plan_builder_invalid)."]);
+      });
+
+      it("secrets: the author's name is redacted, escaped and defused in the notice", async () => {
+        await approvedNotify();
+        expect(await build(2, `x_${FAKE_NAME_SECRET} @someone`)).toBe("started");
+        expect(notices).toHaveLength(1);
+        expect(notices[0].text).not.toContain(FAKE_NAME_SECRET);
+        expect(notices[0].text).not.toContain("@someone");
+      });
     });
 
     it("lockPlanSetForTicketStart: under the set's row lock, an approved set with no ticket run in flight", async () => {

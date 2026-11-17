@@ -28,8 +28,8 @@ import {
   createPlanChainHook,
   createPlanReviewHook,
   issueNoticePoster,
-  lockPlanSetForTicketStart,
-  runningPlanTicket,
+  planTicketStartBlock,
+  type TicketStartBlock,
   setPlanChainHook,
   setPlanReviewHook,
   type PlanApprovalDeps,
@@ -409,6 +409,8 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       return documentSecretValues(options.db, cipher, agentId);
     },
     startTicket: async ({ builderAgentId, set, ticket, starterId, trigger }) => {
+      // What the guard saw under the set's lock, so a refusal reports that (not a later re-read).
+      const guard: { blocked: TicketStartBlock | null } = { blocked: null };
       try {
         const attribution =
           set.issueProvider && set.issueKey
@@ -438,7 +440,10 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
           ...(attribution ? { attribution } : {}),
           // R16, spec §7b: under the set's row lock, only an approved set with no ticket run in flight;
           // a reopen or a concurrent start (the chain's, or a build ticket comment's) waits for it.
-          beforePersist: (tx) => lockPlanSetForTicketStart(tx, set.id),
+          beforePersist: async (tx) => {
+            guard.blocked = await planTicketStartBlock(tx, set.id);
+            return guard.blocked === null;
+          },
           // The chain follows the run from the transaction that creates it, so a run that ends at
           // once still finds itself the chain's run (plans/approval.ts onTicketFinished).
           afterPersist: async (tx, run) => {
@@ -449,10 +454,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
               RETURNING "id"`;
           },
         });
-        if (!dispatched) {
-          const running = await runningPlanTicket(options.db, set.id);
-          return running !== null ? { running } : { refused: "plan_not_approved" };
-        }
+        if (!dispatched) return guard.blocked ?? { refused: "plan_not_approved" };
         if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
           return { refused: (dispatched.run.error ?? "refused").split(":")[0] };
         }

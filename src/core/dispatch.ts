@@ -38,6 +38,7 @@ import { KNOWLEDGE_CONFIG_MAX_BYTES, KNOWLEDGE_CONFIG_PATH, resolveKnowledgeLoca
 import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInput } from "../knowledge/note.js";
 import { logger } from "./logger.js";
 import { assertPlanFilesWithinLimits, savePlanInputFiles, type PlanFile } from "../coding/plan-files/store.js";
+import { planChainHook, type PlanChainDb } from "./plans/chain-hook.js";
 import { PlanRefusedError } from "./plans/refusal.js";
 import { readPlanVersions, resolveBuildPlan, resolveRecordedBuildPlan, type BuildPlan } from "./plans/build.js";
 import type { SecretCipher } from "./plans/publish.js";
@@ -309,7 +310,7 @@ export function isTransactionUnavailable(err: unknown): boolean {
  * than overwrite whatever landed in between.
  */
 export async function markRunFailedFromExecutorError(
-  db: Pick<DispatchDb, "run">,
+  db: Pick<DispatchDb, "run"> & PlanChainDb,
   runId: string,
   err: unknown,
   selfDefects?: SelfDefectSink,
@@ -322,8 +323,16 @@ export async function markRunFailedFromExecutorError(
       finishedAt: new Date(),
     },
   });
+  if (updated.count === 0) return;
+  // A plan ticket run that never started stops its build chain with a notice (the chain's work runs in
+  // the background; a failure here is logged by name only, never thrown into the executor's path).
+  await planChainHook()
+    ?.onTicketFinished(db, runId)
+    .catch((err: unknown) => {
+      dispatchLog.warn({ errorName: err instanceof Error ? err.name : typeof err, runId }, "plan chain run end failed");
+    });
   // Only the call that made the row failed files (the duplicate call matches zero rows); bounded, never throws.
-  if (updated.count > 0) await fileSelfDefectForRun(selfDefects, runId);
+  await fileSelfDefectForRun(selfDefects, runId);
 }
 
 /**
