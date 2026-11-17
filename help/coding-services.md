@@ -3,7 +3,7 @@ id: coding-services
 title: Give coding runs the services their tests need
 summary: Let coding runs on the Kubernetes, Docker or Substrate launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml; startCommand and substrateImage for Substrate.
 audience: operator
-tags: [coding-agents, services, postgres, redis, valkey, mysql, kubernetes, docker, substrate, startCommand, substrateImage]
+tags: [coding-agents, services, postgres, redis, valkey, mysql, substrate, startCommand, substrateImage]
 appliesTo: >=0.2.1
 ---
 
