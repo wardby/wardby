@@ -77,6 +77,35 @@ Sharing a document uses the general grant tools, so it needs their scopes:
 `grant_access` and `revoke_access` need `agents:write`, and `list_access` needs
 `agents:read`.
 
+## Plan sets
+
+A [plan document setting](coding-agent-setup.md#plan-documents) on a coding
+agent publishes its plan as a plan set: one document per top-level `*.md` file
+(`plan.md` first), one design per board subfolder, up to 20 in all. Other files
+are ignored and listed. Later runs version changed files, add new documents and
+mark a removed file `removedFromPlan`; approved or archived documents are never
+changed by a run. Removed documents stay listed, and are read-only to agents.
+`get_document` on a plan document returns the set's documents, and
+`list_documents` takes a `planNumber` filter.
+
+**Access from the agent.** The owner of the agent that was triggered, and anyone
+with any grant on it (an `everyone` grant included), get `comment` on every
+document of the set. The rule is live: losing the grant on the agent loses the
+plan. It never gives more than comment; explicit grants and share links add on
+top, and naming someone as reviewer adds no grant. Sharing an agent with everyone
+lets every signed-in user read and comment on the plans it produces.
+
+**Plan bar.** Each page of a set shows "Plan N - X of Y approved" over the
+documents the viewer can read, with a chip per document; relative links in the
+Markdown open the other documents or boards. A share-link guest sees only
+"Plan N" and their own document. The bar updates live: a plan document's event
+stream also carries the review and version events of the other documents of its
+set that the viewer can read.
+
+**Revisions.** Sending threads to the agent starts the plan's own planner with
+every document's current version; only a document it changed, and nobody edited
+meanwhile, gets a new version, and the rest reconcile.
+
 ## Browser sign-in
 
 | Deployment                  | What members do                                                                                       |

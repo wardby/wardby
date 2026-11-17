@@ -460,6 +460,48 @@ and token-shaped values are replaced. If the agent's secrets can't be read,
 `get_run` returns `requestUnavailable: true` instead of the text. Runs from
 before this field have no `request`.
 
+## Plan documents
+
+A coding agent can publish its plan as [Wardby documents](documents.md) for
+people to review, and a second coding agent can build only from the approved
+plan. The short version is the help article `plan-documents`.
+
+| Setting                        | Meaning                                                                                                         |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `planDocument.store`           | `wardby` (default): the plan stays in Wardby. `repository`: it is also written to `path`, with a branch and PR. |
+| `planDocument.path`            | Required for `repository`: a repository folder holding `{n}` once, such as `docs/plans/issue-{n}/`.             |
+| `planDocument.reviewers`       | 1 to 50 people who can read the agent; default the agent's owner.                                               |
+| `planDocument.finalApproverId` | Optional person who may force an approval.                                                                      |
+| `planDocument.onApproved`      | `notify` (default) or `build`.                                                                                  |
+| `planDocument.builderAgentId`  | The coding agent started by `build`; it needs `buildFromPlan`.                                                  |
+| `buildFromPlan`                | Refuse to build while a plan for the issue has documents that are not approved (`plan_not_approved`).           |
+
+Set `planDocument` and `buildFromPlan` with `update_agent` on a coding agent you
+own. `planDocument: null` turns planning off.
+
+**The plan number** is the issue number, or `planNumber` on a lead's delegate
+call. With neither, the run is refused (`plan_number_missing`). Plans are unique
+per planner agent, repository and number.
+
+**Where the plan is written.** With store `wardby` the planner writes to
+`/tmp/wardby-plan`, outside the repository: no file, branch or pull request.
+With store `repository` it writes to `path` and the run finishes as usual.
+One document is made per top-level `*.md` file (`plan.md` first), and one design
+per board subfolder; other files are ignored and listed. A plan holds up to 20
+documents; the plan folder is limited to 200 files, 1 MiB per file and 8 MiB in
+all, a Markdown document to 60,000 characters and one design's files to 1 MiB
+(`plan_too_large`). A later run versions changed files, adds new ones and marks a
+removed file `removedFromPlan`; approved documents are never changed by a run.
+
+**Review.** Documents are submitted to the reviewers and approved one by one.
+Comments sent to the agent are revised by the plan's own planner. Anyone with a
+grant on the triggered agent, and its owner, can comment on the plan's documents
+(see [Documents](documents.md#plan-sets)).
+
+**Upgrade.** Plan documents need a current driver image (`driver-v37` or later
+for Codex), tool runner and, on Substrate, bridge images: see
+[Plan documents need a current driver and tool runner](coding-worker-byo-images.md#plan-documents-need-a-current-driver-and-tool-runner).
+
 ## Local repositories
 
 A coding agent (or a review agent) can work on a git repository on the same
