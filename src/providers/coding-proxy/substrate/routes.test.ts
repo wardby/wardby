@@ -871,6 +871,224 @@ describe("substrate routes", () => {
     });
   });
 
+  describe("services report", () => {
+    const PAIR: SubstrateRunLayout = { shape: "pair", services: ["postgres", "redis"] };
+    beforeEach(() => {
+      overrides = { runLayoutForToken: async () => PAIR };
+    });
+    const restart = async (layout: SubstrateRunLayout | undefined): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+      overrides = { runLayoutForToken: async () => layout };
+      await start();
+    };
+    const stored = async (): Promise<unknown> => JSON.parse((await blobs.get(BLOB.services(TOKEN))).toString());
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+    const routeLines = (): Record<string, unknown>[] =>
+      logCalls
+        .map((call) => call[0] as Record<string, unknown>)
+        .filter((l) => l.event === "substrate.route" && l.route === "services");
+
+    it("stores the holder's report, rebuilt", async () => {
+      await start();
+      const first = {
+        services: [
+          { name: "postgres", state: "ready" },
+          { name: "redis", state: "probing", attempts: 2 },
+        ],
+      };
+      const answer = await fetch(`${base}/services`, tool(json(first)));
+      expect(answer.status).toBe(200);
+      expect(await answer.json()).toEqual({});
+      expect(await stored()).toEqual(first);
+      const second = {
+        services: [
+          { name: "postgres", state: "ready" },
+          { name: "redis", state: "failed", attempts: 30, reason: "probe_failed" },
+        ],
+      };
+      expect((await fetch(`${base}/services`, tool(json(second)))).status).toBe(200);
+      expect(await stored()).toEqual(second);
+    });
+
+    it("stores the rebuilt object, not the request's bytes", async () => {
+      await start();
+      const body = '{ "services" : [ { "state":"ready",   "name":"postgres" } ] }';
+      expect((await fetch(`${base}/services`, tool({ method: "POST", body }))).status).toBe(200);
+      expect((await blobs.get(BLOB.services(TOKEN))).toString()).toBe(
+        JSON.stringify({ services: [{ name: "postgres", state: "ready" }] }),
+      );
+    });
+
+    it("is holder-only", async () => {
+      await start();
+      const report = { services: [{ name: "postgres", state: "ready" }] };
+      expect((await fetch(`${base}/services`, agent(json(report)))).status).toBe(401);
+      expect(await blobs.head(BLOB.services(TOKEN))).toBeNull();
+      await restart({ shape: "single", services: ["postgres"] });
+      expect((await fetch(`${base}/services`, tool(json(report)))).status).toBe(401);
+      expect(await blobs.head(BLOB.services(TOKEN))).toBeNull();
+      expect((await fetch(`${base}/services`, agent(json(report)))).status).toBe(200);
+      expect(await stored()).toEqual(report);
+    });
+
+    it("answers 404 for a run without services, before the body is read", async () => {
+      for (const layout of [{ shape: "pair" as const }, undefined]) {
+        await restart(layout);
+        const answer = await fetch(
+          `${base}/services`,
+          tool(json({ services: [{ name: "postgres", state: "ready" }] })),
+        );
+        expect(answer.status).toBe(404);
+        expect(await answer.json()).toEqual({ error: { type: "not_found" } });
+        expect(await blobs.head(BLOB.services(TOKEN))).toBeNull();
+        // An oversized body (413 if read) and no Content-Length (411 if checked) still get the 404.
+        const oversized = await fetch(`${base}/services`, tool({ method: "POST", body: "x".repeat(4097) }));
+        expect(oversized.status).toBe(404);
+        const { port } = server.address() as { port: number };
+        const chunked = await new Promise<number>((resolve, reject) => {
+          const req = httpRequest(
+            {
+              host: "127.0.0.1",
+              port,
+              method: "POST",
+              path: `/substrate/runs/${TOKEN}/services`,
+              headers: { ...AUTH, [BRIDGE_PROTOCOL_HEADER]: "1", "transfer-encoding": "chunked" },
+            },
+            (res) => {
+              res.resume();
+              resolve(res.statusCode ?? 0);
+            },
+          );
+          req.on("error", reject);
+          req.end(JSON.stringify({ services: [{ name: "postgres", state: "ready" }] }));
+        });
+        expect(chunked).toBe(404);
+      }
+    });
+
+    it("answers 426 to a bridge of another protocol, before the body", async () => {
+      await start();
+      const answer = await globalThis.fetch(`${base}/services`, {
+        ...tool(json({ services: [{ name: "postgres", state: "ready" }] })),
+        headers: { ...AUTH, [BRIDGE_PROTOCOL_HEADER]: "2" },
+      });
+      expect(answer.status).toBe(426);
+      expect(await blobs.head(BLOB.services(TOKEN))).toBeNull();
+    });
+
+    const REFUSED: [string, string][] = [
+      ["an unlisted name", JSON.stringify({ services: [{ name: "mysql", state: "ready" }] })],
+      ["an unknown state", JSON.stringify({ services: [{ name: "postgres", state: "weird" }] })],
+      [
+        "a reason on ready",
+        JSON.stringify({ services: [{ name: "postgres", state: "ready", reason: "probe_failed" }] }),
+      ],
+      [
+        "an extra key",
+        JSON.stringify({ services: [{ name: "postgres", state: "ready", env: "FAKE_SERVICE_ENV_VALUE_0001" }] }),
+      ],
+      ["a capability as the name", JSON.stringify({ services: [{ name: CAPABILITY, state: "ready" }] })],
+      ["a non-JSON body", "postgres ready"],
+    ];
+
+    it.each(REFUSED)("refuses %s, and stores nothing", async (_label, body) => {
+      await start();
+      const answer = await fetch(`${base}/services`, tool({ method: "POST", body }));
+      expect(answer.status).toBe(400);
+      expect(await answer.json()).toEqual({ error: { type: "substrate_services_report_invalid" } });
+      expect(await blobs.head(BLOB.services(TOKEN))).toBeNull();
+    });
+
+    it("requires a Content-Length", async () => {
+      await start();
+      const { port } = server.address() as { port: number };
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port,
+            method: "POST",
+            path: `/substrate/runs/${TOKEN}/services`,
+            headers: { ...AUTH, [BRIDGE_PROTOCOL_HEADER]: "1", "transfer-encoding": "chunked" },
+          },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end(JSON.stringify({ services: [{ name: "postgres", state: "ready" }] }));
+      });
+      expect(status).toBe(411);
+      expect(await blobs.head(BLOB.services(TOKEN))).toBeNull();
+    });
+
+    it("refuses a body past its bound", async () => {
+      await start();
+      const body = "x".repeat(4097);
+      const answer = await fetch(`${base}/services`, tool({ method: "POST", body }));
+      expect(answer.status).toBe(413);
+      expect(await answer.json()).toEqual({ error: { type: "too_large" } });
+      expect(await blobs.head(BLOB.services(TOKEN))).toBeNull();
+    });
+
+    it("never ends the run", async () => {
+      await start();
+      expect(
+        (await fetch(`${base}/services`, tool(json({ services: [{ name: "postgres", state: "ready" }] })))).status,
+      ).toBe(200);
+      expect(await blobs.head(BLOB.done(TOKEN))).toBeNull();
+      expect((await fetch(`${base}/events?after=0`, tool())).status).toBe(200);
+    });
+
+    it("logs and stores nothing of a refused body", async () => {
+      await start();
+      const secrets = [CAPABILITY, "FAKE_SERVICE_ENV_VALUE_0001"];
+      const answers: string[] = [];
+      for (const [, body] of REFUSED.filter(([, b]) => secrets.some((v) => b.includes(v)))) {
+        const answer = await fetch(`${base}/services`, tool({ method: "POST", body }));
+        expect(answer.status).toBe(400);
+        answers.push(await answer.text());
+      }
+      expect(answers).toHaveLength(2);
+      const ok = await fetch(`${base}/services`, tool(json({ services: [{ name: "redis", state: "ready" }] })));
+      answers.push(await ok.text());
+      await settle();
+      const blobTexts: string[] = [];
+      for (const name of await readdir(dir, { recursive: true })) {
+        try {
+          blobTexts.push((await blobs.get(String(name))).toString());
+        } catch {
+          // a directory, or a store's own metadata file
+        }
+      }
+      expect(blobTexts.length).toBeGreaterThan(0);
+      for (const out of [JSON.stringify(logCalls), JSON.stringify(warnCalls), ...answers, ...blobTexts]) {
+        for (const secret of secrets) expect(out).not.toContain(secret);
+      }
+      const allowed = [
+        "event",
+        "runToken",
+        "route",
+        "status",
+        "bytes",
+        "durationMs",
+        "errorKind",
+        "setupDeleted",
+        "repository",
+        "item",
+      ];
+      const lines = routeLines();
+      expect(lines).toHaveLength(3);
+      for (const l of lines) for (const key of Object.keys(l)) expect(allowed).toContain(key);
+      for (const l of lines) expect(l).not.toHaveProperty("repository");
+      for (const l of lines) expect(l).not.toHaveProperty("item");
+    });
+  });
+
   describe("single actor shape", () => {
     // fetch sends Content-Length for a string body.
     const upload = (body: string) => ({ method: "POST", body });
@@ -1747,12 +1965,14 @@ describe("substrate routes", () => {
     });
 
     it("looks the layout up once per token", async () => {
-      const lookup = vi.fn(async () => LAYOUT);
+      const lookup = vi.fn(async (): Promise<SubstrateRunLayout> => ({ ...LAYOUT, services: ["postgres"] }));
       overrides = { runLayoutForToken: lookup };
       await blobs.put(REPO_BLOB.seed(TOKEN, "extra-alpha"), Buffer.from("seed-alpha"));
       await start();
       expect((await fetch(`${base}/repos/extra-alpha/seed`, tool())).status).toBe(200);
       expect((await fetch(`${base}/repos/extra-alpha/workspace`, tool(upload("tar")))).status).toBe(200);
+      const report = JSON.stringify({ services: [{ name: "postgres", state: "ready" }] });
+      expect((await fetch(`${base}/services`, tool({ method: "POST", body: report }))).status).toBe(200);
       expect((await fetch(`${base}/events?after=0`, tool())).status).toBe(200);
       expect(lookup).toHaveBeenCalledTimes(1);
     });

@@ -27,7 +27,12 @@ import { buildClaudeContext, MAX_RECORDED_SKIPS, type ClaudeContext } from "../.
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
-import { parseStoredServices, storedServiceNames, workerServices } from "../../coding/services/catalog.js";
+import {
+  parseStoredServices,
+  storedServiceNames,
+  workerServices,
+  type ResolvedCodingService,
+} from "../../coding/services/catalog.js";
 import { MAX_SERVICE_DECLARATION_BYTES, SERVICE_DECLARATION_PATH } from "../../coding/services/declaration.js";
 import {
   SERVICE_UNREADY_CATEGORY,
@@ -129,9 +134,15 @@ import {
   type JobRetention,
   type JobSpec,
   type JobWarmStart,
+  type UnstartableService,
   type WorkspaceJobLauncher,
 } from "../jobs/types.js";
-import { systemPromptSha256, warmFingerprint, type WarmSecretVersion } from "../jobs/warm-fingerprint.js";
+import {
+  servicesFingerprint,
+  systemPromptSha256,
+  warmFingerprint,
+  type WarmSecretVersion,
+} from "../jobs/warm-fingerprint.js";
 import { agentSecretVersions, parseSecretVersions } from "../../core/secret-versions.js";
 import { RUN_ID } from "../jobs/kubernetes-isolation.js";
 import { WARM_START_STEP_ID, warmStartLine } from "../../coding/warm-start-wording.js";
@@ -3006,7 +3017,8 @@ export class ContainerExecutor implements Executor {
 
   /**
    * Warm rounds: what a delivered run's job is retained with (the commit it pushed and its agent
-   * fingerprint), or undefined (the job is removed): only on a launcher that retains, for Claude Code.
+   * fingerprint), or undefined (the job is removed): only on a launcher that retains, for Claude Code,
+   * and never for a run with git history, extra repositories or services.
    */
   private retentionFor(run: ContainerRunSnapshot, headSha: string): JobRetention | undefined {
     if (!this.warmRounds || !this.options.jobs.retain || run.provider !== "claude-code") return undefined;
@@ -3016,6 +3028,14 @@ export class ContainerExecutor implements Executor {
     // A run with extra repositories (#537) is never kept: a kept read copy would hold the previous
     // round's pinned commit; per-repository warm rounds are a follow-up (W2).
     if (folderRows(run.repositories).length > 0) return undefined;
+    // A run with services is never kept, nor one whose services column cannot be read: its holder's
+    // service containers and their data belong to that round alone (the launcher removes it too).
+    if (
+      run.services !== null &&
+      run.services !== undefined &&
+      !(Array.isArray(run.services) && run.services.length === 0)
+    )
+      return undefined;
     // The fingerprint the run launched with (never one recomputed now: the agent may have changed).
     const fingerprint = run.warmFingerprint;
     if (!WARM_HEAD_SHA.test(headSha) || !fingerprint || !WARM_FINGERPRINT.test(fingerprint)) return undefined;
@@ -4224,9 +4244,14 @@ export class ContainerExecutor implements Executor {
     return this.options.repoAccess.authorizeUse(input);
   }
 
-  /** The job launcher decides (Kubernetes and Docker start services for both providers). */
+  /** The job launcher decides (Kubernetes, Docker and Substrate start services for both providers). */
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.options.jobs.supportsServicesFor?.(provider) === true;
+  }
+
+  /** The job launcher decides; a launcher without the hook (Docker, Kubernetes) can start them all. */
+  unstartableCodingServices(services: readonly ResolvedCodingService[]): UnstartableService[] {
+    return this.options.jobs.unstartableServices?.(services) ?? [];
   }
 
   /** Delegates to the job launcher's own warm-up (Executor.warmUp); a no-op for a launcher without one. */
@@ -4376,6 +4401,7 @@ export class ContainerExecutor implements Executor {
         repository: run.repository,
         secrets: run.secretVersions,
         mcpTools: pins,
+        services: servicesFingerprint(spec.services),
       });
       return WARM_FINGERPRINT.test(fingerprint) ? fingerprint : undefined;
     } catch {

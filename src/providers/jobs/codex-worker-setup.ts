@@ -39,6 +39,13 @@ export function holderSetupRepositories(
   }));
 }
 
+/** One service's start script, as the holder bridge's setup lists it (in servicesInOrder order). */
+export interface HolderSetupService {
+  name: string;
+  /** serviceStartScript(service): carries serviceEnv and the commands; never logged. */
+  script: string;
+}
+
 export interface CodexWorkerSetup {
   schemaVersion: 1;
   /** deriveRegistryToken(capability): the run's registry-only token. Never the capability. */
@@ -48,6 +55,10 @@ export interface CodexWorkerSetup {
   collectResultBundle?: true;
   /** Present only on a run with extra repositories. */
   repositories?: HolderSetupRepository[];
+  /** Present only on a run with services: their start scripts, by name order. */
+  services?: HolderSetupService[];
+  /** Present exactly with `services`: servicesWaitMs(...), the bridge's bound for all of them. */
+  servicesWaitMs?: number;
 }
 
 /** Same bound as the Claude tool setup's whole document (CLAUDE_TOOL_SETUP_LIMITS.maxSetupBytes). */
@@ -60,7 +71,11 @@ export const CODEX_WORKER_SETUP_LIMITS = { maxSetupBytes: 96 * 1024 } as const;
 export function codexWorkerSetup(
   spec: JobSpec,
   capability: string,
-  options: { collectResultBundle: boolean; repositories?: HolderSetupRepository[] },
+  options: {
+    collectResultBundle: boolean;
+    repositories?: HolderSetupRepository[];
+    services?: { entries: HolderSetupService[]; waitMs: number };
+  },
 ): string {
   if (spec.provider !== "codex") throw new Error("codex_worker_setup_provider");
   const setup: CodexWorkerSetup = {
@@ -77,6 +92,13 @@ export function codexWorkerSetup(
             access,
             ...(collectResultBundle ? { collectResultBundle: true as const } : {}),
           })),
+        }
+      : {}),
+    // Rebuilt field by field: only a name and its script. The scripts carry serviceEnv (never logged).
+    ...(options.services
+      ? {
+          services: options.services.entries.map(({ name, script }) => ({ name, script })),
+          servicesWaitMs: options.services.waitMs,
         }
       : {}),
   };

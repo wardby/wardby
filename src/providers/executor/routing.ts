@@ -1,4 +1,6 @@
 import type { CodingProvider } from "../../coding/provider.js";
+import type { ResolvedCodingService } from "../../coding/services/catalog.js";
+import type { UnstartableService } from "../jobs/types.js";
 import type { CodingImageSelector, Executor, ExecutionRecoveryResult, PersistedExecutionHandle } from "./types.js";
 import type { AuthorizeUseInput, RepoAccessDecision } from "../../core/repo-access.js";
 
@@ -154,6 +156,10 @@ export class RoutingExecutor implements Executor {
 
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.coding.supportsCodingServices?.(provider) === true;
+  }
+
+  unstartableCodingServices(services: readonly ResolvedCodingService[]): UnstartableService[] {
+    return this.coding.unstartableCodingServices?.(services) ?? [];
   }
 }
 

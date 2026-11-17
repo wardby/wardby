@@ -53,6 +53,7 @@ import { PrismaProxyLedger } from "../coding-proxy/prisma-ledger.js";
 import { DockerJobLauncher } from "../jobs/docker.js";
 import type { KubernetesApi } from "../jobs/kubernetes-api.js";
 import { ClientNodeKubernetesApi } from "../jobs/kubernetes-client.js";
+import type { ServiceStateReporter } from "../jobs/service-state.js";
 import { isRegistryDigest } from "../jobs/kubernetes-isolation.js";
 import { assertPlatformConfig, platformProfile } from "../jobs/kubernetes-platform.js";
 import { preflightCanaryImage, runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
@@ -241,6 +242,8 @@ export function buildSubstrateJobLauncher(options: {
   resolveMcpToken?: (runId: string) => Promise<string | undefined>;
   substrateApi?: SubstrateApi;
   kubernetesApi?: KubernetesApi;
+  /** Where coding-service display states go (prismaServiceStateReporter, as for Docker and Kubernetes). */
+  onServiceState?: ServiceStateReporter;
 }): SubstrateJobLauncher {
   const substrate = loadSubstrateJobConfig(options.env);
   const blobStoreConfig = loadBlobStoreConfig(options.env);
@@ -269,6 +272,7 @@ export function buildSubstrateJobLauncher(options: {
     workspaceRoot: options.workspaceRoot,
     resolveCapability: options.resolveCapability,
     ...(options.resolveMcpToken ? { resolveMcpToken: options.resolveMcpToken } : {}),
+    ...(options.onServiceState ? { onServiceState: options.onServiceState } : {}),
     ...(substrate.collectGraceSec !== undefined ? { collectGraceMs: substrate.collectGraceSec * 1000 } : {}),
     ...(substrate.startupTimeoutSec !== undefined ? { startupTimeoutMs: substrate.startupTimeoutSec * 1000 } : {}),
     ...(substrate.templateTtlSec !== undefined ? { templateTtlMs: substrate.templateTtlSec * 1000 } : {}),
@@ -437,6 +441,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       workspaceRoot,
       resolveCapability: (runId) => capabilities.get(runId),
       resolveMcpToken: (runId) => capabilities.mcpToken(runId),
+      onServiceState,
       substrateApi: options.substrateApi,
       kubernetesApi: options.kubernetesApi,
     });

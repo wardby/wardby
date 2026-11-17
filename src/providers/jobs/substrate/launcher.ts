@@ -47,6 +47,11 @@
  *   enum item, recorded once by the proxy (BLOB.imageIncomplete). The run fails as
  *   substrate_image_incomplete:<item> (phase image_incomplete, actors deleted); the item is re-checked
  *   here, so nothing but a SUBSTRATE_IMAGE_ITEMS value reaches the run's result.
+ * - Coding services (JobSpec.services): one container per service in the workspace holder's template
+ *   (specs.ts); each start script is staged in the setup blob and started by the holder's bridge,
+ *   which holds the runner (pair) or the input (single) until all are ready; launch() resumes the
+ *   holder first, waits on BLOB.services (forwarding states to onServiceState) and throws
+ *   coding_service_unready:<name> on failure. A run with services never parks.
  * - Custom images (workerImageRef): any registry digest runs; Claude Code's custom image is the tool
  *   actor's only, Codex's the one actor's. The image must carry this release's bridge; the proxy's
  *   protocol check, the bridge's image check and the template readiness rules turn a broken one into
@@ -92,6 +97,9 @@ import { logger } from "../../../core/logger.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { claudeToolSetup } from "../claude-tool-setup.js";
 import { codexWorkerSetup, holderSetupRepositories } from "../codex-worker-setup.js";
+import { MAX_CODING_SERVICES } from "../../../coding/protocol.js";
+import { StoredCodingServicesSchema, type ResolvedCodingService } from "../../../coding/services/catalog.js";
+import { serviceUnreadyError } from "../../../coding/services/wording.js";
 import { isRepositoryDigest } from "../docker-isolation.js";
 import { KubernetesAlreadyExistsError, KubernetesNotFoundError, type KubernetesApi } from "../kubernetes-api.js";
 import { RUN_ID } from "../kubernetes-isolation.js";
@@ -109,10 +117,17 @@ import {
   type JobStatus,
   type MaterializedWorkspace,
   type MaterializeWorkspaceOptions,
+  type UnstartableService,
   type WarmColdReason,
   type WarmOutcome,
   type WorkspaceJobLauncher,
 } from "../types.js";
+import {
+  reportServiceState,
+  type ServiceFailureReason,
+  type ServiceState,
+  type ServiceStateReporter,
+} from "../service-state.js";
 import { workerDiagnosticOf, type WorkerDiagnostic } from "../worker-diagnostic.js";
 import { replaceDirectoryFromStaging, takeResultBundle } from "../workspace-swap.js";
 import {
@@ -132,6 +147,8 @@ import {
   actorNamesFor,
   agentActorName,
   isSubstrateImageItem,
+  MAX_SERVICES_REPORT_BYTES,
+  parseServicesReport,
   roundBlob,
   type SubstrateImageItem,
   substrateRunToken,
@@ -139,6 +156,13 @@ import {
   toolActorName,
 } from "./names.js";
 import { canPlaceAll, type Room } from "./placement.js";
+import {
+  SERVICE_START_MARKER_MS,
+  serviceStartScript,
+  servicesInOrder,
+  servicesWaitMs,
+  substrateServiceProblems,
+} from "./service-script.js";
 import type { SubstrateActorShape, SubstratePhase, SubstrateRunRecord, SubstrateRunStore } from "./run-store.js";
 import {
   agentEgress,
@@ -202,6 +226,10 @@ export interface SubstrateJobLauncherOptions {
   templateTtlMs?: number;
   /** Where template steps are reported (default: the server log; info, and warn for failures). */
   onTemplateEvent?: (event: TemplateEvent) => void;
+  /** Where coding-service display states go (composition: prismaServiceStateReporter, as for Docker and Kubernetes). */
+  onServiceState?: ServiceStateReporter;
+  /** Waits between polls of a run's services report (default: setTimeout; tests advance their clock). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** A template step, fixed fields only (never a Substrate message, a spec or a run value). */
@@ -284,8 +312,8 @@ export interface WarmRoundsOptions {
 
 /** Why a park was removed to make room: for a launch (`capacity`) or for a newer park (`park_max`). */
 export type WarmEvictReason = "capacity" | "park_max";
-/** Why an agent's parks were removed (WorkspaceJobLauncher.removeParked): its caller's lifecycle event. */
-export type WarmRemoveReason = "agent";
+/** Why an agent's or a run's parks were removed: its caller's lifecycle event, or a run with services (never parked). */
+export type WarmRemoveReason = "agent" | "services";
 
 /**
  * A warm-round step, fixed fields only (never a capability, a commit, a fingerprint, a request or a
@@ -314,6 +342,11 @@ export interface WarmEvent {
 
 /** How often launch() and hasCapacityFor() may look for expired parked runs. */
 const SWEEP_INTERVAL_MS = 30_000;
+
+/** How often launch() reads a services run's BLOB.services. */
+const SERVICES_POLL_MS = 1_000;
+/** Beyond the bridge's own bound: the launcher's slack for the bridge's last report. */
+const SERVICES_GRACE_MS = 15_000;
 
 export const DEFAULT_COLLECT_GRACE_MS = 120_000;
 export const DEFAULT_STARTUP_TIMEOUT_MS = 300_000;
@@ -484,12 +517,18 @@ function isBlobNotFound(error: unknown): boolean {
   return error instanceof BlobStoreError && error.code === "not_found";
 }
 
-const UNSUPPORTED_FEATURES = ["services"] as const;
-
-function refuseUnsupportedFeatures(spec: JobSpec): void {
-  for (const feature of UNSUPPORTED_FEATURES) {
-    if (spec[feature] !== undefined) throw new Error(`substrate_feature_unsupported:${feature}`);
+/**
+ * A spec's services: 1..MAX_CODING_SERVICES validated catalog snapshots (else substrate_spec_invalid),
+ * each one this launcher can start (else substrate_feature_unsupported:services: the backstop of the
+ * dispatch check, unstartableServices).
+ */
+function validateServices(spec: JobSpec): void {
+  if (spec.services === undefined) return;
+  const parsed = StoredCodingServicesSchema.safeParse(spec.services);
+  if (!parsed.success || spec.services.length < 1 || spec.services.length > MAX_CODING_SERVICES) {
+    throw new Error("substrate_spec_invalid");
   }
+  if (substrateServiceProblems(spec.services).length > 0) throw new Error("substrate_feature_unsupported:services");
 }
 
 /**
@@ -502,7 +541,8 @@ function refuseUnsupportedFeatures(spec: JobSpec): void {
  * list must be well formed (jobRepositoriesValid, so every name is a link name before the claim);
  * each host path is checked against the workspace root in launch (checkRepositoryPaths). The
  * dependency cache is supported on both shapes: the cache lives behind the coding proxy and the blob
- * store, keyed by the run's recorded image; an adopted round skips it (`workspaceReused`).
+ * store, keyed by the run's recorded image; an adopted round skips it (`workspaceReused`). Coding
+ * services are supported on both shapes (validateServices).
  */
 function validateSpec(spec: JobSpec): void {
   if (spec.kind !== "coding-agent" || !RUN_ID.test(spec.runId)) throw new Error("substrate_spec_invalid");
@@ -512,12 +552,12 @@ function validateSpec(spec: JobSpec): void {
     if (!isRepositoryDigest(spec.image) || spec.toolImage === undefined || !isRepositoryDigest(spec.toolImage)) {
       throw new Error("substrate_image_not_digest");
     }
-    refuseUnsupportedFeatures(spec);
+    validateServices(spec);
   } else if (spec.provider === "codex") {
     if (!isRepositoryDigest(spec.image)) throw new Error("substrate_image_not_digest");
     // One actor: a tool image has nowhere to run.
     if (spec.toolImage !== undefined) throw new Error("substrate_spec_invalid");
-    refuseUnsupportedFeatures(spec);
+    validateServices(spec);
   } else {
     throw new Error("substrate_provider_unsupported");
   }
@@ -594,6 +634,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   private readonly templateReadyMs: number;
   private readonly templateRetryMs: number;
   private readonly templateTtlMs: number;
+  private readonly sleep: (ms: number) => Promise<void>;
   private readonly warm: WarmRoundsOptions | undefined;
   /** WorkspaceJobLauncher.warmRounds: set from the configuration (warm rounds on). */
   readonly warmRounds: boolean;
@@ -620,15 +661,29 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     this.now = options.now ?? Date.now;
     this.collectGraceMs = options.collectGraceMs ?? DEFAULT_COLLECT_GRACE_MS;
     this.startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    // A services run waits SERVICE_START_MARKER_MS for its services before startup_timeout can apply.
+    if (!Number.isFinite(this.startupTimeoutMs) || this.startupTimeoutMs < SERVICE_START_MARKER_MS) {
+      throw new Error("substrate_startup_timeout_invalid");
+    }
     this.templates = options.templates;
     this.templateReadyMs = options.templateReadyMs ?? DEFAULT_TEMPLATE_READY_MS;
     this.templateRetryMs = options.templateRetryMs ?? DEFAULT_TEMPLATE_RETRY_MS;
     this.templateTtlMs = Math.max(options.templateTtlMs ?? DEFAULT_TEMPLATE_TTL_MS, templateTtlFloorMs());
+    this.sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
   }
 
-  /** Phase A: no coding-run services on Substrate. */
+  /** Kubernetes, Docker and Substrate start services for Codex and Claude Code. */
   supportsServicesFor(_provider: CodingProvider): boolean {
-    return false;
+    return true;
+  }
+
+  /**
+   * substrateServiceProblems: no start command, a reserved data path, or a setup too large (16 KiB per
+   * start script, 64 KiB per run, both measured JSON-escaped, as staged). Dispatch refuses the run
+   * with the first one's sentence, so an oversized script never reaches a launch.
+   */
+  unstartableServices(services: readonly ResolvedCodingService[]): UnstartableService[] {
+    return substrateServiceProblems(services);
   }
 
   plannedHandle(spec: JobSpec): JobHandle | undefined {
@@ -695,6 +750,8 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       ...(coldReason !== undefined ? { coldReason } : {}),
       // Names and access only: a host path never reaches the row.
       ...(spec.repositories ? { repositories: spec.repositories.map(({ name, access }) => ({ name, access })) } : {}),
+      // Names only (the store sorts): never an env value, an image or a command.
+      ...(spec.services ? { services: spec.services.map((s) => s.name) } : {}),
     });
     const handle = this.handleFor(spec.runId);
     if (!claimed.created) {
@@ -938,14 +995,23 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     // The template of the actor being created or resumed: a Substrate failure there may be its
     // golden snapshot failing (goldenFailureAfter).
     let starting: ActorTemplateSpec | undefined;
+    // The template being ensured: a TemplateUnreadyError from it may be a service's image (servicesBlame).
+    let ensuring: ActorTemplateSpec | undefined;
+    // The holder (the tool actor of a pair, the one actor of a single): it runs the services.
+    const holder = shape === "pair" ? tool : agent;
+    const holderTemplate = templates.shape === "pair" ? templates.tool : templates.agent;
     try {
       const capability = await this.options.resolveCapability(spec.runId);
       if (!CAPABILITY.test(capability)) throw new Error("substrate_capability_invalid");
       const mcpToken = await this.mcpTokenFor(spec);
-      for (const template of actorTemplates(templates)) await this.ensureTemplate(template, call);
+      for (const template of actorTemplates(templates)) {
+        ensuring = template;
+        await this.ensureTemplate(template, call);
+      }
+      ensuring = undefined;
       const input = await this.stageInput(spec.inputArtifact, token);
       const history = inputGitHistory(input);
-      await this.stageSetup(spec, capability, token, history.requested, history.paths);
+      const waitMs = await this.stageSetup(spec, capability, token, history.requested, history.paths);
       await this.stageSeed(spec, token);
       try {
         await this.options.secrets.createSecret(
@@ -1006,12 +1072,27 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       );
       if (shape === "pair") {
         await call("putEgressPolicy", () => this.api.putEgressPolicy(atespace, tool, toolEgress(this.config)));
-        // The tool first: the agent's first tool call needs it.
-        resuming = starting = templates.tool;
-        await call("resumeActor", () => this.api.resumeActor(atespace, tool));
       }
-      resuming = starting = templates.agent;
-      await call("resumeActor", () => this.api.resumeActor(atespace, agent));
+      if (waitMs !== undefined) {
+        // Services: the holder first, alone, until every service is ready; only then the agent (pair).
+        resuming = starting = holderTemplate;
+        await call("resumeActor", () => this.api.resumeActor(atespace, holder));
+        resuming = starting = undefined;
+        const ready = await this.waitForServices(spec, token, holder, waitMs + SERVICES_GRACE_MS);
+        // Not ready but no failure: the run was stopped or timed out meanwhile (setPhase below sees it).
+        if (ready && shape === "pair") {
+          resuming = starting = templates.agent;
+          await call("resumeActor", () => this.api.resumeActor(atespace, agent));
+        }
+      } else {
+        if (shape === "pair") {
+          // The tool first: the agent's first tool call needs it.
+          resuming = starting = templates.tool;
+          await call("resumeActor", () => this.api.resumeActor(atespace, tool));
+        }
+        resuming = starting = templates.agent;
+        await call("resumeActor", () => this.api.resumeActor(atespace, agent));
+      }
       starting = undefined;
     } catch (caught) {
       // Clean up before recording requeued, so a relaunch never races this cleanup.
@@ -1027,6 +1108,23 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
           ? await this.goldenFailureAfter(refused, call)
           : undefined;
       const error: unknown = golden ?? caught;
+      // A run with services whose holder template cannot start, while the same holder without
+      // services is known good: the first service's image is the suspect (coding_service_unready).
+      const unready = error instanceof TemplateUnreadyError ? (ensuring ?? refused) : undefined;
+      const blamed =
+        unready?.name === holderTemplate.name
+          ? await this.servicesBlame(spec, templates).catch(() => undefined)
+          : undefined;
+      if (blamed !== undefined) {
+        await reportServiceState(this.options.onServiceState, {
+          runId: spec.runId,
+          name: blamed,
+          state: "failed",
+          reason: "image_unavailable",
+        });
+        await this.runs.setPhase(spec.runId, "provisioning_failed", ["provisioning"]).catch(() => undefined);
+        throw serviceUnreadyError(blamed);
+      }
       // A template that cannot start an actor: the run fails now (substrate_image_unready) and is
       // never requeued. The launch resolves with its handle; status() answers the recorded failure.
       // A still-building template refused past SUBSTRATE_TEMPLATE_READY_SEC is never ready, as a
@@ -1071,6 +1169,85 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     const readyNames = actorTemplates(templates).map((t) => t.name);
     for (const name of readyNames) this.refusedWithRoomSince.delete(name);
     await this.templates.markReady(readyNames, new Date(this.now())).catch(() => undefined);
+  }
+
+  /**
+   * After the holder resumed, for a run with services: reports every service pending once, then
+   * reads BLOB.services every SERVICES_POLL_MS (parseServicesReport: only the validated name, state,
+   * attempts and reason ever reach onServiceState, each change once) until all are ready. Throws
+   * serviceUnreadyError(name) for a failed one; for the first not-ready one (by name) when the
+   * holder is gone or crashed (start_failed) or `boundMs` passed (timed_out), reporting it failed. A
+   * report that does not parse is ignored (the next poll reads it again). True once all are ready (and the run is still provisioning);
+   * false, reporting nothing, when the run left provisioning meanwhile (stopped or timed out: its
+   * actors are deleted).
+   */
+  private async waitForServices(spec: JobSpec, token: string, holder: string, boundMs: number): Promise<boolean> {
+    const names = servicesInOrder(spec.services ?? []).map((s) => s.name);
+    type Seen = { state: ServiceState; attempts?: number; reason?: ServiceFailureReason };
+    const seen = new Map<string, Seen>();
+    const report = async (name: string, next: Seen): Promise<void> => {
+      const last = seen.get(name);
+      if (last && last.state === next.state && last.attempts === next.attempts && last.reason === next.reason) return;
+      seen.set(name, next);
+      await reportServiceState(this.options.onServiceState, {
+        runId: spec.runId,
+        name,
+        state: next.state,
+        ...(next.attempts !== undefined ? { attempts: next.attempts } : {}),
+        ...(next.reason !== undefined ? { reason: next.reason } : {}),
+      });
+    };
+    const failFirstNotReady = async (reason: ServiceFailureReason): Promise<never> => {
+      const name = names.find((n) => seen.get(n)?.state !== "ready") ?? names[0];
+      await report(name, { state: "failed", reason });
+      throw serviceUnreadyError(name);
+    };
+    for (const name of names) await report(name, { state: "pending" });
+    const started = this.now();
+    for (;;) {
+      const value = await this.readJson(BLOB.services(token), MAX_SERVICES_REPORT_BYTES).catch(() => undefined);
+      const entries = value ? parseServicesReport(value, names) : undefined;
+      for (const entry of entries ?? []) {
+        await report(entry.name, {
+          state: entry.state,
+          ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
+          ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+        });
+      }
+      if (names.every((name) => seen.get(name)?.state === "ready")) {
+        // A stop between the ready report and here deleted the actors: the agent must not resume.
+        return (await this.runs.get(spec.runId))?.phase === "provisioning";
+      }
+      const failed = names.find((name) => seen.get(name)?.state === "failed");
+      if (failed !== undefined) throw serviceUnreadyError(failed);
+      const actor = await this.api.getActor(this.config.atespace, holder).then(
+        (info) => info ?? null,
+        // Unreadable now: the next poll asks again (the bound still applies).
+        () => undefined,
+      );
+      if (actor === null || actor?.state === "CRASHED") {
+        if ((await this.runs.get(spec.runId))?.phase !== "provisioning") return false;
+        await failFirstNotReady("start_failed");
+      }
+      if (this.now() - started > boundMs) await failFirstNotReady("timed_out");
+      await this.sleep(SERVICES_POLL_MS);
+    }
+  }
+
+  /**
+   * For a run with services whose holder template is unready: the first service by name when the
+   * same spec's holder template without services has been ready (its SubstrateTemplate row has
+   * readyAt), since the holder's own image is then known good; undefined otherwise (the holder image
+   * is the suspect, and substrate_image_unready stands).
+   */
+  private async servicesBlame(spec: JobSpec, templates: RunTemplates): Promise<string | undefined> {
+    const services = servicesInOrder(spec.services ?? []);
+    if (services.length === 0) return undefined;
+    const plain = { ...spec, services: undefined };
+    const name =
+      templates.shape === "pair" ? toolTemplate(plain, this.config).name : codexTemplate(plain, this.config).name;
+    const row = await this.templates.get(name);
+    return row?.readyAt ? services[0].name : undefined;
   }
 
   /**
@@ -1302,12 +1479,23 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     collectResultBundle: boolean,
     historyPaths: ReadonlySet<string>,
     workspaceReused = false,
-  ): Promise<void> {
+  ): Promise<number | undefined> {
     // Bounded before any launch: validateSpec's jobRepositoriesValid allows at most 16 (MAX_RUN_REPOSITORIES_IN_INPUT) valid, distinct names.
     const repositories = holderSetupRepositories(spec, historyPaths);
+    // Services: each start script (it carries serviceEnv values: this blob is its only home outside
+    // the holder), in name order, and the bridge's bound for all of them. Sized at dispatch and in
+    // validateSpec (substrateServiceProblems) as JSON-escaped once, as they sit here.
+    const services = spec.services
+      ? servicesInOrder(spec.services).map((s) => ({ name: s.name, script: serviceStartScript(s) }))
+      : undefined;
+    const waitMs = spec.services ? servicesWaitMs(spec.services, this.startupTimeoutMs) : undefined;
     const body =
       spec.provider === "codex"
-        ? codexWorkerSetup(spec, capability, { collectResultBundle, ...(repositories ? { repositories } : {}) })
+        ? codexWorkerSetup(spec, capability, {
+            collectResultBundle,
+            ...(repositories ? { repositories } : {}),
+            ...(services && waitMs !== undefined ? { services: { entries: services, waitMs } } : {}),
+          })
         : JSON.stringify({
             toolSetup: claudeToolSetup(spec, capability, {
               proxyBaseUrl: `http://${this.config.proxyHost}:${this.config.proxyPort}`,
@@ -1317,8 +1505,11 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
             collectExclude: spec.collectExclude ?? collectExclusions([]),
             ...(collectResultBundle ? { collectResultBundle: true } : {}),
             ...(repositories ? { repositories } : {}),
+            // Beside the tool setup, never inside it: the tool runner never sees a start script.
+            ...(services ? { services, servicesWaitMs: waitMs } : {}),
           });
     await this.blobs.put(BLOB.toolSetup(token), Buffer.from(body), { contentType: "application/json" });
+    return waitMs;
   }
 
   private reportCallFailure(failure: SubstrateCallFailure): void {
@@ -1657,6 +1848,18 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     // A single-shape (Codex) run is never parked: warm rounds are Claude Code only. Nor is a run with
     // extra repositories (W1: runs with them never park or adopt; the executor never asks either).
     if (record.actorShape === "single" || record.repositories || record.repositoriesUnreadable) {
+      await this.remove(handle);
+      return false;
+    }
+    // Nor is a run with services (or an unreadable services column): its holder's service data
+    // belongs to that round alone.
+    if (record.services || record.servicesUnreadable) {
+      this.warmEvent({
+        event: "substrate_warm_removed",
+        runId: record.runId,
+        runToken: record.token,
+        reason: "services",
+      });
       await this.remove(handle);
       return false;
     }
@@ -2008,7 +2211,10 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     if (!parked || parked.phase !== "parked" || parked.runId === spec.runId) return notAdopted("not_parked");
     if (parked.deadlineAt.getTime() <= this.now()) return notAdopted("expired", parked);
     if (parked.headSha !== warm.headSha) return notAdopted("branch_moved", parked);
-    if (parked.fingerprint !== warm.fingerprint) return notAdopted("fingerprint_changed", parked);
+    // A spec with services never adopts (the executor hashes them into the fingerprint; this is the backstop).
+    if (parked.fingerprint !== warm.fingerprint || spec.services !== undefined) {
+      return notAdopted("fingerprint_changed", parked);
+    }
     const { atespace } = this.config;
     const [agent, tool] = await Promise.all([
       this.api.getActor(atespace, agentActorName(parked.token)),

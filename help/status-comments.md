@@ -3,7 +3,7 @@ id: status-comments
 title: Run status comments
 summary: Read GitHub and Jira run outcomes, package registry blocked statuses, and Slack notifications.
 audience: operator
-tags: [status, comments, github, jira, slack, blocked, packages, mentions, checks, tests, test-first, expected-failure, expected_failure, skipped]
+tags: [status, comments, github, jira, slack, blocked, packages, checks, test-first, expected_failure, skipped]
 appliesTo: >=0.2.1
 ---
 

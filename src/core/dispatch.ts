@@ -26,6 +26,7 @@ import {
   LAUNCHER_UNSUPPORTED_SENTENCE,
   invalidDeclarationSentence,
   serviceRefusal,
+  unstartableServiceSentence,
 } from "../coding/services/wording.js";
 import { attributeRun, type AttributionIntent } from "./attribution.js";
 import {
@@ -857,13 +858,22 @@ export async function resolveDispatchServices(
   if (executor.supportsCodingServices?.(provider) !== true) {
     return { refusal: serviceRefusal("service_launcher_unsupported", LAUNCHER_UNSUPPORTED_SENTENCE) };
   }
-  return resolveRunServices(
+  const resolution = await resolveRunServices(
     { findMany: (args) => tx.codingService.findMany(args) },
     outcome.services,
     parseAllowedServiceNames(allowed),
     request,
     instructions,
   );
+  if ("services" in resolution) {
+    // Unknown and disallowed services were refused above with their own codes; the launcher is
+    // asked only about the validated catalog snapshot, and only a validated name reaches a sentence.
+    const unstartable = executor.unstartableCodingServices?.(resolution.services) ?? [];
+    if (unstartable.length > 0) {
+      return { refusal: serviceRefusal("service_launcher_unsupported", unstartableServiceSentence(unstartable[0])) };
+    }
+  }
+  return resolution;
 }
 
 /** The run's extra repositories (#537 §1) from the agent's set-eligible links, before any ref is resolved. */

@@ -14,11 +14,17 @@
  * The run's MCP tool pins go in as identity only (which tool of which server, never its definition),
  * and only when the run has some, so a fingerprint without them is unchanged.
  *
+ * The run's services go in as one hash of their identity and version (name, version, image digest,
+ * Substrate image digest and start command when set, port, data path, the env KEY names, the catalog row's id and updatedAt): never an env value, since
+ * catalog env values can be secrets. Only when the run has some, so a fingerprint without them is
+ * unchanged.
+ *
  * SHA-256 hex (WARM_FINGERPRINT) over the canonical JSON of exactly these fields: object keys
  * sorted, no whitespace. The fingerprint is not secret, but it is never logged or published either
  * (only compared); the system prompt goes in as its own SHA-256, never as text.
  */
 import { createHash } from "node:crypto";
+import type { ResolvedCodingService } from "../../coding/services/catalog.js";
 
 /** One secret delivered to the run (to its redaction set): identity and version, never its value. */
 export interface WarmSecretVersion {
@@ -52,6 +58,8 @@ export interface WarmFingerprintInput {
   secrets: readonly WarmSecretVersion[];
   /** The run's MCP tool pins, in any order (sorted here). Absent or empty: left out, so the fingerprint is today's. */
   mcpTools?: readonly WarmMcpToolPin[];
+  /** servicesFingerprint(the run's resolved services); absent for a run without any, so its fingerprint is today's. */
+  services?: string;
 }
 
 const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
@@ -74,6 +82,34 @@ export function canonicalJson(value: unknown): string {
 }
 
 const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * SHA-256 hex of canonicalJson(the resolved entries sorted by name, then version), or undefined for
+ * none. Identity of what the run's holder starts; never logged (only compared, inside the fingerprint).
+ */
+export function servicesFingerprint(services: readonly ResolvedCodingService[] | undefined): string | undefined {
+  if (!services || services.length === 0) return undefined;
+  const sorted = [...services].sort((a, b) => compare(a.name, b.name) || compare(a.version, b.version));
+  return sha256(
+    canonicalJson(
+      sorted.map((service) => ({
+        name: service.name,
+        version: service.version,
+        image: service.image,
+        // Only when set, so an entry without one keeps its fingerprint.
+        ...(service.substrateImage === undefined ? {} : { substrateImage: service.substrateImage }),
+        // The start command (catalog, not secret: env goes in by name) changes what the holder runs.
+        ...(service.startCommand === undefined ? {} : { startCommand: service.startCommand }),
+        port: service.port,
+        dataPath: service.dataPath,
+        serviceEnvKeys: Object.keys(service.serviceEnv).sort(),
+        testEnvKeys: Object.keys(service.testEnv).sort(),
+        catalogId: service.catalogId ?? null,
+        catalogUpdatedAt: service.catalogUpdatedAt ?? null,
+      })),
+    ),
+  );
+}
 
 /** The fingerprint of `input`'s fields (and only those): 64 lowercase hex characters. */
 export function warmFingerprint(input: WarmFingerprintInput): string {
@@ -98,6 +134,7 @@ export function warmFingerprint(input: WarmFingerprintInput): string {
             .sort((a, b) => compare(a.exposedName, b.exposedName) || compare(a.serverId, b.serverId)),
         }
       : {}),
+    ...(input.services ? { services: input.services } : {}),
   };
   return sha256(canonicalJson(fields));
 }

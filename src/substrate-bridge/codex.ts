@@ -16,6 +16,16 @@
  * proxy and the launcher, which never let a read repository's content out). Once the worker's group
  * is ended, each writable one is uploaded first, then /workspace as before (its upload writes `done`).
  *
+ * Services (the setup's `services`, coding-run services; services.ts): after the seeds and before the
+ * input (whose first download deletes the setup and starts the run's clock on the proxy), the bridge
+ * writes each service's start script into its script volume and waits for every service to be ready,
+ * reporting each change to the proxy. The input is fetched and the worker started only after that
+ * gate, and every start.sh is removed once it opens. Nothing of a script (it carries the entry's
+ * serviceEnv) or of a state file is logged, and the worker's environment never gets the serviceEnv.
+ * When a service fails, exits, never starts or is not ready in time, the bridge fetches no input,
+ * posts neither workspace-failed nor exit, and idles with its probe answering (the launcher reads the
+ * report and removes the actor).
+ *
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
  * There are no warm rounds here.
  *
@@ -52,12 +62,20 @@ import {
   REGISTRY_TOKEN_ENV,
   REPOSITORY_MOUNT_ROOT,
   REGISTRY_TOKEN_SHAPE,
+  SERVICES_ROOT,
   WORKER_PLACEHOLDERS,
   PLAN_FILES_OUTPUT_PATH,
 } from "./constants.js";
 import { pipeRedacted, type LineSink } from "./diagnostics.js";
 import { checkImage, ImageIncompleteError, type ImageCheck } from "./image-check.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
+import {
+  parseServicesWaitMs,
+  parseSetupServices,
+  ServicesUnreadyError,
+  startServices,
+  type SetupService,
+} from "./services.js";
 import { parseCollectExclusions, type CollectExclusions } from "./tar.js";
 import { superviseWorker, type WorkerHandle } from "./worker-run.js";
 import {
@@ -85,6 +103,12 @@ export interface CodexOptions {
   workspace?: string;
   /** Where the extra repositories are extracted, one folder each (default /repos). */
   reposRoot?: string;
+  /** Where the services' script volumes are mounted, `<root>/<i>` each (default /run/wardby-services). */
+  servicesRoot?: string;
+  /** How often the services' state files are read while the bridge waits for them (default 250 ms). */
+  servicesPollMs?: number;
+  /** The clock the services wait is measured with (tests only; default Date.now). */
+  servicesNow?: () => number;
   /** Where the seed and the workspace tar are staged (outside the workspace). */
   tempRoot?: string;
   /** The tar executable (default `tar`, GNU tar in the images). */
@@ -136,6 +160,10 @@ interface CodexSetup {
   collectResultBundle: boolean;
   /** The run's extra repositories ([] without them). */
   repositories: SetupRepository[];
+  /** The run's services' start scripts, in name order ([] without them). */
+  services: SetupService[];
+  /** How long the bridge waits for all of them: set exactly when `services` is non-empty. */
+  servicesWaitMs?: number;
 }
 
 /**
@@ -159,11 +187,19 @@ function parseSetup(body: Buffer, onSecret: (value: string) => void): CodexSetup
   if (setup.collectResultBundle !== undefined && setup.collectResultBundle !== true) return undefined;
   const repositories = parseSetupRepositories(setup.repositories);
   if (!repositories) return undefined;
+  const services = parseSetupServices(setup.services);
+  if (!services) return undefined;
+  const servicesWaitMs = parseServicesWaitMs(setup.servicesWaitMs);
+  // servicesWaitMs comes exactly with a non-empty services list.
+  if (services.length > 0 !== (setup.servicesWaitMs !== undefined) || (services.length > 0 && !servicesWaitMs))
+    return undefined;
   return {
     registryToken: setup.registryToken,
     exclusions,
     collectResultBundle: setup.collectResultBundle === true,
     repositories,
+    services,
+    ...(services.length > 0 ? { servicesWaitMs } : {}),
   };
 }
 
@@ -325,6 +361,35 @@ export async function run(options: CodexOptions): Promise<CodexHandle> {
     throw error;
   }
 
+  // The services gate: the input (and so the run's clock on the proxy) and the worker wait for it.
+  if (setup.services.length > 0) {
+    const gate = await startServices({
+      base,
+      token,
+      headers,
+      root: options.servicesRoot ?? SERVICES_ROOT,
+      services: setup.services,
+      waitMs: setup.servicesWaitMs ?? 0,
+      pollMs: options.servicesPollMs,
+      policy,
+      log,
+      signal: shutdown.signal,
+      ...(options.servicesNow ? { now: options.servicesNow } : {}),
+    });
+    // The scripts are no longer needed (and on success no longer on disk): drop this bridge's copies.
+    setup.services = [];
+    if (!gate.ok) {
+      log("substrate_bridge_service_unready", { runToken: token, service: gate.service, reason: gate.reason });
+      await cleanup();
+      // No input, no workspace-failed and no exit: the launcher reads the report. The probe stays up.
+      throw new ServicesUnreadyError(gate.service, gate.reason, async () => {
+        shutdown.abort();
+        await new Promise<void>((resolve) => ready.server.close(() => resolve()));
+        ready.server.closeAllConnections();
+      });
+    }
+  }
+
   // 5. The input, and from its answer whether the worker gets MCP tools.
   let mcpEnv: Record<string, string>;
   try {
@@ -445,6 +510,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   } catch (error) {
     if (error instanceof ImageIncompleteError && error.reported) {
       // Reported to the proxy; idle with the probe answering (the readiness server holds the event loop open).
+      stderrLogger(error.code);
+      return;
+    }
+    if (error instanceof ServicesUnreadyError) {
+      // Reported to the proxy as the services' states; idle with the probe answering.
       stderrLogger(error.code);
       return;
     }

@@ -152,8 +152,21 @@ describe("configured coding proxy runtime", () => {
     expect(await lookup("wr-missing")).toBeUndefined();
     expect(findUnique).toHaveBeenCalledWith({
       where: { token: "wr-single" },
-      select: { actorShape: true, repositories: true },
+      select: { actorShape: true, repositories: true, services: true },
     });
+  });
+
+  it("reads a Substrate run's services only when they parse", async () => {
+    const rows: Record<string, { actorShape: string; repositories: unknown; services: unknown }> = {
+      "wr-services": { actorShape: "pair", repositories: null, services: ["postgres"] },
+      "wr-bad-services": { actorShape: "pair", repositories: null, services: "x" },
+    };
+    const findUnique = vi.fn(async ({ where }: { where: { token: string } }) => rows[where.token] ?? null);
+    const lookup = substrateRunLayoutLookup({ substrateRun: { findUnique } } as unknown as PrismaClient);
+    expect(await lookup("wr-services")).toEqual({ shape: "pair", services: ["postgres"] });
+    const bad = await lookup("wr-bad-services");
+    expect(bad).toEqual({ shape: "pair" });
+    expect(bad).not.toHaveProperty("services");
   });
 
   it("reads a Substrate run's extra repositories only when they parse", async () => {

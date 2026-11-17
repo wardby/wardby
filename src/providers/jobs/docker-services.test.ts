@@ -94,6 +94,15 @@ describe("Docker service containers", () => {
     expect(dockerServiceContainerNames({ ...spec, services: undefined })).toEqual([]);
   });
 
+  it("runs the entry's image, never its Substrate-only image, with the image's own entrypoint", () => {
+    expect(POSTGRES.substrateImage).toBeDefined();
+    const args = buildServiceCreateArgs(spec, POSTGRES);
+    expect(args.at(-1)).toBe(POSTGRES.image);
+    expect(args).not.toContain(POSTGRES.substrateImage);
+    expect(args.join(" ")).not.toContain("cloudnative-pg");
+    expect(args).not.toContain("--entrypoint");
+  });
+
   it("builds a hardened container in the network keeper's namespace", () => {
     const args = buildServiceCreateArgs(spec, POSTGRES);
     expect(args.slice(0, 4)).toEqual([

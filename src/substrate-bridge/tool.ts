@@ -18,6 +18,14 @@
  * writable one is uploaded first, then /workspace as before (its upload writes `done`); when any of
  * them collects a result bundle, the runner's process group is ended first.
  *
+ * Services (the setup's `services`, coding-run services; services.ts): after the seeds and before the
+ * runner starts, the bridge writes each service's start script into its script volume and waits for
+ * every service to be ready, reporting each change to the proxy. The runner starts only after that
+ * gate, and every start.sh is removed once it opens. Nothing of a script (it carries the entry's
+ * serviceEnv) or of a state file is logged. When a service fails, exits, never starts or is not ready
+ * in time, the bridge starts no runner, posts no workspace-failed, and idles with its probe answering
+ * (the launcher reads the report and removes the actor). A run with services never has a later round.
+ *
  * Only Node built-ins and sibling files are imported: the image carries dist/substrate-bridge/ alone.
  * Nothing secret is logged (see Logger in common.ts); the tool setup is never logged and only
  * reaches the tool runner's environment. This bridge sends no operator-diagnostics tail: model-run
@@ -53,6 +61,7 @@ import {
   MAX_ROUND,
   NEXT_ROUND_POLL_MS,
   REPOSITORY_MOUNT_ROOT,
+  SERVICES_ROOT,
   WARM_ROUNDS_ENV,
   PLAN_FOLDER,
 } from "./constants.js";
@@ -60,6 +69,13 @@ import { waitAtMost } from "./diagnostics.js";
 import { checkImage, ImageIncompleteError, type ImageCheck } from "./image-check.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
 import { LineSplitter } from "./lines.js";
+import {
+  parseServicesWaitMs,
+  parseSetupServices,
+  ServicesUnreadyError,
+  startServices,
+  type SetupService,
+} from "./services.js";
 import { parseCollectExclusions, type CollectExclusions } from "./tar.js";
 import {
   collectRepositories,
@@ -109,6 +125,12 @@ export interface ToolOptions {
   planFolder?: string;
   /** Where the extra repositories are extracted, one folder each (default /repos). */
   reposRoot?: string;
+  /** Where the services' script volumes are mounted, `<root>/<i>` each (default /run/wardby-services). */
+  servicesRoot?: string;
+  /** How often the services' state files are read while the bridge waits for them (default 250 ms). */
+  servicesPollMs?: number;
+  /** The clock the services wait is measured with (tests only; default Date.now). */
+  servicesNow?: () => number;
   socketPath?: string;
   /** 0 picks a free port (tests). */
   readyPort?: number;
@@ -197,6 +219,10 @@ interface SetupFile {
   collectResultBundle?: unknown;
   /** The run's extra repositories (names and access), only on a run that has them. */
   repositories?: unknown;
+  /** The run's services' start scripts (in name order), only on a run that has them. */
+  services?: unknown;
+  /** How long the bridge waits for all of them: present exactly with `services`. */
+  servicesWaitMs?: unknown;
 }
 
 /** The events of a 200 answer; undefined (a transient error to the caller) unless every event is an object with an integer seq. */
@@ -304,6 +330,9 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
   let collectResultBundle = false;
   // The run's extra repositories (round 1 only: a run with them never has a later round).
   let repositories: SetupRepository[] = [];
+  // The run's services and the wait for them (round 1 only: a run with services never has a later round).
+  let services: SetupService[];
+  let servicesWaitMs: number;
   try {
     const body = await fetchSetup(`${base}/tool-setup`, headers, policy, log, SETUP_DEADLINE_MS);
     const parsed = JSON.parse(body.toString("utf8")) as SetupFile;
@@ -312,6 +341,17 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     if (!parsedExclusions) return await abortStart("substrate_bridge_exclude_invalid");
     const parsedRepositories = parseSetupRepositories(parsed.repositories);
     if (!parsedRepositories) return await abortStart("substrate_bridge_setup_invalid");
+    const parsedServices = parseSetupServices(parsed.services);
+    if (!parsedServices) return await abortStart("substrate_bridge_setup_invalid");
+    const parsedWaitMs = parseServicesWaitMs(parsed.servicesWaitMs);
+    // servicesWaitMs comes exactly with a non-empty services list.
+    if (
+      parsedServices.length > 0 !== (parsed.servicesWaitMs !== undefined) ||
+      (parsedServices.length > 0 && !parsedWaitMs)
+    )
+      return await abortStart("substrate_bridge_setup_invalid");
+    services = parsedServices;
+    servicesWaitMs = parsedWaitMs ?? 0;
     toolSetup = parsed.toolSetup;
     exclusions = parsedExclusions;
     collectResultBundle = parsed.collectResultBundle === true;
@@ -349,6 +389,35 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
     )
       return abortStart(error.code);
     throw error;
+  }
+
+  // The services gate: the runner starts only once every service is ready.
+  if (services.length > 0) {
+    const gate = await startServices({
+      base,
+      token,
+      headers,
+      root: options.servicesRoot ?? SERVICES_ROOT,
+      services,
+      waitMs: servicesWaitMs,
+      pollMs: options.servicesPollMs,
+      policy,
+      log,
+      signal: shutdown.signal,
+      ...(options.servicesNow ? { now: options.servicesNow } : {}),
+    });
+    // The scripts are no longer needed (and on success no longer on disk): drop this bridge's copies.
+    services.length = 0;
+    if (!gate.ok) {
+      log("substrate_bridge_service_unready", { runToken: token, service: gate.service, reason: gate.reason });
+      await cleanup();
+      // No runner and no workspace-failed: the launcher reads the report. The readiness server stays open.
+      throw new ServicesUnreadyError(gate.service, gate.reason, async () => {
+        shutdown.abort();
+        await new Promise<void>((resolve) => ready.server.close(() => resolve()));
+        ready.server.closeAllConnections();
+      });
+    }
   }
 
   // 3. The tool runner (warm rounds: one per round, each with its round's tool setup).
@@ -607,6 +676,8 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
       if (typeof parsed.toolSetup !== "string" || !parsedExclusions) throw new Error("invalid");
       // A run with extra repositories always starts cold and never has a later round (W1).
       if (parsed.repositories !== undefined) throw new Error("invalid");
+      // Nor does a run with services (it never parks).
+      if (parsed.services !== undefined) throw new Error("invalid");
       setup = parsed.toolSetup;
       exclusions = parsedExclusions;
       collectResultBundle = parsed.collectResultBundle === true;
@@ -682,6 +753,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   } catch (error) {
     if (error instanceof ImageIncompleteError && error.reported) {
       // Reported to the proxy; idle with the probe answering (the readiness server holds the event loop open).
+      stderrLogger(error.code);
+      return;
+    }
+    if (error instanceof ServicesUnreadyError) {
+      // Reported to the proxy as the services' states; idle with the probe answering.
       stderrLogger(error.code);
       return;
     }

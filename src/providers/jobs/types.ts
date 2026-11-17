@@ -16,6 +16,14 @@ export interface JobResourceLimits {
 import type { CollectExclusions } from "../../coding/collect-exclude.js";
 import type { ResolvedCodingService } from "../../coding/services/catalog.js";
 
+/** Why a launcher cannot start one of a run's services (WorkspaceJobLauncher.unstartableServices). */
+export type UnstartableServiceReason = "start_command_missing" | "data_path_reserved" | "setup_too_large";
+/** A service a launcher cannot start: its validated catalog name and why. */
+export interface UnstartableService {
+  name: string;
+  reason: UnstartableServiceReason;
+}
+
 /**
  * One of a run's extra repositories (#537): mounted at /repos/<name> wherever /workspace is (the Codex
  * worker, Claude Code's tool runner; never Claude's agent), read-only for a read link. `hostPath` is
@@ -256,10 +264,16 @@ export interface WorkspaceJobLauncher extends JobLauncher {
     options?: MaterializeWorkspaceOptions,
   ) => Promise<MaterializedWorkspace>;
   /**
-   * Whether this launcher starts JobSpec.services for a run of `provider`: Kubernetes and Docker, for
-   * Codex and Claude Code. Absent means no services at all.
+   * Whether this launcher starts JobSpec.services for a run of `provider`: Kubernetes, Docker and
+   * Substrate, for Codex and Claude Code. Absent means no services at all.
    */
   supportsServicesFor?(provider: CodingProvider): boolean;
+  /**
+   * The services of a run this launcher cannot start, with why (each at most once, in name order);
+   * [] when it can start them all. Dispatch refuses the run with service_launcher_unsupported and the
+   * first one's sentence. Absent (Docker, Kubernetes): every resolved service can start.
+   */
+  unstartableServices?(services: readonly ResolvedCodingService[]): UnstartableService[];
   /**
    * Whether this launcher has warm rounds on (Substrate, SUBSTRATE_WARM_ROUNDS): only then does the
    * executor ask for a previous round, set JobSpec.warm, retain, read warmOutcome or remove parks.

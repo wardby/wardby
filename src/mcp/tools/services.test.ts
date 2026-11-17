@@ -192,9 +192,11 @@ describe("coding service catalog tools", () => {
       version: "16",
       kind: "sidecar",
       image: BUILTIN_CODING_SERVICES[1].image,
+      substrateImage: BUILTIN_CODING_SERVICES[1].substrateImage,
       port: 5432,
       builtin: true,
     });
+    expect(listed.find((entry: { name: string }) => entry.name === "redis")).not.toHaveProperty("substrateImage");
     const shown = JSON.parse(
       text(await client.callTool({ name: "get_service", arguments: { name: "postgres", version: "16" } })),
     );
@@ -208,8 +210,12 @@ describe("coding service catalog tools", () => {
   it("creates, updates and deletes an entry, auditing each change", async () => {
     logged.length = 0;
     const { client, rows } = await connect(ADMIN);
-    const created = await client.callTool({ name: "create_service", arguments: CUSTOM });
+    const created = await client.callTool({
+      name: "create_service",
+      arguments: { ...CUSTOM, startCommand: ["fakedb-serve"] },
+    });
     expect(created.isError).toBeFalsy();
+    expect(JSON.parse(text(created))).toMatchObject({ startCommand: ["fakedb-serve"] });
     expect(rows.get("postgres-postgis 16")).toMatchObject({ builtin: false, createdById: "p-admin", kind: "sidecar" });
 
     const updated = await client.callTool({
@@ -254,6 +260,118 @@ describe("coding service catalog tools", () => {
       },
       { event: "coding.service_catalog.delete", name: "postgres-postgis", version: "16", by: "p-admin" },
     ]);
+    await client.close();
+  });
+
+  it("sets and changes a start command with update_service, and validates it", async () => {
+    const { client, rows } = await connect(ADMIN);
+    const created = await client.callTool({ name: "create_service", arguments: CUSTOM });
+    expect(created.isError).toBeFalsy();
+    expect(JSON.parse(text(created))).not.toHaveProperty("startCommand");
+
+    const updated = await client.callTool({
+      name: "update_service",
+      arguments: { name: "postgres-postgis", version: "16", startCommand: ["serve", "--port", "1"] },
+    });
+    expect(updated.isError).toBeFalsy();
+    expect(JSON.parse(text(updated))).toMatchObject({ startCommand: ["serve", "--port", "1"] });
+    expect(rows.get("postgres-postgis 16")?.startCommand).toEqual(["serve", "--port", "1"]);
+
+    const refused = await client.callTool({
+      name: "update_service",
+      arguments: { name: "postgres-postgis", version: "16", startCommand: ["a\nb"] },
+    });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain("startCommand.0: must be one line of at most 4096 bytes");
+    expect(rows.get("postgres-postgis 16")?.startCommand).toEqual(["serve", "--port", "1"]);
+    await client.close();
+  });
+
+  it("describes startCommand and substrateImage in both input schemas", async () => {
+    const { client } = await connect(ADMIN);
+    const { tools } = await client.listTools();
+    for (const name of ["create_service", "update_service"]) {
+      const tool = tools.find((candidate) => candidate.name === name);
+      const properties = tool?.inputSchema.properties as Record<string, { description?: string }> | undefined;
+      expect(properties?.startCommand?.description).toContain("Substrate");
+      expect(properties?.substrateImage?.description).toContain("Substrate");
+      expect(properties?.substrateImage?.description).toContain("startCommand");
+    }
+    await client.close();
+  });
+
+  const SUBSTRATE_IMAGE = `registry.example/postgis-nonroot@sha256:${"c".repeat(64)}`;
+
+  it("round-trips a Substrate image through create, get, list and update, auditing it", async () => {
+    logged.length = 0;
+    const { client, rows } = await connect(ADMIN);
+    const created = await client.callTool({
+      name: "create_service",
+      arguments: { ...CUSTOM, substrateImage: SUBSTRATE_IMAGE, startCommand: ["/bin/sh", "-c", "exec fakedb-serve"] },
+    });
+    expect(created.isError).toBeFalsy();
+    expect(JSON.parse(text(created))).toMatchObject({ substrateImage: SUBSTRATE_IMAGE, image: CUSTOM.image });
+    expect(rows.get("postgres-postgis 16")?.substrateImage).toBe(SUBSTRATE_IMAGE);
+
+    const shown = JSON.parse(
+      text(await client.callTool({ name: "get_service", arguments: { name: "postgres-postgis", version: "16" } })),
+    );
+    expect(shown.substrateImage).toBe(SUBSTRATE_IMAGE);
+    const listed = JSON.parse(text(await client.callTool({ name: "list_services", arguments: {} })));
+    expect(listed.find((entry: { name: string }) => entry.name === "postgres-postgis")).toMatchObject({
+      substrateImage: SUBSTRATE_IMAGE,
+    });
+
+    const next = `registry.example/postgis-nonroot@sha256:${"e".repeat(64)}`;
+    const updated = await client.callTool({
+      name: "update_service",
+      arguments: { name: "postgres-postgis", version: "16", substrateImage: next },
+    });
+    expect(updated.isError).toBeFalsy();
+    expect(JSON.parse(text(updated))).toMatchObject({ substrateImage: next });
+    expect(rows.get("postgres-postgis 16")?.substrateImage).toBe(next);
+    expect(
+      logged
+        .filter((entry) => String(entry.payload.event).startsWith("coding.service_catalog."))
+        .map((entry) => entry.payload.substrateImage),
+    ).toEqual([SUBSTRATE_IMAGE, next]);
+    await client.close();
+  });
+
+  it.each([
+    ["a tag", { substrateImage: "postgis:16", startCommand: ["serve"] }, "substrateImage: must be a registry digest"],
+    [
+      "no start command",
+      { substrateImage: `registry.example/postgis-nonroot@sha256:${"c".repeat(64)}` },
+      "startCommand: is required with substrateImage",
+    ],
+  ])("refuses a Substrate image with %s on create and update", async (_label, patch, message) => {
+    const { client, rows } = await connect(ADMIN);
+    const refusedCreate = await client.callTool({ name: "create_service", arguments: { ...CUSTOM, ...patch } });
+    expect(refusedCreate.isError).toBe(true);
+    expect(text(refusedCreate)).toContain(message);
+    expect(rows.has("postgres-postgis 16")).toBe(false);
+
+    expect((await client.callTool({ name: "create_service", arguments: CUSTOM })).isError).toBeFalsy();
+    const refusedUpdate = await client.callTool({
+      name: "update_service",
+      arguments: { name: "postgres-postgis", version: "16", ...patch },
+    });
+    expect(refusedUpdate.isError).toBe(true);
+    expect(text(refusedUpdate)).toContain(message);
+    expect(rows.get("postgres-postgis 16")).not.toHaveProperty("substrateImage");
+    await client.close();
+  });
+
+  it("refuses a Substrate image from a member without services:manage", async () => {
+    const { client, rows } = await connect(MEMBER);
+    const result = await client.callTool({
+      name: "update_service",
+      arguments: { name: "postgres", version: "16", substrateImage: SUBSTRATE_IMAGE },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/Insufficient scope; this operation requires: services:manage/);
+    expect(rows.get("postgres 16")?.substrateImage).toBe(BUILTIN_CODING_SERVICES[1].substrateImage);
     await client.close();
   });
 

@@ -11,7 +11,28 @@ import {
   serviceUnreadyName,
   serviceUnreadySentence,
   unknownServiceSentence,
+  unstartableServiceSentence,
 } from "./wording.js";
+import type { ResolvedCodingService } from "./catalog.js";
+
+const FAKE_SERVICE: ResolvedCodingService = {
+  name: "fakedb",
+  version: "1.2.3-fake",
+  image: `registry.example/fakedb-image@sha256:${"b".repeat(64)}`,
+  port: 5999,
+  serviceEnv: { FAKEDB_PASSWORD: "FAKE_SERVICE_ENV_VALUE_0001" },
+  testEnv: {},
+  readiness: {
+    command: ["fakedb-ready", "-pFAKE_READINESS_ARG"],
+    periodSeconds: 1,
+    timeoutSeconds: 1,
+    failureThreshold: 3,
+  },
+  startCommand: ["fakedb-serve", "--fake-start-arg"],
+  resources: { cpuMillicores: 100, memoryMib: 64, diskMib: 64 },
+  dataPath: "/var/lib/fakedb-data",
+  writablePaths: [],
+};
 
 describe("service refusals", () => {
   it("carries the host sentence after the code in Run.error, and reads it back", () => {
@@ -24,7 +45,36 @@ describe("service refusals", () => {
 
   it("words the launcher refusal without naming a provider", () => {
     expect(LAUNCHER_UNSUPPORTED_SENTENCE).toBe(
-      "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes or Docker job launcher.",
+      "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes, Docker or Substrate job launcher.",
+    );
+  });
+
+  it("words each unstartable reason with only the service's name", () => {
+    const sentences = (["start_command_missing", "data_path_reserved", "setup_too_large"] as const).map((reason) =>
+      unstartableServiceSentence({ name: FAKE_SERVICE.name, reason }),
+    );
+    expect(sentences).toEqual([
+      "This repository asks for `fakedb`, which this wardby deployment can't start: its service catalog entry has no start command.",
+      "This repository asks for `fakedb`, which this wardby deployment can't start: its service catalog entry's data path overlaps a directory the job launcher reserves.",
+      "This repository asks for `fakedb`, which this wardby deployment can't start: its service catalog entry's environment and commands are too large for the job launcher.",
+    ]);
+    const text = JSON.stringify(sentences);
+    for (const value of [
+      FAKE_SERVICE.version,
+      FAKE_SERVICE.image,
+      String(FAKE_SERVICE.port),
+      ...Object.values(FAKE_SERVICE.serviceEnv),
+      ...(FAKE_SERVICE.startCommand ?? []),
+      ...FAKE_SERVICE.readiness.command,
+      FAKE_SERVICE.dataPath,
+    ]) {
+      expect(text).not.toContain(value);
+    }
+  });
+
+  it("falls back to the generic launcher sentence for a name that isn't a catalog name", () => {
+    expect(unstartableServiceSentence({ name: "Bad Name`", reason: "setup_too_large" })).toBe(
+      LAUNCHER_UNSUPPORTED_SENTENCE,
     );
   });
 

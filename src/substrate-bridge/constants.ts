@@ -101,3 +101,13 @@ export const REPOSITORY_MOUNT_ROOT = "/repos";
 /** coding/protocol.ts MAX_RUN_REPOSITORIES_IN_INPUT and CODING_REPOSITORY_NAME (constants.test.ts keeps them equal). */
 export const MAX_SETUP_REPOSITORIES = 16;
 export const REPOSITORY_NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+
+/** service-script.ts SERVICES_ROOT, SERVICE_START_MARKER_MS and MAX_SERVICES_WAIT_MS. */
+export const SERVICES_ROOT = "/run/wardby-services";
+export const SERVICE_START_MARKER_MS = 30_000;
+export const MAX_SERVICES_WAIT_MS = 3_600_000;
+/** coding/protocol.ts MAX_CODING_SERVICES and CODING_SERVICE_NAME. */
+export const MAX_SETUP_SERVICES = 5;
+export const SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+/** service-script.ts MAX_SERVICE_SCRIPT_BYTES. */
+export const MAX_SERVICE_SCRIPT_BYTES = 16 * 1024;

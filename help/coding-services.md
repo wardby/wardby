@@ -1,9 +1,9 @@
 ---
 id: coding-services
 title: Give coding runs the services their tests need
-summary: Let coding runs on the Kubernetes or Docker launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml.
+summary: Let coding runs on the Kubernetes, Docker or Substrate launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml; startCommand and substrateImage for Substrate.
 audience: operator
-tags: [coding-agents, services, postgres, redis, valkey, mysql, kubernetes, docker]
+tags: [coding-agents, services, postgres, redis, valkey, mysql, substrate, startCommand, substrateImage]
 appliesTo: >=0.2.1
 ---
 
@@ -34,9 +34,11 @@ one service. Such an agent's runs simply start without services, whatever a
 repository declares, and none of the errors below can apply to them.
 
 Services need the Kubernetes job launcher with Kubernetes 1.29 or later (each
-service runs as a native sidecar in the run's pod) or the Docker job launcher
-(each service runs as its own container sharing the run's network namespace);
-both start them for Codex and Claude Code agents. Each run gets its own empty
+service runs as a native sidecar in the run's pod), the Docker job launcher
+(each service runs as its own container sharing the run's network namespace)
+or the experimental Substrate job launcher (see
+[Substrate launcher](#substrate-launcher)); all three start them for Codex and
+Claude Code agents. Each run gets its own empty
 instance, reachable on `127.0.0.1`; the run's sandbox and network policy do
 not change, and the instance is deleted with the run. Each service's CPU,
 memory and disk count toward the run: on Kubernetes toward its pod, namespace
@@ -48,7 +50,7 @@ A bring-your-own worker image
 needs driver v11 or later to run with services.
 
 Catalog values are visible to anyone with `agents:read`. Use throwaway test
-credentials only; never put a real secret in `serviceEnv` or `testEnv`.
+credentials only; never put a real secret in `serviceEnv`, `testEnv` or `startCommand`.
 
 Every run protects `.wardby/**` except `.wardby/services.yaml`, so a coding
 agent may propose a declaration change in its pull request but cannot change
@@ -77,6 +79,58 @@ format, catalog fields, built-in variables, custom entries, and capacity.
 
 ## Substrate launcher
 
-The experimental `JOB_LAUNCHER=substrate` does not support this feature yet; a
-run that needs it fails with `substrate_feature_unsupported`. Use the Docker or
-Kubernetes launcher. See the `job-launcher-substrate` help article.
+From release 0.10.1 the experimental `JOB_LAUNCHER=substrate` starts services
+too, for Claude Code and Codex. Each service is a container in the run's
+workspace actor (the tool actor, or the Codex actor), reachable on
+`127.0.0.1`, and the agent's shells receive the same variables as on the other
+launchers.
+
+- **`startCommand`.** Substrate does not run an image's own entrypoint, so
+  every catalog entry a run uses needs a `startCommand`: the argv that starts
+  the service (at most 16 arguments, each one line of at most 4096 bytes).
+  Docker and Kubernetes ignore it. Built-in entries have one; give a custom
+  entry one with `update_service`, or dispatch refuses the run with
+  [`service_launcher_unsupported`](errors/service-launcher-unsupported.md).
+- **`substrateImage`.** A service runs as its image's default user with almost
+  no Linux capabilities, so an entrypoint that runs `chown` or
+  switches user (`gosu`) fails. An entry's optional `substrateImage`, pinned by
+  registry digest (`repo@sha256:<64 hex>`), is the image Substrate runs
+  instead of `image`; Docker and Kubernetes ignore it. Use an image whose
+  default user is non-root and start the server directly. It requires
+  `startCommand`. `get_service` shows both fields; `list_services` shows
+  `substrateImage` only when it is set. Neither can be cleared with
+  `update_service`: delete the entry and create it again.
+- **Setup done.** An entry with `substrateImage` must create the file named by
+  `$WARDBY_SERVICE_SETUP_DONE` once its setup is done (database and users
+  created), then keep the server running. On Substrate it is ready only when
+  its readiness command succeeds and that file exists. For example, a
+  PostgreSQL entry's script ends with:
+
+  ```sh
+  createdb -h 127.0.0.1 -U "$POSTGRES_USER" "$POSTGRES_DB" || exit 1
+  : > "$WARDBY_SERVICE_SETUP_DONE"; wait "$pid"
+  ```
+
+  (In the entry each argument is one line: join the commands with `;`.)
+
+- **Size limits.** A service's start script, with its environment, may be at
+  most 16 KiB, and a run's services 64 KiB together (JSON-escaped). A larger
+  one is refused at dispatch.
+- **Built-ins.** `postgres` 15, 16 and 17 run CloudNativePG's PostgreSQL image
+  on Substrate, `mysql` 8 runs Percona Server 8.4 with its telemetry off, and
+  `redis` 7 starts the catalog's redis image directly. Docker and Kubernetes
+  keep the official images.
+- **Sizing.** The workspace actor is sized with its services: their CPU, and
+  as memory each one's memory plus 64 MiB per writable path plus 64 MiB.
+  Writes to the data path don't count against memory; writes anywhere else
+  do. `diskMib` is not enforced as a disk limit. MySQL needs about
+  730 MiB idle.
+- **No restart, no warm rounds.** A service that exits is not restarted, and a
+  run with services is never kept between warm rounds: its actors are removed
+  when it finishes, and the next round starts with empty services.
+- **Network.** A service container shares its workspace actor's access to the
+  coding proxy; use only service images you trust as much as the code your
+  agents run.
+
+See [On the Substrate job launcher](../docs/coding-services.md#on-the-substrate-job-launcher)
+and the `job-launcher-substrate` help article.

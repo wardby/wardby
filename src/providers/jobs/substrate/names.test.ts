@@ -5,6 +5,7 @@ import {
   BLOB,
   isSubstrateImageItem,
   MCP_TOKEN_EGRESS_HEADER,
+  parseServicesReport,
   REPO_BLOB,
   actorNamesFor,
   agentActorName,
@@ -73,6 +74,10 @@ describe("substrate names", () => {
     );
     assertValidBlobKey(BLOB.imageIncomplete("wr-00000000000000000000"));
   });
+  it("keys the services report once per run", () => {
+    expect(BLOB.services("wr-00000000000000000000")).toBe("substrate/runs/wr-00000000000000000000/services.json");
+    assertValidBlobKey(BLOB.services("wr-00000000000000000000"));
+  });
   it("accepts only the image check's items", () => {
     for (const item of ["user", "runner", "tar", "workspace", "run_dir"]) expect(isSubstrateImageItem(item)).toBe(true);
     for (const value of ["other", "", "Runner", 1, null, undefined, {}, ["tar"]]) {
@@ -117,7 +122,68 @@ describe("substrate names", () => {
         "started",
         "bridgeRefused",
         "imageIncomplete",
+        "services",
       ]);
     });
+  });
+});
+
+describe("parseServicesReport", () => {
+  const ALLOWED = ["postgres"];
+  it("returns a valid report, rebuilt", () => {
+    const probing = { services: [{ name: "postgres", state: "probing", attempts: 3 }] };
+    expect(parseServicesReport(probing, ALLOWED)).toEqual(probing.services);
+    const failed = { services: [{ name: "postgres", state: "failed", reason: "probe_failed" }] };
+    expect(parseServicesReport(failed, ALLOWED)).toEqual(failed.services);
+    expect(parseServicesReport(failed, ALLOWED)?.[0]).not.toBe(failed.services[0]);
+  });
+
+  it("accepts every listed name once", () => {
+    const report = {
+      services: [
+        { name: "redis", state: "ready" },
+        { name: "postgres", state: "pending", attempts: 0 },
+      ],
+    };
+    expect(parseServicesReport(report, ["postgres", "redis"])).toEqual(report.services);
+  });
+
+  it.each([
+    ["a name not allowed", { services: [{ name: "mysql", state: "ready" }] }],
+    [
+      "a name twice",
+      {
+        services: [
+          { name: "postgres", state: "ready" },
+          { name: "postgres", state: "ready" },
+        ],
+      },
+    ],
+    ["an unknown state", { services: [{ name: "postgres", state: "starting" }] }],
+    ["fractional attempts", { services: [{ name: "postgres", state: "probing", attempts: 1.5 }] }],
+    ["too many attempts", { services: [{ name: "postgres", state: "probing", attempts: 10001 }] }],
+    ["negative attempts", { services: [{ name: "postgres", state: "probing", attempts: -1 }] }],
+    ["attempts as a string", { services: [{ name: "postgres", state: "probing", attempts: "3" }] }],
+    ["a reason on ready", { services: [{ name: "postgres", state: "ready", reason: "probe_failed" }] }],
+    ["an unknown reason", { services: [{ name: "postgres", state: "failed", reason: "oops" }] }],
+    ["an extra key on an entry", { services: [{ name: "postgres", state: "ready", detail: "x" }] }],
+    ["an extra top-level key", { services: [{ name: "postgres", state: "ready" }], note: "x" }],
+    ["an empty list", { services: [] }],
+    ["an entry that is not an object", { services: ["postgres"] }],
+    ["services not a list", { services: { name: "postgres", state: "ready" } }],
+    ["null", null],
+    ["a list", [{ name: "postgres", state: "ready" }]],
+  ])("refuses %s", (_label, value) => {
+    expect(parseServicesReport(value, ALLOWED)).toBeUndefined();
+  });
+
+  it("refuses more entries than names allowed", () => {
+    const report = {
+      services: [
+        { name: "postgres", state: "ready" },
+        { name: "redis", state: "ready" },
+      ],
+    };
+    expect(parseServicesReport(report, ["postgres"])).toBeUndefined();
   });
 });
