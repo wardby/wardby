@@ -7,6 +7,7 @@
  */
 import type { ElementAnchor } from "../../core/documents/element-anchors.js";
 import type { VersionWarning } from "../../core/documents/warnings.js";
+import type { PlanLinksPayload, PlanSetPayload } from "../../core/plans/page-payload.js";
 import type { TextAnchor } from "./anchors.js";
 import type { VersionItem } from "./version-rows.js";
 
@@ -64,6 +65,10 @@ export interface DocumentPayload {
   /** Names for @[guest:id] mentions in these threads (this document's own guests only). */
   mentionedGuests?: { guestId: string; name: string }[];
   review: ReviewPayload;
+  /** A plan document's set: the documents the viewer can read (the plan bar). */
+  planSet?: PlanSetPayload;
+  /** A plan document's relative links to other documents of its set (Markdown documents only). */
+  planLinks?: PlanLinksPayload;
 }
 
 /** A document's review state (the page shows it in the banner and the Review tab). */

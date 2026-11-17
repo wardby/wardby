@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Executor } from "../providers/executor/types.js";
 import { CODING_QUEUE_TIMEOUT_ERROR, drainCodingQueue, type CodingQueueDb } from "./coding-queue.js";
 import type { SelfDefectSink } from "./self-defects.js";
+import { setPlanChainHook } from "./plans/approval.js";
 
 const NOW = new Date("2026-10-02T12:00:00.000Z");
 
@@ -98,6 +99,25 @@ describe("drainCodingQueue self-defects", () => {
     expect((fileIssue.mock.calls[0] as unknown[])[0]).toMatchObject({
       fingerprint: "self:a1:failed:coding_queue_timeout",
     });
+  });
+
+  it("a run it times out reaches the plan build chain (the shared run-end event), once", async () => {
+    const onTicketFinished = vi.fn(async () => undefined);
+    setPlanChainHook({ onMerged: vi.fn(), onTicketFinished, buildTicketFromComment: vi.fn() });
+    try {
+      const runs: FakeRun[] = [{ id: "q1", status: "pending", error: null, finishedAt: null, failureCategory: null }];
+      const db = fakeQueue(runs);
+      const executor = { start: vi.fn() } as unknown as Executor;
+      await drainCodingQueue({ db, executor, maxConcurrent: 1, queueTimeoutSec: 60, now: () => NOW });
+      expect(runs[0].status).toBe("failed");
+      expect(onTicketFinished).toHaveBeenCalledTimes(1);
+      expect(onTicketFinished.mock.calls[0]).toEqual([db, "q1"]);
+      // Another drain finds the run already failed: it reports nothing.
+      await drainCodingQueue({ db, executor, maxConcurrent: 1, queueTimeoutSec: 60, now: () => NOW });
+      expect(onTicketFinished).toHaveBeenCalledTimes(1);
+    } finally {
+      setPlanChainHook(undefined);
+    }
   });
 
   it("files nothing when another drain already ended the run", async () => {

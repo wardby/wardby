@@ -143,6 +143,9 @@ import { ModelUnavailableError } from "../providers/llm/catalog-types.js";
 import { trackRun } from "./in-flight-runs.js";
 import { dispatchRunStepsLevel } from "./run-steps/config.js";
 import { ReviewReadLedger } from "./review-reads.js";
+import { refusalOf } from "./plans/refusal.js";
+import { MAX_PLAN_NUMBER } from "./plans/number.js";
+import { planSummaryForRun, type PlanSummary } from "./plans/publish.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
 import { loadBudgetEvent, ownerBudgetSentence, type BudgetEventView } from "./budget-events.js";
 
@@ -246,6 +249,12 @@ export function delegateToolDef(
             "Give dependencies lower numbers than the changes that use them (e.g. a service 1, the API that calls it 2, the client 3); " +
             "equal numbers have no order between them. Set it whenever one change spans several repositories.",
         },
+        planNumber: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "The plan this coding sub-agent writes or builds from, when there is no issue (usually the issue number). Needed by a planner with plan documents; a builder with buildFromPlan checks that plan is approved.",
+        },
         ...repositoryProperty,
         ...repositoriesProperty,
       },
@@ -272,6 +281,7 @@ const DelegateArgs = z
       .optional(),
     repository: z.string().min(1).max(300).optional(),
     repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
+    planNumber: z.number().int().min(1).max(MAX_PLAN_NUMBER).optional(),
   })
   .strict();
 
@@ -500,6 +510,11 @@ export type RunnerDb = Pick<
   | "workItem"
   | "deferredReview"
   | "runAttribution"
+  | "planSet"
+  // The plan build chain's builder check (host events, plans/approval.ts).
+  | "principal"
+  | "documentVersion"
+  | "documentFile"
 >;
 
 /** The providers a native run needs; `executor`, `reviewHosts` and `issueTrackers` are optional capabilities. */
@@ -519,6 +534,8 @@ export type NativeRunProviders = Pick<ProviderRegistry, "llm" | "engine" | "data
   sandboxFetch?: typeof safeFetch;
   /** Records runs' steps (src/core/run-steps/writer.ts); absent = no steps are recorded. */
   runSteps?: RunStepSink;
+  /** The public http(s) origin (MCP_CANONICAL_URI's), for absolute document links in a delegate result; unset: page paths only. */
+  publicOrigin?: string | null;
 };
 
 /**
@@ -745,6 +762,8 @@ export function codingChildResult(
   budgetEvent?: { event: BudgetEventView; agentName: string } | null,
   /** The results stored on the child's writable extra repositories' rows (#537), in set order. */
   extraResults: readonly unknown[] = [],
+  /** The planner child's plan (planSummaryForRun): ids, page paths, links, states and names only. */
+  plan?: PlanSummary | null,
 ): string {
   // Checked before the "refused" branch: a continuation whose PR closed
   // before the run ever spent anything is stored as "refused" (a preflight
@@ -771,6 +790,26 @@ export function codingChildResult(
     ...(errorCode ? { errorCode } : {}),
     ...(budget ? { budget } : {}),
     ...pullRequestsOf(codingResult, extraResults),
+    ...(plan
+      ? {
+          plan:
+            "error" in plan || "pending" in plan
+              ? plan
+              : {
+                  number: plan.number,
+                  documents: plan.documents.map(({ id, pagePath, url, kind, reviewState }) => ({
+                    id,
+                    pagePath,
+                    ...(url ? { url } : {}),
+                    kind,
+                    reviewState,
+                  })),
+                  ignored: plan.ignored,
+                  withheld: plan.withheld,
+                  skippedReviewers: plan.skippedReviewers.length,
+                },
+        }
+      : {}),
   });
 }
 
@@ -800,6 +839,16 @@ function pullRequestsOf(
   });
   if (prs.length === 0) return {};
   return { pullRequest: prs[0], ...(prs.length > 1 ? { pullRequests: prs } : {}) };
+}
+
+/** The planner child's plan for the lead's result; null for any other run, and when it cannot be read. */
+async function planSummaryOf(db: RunnerDb, runId: string, origin: string | null): Promise<PlanSummary | null> {
+  // RunnerDb is the real client at runtime; planSummaryForRun reads plan tables RunnerDb does not name:
+  // planSet, planFile, document and documentVersion (and the run's own row).
+  return planSummaryForRun(db as unknown as PrismaClient, runId, origin).catch((err: unknown) => {
+    runnerLog.warn({ runId, errorName: err instanceof Error ? err.name : "unknown" }, "could not read the run's plan");
+    return null;
+  });
 }
 
 /** The results stored on a coding run's writable extra repositories' rows, in set order. Empty on a read failure. */
@@ -1173,6 +1222,8 @@ export interface NativeRunToolsOptions {
   reviewReads?: ReviewReadLedger;
   /** A sandboxed run's session deadline (the gateway's); an MCP tool call never runs past it. */
   deadlineAt?: Date;
+  /** The public origin for document links in a planner child's result (R10c); null/unset gives page paths only. */
+  origin?: string | null;
 }
 
 /** An attached user tool as the load step pinned it: its code, schema, and consented capabilities. */
@@ -1349,6 +1400,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
         stored?.result,
         await loadBudgetEvent(db, childRunId),
         await extraRepositoryResults(db, childRunId),
+        await planSummaryOf(db, childRunId, options.origin ?? null),
       );
     }
     return nativeChildResult(waited.run, wait.mergeOrderNote);
@@ -1662,12 +1714,14 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
               dispatched = await dispatchRun({
                 db,
                 executor: providers.executor,
+                secretCipher: providers.secrets,
                 selfDefects: { db, issueTrackers },
                 agentId: edge.childAgentId,
                 trigger: "subagent",
                 codingTask: args.task,
                 continuesCodingRunId: args.continuePriorRun,
                 mergeOrder: args.mergeOrder,
+                planNumber: args.planNumber,
                 codingRepository: delegation.repository,
                 codingRepositories: args.repositories,
                 requireExplicitRepository: true,
@@ -1692,6 +1746,8 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
               if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
                 return repositorySetRefusal(err);
               }
+              const planRefusal = refusalOf(err);
+              if (planRefusal) return JSON.stringify(planRefusal);
               // A continuation this deployment cannot make (the run id came from
               // a pull request another deployment opened, say) is the model's to
               // report, not a reason to fail the whole run.
@@ -1742,6 +1798,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
               dispatched = await dispatchRun({
                 db,
                 executor: providers.executor,
+                secretCipher: providers.secrets,
                 selfDefects: { db, issueTrackers },
                 agentId: edge.childAgentId,
                 trigger: "subagent",
@@ -2034,7 +2091,14 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
   // delegated nothing has no rows: one indexed lookup. Never throws.
   if (finished.parentRunId === null && providers.executor && reviewHosts && repoAccess) {
     await startDeferredForRequest(
-      { db, executor: providers.executor, hosts: reviewHosts, repoAccess, issueTrackers },
+      {
+        db,
+        executor: providers.executor,
+        hosts: reviewHosts,
+        repoAccess,
+        issueTrackers,
+        secretCipher: providers.secrets,
+      },
       runId,
     ).catch((err: unknown) => runnerLog.warn({ err, runId }, "could not start the reviews waiting for this run"));
   }
@@ -2045,6 +2109,7 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
       hosts: reviewHosts,
       repoAccess,
       issueTrackers,
+      secretCipher: providers.secrets,
     });
   }
   // Only the call that made the row terminal files, so a run another finalizer (the reconciler) ended is not
@@ -2208,6 +2273,8 @@ export interface DurableDelegationContext {
   sessionId: string;
   /** Every secret value the run can read, to redact its logs by exact value (unset or failing: nothing is logged of an error but its name and code). */
   secretValues?: () => Promise<string[]>;
+  /** The public origin for document links in a planner child's result (R10c); null/unset gives page paths only. */
+  origin?: string | null;
   /** How long one call waits on the child before answering `pending` (the worker calls again). */
   pollWindowMs?: number;
   pollIntervalMs?: number;
@@ -2393,6 +2460,7 @@ export async function durableDelegate(
       dispatched = await dispatchRun({
         db,
         executor,
+        secretCipher: providers.secrets,
         selfDefects: { db, issueTrackers: ctx.issueTrackers },
         agentId: edge.childAgentId,
         trigger: "subagent",
@@ -2401,6 +2469,7 @@ export async function durableDelegate(
               codingTask: dispatchArgs.task,
               continuesCodingRunId: dispatchArgs.continuePriorRun,
               mergeOrder: dispatchArgs.mergeOrder,
+              planNumber: dispatchArgs.planNumber,
               codingRepository: delegation.repository,
               codingRepositories: dispatchArgs.repositories,
               requireExplicitRepository: true,
@@ -2426,6 +2495,8 @@ export async function durableDelegate(
       if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
         return finish(repositorySetRefusal(err));
       }
+      const planRefusal = refusalOf(err);
+      if (planRefusal) return finish(JSON.stringify(planRefusal));
       if (err instanceof ContinuationRefusedError) {
         return finish(
           JSON.stringify({
@@ -2482,6 +2553,7 @@ export async function durableDelegate(
           stored?.result,
           await loadBudgetEvent(db, childRunId),
           await extraRepositoryResults(db, childRunId),
+          await planSummaryOf(db, childRunId, ctx.origin ?? null),
         ),
       );
     }
@@ -2588,6 +2660,7 @@ export async function createSandboxSession(options: {
     reviewHosts,
     repoAccess,
     issueTrackers,
+    origin: providers.publicOrigin ?? null,
   });
   let input: WorkerInput;
   try {
@@ -2739,6 +2812,7 @@ async function executeTrackedRun(
       reviewHosts,
       repoAccess,
       issueTrackers,
+      origin: providers.publicOrigin ?? null,
     });
     const { runSandboxTool } = tools;
 

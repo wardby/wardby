@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   CODING_PROTOCOL_VERSION,
+  PLAN_FOLDER_PATH,
   parseCodingAgentOutputJson,
   sanitizeDependencyCacheReport,
   type CodingAgentOutput,
@@ -16,6 +17,7 @@ import { normalizeRegistryLockfiles } from "../coding/registry/lockfiles.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 import { registryWorkerSetup } from "../coding/registry/worker-config.js";
 import { describeError } from "./debug-trace.js";
+import { placePlanFiles } from "./plan-folder.mjs";
 import { safeWorkerErrorCode, streamFailureCode } from "./errors.js";
 import { disabledCodexSkills } from "./skills.js";
 import { WARDBY_MCP_INSTRUCTIONS } from "./mcp-config.js";
@@ -377,6 +379,16 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     await writeFile(file.path, file.content, { mode: file.mode });
   }
   await mkdir(workspaceTmpDir(options.workspace), { recursive: true, mode: 0o700 });
+  // Plan files (a revision, a builder's approved design): in place before the agent exists. A
+  // refused path or folder fails the run with a fixed code.
+  if (options.input.planFiles) {
+    try {
+      await placePlanFiles(options.planRoot ?? PLAN_FOLDER_PATH, options.input.planFiles.files);
+    } catch (error) {
+      options.trace?.record("plan_files_error", describeError(error));
+      throw new Error("worker_plan_files_failed", { cause: error });
+    }
+  }
   // What every Codex shell gets; the dependency cache's npm runs with exactly this too.
   const agentEnvironment = {
     ...serviceEnvironment(options.input.services),

@@ -275,6 +275,7 @@ export function buildMcpProviders(): McpProviderComposition {
     issueTrackers,
     repoAccess,
     runSteps,
+    publicOrigin: publicHttpOrigin(process.env.MCP_CANONICAL_URI),
   };
   // Read again at each tool call; checked here so a bad value stops start-up, not every run.
   loadToolMaxTimeoutMs();
@@ -523,6 +524,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
             hosts: reviewHosts,
             repoAccess: providers.repoAccess ?? createRepoAccessGate({ db: prisma, hosts: reviewHosts }),
             ...(providers.issueTrackers ? { issueTrackers: providers.issueTrackers } : {}),
+            secretCipher: providers.secrets,
             webhookSecret: eventConfig.webhookSecret,
             appIdentity: (opts?: { fresh?: boolean }) => githubApp.appIdentity(opts),
             allowedAccounts: () => allowedAccounts,
@@ -539,6 +541,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
           db: prisma,
           executor: providers.executor,
           trackers: providers.issueTrackers,
+          secretCipher: providers.secrets,
           webhookSecret: jiraConfig.webhookSecret,
         }
       : undefined;

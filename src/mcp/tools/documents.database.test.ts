@@ -1088,4 +1088,128 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       }
     });
   });
+
+  describe("plan sets", () => {
+    let lead: string;
+    let setId: string;
+    let planId: string;
+    let screensId: string;
+    let hiddenId: string;
+    let grantee: Principal;
+    let stranger: Principal;
+    let fan: Principal;
+    beforeAll(async () => {
+      grantee = await db.principal.create({ data: { subject: `docmcp-grantee-${s}` } });
+      stranger = await db.principal.create({ data: { subject: `docmcp-stranger-${s}` } });
+      fan = await db.principal.create({ data: { subject: `docmcp-fan-${s}` } });
+      // The access agent belongs to `other`: the owner reaches only the documents it owns.
+      lead = (
+        await db.agent.create({
+          data: { name: `docmcp-lead-${s}`, systemPrompt: "p", model: "m", budgetUsd: 1, ownerId: other.id },
+        })
+      ).id;
+      setId = (
+        await db.planSet.create({
+          data: {
+            agentId: codingAgentId,
+            accessAgentId: lead,
+            repository: `acme/plan-${s}`,
+            number: 12,
+            store: "wardby",
+            createdByRunId: "run-plan",
+          },
+        })
+      ).id;
+      const ownerCall = await connect(owner);
+      const otherCall = await connect(other);
+      planId = (await ownerCall("create_document", { title: "Plan title", markdown: "# Plan" })).json.documentId;
+      screensId = (await ownerCall("create_document", { title: "Screens", markdown: "# Screens" })).json.documentId;
+      hiddenId = (await otherCall("create_document", { title: "Hidden", markdown: "# Hidden" })).json.documentId;
+      await db.document.update({ where: { id: planId }, data: { planSetId: setId, planPath: "plan.md" } });
+      await db.document.update({
+        where: { id: screensId },
+        data: { planSetId: setId, planPath: "screens/", kind: "design" },
+      });
+      await db.document.update({ where: { id: hiddenId }, data: { planSetId: setId, planPath: "hidden.md" } });
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "agent",
+          resourceId: lead,
+          granteeKind: "principal",
+          granteePrincipalId: grantee.id,
+          granteeKey: `principal:${grantee.id}`,
+          level: "read",
+          source: "test",
+        },
+      });
+    });
+    afterAll(async () => {
+      await db.document.deleteMany({ where: { id: { in: [planId, screensId, hiddenId] } } });
+      await db.resourceGrant.deleteMany({ where: { resourceId: lead } });
+      await db.planSet.deleteMany({ where: { id: setId } });
+      await db.agent.deleteMany({ where: { id: lead } });
+      await db.principal.deleteMany({ where: { id: { in: [grantee.id, stranger.id, fan.id] } } });
+    });
+    const ids = (out: { json: any }) => out.json.documents.map((d: { documentId: string }) => d.documentId).sort();
+
+    it("get_document shows the set's documents the caller can read, without titles", async () => {
+      const got = await (await connect(owner))("get_document", { documentId: planId });
+      expect(got.json.planSet.number).toBe(12);
+      const entries = got.json.planSet.documents;
+      expect(entries.map((d: { path: string }) => d.path).sort()).toEqual(["plan.md", "screens/"]);
+      expect(entries.find((d: { id: string }) => d.id === screensId)).toEqual({
+        id: screensId,
+        kind: "design",
+        path: "screens/",
+        reviewState: "draft",
+        versionNumber: 1,
+        removed: false,
+      });
+      expect(got.json.planSet).not.toHaveProperty("title");
+      expect(JSON.stringify(got.json.planSet)).not.toContain("Screens");
+      // The access agent's grantee comments on every document of the set, so sees all three.
+      const viaAgent = await (await connect(grantee))("get_document", { documentId: planId });
+      expect(viaAgent.json.planSet.documents.map((d: { id: string }) => d.id).sort()).toEqual(
+        [planId, screensId, hiddenId].sort(),
+      );
+      const plain = await (await connect(owner))("create_document", { title: "Plain", markdown: "x" });
+      expect(
+        (await (await connect(owner))("get_document", { documentId: plain.json.documentId })).json,
+      ).not.toHaveProperty("planSet");
+    });
+
+    it("list_documents filters by plan number", async () => {
+      expect(ids(await (await connect(owner))("list_documents", { planNumber: 12 }))).toEqual(
+        [planId, screensId].sort(),
+      );
+      expect((await (await connect(owner))("list_documents", { planNumber: 0 })).isError).toBe(true);
+    });
+
+    it("list_documents lists plan documents reachable through the access agent, and only those", async () => {
+      const all = [planId, screensId, hiddenId].sort();
+      expect(ids(await (await connect(grantee))("list_documents", { planNumber: 12 }))).toEqual(all);
+      expect(ids(await (await connect(grantee))("list_documents"))).toEqual(all);
+      expect(ids(await (await connect(grantee))("list_documents", { ownedOnly: true }))).toEqual([]);
+      expect(ids(await (await connect(stranger))("list_documents"))).toEqual([]);
+      expect(ids(await (await connect(stranger))("list_documents", { planNumber: 12 }))).toEqual([]);
+      // An everyone grant on the access agent reaches everyone, as in access.ts.
+      const everyone = await db.resourceGrant.create({
+        data: {
+          resourceType: "agent",
+          resourceId: lead,
+          granteeKind: "everyone",
+          granteePrincipalId: null,
+          granteeKey: "everyone",
+          level: "read",
+          source: "test",
+        },
+      });
+      try {
+        expect(ids(await (await connect(fan))("list_documents", { planNumber: 12 }))).toEqual(all);
+      } finally {
+        await db.resourceGrant.delete({ where: { id: everyone.id } });
+      }
+      expect(ids(await (await connect(fan))("list_documents", { planNumber: 12 }))).toEqual([]);
+    });
+  });
 });

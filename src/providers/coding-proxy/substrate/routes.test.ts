@@ -15,6 +15,7 @@ import type { SubstrateRunLayout } from "../../jobs/substrate/run-store.js";
 import { LocalBlobStore } from "../../storage/local.js";
 import { BlobStoreError } from "../../storage/types.js";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
+import { MAX_PLAN_FILES_WIRE_BYTES } from "../../../coding/protocol.js";
 import { capabilityHash } from "../capability-hash.js";
 import type { ProxySession } from "../types.js";
 import { MemoryRelayStore } from "./memory-relay-store.js";
@@ -288,6 +289,40 @@ describe("substrate routes", () => {
     expect((await fetch(`${base}/transcript`, agent({ method: "POST", body: "line\n" }))).status).toBe(200);
     expect((await blobs.get(BLOB.transcript(TOKEN))).toString()).toBe("line\n");
     expect((await fetch(`${base}/transcript`, agent({ method: "POST", body: "x".repeat(2000) }))).status).toBe(413);
+  });
+
+  it("stores the plan files within the protocol's limit, and never logs their text", async () => {
+    await start();
+    const body = JSON.stringify({ schemaVersion: 1, note: "rrc_fake_plan_secret_value" });
+    expect((await fetch(`${base}/plan-files`, agent({ method: "POST", body }))).status).toBe(200);
+    expect((await blobs.get(BLOB.planFiles(TOKEN))).toString()).toBe(body);
+    // Declared over the limit: refused from the header, before any body is read.
+    const big = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(
+        `${base}/plan-files`,
+        {
+          method: "POST",
+          headers: {
+            "x-api-key": CAPABILITY,
+            [BRIDGE_PROTOCOL_HEADER]: "1",
+            "content-length": String(MAX_PLAN_FILES_WIRE_BYTES + 1),
+          },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on("error", reject);
+      req.write("abc");
+    });
+    expect(big).toBe(413);
+    expect((await blobs.get(BLOB.planFiles(TOKEN))).toString()).toBe(body);
+    // The tool side may not post plan files: the route is the agent's.
+    expect((await fetch(`${base}/plan-files`, tool({ method: "POST", body: "{}" }))).status).toBe(401);
+    const logged = JSON.stringify([logCalls, warnCalls]);
+    expect(logged).not.toContain("rrc_fake_plan_secret_value");
+    expect(logged).toContain('"route":"plan-files"');
   });
 
   it("refuses an oversized workspace and writes no done marker", async () => {

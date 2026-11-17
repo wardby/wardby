@@ -33,13 +33,18 @@ import { Prisma, type PrismaClient } from "#prisma";
 import { byteLength, MAX_CODING_TASK_BYTES, publicCodingRunResult, truncateText } from "../../coding/protocol.js";
 import { PostgresRateLimiter, RateLimitError, type RateLimiter } from "../../mcp/auth/self-hosted/rate-limit.js";
 import type { Executor } from "../../providers/executor/types.js";
+import { loadPlanFiles } from "../../coding/plan-files/store.js";
 import { RepositoryChoiceRefusedError } from "../coding-repository.js";
 import { dispatchRun, type DispatchRunOptions } from "../dispatch.js";
 import { atLeast, effectiveAccess } from "../grants.js";
 import { TERMINAL_RUN_STATUSES } from "../host-status.js";
 import { logger } from "../logger.js";
+import { parsePlanLayout } from "../plans/layout.js";
+import { publishPlanFromRun, withPlanSetLease, type PlanPublishClock } from "../plans/publish.js";
+import { PlanRefusedError } from "../plans/refusal.js";
+import { planSetInputFiles } from "../plans/revision.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
-import { redactExactSecretValues } from "../secret-spans.js";
+import { redactExactSecretValues, withEscapedForms } from "../secret-spans.js";
 import { composeTaskOverride, MAX_UNTRUSTED_BODY_CHARS } from "../untrusted-content.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
 import {
@@ -80,21 +85,28 @@ export const AGENT_NO_REPLY = "The agent did not reply to this thread.";
 export const AGENT_EDITED_NO_REPLY = "The agent edited the document but did not reply to this thread.";
 /** Appended to the agent's reply when its edit could not be read or published (threads stay open). */
 export const EDIT_NOT_APPLIED_NOTE = "(The edit could not be applied.)";
+/**
+ * Where an edit that was not applied is kept: a branch name, or (a plan revision, spec §5) the plan
+ * files of the run that wrote it.
+ */
+export type EditPlace = string | { planRun: string };
+const placeText = (place: EditPlace): string =>
+  typeof place === "string" ? `on branch ${place}` : `in the plan files of run ${place.planRun}`;
 /** The reply when the document got a newer version after the send and neither a merge nor a reconcile run applied the edit. */
-export function versionConflictReply(branch: string): string {
-  return `The document changed after this was sent, so the agent's edit was not applied. It is on branch ${branch}.`;
+export function versionConflictReply(place: EditPlace): string {
+  return `The document changed after this was sent, so the agent's edit was not applied. It is ${placeText(place)}.`;
 }
 /** The reply when the document was approved or archived while the agent worked: no merge or reconcile is tried. */
-export function lockedEditReply(state: LockedState, branch: string): string {
-  return `The document was ${state} while the agent worked, so its edit was not applied. It is on branch ${branch}.`;
+export function lockedEditReply(state: LockedState, place: EditPlace): string {
+  return `The document was ${state} while the agent worked, so its edit was not applied. It is ${placeText(place)}.`;
 }
 /** The reply when the edit conflicted and is too large, even as a diff, to send back to the agent to re-apply. */
-export function reconcileTooLargeReply(branch: string): string {
-  return `The document changed after this was sent, and the agent's edit is too large to re-apply automatically, so it was not applied. It is on branch ${branch}.`;
+export function reconcileTooLargeReply(place: EditPlace): string {
+  return `The document changed after this was sent, and the agent's edit is too large to re-apply automatically, so it was not applied. It is ${placeText(place)}.`;
 }
 /** The reply when a reconcile run ends without succeeding: the conflicted run's edit is still on its branch. */
-export function reconcileFailedReply(branch: string): string {
-  return `The agent run that re-applied the edit on the newer version failed, so the document was not changed. The earlier edit is on branch ${branch}.`;
+export function reconcileFailedReply(place: EditPlace): string {
+  return `The agent run that re-applied the edit on the newer version failed, so the document was not changed. The earlier edit is ${placeText(place)}.`;
 }
 /**
  * Room kept in the coding task for what dispatch adds around this request
@@ -129,6 +141,8 @@ export interface DocumentAgentDeps {
   /** Counts sends per document; default: the Postgres limiter over one-hour windows. */
   rateLimiter?: RateLimiter;
   selfDefects?: DispatchRunOptions["selfDefects"];
+  /** The plan set's publish-lease clock (a test seam; default the real one). */
+  planClock?: PlanPublishClock;
 }
 
 /** Rate-limit keys: a domain-separated hash of bucket, document id and window (no secret involved). */
@@ -220,6 +234,8 @@ type SendableLink = {
   ef: AgentEditFormat;
   path: string;
   baseRef: string | null;
+  /** A document of a "wardby" plan set (spec §5): `doc.repository` is the set's, `path` its file in the plan folder. */
+  plan: { planSetId: string; number: number } | null;
 };
 
 /**
@@ -229,9 +245,21 @@ type SendableLink = {
  */
 async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer): Promise<SendableLink> {
   const doc = await requireDocumentAccess(db, documentId, viewer, "write");
-  if (isLocked(doc.reviewState)) throw new Error("document_locked");
+  // A document removed from its plan is read-only, like an approved or archived one.
+  if (isLocked(doc.reviewState) || doc.removedFromPlan) throw new Error("document_locked");
   if (viewer.kind !== "principal") throw new Error("document_access_denied");
-  if (!doc.agentId || !doc.repository || !doc.path) throw new Error("document_not_agent_linked");
+  // A document of a "wardby" plan set is linked to its planner only: its files go in the plan folder (spec §5).
+  const set = doc.planSetId
+    ? await db.planSet.findUnique({
+        where: { id: doc.planSetId },
+        select: { id: true, store: true, repository: true, number: true, agentId: true },
+      })
+    : null;
+  const plan = set?.store === "wardby" && doc.planPath ? set : null;
+  const repository = plan ? plan.repository : doc.repository;
+  if (!doc.agentId || !repository || (!plan && !doc.path)) throw new Error("document_not_agent_linked");
+  // A revision is the set's planner's run: a document linked to any other agent is not sendable.
+  if (plan && doc.agentId !== plan.agentId) throw new Error("document_not_agent_linked");
   const agent = await db.agent.findUnique({
     where: { id: doc.agentId },
     select: {
@@ -253,20 +281,21 @@ async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer
   // Ruling T6-1 at send time too: no repository is read, and no run started, for an agent that is no
   // longer authorized for the linked repository.
   try {
-    assertAgentRepository(agent, doc.repository);
+    assertAgentRepository(agent, repository);
   } catch (err) {
     throw new Error("document_not_agent_linked", { cause: err });
   }
-  const ef = agentEditFormat(doc.kind);
-  const path = ef.validLinkPath(doc.path);
-  const baseRef = doc.baseRef === null ? null : validDocumentBaseRef(doc.baseRef);
+  const ef = agentEditFormat(doc.kind, plan !== null);
+  const path = ef.validLinkPath(plan ? doc.planPath! : doc.path!);
+  const baseRef = plan || doc.baseRef === null ? null : validDocumentBaseRef(doc.baseRef);
   return {
-    doc: { ...doc, agentId: doc.agentId, repository: doc.repository, path: doc.path },
+    doc: { ...doc, agentId: doc.agentId, repository, path },
     senderId: viewer.principalId,
     agent,
     ef,
     path,
     baseRef,
+    plan: plan ? { planSetId: plan.id, number: plan.number } : null,
   };
 }
 
@@ -276,7 +305,8 @@ async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer
  */
 async function taskSecretValues(db: PrismaClient, cipher: Cipher, agentId: string): Promise<string[]> {
   try {
-    return withHtmlEscapedForms((await loadAgentSecretValues(db, cipher, agentId)).flatMap((e) => e.values));
+    const values = (await loadAgentSecretValues(db, cipher, agentId)).flatMap((e) => e.values);
+    return withHtmlEscapedForms(withEscapedForms(values));
   } catch (err) {
     throw new Error("document_send_failed", { cause: err });
   }
@@ -296,6 +326,21 @@ async function startDocumentRun(
 ): Promise<{ id: string; status: string }> {
   const { link, ids, versionNumber, reconcileOf } = input;
   const { doc, senderId } = link;
+  // A plan revision (spec §5): every counted document of the set goes in the plan folder, redacted
+  // against the planner's current secret values at send time, and the run's plan folder is collected.
+  const planOptions: Partial<DispatchRunOptions> = link.plan
+    ? {
+        planInputFiles: await planSetInputFiles(
+          db,
+          link.plan.planSetId,
+          await taskSecretValues(db, deps.cipher, doc.agentId),
+        ),
+        collectPlanFiles: true,
+        planNumber: link.plan.number,
+      }
+    : // Not a plan revision: the agent's plan setting (if any) does not make this a planner run.
+      { withoutPlanDocument: true };
+
   // Counted last: a send refused for any other reason uses none of the hourly allowance.
   try {
     await (deps.rateLimiter ?? defaultLimiter(db)).check(SEND_RATE_BUCKET, doc.id, MAX_SENDS_PER_DOCUMENT_HOUR);
@@ -307,8 +352,10 @@ async function startDocumentRun(
   let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
   try {
     dispatched = await dispatchRun({
+      ...planOptions,
       db,
       executor: deps.executor,
+      secretCipher: deps.cipher,
       selfDefects: deps.selfDefects,
       agentId: doc.agentId,
       trigger: "comment",
@@ -364,6 +411,9 @@ async function startDocumentRun(
     });
   } catch (err) {
     if (err instanceof RepositoryChoiceRefusedError) throw new Error("document_not_agent_linked", { cause: err });
+    if (err instanceof PlanRefusedError && err.code === "plan_too_large") {
+      throw new Error("document_too_large_for_agent", { cause: err });
+    }
     if (err instanceof Error && CODING_TASK_LIMIT.test(err.message)) {
       throw new Error("document_too_large_for_agent", { cause: err });
     }
@@ -616,52 +666,104 @@ export async function onDocumentRunFinished(db: PrismaClient, deps: DocumentAgen
 
     if (run.status !== "succeeded") {
       // A reconcile run's threads: the conflicted run's edit is still on its branch, so say where.
-      const branches = await conflictedBranches(db, threads);
+      const places = await conflictedPlaces(db, threads);
       for (const t of threads) {
-        const branch = t.reconcileOfRunId === null ? undefined : branches.get(t.reconcileOfRunId);
-        await reply(t, branch === undefined ? AGENT_RUN_FAILED_REPLY : reconcileFailedReply(branch));
+        const place = t.reconcileOfRunId === null ? undefined : places.get(t.reconcileOfRunId);
+        await reply(t, place === undefined ? AGENT_RUN_FAILED_REPLY : reconcileFailedReply(place));
       }
       return;
     }
 
-    const edit = await publishRunEdit(db, deps, runId, threads, run.codingRun?.result, secretValues);
-    if (edit.kind === "locked") {
-      for (const t of threads) await reply(t, lockedEditReply(edit.state, edit.branch));
-      return;
-    }
-    if (edit.kind === "conflict") {
-      const start =
-        edit.reconcile === null
-          ? "refused"
-          : await startReconcileRun(db, deps, { runId, threads, ...edit.reconcile, secretValues });
-      if (start !== "started") {
-        // A reconcile refused because the document was locked meanwhile gets the locked reply.
-        const lockedNow = await documentReviewState(db, threads[0].documentId);
-        const text =
-          lockedNow && isLocked(lockedNow)
-            ? lockedEditReply(lockedNow, edit.branch)
-            : start === "too_large"
-              ? reconcileTooLargeReply(edit.branch)
-              : versionConflictReply(edit.branch);
-        for (const t of threads) await reply(t, text);
-      }
-      return;
-    }
-    const replies = parseThreadReplies(run.finalText);
-    for (const t of threads) {
-      const entry = replies.get(t.number);
-      const body = entry?.reply ?? (edit.kind === "published" ? AGENT_EDITED_NO_REPLY : AGENT_NO_REPLY);
-      await reply(t, edit.kind === "failed" ? `${body}\n\n${EDIT_NOT_APPLIED_NOTE}` : body);
-      if (entry?.resolved && edit.kind !== "failed") {
-        const resolved = await db.commentThread.updateMany({
-          where: { id: t.id, status: { in: ["open", "outdated"] } },
-          data: { status: "resolved", resolvedById: null },
+    const planSetId = await revisedPlanSet(db, threads[0].documentId);
+    let edit: RunEdit | undefined;
+    try {
+      edit = planSetId
+        ? await publishPlanRunEdit(db, deps, runId, threads, planSetId, secretValues)
+        : await publishRunEdit(db, deps, runId, threads, run.codingRun?.result, secretValues);
+      await answerEdit(db, deps, { runId, threads, edit, finalText: run.finalText, secretValues, reply });
+    } finally {
+      // R11: a plan revision's other changed files (the set's other documents, new ones) are published
+      // last, after the threads' document and its replies, whatever their outcome. The run-end plan hook
+      // skips this run, and publishPlanFromRun leaves a document this run already versioned alone. The
+      // threads' document is never removed by it, and is left alone entirely when its edit was not
+      // applied (failed, or the set's lease was busy): the replies already said so.
+      if (planSetId) {
+        await publishPlanFromRun(
+          db,
+          {
+            cipher: deps.cipher,
+            origin: null,
+            ...(deps.planClock ? { clock: deps.planClock } : {}),
+            threadsDocument: { id: threads[0].documentId, skip: edit === undefined || edit.kind === "failed" },
+          },
+          runId,
+        ).catch((err: unknown) => {
+          log.warn({ runId, code: codeOf(err) }, "could not publish the rest of the revised plan");
         });
-        if (resolved.count > 0) await notifyDocumentChange(db, t.documentId, "thread");
       }
     }
   } catch (err) {
     log.warn({ runId, code: codeOf(err) }, "could not finish the document send for this run");
+  }
+}
+
+/** The set of a document in a "wardby" plan set (its revisions publish from the run's plan files), else null. */
+async function revisedPlanSet(db: PrismaClient, documentId: string): Promise<string | null> {
+  const doc = await db.document.findUnique({
+    where: { id: documentId },
+    select: { planPath: true, planSet: { select: { id: true, store: true } } },
+  });
+  return doc?.planPath && doc.planSet?.store === "wardby" ? doc.planSet.id : null;
+}
+
+/** A succeeded run's answer on its threads, after its edit was published (or not). */
+async function answerEdit(
+  db: PrismaClient,
+  deps: DocumentAgentDeps,
+  input: {
+    runId: string;
+    threads: ClaimedThread[];
+    edit: RunEdit;
+    finalText: string | null;
+    secretValues: readonly string[];
+    reply: (t: ClaimedThread, body: string) => Promise<unknown>;
+  },
+): Promise<void> {
+  const { runId, threads, edit, secretValues, reply } = input;
+  if (edit.kind === "locked") {
+    for (const t of threads) await reply(t, lockedEditReply(edit.state, edit.place));
+    return;
+  }
+  if (edit.kind === "conflict") {
+    const start =
+      edit.reconcile === null
+        ? "refused"
+        : await startReconcileRun(db, deps, { runId, threads, ...edit.reconcile, secretValues });
+    if (start !== "started") {
+      // A reconcile refused because the document was locked meanwhile gets the locked reply.
+      const lockedNow = await documentReviewState(db, threads[0].documentId);
+      const text =
+        lockedNow && isLocked(lockedNow)
+          ? lockedEditReply(lockedNow, edit.place)
+          : start === "too_large"
+            ? reconcileTooLargeReply(edit.place)
+            : versionConflictReply(edit.place);
+      for (const t of threads) await reply(t, text);
+    }
+    return;
+  }
+  const replies = parseThreadReplies(input.finalText);
+  for (const t of threads) {
+    const entry = replies.get(t.number);
+    const body = entry?.reply ?? (edit.kind === "published" ? AGENT_EDITED_NO_REPLY : AGENT_NO_REPLY);
+    await reply(t, edit.kind === "failed" ? `${body}\n\n${EDIT_NOT_APPLIED_NOTE}` : body);
+    if (entry?.resolved && edit.kind !== "failed") {
+      const resolved = await db.commentThread.updateMany({
+        where: { id: t.id, status: { in: ["open", "outdated"] } },
+        data: { status: "resolved", resolvedById: null },
+      });
+      if (resolved.count > 0) await notifyDocumentChange(db, t.documentId, "thread");
+    }
   }
 }
 
@@ -701,16 +803,20 @@ async function claimThreads(db: PrismaClient, runId: string): Promise<ClaimedThr
   });
 }
 
-/** The branch each conflicted run (a reconcile run's reconcileOfRunId) left its edit on. */
-async function conflictedBranches(db: PrismaClient, threads: ClaimedThread[]): Promise<Map<string, string>> {
+/** Where each conflicted run (a reconcile run's reconcileOfRunId) left its edit: its branch, or its stored plan files. */
+async function conflictedPlaces(db: PrismaClient, threads: ClaimedThread[]): Promise<Map<string, EditPlace>> {
   const runIds = [...new Set(threads.flatMap((t) => (t.reconcileOfRunId === null ? [] : [t.reconcileOfRunId])))];
-  const out = new Map<string, string>();
+  const out = new Map<string, EditPlace>();
   if (runIds.length === 0) return out;
-  const rows = await db.codingRun.findMany({ where: { runId: { in: runIds } }, select: { runId: true, result: true } });
+  const rows = await db.codingRun.findMany({
+    where: { runId: { in: runIds } },
+    select: { runId: true, result: true, planFilesStatus: true },
+  });
   for (const row of rows) {
     const result = publicCodingRunResult(row.result);
     const branch = result?.headRef ?? result?.commitSha;
     if (branch) out.set(row.runId, branch);
+    else if (row.planFilesStatus === "stored") out.set(row.runId, { planRun: row.runId });
   }
   return out;
 }
@@ -721,10 +827,10 @@ async function conflictedBranches(db: PrismaClient, threads: ClaimedThread[]): P
  */
 type RunEdit =
   | { kind: "published" | "unchanged" | "failed" }
-  | { kind: "locked"; state: LockedState; branch: string }
+  | { kind: "locked"; state: LockedState; place: EditPlace }
   | {
       kind: "conflict";
-      branch: string;
+      place: EditPlace;
       reconcile: { sentVersion: number; base: VersionContent; ours: VersionContent } | null;
     };
 
@@ -736,11 +842,7 @@ async function versionContent(db: PrismaClient, documentId: string, number: numb
 }
 
 /**
- * Publishes the linked file or design at the run's pushed commit as the next version while the
- * document is still at the version the threads were sent with. When it moved on, the edit is merged
- * (file by file, then line by line) with the current version (base: the sent version) and published while the
- * document is still at that current version; a conflicting file, or a newer version again, is a
- * conflict. Both publishes go through publishVersion (normalising and redaction).
+ * Publishes the linked file or design at the run's pushed commit as the next version (applyRunEdit).
  * Never throws: an error is reported as `failed`.
  */
 async function publishRunEdit(
@@ -764,105 +866,218 @@ async function publishRunEdit(
     if (!doc?.repository || !doc.path || !doc.currentVersion || !ref || !deps.executor.readCodingRepositoryFile) {
       return { kind: "failed" };
     }
-    const sentVersion = threads[0].sentVersionNumber;
-    if (sentVersion === null || threads.some((t) => t.sentVersionNumber !== sentVersion)) return { kind: "failed" };
+    const sentVersion = sentVersionOf(threads);
+    if (sentVersion === null) return { kind: "failed" };
     const ef = agentEditFormat(doc.kind);
     const path = ef.validLinkPath(doc.path);
     // Agent output, redacted by the adapter (token shapes and the agent's secret values).
     const edited = await ef.readEdit(deps, { repository: doc.repository, path }, ref, secretValues);
     if (edited === null) return { kind: "failed" };
-    // As it would be stored (ruling PF-H3): limits, format check, normalising and exact-value
-    // redaction again. A refusal (board_format_invalid, an external reference, too large) is `failed`.
-    const fmt = formatFor(doc.kind);
-    const prepared = fmt.prepare(edited, secretValues).content;
-    const branch = result?.headRef ?? ref;
-    const numbers = threads.map((t) => `#${t.number}`).join(", ");
-    const publish = async (
-      content: VersionContent,
-      expectedNumber: number,
-      summary: string,
-    ): Promise<"published" | "conflict" | "locked"> => {
-      try {
-        await publishVersion(db, deps.cipher, {
-          documentId,
-          ...(content.format === "markdown" ? { markdown: content.markdown } : { files: content.files }),
-          via: "agent",
-          runId,
-          summary,
-          expectedNumber,
-        });
-        return "published";
-      } catch (err) {
-        if (err instanceof Error && err.message === "document_version_conflict") return "conflict";
-        if (err instanceof Error && err.message === "document_locked") return "locked";
-        throw err;
-      }
-    };
-    // Locked between the read above and a publish: the state at that moment names the reply.
-    // Anything but archived reads as approved, a document deleted meanwhile (null) included: the
-    // reply must still say the edit was not applied, and approved is the only other locked state.
-    const locked = async (): Promise<RunEdit> => ({
-      kind: "locked",
-      state: (await documentReviewState(db, documentId)) === "archived" ? "archived" : "approved",
-      branch,
+    const place = result?.headRef ?? ref;
+    return await applyRunEdit(db, deps.cipher, {
+      runId,
+      threads,
+      doc,
+      current: doc.currentVersion,
+      edited,
+      place,
+      sentVersion,
+      secretValues,
     });
-
-    // Approved or archived while the agent worked: nothing is published, merged or reconciled.
-    if (isLocked(doc.reviewState) && contentHash(prepared) !== doc.currentVersion.contentHash) {
-      return { kind: "locked", state: doc.reviewState, branch };
-    }
-    let current = doc.currentVersion;
-    if (current.number === sentVersion) {
-      if (contentHash(prepared) === current.contentHash) return { kind: "unchanged" };
-      const out = await publish(prepared, sentVersion, `Agent edit for comment threads ${numbers}`);
-      if (out === "published") return { kind: "published" };
-      if (out === "locked") return locked();
-      // Someone published first: merge with what they published.
-      const latest = await getDocument(db, documentId);
-      current = latest.version;
-    }
-    // Layer 1: the per-file three-way merge with the version the threads were sent with. Base and
-    // theirs are prepared with the same secret values as ours, so a value that became a secret since
-    // (redacted in ours only) does not make an untouched file differ.
-    // A stored version the checks now refuse (e.g. a near-limit board that the longer redaction marker
-    // pushes over) is compared as stored: at worst a false conflict, which the reconcile run handles.
-    const prep = (c: VersionContent): VersionContent => {
-      try {
-        return fmt.prepare(c, secretValues).content;
-      } catch {
-        return c;
-      }
-    };
-    const base = prep(await versionContent(db, documentId, sentVersion));
-    const reconcile = { sentVersion, base, ours: prepared };
-    const theirs = prep(await loadContent(db, current));
-    const merged = mergeContent(ef, base, theirs, prepared);
-    if (merged.kind === "conflict") return { kind: "conflict", branch, reconcile };
-    // A line-merged file is new text: it must pass the format's checks (sanitiser, board rules,
-    // redaction) as any edit does. A refusal is a conflict, so the reconcile run can redo it.
-    let mergedContent: VersionContent;
-    try {
-      mergedContent = fmt.prepare(merged.content, secretValues).content;
-    } catch (err) {
-      log.info({ runId, documentId, code: codeOf(err) }, "the merged agent edit does not pass the format checks");
-      return { kind: "conflict", branch, reconcile };
-    }
-    // The current version already holds the agent's edit.
-    if (contentHash(mergedContent) === contentHash(theirs)) return { kind: "unchanged" };
-    try {
-      const summary = `Agent edit for comment threads ${numbers} (merged with v${current.number})`;
-      const out = await publish(mergedContent, current.number, summary);
-      if (out === "published") return { kind: "published" };
-      if (out === "locked") return locked();
-    } catch (err) {
-      // A merge the store refuses (a manifest and boards that no longer agree) is a conflict too.
-      log.info({ runId, documentId, code: codeOf(err) }, "the merged agent edit could not be stored");
-    }
-    return { kind: "conflict", branch, reconcile };
   } catch (err) {
     log.warn({ runId, documentId, code: codeOf(err) }, "could not publish the agent's edit");
     return { kind: "failed" };
   }
+}
+
+/**
+ * A plan revision's edit (spec §5): the threads' document as the run left it in its stored plan
+ * files (already redacted when they were recorded), published by applyRunEdit while holding the
+ * set's publish lease, so it cannot interleave with a set publish. A file missing from the run's
+ * plan folder, or a layout it no longer passes, is `failed`. Never throws.
+ */
+async function publishPlanRunEdit(
+  db: PrismaClient,
+  deps: Pick<DocumentAgentDeps, "cipher" | "planClock">,
+  runId: string,
+  threads: ClaimedThread[],
+  planSetId: string,
+  secretValues: readonly string[],
+): Promise<RunEdit> {
+  const documentId = threads[0].documentId;
+  try {
+    if (await db.documentVersion.findFirst({ where: { documentId, runId }, select: { id: true } })) {
+      return { kind: "published" };
+    }
+    const coding = await db.codingRun.findUnique({ where: { runId }, select: { planFilesStatus: true } });
+    if (coding?.planFilesStatus !== "stored") return { kind: "failed" };
+    const sentVersion = sentVersionOf(threads);
+    if (sentVersion === null) return { kind: "failed" };
+    const layout = parsePlanLayout(await loadPlanFiles(db, runId, "output"));
+    const outcome = await withPlanSetLease(
+      db,
+      planSetId,
+      runId,
+      async (): Promise<RunEdit> => {
+        // Read under the lease, so a set publish that held it is seen.
+        const doc = await db.document.findUnique({ where: { id: documentId }, include: { currentVersion: true } });
+        if (!doc?.planPath || !doc.currentVersion || !layout.ok) return { kind: "failed" };
+        const file = layout.documents.find((d) => d.path === doc.planPath && d.kind === doc.kind);
+        if (!file) return { kind: "failed" };
+        const edited: VersionContent =
+          file.kind === "document"
+            ? { format: "markdown", markdown: file.markdown! }
+            : { format: "boards-v1", files: file.files! };
+        return applyRunEdit(db, deps.cipher, {
+          runId,
+          threads,
+          doc,
+          current: doc.currentVersion,
+          edited,
+          place: { planRun: runId },
+          sentVersion,
+          secretValues,
+        });
+      },
+      deps.planClock,
+    );
+    return outcome === "busy" ? { kind: "failed" } : outcome;
+  } catch (err) {
+    log.warn({ runId, documentId, code: codeOf(err) }, "could not publish the agent's plan edit");
+    return { kind: "failed" };
+  }
+}
+
+/** The version every thread was sent with, or null when they disagree or one has none. */
+function sentVersionOf(threads: ClaimedThread[]): number | null {
+  const sentVersion = threads[0].sentVersionNumber;
+  if (sentVersion === null || threads.some((t) => t.sentVersionNumber !== sentVersion)) return null;
+  return sentVersion;
+}
+
+/**
+ * Publishes the run's edit as the next version while the document is still at the version the
+ * threads were sent with. When it moved on, the edit is merged (file by file, then line by line) with
+ * the current version (base: the sent version) and published while the document is still at that
+ * current version; a conflicting file, or a newer version again, is a conflict. Both publishes go
+ * through publishVersion (normalising and redaction). Throws only on an unexpected error.
+ */
+async function applyRunEdit(
+  db: PrismaClient,
+  cipher: Cipher,
+  input: {
+    runId: string;
+    threads: ClaimedThread[];
+    doc: { id: string; kind: string; reviewState: string };
+    current: Parameters<typeof loadContent>[1] & { number: number; contentHash: string };
+    edited: VersionContent;
+    place: EditPlace;
+    sentVersion: number;
+    secretValues: readonly string[];
+  },
+): Promise<RunEdit> {
+  const { runId, threads, doc, edited, place, sentVersion, secretValues } = input;
+  const documentId = doc.id;
+  const ef = agentEditFormat(doc.kind);
+  // As it would be stored (ruling PF-H3): limits, format check, normalising and exact-value
+  // redaction again. A refusal (board_format_invalid, an external reference, too large) is `failed`.
+  const fmt = formatFor(doc.kind);
+  const prepared = fmt.prepare(edited, secretValues).content;
+  const numbers = threads.map((t) => `#${t.number}`).join(", ");
+  const publish = async (
+    content: VersionContent,
+    expectedNumber: number,
+    summary: string,
+  ): Promise<"published" | "conflict" | "locked"> => {
+    try {
+      await publishVersion(db, cipher, {
+        documentId,
+        ...(content.format === "markdown" ? { markdown: content.markdown } : { files: content.files }),
+        via: "agent",
+        runId,
+        summary,
+        expectedNumber,
+      });
+      return "published";
+    } catch (err) {
+      if (err instanceof Error && err.message === "document_version_conflict") return "conflict";
+      if (err instanceof Error && err.message === "document_locked") return "locked";
+      throw err;
+    }
+  };
+  // Locked between the read above and a publish: the state at that moment names the reply.
+  // Anything but archived reads as approved, a document deleted meanwhile (null) included: the
+  // reply must still say the edit was not applied, and approved is the only other locked state.
+  const locked = async (): Promise<RunEdit> => ({
+    kind: "locked",
+    state: (await documentReviewState(db, documentId)) === "archived" ? "archived" : "approved",
+    place,
+  });
+
+  // Whether the edit is the current version's content. Preparing is not idempotent on a stored design
+  // (a second pass can add a line break), so the stored content is also compared prepared once more:
+  // an untouched design the run hands back (already prepared once when it was stored) matches it.
+  const preparedHash = contentHash(prepared);
+  const isCurrentContent = async (): Promise<boolean> => {
+    if (preparedHash === input.current.contentHash) return true;
+    try {
+      return preparedHash === contentHash(fmt.prepare(await loadContent(db, input.current), secretValues).content);
+    } catch {
+      return false;
+    }
+  };
+  // Approved or archived while the agent worked: nothing is published, merged or reconciled.
+  if (isLocked(doc.reviewState) && !(await isCurrentContent())) {
+    return { kind: "locked", state: doc.reviewState, place };
+  }
+  let current = input.current;
+  if (current.number === sentVersion) {
+    if (await isCurrentContent()) return { kind: "unchanged" };
+    const out = await publish(prepared, sentVersion, `Agent edit for comment threads ${numbers}`);
+    if (out === "published") return { kind: "published" };
+    if (out === "locked") return locked();
+    // Someone published first: merge with what they published.
+    const latest = await getDocument(db, documentId);
+    current = latest.version;
+  }
+  // Layer 1: the per-file three-way merge with the version the threads were sent with. Base and
+  // theirs are prepared with the same secret values as ours, so a value that became a secret since
+  // (redacted in ours only) does not make an untouched file differ.
+  // A stored version the checks now refuse (e.g. a near-limit board that the longer redaction marker
+  // pushes over) is compared as stored: at worst a false conflict, which the reconcile run handles.
+  const prep = (c: VersionContent): VersionContent => {
+    try {
+      return fmt.prepare(c, secretValues).content;
+    } catch {
+      return c;
+    }
+  };
+  const base = prep(await versionContent(db, documentId, sentVersion));
+  const reconcile = { sentVersion, base, ours: prepared };
+  const theirs = prep(await loadContent(db, current));
+  const merged = mergeContent(ef, base, theirs, prepared);
+  if (merged.kind === "conflict") return { kind: "conflict", place, reconcile };
+  // A line-merged file is new text: it must pass the format's checks (sanitiser, board rules,
+  // redaction) as any edit does. A refusal is a conflict, so the reconcile run can redo it.
+  let mergedContent: VersionContent;
+  try {
+    mergedContent = fmt.prepare(merged.content, secretValues).content;
+  } catch (err) {
+    log.info({ runId, documentId, code: codeOf(err) }, "the merged agent edit does not pass the format checks");
+    return { kind: "conflict", place, reconcile };
+  }
+  // The current version already holds the agent's edit.
+  if (contentHash(mergedContent) === contentHash(theirs)) return { kind: "unchanged" };
+  try {
+    const summary = `Agent edit for comment threads ${numbers} (merged with v${current.number})`;
+    const out = await publish(mergedContent, current.number, summary);
+    if (out === "published") return { kind: "published" };
+    if (out === "locked") return locked();
+  } catch (err) {
+    // A merge the store refuses (a manifest and boards that no longer agree) is a conflict too.
+    log.info({ runId, documentId, code: codeOf(err) }, "the merged agent edit could not be stored");
+  }
+  return { kind: "conflict", place, reconcile };
 }
 
 /**

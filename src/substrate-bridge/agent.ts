@@ -37,6 +37,7 @@ import {
   WARM_ROUNDS_ENV,
   WORKER_CONTEXT_ROOT,
   WORKER_PLACEHOLDERS,
+  PLAN_FILES_OUTPUT_PATH,
 } from "./constants.js";
 import { pipeRedacted, type LineSink } from "./diagnostics.js";
 import { BridgeError, DEFAULT_POLICY, send, withRetry, type RetryPolicy } from "./http.js";
@@ -58,6 +59,8 @@ export interface AgentOptions {
   inputPath?: string;
   resultPath?: string;
   transcriptPath?: string;
+  /** Where the worker writes its plan-files.json (default PLAN_FILES_OUTPUT_PATH). */
+  planFilesPath?: string;
   socketPath?: string;
   /** 0 picks a free port (tests). */
   readyPort?: number;
@@ -175,6 +178,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
   const inputPath = options.inputPath ?? "/run/wardby/input/input.json";
   const resultPath = options.resultPath ?? "/run/wardby/output/result.json";
   const transcriptPath = options.transcriptPath ?? "/run/wardby/output/session.jsonl";
+  const planFilesPath = options.planFilesPath ?? PLAN_FILES_OUTPUT_PATH;
   const socketPath = options.socketPath ?? DEFAULT_TOOL_SOCKET;
   // The readiness server first: Substrate's wake-up probe must answer for the golden actor too, which
   // never gets a run actor's name (see waitForRunToken). Nothing touches the network before the name.
@@ -389,6 +393,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
       headers,
       resultPath,
       transcriptPath,
+      planFilesPath,
       transcriptDeadlineMs,
       tail,
       policy,
@@ -425,7 +430,7 @@ export async function run(options: AgentOptions): Promise<AgentHandle> {
       );
       diagnostics = newTail();
       roundLog = diagnostics.logger(baseLog);
-      await Promise.all([resultPath, transcriptPath].map((path) => rm(path, { force: true })));
+      await Promise.all([resultPath, transcriptPath, planFilesPath].map((path) => rm(path, { force: true })));
       await rm(options.contextRoot ?? WORKER_CONTEXT_ROOT, { recursive: true, force: true });
       await writeRoundInput(inputPath, answer.body, sessionId);
       log("substrate_bridge_input_ready", { runToken: token, round, resumed: sessionId ? 1 : 0 });

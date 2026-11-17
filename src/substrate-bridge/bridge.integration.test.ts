@@ -698,6 +698,7 @@ describe("substrate bridges, end to end without Substrate", () => {
     inputPath: join(dir, "in", "input.json"),
     resultPath: join(dir, "out", "result.json"),
     transcriptPath: join(dir, "out", "session.jsonl"),
+    planFilesPath: join(dir, "out", "plan-files.json"),
     socketPath: join(dir, "agent", "runner.sock"),
     readyPort: 0,
     policy: FAST,
@@ -1064,6 +1065,34 @@ describe("substrate bridges, end to end without Substrate", () => {
     expect(posts).toEqual(["transcript", "result"]);
     // The result asks the tool for the workspace: let that collect finish before teardown (its
     // outcome is not the point here: the first part already stored this token's workspace).
+    await tool.collected;
+  });
+
+  it("uploads the plan files after the transcript and before the result, and the proxy stores them", async () => {
+    const { workspace, toolSetup } = await stage();
+    tool = await startTool(workspace, toolSetup);
+    const posts: string[] = [];
+    proxyDelay = (request) => {
+      const match = /^POST \/substrate\/runs\/[^/]+\/(transcript|plan-files|result|exit|diagnostics)$/.exec(request);
+      if (match) posts.push(match[1]);
+      return 0;
+    };
+    agent = await runAgent(
+      await workerOptions({
+        launchWorker: () => ({
+          exited: (async () => {
+            await mkdir(join(dir, "out"), { recursive: true });
+            await writeFile(join(dir, "out", "session.jsonl"), '{"type":"user"}\n');
+            await writeFile(join(dir, "out", "plan-files.json"), '{"schemaVersion":1}');
+            await writeFile(join(dir, "out", "result.json"), "{}");
+            return 0;
+          })(),
+        }),
+      }),
+    );
+    await agent.uploaded;
+    expect(posts).toEqual(["transcript", "plan-files", "result"]);
+    expect((await readBlob(BLOB.planFiles(TOKEN))).toString()).toBe('{"schemaVersion":1}');
     await tool.collected;
   });
 

@@ -1386,6 +1386,23 @@ describe("pull request issue reference", () => {
     );
   });
 
+  it("cites the plan a build used right after the issue line, and Related goes after it", () => {
+    const body = pullRequestBody({ ...base, summary: "Did it.", issueNumber: 12, planLine: "Plan 12: plan.md v3" });
+    expect(body.split("\n\n").slice(0, 4)).toEqual([
+      "<!-- wardby:run-1 -->",
+      "From issue #12",
+      "Plan 12: plan.md v3",
+      "Did it.",
+    ]);
+    const tracker = pullRequestBody({ ...base, summary: "Did it.", issue, planLine: "Plan 12: plan.md v3" });
+    expect(tracker.split("\n\n")[2]).toBe("Plan 12: plan.md v3");
+    expect(pullRequestBody({ ...base, summary: "Did it." })).not.toContain("Plan ");
+    const block = `${RELATED_SECTION_START}\nA\n${RELATED_SECTION_END}`;
+    expect(upsertRelatedSection(body, block)).toBe(
+      `<!-- wardby:run-1 -->\n\nFrom issue #12\n\nPlan 12: plan.md v3\n\n${block}\n\nDid it.`,
+    );
+  });
+
   it("leaves closing to the agent: a plan's `Refs #N` stays non-closing, a `Resolves #N` it writes still closes", () => {
     const plan = pullRequestBody({ ...base, summary: "Plan only.\n\nRefs #12", issueNumber: 12 });
     expect(plan).toContain("From issue #12");

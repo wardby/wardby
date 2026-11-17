@@ -7,7 +7,7 @@ import { Editor, Extension } from "@tiptap/core";
 import { Markdown } from "@tiptap/markdown";
 import { Plugin, PluginKey, type EditorState, type Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
-import { documentExtensions } from "./extensions.js";
+import { documentExtensions, type PlanLinkTargets } from "./extensions.js";
 import { diffMarks, type DiffMarks } from "./history.js";
 
 export interface Highlight {
@@ -72,13 +72,19 @@ const CommentHighlights = Extension.create({
   },
 });
 
-export function createEditor(element: HTMLElement, markdown: string, editable: boolean): Editor {
+/** `planLinks`: a plan document's link targets, read on every render (they follow the latest payload). */
+export function createEditor(
+  element: HTMLElement,
+  markdown: string,
+  editable: boolean,
+  planLinks?: () => PlanLinkTargets | null,
+): Editor {
   return new Editor({
     element,
     // The page's CSP allows no inline <style>; the editor's base styles are in styles.css.
     injectCSS: false,
     editable,
-    extensions: [...documentExtensions(), Markdown, CommentHighlights],
+    extensions: [...documentExtensions(planLinks), Markdown, CommentHighlights],
     content: markdown,
     contentType: "markdown",
   });

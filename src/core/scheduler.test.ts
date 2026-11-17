@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "./db.js";
 import type { Executor } from "../providers/executor/types.js";
 import { findDueCandidates, claimDueRun, markRunFailedFromExecutorError, type SchedulerDb } from "./scheduler.js";
+import { setPlanChainHook } from "./plans/chain-hook.js";
 import type { SelfDefectSink } from "./self-defects.js";
 
 const executor: Executor = {
@@ -95,7 +96,9 @@ describe("markRunFailedFromExecutorError", () => {
     finishedAt: Date | null;
   }
 
-  function fakeRunDb(runs: FakeRun[]): Pick<SchedulerDb, "run"> {
+  type MarkFailedDb = Parameters<typeof markRunFailedFromExecutorError>[0];
+
+  function fakeRunDb(runs: FakeRun[]): MarkFailedDb {
     const byId = new Map(runs.map((r) => [r.id, r]));
     return {
       run: {
@@ -110,8 +113,36 @@ describe("markRunFailedFromExecutorError", () => {
           return { count };
         }) as any,
       },
-    } as unknown as Pick<SchedulerDb, "run">;
+    } as unknown as MarkFailedDb;
   }
+
+  describe("a plan ticket run's build chain", () => {
+    afterEach(() => setPlanChainHook(undefined));
+
+    it("hears of the run that failed to start, once", async () => {
+      const onTicketFinished = vi.fn(async () => {});
+      setPlanChainHook({ onMerged: vi.fn(), onTicketFinished, buildTicketFromComment: vi.fn() });
+      const runs: FakeRun[] = [{ id: "r1", status: "pending", error: null, finishedAt: null }];
+      const db = fakeRunDb(runs);
+      await markRunFailedFromExecutorError(db, "r1", new Error("boom"));
+      await markRunFailedFromExecutorError(db, "r1", new Error("again"));
+      expect(onTicketFinished).toHaveBeenCalledTimes(1);
+      expect(onTicketFinished).toHaveBeenCalledWith(db, "r1");
+    });
+
+    it("never throws its failure into the executor's path", async () => {
+      setPlanChainHook({
+        onMerged: vi.fn(),
+        onTicketFinished: vi.fn(async () => {
+          throw new Error("chain down");
+        }),
+        buildTicketFromComment: vi.fn(),
+      });
+      const runs: FakeRun[] = [{ id: "r1", status: "running", error: null, finishedAt: null }];
+      await expect(markRunFailedFromExecutorError(fakeRunDb(runs), "r1", new Error("boom"))).resolves.toBeUndefined();
+      expect(runs[0].status).toBe("failed");
+    });
+  });
 
   it("marks a pending run failed with the executor's error message", async () => {
     const runs: FakeRun[] = [{ id: "r1", status: "pending", error: null, finishedAt: null }];

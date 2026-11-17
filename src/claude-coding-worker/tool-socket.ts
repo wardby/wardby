@@ -147,23 +147,50 @@ export async function callResultBundle(
   );
 }
 
+interface ToolSessionOptions {
+  socketPath: string;
+  timeoutMs: number;
+  signal?: AbortSignal;
+  unavailable: string;
+  failed: string;
+  maxResponseBytes?: number;
+}
+
 /**
- * One call to one of the tool runner's tools: a minimal MCP client (newline-delimited JSON-RPC, as
- * the relay carries) that initializes and calls `name` once. Resolves with the tool's JSON
- * (unchecked). Fails only with `codes.unavailable` (a tool runner without the tool) or
- * `codes.failed`; never with the tool runner's text.
+ * One call to one of the tool runner's tools: opens a session, calls `name` once, closes it.
+ * Resolves with the tool's JSON (unchecked). Fails only with `unavailable` (a tool runner without
+ * the tool) or `failed`; never with the tool runner's text.
  */
 async function callToolRunner(
   name: string,
   args: Record<string, unknown>,
-  {
-    socketPath,
-    timeoutMs,
-    signal,
-    unavailable,
-    failed: failedCode,
-  }: { socketPath: string; timeoutMs: number; signal?: AbortSignal; unavailable: string; failed: string },
+  options: ToolSessionOptions,
 ): Promise<unknown> {
+  const session = await openToolSession(options);
+  try {
+    return await session.call(name, args);
+  } finally {
+    session.close();
+  }
+}
+
+/**
+ * One MCP connection to the tool runner (a minimal client: newline-delimited JSON-RPC, as the relay
+ * carries), initialized, over which `call` may be made repeatedly (one at a time). `timeoutMs`
+ * bounds the whole session. Fails only with `unavailable` or `failed`; never with the tool
+ * runner's text.
+ */
+async function openToolSession({
+  socketPath,
+  timeoutMs,
+  signal,
+  unavailable,
+  failed: failedCode,
+  maxResponseBytes = MAX_RESPONSE_LINE_BYTES,
+}: ToolSessionOptions): Promise<{
+  call(name: string, args: Record<string, unknown>): Promise<unknown>;
+  close(): void;
+}> {
   const failed = () => new Error(failedCode);
   if (signal?.aborted) throw failed();
   const socket = createConnection(socketPath);
@@ -180,6 +207,11 @@ async function callToolRunner(
   const timer = setTimeout(() => fail(failed()), timeoutMs);
   const onAbort = () => fail(failed());
   signal?.addEventListener("abort", onAbort, { once: true });
+  const close = () => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+    socket.destroy();
+  };
   socket.on("error", () => fail(failed()));
   socket.once("close", () => fail(failed()));
   socket.on("data", (chunk: string) => {
@@ -197,7 +229,7 @@ async function callToolRunner(
       }
       if (typeof message?.id === "number") pending.get(message.id)?.resolve(message);
     }
-    if (Buffer.byteLength(buffered) > MAX_RESPONSE_LINE_BYTES) fail(failed());
+    if (Buffer.byteLength(buffered) > maxResponseBytes) fail(failed());
   });
   let nextId = 0;
   const request = (method: string, params: unknown): Promise<JsonRpcResponse> => {
@@ -215,25 +247,79 @@ async function callToolRunner(
     });
     if (!initialized.result) throw failed();
     socket.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
-    const called = await request("tools/call", { name, arguments: args });
-    const result = called.result as
-      { isError?: boolean; content?: Array<{ type?: string; text?: unknown }> } | undefined;
-    if (called.error || !result || result.isError) throw new Error(unavailable);
-    const text = result.content?.find((item) => item.type === "text")?.text;
-    if (typeof text !== "string") throw failed();
-    try {
-      return JSON.parse(text) as unknown;
-    } catch {
-      throw failed();
-    }
-  } catch (error) {
-    if (error instanceof Error && error.message === unavailable) throw error;
+  } catch {
+    close();
     throw failed();
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
-    socket.destroy();
   }
+  return {
+    close,
+    async call(name, args) {
+      try {
+        const called = await request("tools/call", { name, arguments: args });
+        const result = called.result as
+          { isError?: boolean; content?: Array<{ type?: string; text?: unknown }> } | undefined;
+        if (called.error || !result || result.isError) throw new Error(unavailable);
+        const text = result.content?.find((item) => item.type === "text")?.text;
+        if (typeof text !== "string") throw failed();
+        try {
+          return JSON.parse(text) as unknown;
+        } catch {
+          throw failed();
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message === unavailable) throw error;
+        throw failed();
+      }
+    },
+  };
+}
+
+/** The tool runner's plan tools (claude-tool-runner/main.mjs); the agent's SDK options disallow all three (sdk.ts). */
+export const PLAN_PLACE_TOOL = "wardby_plan_place";
+export const PLAN_LIST_TOOL = "wardby_plan_list";
+export const PLAN_READ_TOOL = "wardby_plan_read";
+/** A maximum-size file (1 MiB, base64) in one JSON-RPC line, with room for its envelope. */
+export const PLAN_READ_RESPONSE_BYTES = 2 * 1024 * 1024;
+export const PLAN_TOOL_TIMEOUT_MS = 60_000;
+
+export interface PlanToolCall {
+  socketPath?: string;
+  signal?: AbortSignal;
+}
+
+/** One input plan file, placed in the tool runner's plan folder before the agent's first command. */
+export async function callPlanPlace(
+  file: { path: string; contentBase64: string },
+  { socketPath = TOOL_SOCKET_PATH, signal }: PlanToolCall = {},
+): Promise<unknown> {
+  return callToolRunner(
+    PLAN_PLACE_TOOL,
+    { path: file.path, content_base64: file.contentBase64 },
+    {
+      socketPath,
+      timeoutMs: PLAN_TOOL_TIMEOUT_MS,
+      signal,
+      unavailable: "plan_tool_unavailable",
+      failed: "plan_tool_failed",
+    },
+  );
+}
+
+/** One connection for the plan list and every read (the tool runner keeps the list per connection). */
+export async function openPlanSession({ socketPath = TOOL_SOCKET_PATH, signal }: PlanToolCall = {}) {
+  const session = await openToolSession({
+    socketPath,
+    timeoutMs: 5 * 60_000,
+    signal,
+    unavailable: "plan_tool_unavailable",
+    failed: "plan_tool_failed",
+    maxResponseBytes: PLAN_READ_RESPONSE_BYTES,
+  });
+  return {
+    list: () => session.call(PLAN_LIST_TOOL, {}),
+    read: (path: string) => session.call(PLAN_READ_TOOL, { path }),
+    close: () => session.close(),
+  };
 }
 
 interface JsonRpcResponse {

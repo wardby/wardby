@@ -227,6 +227,48 @@ describe.skipIf(!process.env.DATABASE_URL)("Phase 5 coding schema (PostgreSQL)",
     expect(coding).toMatchObject({ gitHistoryDepth: null, gitHistoryFull: false });
     expect(coding.repositories[0].asRemote).toBe(false);
   });
+
+  it("stores plan files per run and direction, unique by path, removed with the run", async () => {
+    const agent = await db.agent.create({
+      data: {
+        name: `plan-files-${randomUUID()}`,
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        kind: "coding",
+        codingProfile: { create: { repository: "openai/example", protectedPaths: [] } },
+      },
+    });
+    agentIds.push(agent.id);
+    const run = await db.run.create({ data: { agentId: agent.id, status: "cancelled", executionManaged: true } });
+    runIds.push(run.id);
+    const runId = run.id;
+    await db.codingRun.create({
+      data: {
+        runId,
+        task: "x",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: `wardby/run-${runId}`,
+        provider: "codex",
+        model: "m",
+        timeoutSec: 1800,
+        allowedEgress: [],
+        protectedPaths: [],
+        budgetReservedUsd: 0.25,
+      },
+    });
+    await db.codingRunPlanFile.create({ data: { runId, direction: "output", path: "plan.md", content: "# P" } });
+    await expect(
+      db.codingRunPlanFile.create({ data: { runId, direction: "output", path: "plan.md", content: "# Q" } }),
+    ).rejects.toThrow();
+    await db.codingRunPlanFile.create({ data: { runId, direction: "input", path: "plan.md", content: "# P" } });
+    const coding = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    expect(coding.collectPlanFiles).toBe(false);
+    expect(coding.planFilesStatus).toBeNull();
+    await db.codingRun.delete({ where: { runId } });
+    expect(await db.codingRunPlanFile.count({ where: { runId } })).toBe(0);
+  });
 });
 
 const MIGRATIONS = join(process.cwd(), "prisma", "migrations");

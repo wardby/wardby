@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { codingBadge, shortModel } from "./labels";
+import { codingBadge, shortModel, triggerLabel } from "./labels";
 
 describe("shortModel", () => {
   it("drops the claude- prefix and a trailing date stamp", () => {
@@ -20,5 +20,11 @@ describe("codingBadge", () => {
 
   it("falls back to the provider's first two letters", () => {
     expect(codingBadge("aider")).toEqual({ text: "AI", name: "aider", known: false });
+  });
+});
+
+describe("triggerLabel", () => {
+  it("names a plan approval", () => {
+    expect(triggerLabel({ kind: "plan_approved" })).toBe("plan approved");
   });
 });

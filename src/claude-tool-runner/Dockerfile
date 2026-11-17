@@ -42,6 +42,9 @@ RUN node --input-type=module -e 'const m = await import("/opt/wardby/coding-work
 # ../coding-worker/result-bundle.mjs.
 COPY src/coding-worker/result-bundle.mjs /opt/wardby/coding-worker/result-bundle.mjs
 RUN node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/result-bundle.mjs"); if (typeof m.createResultBundle !== "function" || !(await m.gitAvailable())) process.exit(1)'
+# The plan folder (src/coding-worker/plan-folder.mjs, the same file the Codex driver ships).
+COPY src/coding-worker/plan-folder.mjs /opt/wardby/coding-worker/plan-folder.mjs
+RUN node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/plan-folder.mjs"); if (typeof m.placePlanFiles !== "function" || typeof m.collectPlanFolder !== "function" || typeof m.isSafePlanPath !== "function") process.exit(1)'
 # `wardby-packages` (src/coding-worker/wardby-packages.mjs): lists the package registry's refusals for
 # the run, which pip and uv don't print. command.mjs imports registry-refusals.mjs as
 # ../coding-worker/registry-refusals.mjs to add them to a failed command's output.

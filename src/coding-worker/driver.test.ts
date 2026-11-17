@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,7 +8,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
-import type { CodingTaskInput } from "../coding/protocol.js";
+import { PLAN_FOLDER_PATH, type CodingTaskInput } from "../coding/protocol.js";
 import { repositoriesTaskNote, workerTaskNote } from "./task-note.js";
 import {
   CODING_OUTPUT_JSON_SCHEMA,
@@ -29,6 +30,7 @@ import {
   dependencyCacheBudget,
   dependencyCacheTimeLimit,
 } from "./dependency-cache.mjs";
+import { safeWorkerErrorCode } from "./errors.js";
 import { createDebugTracer } from "./debug-trace.js";
 import { INJECTED_CAPABILITY_PLACEHOLDER } from "./credentials.js";
 
@@ -1343,5 +1345,97 @@ describe("runCodingWorker git history (#536)", () => {
     expect(git(upstream, "bundle", "list-heads", join(workspace, ".git", "wardby-result.bundle"))).toBe(
       `${head} refs/wardby/bundle-head`,
     );
+  });
+});
+
+describe("runCodingWorker plan files", () => {
+  it("writes the input plan files before the agent starts, outside the workspace", async () => {
+    const workspace = await tempWorkspace();
+    const planRoot = join(await tempWorkspace(), "plan");
+    // What the plan folder held at the moment the client was created (R19): proves placement came first.
+    const seen: string[] = [];
+    const output = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "None.",
+      tests: [],
+    });
+    await runCodingWorker({
+      input: {
+        ...input,
+        planFiles: { files: [{ path: "plan.md", contentBase64: Buffer.from("# Plan v2\n").toString("base64") }] },
+      },
+      workspace,
+      planRoot,
+      proxyBaseUrl: "http://127.0.0.1:9",
+      capability: "rrp_" + "a".repeat(40),
+      signal: new AbortController().signal,
+      createClient: (config) => {
+        // Read synchronously here: the file must already be in place when the agent's client exists.
+        seen.push(existsSync(join(planRoot, "plan.md")) ? readFileSync(join(planRoot, "plan.md"), "utf8") : "missing");
+        return clientFor([{ type: "item.completed", item: { type: "agent_message", text: output } }], {})(config);
+      },
+    });
+    expect(seen).toEqual(["# Plan v2\n"]);
+    await expect(stat(join(workspace, "plan.md"))).rejects.toThrow();
+  });
+
+  // Never touches a folder this test did not create.
+  it.skipIf(existsSync(PLAN_FOLDER_PATH))("uses PLAN_FOLDER_PATH when no planRoot is given", async () => {
+    const workspace = await tempWorkspace();
+    const seen: string[] = [];
+    const output = JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "None.",
+      tests: [],
+    });
+    try {
+      await runCodingWorker({
+        input: {
+          ...input,
+          planFiles: { files: [{ path: "plan.md", contentBase64: Buffer.from("# Default\n").toString("base64") }] },
+        },
+        workspace,
+        proxyBaseUrl: "http://127.0.0.1:9",
+        capability: "rrp_" + "a".repeat(40),
+        signal: new AbortController().signal,
+        createClient: (config) => {
+          seen.push(readFileSync(join(PLAN_FOLDER_PATH, "plan.md"), "utf8"));
+          return clientFor([{ type: "item.completed", item: { type: "agent_message", text: output } }], {})(config);
+        },
+      });
+      expect(seen).toEqual(["# Default\n"]);
+    } finally {
+      await rm(PLAN_FOLDER_PATH, { recursive: true, force: true });
+    }
+  });
+
+  it("a placement failure is worker_plan_files_failed, with nothing of the cause in its safe output", async () => {
+    const workspace = await tempWorkspace();
+    const marker = "sk-test-FAKE-0000000000000000";
+    const blocker = join(await tempWorkspace(), `file-${marker}`);
+    await writeFile(blocker, "not a directory");
+    const createClient = vi.fn();
+    const failure = await runCodingWorker({
+      input: { ...input, planFiles: { files: [{ path: "plan.md", contentBase64: "eA==" }] } },
+      workspace,
+      planRoot: blocker,
+      proxyBaseUrl: "http://127.0.0.1:9",
+      capability: "rrp_" + "a".repeat(40),
+      signal: new AbortController().signal,
+      createClient,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("worker_plan_files_failed");
+    expect(createClient).not.toHaveBeenCalled();
+    const safe = JSON.stringify({ error: safeWorkerErrorCode(failure) });
+    expect(safe).toBe('{"error":"worker_plan_files_failed"}');
+    expect(safe).not.toContain(marker);
   });
 });

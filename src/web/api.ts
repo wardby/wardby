@@ -46,7 +46,12 @@ import {
 import { isLocked } from "../core/documents/review-state.js";
 import type { VersionWarning } from "../core/documents/warnings.js";
 import { getVersion, listVersions, MAX_VERSIONS_PAGE, restoreVersion } from "../core/documents/versions.js";
+import { resolvePlanLinks } from "../core/plans/links.js";
+import type { PlanLinksPayload, PlanSetPayload } from "../core/plans/page-payload.js";
+import { readablePlanSet } from "../core/plans/set-view.js";
 import { sendWebJson, WebError, type WebDeps } from "./context.js";
+
+export type { PlanLinksPayload, PlanSetPayload } from "../core/plans/page-payload.js";
 import type { PageViewer } from "./page.js";
 import { GUEST_RATE_LIMITS, WEB_RATE_BUCKETS, webRateLimiter } from "./rate-limits.js";
 
@@ -104,6 +109,15 @@ export async function getDocumentJson(
   const design = document.kind === "design";
   const review = await getReviewView(deps.db, documentId, viewer);
   const linked = !!document.repository && !!document.path && (!design || !!document.baseRef);
+  const plan = document.planSetId
+    ? await planPayload(
+        deps,
+        document.planSetId,
+        documentId,
+        viewer,
+        content.format === "markdown" ? content.markdown : null,
+      )
+    : null;
   sendWebJson(res, 200, {
     document: {
       id: document.id,
@@ -127,7 +141,61 @@ export async function getDocumentJson(
     threads,
     mentionedGuests,
     review: reviewJson(review),
+    ...(plan ? plan : {}),
   });
+}
+
+/**
+ * A plan document's bar and links. The bar lists the set's documents this viewer can read (a share-link
+ * guest sees only theirs), and counts only those. Links resolve against every document still in the
+ * set, but a link to one the viewer cannot read is left out of both lists: no id of it reaches the page,
+ * and it shows as plain text without a warning.
+ */
+async function planPayload(
+  deps: WebDeps,
+  planSetId: string,
+  documentId: string,
+  viewer: Viewer,
+  markdown: string | null,
+): Promise<{ planSet: PlanSetPayload; planLinks?: PlanLinksPayload } | null> {
+  const set = await readablePlanSet(deps.db, planSetId, viewer);
+  if (!set) return null;
+  const guest = viewer.kind === "guest";
+  const counted = set.documents.filter((d) => !d.removed);
+  const documents = [...set.documents]
+    .sort((a, b) => Number(a.removed) - Number(b.removed))
+    .map((d) => ({
+      id: d.id,
+      title: d.title,
+      kind: d.kind,
+      reviewState: d.reviewState,
+      path: d.path,
+      removed: d.removed,
+      current: d.id === documentId,
+      pagePath: guest ? "" : `/d/${d.id}`,
+    }));
+  const planSet: PlanSetPayload = {
+    number: set.number,
+    approved: counted.filter((d) => d.reviewState === "approved").length,
+    counted: counted.length,
+    documents,
+    ...(guest ? { partial: true } : {}),
+  };
+  if (markdown === null) return { planSet };
+  // A guest always sees a partial set; warned versus plain links would tell them which files are in it.
+  if (guest) return { planSet, planLinks: { links: [], unresolved: [] } };
+  const inSet = await deps.db.document.findMany({
+    where: { planSetId, removedFromPlan: false, planPath: { not: null } },
+    select: { id: true, kind: true, planPath: true },
+  });
+  const self = inSet.find((d) => d.id === documentId);
+  const { links, unresolved } = resolvePlanLinks(
+    markdown,
+    self?.planPath ?? "plan.md",
+    inSet.map((d) => ({ id: d.id, path: d.planPath ?? "", kind: d.kind === "design" ? "design" : "document" })),
+  );
+  const readable = new Set(set.documents.map((d) => d.id));
+  return { planSet, planLinks: { links: links.filter((l) => readable.has(l.documentId)), unresolved } };
 }
 
 /** The `review` payload of the page API. */

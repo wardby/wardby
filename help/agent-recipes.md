@@ -3,7 +3,7 @@ id: agent-recipes
 title: Agent recipes
 summary: Two copyable agent setups, an architecture keeper and a per-language builder, with the version, GitHub App, and webhook prerequisites each needs, written as a procedure an MCP assistant can follow.
 audience: operator
-tags: [recipes, examples, coding-agents, architecture, builder, router, mention, push, getting-started, fan-out, parallel-delegations, parallelDelegations, maxDelegationsPerRun]
+tags: [recipes, examples, coding-agents, architecture, builder, router, mention, push, getting-started, fan-out, parallel-delegations, parallelDelegations, maxDelegationsPerRun, planner, planDocument]
 appliesTo: >=0.4.0
 ---
 
@@ -30,7 +30,8 @@ prerequisite.
 
 Ask the user:
 
-1. Which recipe: "architecture keeper" or "builder"?
+1. Which recipe: "architecture keeper", "builder", or "planner and builder"
+   (Step 2D, after the builder)?
 2. Which repository, as `owner/name`?
 3. The coding provider, `codex` or `claude-code`, for both recipes (the
    architect is a coding agent too). Never guess it.
@@ -238,6 +239,61 @@ they need, or a pull request opened there gets no review, mention follow-up, fix
 round or mark-ready.
 
 Search help for `repository_required` or `repository_not_listed` for what to do about those refusals.
+
+## Step 2D (optional): planner and builder
+
+A planner writes the plan as Wardby documents that people review; a builder
+builds only from the approved plan, one ticket at a time. It needs Wardby 0.10.0
+or later and current worker images (search help for "plan documents"). The
+names here are examples: `planner`, `builder` and `delivery-lead` on
+`your-org/your-repo`; use repo-scoped names as in Step 0.
+
+1. The builder: a coding agent built as in Step 2B, plus
+   `"buildFromPlan": true` in its `codingProfile`. Each run then builds only from
+   an approved plan for its issue, and refuses (`plan_not_approved`) while a
+   document is waiting.
+2. The planner: a coding agent on the same repository (as in Step 2B, but its
+   prompt asks for a plan, not code), with `update_agent`:
+
+   ```json
+   {
+     "codingProfile": {
+       "planDocument": {
+         "store": "wardby",
+         "reviewers": ["<principalId>"],
+         "onApproved": "build",
+         "builderAgentId": "<builder agent id>"
+       }
+     }
+   }
+   ```
+
+   `onApproved: "build"` starts the builder on ticket 1 when every document is
+   approved, and each merged ticket starts the next. Use `"notify"`, still with
+   `builderAgentId`, to get a notice instead, and start each ticket by
+   commenting `@<app-slug> build ticket <t>` on the issue (GitHub only). The
+   planner's owner must be able to execute the builder, and the builder's owner
+   must be able to execute the planner.
+
+3. Without a lead, link the planner with `link_repository` (`access: "write"`,
+   `triggers: ["mention"]`), so an `@<app-slug>` request on an issue starts it.
+   The plan number is the issue number.
+4. With a lead (a native agent such as `delivery-lead`), attach the planner and
+   the builder with `attach_subagent` (bound names `planner` and `builder`), link
+   the lead for `mention` instead, and add lines like these to its prompt:
+   - "Delegate the plan to `planner`. Reply with its plan links: Review the
+     plan: <links>. When every document is approved, comment
+     `@<app-slug> build ticket <n>`."
+   - "When delegating a build to `builder`, pass `planNumber` = the issue
+     number."
+
+   A delegation from a run that came from an issue gets the issue's number by
+   itself. When there is no issue, `planNumber` is required for the planner;
+   pass it to the builder too, or its build is not checked against the plan
+   (ungated).
+
+Ask the user to try one request on a test issue first. Search help for
+`plan-documents` for the ticket layout, the build chain and its stop codes.
 
 ## Step 3: confirm
 

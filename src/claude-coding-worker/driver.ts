@@ -7,6 +7,7 @@ import {
   type CodingWorkerOutput,
   type DependencyCacheReport,
   type GitHistoryInput,
+  type PlanFileWire,
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_CLAUDE_MAX_TURNS,
   TEST_OUTCOME_DESCRIPTION,
@@ -207,6 +208,12 @@ export interface ClaudeWorkerRunOptions {
    * git (callGitCheck, tool-socket.ts) before anything else, and resolves with its unchecked JSON.
    */
   gitCheck?: () => Promise<unknown>;
+  /**
+   * On a run with input plan files (CodingTaskInput.planFiles): places one file in the tool runner's
+   * plan folder (callPlanPlace, tool-socket.ts) and resolves with its unchecked JSON. Called before
+   * the dependency cache and before any command.
+   */
+  placePlanFile?: (file: PlanFileWire) => Promise<unknown>;
   /**
    * On a run with git history: asks the tool runner for one repository's result bundle
    * (callResultBundle, tool-socket.ts) after the agent has finished, and resolves with its unchecked JSON.
@@ -429,6 +436,16 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   // A run with git history (#536) needs git in the tool runner: fail before anything else without it.
   const gitHistory = options.input.gitHistory !== undefined;
   if (gitHistory) await checkGit(options);
+  // Plan files: placed in the tool runner's plan folder before any command (the tool refuses after one).
+  for (const file of options.input.planFiles?.files ?? []) {
+    let answer: unknown;
+    try {
+      answer = options.placePlanFile ? await options.placePlanFile(file) : undefined;
+    } catch {
+      answer = undefined;
+    }
+    if ((answer as { ok?: unknown } | null | undefined)?.ok !== true) throw new Error("worker_plan_files_failed");
+  }
   // The workspace is seeded before this container starts (the launcher's input gate); the agent
   // does not exist yet, so the tool runner has run no command.
   const dependencyCache = options.input.dependencyCache ? await runDependencyCache(options) : undefined;

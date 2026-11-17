@@ -17,6 +17,8 @@ export function triggerLabel(trigger: GraphRun["trigger"]): string {
       return "host event";
     case "comment":
       return "comment";
+    case "plan_approved":
+      return "plan approved";
     case "subagent":
       return "sub-agent";
   }

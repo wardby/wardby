@@ -6,15 +6,18 @@ import type { Engine, EngineResult, EngineRunContext, StepRunner } from "../prov
 import type { LlmProvider } from "../providers/index.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import {
+  codingChildResult,
   createRun,
   executeRun,
   loseNativeRun,
+  parseDelegateArgs,
   runAgent,
   RunCancelledError,
   RunOwnershipLostError,
   TOOL_STOP_POLL_MS,
   type RunnerDb,
 } from "./runner.js";
+import { planReplyLines } from "./plans/wording.js";
 import { WITHHELD_TEXT_NOTICE } from "./secret-guard.js";
 import { RoutingLlmProvider, type CatalogLlmAdapter } from "../providers/llm/routing.js";
 import { buildCatalog } from "../providers/llm/catalog.js";
@@ -1953,5 +1956,71 @@ describe("a native run's final text and error are masked at the terminal write",
     const engine = fakeEngine({ status: "succeeded", finalText: `plain ${FAKE_KEY}`, turns: 1, usage });
     const finished = await executeRun(run.id, providersWith(engine), db);
     expect(finished.finalText).toBe(`plain ${FAKE_KEY}`);
+  });
+});
+
+describe("parseDelegateArgs planNumber", () => {
+  it("accepts a positive integer", () => {
+    const parsed = parseDelegateArgs('{"task":"t","planNumber":3}');
+    expect("args" in parsed && parsed.args.planNumber).toBe(3);
+  });
+  it("refuses zero", () => {
+    expect("refusal" in parseDelegateArgs('{"task":"t","planNumber":0}')).toBe(true);
+  });
+});
+
+describe("codingChildResult plan", () => {
+  const FAKE_SECRET = "wardby-fake-secret-value-7f3a9c";
+  const run = { status: "succeeded", finalText: "done", costUsd: 0.1, tokensIn: 1, tokensOut: 1, error: null };
+  const plan = {
+    number: 12,
+    planSetId: "ps1",
+    documents: [
+      {
+        id: "d1",
+        pagePath: "/d/d1",
+        kind: "document" as const,
+        path: "plan.md",
+        reviewState: "in_review",
+        versionNumber: 1,
+        change: "created" as const,
+      },
+    ],
+    ignored: ["notes.txt"],
+    withheld: ["leak.md"],
+    skippedReviewers: ["p9", "p10"],
+  };
+
+  it("names the documents, with a count of skipped reviewers and no text", () => {
+    const parsed = JSON.parse(codingChildResult(run, undefined, undefined, [], plan));
+    expect(parsed.plan).toEqual({
+      number: 12,
+      documents: [{ id: "d1", pagePath: "/d/d1", kind: "document", reviewState: "in_review" }],
+      ignored: ["notes.txt"],
+      withheld: ["leak.md"],
+      skippedReviewers: 2,
+    });
+    expect(JSON.stringify(parsed)).not.toContain("markdown");
+    expect(JSON.stringify(parsed)).not.toContain("p9");
+  });
+
+  it("carries a link when the origin is known, a failure code, or the pending form", () => {
+    const withUrl = { ...plan, documents: [{ ...plan.documents[0], url: "https://x/d/d1" }] };
+    expect(JSON.parse(codingChildResult(run, undefined, undefined, [], withUrl)).plan.documents[0].url).toBe(
+      "https://x/d/d1",
+    );
+    const failed = { number: 12, error: "plan_files_unsupported" as const };
+    expect(JSON.parse(codingChildResult(run, undefined, undefined, [], failed)).plan).toEqual(failed);
+    const pending = { number: 12, documents: [] as [], pending: true as const };
+    expect(JSON.parse(codingChildResult(run, undefined, undefined, [], pending)).plan).toEqual(pending);
+    expect("plan" in JSON.parse(codingChildResult(run, undefined, undefined, [], null))).toBe(false);
+  });
+
+  it("never carries a stored file's or document's text (secrets)", () => {
+    // The plan summary type has no text field: a stored file or document version holding a secret
+    // value cannot reach the result, which is built from ids, paths, states and links only.
+    const leaky = { ...plan, documents: [{ ...plan.documents[0], markdown: FAKE_SECRET }] };
+    expect(codingChildResult(run, undefined, undefined, [], leaky)).not.toContain(FAKE_SECRET);
+    expect(planReplyLines(leaky).join("\n")).not.toContain(FAKE_SECRET);
   });
 });

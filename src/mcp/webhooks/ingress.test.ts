@@ -370,6 +370,11 @@ describe("webhook ingress", () => {
       }
     });
 
+    it("a planner with no plan number is a 400 with the plan refusal code only", async () => {
+      const { handle } = await setup({ ...codingProfile, planDocument: { store: "wardby", reviewers: ["p1"] } });
+      expect(await handle({})).toEqual({ status: 400, body: { error: "plan_number_missing" } });
+    });
+
     it("a duplicate name is the plain 400", async () => {
       const { handle } = await setup();
       expect(await handle({ wardbyRepositories: ["a", "a"] })).toEqual({

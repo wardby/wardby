@@ -22,6 +22,7 @@
 import type { PrismaClient, RunStatus } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import { logger } from "./logger.js";
+import { emitRunCompletedEvent, type RunCompletedDb } from "./workflow-run-events.js";
 
 const stopLog = logger.child({ module: "stop-run" });
 
@@ -30,7 +31,7 @@ const DRIVABLE: readonly RunStatus[] = ["pending", "running"];
 /** Delegation trees are shallow; this only bounds a malformed one. */
 const MAX_CHILD_DEPTH = 16;
 
-export type StopRunDb = Pick<PrismaClient, "run">;
+export type StopRunDb = Pick<PrismaClient, "run"> & RunCompletedDb;
 
 export interface StopRunOptions {
   db: StopRunDb;
@@ -110,10 +111,12 @@ async function stopOne(
     stopLog.warn({ err, runId }, "the executor failed to stop the run");
   }
   // A run that never started has nothing to interrupt: end it here if no executor did.
-  await db.run.updateMany({
+  const cancelled = await db.run.updateMany({
     where: { id: runId, status: "pending" },
     data: { status: "cancelled", error: reason, finishedAt: new Date() },
   });
+  // Only this write made it terminal: the shared run-end event (a plan's build chain, run hooks); never throws.
+  if (cancelled.count > 0) await emitRunCompletedEvent(db, runId);
   // Kept for get_run; written only on a run this stop (or another) cancelled, never on one that
   // finished some other way meanwhile. stopRequestedAt stays null: it is the native sandbox
   // gateway's deferred-stop marker, which the scheduler leader drains.

@@ -6,8 +6,33 @@ export const CODING_PROTOCOL_VERSION = 1 as const;
 export const CODING_CODE_PROVIDER = "github";
 /** result.json and the agent output file: room for a full summary and test list, JSON-escaped. */
 export const MAX_CODING_ARTIFACT_BYTES = 256 * 1024;
-/** The worker input artifact (input.json): larger than results because it can carry Claude Code repo context. */
-export const MAX_CODING_INPUT_BYTES = 512 * 1024;
+/** input.json without plan files: the size the control plane trims Claude Code context to (container.ts). */
+export const MAX_CODING_BASE_INPUT_BYTES = 512 * 1024;
+/**
+ * The plan folder (docs: agent plan documents): a tmpfs in the Codex worker and in Claude Code's
+ * tool runner, outside /workspace, so nothing in it is ever collected, committed or in a PR.
+ */
+export const PLAN_FOLDER_PATH = "/tmp/wardby-plan";
+/** The worker's plan-files output, next to result.json in /run/wardby/output. */
+export const PLAN_FILES_ARTIFACT = "plan-files.json";
+/** Enforced by the worker (plan-folder.mjs, which keeps its own copy) and again by the control plane. */
+export const PLAN_FILES_LIMITS = {
+  maxFiles: 200,
+  maxFileBytes: 1024 * 1024,
+  maxTotalBytes: 8 * 1024 * 1024,
+  maxPathBytes: 512,
+  maxDepth: 4,
+  maxSkipped: 50,
+} as const;
+/** Base64 of `bytes` (padded). */
+export function base64Length(bytes: number): number {
+  return Math.ceil(bytes / 3) * 4;
+}
+/** The plan files' share of input.json and the size of plan-files.json: base64 of the total, plus 1 KiB per file. */
+export const MAX_PLAN_FILES_WIRE_BYTES =
+  base64Length(PLAN_FILES_LIMITS.maxTotalBytes) + PLAN_FILES_LIMITS.maxFiles * 1024 + 64 * 1024;
+/** The worker input artifact (input.json): Claude Code repo context and, on a plan run, its plan files. */
+export const MAX_CODING_INPUT_BYTES = MAX_CODING_BASE_INPUT_BYTES + MAX_PLAN_FILES_WIRE_BYTES;
 /** Bounds on CodingTaskInput.claudeContext, enforced by the builder (src/coding/claude-context.ts) and this schema. */
 export const CLAUDE_CONTEXT_LIMITS = { maxFiles: 200, maxFileBytes: 64 * 1024, maxTotalBytes: 256 * 1024 } as const;
 // 64 KiB: room for the agent's task, a lead's request and an event's original request (issue and PR
@@ -527,6 +552,55 @@ export function isAllowedContextPath(path: string): boolean {
   return segments[segments.length - 1] !== "claude.local.md";
 }
 
+/**
+ * A plan-relative POSIX path: at most maxPathBytes, at most maxDepth segments, no empty, ".", ".."
+ * or dot-leading segment, no backslash and no control character. Never absolute.
+ */
+export function isSafePlanPath(path: string): boolean {
+  if (path.length === 0 || byteLength(path) > PLAN_FILES_LIMITS.maxPathBytes) return false;
+  if (path.startsWith("/") || path.includes("\\") || CONTROL_CHARACTER.test(path)) return false;
+  const segments = path.split("/");
+  if (segments.length > PLAN_FILES_LIMITS.maxDepth) return false;
+  return segments.every((segment) => segment !== "" && !segment.startsWith("."));
+}
+
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+export const PlanFileWireSchema = z
+  .object({
+    path: z.string().refine(isSafePlanPath, "must be a safe plan path"),
+    contentBase64: z
+      .string()
+      .max(base64Length(PLAN_FILES_LIMITS.maxFileBytes))
+      .refine((value) => value.length % 4 === 0 && BASE64.test(value), "must be base64"),
+  })
+  .strict();
+export type PlanFileWire = z.infer<typeof PlanFileWireSchema>;
+
+/** Decoded size of a base64 string (no decode). */
+function base64Bytes(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return (value.length / 4) * 3 - padding;
+}
+
+/** Unique paths and the total limit, for the input and for the output. */
+function refinePlanFiles(files: readonly PlanFileWire[], ctx: z.RefinementCtx, path: (string | number)[]): void {
+  const paths = files.map((file) => file.path);
+  if (new Set(paths).size !== paths.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: "must name each path once" });
+  }
+  let total = 0;
+  for (const file of files) {
+    const bytes = base64Bytes(file.contentBase64);
+    if (bytes > PLAN_FILES_LIMITS.maxFileBytes) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: "plan file too large" });
+    }
+    total += bytes;
+  }
+  if (total > PLAN_FILES_LIMITS.maxTotalBytes) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path, message: "plan too large" });
+  }
+}
+
 export const ClaudeContextFileSchema = z
   .object({
     path: z.string().refine(isSafeContextPath, "must be a safe repo-relative path"),
@@ -681,6 +755,14 @@ export const CodingTaskInputSchema = z
     repositories: z.array(RunRepositoryInputSchema).min(1).max(MAX_RUN_REPOSITORIES_IN_INPUT).optional(),
     /** Git history (#536); written only when the run has it. */
     gitHistory: GitHistoryInputSchema.optional(),
+    /**
+     * Plan files the worker writes to PLAN_FOLDER_PATH before the agent starts (a plan revision, a
+     * builder's approved design). Written only when there are some.
+     */
+    planFiles: z
+      .object({ files: z.array(PlanFileWireSchema).min(1).max(PLAN_FILES_LIMITS.maxFiles) })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -716,6 +798,7 @@ export const CodingTaskInputSchema = z
     if (total > CLAUDE_CONTEXT_LIMITS.maxTotalBytes) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["claudeContext", "files"], message: "context too large" });
     }
+    if (value.planFiles) refinePlanFiles(value.planFiles.files, ctx, ["planFiles", "files"]);
   });
 
 const optionalTag = z.preprocess(normalizeCodingTag, tagSchema) as unknown as OptionalTagSchema;
@@ -1185,4 +1268,40 @@ export function parseCodingWorkerOutputJson(text: string): CodingWorkerOutput {
 
 export function parseCodingRunResultJson(text: string): CodingRunResult {
   return CodingRunResultSchema.parse(parseJsonWithoutDuplicateKeys(text));
+}
+
+export const PLAN_FILES_ERRORS = [
+  "plan_too_large",
+  "plan_folder_invalid",
+  "plan_files_failed",
+  "plan_tool_unavailable",
+] as const;
+export type PlanFilesError = (typeof PLAN_FILES_ERRORS)[number];
+
+const planOkSchema = z
+  .object({
+    schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
+    runId: runIdSchema,
+    status: z.literal("ok"),
+    files: z.array(PlanFileWireSchema).max(PLAN_FILES_LIMITS.maxFiles),
+    skipped: z.array(z.string().refine(isSafePlanPath)).max(PLAN_FILES_LIMITS.maxSkipped),
+    skippedUnnamed: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict()
+  .superRefine((value, ctx) => refinePlanFiles(value.files, ctx, ["files"]));
+const planErrorSchema = z
+  .object({
+    schemaVersion: z.literal(CODING_PROTOCOL_VERSION),
+    runId: runIdSchema,
+    status: z.literal("error"),
+    error: z.enum(PLAN_FILES_ERRORS),
+  })
+  .strict();
+
+/** What a worker writes to PLAN_FILES_ARTIFACT; the control plane parses it again (untrusted bytes). */
+export const CodingPlanFilesOutputSchema = z.union([planOkSchema, planErrorSchema]);
+export type CodingPlanFilesOutput = z.infer<typeof CodingPlanFilesOutputSchema>;
+
+export function parsePlanFilesOutputJson(text: string): CodingPlanFilesOutput {
+  return CodingPlanFilesOutputSchema.parse(parseJsonWithoutDuplicateKeys(text, MAX_PLAN_FILES_WIRE_BYTES));
 }

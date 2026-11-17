@@ -1,0 +1,245 @@
+import { Prisma, type PrismaClient } from "#prisma";
+import { redactExactSecretValues, withEscapedForms } from "../../core/secret-spans.js";
+import { sameSecretVersions, type SecretVersion } from "../../core/secret-versions.js";
+import { MAX_PLAN_FILES_WIRE_BYTES, parsePlanFilesOutputJson } from "../protocol.js";
+import { REDACTED, redactSecrets } from "../redact.js";
+import { assertPlanFilesWithinLimits, type PlanFile } from "./store.js";
+
+export type PlanFilesStatus =
+  | "stored"
+  | "plan_too_large"
+  | "plan_folder_invalid"
+  | "plan_folder_refused"
+  | "plan_files_failed"
+  | "plan_tool_unavailable"
+  | "plan_files_unsupported"
+  | "plan_files_missing"
+  | "secrets_changed"
+  | "secrets_unavailable";
+
+/**
+ * The fixed failure outcomes a caller that knows why nothing was stored can settle (markStatus).
+ * plan_folder_refused: a repository-stored plan's folder is one a run may not read from (under .git/,
+ * protected, or outside the workspace).
+ */
+export type PlanFilesFailureStatus =
+  "plan_too_large" | "plan_folder_invalid" | "plan_folder_refused" | "plan_files_failed";
+
+export type { PlanFile };
+
+/**
+ * The stored shape of CodingRun.planFilesWithheld and CodingRun.planFilesSkipped: the paths that can be
+ * named, and how many were left unnamed (a path that itself holds a secret value or a token-shaped
+ * value is never stored, only counted).
+ */
+export interface PlanFilesPathList {
+  paths: string[];
+  unnamed: number;
+}
+
+export interface PlanFilesRecorderDeps {
+  db: Pick<PrismaClient, "codingRun" | "codingRunPlanFile" | "$transaction">;
+  secretValues: (agentId: string) => Promise<string[]>;
+  secretVersions: (agentId: string) => Promise<SecretVersion[]>;
+}
+
+export interface RecordPlanFilesInput {
+  runId: string;
+  agentId: string;
+  launchSecretVersions?: readonly SecretVersion[];
+  /** Undefined read: the launcher has no readPlanFiles (none of the shipped ones; Docker, Kubernetes, Substrate and the fake all have it). */
+  read?: (maxBytes: number) => Promise<string | undefined>;
+}
+
+/** The write-once transaction holds up to an 8 MiB plan: Prisma's 5 s default is too short for it. */
+const WRITE_TRANSACTION_TIMEOUT_MS = 30_000;
+const WRITE_TRANSACTION_MAX_WAIT_MS = 10_000;
+
+const DECODER = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * Stores a coding run's returned plan folder. The worker's file is untrusted: parsed and bounded
+ * again; each file is redacted by exact value against the agent's secret values (and their JSON-escaped
+ * forms, as RunTranscriptRecorder does), and a file that still holds a token-shaped value (redactSecrets:
+ * the run's rrp_/rrg_/rmt_ tokens and Bearer values included) is withheld (its path recorded, never its
+ * text), as is one holding a NUL character (which Postgres can't store). A path that holds a secret, a
+ * token-shaped value or a NUL is never stored, only counted. Nothing is
+ * stored when a delivered secret changed while the run ran; every outcome other than "stored" removes
+ * the run's stored output files. An outcome is written once: nothing overwrites a recorded
+ * planFilesStatus (see writeOnce). Never throws, never logs content.
+ */
+export class PlanFilesRecorder {
+  constructor(private readonly deps: PlanFilesRecorderDeps) {}
+
+  async record(input: RecordPlanFilesInput): Promise<PlanFilesStatus> {
+    const status = await this.capture(input).catch((): PlanFilesStatus => "plan_files_failed");
+    return status === "stored" ? status : this.settle(input.runId, status);
+  }
+
+  async storeChecked(
+    input: Omit<RecordPlanFilesInput, "read">,
+    files: PlanFile[],
+    skipped: PlanFilesPathList,
+  ): Promise<PlanFilesStatus> {
+    const status = await this.redactAndStore(input, files, skipped).catch((): PlanFilesStatus => "plan_files_failed");
+    return status === "stored" ? status : this.settle(input.runId, status);
+  }
+
+  /** Writes a non-stored outcome and returns the status the database holds (a refused write read back). */
+  private async settle(runId: string, status: PlanFilesStatus): Promise<PlanFilesStatus> {
+    const written = await this.writeStatus(runId, status).catch(() => undefined);
+    return written === false ? await this.recordedStatus(runId, status) : status;
+  }
+
+  /** The status already recorded for the run; the given one when it cannot be read. */
+  private async recordedStatus(runId: string, fallback: PlanFilesStatus): Promise<PlanFilesStatus> {
+    try {
+      const run = await this.deps.db.codingRun.findUnique({ where: { runId }, select: { planFilesStatus: true } });
+      return (run?.planFilesStatus as PlanFilesStatus | null | undefined) ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  private async capture(input: RecordPlanFilesInput): Promise<PlanFilesStatus> {
+    if (!input.read) return "plan_files_unsupported";
+    let text: string | undefined;
+    try {
+      text = await input.read(MAX_PLAN_FILES_WIRE_BYTES);
+    } catch (error) {
+      return error instanceof Error && error.message === "plan_files_too_large"
+        ? "plan_too_large"
+        : "plan_files_failed";
+    }
+    if (text === undefined) return "plan_files_missing";
+    let parsed;
+    try {
+      parsed = parsePlanFilesOutputJson(text);
+    } catch {
+      return "plan_files_failed";
+    }
+    if (parsed.runId !== input.runId) return "plan_files_failed";
+    if (parsed.status === "error") return parsed.error;
+    const files: PlanFile[] = [];
+    const undecodable: string[] = [];
+    for (const file of parsed.files) {
+      try {
+        files.push({ path: file.path, content: DECODER.decode(Buffer.from(file.contentBase64, "base64")) });
+      } catch {
+        undecodable.push(file.path);
+      }
+    }
+    return this.redactAndStore(input, files, { paths: parsed.skipped, unnamed: parsed.skippedUnnamed }, undecodable);
+  }
+
+  private async redactAndStore(
+    input: Omit<RecordPlanFilesInput, "read">,
+    files: PlanFile[],
+    skipped: PlanFilesPathList,
+    alreadyWithheld: string[] = [],
+  ): Promise<PlanFilesStatus> {
+    try {
+      assertPlanFilesWithinLimits(files);
+    } catch (error) {
+      return error instanceof Error && error.message === "plan_too_large" ? "plan_too_large" : "plan_files_failed";
+    }
+    let secrets: string[];
+    try {
+      secrets = await this.deps.secretValues(input.agentId);
+    } catch {
+      return "secrets_unavailable";
+    }
+    // Read after the values, as RunTranscriptRecorder does: a change before this check is caught here.
+    if (!input.launchSecretVersions) return "secrets_changed";
+    let current: SecretVersion[];
+    try {
+      current = await this.deps.secretVersions(input.agentId);
+    } catch {
+      return "secrets_unavailable";
+    }
+    if (!sameSecretVersions(input.launchSecretVersions, current)) return "secrets_changed";
+    // As RunTranscriptRecorder: every value in its raw and JSON-escaped forms, however short.
+    const escaped = withEscapedForms(secrets);
+    // A NUL character can't be stored (Postgres text and JSON reject it): such a file or path is
+    // withheld or counted like a token-shaped one, so it never fails the whole plan.
+    const holdsSecret = (text: string): boolean => text.includes("\u0000") || redactSecrets(text, escaped) !== text;
+    const kept: PlanFile[] = [];
+    const withheld: PlanFilesPathList = { paths: [], unnamed: 0 };
+    const withhold = (path: string): void => {
+      if (holdsSecret(path)) withheld.unnamed += 1;
+      else withheld.paths.push(path);
+    };
+    alreadyWithheld.forEach(withhold);
+    for (const file of files) {
+      const redacted = redactExactSecretValues(file.content, escaped, { marker: REDACTED, minLength: 1 });
+      if (holdsSecret(file.path) || redacted.includes("\u0000") || redactSecrets(redacted) !== redacted) {
+        withhold(file.path);
+      } else kept.push({ path: file.path, content: redacted });
+    }
+    const skippedNamed = skipped.paths.filter((path) => !holdsSecret(path));
+    const skippedList: PlanFilesPathList = {
+      paths: skippedNamed,
+      unnamed: skipped.unnamed + skipped.paths.length - skippedNamed.length,
+    };
+    const written = await this.writeOnce(input.runId, kept, {
+      planFilesStatus: "stored",
+      planFilesWithheld: { ...withheld },
+      planFilesSkipped: { ...skippedList },
+    });
+    // Refused: an outcome is already recorded (a timeout's plan_files_failed); it stands.
+    return written ? "stored" : this.recordedStatus(input.runId, "plan_files_failed");
+  }
+
+  /**
+   * The executor's timeout: records the fixed plan_files_failed unless an outcome is already recorded.
+   * A recorder still running for this run can then neither add rows nor change the status.
+   */
+  async markFailed(runId: string): Promise<PlanFilesStatus> {
+    return this.settle(runId, "plan_files_failed");
+  }
+
+  /**
+   * Records a given fixed failure outcome through the same write-once path as markFailed, for a caller
+   * that knows the precise reason nothing was stored. Returns the status the database holds.
+   */
+  async markStatus(runId: string, status: PlanFilesFailureStatus): Promise<PlanFilesStatus> {
+    return this.settle(runId, status);
+  }
+
+  /** A non-stored outcome: no output files (and no path lists) survive it. */
+  private async writeStatus(runId: string, status: PlanFilesStatus): Promise<boolean> {
+    return this.writeOnce(runId, [], {
+      planFilesStatus: status,
+      planFilesWithheld: Prisma.DbNull,
+      planFilesSkipped: Prisma.DbNull,
+    });
+  }
+
+  /**
+   * The one place an outcome is written: the status, the path lists and the output rows, in one
+   * transaction, and only while planFilesStatus is still null. A run's outcome is written once, so a
+   * recorder that finishes after the executor gave up on it (and the run went terminal) stores nothing.
+   * The conditional update takes the row lock first, so two writers for the same run serialize and the
+   * second sees the first's status. Returns false when refused.
+   */
+  private async writeOnce(
+    runId: string,
+    files: PlanFile[],
+    data: Pick<Prisma.CodingRunUpdateManyMutationInput, "planFilesStatus" | "planFilesWithheld" | "planFilesSkipped">,
+  ): Promise<boolean> {
+    return this.deps.db.$transaction(
+      async (tx) => {
+        const claimed = await tx.codingRun.updateMany({ where: { runId, planFilesStatus: null }, data });
+        if (claimed.count === 0) return false;
+        await tx.codingRunPlanFile.deleteMany({ where: { runId, direction: "output" } });
+        if (files.length > 0) {
+          await tx.codingRunPlanFile.createMany({
+            data: files.map((f) => ({ runId, direction: "output", path: f.path, content: f.content })),
+          });
+        }
+        return true;
+      },
+      { timeout: WRITE_TRANSACTION_TIMEOUT_MS, maxWait: WRITE_TRANSACTION_MAX_WAIT_MS },
+    );
+  }
+}

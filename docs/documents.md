@@ -77,6 +77,40 @@ Sharing a document uses the general grant tools, so it needs their scopes:
 `grant_access` and `revoke_access` need `agents:write`, and `list_access` needs
 `agents:read`.
 
+## Plan sets
+
+A [plan document setting](coding-agent-setup.md#plan-documents) on a coding
+agent publishes its plan as a plan set: one document per top-level `*.md` file
+(`plan.md` first, titled by its first heading or else its file name), one design
+per board subfolder (titled by its folder name), up to 20 in all. Other files
+are ignored and listed. Later runs version changed files, add new documents and
+mark a removed file `removedFromPlan`; approved or archived documents are never
+changed by a run. Removed documents stay listed, and are read-only to agents.
+`get_document` on a plan document returns the set's documents, and
+`list_documents` takes a `planNumber` filter.
+
+**Access from the agent.** The owner of the agent that was triggered, and anyone
+with any grant on it (an `everyone` grant included), get `comment` on every
+document of the set. The rule is live: losing the grant on the agent loses the
+plan. It never gives more than comment; explicit grants and share links add on
+top, and naming someone as reviewer adds no grant. Sharing an agent with everyone
+lets every signed-in user read and comment on the plans it produces.
+
+**Plan bar.** Each page of a set shows "Plan N · X of Y approved" over the
+documents the viewer can read, with a chip per document; relative links in the
+Markdown open the other documents or boards. A share-link guest sees only
+"Plan N" and their own document. The bar updates live: a plan document's event
+stream also carries the review and version events of the other documents of its
+set that the viewer can read.
+
+**Revisions.** Sending threads to the agent starts the plan's own planner with
+the current version of every document still in the plan (not removed); only a
+document it changed, and nobody edited meanwhile, gets a new version, and the
+rest reconcile. A document of a plan stored in the repository (store
+`repository`), or any other document linked to a planner, is edited like any
+linked document: sending its threads starts an ordinary run on its file, not a
+plan revision.
+
 ## Browser sign-in
 
 | Deployment                  | What members do                                                                                       |
@@ -198,18 +232,18 @@ gives a name, **Refresh list** shows them. The owner may also name one final
 approver. Reviewers act only with live access (comment access for a
 member, an unrevoked and unexpired comment link for a guest).
 
-The state is computed from the verdicts on the **current version** only: a
-force approval gives approved; otherwise any current changes-requested verdict
-gives changes requested; otherwise every reviewer's current approval gives
-approved; otherwise in review. Publishing a new version while the document is
-in review or has changes requested recomputes it, so earlier verdicts stop
-counting. A reviewer's verdict names the version they read
-(`review_document` takes `versionNumber`); if a newer version was published
-first it is refused with `document_version_conflict`, and the page offers
-**Review vN** to see what changed. A reviewer is offered only the verdict they
-have not already given on the current version (on a document every reviewer
-approved, only **Request changes on vN**; on a force approval, nothing); repeating a verdict changes nothing and records no
-event.
+The state is computed from the verdicts on the **current version** only: a force
+approval gives approved; otherwise any current changes-requested verdict gives
+changes requested; otherwise every reviewer's current approval gives approved;
+otherwise in review. Publishing a new version while the document is in review or
+has changes requested recomputes it, so earlier verdicts stop counting. A
+reviewer's verdict names the version they read (`review_document` takes
+`versionNumber`); if a newer version was published first it is refused with
+`document_version_conflict`, and the page offers **Review vN** to see what
+changed. A reviewer is offered only the verdict they have not already given on
+the current version (on a document every reviewer approved, only **Request
+changes on vN**; on a force approval, nothing); repeating a verdict changes
+nothing and records no event.
 
 - **Force approve**: the owner or the final approver approves the current
   version over missing verdicts and requested changes. A note is required and
@@ -227,15 +261,16 @@ event.
   had before.
 - **The lock**: an approved or archived document takes no new version by any
   route (editor, board saves, `publish_version`, restore, agent edits), and its
-  threads cannot be sent to an agent: all are refused with `document_locked`.
-  Comments stay open. A page open when the lock lands turns read-only in place,
-  with no reload; edits not yet saved are kept ("Read only: approved · unsaved
-  changes"). After a reopen they show as "Unsaved changes" and are saved with
-  the next edit, never on a timer; a Markdown page
-  is editable again in place, and a design page that was opened read-only must
-  be reloaded to edit.
-  An agent edit that finishes after the lock is not applied; each thread gets a
-  reply naming the branch with the edit.
+  threads cannot be sent to an agent: all are refused with `document_locked`. A
+  document its planner removed from the plan is read-only to agents too: its
+  threads cannot be sent to an agent (`document_locked`) until a later revision
+  of the plan writes its file again. Comments stay open. A page open when the
+  lock lands turns read-only in place, with no reload; edits not yet saved are
+  kept ("Read only: approved · unsaved changes"). After a reopen they show as
+  "Unsaved changes" and are saved with the next edit, never on a timer; a
+  Markdown page is editable again in place, and a design page that was opened
+  read-only must be reloaded to edit. An agent edit that finishes after the lock
+  is not applied; each thread gets a reply naming the branch with the edit.
 
 Open pages update live (the `review` event). The page shows a banner with the
 state and approval count and a **Review** tab with reviewers, verdicts, history

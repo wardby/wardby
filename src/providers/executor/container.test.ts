@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +11,14 @@ import {
   CONTINUATION_CLOSED_ERROR,
   WORKER_BUDGET_EXHAUSTED_SUMMARY,
 } from "../../coding/continuation-wording.js";
-import { MAX_CODING_INPUT_BYTES, MAX_CODING_TASK_BYTES } from "../../coding/protocol.js";
+import { MAX_CODING_BASE_INPUT_BYTES, MAX_CODING_TASK_BYTES } from "../../coding/protocol.js";
+import type {
+  PlanFilesPathList,
+  PlanFilesRecorder,
+  PlanFilesStatus,
+  RecordPlanFilesInput,
+} from "../../coding/plan-files/recorder.js";
+import type { PlanFile } from "../../coding/plan-files/store.js";
 import { mentionTaskText } from "../../core/host-events.js";
 import { mcpTokenHash } from "../../coding/mcp-token.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
@@ -446,6 +453,7 @@ class FakeJobs implements WorkspaceJobLauncher {
   }
   /** Set to give the launcher a transcript reader (it is optional on a real launcher). */
   readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
+  readPlanFiles?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
   /** Every materializeWorkspace call's repository name (undefined for the default workspace). */
   materializedNames: Array<string | undefined> = [];
   /** Every materializeWorkspace call's arguments after the handle, as passed (#536). */
@@ -805,6 +813,35 @@ async function harness(
   return { executor, store, jobs, vcs, sessions, capabilities, events, observer, root };
 }
 
+/** Terminal writes so far: store.complete, completePartially and terminate all fire onTerminal. */
+function terminalWrites(created: Awaited<ReturnType<typeof harness>>): number {
+  return created.store.completions.length + created.store.partials.length + created.store.terminations.length;
+}
+
+/** A fake plan files recorder with the real one's write-once rule (recorder.ts writeOnce). */
+function writeOnceRecorder(writesNow: () => number) {
+  let status: PlanFilesStatus | null = null;
+  let settledAt: number | undefined;
+  const stored: { files: PlanFile[]; skipped: PlanFilesPathList }[] = [];
+  const settle = (next: PlanFilesStatus): PlanFilesStatus => {
+    if (status === null) {
+      status = next;
+      settledAt = writesNow();
+    }
+    return status;
+  };
+  const recorder: Pick<PlanFilesRecorder, "record" | "markFailed" | "markStatus" | "storeChecked"> = {
+    record: async () => settle("stored"),
+    markFailed: async () => settle("plan_files_failed"),
+    markStatus: async (_runId, next) => settle(next),
+    storeChecked: async (_input, files, skipped) => {
+      stored.push({ files, skipped });
+      return settle("stored");
+    },
+  };
+  return { recorder, state: { stored, state: () => ({ status, terminalWrites: settledAt }) } };
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -815,6 +852,376 @@ beforeEach(() => {
 });
 
 describe("ContainerExecutor", () => {
+  describe("plan files", () => {
+    const FAKE_SECRET = "wardby-fake-secret-value-7f3a9c";
+    async function planRun(
+      overrides: Partial<ContainerRunSnapshot>,
+      read?: FakeJobs["readPlanFiles"],
+      jobOutcome?: "failed",
+    ) {
+      const calls: RecordPlanFilesInput[] = [];
+      const terminalWritesAtRecord: number[] = [];
+      const holder: { created?: Awaited<ReturnType<typeof harness>> } = {};
+      const created = await harness(overrides, IMAGE, undefined, undefined, {
+        planFiles: {
+          record: async (input) => {
+            const self = holder.created!;
+            self.events.push("plan");
+            terminalWritesAtRecord.push(self.store.completions.length + self.store.terminations.length);
+            calls.push(input);
+            return "stored";
+          },
+          markFailed: async () => "plan_files_failed" as const,
+          markStatus: async (_runId, status) => status,
+          storeChecked: async () => "stored" as const,
+        },
+      });
+      holder.created = created;
+      if (read) created.jobs.readPlanFiles = read;
+      // A failed job, as the file's other failed-job tests make one.
+      if (jobOutcome === "failed") created.jobs.statusValue = { state: "failed" };
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { created, calls, terminalWritesAtRecord, input: input! };
+    }
+
+    it("writes input plan files into input.json as base64", async () => {
+      const { input } = await planRun({
+        collectPlanFiles: true,
+        planInputFiles: [{ path: "plan.md", content: "# Plan v1\n" }],
+      });
+      expect(input.planFiles).toEqual({
+        files: [{ path: "plan.md", contentBase64: Buffer.from("# Plan v1\n").toString("base64") }],
+      });
+    });
+
+    it("an ordinary run's input has no planFiles key and its plan output is never read", async () => {
+      const { input, calls } = await planRun({});
+      expect(input).not.toHaveProperty("planFiles");
+      expect(calls).toHaveLength(0);
+    });
+
+    it("records the plan output before the run is made terminal and before the job is removed", async () => {
+      const { created, calls, terminalWritesAtRecord } = await planRun(
+        { collectPlanFiles: true },
+        async (_h, max) => `plan:${max}`,
+      );
+      expect(calls).toHaveLength(1);
+      expect(await calls[0].read!(7)).toBe("plan:7");
+      expect(created.events.indexOf("plan")).toBeLessThan(created.events.indexOf("remove"));
+      // R3: store.complete/terminate fire onTerminal (the publish hook), so nothing terminal is written yet.
+      expect(terminalWritesAtRecord).toEqual([0]);
+      expect(created.store.completions).toHaveLength(1);
+    });
+
+    it("records the plan output on a failed job too, before terminate", async () => {
+      const { created, calls, terminalWritesAtRecord } = await planRun({ collectPlanFiles: true }, undefined, "failed");
+      expect(calls).toHaveLength(1);
+      expect(terminalWritesAtRecord).toEqual([0]);
+      expect(created.store.terminations).toHaveLength(1);
+    });
+
+    it("a launcher without readPlanFiles gives the recorder no reader", async () => {
+      const { calls } = await planRun({ collectPlanFiles: true });
+      expect(calls[0].read).toBeUndefined();
+    });
+
+    it("never logs plan file content", async () => {
+      await planRun(
+        { collectPlanFiles: true, planInputFiles: [{ path: "plan.md", content: `# ${FAKE_SECRET}` }] },
+        async () => `{"x":"${FAKE_SECRET}"}`,
+      );
+      expect(JSON.stringify(logged)).not.toContain(FAKE_SECRET);
+    });
+
+    describe("store repository", () => {
+      /** Writes the plan folder at launch (no push needed) or as the default workspace's push starts. */
+      async function repositoryRun(
+        overrides: Partial<ContainerRunSnapshot>,
+        writeFolder: (workspace: string) => void,
+        options: { when?: "launch" | "finalize"; setup?: (created: Awaited<ReturnType<typeof harness>>) => void } = {},
+      ) {
+        const holder: { created?: Awaited<ReturnType<typeof harness>> } = {};
+        const fake = writeOnceRecorder(() => terminalWrites(holder.created!));
+        const created = await harness(
+          { planRepositoryPath: "docs/plans/issue-12/", ...overrides },
+          IMAGE,
+          undefined,
+          undefined,
+          { planFiles: fake.recorder },
+        );
+        holder.created = created;
+        if (options.when === "launch") {
+          created.jobs.onLaunch = () => writeFolder(created.vcs.workspace!.workspacePath);
+        } else {
+          created.vcs.onFinalize = (slot) => {
+            if (slot !== undefined || !created.vcs.workspace) return;
+            writeFolder(created.vcs.workspace.workspacePath);
+          };
+        }
+        options.setup?.(created);
+        await created.executor.start("run-1");
+        return { created, ...fake.state };
+      }
+      const writePlan =
+        (path = "docs/plans/issue-12", name = "plan.md") =>
+        (workspace: string): void => {
+          mkdirSync(join(workspace, path), { recursive: true });
+          writeFileSync(join(workspace, path, name), "# Plan\n");
+        };
+
+      it("reads the plan folder from the run's workspace and stores it checked, before the terminal write", async () => {
+        const { stored, state } = await repositoryRun({}, writePlan());
+        expect(stored).toEqual([
+          { files: [{ path: "plan.md", content: "# Plan\n" }], skipped: { paths: [], unnamed: 0 } },
+        ]);
+        expect(state()).toEqual({ status: "stored", terminalWrites: 0 });
+      });
+
+      it("carries the folder's unnamed skipped count", async () => {
+        const { stored } = await repositoryRun({}, (workspace) => {
+          writePlan()(workspace);
+          mkdirSync(join(workspace, "docs/plans/issue-12/.hidden"));
+        });
+        expect(stored[0].skipped).toEqual({ paths: [], unnamed: 1 });
+      });
+
+      it("a missing folder stores an empty plan", async () => {
+        const { stored, state } = await repositoryRun({}, () => undefined);
+        expect(stored).toEqual([{ files: [], skipped: { paths: [], unnamed: 0 } }]);
+        expect(state().status).toBe("stored");
+      });
+
+      it("a folder too large to read settles plan_too_large, before the terminal write", async () => {
+        const { stored, state } = await repositoryRun({}, (workspace) => {
+          mkdirSync(join(workspace, "docs/plans/issue-12"), { recursive: true });
+          writeFileSync(join(workspace, "docs/plans/issue-12/big.md"), "x".repeat(1024 * 1024 + 1));
+        });
+        expect(stored).toEqual([]);
+        expect(state()).toEqual({ status: "plan_too_large", terminalWrites: 0 });
+      });
+
+      it("refuses a folder under .git/ and one the agent's protected paths cover, reading nothing", async () => {
+        for (const [path, protectedPaths] of [
+          [".git/12/", ["CODEOWNERS"]],
+          ["./.git/12/", ["CODEOWNERS"]],
+          ["sub/.git/12/", ["CODEOWNERS"]],
+          [".github/workflows/12/", [".github/workflows/**"]],
+          ["./.github/workflows/12/", [".github/workflows/**"]],
+        ] as const) {
+          const { stored, state } = await repositoryRun(
+            { planRepositoryPath: path, protectedPaths: [...protectedPaths] },
+            writePlan(path),
+          );
+          expect(stored, path).toEqual([]);
+          expect(state(), path).toEqual({ status: "plan_folder_refused", terminalWrites: 0 });
+        }
+      });
+
+      it("refuses a folder an agent-written symlink points into a protected path", async () => {
+        const { stored, state } = await repositoryRun({ protectedPaths: [".github/workflows/**"] }, (workspace) => {
+          writePlan(".github/workflows")(workspace);
+          mkdirSync(join(workspace, "docs/plans"), { recursive: true });
+          symlinkSync("../../.github/workflows", join(workspace, "docs/plans/issue-12"));
+        });
+        expect(stored).toEqual([]);
+        expect(state().status).toBe("plan_folder_refused");
+      });
+
+      it("refuses a folder an agent-written symlink points into .git", async () => {
+        const { stored, state } = await repositoryRun({}, (workspace) => {
+          writePlan(".git/hooks")(workspace);
+          mkdirSync(join(workspace, "docs/plans"), { recursive: true });
+          symlinkSync("../../.git/hooks", join(workspace, "docs/plans/issue-12"));
+        });
+        expect(stored).toEqual([]);
+        expect(state().status).toBe("plan_folder_refused");
+      });
+
+      it("refuses a folder that leaves the workspace through a symlink", async () => {
+        const { stored, state } = await repositoryRun({}, (workspace) => {
+          const outside = join(workspace, "..", "outside-plans");
+          mkdirSync(outside, { recursive: true });
+          writeFileSync(join(outside, "plan.md"), "# Not mine\n");
+          mkdirSync(join(workspace, "docs"), { recursive: true });
+          symlinkSync(outside, join(workspace, "docs/plans"));
+        });
+        expect(stored).toEqual([]);
+        expect(state().status).toBe("plan_folder_refused");
+      });
+
+      it("drops a collected file a protected pattern covers, counted as unnamed", async () => {
+        const { stored } = await repositoryRun({ protectedPaths: ["docs/plans/**/*.yml"] }, (workspace) => {
+          writePlan()(workspace);
+          writeFileSync(join(workspace, "docs/plans/issue-12/deploy.yml"), "on: push\n");
+        });
+        expect(stored).toEqual([
+          { files: [{ path: "plan.md", content: "# Plan\n" }], skipped: { paths: [], unnamed: 1 } },
+        ]);
+      });
+
+      it("a worker no_changes success reads the plan from the existing workspace", async () => {
+        const { created, stored, state } = await repositoryRun({}, writePlan(), {
+          when: "launch",
+          setup: (c) => {
+            c.jobs.result.resultArtifact = JSON.stringify({
+              schemaVersion: 1,
+              runId: "run-1",
+              outcome: "no_changes",
+              summary: "Already correct.",
+              tests: [],
+            });
+          },
+        });
+        expect(created.vcs.finalized).toBe(0);
+        expect(stored).toEqual([
+          { files: [{ path: "plan.md", content: "# Plan\n" }], skipped: { paths: [], unnamed: 0 } },
+        ]);
+        expect(state()).toEqual({ status: "stored", terminalWrites: 0 });
+      });
+
+      it("a failed job reads nothing and settles plan_files_failed before terminate", async () => {
+        const { created, stored, state } = await repositoryRun({}, writePlan(), {
+          when: "launch",
+          setup: (c) => {
+            c.jobs.statusValue = { state: "failed" };
+          },
+        });
+        expect(created.store.terminations).toHaveLength(1);
+        expect(stored).toEqual([]);
+        expect(state()).toEqual({ status: "plan_files_failed", terminalWrites: 0 });
+      });
+
+      it("a run stopped at its budget reads nothing and settles plan_files_failed before its terminal write", async () => {
+        const { created, stored, state } = await repositoryRun({}, writePlan(), {
+          when: "launch",
+          setup: (c) => {
+            c.jobs.result.resultArtifact = JSON.stringify({
+              schemaVersion: 1,
+              runId: "run-1",
+              outcome: "budget_exhausted",
+              summary: "Ran out.",
+              tests: [],
+            });
+            c.vcs.finalizeEmpty = true;
+          },
+        });
+        expect(created.store.run.status).toBe("budget_exhausted");
+        expect(stored).toEqual([]);
+        expect(state()).toEqual({ status: "plan_files_failed", terminalWrites: 0 });
+      });
+
+      it("a push that fails reads nothing and settles plan_files_failed before terminate", async () => {
+        const { created, stored, state } = await repositoryRun({}, writePlan(), {
+          when: "launch",
+          setup: (c) => {
+            c.vcs.onFinalize = () => {
+              throw new Error("push refused");
+            };
+          },
+        });
+        expect(created.store.run.status).toBe("failed");
+        expect(stored).toEqual([]);
+        expect(state()).toEqual({ status: "plan_files_failed", terminalWrites: 0 });
+      });
+
+      it("a hung repository read is abandoned after the timeout: plan_files_failed, and the run still completes", async () => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          const holder: { created?: Awaited<ReturnType<typeof harness>> } = {};
+          const fake = writeOnceRecorder(() => terminalWrites(holder.created!));
+          let finish: (() => void) | undefined;
+          const created = await harness({ planRepositoryPath: "docs/plans/issue-12/" }, IMAGE, undefined, undefined, {
+            planFiles: {
+              ...fake.recorder,
+              storeChecked: async (...args) => {
+                await new Promise<void>((resolve) => {
+                  finish = resolve;
+                });
+                return fake.recorder.storeChecked(...args);
+              },
+            },
+          });
+          holder.created = created;
+          created.vcs.onFinalize = (slot) => {
+            if (slot === undefined) writePlan()(created.vcs.workspace!.workspacePath);
+          };
+          const running = created.executor.start("run-1");
+          await vi.waitFor(() => expect(finish).toBeDefined(), { timeout: 3000, interval: 5 });
+          expect(created.store.completions).toHaveLength(0);
+          await vi.advanceTimersByTimeAsync(61_000);
+          await running;
+          expect(created.store.run.status).toBe("succeeded");
+          expect(fake.state.state()).toEqual({ status: "plan_files_failed", terminalWrites: 0 });
+          finish!();
+          await vi.waitFor(() => expect(fake.state.stored).toHaveLength(1));
+          expect(fake.state.state().status).toBe("plan_files_failed");
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    });
+
+    it("a hung plan read is abandoned after the timeout: the run still goes terminal and a late result stores nothing", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        // A fake recorder with the real store's write-once rule (recorder.ts writeOnce).
+        let status: string | null = null;
+        const storedRows: string[] = [];
+        const writeOnce = (next: string, rows: string[]): boolean => {
+          if (status !== null) return false;
+          status = next;
+          storedRows.push(...rows);
+          return true;
+        };
+        let finishRead: ((text: string) => void) | undefined;
+        let recordSettled: Promise<unknown> | undefined;
+        const created = await harness({ collectPlanFiles: true }, IMAGE, undefined, undefined, {
+          planFiles: {
+            record: (input) => {
+              recordSettled = (async () => {
+                const text = await input.read!(1024);
+                return writeOnce("stored", [text ?? ""]) ? "stored" : "plan_files_failed";
+              })();
+              return recordSettled as Promise<"stored" | "plan_files_failed">;
+            },
+            markFailed: async () => {
+              writeOnce("plan_files_failed", []);
+              return "plan_files_failed" as const;
+            },
+            markStatus: async (_runId, next) => {
+              writeOnce(next, []);
+              return next;
+            },
+            storeChecked: async () => "stored" as const,
+          },
+        });
+        // Never resolves until the test says so.
+        created.jobs.readPlanFiles = () =>
+          new Promise<string | undefined>((resolve) => {
+            finishRead = resolve;
+          });
+        const running = created.executor.start("run-1");
+        await vi.waitFor(() => expect(finishRead).toBeDefined(), { timeout: 3000, interval: 5 });
+        expect(created.store.completions).toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(61_000);
+        await running;
+        expect(created.store.run.status).toBe("succeeded");
+        expect(created.jobs.removals).toBe(1);
+        expect(status).toBe("plan_files_failed");
+        finishRead!("late plan");
+        expect(await recordSettled).toBe("plan_files_failed");
+        expect(status).toBe("plan_files_failed");
+        expect(storedRows).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe("session transcripts", () => {
     const CLAUDE_RUN = { sessionResume: true, provider: "claude-code" } as const;
     async function recorded(
@@ -1438,7 +1845,7 @@ describe("ContainerExecutor", () => {
       };
       await created.executor.start("run-1");
       expect(created.jobs.launches).toBe(1);
-      expect(size).toBeLessThanOrEqual(MAX_CODING_INPUT_BYTES);
+      expect(size).toBeLessThanOrEqual(MAX_CODING_BASE_INPUT_BYTES);
       expect(input!.claudeContext!.files.map((file) => file.path)).toEqual(["CLAUDE.md"]);
       expect(
         logged.filter((entry) => entry.payload.event === "coding.claude_context_skipped").map((entry) => entry.payload),
@@ -5345,6 +5752,31 @@ describe("ContainerExecutor with several repositories (#537)", () => {
     expect(created.vcs.cleanedCopies).toEqual(["base"]);
     expect(created.vcs.cleaned).toBe(1);
     expectNothingLeft(created);
+  });
+
+  it("reads a repository-stored plan from the default workspace before the terminal write", async () => {
+    const holder: { created?: Awaited<ReturnType<typeof harness>> } = {};
+    const fake = writeOnceRecorder(() => terminalWrites(holder.created!));
+    const created = await harness(
+      { repositories: [readRow("base"), writeRow("tools")], planRepositoryPath: "docs/plans/issue-12/" },
+      IMAGE,
+      undefined,
+      undefined,
+      { repoAccess: allowAll() as never, planFiles: fake.recorder },
+    );
+    holder.created = created;
+    created.vcs.onFinalize = (slot) => {
+      if (slot !== undefined) return;
+      const folder = join(created.vcs.workspace!.workspacePath, "docs/plans/issue-12");
+      mkdirSync(folder, { recursive: true });
+      writeFileSync(join(folder, "plan.md"), "# Plan\n");
+    };
+    await created.executor.start("run-1");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(fake.state.stored).toEqual([
+      { files: [{ path: "plan.md", content: "# Plan\n" }], skipped: { paths: [], unnamed: 0 } },
+    ]);
+    expect(fake.state.state()).toEqual({ status: "stored", terminalWrites: 0 });
   });
 
   it("prepares at most three extras at once", async () => {

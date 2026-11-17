@@ -855,6 +855,34 @@ describe("DockerJobLauncher", () => {
     await expect(created.launcher.readTranscript(handle, 1024)).resolves.toBeUndefined();
   });
 
+  describe("readPlanFiles", () => {
+    it("reads plan-files.json from the keeper, bounded", async () => {
+      const created = await harness("docker-plan-files", { provider: "claude-code", toolImage, limits: claudeLimits });
+      const handle = await created.launcher.launch(created.spec);
+      created.docker.output = '{"schemaVersion":1}';
+      await expect(created.launcher.readPlanFiles(handle, 1024)).resolves.toBe('{"schemaVersion":1}');
+      expect(
+        created.docker.calls.some((c) => c.args.join(" ").includes(":/run/wardby/storage/output/plan-files.json")),
+      ).toBe(true);
+      await expect(created.launcher.readPlanFiles(handle, 3)).rejects.toThrow("plan_files_too_large");
+    });
+
+    it("returns undefined when the copy fails", async () => {
+      const created = await harness("docker-plan-files-missing", {
+        provider: "claude-code",
+        toolImage,
+        limits: claudeLimits,
+      });
+      const handle = await created.launcher.launch(created.spec);
+      const run = created.docker.run.bind(created.docker);
+      created.docker.run = async (args, options) => {
+        if (args[0] === "container" && args[1] === "cp") throw new Error("no such file");
+        return run(args, options);
+      };
+      await expect(created.launcher.readPlanFiles(handle, 1024)).resolves.toBeUndefined();
+    });
+  });
+
   it("fails the composite job when the Claude tool runner exits", async () => {
     const created = await harness("docker-claude-tool-failure", {
       provider: "claude-code",

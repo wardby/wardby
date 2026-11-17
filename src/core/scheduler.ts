@@ -7,6 +7,7 @@
  * *ticking*, not a race within a single tick against a future one).
  */
 
+import type { SecretCipher } from "./plans/publish.js";
 import { randomUUID } from "node:crypto";
 import type { Agent } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
@@ -58,10 +59,12 @@ export async function claimDueRun(
   agentId: string,
   now: Date,
   selfDefects?: SelfDefectSink,
+  secretCipher?: SecretCipher,
 ): Promise<string | null> {
   const dispatched = await dispatchRun({
     db,
     executor,
+    secretCipher,
     agentId,
     selfDefects,
     trigger: "scheduled",
@@ -98,6 +101,8 @@ export interface SchedulerOptions {
   onLeaderTick?: () => Promise<void>;
   /** Files a self-defect when a scheduled run's executor fails to start it. Optional. */
   selfDefects?: SelfDefectSink;
+  /** Reads a builder's secret values to redact its approved plan (spec §7). */
+  secretCipher?: SecretCipher;
 }
 
 export interface SchedulerHandle {
@@ -131,7 +136,14 @@ export function startScheduler(options: SchedulerOptions): SchedulerHandle {
     const due = await findDueCandidates(db, now());
     for (const agent of due) {
       try {
-        const runId = await claimDueRun(db, options.executor, agent.id, now(), options.selfDefects);
+        const runId = await claimDueRun(
+          db,
+          options.executor,
+          agent.id,
+          now(),
+          options.selfDefects,
+          options.secretCipher,
+        );
         if (runId) {
           log(`firing agent "${agent.name}" -> run ${runId}`);
         }

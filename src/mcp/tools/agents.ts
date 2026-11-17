@@ -19,6 +19,7 @@ import {
   CodingProfileSchema,
   MAX_GIT_HISTORY_DEPTH,
   type CodingProfile,
+  type PlanDocument,
 } from "../../coding/profile.js";
 import {
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
@@ -83,6 +84,7 @@ import {
 } from "../auth/repo-authorization.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
+import { checkPlanDocumentSetting } from "../../core/plans/settings.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
@@ -532,6 +534,16 @@ const profileJsonSchema = {
       description:
         "Claude Code runs only. Keep each run's session transcript (redacted) on the server so the session can later be continued in a local Claude Code CLI. Once transcripts are served, anyone who can read a run can read everything its agent saw. Needs a blob store (BLOB_STORE) on the server. Default false.",
     },
+    planDocument: {
+      type: ["object", "null"],
+      description:
+        "Publish this coding agent's plan as Wardby documents for review (see help article plan-documents). store wardby (default) keeps the plan out of the repository; store repository writes it to path, a folder with one {n}. reviewers: 1-50 principal ids with access to this agent (default: the owner). finalApproverId, onApproved (notify or build; build needs builderAgentId, a coding agent with buildFromPlan). null turns it off.",
+    },
+    buildFromPlan: {
+      type: "boolean",
+      description:
+        "Refuse to build from a plan set that is not fully approved (plan_not_approved); give runs the approved versions. Default false.",
+    },
     packageAllowlist: {
       type: "object",
       description:
@@ -656,9 +668,10 @@ function requireModelAvailable(ctx: McpRequestContext, model: string, kind: "nat
 
 /** The stored columns for a validated profile: gitHistory is kept as gitHistoryDepth + gitHistoryFull (full overrides depth). */
 function profileColumns(profile: CodingProfile) {
-  const { gitHistory, ...rest } = profile;
+  const { gitHistory, planDocument, ...rest } = profile;
   return {
     ...rest,
+    planDocument: planDocument ?? Prisma.DbNull,
     gitHistoryDepth: gitHistory && gitHistory.depth !== "full" ? gitHistory.depth : null,
     gitHistoryFull: gitHistory?.depth === "full",
   };
@@ -692,6 +705,8 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     claudeBareMode: profile.claudeBareMode,
     dependencyCache: profile.dependencyCache,
     sessionResume: profile.sessionResume,
+    planDocument: profile.planDocument ?? null,
+    buildFromPlan: profile.buildFromPlan,
   });
 }
 
@@ -806,6 +821,18 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             adminOverride: repositoryAdminOverride === true,
           })
         : null;
+      let planChecked: PlanDocument | null = null;
+      if (codingProfile?.planDocument) {
+        try {
+          planChecked = await checkPlanDocumentSetting(
+            ctx.db,
+            { id: "", ownerId: ctx.principal.id },
+            codingProfile.planDocument,
+          );
+        } catch (err) {
+          throw new McpError(400, err instanceof Error ? err.message : "plan_settings_invalid");
+        }
+      }
       const agent = await ctx.db.agent.create({
         data: {
           ...agentData,
@@ -816,7 +843,14 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           })),
           ownerId: ctx.principal.id,
           ...(codingProfile && authorization
-            ? { codingProfile: { create: { ...profileColumns(codingProfile), ...profileStamp(authorization) } } }
+            ? {
+                codingProfile: {
+                  create: {
+                    ...profileColumns(planChecked ? { ...codingProfile, planDocument: planChecked } : codingProfile),
+                    ...profileStamp(authorization),
+                  },
+                },
+              }
             : {}),
         },
         include: { codingProfile: true },
@@ -1112,6 +1146,17 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             const profileResult = CodingProfileSchema.safeParse({ ...currentProfile, ...profilePatch });
             if (!profileResult.success) throw invalidArguments("coding profile", profileResult.error);
             nextProfile = profileResult.data;
+            if (args.codingProfile?.planDocument) {
+              try {
+                nextProfile.planDocument = await checkPlanDocumentSetting(
+                  tx,
+                  { id: existing.id, ownerId: existing.ownerId },
+                  args.codingProfile.planDocument,
+                );
+              } catch (err) {
+                throw new McpError(400, err instanceof Error ? err.message : "plan_settings_invalid");
+              }
+            }
             if (typeof args.codingProfile?.workspaceDiskMb === "number" || nextKind !== existing.kind) {
               validateWorkspaceDiskMb(nextProfile.workspaceDiskMb);
             }
