@@ -24,6 +24,8 @@ import {
 } from "./attribution.js";
 import { headStoppedAtBudget, pushingRunInFlight } from "./budget-stopped-head.js";
 import { checkContinuation, dispatchRun, type DispatchTx } from "./dispatch.js";
+import { PlanRefusedError } from "./plans/refusal.js";
+import { planRefusedReply } from "./plans/wording.js";
 import { rootFollowUpInFlight } from "./run-pull-request.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { githubIssueKey, handlePullRequestClosed } from "./issue-bridge.js";
@@ -81,6 +83,7 @@ export type HostEventDb = Pick<
   | "agentIssueProject"
   // A buildFromPlan builder's approved plan (dispatch, spec §7).
   | "planSet"
+  | "documentVersion"
   | "documentFile"
   | "resourceGrant"
   | "agentSecret"
@@ -1849,46 +1852,73 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
             provider: "github",
             key: githubIssueKey(event.repository, event.number),
           });
-      const dispatched = await dispatchRun({
-        db: deps.db,
-        executor: deps.executor,
-        secretCipher: deps.secretCipher,
-        selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
-        agentId: allowed[0].agentId,
-        trigger: "host_event",
-        taskOverride: mentionTaskText(event, siblings),
-        attribution: event.isPullRequest
-          ? await linkedPullRequestAttribution(
-              deps.db,
-              deps.issueTrackers,
-              { codeProvider: host.provider, repository: event.repository, number: event.number },
-              RESPONSE_PATH_SNAPSHOT_BUDGET,
-            )
-          : // A mention on an issue is that issue's own run tree, like a Jira issue event's.
-            {
-              source: "issue_event",
-              item: await resolveWorkItem(
+      let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+      try {
+        dispatched = await dispatchRun({
+          db: deps.db,
+          executor: deps.executor,
+          secretCipher: deps.secretCipher,
+          selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
+          agentId: allowed[0].agentId,
+          trigger: "host_event",
+          taskOverride: mentionTaskText(event, siblings),
+          attribution: event.isPullRequest
+            ? await linkedPullRequestAttribution(
                 deps.db,
                 deps.issueTrackers,
-                "github",
-                githubIssueKey(event.repository, event.number),
+                { codeProvider: host.provider, repository: event.repository, number: event.number },
                 RESPONSE_PATH_SNAPSHOT_BUDGET,
-              ),
-            },
-        ...(priorRoot
-          ? {
-              beforePersist: async (tx: DispatchTx) => {
-                followUpRunning = await rootFollowUpInFlight(tx, priorRoot);
-                return !followUpRunning;
+              )
+            : // A mention on an issue is that issue's own run tree, like a Jira issue event's.
+              {
+                source: "issue_event",
+                item: await resolveWorkItem(
+                  deps.db,
+                  deps.issueTrackers,
+                  "github",
+                  githubIssueKey(event.repository, event.number),
+                  RESPONSE_PATH_SNAPSHOT_BUDGET,
+                ),
               },
-            }
-          : {}),
-        // Where to report, written with the run: even if this instance dies
-        // before the follow-up below, the run's outcome still gets a comment.
-        afterPersist: async (tx, run) => {
-          await tx.runHostStatus.create({ data: mentionStatusRow(host.provider, event, run.id) });
-        },
-      });
+          ...(priorRoot
+            ? {
+                beforePersist: async (tx: DispatchTx) => {
+                  followUpRunning = await rootFollowUpInFlight(tx, priorRoot);
+                  return !followUpRunning;
+                },
+              }
+            : {}),
+          // Where to report, written with the run: even if this instance dies
+          // before the follow-up below, the run's outcome still gets a comment.
+          afterPersist: async (tx, run) => {
+            await tx.runHostStatus.create({ data: mentionStatusRow(host.provider, event, run.id) });
+          },
+        });
+      } catch (err) {
+        // A buildFromPlan builder refused before anything was written (spec §7): say why on the
+        // issue, as a decline does, instead of failing the delivery. Always posted: the author asked
+        // this agent for a build, and the reply names only the plan's paths and the refusal code.
+        if (!(err instanceof PlanRefusedError)) throw err;
+        log.info(
+          { repository: event.repository, number: event.number, code: err.code },
+          "mention refused: the builder's plan refused the run",
+        );
+        const reply = async () => {
+          await host
+            .comment(event.repository, {
+              number: event.number,
+              body: planRefusedReply(err),
+              ...(event.replyToReviewCommentId ? { replyToReviewCommentId: event.replyToReviewCommentId } : {}),
+            })
+            .catch((postErr: unknown) => {
+              log.warn(
+                { err: postErr, repository: event.repository, number: event.number },
+                "could not post the refusal",
+              );
+            });
+        };
+        return { runIds: [], followUps: [reply] };
+      }
       if (!dispatched) return followUpRunning ? decline("follow_up_running") : none;
       log.info(
         { repository: event.repository, number: event.number, runId: dispatched.run.id },

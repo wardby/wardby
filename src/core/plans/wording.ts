@@ -1,5 +1,6 @@
 import { PLAN_FOLDER_PATH } from "../../coding/protocol.js";
 import type { PlanSummary, PublishedPlan } from "./publish.js";
+import type { PlanRefusedError } from "./refusal.js";
 
 /** The layout a planner (or a revision) writes, shared by both notes. */
 export const PLAN_LAYOUT_RULES = [
@@ -66,4 +67,25 @@ export function planSummaryLines(plan: PlanSummary): string[] {
   if ("error" in plan) return [`Plan ${plan.number}: not published (${plan.error}).`];
   if ("pending" in plan) return [`Plan ${plan.number}: being published.`];
   return planReplyLines(plan);
+}
+
+/** A plan path as shown in a reply: one line, no code-span breakout. */
+const shownPath = (path: string) => `\`${path.replace(/[`\r\n]/g, "")}\``;
+
+/**
+ * The reply on an issue (GitHub or Jira) when a buildFromPlan builder refuses to start (spec §7).
+ * Fixed wording per refusal code; plan_not_approved lists the waiting documents by plan path only,
+ * never a title or any document text. Never names the App's handle (it is posted by the App).
+ */
+export function planRefusedReply(err: PlanRefusedError): string {
+  switch (err.code) {
+    case "plan_not_approved":
+      return err.waiting.length > 0
+        ? `ℹ️ I didn't start a build: the plan is not approved yet. Still waiting for approval: ${err.waiting.map(shownPath).join(", ")}. Ask again once each is approved.`
+        : "ℹ️ I didn't start a build: the plan could not be checked (`plan_not_approved`). An agent owner can look up `plan_not_approved` in the wardby help.";
+    case "plan_too_large":
+      return "ℹ️ I didn't start a build: the approved plan is too large for one run (`plan_too_large`).";
+    case "plan_number_missing":
+      return "ℹ️ I didn't start a run: it needs an issue or a plan number (`plan_number_missing`).";
+  }
 }

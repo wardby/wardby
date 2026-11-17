@@ -28,6 +28,8 @@ vi.mock("./mark-ready.js", () => ({ maybeMarkReady: vi.fn(async () => "off") }))
 import { maybeMarkReady } from "./mark-ready.js";
 import { mentionDeclinedBody, mentionTaskText, siblingContinuationHints } from "./host-events.js";
 import { isIssueMentionTask } from "./host-status.js";
+import { PlanRefusedError } from "./plans/refusal.js";
+import { planRefusedReply } from "./plans/wording.js";
 
 // vi.mock factories are hoisted above every declaration, so shared state goes through vi.hoisted.
 const { txStub } = vi.hoisted(() => ({
@@ -647,6 +649,45 @@ describe("routeHostEvent mention task text", () => {
       expect(rootFollowUpInFlight).not.toHaveBeenCalled();
       expect(vi.mocked(dispatchRun).mock.calls.at(-1)![0].beforePersist).toBeUndefined();
     });
+  });
+
+  it("replies on the issue, listing the waiting documents by path, when a buildFromPlan builder refuses", async () => {
+    vi.mocked(dispatchRun).mockClear();
+    vi.mocked(dispatchRun).mockRejectedValueOnce(
+      new PlanRefusedError("plan_not_approved", "still waiting: api.md, screens/", ["api.md", "screens/"]),
+    );
+    const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    // Resolves (no 500): the ingress keeps the delivery recorded, and the reply is a follow-up.
+    const result = await routeHostEvent({ ...base, number: 12, isPullRequest: false }, d);
+    expect(result.runIds).toEqual([]);
+    for (const f of result.followUps) await f();
+    const body =
+      "ℹ️ I didn't start a build: the plan is not approved yet. Still waiting for approval: `api.md`, `screens/`. " +
+      "Ask again once each is approved.";
+    expect(planRefusedReply(new PlanRefusedError("plan_not_approved", "x", ["api.md", "screens/"]))).toBe(body);
+    expect(d.hosts.github.comment).toHaveBeenCalledTimes(1);
+    expect(d.hosts.github.comment).toHaveBeenCalledWith(REPO, { number: 12, body });
+    // Posted even with mention explanations off: the author asked this agent for a build.
+    vi.mocked(dispatchRun).mockRejectedValueOnce(
+      new PlanRefusedError("plan_not_approved", "secret values unavailable"),
+    );
+    const quiet = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    const silenced = await routeHostEvent(
+      { ...base, number: 12, isPullRequest: false },
+      { ...quiet, mentionExplanations: false },
+    );
+    for (const f of silenced.followUps) await f();
+    expect(quiet.hosts.github.comment).toHaveBeenCalledWith(REPO, {
+      number: 12,
+      body: expect.stringContaining("`plan_not_approved`"),
+    });
+    expect(vi.mocked(quiet.hosts.github.comment).mock.calls[0][1].body).not.toContain("secret values");
+  });
+
+  it("still fails the delivery for an error that is not a plan refusal", async () => {
+    vi.mocked(dispatchRun).mockRejectedValueOnce(new Error("database down"));
+    const d = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    await expect(routeHostEvent({ ...base, number: 12, isPullRequest: false }, d)).rejects.toThrow("database down");
   });
 
   it("N-1: an outsider's issue text reaches the agent only as wrapped untrusted context", async () => {

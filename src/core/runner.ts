@@ -511,6 +511,7 @@ export type RunnerDb = Pick<
   | "deferredReview"
   | "runAttribution"
   | "planSet"
+  | "documentVersion"
   | "documentFile"
 >;
 

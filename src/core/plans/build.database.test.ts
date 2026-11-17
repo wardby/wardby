@@ -8,7 +8,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../db.js";
 import { MAX_CODING_TASK_BYTES } from "../../coding/protocol.js";
 import { attachSecret, createSecret } from "../secrets.js";
-import { planPullRequestLine, resolveBuildPlan, ticketTitles, type BuildPlan } from "./build.js";
+import {
+  planPullRequestLine,
+  resolveBuildPlan,
+  resolveRecordedBuildPlan,
+  ticketTitles,
+  type BuildPlan,
+} from "./build.js";
 import { createPlanSetFixture, setReviewState, type FixtureDocument } from "./build.test-support.js";
 import { PlanRefusedError } from "./refusal.js";
 
@@ -56,21 +62,28 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveBuildPlan (database)", () => 
   ];
   /** A fresh plan set under its own number, so cases do not share state. */
   let nextNumber = 100;
-  async function planSet(documents: FixtureDocument[], number = ++nextNumber) {
+  async function planSet(
+    documents: FixtureDocument[],
+    number = ++nextNumber,
+    at: { repository?: string; plannerId?: string } = {},
+  ) {
     const fixture = await createPlanSetFixture(db, {
-      plannerId: planner,
+      plannerId: at.plannerId ?? planner,
       ownerId: owner,
-      repository,
+      repository: at.repository ?? repository,
       number,
       documents,
     });
     return { ...fixture, number };
   }
-  const resolve = (number: number, extra: { ticket?: number; builderOwnerId?: string; agentId?: string } = {}) =>
+  const resolve = (
+    number: number,
+    extra: { ticket?: number; builderOwnerId?: string | null; agentId?: string; repository?: string } = {},
+  ) =>
     resolveBuildPlan(db, cipher, {
       builderAgentId: extra.agentId ?? builder,
-      builderOwnerId: extra.builderOwnerId ?? owner,
-      repository,
+      builderOwnerId: extra.builderOwnerId === undefined ? owner : extra.builderOwnerId,
+      repository: extra.repository ?? repository,
       number,
       ...(extra.ticket !== undefined ? { ticket: extra.ticket } : {}),
     });
@@ -191,6 +204,114 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveBuildPlan (database)", () => 
     expect(
       plan.taskSection.startsWith(`Approved plan ${number}. Build exactly ticket 2 from this approved plan.`),
     ).toBe(true);
+  });
+
+  it("matches the plan set's repository the way the host does (case-insensitively, any accepted form)", async () => {
+    const upper = `O/R-${s.toUpperCase()}-CASE`;
+    const { number } = await planSet(baseDocuments(), undefined, { repository: upper });
+    // The planner's set is recorded as O/R-…; the builder is linked as o/r-… (or a github.com URL).
+    for (const asked of [upper.toLowerCase(), `https://github.com/${upper.toLowerCase()}`]) {
+      await expect(resolve(number, { repository: asked })).rejects.toThrow(/^plan_not_approved: .*api\.md/);
+    }
+  });
+
+  it("builds from the newest of two visible plan sets for one repository and number", async () => {
+    const otherPlanner = await makeAgent(owner, { planDocument: { store: "wardby", reviewers: [owner] } });
+    const number = ++nextNumber;
+    const older = await planSet(baseDocuments("approved"), number);
+    const newer = await planSet([{ path: "plan.md", content: "# Newer plan\n", version: 7 }], number, {
+      plannerId: otherPlanner,
+    });
+    await db.planSet.update({ where: { id: older.planSetId }, data: { createdAt: new Date(Date.UTC(2026, 0, 1)) } });
+    await db.planSet.update({ where: { id: newer.planSetId }, data: { createdAt: new Date(Date.UTC(2026, 0, 2)) } });
+    const plan = ok(await resolve(number));
+    expect(plan.planSetId).toBe(newer.planSetId);
+    expect(plan.versions.map((v) => `${v.path} v${v.versionNumber}`)).toEqual(["plan.md v7"]);
+    // And the other way round: the older set's approval is not used once a newer one waits.
+    await setReviewState(db, newer.documentIds["plan.md"], "in_review");
+    await expect(resolve(number)).rejects.toThrow(/^plan_not_approved: still waiting: plan\.md/);
+  });
+
+  it("refuses an ownerless builder with plan_not_approved (fail closed)", async () => {
+    const { number } = await planSet(baseDocuments("approved"));
+    const attempt = resolve(number, { builderOwnerId: null });
+    await expect(attempt).rejects.toBeInstanceOf(PlanRefusedError);
+    await expect(attempt).rejects.toThrow(/^plan_not_approved: the builder has no owner/);
+  });
+
+  it("redacts a JSON-escaped secret in a design's manifest and an HTML-escaped one in a board", async () => {
+    const secretBuilder = await makeAgent(owner, { buildFromPlan: true });
+    // Values whose stored forms differ from the raw value: JSON escapes the quote and the backslash,
+    // HTML escapes the angle bracket and the ampersand.
+    const jsonSecret = `wardby-fake"json\\secret-${s}`;
+    const htmlSecret = `wardby-fake<html&secret-${s}`;
+    for (const [name, value] of [
+      [`JSON_SECRET_${s}`, jsonSecret],
+      [`HTML_SECRET_${s}`, htmlSecret],
+    ]) {
+      await createSecret(name, value, owner, cipher, db);
+      await attachSecret(secretBuilder, name, owner, db);
+    }
+    const jsonEscaped = JSON.stringify(jsonSecret).slice(1, -1);
+    const htmlEscaped = htmlSecret.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    expect(jsonEscaped).not.toBe(jsonSecret);
+    expect(htmlEscaped).not.toBe(htmlSecret);
+    const { number } = await planSet([
+      { path: "plan.md", content: `# Plan\n\nkeys ${jsonEscaped} and ${htmlEscaped}\n`, version: 3 },
+      {
+        path: "screens/",
+        content: {
+          "manifest.json": JSON.stringify({ boards: [{ id: "home", title: jsonSecret }] }),
+          "boards/home.html": `<main data-k="${htmlEscaped}">${htmlEscaped}</main>`,
+        },
+        version: 2,
+      },
+    ]);
+    const plan = ok(await resolve(number, { agentId: secretBuilder }));
+    const outputs = [plan.taskSection, ...plan.planInputFiles.map((f) => f.content)];
+    for (const text of outputs) {
+      for (const form of [jsonSecret, jsonEscaped, htmlSecret, htmlEscaped]) expect(text).not.toContain(form);
+    }
+    expect(plan.planInputFiles.find((f) => f.path === "screens/manifest.json")!.content).toContain("[REDACTED]");
+    expect(plan.planInputFiles.find((f) => f.path === "screens/boards/home.html")!.content).toContain("[REDACTED]");
+    expect(plan.taskSection).toContain("[REDACTED]");
+  });
+
+  it("rebuilds a recorded plan from exactly its versions, and refuses when one is gone", async () => {
+    const { number, planSetId, documentIds } = await planSet(baseDocuments("approved"));
+    const recorded = ok(await resolve(number, { ticket: 1 }));
+    // The document is reopened and gets a new version: the recorded build still uses v1.
+    await setReviewState(db, documentIds["api.md"], "in_review");
+    const v2 = await db.documentVersion.create({
+      data: {
+        documentId: documentIds["api.md"],
+        number: 2,
+        format: "markdown",
+        markdown: "# API\n\nPOST /feed (reopened)\n",
+        contentHash: `v2-${s}`,
+        via: "agent",
+      },
+    });
+    await db.document.update({ where: { id: documentIds["api.md"] }, data: { currentVersionId: v2.id } });
+    const again = await resolveRecordedBuildPlan(db, cipher, {
+      builderAgentId: builder,
+      planSetId,
+      number,
+      versions: recorded.versions,
+      ticket: 1,
+    });
+    expect(again).toEqual(recorded);
+
+    const attempt = resolveRecordedBuildPlan(db, cipher, {
+      builderAgentId: builder,
+      planSetId,
+      number,
+      versions: [
+        ...recorded.versions,
+        { documentId: documentIds["api.md"], path: "gone.md", kind: "document", versionNumber: 9 },
+      ],
+    });
+    await expect(attempt).rejects.toThrow(/^plan_not_approved: approved version no longer available: gone\.md/);
   });
 
   it("cites the plan in a pull request line", () => {

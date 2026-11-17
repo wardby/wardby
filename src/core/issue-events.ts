@@ -15,6 +15,8 @@ import { RESPONSE_PATH_SNAPSHOT_BUDGET, resolveWorkItem, type ResolvedWorkItem }
 import { dispatchRun, type DispatchDb } from "./dispatch.js";
 import { issueStatusRow, postIssueWorkingStatus } from "./issue-status.js";
 import { logger } from "./logger.js";
+import { PlanRefusedError } from "./plans/refusal.js";
+import { planRefusedReply } from "./plans/wording.js";
 import { openPullRequestHints, openSiblingsForIssue, type OpenSibling } from "./related-pull-requests.js";
 import { contextFollowsNote, REQUEST_COMMENT_LABEL } from "./request-text.js";
 import { composeTaskOverride, cutUntrustedText, MAX_UNTRUSTED_BODY_CHARS, withCutMarker } from "./untrusted-content.js";
@@ -216,6 +218,26 @@ export async function routeIssueEvent(event: IssueEvent, deps: RouteIssueEventDe
       );
       log.info({ issueKey: event.issueKey, agentId: link.agentId, runId, kinds: matched }, "issue run dispatched");
     } catch (err) {
+      if (err instanceof PlanRefusedError) {
+        // A buildFromPlan builder refused before anything was written (spec §7): say why on the issue,
+        // with the same wording a GitHub mention gets (paths and the refusal code only).
+        log.info(
+          { issueKey: event.issueKey, agentId: link.agentId, code: err.code },
+          "issue run refused: the builder's plan refused the run",
+        );
+        const visibilityRole = link.commentVisibilityRole;
+        result.followUps.push(async () => {
+          await tracker
+            .comment(event.issueKey, {
+              markdown: planRefusedReply(err),
+              ...(visibilityRole ? { visibilityRole } : {}),
+            })
+            .catch((postErr: unknown) => {
+              log.warn({ err: postErr, issueKey: event.issueKey }, "could not post the refusal");
+            });
+        });
+        continue;
+      }
       log.warn({ err, issueKey: event.issueKey, agentId: link.agentId }, "issue run could not be dispatched");
     }
   }

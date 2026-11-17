@@ -5,6 +5,8 @@ export class PlanRefusedError extends Error {
   constructor(
     readonly code: PlanRefusalCode,
     detail: string,
+    /** plan_not_approved: the plan paths of the documents still waiting (paths only, never titles or text). */
+    readonly waiting: readonly string[] = [],
   ) {
     super(`${code}: ${detail}`);
     this.name = "PlanRefusedError";

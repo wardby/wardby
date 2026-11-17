@@ -720,9 +720,9 @@ export interface ContainerRunSnapshot {
   /** The issue that triggered this run (CodingRun.issueProvider/issueKey); null when none. */
   issueProvider?: string | null;
   issueKey?: string | null;
-  /** The plan this run wrote or built from (CodingRun.planNumber); null when none. */
+  /** The plan the run tree's root built from (its CodingRun.planNumber), for the PR body's plan line; null when none. */
   planNumber?: number | null;
-  /** The approved versions a build used (CodingRun.planVersions), for the PR body's plan line; null when none. */
+  /** The approved versions the run tree's root built from (its CodingRun.planVersions); null when none. */
   planVersions?: BuildPlan["versions"] | null;
   /** Step in the delegating agent's declared merge order (CodingRun.mergeOrder); null = no order. */
   mergeOrder?: number | null;
@@ -1068,8 +1068,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       rootCodingRunId: row.codingRun.rootCodingRunId,
       issueProvider: row.codingRun.issueProvider,
       issueKey: row.codingRun.issueKey,
-      planNumber: row.codingRun.planNumber,
-      planVersions: readPlanVersions(row.codingRun.planVersions),
+      ...(await this.planLineSource(row.codingRun)),
       mergeOrder: row.codingRun.mergeOrder,
       budgetUsd: Number(row.codingRun.budgetReservedUsd),
       agentBudgetUsd: Number(row.agent.budgetUsd),
@@ -1275,6 +1274,35 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       agentTextRunId,
       ...(legacySource ? { legacySource } : {}),
     };
+  }
+
+  /**
+   * The plan a run's pull request cites: the root run's (CodingRun.planSetId/planVersions), so a
+   * continuation by any agent (a review fix round, a mention's follow-up) keeps the root's plan line,
+   * as issueSourceFor keeps its issue line. A failed read gives no plan line.
+   */
+  private async planLineSource(run: {
+    runId: string;
+    rootCodingRunId: string | null;
+    planSetId: string | null;
+    planNumber: number | null;
+    planVersions: unknown;
+  }): Promise<Pick<ContainerRunSnapshot, "planNumber" | "planVersions">> {
+    let source: { planSetId: string | null; planNumber: number | null; planVersions: unknown } | null = run;
+    if (run.rootCodingRunId) {
+      source = await this.db.codingRun
+        .findUnique({
+          where: { runId: run.rootCodingRunId },
+          select: { planSetId: true, planNumber: true, planVersions: true },
+        })
+        .catch((err: unknown) => {
+          containerLog.warn({ err, runId: run.runId }, "could not read the root run's plan");
+          return null;
+        });
+    }
+    return source?.planSetId
+      ? { planNumber: source.planNumber, planVersions: readPlanVersions(source.planVersions) }
+      : { planNumber: null, planVersions: null };
   }
 
   /**

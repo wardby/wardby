@@ -3,6 +3,8 @@ import type { IssueEvent, IssueTracker } from "../providers/issue-tracker/types.
 import { issueTaskText, routeIssueEvent } from "./issue-events.js";
 import { MAX_UNTRUSTED_BODY_CHARS, splitTaskOverride } from "./untrusted-content.js";
 import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
+import { PlanRefusedError } from "./plans/refusal.js";
+import { planRefusedReply } from "./plans/wording.js";
 
 const { txStub } = vi.hoisted(() => ({ txStub: { runIssueStatus: { create: vi.fn(async () => undefined) } } }));
 vi.mock("./dispatch.js", () => ({
@@ -55,6 +57,7 @@ function setup(links: Link[], jqlMatches = true, prs: Pr[] = [], prFails = false
     matchesJql: vi.fn(async () => jqlMatches),
     issueUrl: (k: string) => `https://s/browse/${k}`,
     snapshotIssue: vi.fn(async (key: string) => ({ key, title: "T", url: "u", scopeKey: "PROJ" })),
+    comment: vi.fn(async () => ({ id: "c-1", url: "https://s/c-1" })),
   } as unknown as IssueTracker;
   vi.mocked(dispatchRun).mockClear();
   txStub.runIssueStatus.create.mockClear();
@@ -93,6 +96,34 @@ function setup(links: Link[], jqlMatches = true, prs: Pr[] = [], prFails = false
 }
 
 describe("routeIssueEvent", () => {
+  it("replies on the issue, listing the waiting documents by path, when a buildFromPlan builder refuses", async () => {
+    const { deps, tracker } = setup([{ triggers: ["created"], commentVisibilityRole: "Developers" }]);
+    vi.mocked(dispatchRun).mockRejectedValueOnce(
+      new PlanRefusedError("plan_not_approved", "still waiting: api.md, screens/", ["api.md", "screens/"]),
+    );
+    const r = await routeIssueEvent(event({}), deps);
+    expect(r.runIds).toEqual([]);
+    for (const f of r.followUps) await f();
+    // The same wording a GitHub mention gets (one shared reply), paths only.
+    const markdown = planRefusedReply(new PlanRefusedError("plan_not_approved", "x", ["api.md", "screens/"]));
+    expect(markdown).toContain("Still waiting for approval: `api.md`, `screens/`.");
+    expect(tracker.comment).toHaveBeenCalledTimes(1);
+    expect(tracker.comment).toHaveBeenCalledWith("PROJ-7", { markdown, visibilityRole: "Developers" });
+  });
+
+  it("names only the refusal code when no document is waiting (never its detail)", async () => {
+    const { deps, tracker } = setup([{ triggers: ["created"] }]);
+    vi.mocked(dispatchRun).mockRejectedValueOnce(
+      new PlanRefusedError("plan_not_approved", "secret values unavailable"),
+    );
+    const r = await routeIssueEvent(event({}), deps);
+    for (const f of r.followUps) await f();
+    expect(tracker.comment).toHaveBeenCalledWith("PROJ-7", {
+      markdown: expect.stringContaining("`plan_not_approved`"),
+    });
+    expect(vi.mocked(tracker.comment).mock.calls[0][1].markdown).not.toContain("secret values");
+  });
+
   it("dispatches a created trigger with the subject as untrusted context", async () => {
     const { deps } = setup([{ triggers: ["created"], commentVisibilityRole: "Developers" }]);
     const r = await routeIssueEvent(event({}), deps);

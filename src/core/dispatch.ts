@@ -39,7 +39,7 @@ import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInp
 import { logger } from "./logger.js";
 import { assertPlanFilesWithinLimits, savePlanInputFiles, type PlanFile } from "../coding/plan-files/store.js";
 import { PlanRefusedError } from "./plans/refusal.js";
-import { resolveBuildPlan, type BuildPlan } from "./plans/build.js";
+import { readPlanVersions, resolveBuildPlan, resolveRecordedBuildPlan, type BuildPlan } from "./plans/build.js";
 import type { SecretCipher } from "./plans/publish.js";
 import { resolvePlanNumber } from "./plans/number.js";
 import { planFolderFor } from "./plans/settings.js";
@@ -87,6 +87,7 @@ export type DispatchDb = Pick<
   | "webhook"
   | "budgetGroup"
   | "planSet"
+  | "documentVersion"
   | "documentFile"
   | "resourceGrant"
   | "agentSecret"
@@ -974,6 +975,29 @@ export async function copyRootRepositoryRows(
 }
 
 /**
+ * The plan a continuation's root run was built from (spec §7), or null when the root built from none.
+ * Read before the transaction; the transaction's continuation check decides whether the root may be
+ * continued at all.
+ */
+async function recordedRootPlan(
+  db: Pick<DispatchDb, "codingRun">,
+  continuesCodingRunId: string,
+): Promise<{ planSetId: string; number: number; versions: BuildPlan["versions"]; ticket: number | null } | null> {
+  const marked = await db.codingRun.findUnique({
+    where: { runId: continuesCodingRunId },
+    select: { runId: true, rootCodingRunId: true },
+  });
+  if (!marked) return null;
+  const root = await db.codingRun.findUnique({
+    where: { runId: marked.rootCodingRunId ?? marked.runId },
+    select: { planSetId: true, planNumber: true, planVersions: true, planTicket: true },
+  });
+  const versions = readPlanVersions(root?.planVersions);
+  if (!root?.planSetId || root.planNumber === null || !versions) return null;
+  return { planSetId: root.planSetId, number: root.planNumber, versions, ticket: root.planTicket };
+}
+
+/**
  * Persists every detached run input in one transaction, then invokes the
  * executor only after commit. A null result means the caller's transactional
  * claim was no longer valid (for example, a schedule was already claimed).
@@ -1135,23 +1159,35 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   // Building from an approved plan (spec §7): decided before the transaction so a refusal leaves no
   // Run row. Its section rides in the stored request (R9) and its files are input rows (R4, R14).
   let buildPlan: BuildPlan | null = null;
+  let runPlanTicket = options.planTicket ?? null;
   // The run's repository: the resolved target, or (deferred) the requested or profile repository.
+  // resolveBuildPlan normalizes it and matches it case-insensitively, as the host does.
   const buildRepository = previewTarget?.repository ?? options.codingRepository ?? preview?.codingProfile?.repository;
-  if (
-    preview?.kind === "coding" &&
-    preview.codingProfile?.buildFromPlan &&
-    planNumber !== undefined &&
-    buildRepository &&
-    planRefusal === undefined
-  ) {
+  if (preview?.kind === "coding" && preview.codingProfile?.buildFromPlan && planRefusal === undefined) {
     try {
-      buildPlan = await resolveBuildPlan(options.db, options.secretCipher, {
-        builderAgentId: options.agentId,
-        builderOwnerId: preview.ownerId ?? null,
-        repository: buildRepository,
-        number: planNumber,
-        ...(options.planTicket !== undefined ? { ticket: options.planTicket } : {}),
-      });
+      if (options.continuesCodingRunId !== undefined) {
+        // A continuation (a fix round, a follow-up) builds from exactly the versions its root was built
+        // from: no approval gate, so reopening a document never refuses work on a build already made.
+        const recorded = await recordedRootPlan(options.db, options.continuesCodingRunId);
+        if (recorded) {
+          runPlanTicket = options.planTicket ?? recorded.ticket;
+          buildPlan = await resolveRecordedBuildPlan(options.db, options.secretCipher, {
+            builderAgentId: options.agentId,
+            planSetId: recorded.planSetId,
+            number: recorded.number,
+            versions: recorded.versions,
+            ...(runPlanTicket !== null ? { ticket: runPlanTicket } : {}),
+          });
+        }
+      } else if (planNumber !== undefined && buildRepository) {
+        buildPlan = await resolveBuildPlan(options.db, options.secretCipher, {
+          builderAgentId: options.agentId,
+          builderOwnerId: preview.ownerId ?? null,
+          repository: buildRepository,
+          number: planNumber,
+          ...(options.planTicket !== undefined ? { ticket: options.planTicket } : {}),
+        });
+      }
     } catch (err) {
       if (!(err instanceof PlanRefusedError)) throw err;
       planRefusal = setRefusalOf(err);
@@ -1430,7 +1466,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
                     planVersions: buildPlan.versions,
                   }
                 : {}),
-              planTicket: options.planTicket ?? null,
+              planTicket: runPlanTicket,
             },
           });
           await savePlanInputFiles(tx, run.id, runPlanInputFiles);

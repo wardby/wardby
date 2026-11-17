@@ -374,7 +374,7 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     const SCREENS = { "manifest.json": '{"boards":[{"id":"home"}]}', "boards/home.html": "<main>Home</main>" };
 
     /** A planner and a buildFromPlan builder on their own repository, and plan set #12 with api.md in review. */
-    async function setUp() {
+    async function setUp(setRepository: (repository: string) => string = (r) => r) {
       const repository = `acme/build-${suffix}-${++counter}`;
       const make = async (profile: object) => {
         const id = `${PREFIX}agent-${suffix}-${++counter}`;
@@ -399,7 +399,7 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       const { planSetId, documentIds } = await createPlanSetFixture(db, {
         plannerId: planner,
         ownerId: owner,
-        repository,
+        repository: setRepository(repository),
         number: 12,
         documents: [
           { path: "plan.md", content: PLAN_MD, version: 3 },
@@ -497,6 +497,106 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       const row = await codingRunOf(result!.run.id);
       expect(row.request).toMatch(/<plan>\n[\s\S]*\n<\/plan>/);
       expect(row.planSetId).not.toBeNull();
+    });
+
+    it("gates a builder linked as acme/… on a plan set recorded as Acme/… (fresh and deferred)", async () => {
+      const { builder, repository } = await setUp((r) => r.toUpperCase());
+      const { executor } = fakeExecutor(null);
+      await expect(
+        dispatchRun({ db, executor, agentId: builder, planNumber: 12, secretCipher: cipher }),
+      ).rejects.toThrow(/^plan_not_approved: .*api\.md/);
+      // Deferred: the raw requested repository is matched the same way before the lookup.
+      executor.defersCodingResolution = true;
+      await expect(
+        dispatchRun({
+          db,
+          executor,
+          agentId: builder,
+          planNumber: 12,
+          secretCipher: cipher,
+          codingRepository: `https://github.com/${repository}`,
+        }),
+      ).rejects.toThrow(/^plan_not_approved: .*api\.md/);
+      expect(await runsOf(builder)).toEqual([]);
+    });
+
+    it("a continuation builds from its root's versions after a document is reopened (no plan_not_approved)", async () => {
+      const { repository, builder, planSetId, documentIds, approveAll } = await setUp();
+      await approveAll();
+      const { executor } = fakeExecutor(null);
+      const root = await dispatchRun({
+        db,
+        executor,
+        agentId: builder,
+        codingTask: "Build ticket 2.",
+        planNumber: 12,
+        planTicket: 2,
+        secretCipher: cipher,
+      });
+      const rootId = root!.run.id;
+      await db.run.update({ where: { id: rootId }, data: { status: "succeeded" } });
+      await db.codingRun.update({
+        where: { runId: rootId },
+        data: {
+          result: {
+            schemaVersion: 1,
+            outcome: "pull_request_opened",
+            repository,
+            baseRef: "main",
+            headRef: `wardby/run-${rootId}`,
+            commitSha: "a".repeat(40),
+            pullRequestUrl: `https://github.com/${repository}/pull/5`,
+            pullRequestNumber: 5,
+            summary: "Opened the PR",
+            tests: [],
+            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+          },
+        },
+      });
+      // A reviewer reopens api.md and the planner publishes v2: a fresh build would now be refused.
+      await setReviewState(db, documentIds["api.md"], "in_review");
+      const v2 = await db.documentVersion.create({
+        data: {
+          documentId: documentIds["api.md"],
+          number: 2,
+          format: "markdown",
+          markdown: "# API\n\nPOST /feed (reopened)\n",
+          contentHash: `api-v2-${suffix}-${counter}`,
+          via: "agent",
+        },
+      });
+      await db.document.update({ where: { id: documentIds["api.md"] }, data: { currentVersionId: v2.id } });
+      await expect(
+        dispatchRun({ db, executor, agentId: builder, planNumber: 12, secretCipher: cipher }),
+      ).rejects.toThrow(/^plan_not_approved/);
+
+      // The fix round (a continuation of the root): built from the root's versions, never refused.
+      const fix = await dispatchRun({
+        db,
+        executor,
+        agentId: builder,
+        codingTask: "Fix the review findings.",
+        continuesCodingRunId: rootId,
+        secretCipher: cipher,
+      });
+      expect(fix!.run.status).not.toBe("refused");
+      const rootRow = await codingRunOf(rootId);
+      const fixRow = await codingRunOf(fix!.run.id);
+      expect(fixRow.rootCodingRunId).toBe(rootId);
+      expect(fixRow.planSetId).toBe(planSetId);
+      expect(fixRow.planVersions).toEqual(rootRow.planVersions);
+      expect(fixRow.planTicket).toBe(2);
+      expect(fixRow.request).toContain("Approved plan 12. Build exactly ticket 2 from this approved plan.");
+      expect(fixRow.request).toMatch(/<plan>\n[\s\S]*--- api\.md \(approved v1\) ---[\s\S]*\n<\/plan>/);
+      expect(fixRow.request).not.toContain("reopened");
+      const files = await loadPlanFiles(db, fix!.run.id, "input");
+      expect(files.map((f) => f.path)).toEqual([
+        "api.md",
+        "plan.md",
+        "screens/boards/home.html",
+        "screens/manifest.json",
+      ]);
+      expect(files.find((f) => f.path === "api.md")!.content).toBe("# API\n");
     });
 
     it("refuses without a secret cipher: the plan is never sent unredacted", async () => {
