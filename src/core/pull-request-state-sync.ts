@@ -3,7 +3,8 @@
  * (an outage, a redelivery that never came). Each reconciler pass reads a
  * small batch of rows still marked open — least recently checked first —
  * from the code host and settles merged or closed ones through
- * handlePullRequestClosed, the webhook's own path. Sibling continuation hints
+ * handlePullRequestClosed, the webhook's own path, and tell a plan's build
+ * chain (which starts the next ticket or stops). Sibling continuation hints
  * and the Related pull requests section read this state. Best effort: never throws.
  */
 import type { PrismaClient } from "#prisma";
@@ -11,6 +12,7 @@ import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import type { ReviewHostRegistry } from "../providers/review-host/types.js";
 import { handlePullRequestClosed } from "./issue-bridge.js";
 import { logger } from "./logger.js";
+import { planChainHook, type PlanChainMergeDb } from "./plans/chain-hook.js";
 
 const log = logger.child({ module: "pull-request-state-sync" });
 
@@ -19,7 +21,7 @@ export const PR_STATE_SYNC_BATCH = 10;
 /** A row is re-checked at most this often. */
 export const PR_STATE_SYNC_MIN_AGE_MS = 10 * 60_000;
 
-export type PullRequestStateSyncDb = Pick<PrismaClient, "issuePullRequest" | "agentIssueProject">;
+export type PullRequestStateSyncDb = Pick<PrismaClient, "issuePullRequest" | "agentIssueProject"> & PlanChainMergeDb;
 
 export async function syncOpenPullRequestStates(
   db: PullRequestStateSyncDb,
@@ -57,6 +59,8 @@ export async function syncOpenPullRequestStates(
           number: row.number,
           merged,
         });
+        // As the pr_closed webhook does; never throws (its work runs in the background).
+        await planChainHook()?.onMerged(db, { repository: row.repository, number: row.number, merged });
         settled += 1;
         log.info(
           { repository: row.repository, number: row.number, merged },

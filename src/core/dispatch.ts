@@ -6,6 +6,7 @@ import {
   CodingTaskInputSchema,
   normalizeGitRef,
   composeCodingTask,
+  PLAN_FOLDER_PATH,
   publicCodingRunResult,
 } from "../coding/protocol.js";
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
@@ -37,6 +38,15 @@ import {
 import { KNOWLEDGE_CONFIG_MAX_BYTES, KNOWLEDGE_CONFIG_PATH, resolveKnowledgeLocation } from "../knowledge/location.js";
 import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInput } from "../knowledge/note.js";
 import { logger } from "./logger.js";
+import { assertPlanFilesWithinLimits, savePlanInputFiles, type PlanFile } from "../coding/plan-files/store.js";
+import { planChainHook, type PlanChainMergeDb } from "./plans/chain-hook.js";
+import { PlanRefusedError } from "./plans/refusal.js";
+import { readPlanVersions, resolveBuildPlan, resolveRecordedBuildPlan, type BuildPlan } from "./plans/build.js";
+import type { SecretCipher } from "./plans/publish.js";
+import { resolvePlanNumber } from "./plans/number.js";
+import { planFolderFor } from "./plans/settings.js";
+import { plannerTaskNote, withPlanSections } from "./plans/wording.js";
+import { readPlanDocument } from "../coding/profile.js";
 import { CodingModelProviderMismatchError, resolveCodingEntry } from "./run-pricing.js";
 import {
   resolveRunPullRequest,
@@ -73,10 +83,19 @@ export type DispatchDb = Pick<
   | "run"
   | "runHostCheck"
   | "codingRun"
+  | "runAttribution"
   | "codingRunRepository"
   | "task"
   | "webhook"
   | "budgetGroup"
+  | "planSet"
+  | "documentVersion"
+  | "documentFile"
+  | "resourceGrant"
+  | "principal"
+  | "agentSecret"
+  | "agentMcpServer"
+  | "secret"
   | "$transaction"
   | "$queryRaw"
 >;
@@ -91,6 +110,7 @@ export type DispatchTx = Pick<
   | "runIssueStatus"
   | "codingRun"
   | "codingRunRepository"
+  | "codingRunPlanFile"
   | "codingService"
   | "task"
   | "webhook"
@@ -207,6 +227,35 @@ export interface DispatchRunOptions {
    * while this one's coding run is still starting or queued.
    */
   onPersisted?: (run: Run) => void;
+  /**
+   * Plan files given to a coding run as input (a revision, a builder's approved design), stored with
+   * the CodingRun in the persist transaction. Bounded before anything is written: over the plan limits
+   * is a PlanRefusedError("plan_too_large"). Coding agents only.
+   */
+  planInputFiles?: PlanFile[];
+  /** The coding run returns its plan folder, stored when it ends. Coding agents only. */
+  collectPlanFiles?: boolean;
+  /** The plan this coding run writes or builds from, when it is not the attributed issue's number. */
+  planNumber?: number;
+  /** The ticket of the plan a `buildFromPlan` run builds, stored on the run (spec §7). */
+  planTicket?: number;
+  /**
+   * Reads the builder's secret values, to redact an approved plan before it reaches the run (spec §7).
+   * Without it a `buildFromPlan` run with a plan set is refused (plan_not_approved): never unredacted.
+   */
+  secretCipher?: SecretCipher;
+  /**
+   * The plan set a plan ticket start (the build chain, a `build ticket <t>` comment) was made for: the
+   * run is refused with plan_not_approved unless the build gate picks exactly this set. Another set for
+   * the same repository and number (a second planner's, say), or none, never builds in its place.
+   */
+  expectedPlanSetId?: string;
+  /**
+   * The agent's planDocument setting is treated as absent for this run: a document send that is not a
+   * plan revision (a repository-store plan document, or any document linked to a planner) runs as a
+   * plain linked-document run, with no plan number, plan note or plan folder.
+   */
+  withoutPlanDocument?: boolean;
 }
 
 export interface DispatchRunResult {
@@ -275,7 +324,7 @@ export function isTransactionUnavailable(err: unknown): boolean {
  * than overwrite whatever landed in between.
  */
 export async function markRunFailedFromExecutorError(
-  db: Pick<DispatchDb, "run">,
+  db: Pick<DispatchDb, "run"> & PlanChainMergeDb,
   runId: string,
   err: unknown,
   selfDefects?: SelfDefectSink,
@@ -288,8 +337,16 @@ export async function markRunFailedFromExecutorError(
       finishedAt: new Date(),
     },
   });
+  if (updated.count === 0) return;
+  // A plan ticket run that never started stops its build chain with a notice (the chain's work runs in
+  // the background; a failure here is logged by name only, never thrown into the executor's path).
+  await planChainHook()
+    ?.onTicketFinished(db, runId)
+    .catch((err: unknown) => {
+      dispatchLog.warn({ errorName: err instanceof Error ? err.name : typeof err, runId }, "plan chain run end failed");
+    });
   // Only the call that made the row failed files (the duplicate call matches zero rows); bounded, never throws.
-  if (updated.count > 0) await fileSelfDefectForRun(selfDefects, runId);
+  await fileSelfDefectForRun(selfDefects, runId);
 }
 
 /**
@@ -950,6 +1007,45 @@ export async function copyRootRepositoryRows(
 }
 
 /**
+ * The plan a continuation's root run was built from (spec §7), or null when the root built from none.
+ * Read before the transaction; the transaction's continuation check decides whether the root may be
+ * continued at all. The root's owner and repository are checked first, cheaply, so another owner's
+ * plan (or another repository's) is never loaded: another owner's root is refused here with the
+ * transaction's own other_owner; a root in another repository gives no recorded plan.
+ */
+async function recordedRootPlan(
+  db: Pick<DispatchDb, "codingRun">,
+  continuesCodingRunId: string,
+  dispatching: { ownerId: string | null; repository: string | undefined },
+): Promise<{ planSetId: string; number: number; versions: BuildPlan["versions"]; ticket: number | null } | null> {
+  const marked = await db.codingRun.findUnique({
+    where: { runId: continuesCodingRunId },
+    select: { runId: true, rootCodingRunId: true },
+  });
+  if (!marked) return null;
+  const root = await db.codingRun.findUnique({
+    where: { runId: marked.rootCodingRunId ?? marked.runId },
+    select: {
+      repository: true,
+      planSetId: true,
+      planNumber: true,
+      planVersions: true,
+      planTicket: true,
+      run: { select: { agent: { select: { ownerId: true } } } },
+    },
+  });
+  if (!root) return null;
+  const rootOwnerId = root.run?.agent?.ownerId ?? null;
+  if (dispatching.ownerId === null || rootOwnerId === null || rootOwnerId !== dispatching.ownerId) {
+    throw new ContinuationRefusedError("other_owner");
+  }
+  if (dispatching.repository === undefined || !sameRepository(root.repository, dispatching.repository)) return null;
+  const versions = readPlanVersions(root.planVersions);
+  if (!root.planSetId || root.planNumber === null || !versions) return null;
+  return { planSetId: root.planSetId, number: root.planNumber, versions, ticket: root.planTicket };
+}
+
+/**
  * Persists every detached run input in one transaction, then invokes the
  * executor only after commit. A null result means the caller's transactional
  * claim was no longer valid (for example, a schedule was already claimed).
@@ -974,8 +1070,18 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       kind: true,
       ownerId: true,
       budgetGroupId: true,
+      systemPrompt: true,
       codingProfile: {
-        select: { repository: true, baseRef: true, services: true, gitHistoryDepth: true, gitHistoryFull: true },
+        select: {
+          defaultTask: true,
+          repository: true,
+          baseRef: true,
+          services: true,
+          gitHistoryDepth: true,
+          gitHistoryFull: true,
+          planDocument: true,
+          buildFromPlan: true,
+        },
       },
     },
   });
@@ -998,7 +1104,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   // A continuation takes its root's rows instead, and a deferred run resolves them when it starts.
   const setRefusalOf = (err: unknown): string | undefined =>
     options.trigger === "scheduled" &&
-    (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError)
+    (err instanceof RepositorySetRefusedError ||
+      err instanceof RepositoryRefUnreadableError ||
+      err instanceof PlanRefusedError)
       ? err.message
       : undefined;
   let previewPlan: PlannedRunRepository[] | undefined;
@@ -1047,6 +1155,124 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     options.executor.readCodingRepositoryFile
       ? await readKnowledgeIndex(options, previewTarget, declarationRead?.branch, preview.ownerId ?? null)
       : undefined;
+  // Plan files given as input (a revision, B8): bounded before anything is written.
+  try {
+    assertPlanFilesWithinLimits(options.planInputFiles ?? []);
+  } catch (err) {
+    if (err instanceof Error && err.message === "plan_too_large") {
+      throw new PlanRefusedError("plan_too_large", "the plan's input files exceed the plan limits");
+    }
+    throw err;
+  }
+  // Plan documents (spec §2): the number and the planner check are decided here, before the
+  // transaction, so a refusal leaves no Run row behind. attributeRun runs inside the transaction,
+  // after the Run row exists, so the issue is read the way resolvePlanNumber does.
+  // A malformed stored setting is treated as no plan setting (logged by agent id only, never the
+  // value) so a bad row cannot stop every dispatch of the agent.
+  let planSetting: ReturnType<typeof readPlanDocument> = null;
+  if (preview?.kind === "coding" && options.withoutPlanDocument !== true) {
+    try {
+      planSetting = readPlanDocument(preview.codingProfile?.planDocument, preview.ownerId ?? null);
+    } catch {
+      dispatchLog.warn(
+        { agentId: options.agentId },
+        "stored planDocument is malformed; dispatching without plan documents",
+      );
+    }
+  }
+  const planNumber =
+    preview?.kind === "coding" && (planSetting || preview.codingProfile?.buildFromPlan)
+      ? await resolvePlanNumber(options.db, options)
+      : undefined;
+  let planRefusal: string | undefined;
+  if (planSetting && planNumber === undefined) {
+    const err = new PlanRefusedError("plan_number_missing", "a planner run needs an issue or a planNumber");
+    planRefusal = setRefusalOf(err);
+    if (planRefusal === undefined) throw err;
+  }
+  // Plan sections ride in the stored request (R9), never the knowledge slot: a deferred composer
+  // (deferred-coding.ts) composes coding.task from the request later.
+  const planSections: string[] = [];
+  const planRepositoryFolder =
+    planSetting?.store === "repository" && planNumber !== undefined ? planFolderFor(planSetting, planNumber) : null;
+  if (planSetting && planNumber !== undefined && options.planInputFiles === undefined) {
+    planSections.push(
+      plannerTaskNote({
+        store: planSetting.store,
+        folder: planSetting.store === "wardby" ? PLAN_FOLDER_PATH : (planRepositoryFolder as string),
+        number: planNumber,
+      }),
+    );
+  }
+  // Building from an approved plan (spec §7): decided before the transaction so a refusal leaves no
+  // Run row. Its section rides in the stored request (R9) and its files are input rows (R4, R14).
+  let buildPlan: BuildPlan | null = null;
+  let runPlanTicket = options.planTicket ?? null;
+  // The run's repository: the resolved target, or (deferred) the requested or profile repository.
+  // resolveBuildPlan normalizes it and matches it case-insensitively, as the host does.
+  const buildRepository = previewTarget?.repository ?? options.codingRepository ?? preview?.codingProfile?.repository;
+  if (preview?.kind === "coding" && preview.codingProfile?.buildFromPlan && planRefusal === undefined) {
+    try {
+      // A continuation (a fix round, a follow-up) of a root that recorded a plan builds from exactly
+      // the versions its root was built from: no approval gate, so reopening a document never refuses
+      // work on a build already made. Any other continuation passes the gate like a fresh build.
+      const recorded =
+        options.continuesCodingRunId !== undefined
+          ? await recordedRootPlan(options.db, options.continuesCodingRunId, {
+              ownerId: preview.ownerId ?? null,
+              repository: buildRepository,
+            })
+          : null;
+      if (recorded) {
+        runPlanTicket = options.planTicket ?? recorded.ticket;
+        buildPlan = await resolveRecordedBuildPlan(options.db, options.secretCipher, {
+          builderAgentId: options.agentId,
+          planSetId: recorded.planSetId,
+          number: recorded.number,
+          versions: recorded.versions,
+          ...(runPlanTicket !== null ? { ticket: runPlanTicket } : {}),
+        });
+      } else if (planNumber !== undefined && buildRepository) {
+        buildPlan = await resolveBuildPlan(options.db, options.secretCipher, {
+          builderAgentId: options.agentId,
+          builderOwnerId: preview.ownerId ?? null,
+          repository: buildRepository,
+          number: planNumber,
+          ...(options.planTicket !== undefined ? { ticket: options.planTicket } : {}),
+        });
+      }
+    } catch (err) {
+      if (!(err instanceof PlanRefusedError)) throw err;
+      planRefusal = setRefusalOf(err);
+      if (planRefusal === undefined) throw err;
+    }
+    if (buildPlan) planSections.push(buildPlan.taskSection);
+  }
+  // A plan ticket start builds only from the set it was started for, checked after the gate.
+  if (
+    options.expectedPlanSetId !== undefined &&
+    planRefusal === undefined &&
+    buildPlan?.planSetId !== options.expectedPlanSetId
+  ) {
+    const err = new PlanRefusedError("plan_not_approved", "the build would not use the plan set it was started for");
+    planRefusal = setRefusalOf(err);
+    if (planRefusal === undefined) throw err;
+  }
+  const runPlanInputFiles = options.planInputFiles ?? buildPlan?.planInputFiles ?? [];
+  if (planSections.length > 0 && planRefusal === undefined) {
+    try {
+      composeCodingTask(
+        preview?.systemPrompt,
+        withPlanSections(options.codingTask ?? preview?.codingProfile?.defaultTask ?? "", planSections),
+      );
+    } catch {
+      // Refused like a missing number: a scheduled planner commits a refused run rather than
+      // throwing on every tick.
+      const err = new PlanRefusedError("plan_too_large", "the plan instructions do not fit the coding task limit");
+      planRefusal = setRefusalOf(err);
+      if (planRefusal === undefined) throw err;
+    }
+  }
   const persistOnce = () =>
     options.db.$transaction(
       async (tx) => {
@@ -1131,13 +1357,13 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             if ("refusal" in resolved) servicesRefusal = resolved.refusal;
             else services = resolved.services;
           }
-          if (!modelFailure && !servicesRefusal && !extrasRefusal && !inTxSetRefusal) {
+          if (!modelFailure && !servicesRefusal && !extrasRefusal && !inTxSetRefusal && !planRefusal) {
             codingBudget = await reserveCodingBudget(tx, agent, now, options);
           }
         }
         const refusal = modelFailure
           ? undefined
-          : (servicesRefusal ?? inTxSetRefusal ?? extrasRefusal ?? codingBudget?.refusal);
+          : (servicesRefusal ?? inTxSetRefusal ?? extrasRefusal ?? planRefusal ?? codingBudget?.refusal);
 
         const run = await tx.run.create({
           data: {
@@ -1193,8 +1419,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
         if (agent.kind === "coding" && agent.codingProfile && target && codingBudget && !refusal) {
           // Checked above too; repeated so the provider type narrows here.
           assertCodingProviderModel(agent.codingProfile.provider, agent.model);
-          const request = options.codingTask ?? agent.codingProfile.defaultTask;
-          if (!request) throw new Error(`Coding agent "${agent.id}" requires a task.`);
+          const baseRequest = options.codingTask ?? agent.codingProfile.defaultTask;
+          if (!baseRequest) throw new Error(`Coding agent "${agent.id}" requires a task.`);
+          const request = withPlanSections(baseRequest, planSections);
           // The worker sees only the task text, so the agent's own instructions, and the
           // services note, ride in it. Deferred, the task is stored raw and composed when the
           // run starts; composing here only checks its size, so it throws exactly as today.
@@ -1246,6 +1473,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           await tx.codingRun.create({
             data: {
               runId: run.id,
+              planNumber: planNumber ?? null,
               budgetLimitedBy: codingBudget.limitedBy ?? null,
               issueProvider: attributed?.provider ?? null,
               issueKey: attributed?.key ?? null,
@@ -1288,8 +1516,23 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
                 ? packageAuditMode
                 : null,
               services,
+              // The field's only writer (R5). A repository-store planner writes into the repository,
+              // never to the plan-files recorder: a run holds one store.
+              collectPlanFiles:
+                planSetting?.store !== "repository" &&
+                (options.collectPlanFiles === true || planSetting?.store === "wardby"),
+              planRepositoryPath: planRepositoryFolder,
+              // The approved versions this run builds from (spec §7), names and numbers only.
+              ...(buildPlan
+                ? {
+                    planSetId: buildPlan.planSetId,
+                    planVersions: buildPlan.versions,
+                  }
+                : {}),
+              planTicket: runPlanTicket,
             },
           });
+          await savePlanInputFiles(tx, run.id, runPlanInputFiles);
           // The run's repository set, fixed here with the CodingRun (#537 §2).
           if (rootCodingRunId) {
             await copyRootRepositoryRows(tx, rootCodingRunId, run.id);

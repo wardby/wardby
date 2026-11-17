@@ -37,6 +37,24 @@ export const PREPARE_DEPENDENCIES_TOOL = "wardby_prepare_dependencies";
  */
 export const GIT_CHECK_TOOL = "wardby_git_check";
 export const RESULT_BUNDLE_TOOL = "wardby_result_bundle";
+/**
+ * The worker's plan-file calls (claude-coding-worker/plan-files.ts): place the run's input files
+ * before any command, then list and read the folder after the agent has finished. Never the
+ * agent's: the worker's SDK options disallow them (sdk.ts). The folder is the agent's own scratch,
+ * so they give a command nothing it lacks. Answers are fixed codes, never file content in errors.
+ */
+export const PLAN_PLACE_TOOL = "wardby_plan_place";
+export const PLAN_LIST_TOOL = "wardby_plan_list";
+export const PLAN_READ_TOOL = "wardby_plan_read";
+/** plan-folder.mjs PLAN_ROOT and protocol.ts PLAN_FOLDER_PATH; main.test.mjs keeps them equal. */
+export const PLAN_ROOT = "/tmp/wardby-plan";
+/** base64Length(PLAN_FILES_LIMITS.maxFileBytes); main.test.mjs keeps it equal to the shared limit. */
+export const PLAN_PLACE_MAX_BASE64 = 1_398_104;
+/** PLAN_FILES_LIMITS.maxFileBytes; main.test.mjs keeps it equal to the shared limit. */
+export const PLAN_PLACE_MAX_BYTES = 1024 * 1024;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+/** The plan folder module (src/coding-worker/plan-folder.mjs), shipped to /opt/wardby/coding-worker/. */
+const loadDefaultPlanFolder = () => import("../coding-worker/plan-folder.mjs");
 const COMMIT = /^[0-9a-f]{40}$/;
 const RESULT_BUNDLE_CODE = /^result_bundle_[a-z_]+$/;
 
@@ -73,6 +91,7 @@ function dependencyGate(setup, workspacePath, loadDependencyCache) {
       }
     })());
   return {
+    started: () => commandStarted,
     /**
      * `deadlineAt`: the run's deadline (ISO), which the worker passes; the cache then takes at most
      * half the time left before it (dependencyCacheTimeLimit), the budget walk included. `signal`:
@@ -166,7 +185,7 @@ function gitTools({ workspacePath, reposRoot, gitBinary, loadResultBundle }) {
   };
 }
 
-function toolServer(setup, gate, workspacePath, git) {
+function toolServer(setup, gate, workspacePath, git, plan) {
   const server = new McpServer({ name: "wardby_tools", version: "1.0.0" });
   const limits = commandTimeoutLimits(setup);
   server.registerTool(
@@ -233,6 +252,79 @@ function toolServer(setup, gate, workspacePath, git) {
       ],
     }),
   );
+  const listed = { files: undefined };
+  server.registerTool(
+    PLAN_PLACE_TOOL,
+    {
+      description: "Wardby internal: place one plan file before the agent starts.",
+      inputSchema: { path: z.string().min(1).max(512), content_base64: z.string().max(PLAN_PLACE_MAX_BASE64) },
+    },
+    async ({ path, content_base64 }) => {
+      const answer = async () => {
+        if (gate.started()) return { ok: false, reason: "already_started" };
+        try {
+          const module = await plan.load();
+          if (!module.isSafePlanPath(path)) return { ok: false, reason: "plan_path_invalid" };
+          // No fixed code names a malformed encoding, so it is the folder's own: plan_folder_invalid.
+          if (!BASE64.test(content_base64)) return { ok: false, reason: "plan_folder_invalid" };
+          if (Buffer.from(content_base64, "base64").length > PLAN_PLACE_MAX_BYTES) {
+            return { ok: false, reason: "plan_too_large" };
+          }
+          await module.placePlanFiles(plan.root, [{ path, contentBase64: content_base64 }]);
+          return { ok: true };
+        } catch (error) {
+          return {
+            ok: false,
+            reason:
+              error instanceof Error && error.message === "plan_path_invalid"
+                ? "plan_path_invalid"
+                : "plan_folder_invalid",
+          };
+        }
+      };
+      return { content: [{ type: "text", text: JSON.stringify(await answer()) }] };
+    },
+  );
+  server.registerTool(
+    PLAN_LIST_TOOL,
+    { description: "Wardby internal: list the plan folder after the agent has finished.", inputSchema: {} },
+    async () => {
+      const answer = async () => {
+        try {
+          const module = await plan.load();
+          const result = await module.collectPlanFolder(plan.root);
+          if (result.status !== "ok") {
+            listed.files = undefined;
+            return { ok: false, reason: result.error === "plan_too_large" ? "plan_too_large" : "plan_folder_invalid" };
+          }
+          listed.files = new Map(result.files.map((file) => [file.path, file.contentBase64]));
+          return {
+            ok: true,
+            paths: result.files.map((file) => file.path),
+            skipped: result.skipped,
+            skippedUnnamed: result.skippedUnnamed,
+          };
+        } catch {
+          listed.files = undefined;
+          return { ok: false, reason: "plan_folder_invalid" };
+        }
+      };
+      return { content: [{ type: "text", text: JSON.stringify(await answer()) }] };
+    },
+  );
+  server.registerTool(
+    PLAN_READ_TOOL,
+    {
+      description: "Wardby internal: one plan file from the last list.",
+      inputSchema: { path: z.string().min(1).max(512) },
+    },
+    async ({ path }) => {
+      const content = listed.files?.get(path);
+      const text =
+        content === undefined ? { ok: false, reason: "plan_path_invalid" } : { ok: true, content_base64: content };
+      return { content: [{ type: "text", text: JSON.stringify(text) }] };
+    },
+  );
   return server;
 }
 
@@ -245,6 +337,8 @@ export async function startToolRunner(
     gitBinary = "git",
     loadDependencyCache = loadDefaultDependencyCache,
     loadResultBundle = loadDefaultResultBundle,
+    planRoot = PLAN_ROOT,
+    loadPlanFolder = loadDefaultPlanFolder,
   } = {},
 ) {
   if (!isAbsolute(socketPath)) throw new Error("tool_socket_path_invalid");
@@ -252,8 +346,9 @@ export async function startToolRunner(
   await rm(socketPath, { force: true });
   const gate = dependencyGate(setup, workspacePath, loadDependencyCache);
   const git = gitTools({ workspacePath, reposRoot, gitBinary, loadResultBundle });
+  const plan = { root: planRoot, load: loadPlanFolder };
   const server = createServer((socket) => {
-    const mcp = toolServer(setup, gate, workspacePath, git);
+    const mcp = toolServer(setup, gate, workspacePath, git, plan);
     // A closed connection ends the server, which aborts its in-flight calls' signals (a prepare stops).
     socket.once("close", () => void mcp.close().catch(() => undefined));
     void mcp.connect(new StdioServerTransport(socket, socket)).catch(() => socket.destroy());

@@ -6,7 +6,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { chromium, type Browser, type ConsoleMessage, type Locator, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { publishVersion } from "../core/documents/service.js";
+import { forceApprove, submitForReview } from "../core/documents/review.js";
+import { createDocument, publishVersion } from "../core/documents/service.js";
 import { startTestWebServer, TEST_CIPHER, type TestWebServer } from "./test-server.test-support.js";
 
 /** GrapesJS 0.23.9's canvas iframe. */
@@ -987,3 +988,96 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     }, 90_000);
   },
 );
+
+describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath()))("plan bar (browser)", () => {
+  let server: TestWebServer;
+  let browser: Browser;
+  beforeAll(async () => {
+    server = await startTestWebServer({ assetsRoot: "dist/web-assets" });
+    browser = await chromium.launch();
+  }, 60_000);
+  afterAll(async () => {
+    await browser?.close();
+    await server?.close();
+  });
+
+  it("shows the set's documents, links between them, and follows the other document's review live", async () => {
+    const plan = await server.design({
+      title: "Plan title",
+      kind: "document",
+      markdown: "# Plan\n\nSee [the api](api.md) and [gone](missing.md).\n",
+      access: "owner",
+      share: "view",
+    });
+    const owner = plan.principalIds.owner;
+    const api = (
+      await createDocument(server.db, TEST_CIPHER, { ownerId: owner, title: "Api title", markdown: "# Api\n" })
+    ).id;
+    const agent = await server.db.agent.create({
+      data: { name: `plan-bar-${api}`, systemPrompt: "p", model: "m", budgetUsd: 1, ownerId: owner },
+    });
+    try {
+      const set = await server.db.planSet.create({
+        data: { agentId: agent.id, repository: `acme/${api}`, number: 12, store: "wardby", createdByRunId: "run" },
+      });
+      await server.db.document.update({
+        where: { id: plan.documentId },
+        data: { planSetId: set.id, planPath: "plan.md" },
+      });
+      await server.db.document.update({ where: { id: api }, data: { planSetId: set.id, planPath: "api.md" } });
+
+      const context = await browser.newContext();
+      await context.addCookies([plan.ownerCookie]);
+      const page = await context.newPage();
+      const seen = watch(page, server.origin);
+      await page.goto(`${server.origin}/d/${plan.documentId}`);
+      const bar = page.getByRole("navigation", { name: "Plan" });
+      await expect
+        .poll(() => bar.locator(".plan-count").textContent(), { timeout: 20_000 })
+        .toBe("Plan 12 · 0 of 2 approved");
+      expect(await bar.locator("a").count()).toBe(2);
+      const current = bar.locator('a[aria-current="page"]');
+      expect(await current.count()).toBe(1);
+      expect(await current.getAttribute("href")).toBe(`/d/${plan.documentId}`);
+      expect(await current.textContent()).toContain("Plan title");
+      expect(await bar.locator(`a[href="/d/${api}"]`).textContent()).toContain("Api title");
+      // The link to api.md opens its page; the one that matches nothing is plain text with a warning.
+      expect(await page.locator(".editor a", { hasText: "the api" }).getAttribute("href")).toBe(`/d/${api}`);
+      expect(await page.locator(".editor a", { hasText: "gone" }).count()).toBe(0);
+      expect(await page.locator(".editor .plan-link-missing").textContent()).toBe("gone");
+      expect(await page.locator(".plan-warnings").textContent()).toContain(
+        "Links to files that are not in plan 12: missing.md",
+      );
+
+      // The other document is approved: the bar follows without a reload.
+      const viewer = { kind: "principal" as const, principalId: owner };
+      await submitForReview(server.db, { documentId: api, viewer, reviewers: [plan.principalIds.second] });
+      await forceApprove(server.db, TEST_CIPHER, { documentId: api, viewer, note: "ok" });
+      await expect
+        .poll(() => bar.locator(".plan-count").textContent(), { timeout: 20_000 })
+        .toBe("Plan 12 · 1 of 2 approved");
+      expect(await bar.locator(`a[href="/d/${api}"] .plan-state`).textContent()).toBe("Approved");
+      expect(seen.violations).toEqual([]);
+      expect(seen.errors).toEqual([]);
+      await context.close();
+
+      // A share-link visitor sees only the document the link opens, and no link into the rest of the set.
+      const visitor = await browser.newContext();
+      const shared = await visitor.newPage();
+      await shared.goto(`${server.origin}${plan.sharePath!}`);
+      const sharedBar = shared.getByRole("navigation", { name: "Plan" });
+      await expect.poll(() => sharedBar.locator(".plan-count").textContent(), { timeout: 20_000 }).toBe("Plan 12");
+      // No count, no link to any member route (not even the current chip), no unresolved-links warning.
+      expect(await sharedBar.locator("a").count()).toBe(0);
+      expect(await sharedBar.locator('[aria-current="page"]').getAttribute("href")).toBeNull();
+      expect(await shared.locator(".plan-warnings:not([hidden])").count()).toBe(0);
+      expect(await shared.locator(".editor a", { hasText: "the api" }).count()).toBe(0);
+      expect(await shared.locator(`a[href="/d/${api}"]`).count()).toBe(0);
+      expect(await shared.content()).not.toContain("Api title");
+      await visitor.close();
+    } finally {
+      await server.db.document.deleteMany({ where: { id: api } });
+      await server.db.agent.delete({ where: { id: agent.id } });
+    }
+  }, 90_000);
+});

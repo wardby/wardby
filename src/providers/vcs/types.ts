@@ -167,6 +167,8 @@ export interface FinalizeChangesDetails {
   issue?: { key: string; url?: string; trackerName?: string };
   /** The same-repository issue the run came from (a mention on a GitHub issue): the body's `From issue #N` line (a link; it never closes the issue). */
   issueNumber?: number;
+  /** The plan a build used (`Plan <n>: plan.md v3, …`; names and version numbers only): the line after the issue line. */
+  planLine?: string;
   /** The request's other pull requests (control-plane rows): the PR body's Related pull requests section. */
   related?: RelatedPullRequestsInput;
   /** Fix rounds: the control plane's record of the description wardby last wrote; enables the description update. */

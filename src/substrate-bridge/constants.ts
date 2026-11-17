@@ -94,6 +94,11 @@ export const REGISTRY_TOKEN_ENV = "WARDBY_REGISTRY_TOKEN";
 /** A run's registry-only token (coding-worker/credentials.ts REGISTRY_TOKEN_SHAPE). */
 export const REGISTRY_TOKEN_SHAPE = /^rrg_[A-Za-z0-9_-]{43}$/;
 
+/** Where the workers write their plan folder's output (coding/protocol.ts PLAN_FILES_ARTIFACT under /run/wardby/output). */
+export const PLAN_FILES_OUTPUT_PATH = "/run/wardby/output/plan-files.json";
+/** The plan folder (coding/protocol.ts PLAN_FOLDER_PATH): removed between warm rounds by the tool bridge. */
+export const PLAN_FOLDER = "/tmp/wardby-plan";
+
 /** Where extra repositories live (providers/jobs/storage-init.ts REPOSITORY_MOUNT_ROOT). */
 export const REPOSITORY_MOUNT_ROOT = "/repos";
 /** coding/protocol.ts MAX_RUN_REPOSITORIES_IN_INPUT and CODING_REPOSITORY_NAME (constants.test.ts keeps them equal). */

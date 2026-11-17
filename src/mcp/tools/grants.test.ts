@@ -67,7 +67,16 @@ function fakeDb(
     webhook: {},
     document: {
       findUnique: async ({ where }: { where: { id: string } }) =>
-        where.id === "d1" ? { id: "d1", ownerId: "owner" } : null,
+        where.id === "d1"
+          ? { id: "d1", ownerId: "owner", planSetId: null }
+          : where.id === "d2"
+            ? {
+                id: "d2",
+                ownerId: "owner",
+                planSetId: "set1",
+                planSet: { accessAgent: { id: "a1", ownerId: "owner" } },
+              }
+            : null,
     },
     $queryRaw: async () => [],
   };
@@ -276,6 +285,28 @@ describe("grant_access / revoke_access / list_access", () => {
     expect(refused.isError).toBe(true);
     expect(text(refused)).toMatch(/owner/);
     await reader.client.close();
+  });
+
+  it("a principal who reaches a plan document only through its access agent gets 403, like other non-owners", async () => {
+    const db = fakeDb(agents, people, [
+      { resourceType: "agent", resourceId: "a1", principalId: "alice", level: "read" },
+    ]);
+    const alice = await connect(db, ctx(db, "alice"));
+    const res = await alice.client.callTool({
+      name: "grant_access",
+      arguments: { resourceType: "document", resourceId: "d2", grantee: { subject: "sub-bob" }, level: "read" },
+    });
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/only its owner/);
+    // Someone with nothing still gets 404.
+    const bob = await connect(db, ctx(db, "bob"));
+    const none = await bob.client.callTool({
+      name: "list_access",
+      arguments: { resourceType: "document", resourceId: "d2" },
+    });
+    expect(text(none)).toMatch(/not found/);
+    await alice.client.close();
+    await bob.client.close();
   });
 
   it("refuses self-grants, unknown subjects, bad levels and other types", async () => {

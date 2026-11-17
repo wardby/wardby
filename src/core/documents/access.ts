@@ -14,7 +14,10 @@ export type DocumentAccess = "none" | "read" | "comment" | "write" | "owner";
 export type DocumentDb = Pick<PrismaClient, "document" | "documentShareLink" | "resourceGrant">;
 
 export async function documentAccess(db: DocumentDb, documentId: string, viewer: Viewer): Promise<DocumentAccess> {
-  const doc = await db.document.findUnique({ where: { id: documentId }, select: { id: true, ownerId: true } });
+  const doc = await db.document.findUnique({
+    where: { id: documentId },
+    select: { id: true, ownerId: true, planSetId: true },
+  });
   if (!doc) return "none";
   return accessTo(db, doc, viewer);
 }
@@ -32,14 +35,40 @@ async function linkAccess(
   return link.permission === "comment" ? "comment" : link.permission === "view" ? "read" : "none";
 }
 
-async function accessTo(db: DocumentDb, doc: { id: string; ownerId: string }, viewer: Viewer): Promise<DocumentAccess> {
-  if (viewer.kind === "principal") {
-    const own = await effectiveAccess(db, "document", doc, viewer.principalId, { operator: viewer.operator });
-    if (!viewer.shareLinkId) return own;
-    const viaLink = await linkAccess(db, doc, viewer.shareLinkId);
-    return accessRank("document", viaLink) > accessRank("document", own) ? viaLink : own;
+type AccessDoc = { id: string; ownerId: string; planSetId: string | null };
+
+function higher(a: DocumentAccess, b: DocumentAccess): DocumentAccess {
+  return accessRank("document", a) >= accessRank("document", b) ? a : b;
+}
+
+/**
+ * A plan document is open to comment for the people of the agent that was triggered (PlanSet.accessAgentId,
+ * docs/private spec §6): its owner and anyone with any grant on it, everyone grants included. Live, never
+ * copied: losing the agent loses the plan. Never more than comment. A removed access agent (SetNull) or a
+ * document outside a plan set gives nothing here.
+ */
+async function planAccess(db: DocumentDb, doc: AccessDoc, principalId: string): Promise<"none" | "comment"> {
+  if (!doc.planSetId) return "none";
+  const plan = await db.document.findUnique({
+    where: { id: doc.id },
+    select: { planSet: { select: { accessAgent: { select: { id: true, ownerId: true } } } } },
+  });
+  const agent = plan?.planSet?.accessAgent;
+  if (!agent) return "none";
+  return atLeast("agent", await effectiveAccess(db, "agent", agent, principalId), "read") ? "comment" : "none";
+}
+
+async function accessTo(db: DocumentDb, doc: AccessDoc, viewer: Viewer): Promise<DocumentAccess> {
+  if (viewer.kind !== "principal") return linkAccess(db, doc, viewer.shareLinkId);
+  let best: DocumentAccess = await effectiveAccess(db, "document", doc, viewer.principalId, {
+    operator: viewer.operator,
+  });
+  if (viewer.shareLinkId) best = higher(best, await linkAccess(db, doc, viewer.shareLinkId));
+  // The plan lookup runs only for plan documents, and only when the cheaper checks gave less than comment.
+  if (accessRank("document", best) < accessRank("document", "comment")) {
+    best = higher(best, await planAccess(db, doc, viewer.principalId));
   }
-  return linkAccess(db, doc, viewer.shareLinkId);
+  return best;
 }
 
 export async function requireDocumentAccess(

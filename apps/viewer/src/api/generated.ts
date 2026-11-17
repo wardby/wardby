@@ -48,6 +48,9 @@ export interface GraphSnapshot {
         }
       | {
           kind: "comment";
+        }
+      | {
+          kind: "plan_approved";
         };
     turns: number;
     tokensIn: number;
@@ -158,6 +161,9 @@ export interface RunDetail {
       }
     | {
         kind: "comment";
+      }
+    | {
+        kind: "plan_approved";
       };
   turns: number;
   tokensIn: number;
@@ -247,6 +253,21 @@ export interface RunDetail {
       image: string;
       envNames: string[];
     }[];
+    /**
+     * The other repositories of a multi-repository coding run, in order (the default repository is `repository` above, with its pull request in `result`); empty for a single-repository run. Absent from servers older than the release that added it.
+     */
+    repositories: {
+      name: string;
+      access: "read" | "write";
+      asRemote: boolean;
+      repository: string;
+      requestedRef: string | null;
+      resolvedSha: string | null;
+      pullRequestNumber: number | null;
+      pullRequestUrl: string | null;
+      resultBranch: string | null;
+      outcome: string | null;
+    }[];
   } | null;
 }
 
@@ -287,7 +308,7 @@ export type ViewerEvent =
     };
 
 export interface InfraInfo {
-  launcher: "local" | "docker" | "kubernetes";
+  launcher: "local" | "docker" | "kubernetes" | "substrate";
   kubernetes: {
     namespace: string;
     platform: string;

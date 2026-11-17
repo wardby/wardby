@@ -224,6 +224,12 @@ export interface JobLauncher {
    * when larger. Never cached in the job record: it is not redacted yet. Call before `remove`.
    */
   readTranscript?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
+  /**
+   * The run's plan-files output (the worker's plan-files.json), at most `maxBytes`; undefined when
+   * there is none or the job's storage is gone. Throws `plan_files_too_large` when larger. Never
+   * cached in the job record: it is not redacted yet. Call before `remove`.
+   */
+  readPlanFiles?: (handle: JobHandle, maxBytes: number) => Promise<string | undefined>;
   stop: (handle: JobHandle, reason?: string) => Promise<void>;
   remove: (handle: JobHandle) => Promise<void>;
 }

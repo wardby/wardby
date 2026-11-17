@@ -19,12 +19,13 @@
  * Errors are codes; nothing here logs.
  */
 import { Prisma, type PrismaClient } from "#prisma";
-import { atLeast, effectiveAccess, principalGranteeKey } from "../grants.js";
+import { atLeast, principalGranteeKey } from "../grants.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import { documentAccess, requireDocumentAccess, type Viewer } from "./access.js";
 import { mentionCandidates, principalNames } from "./comments.js";
 import { notifyDocumentChange } from "./events.js";
+import { planReviewHook } from "../plans/approval.js";
 import { loadContent } from "./files.js";
 import { formatFor } from "./formats/index.js";
 import { DOCUMENT_WRITE_ATTEMPTS, MAX_REVIEW_EVENTS, MAX_REVIEW_NOTE_CHARS, MAX_REVIEWERS } from "./limits.js";
@@ -238,7 +239,9 @@ const parseRef = (ref: string): Ref => (ref.startsWith("guest:") ? { guestId: re
 
 /** Raises a principal to comment access on the document when they hold less; never lowers a grant. */
 async function ensureCommentAccess(tx: Tx, doc: { id: string; ownerId: string }, principalId: string, by: string) {
-  if (atLeast("document", await effectiveAccess(tx, "document", doc, principalId), "comment")) return;
+  // Through the shared rule, so access that comes live from a plan's access agent is not copied into a grant.
+  const held = await documentAccess(tx, doc.id, { kind: "principal", principalId });
+  if (atLeast("document", held, "comment")) return;
   const granteeKey = principalGranteeKey(principalId);
   await tx.resourceGrant.upsert({
     where: { resourceType_resourceId_granteeKey: { resourceType: "document", resourceId: doc.id, granteeKey } },
@@ -315,6 +318,7 @@ export async function submitForReview(
     });
   });
   await notifyDocumentChange(db, input.documentId, "review");
+  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
   return getReviewView(db, input.documentId, input.viewer);
 }
 
@@ -367,7 +371,11 @@ export async function reviewDocument(
     });
     return true;
   });
-  if (changed) await notifyDocumentChange(db, input.documentId, "review");
+  if (changed) {
+    await notifyDocumentChange(db, input.documentId, "review");
+    // Spec §7b: the verdict that approves a plan set's last document notifies or starts a build.
+    await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
+  }
   return getReviewView(db, input.documentId, input.viewer);
 }
 
@@ -414,6 +422,7 @@ export async function forceApprove(
     return ids;
   });
   await notifyDocumentChange(db, input.documentId, "review");
+  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
   return { view: await getReviewView(db, input.documentId, input.viewer), overridden };
 }
 
@@ -491,6 +500,7 @@ export async function reopenDocument(
   // As a publish does (open pages load the new version), and as a review action does.
   await notifyDocumentChange(db, input.documentId, "version");
   await notifyDocumentChange(db, input.documentId, "review");
+  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
   return getReviewView(db, input.documentId, input.viewer);
 }
 
@@ -524,6 +534,7 @@ export async function setArchived(
     });
   });
   await notifyDocumentChange(db, input.documentId, "review");
+  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
   return getReviewView(db, input.documentId, input.viewer);
 }
 

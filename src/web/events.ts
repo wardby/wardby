@@ -8,10 +8,14 @@
  *   is required at open (404/403 otherwise). GET only, so no CSRF; the
  *   transport's host and Origin rules apply as to every request.
  * - Frames: `retry: 3000`, `hello`, then `thread` | `comment` | `version` |
- *   `share` events whose data is `{documentId, kind}` only — never titles,
+ *   `share` | `review` events whose data is `{documentId, kind}` only — never titles,
  *   Markdown, comment bodies or names (the client refetches through the
  *   access-checked API). `status` and `resync` follow the documents bus's
  *   LISTEN connection, as on the Viewer stream.
+ * - A plan document's stream also carries the `review` and `version` events of
+ *   the other documents in its plan set (for the plan bar), each only after
+ *   checking that the document is still in the set and that this viewer can
+ *   read it — a share-link guest hears only about documents they can open.
  * - Every heartbeat re-validates the session without refreshing it (expired,
  *   idle, revoked share link, disabled user) and the viewer's read access;
  *   any failure ends the stream. The heartbeat is not activity, but the
@@ -21,8 +25,8 @@
  *   one answers 429 `web_rate_limited`); all end on server shutdown.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { documentAccess, requireDocumentAccess } from "../core/documents/access.js";
-import type { DocumentEventBus } from "../core/documents/events.js";
+import { documentAccess, requireDocumentAccess, type Viewer } from "../core/documents/access.js";
+import type { DocumentEvent, DocumentEventBus } from "../core/documents/events.js";
 import { openSseStream } from "../mcp/transport/sse-stream.js";
 import { SSE_MAX_BUFFERED_BYTES } from "../viewer/http.js";
 import { SSE_HEARTBEAT_MS } from "../viewer/limits.js";
@@ -63,6 +67,20 @@ export function createDocumentStreams(options: {
   };
 }
 
+/** Events of the other documents of a plan set that the page's plan bar follows. */
+const SET_EVENT_KINDS = new Set<DocumentEvent["kind"]>(["review", "version"]);
+
+/** Whether another document is in the stream's plan set and the viewer can read it (checked per event, never cached). */
+async function inSetAndReadable(deps: WebDeps, planSetId: string, documentId: string, viewer: Viewer) {
+  try {
+    const doc = await deps.db.document.findUnique({ where: { id: documentId }, select: { planSetId: true } });
+    if (doc?.planSetId !== planSetId) return false;
+    return (await documentAccess(deps.db, documentId, viewer)) !== "none";
+  } catch {
+    return false;
+  }
+}
+
 export async function openDocumentStream(
   req: IncomingMessage,
   res: ServerResponse,
@@ -73,7 +91,23 @@ export async function openDocumentStream(
   if (!streams) throw new Error("not_found");
   const ctx = await resolveContext(req, deps);
   if (ctx.kind === "none") throw new Error("web_session_required");
-  await requireDocumentAccess(deps.db, documentId, await requestViewer(req, deps, ctx), "read");
+  const viewer = await requestViewer(req, deps, ctx);
+  await requireDocumentAccess(deps.db, documentId, viewer, "read");
+  const planSetId =
+    (await deps.db.document.findUnique({ where: { id: documentId }, select: { planSetId: true } }))?.planSetId ?? null;
+  // The set's document ids, a cheap pre-filter ahead of the per-event check (which still decides). Refreshed
+  // on the stream's own events and each heartbeat, so a document that joins the set is followed soon after.
+  let setIds = new Set<string>();
+  const refreshSetIds = async () => {
+    if (!planSetId) return;
+    try {
+      const rows = await deps.db.document.findMany({ where: { planSetId }, select: { id: true } });
+      setIds = new Set(rows.map((r) => r.id));
+    } catch {
+      // Keep the previous snapshot.
+    }
+  };
+  await refreshSetIds();
   const sessionId = ctx.session.id;
   const open = streams.perSession.get(sessionId) ?? 0;
   if (open >= streams.maxPerSession) throw new Error("web_rate_limited");
@@ -82,6 +116,7 @@ export async function openDocumentStream(
     heartbeatMs: streams.heartbeatMs,
     maxBufferedBytes: streams.maxBufferedBytes,
     beforeHeartbeat: async () => {
+      void refreshSetIds();
       const now = await resolveContext(req, deps, { touch: false });
       if (now.kind === "none" || now.session.id !== sessionId) return false;
       return (await documentAccess(deps.db, documentId, await requestViewer(req, deps, now))) !== "none";
@@ -96,13 +131,28 @@ export async function openDocumentStream(
   });
 
   stream.send(`event: hello\ndata: ${JSON.stringify({ connected: streams.bus.connected() })}\n\n`);
+  // Ids and a kind only: the bus schema allows nothing else.
+  const forward = (event: DocumentEvent) =>
+    stream.send(
+      `event: ${event.kind}\ndata: ${JSON.stringify({ documentId: event.documentId, kind: event.kind })}\n\n`,
+    );
+  // Events pass through one queue, so a plan-set event checked against the database keeps its place.
+  let queue: Promise<void> = Promise.resolve();
+  const enqueue = (task: () => void | Promise<void>) => {
+    queue = queue.then(task).catch(() => undefined);
+  };
   stream.onEnd(
     streams.bus.subscribe((event) => {
-      if (event.documentId !== documentId) return;
-      // Ids and a kind only: the bus schema allows nothing else.
-      stream.send(
-        `event: ${event.kind}\ndata: ${JSON.stringify({ documentId: event.documentId, kind: event.kind })}\n\n`,
-      );
+      if (event.documentId === documentId) {
+        return enqueue(async () => {
+          forward(event);
+          if (event.kind === "version") await refreshSetIds();
+        });
+      }
+      if (!planSetId || !SET_EVENT_KINDS.has(event.kind) || !setIds.has(event.documentId)) return;
+      enqueue(async () => {
+        if (await inSetAndReadable(deps, planSetId, event.documentId, viewer)) forward(event);
+      });
     }),
   );
   stream.onEnd(

@@ -37,6 +37,7 @@ import {
   MAX_CODING_INPUT_BYTES,
   MAX_DEBUG_TRACE_LINE_BYTES,
   parseCodingWorkerOutputJson,
+  PLAN_FILES_ARTIFACT,
 } from "../../coding/protocol.js";
 import { CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "./docker-isolation.js";
 import { parseWorkerDiagnosticLine, type WorkerDiagnostic } from "./docker.js";
@@ -268,6 +269,7 @@ const WORKSPACE_STORAGE = `${STORAGE_ROOT}/workspace`;
 const INPUT_STORAGE = `${STORAGE_ROOT}/input`;
 const RESULT_PATH = `${STORAGE_ROOT}/output/result.json`;
 const TRANSCRIPT_PATH = `${STORAGE_ROOT}/output/session.jsonl`;
+const PLAN_FILES_PATH = `${STORAGE_ROOT}/output/${PLAN_FILES_ARTIFACT}`;
 /** Stands in for the proxy ClusterIP when building a pod only to count its resources. */
 const QUOTA_PROBE_PROXY_IP = "10.0.0.1";
 
@@ -1448,6 +1450,19 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   async readTranscript(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
+    return this.readOutputFile(handle, TRANSCRIPT_PATH, maxBytes, "transcript_too_large");
+  }
+
+  async readPlanFiles(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
+    return this.readOutputFile(handle, PLAN_FILES_PATH, maxBytes, "plan_files_too_large");
+  }
+
+  private async readOutputFile(
+    handle: JobHandle,
+    path: string,
+    maxBytes: number,
+    tooLarge: string,
+  ): Promise<string | undefined> {
     const names = this.namesFor(handle);
     const found = names && (await this.readRecord(names));
     if (!names || !found) return undefined;
@@ -1458,7 +1473,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
         this.namespace,
         names.pod,
         KEEPER_CONTAINER,
-        ["head", "-c", String(maxBytes + 1), TRANSCRIPT_PATH],
+        ["head", "-c", String(maxBytes + 1), path],
         { stdout: collector, timeoutMs: SHORT_EXEC_TIMEOUT_MS },
       );
       if (!collector.writableEnded) collector.end();
@@ -1469,7 +1484,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       return undefined;
     }
     if (exitCode !== 0) return undefined;
-    if (collector.exceeded) throw new Error("transcript_too_large");
+    if (collector.exceeded) throw new Error(tooLarge);
     return collector.text();
   }
 

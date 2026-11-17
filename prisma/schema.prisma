@@ -32,6 +32,8 @@ model Agent {
   runs                  Run[]
   kind                  AgentKind           @default(native)
   codingProfile         CodingAgentProfile?
+  planSets              PlanSet[]           @relation("PlanSetPlanner")
+  accessPlanSets        PlanSet[]           @relation("PlanSetAccess")
 
   // Phase 2: scheduling. `schedule` is a cron expression; null = manual-only.
   schedule        String?
@@ -354,6 +356,7 @@ enum RunTrigger {
   subagent
   host_event
   comment
+  plan_approved
 }
 
 model Run {
@@ -498,6 +501,10 @@ model CodingAgentProfile {
   workspaceDiskMb          Int?
   /// Git history in runs (#536): the clone depth (1..100000) when gitHistoryFull is false. Null with full false = off.
   gitHistoryDepth          Int?
+  /// Owner-set through update_agent: where this planner's plan goes and who reviews it (PlanDocumentSchema).
+  planDocument             Json?
+  /// Runs refuse to build from an unapproved plan set (plan_not_approved).
+  buildFromPlan            Boolean           @default(false)
   /// Git history in runs: the full history; overrides gitHistoryDepth.
   gitHistoryFull           Boolean           @default(false)
   packageAllowlist         Json              @default("{}")
@@ -543,6 +550,16 @@ model CodingRun {
   substrate             SubstrateRun?
   run                   Run                 @relation(fields: [runId], references: [id], onDelete: Cascade)
   task                  String
+  /// The plan this run writes or builds.
+  planNumber            Int?
+  /// The plan set a builder run used.
+  planSetId             String?
+  /// [{documentId, path, versionNumber}] a builder run was given.
+  planVersions          Json?
+  /// The ticket a plan_approved / build-ticket run builds.
+  planTicket            Int?
+  /// Store repository: the folder read from the run's workspace (planDocument.path with {n} filled).
+  planRepositoryPath    String?
   /// The run's own request (the trigger's task or the agent's default task), without the agent's standing instructions. Null on older runs.
   request               String?             @db.Text
   repository            String
@@ -652,6 +669,20 @@ model CodingRun {
   /// never a value or a hash of one. Transcript capture compares it with the versions current then
   /// and stores nothing when they differ. Null = not recorded (then no transcript is stored).
   launchSecretVersions  Json?
+  /// Plan documents: the worker returns the plan folder (PLAN_FOLDER_PATH) and the control plane stores it.
+  collectPlanFiles      Boolean             @default(false)
+  /// What happened to the returned plan folder (a fixed code; see PlanFilesRecorder). Null: not collected.
+  planFilesStatus       String?
+  /// Returned plan files withheld (a token-shaped value, or not UTF-8), as { paths, unnamed }
+  /// (PlanFilesPathList): a path that itself holds a secret or token-shaped value is only counted in
+  /// unnamed. Never their content. Null unless planFilesStatus is "stored".
+  planFilesWithheld     Json?
+  /// Paths the worker skipped (symlinks, non-UTF-8, unsafe names) as { paths, unnamed }: unnamed is the
+  /// worker's skippedUnnamed plus every skipped path that holds a secret or token-shaped value.
+  planFilesSkipped      Json?
+  /// The plan publish of this run (plans/publish.ts): "published" when it finished, or a fixed error
+  /// code ("plan_publish_failed") when it threw. Null: not published yet. Never error text.
+  planPublishStatus     String?
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
   proxySession          CodingProxySession?
@@ -667,6 +698,7 @@ model CodingRun {
   continuations   CodingRun[] @relation("CodingRunContinuation")
 
   repositories             CodingRunRepository[]
+  planFiles                CodingRunPlanFile[]
   registryAllowances       RegistryAllowance[]
   registryFetches          RegistryFetch[]
   registryApprovedVersions RegistryApprovedVersion[]
@@ -679,6 +711,7 @@ model CodingRun {
   @@index([queuedAt])
   @@index([rootCodingRunId])
   @@index([mergeOrder])
+  @@index([planSetId])
 }
 
 /// A coding run's session transcript for local resume: metadata only. The redacted content lives in
@@ -1697,6 +1730,22 @@ model CodingRunRepository {
   @@index([mergeOrder])
 }
 
+/// A coding run's plan files: "input" ones are written to the plan folder before the agent starts;
+/// "output" ones are what the run left there (or, for store "repository", in its plan path), redacted.
+model CodingRunPlanFile {
+  id        String    @id @default(cuid())
+  runId     String
+  codingRun CodingRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  /// "input" or "output".
+  direction String
+  path      String
+  content   String
+  createdAt DateTime  @default(now())
+
+  @@unique([runId, direction, path])
+  @@index([runId])
+}
+
 /// A pull-request review deferred because its head's CI was still pending
 /// (or had not reported) when the triggering push event arrived
 /// (AgentRepository.waitForCi). Started either when that head's CI finishes
@@ -2407,9 +2456,53 @@ model Document {
   exports                  DocumentExport[]
   reviewers                DocumentReviewer[]
   reviewEvents             DocumentReviewEvent[]
+  planSetId                String?
+  planSet                  PlanSet?              @relation(fields: [planSetId], references: [id], onDelete: SetNull)
+  planPath                 String?
+  removedFromPlan          Boolean               @default(false)
 
   @@index([ownerId])
   @@index([agentId])
+  @@index([planSetId])
+  /// One document per plan path in a set. Postgres treats NULLs as distinct, so documents outside a set are unaffected.
+  @@unique([planSetId, planPath])
+}
+
+/// A planner's plan for one repository and number (docs/private spec §4): its documents are Documents with planSetId.
+model PlanSet {
+  id                String     @id @default(cuid())
+  /// The planner agent whose runs write the plan.
+  agentId           String
+  agent             Agent      @relation("PlanSetPlanner", fields: [agentId], references: [id], onDelete: Cascade)
+  repository        String
+  number            Int
+  /// "wardby" or "repository" (the planner's planDocument.store when the set was made).
+  store             String
+  /// The agent whose run started the work (the planner, or the lead that delegated): its owner and grantees comment.
+  accessAgentId     String?
+  accessAgent       Agent?     @relation("PlanSetAccess", fields: [accessAgentId], references: [id], onDelete: SetNull)
+  createdByRunId    String
+  /// The issue the plan answers (CodingRun.issueProvider/issueKey of the first run), for notices and the build chain.
+  issueProvider     String?
+  issueKey          String?
+  /// Set when the last counted document became approved; cleared by a reopen (C2).
+  approvedAt        DateTime?
+  /// The principal whose verdict completed the approval (null for a publish): the starter of every ticket run it starts.
+  approvedById      String?
+  /// Build chain (§7b "build"): the ticket running or next, and why it stopped ("done" once every ticket was built).
+  chainTicket       Int?
+  chainStopped      String?
+  /// The ticket run the chain follows: only its pull request's merge moves the chain on. Null when stopped or done.
+  chainRunId        String?
+  /// The run whose publish holds the set (one publish per set at a time), and until when; both null when free.
+  publishLeaseRunId String?
+  publishLeaseUntil DateTime?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  documents         Document[]
+
+  @@unique([agentId, repository, number])
+  @@index([accessAgentId])
 }
 
 model DocumentVersion {

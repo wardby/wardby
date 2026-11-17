@@ -29,6 +29,8 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   "worker_tool_runner_unreachable",
   // A run with git history (#536) on an image (or tool runner) without git.
   "worker_git_unavailable",
+  // The input plan files could not be placed in the plan folder.
+  "worker_plan_files_failed",
 ]);
 
 /**

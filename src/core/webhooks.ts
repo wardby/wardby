@@ -8,6 +8,7 @@
  * Comparison is constant-time (`timingSafeEqual` over the raw digest, which
  * is always 32 bytes, so there's no length-mismatch case to special-case).
  */
+import type { SecretCipher } from "./plans/publish.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { AgentKind, CodingAgentProfile, PrismaClient, Webhook } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
@@ -25,6 +26,7 @@ import {
   type RepositorySetRefusalCode,
 } from "./coding-repository-set.js";
 import { dispatchRun } from "./dispatch.js";
+import { PlanRefusedError, type PlanRefusalCode } from "./plans/refusal.js";
 import { atLeast, effectiveAccess } from "./grants.js";
 
 export type WebhookMetadata = Pick<Webhook, "id" | "agentId" | "status" | "ownerId" | "createdAt" | "lastFiredAt">;
@@ -97,6 +99,7 @@ export type ResolveWebhookRunResult =
   | { ok: false; reason: "invalid_repository" }
   | { ok: false; reason: "invalid_repositories"; code: RepositorySetRefusalCode }
   | { ok: false; reason: "repository_ref_unreadable" }
+  | { ok: false; reason: "plan_refused"; code: PlanRefusalCode }
   | { ok: false; reason: "invalid_issue"; message: string };
 
 /**
@@ -110,7 +113,14 @@ export async function resolveWebhookRun(
   db: PrismaClient,
   executor: Executor,
   codingTask?: string,
-  opts: { issue?: unknown; issueTrackers?: IssueTrackerRegistry; repository?: string; repositories?: string[] } = {},
+  opts: {
+    issue?: unknown;
+    issueTrackers?: IssueTrackerRegistry;
+    repository?: string;
+    repositories?: string[];
+    /** Reads a builder's secret values to redact its approved plan (spec §7). */
+    secretCipher?: SecretCipher;
+  } = {},
 ): Promise<ResolveWebhookRunResult> {
   const webhook = await db.webhook.findUnique({ where: { id } });
   if (!webhook) return { ok: false, reason: "not_found" };
@@ -153,6 +163,7 @@ export async function resolveWebhookRun(
     dispatched = await dispatchRun({
       db,
       executor,
+      secretCipher: opts.secretCipher,
       selfDefects: { db, issueTrackers: opts.issueTrackers },
       agentId: agent.id,
       trigger: "webhook",
@@ -210,6 +221,7 @@ export async function resolveWebhookRun(
     // Likewise for the extra repositories: the set refusal's code, and no detail for a ref failure.
     if (err instanceof RepositorySetRefusedError) return { ok: false, reason: "invalid_repositories", code: err.code };
     if (err instanceof RepositoryRefUnreadableError) return { ok: false, reason: "repository_ref_unreadable" };
+    if (err instanceof PlanRefusedError) return { ok: false, reason: "plan_refused", code: err.code };
     throw err;
   }
   if (!dispatched) return { ok: false, reason: rejected };

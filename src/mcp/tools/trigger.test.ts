@@ -488,6 +488,17 @@ describe("trigger_agent", () => {
       await client.close();
     });
 
+    it("maps a plan refusal to a 400 with its code, and starts no run", async () => {
+      const agent = coding(false);
+      agent.codingProfile = { ...agent.codingProfile!, planDocument: { store: "wardby", reviewers: ["owner"] } };
+      const { db, client } = await as("owner", agent, []);
+      const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain("plan_number_missing");
+      expect((db as any).runs.size).toBe(0);
+      await client.close();
+    });
+
     describe("repository choice", () => {
       const links = new Map([["a1", ["acme/service-a", "acme/service-b"]]]);
       async function withLinks(principalId: string, agent: FakeAgentRow, grants: FakeGrantSeed[]) {

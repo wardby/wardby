@@ -144,6 +144,8 @@ export interface PullRequestInput {
    * its summary). Used only when `issue` renders no line.
    */
   issueNumber?: number;
+  /** The plan the run built from (Plan <n>: <path> v<k>, …); names and numbers only. Rendered after the issue line. */
+  planLine?: string;
   /**
    * The request's other pull requests (control-plane rows only), rendered as
    * the marked "Related pull requests" section. Rendering failures omit it.
@@ -496,9 +498,12 @@ export function renderRelatedSection(input: RelatedPullRequestsInput): string | 
   ].join("\n");
 }
 
-/** The run marker, then optionally blank lines and the issue line ("Resolves … issue …" or "From issue #N"): the section goes right after. */
+/**
+ * The run marker, then optionally blank lines and the issue line ("Resolves … issue …" or "From issue #N"),
+ * then optionally the plan line ("Plan <n>: …"): the section goes right after, as in a new body.
+ */
 const BODY_HEAD =
-  /^[^\S\n]*<!-- (?:wardby|reevo-run):\S+ -->[^\S\n]*(?:\n|$)(?:[^\S\n]*\n)*(?:(?:Resolves |From issue #\d)[^\n]*(?:\n|$))?/;
+  /^[^\S\n]*<!-- (?:wardby|reevo-run):\S+ -->[^\S\n]*(?:\n|$)(?:[^\S\n]*\n)*(?:(?:Resolves |From issue #\d)[^\n]*(?:\n|$))?(?:(?:[^\S\n]*\n)*Plan \d+: [^\n]*(?:\n|$))?/;
 
 /**
  * The body with `block` in place of the existing marked section, or inserted
@@ -748,6 +753,7 @@ function buildPullRequestBody(input: PullRequestInput, options: { omitPackages?:
   // Hidden marker stays first; the issue link is the first visible line.
   const issue = issueLine(input);
   if (issue) sections.push(issue);
+  if (input.planLine) sections.push(input.planLine);
   try {
     const related = input.related ? renderRelatedSection(input.related) : undefined;
     if (related) sections.push(related);
@@ -1432,6 +1438,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
           changedLockfiles: input.changedLockfiles,
           issue: input.issue,
           issueNumber: input.issueNumber,
+          planLine: input.planLine,
         },
         { omitPackages },
       );

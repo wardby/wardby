@@ -153,6 +153,42 @@ const packagePolicySchema = z
     }
   });
 
+const PLAN_PATH = /^(?!\/)(?!.*\.\.)(?!.*\/\/)[A-Za-z0-9._{}/-]{1,200}\/$/;
+export const PlanDocumentSchema = z
+  .object({
+    store: z.enum(["wardby", "repository"]).default("wardby"),
+    path: z
+      .string()
+      .regex(PLAN_PATH, "must be a repository folder ending in /")
+      .refine((p) => p.split("{n}").length === 2, "must hold {n} once")
+      .optional(),
+    reviewers: z.array(z.string().min(1).max(200)).min(1).max(50).optional(),
+    finalApproverId: z.string().min(1).max(200).optional(),
+    onApproved: z.enum(["notify", "build"]).default("notify"),
+    builderAgentId: z.string().min(1).max(200).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.store === "repository" && !value.path) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["path"], message: "required for store repository" });
+    }
+    if (value.store === "wardby" && value.path) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["path"], message: "only for store repository" });
+    }
+    if (value.onApproved === "build" && !value.builderAgentId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["builderAgentId"], message: "required for onApproved build" });
+    }
+  });
+export type PlanDocumentInput = z.infer<typeof PlanDocumentSchema>;
+export type PlanDocument = PlanDocumentInput & { reviewers: string[] };
+
+/** A stored planDocument for a reader (dispatch, publish, approval): reviewers default to the owner (R20). */
+export function readPlanDocument(stored: unknown, ownerId: string | null): PlanDocument | null {
+  if (stored === null || stored === undefined) return null;
+  const parsed = PlanDocumentSchema.parse(stored);
+  return { ...parsed, reviewers: parsed.reviewers ?? (ownerId ? [ownerId] : []) };
+}
+
 const codingProfileFields = {
   provider: z.enum(CODING_PROVIDERS),
   repository: repositorySchema,
@@ -187,6 +223,10 @@ const codingProfileFields = {
   dependencyCache: z.boolean(),
   /** Keep each run's redacted Claude Code session transcript so it can be resumed locally. */
   sessionResume: z.boolean(),
+  /** Publish this agent's plan as reviewable documents (docs: plan documents). */
+  planDocument: PlanDocumentSchema.nullable(),
+  /** Refuse to build from a plan set that is not fully approved. */
+  buildFromPlan: z.boolean(),
 };
 
 export const CodingProfileSchema = z
@@ -213,6 +253,8 @@ export const CodingProfileSchema = z
     claudeBareMode: codingProfileFields.claudeBareMode.default(true),
     dependencyCache: codingProfileFields.dependencyCache.default(false),
     sessionResume: codingProfileFields.sessionResume.default(false),
+    planDocument: codingProfileFields.planDocument.default(null),
+    buildFromPlan: codingProfileFields.buildFromPlan.default(false),
   })
   .strict()
   .superRefine((profile, ctx) => {
@@ -256,6 +298,8 @@ export const CodingProfilePatchSchema = z
     claudeBareMode: codingProfileFields.claudeBareMode.optional(),
     dependencyCache: codingProfileFields.dependencyCache.optional(),
     sessionResume: codingProfileFields.sessionResume.optional(),
+    planDocument: codingProfileFields.planDocument.optional(),
+    buildFromPlan: codingProfileFields.buildFromPlan.optional(),
   })
   .strict();
 

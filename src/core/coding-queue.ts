@@ -20,12 +20,13 @@ import type { Executor } from "../providers/executor/types.js";
 import { markRunFailedFromExecutorError } from "./dispatch.js";
 import { logger } from "./logger.js";
 import { fileSelfDefectForRun, type SelfDefectSink } from "./self-defects.js";
+import { emitRunCompletedEvent, type RunCompletedDb } from "./workflow-run-events.js";
 
 const queueLog = logger.child({ module: "coding-queue" });
 
 export const CODING_QUEUE_TIMEOUT_ERROR = "coding_queue_timeout";
 
-export type CodingQueueDb = Pick<PrismaClient, "run" | "codingRun" | "$transaction">;
+export type CodingQueueDb = Pick<PrismaClient, "run" | "codingRun" | "$transaction"> & RunCompletedDb;
 
 export interface DrainCodingQueueOptions {
   db: CodingQueueDb;
@@ -69,6 +70,8 @@ export async function drainCodingQueue(options: DrainCodingQueueOptions): Promis
       timedOut += 1;
       // Only this drain made the row failed (a concurrent drain matched zero rows); bounded, never throws.
       await fileSelfDefectForRun(options.selfDefects, runId);
+      // The shared run-end event (a plan's build chain, run hooks); never throws.
+      await emitRunCompletedEvent(db, runId);
       // What a launch the cluster refused left behind (a continuation's in-progress check, its input).
       try {
         await executor.cleanupQueueTimeout?.(runId);

@@ -838,12 +838,26 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   }
 
   async readTranscript(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
+    return this.readRoundOutput(handle, BLOB.transcript, maxBytes, "transcript_too_large");
+  }
+
+  async readPlanFiles(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
+    return this.readRoundOutput(handle, BLOB.planFiles, maxBytes, "plan_files_too_large");
+  }
+
+  /** The current round's output blob, at most maxBytes; undefined when absent or the run is removed. */
+  private async readRoundOutput(
+    handle: JobHandle,
+    blob: (token: string, round?: number) => string,
+    maxBytes: number,
+    tooLarge: string,
+  ): Promise<string | undefined> {
     const record = await this.recordFor(handle);
     if (!record || record.phase === "removed") return undefined;
-    const key = BLOB.transcript(record.token, roundOf(record));
+    const key = blob(record.token, roundOf(record));
     const info = await this.blobs.head(key);
     if (!info) return undefined;
-    if (info.sizeBytes > maxBytes) throw new Error("transcript_too_large");
+    if (info.sizeBytes > maxBytes) throw new Error(tooLarge);
     let body: Buffer;
     try {
       body = await this.blobs.get(key);
@@ -851,7 +865,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
       if (isBlobNotFound(error)) return undefined;
       throw error;
     }
-    if (body.length > maxBytes) throw new Error("transcript_too_large");
+    if (body.length > maxBytes) throw new Error(tooLarge);
     return body.toString("utf8");
   }
 

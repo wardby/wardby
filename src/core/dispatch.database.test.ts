@@ -11,6 +11,10 @@ import { RepositoryRefUnreadableError, RepositorySetRefusedError } from "./codin
 import { createPrismaClient } from "./db.js";
 import { setLogLineFilter } from "./logger.js";
 import { checkContinuation, ContinuationRefusedError, dispatchRun } from "./dispatch.js";
+import { loadPlanFiles } from "../coding/plan-files/store.js";
+import { MAX_CODING_TASK_BYTES, PLAN_FOLDER_PATH } from "../coding/protocol.js";
+import { PlanRefusedError } from "./plans/refusal.js";
+import { createPlanSetFixture, setReviewState } from "./plans/build.test-support.js";
 import { createRepoAccessGate } from "./repo-access.js";
 import { claimDueRun, findDueCandidates } from "./scheduler.js";
 
@@ -92,6 +96,8 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
   async function cleanup(): Promise<void> {
     const agents = { agentId: { startsWith: PREFIX } };
     await db.run.deleteMany({ where: agents });
+    await db.document.deleteMany({ where: { ownerId: { startsWith: PREFIX } } });
+    await db.workItem.deleteMany({ where: { provider: "jira", scopeKey: { startsWith: `T${suffix}` } } });
     await db.agent.deleteMany({ where: { id: { startsWith: PREFIX } } });
     await db.principal.deleteMany({ where: { id: { startsWith: PREFIX } } });
   }
@@ -144,6 +150,613 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     const result = await dispatchRun({ db, executor, agentId, codingTask: "sync", codingRepositories: [] });
     expect(await rowsOf(result!.run.id)).toEqual([]);
     expect(spies.resolveCodingRepositoryRef).not.toHaveBeenCalled();
+  });
+
+  it("stores a coding run's input plan files and its collectPlanFiles flag", async () => {
+    const { agentId } = await codingAgent();
+    const { executor } = fakeExecutor();
+    const result = await dispatchRun({
+      db,
+      executor,
+      agentId,
+      codingTask: "sync",
+      planInputFiles: [{ path: "plan.md", content: "# P" }],
+      collectPlanFiles: true,
+    });
+    const runId = result!.run.id;
+    expect((await db.codingRun.findUniqueOrThrow({ where: { runId } })).collectPlanFiles).toBe(true);
+    expect(await loadPlanFiles(db, runId, "input")).toEqual([{ path: "plan.md", content: "# P" }]);
+  });
+
+  it("refuses input plan files over the limit before anything is created", async () => {
+    const { agentId } = await codingAgent();
+    const { executor } = fakeExecutor();
+    const files = Array.from({ length: 201 }, (_, i) => ({ path: `f${i}.md`, content: "x" }));
+    const attempt = dispatchRun({ db, executor, agentId, codingTask: "sync", planInputFiles: files });
+    await expect(attempt).rejects.toBeInstanceOf(PlanRefusedError);
+    await expect(attempt).rejects.toThrow("plan_too_large");
+    expect(await runsOf(agentId)).toEqual([]);
+  });
+
+  describe("plan numbers", () => {
+    async function planner() {
+      const { agentId } = await codingAgent();
+      await db.codingAgentProfile.update({
+        where: { agentId },
+        data: { planDocument: { store: "wardby", reviewers: [owner] } },
+      });
+      return agentId;
+    }
+
+    it("refuses a planner with no number, leaving no run", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      await expect(dispatchRun({ db, executor, agentId, codingTask: "plan" })).rejects.toThrow("plan_number_missing");
+      expect(await runsOf(agentId)).toEqual([]);
+    });
+
+    it("stores planNumber from the call", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({ db, executor, agentId, codingTask: "plan", planNumber: 7 });
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } })).planNumber).toBe(7);
+    });
+
+    it("reads the number from the attribution intent", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({
+        db,
+        executor,
+        agentId,
+        codingTask: "plan",
+        attribution: {
+          source: "issue_event",
+          item: { provider: "github", key: "o/r#12", scopeKey: "o/r", snapshot: null },
+        },
+      });
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } })).planNumber).toBe(12);
+    });
+
+    it("reads the number from the parent run's issue (delegated)", async () => {
+      const agentId = await planner();
+      const parentId = `${PREFIX}parent-${suffix}-${++counter}`;
+      const parentAgent = `${PREFIX}pagent-${suffix}-${counter}`;
+      await db.agent.create({
+        data: {
+          id: parentAgent,
+          name: parentAgent,
+          systemPrompt: "p",
+          model: "gpt-5.6-luna",
+          budgetUsd: 1,
+          ownerId: owner,
+        },
+      });
+      await db.run.create({ data: { id: parentId, agentId: parentAgent, trigger: "manual", status: "running" } });
+      const item = await db.workItem.create({
+        data: { provider: "jira", key: `T${suffix.toUpperCase()}-345`, scopeKey: `T${suffix}` },
+      });
+      await db.runAttribution.create({ data: { runId: parentId, workItemId: item.id, source: "issue_event" } });
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({ db, executor, agentId, codingTask: "plan", parentRunId: parentId });
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } })).planNumber).toBe(345);
+    });
+
+    it("keeps an explicit planNumber across a continuation that has no issue", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const first = await dispatchRun({ db, executor, agentId, codingTask: "plan", planNumber: 9 });
+      await db.run.update({ where: { id: first!.run.id }, data: { status: "succeeded" } });
+      await db.codingRun.update({
+        where: { runId: first!.run.id },
+        data: {
+          result: {
+            schemaVersion: 1,
+            outcome: "pull_request_opened",
+            repository: "acme/fork",
+            baseRef: "main",
+            headRef: `wardby/run-${first!.run.id}`,
+            commitSha: "a".repeat(40),
+            pullRequestUrl: "https://github.com/acme/fork/pull/1",
+            pullRequestNumber: 1,
+            summary: "Opened the PR",
+            tests: [],
+            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+          },
+        },
+      });
+      const second = await dispatchRun({
+        db,
+        executor,
+        agentId,
+        codingTask: "plan",
+        continuesCodingRunId: first!.run.id,
+      });
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: second!.run.id } })).planNumber).toBe(9);
+    });
+
+    it("treats a malformed stored planDocument as no plan setting", async () => {
+      const { agentId } = await codingAgent();
+      await db.codingAgentProfile.update({ where: { agentId }, data: { planDocument: { store: 42 } } });
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({ db, executor, agentId, codingTask: "plan" });
+      expect(result!.run.status).not.toBe("refused");
+      expect((await db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } })).planNumber).toBeNull();
+    });
+
+    describe("planner task note", () => {
+      const WRITE = /Write plan/;
+      async function run(
+        planDocument: object,
+        extra: Partial<Parameters<typeof dispatchRun>[0]> = {},
+        deferred = false,
+      ) {
+        const { agentId } = await codingAgent();
+        await db.codingAgentProfile.update({ where: { agentId }, data: { planDocument } });
+        const { executor } = fakeExecutor();
+        if (deferred) (executor as { defersCodingResolution?: boolean }).defersCodingResolution = true;
+        const result = await dispatchRun({ db, executor, agentId, codingTask: "plan it", planNumber: 12, ...extra });
+        return db.codingRun.findUniqueOrThrow({ where: { runId: result!.run.id } });
+      }
+
+      it("a wardby-store planner's task and request carry the plan folder, and it collects files", async () => {
+        const row = await run({ store: "wardby", reviewers: [owner] });
+        expect(row.task).toContain(PLAN_FOLDER_PATH);
+        expect(row.request).toContain(PLAN_FOLDER_PATH);
+        expect(row.collectPlanFiles).toBe(true);
+        expect(row.planRepositoryPath).toBeNull();
+      });
+
+      it("a repository-store planner records the folder and does not collect files", async () => {
+        const row = await run({ store: "repository", path: "docs/plans/issue-{n}/", reviewers: [owner] });
+        expect(row.planRepositoryPath).toBe("docs/plans/issue-12/");
+        expect(row.collectPlanFiles).toBe(false);
+        expect(row.request).toContain("docs/plans/issue-12/");
+      });
+
+      it("a deferred executor's stored request holds the note", async () => {
+        const row = await run({ store: "wardby", reviewers: [owner] }, {}, true);
+        expect(row.request).toContain(PLAN_FOLDER_PATH);
+      });
+
+      it("a revision (planInputFiles) adds no planner note and collects files", async () => {
+        const row = await run(
+          { store: "wardby", reviewers: [owner] },
+          { planInputFiles: [{ path: "plan.md", content: "# P" }] },
+        );
+        expect(row.request).not.toMatch(WRITE);
+        expect(row.collectPlanFiles).toBe(true);
+      });
+    });
+
+    it("refuses a planner whose note overflows the task limit, leaving no run", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const attempt = dispatchRun({
+        db,
+        executor,
+        agentId,
+        codingTask: "x".repeat(MAX_CODING_TASK_BYTES),
+        planNumber: 3,
+      });
+      await expect(attempt).rejects.toBeInstanceOf(PlanRefusedError);
+      await expect(attempt).rejects.toThrow("plan_too_large");
+      expect(await runsOf(agentId)).toEqual([]);
+    });
+
+    it("commits a refused run for a scheduled planner whose note overflows the task limit", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({
+        db,
+        executor,
+        agentId,
+        codingTask: "x".repeat(MAX_CODING_TASK_BYTES),
+        planNumber: 3,
+        trigger: "scheduled",
+      });
+      expect(result!.run.status).toBe("refused");
+      expect(result!.run.error).toMatch(/^plan_too_large:/);
+    });
+
+    it("commits a refused run for a scheduled planner with no number", async () => {
+      const agentId = await planner();
+      const { executor } = fakeExecutor();
+      const result = await dispatchRun({ db, executor, agentId, codingTask: "plan", trigger: "scheduled" });
+      expect(result!.run.status).toBe("refused");
+      expect(result!.run.error).toMatch(/^plan_number_missing:/);
+    });
+  });
+
+  describe("building from an approved plan", () => {
+    const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
+    const PLAN_MD = "# Plan\n\nSee [api](api.md).\n\n## Tickets\n### Ticket 1: Login\n### Ticket 2: Feed\n";
+    const SCREENS = { "manifest.json": '{"boards":[{"id":"home"}]}', "boards/home.html": "<main>Home</main>" };
+
+    /** A planner and a buildFromPlan builder on their own repository, and plan set #12 with api.md in review. */
+    async function setUp(setRepository: (repository: string) => string = (r) => r) {
+      const repository = `acme/build-${suffix}-${++counter}`;
+      const make = async (profile: object) => {
+        const id = `${PREFIX}agent-${suffix}-${++counter}`;
+        await db.agent.create({
+          data: {
+            id,
+            name: id,
+            systemPrompt: "Build things.",
+            model: "gpt-5.6-luna",
+            budgetUsd: 2,
+            kind: "coding",
+            ownerId: owner,
+            codingProfile: {
+              create: { provider: "codex", repository, defaultTask: "Build.", protectedPaths: [], ...profile },
+            },
+          },
+        });
+        return id;
+      };
+      const planner = await make({ planDocument: { store: "wardby", reviewers: [owner] } });
+      const builder = await make({ buildFromPlan: true });
+      const { planSetId, documentIds } = await createPlanSetFixture(db, {
+        plannerId: planner,
+        ownerId: owner,
+        repository: setRepository(repository),
+        number: 12,
+        documents: [
+          { path: "plan.md", content: PLAN_MD, version: 3 },
+          { path: "screens/", content: SCREENS, version: 2 },
+          { path: "api.md", content: "# API\n", version: 1, reviewState: "in_review" },
+        ],
+      });
+      const approveAll = () => setReviewState(db, documentIds["api.md"], "approved");
+      return { repository, builder, planSetId, documentIds, approveAll };
+    }
+    const codingRunOf = (runId: string) => db.codingRun.findUniqueOrThrow({ where: { runId } });
+    /** Marks a root run finished with an opened pull request, so it can be continued. */
+    async function finishWithPullRequest(rootId: string, repository: string): Promise<void> {
+      await db.run.update({ where: { id: rootId }, data: { status: "succeeded" } });
+      await db.codingRun.update({
+        where: { runId: rootId },
+        data: {
+          result: {
+            schemaVersion: 1,
+            outcome: "pull_request_opened",
+            repository,
+            baseRef: "main",
+            headRef: `wardby/run-${rootId}`,
+            commitSha: "a".repeat(40),
+            pullRequestUrl: `https://github.com/${repository}/pull/5`,
+            pullRequestNumber: 5,
+            summary: "Opened the PR",
+            tests: [],
+            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+          },
+        },
+      });
+    }
+
+    it("refuses while a document waits, leaving no run; a scheduled build commits a refused run", async () => {
+      const { builder } = await setUp();
+      const { executor } = fakeExecutor(null);
+      const attempt = dispatchRun({ db, executor, agentId: builder, planNumber: 12, secretCipher: cipher });
+      await expect(attempt).rejects.toBeInstanceOf(PlanRefusedError);
+      await expect(attempt).rejects.toThrow(/^plan_not_approved: .*api\.md/);
+      expect(await runsOf(builder)).toEqual([]);
+
+      const scheduled = await dispatchRun({
+        db,
+        executor,
+        agentId: builder,
+        planNumber: 12,
+        secretCipher: cipher,
+        trigger: "scheduled",
+      });
+      expect(scheduled!.run.status).toBe("refused");
+      expect(scheduled!.run.error).toMatch(/^plan_not_approved:/);
+      expect(await db.codingRun.findUnique({ where: { runId: scheduled!.run.id } })).toBeNull();
+    });
+
+    it("builds from the approved versions: plan set, versions, ticket, plan section and files on the run", async () => {
+      const { builder, planSetId, documentIds, approveAll } = await setUp();
+      await approveAll();
+      const { executor } = fakeExecutor(null);
+      const result = await dispatchRun({
+        db,
+        executor,
+        agentId: builder,
+        codingTask: "Build ticket 2.",
+        planNumber: 12,
+        planTicket: 2,
+        secretCipher: cipher,
+      });
+      expect(result!.run.status).not.toBe("refused");
+      const row = await codingRunOf(result!.run.id);
+      expect(row.planSetId).toBe(planSetId);
+      expect(row.planNumber).toBe(12);
+      expect(row.planTicket).toBe(2);
+      expect(row.planVersions).toEqual([
+        { documentId: documentIds["plan.md"], path: "plan.md", kind: "document", versionNumber: 3 },
+        { documentId: documentIds["api.md"], path: "api.md", kind: "document", versionNumber: 1 },
+        { documentId: documentIds["screens/"], path: "screens/", kind: "design", versionNumber: 2 },
+      ]);
+      expect(row.collectPlanFiles).toBe(false);
+      for (const text of [row.request!, row.task]) {
+        expect(text).toContain("Build ticket 2.");
+        expect(text).toContain("Approved plan 12. Build exactly ticket 2 from this approved plan.");
+        expect(text).toMatch(/<plan>\n[\s\S]*\[api\]\(\/tmp\/wardby-plan\/api\.md\)[\s\S]*\n<\/plan>/);
+      }
+      expect((await loadPlanFiles(db, result!.run.id, "input")).map((f) => f.path)).toEqual([
+        "api.md",
+        "plan.md",
+        "screens/boards/home.html",
+        "screens/manifest.json",
+      ]);
+    });
+
+    it("keeps the whole plan section in the task beside a knowledge index (never cut)", async () => {
+      const { builder, approveAll } = await setUp();
+      await approveAll();
+      const { executor } = fakeExecutor(null);
+      // A large bundle index: the knowledge slot is cut to fit, the plan section is not.
+      executor.readCodingRepositoryFile = vi.fn(async ({ path }: { path: string }) =>
+        path.endsWith("index.md") ? `# Knowledge\n${"k".repeat(MAX_CODING_TASK_BYTES)}` : null,
+      );
+      const result = await dispatchRun({ db, executor, agentId: builder, planNumber: 12, secretCipher: cipher });
+      expect(executor.readCodingRepositoryFile).toHaveBeenCalledWith(
+        expect.objectContaining({ path: expect.stringMatching(/index\.md$/) }),
+      );
+      const row = await codingRunOf(result!.run.id);
+      const section = /<plan>\n[\s\S]*?\n<\/plan>/.exec(row.request!)![0];
+      expect(row.task).toContain(section);
+      expect(row.task).toContain("Request:");
+    });
+
+    it("stores the plan section in the request a deferred executor composes later", async () => {
+      const { builder, approveAll } = await setUp();
+      await approveAll();
+      const { executor } = fakeExecutor(null);
+      executor.defersCodingResolution = true;
+      const result = await dispatchRun({ db, executor, agentId: builder, planNumber: 12, secretCipher: cipher });
+      const row = await codingRunOf(result!.run.id);
+      expect(row.request).toMatch(/<plan>\n[\s\S]*\n<\/plan>/);
+      expect(row.planSetId).not.toBeNull();
+    });
+
+    it("gates a builder linked as acme/… on a plan set recorded as Acme/… (fresh and deferred)", async () => {
+      const { builder, repository } = await setUp((r) => r.toUpperCase());
+      const { executor } = fakeExecutor(null);
+      await expect(
+        dispatchRun({ db, executor, agentId: builder, planNumber: 12, secretCipher: cipher }),
+      ).rejects.toThrow(/^plan_not_approved: .*api\.md/);
+      // Deferred: the raw requested repository is matched the same way before the lookup.
+      executor.defersCodingResolution = true;
+      await expect(
+        dispatchRun({
+          db,
+          executor,
+          agentId: builder,
+          planNumber: 12,
+          secretCipher: cipher,
+          codingRepository: `https://github.com/${repository}`,
+        }),
+      ).rejects.toThrow(/^plan_not_approved: .*api\.md/);
+      expect(await runsOf(builder)).toEqual([]);
+    });
+
+    it("a plan ticket start builds only from its own set: another planner's newer set, or none, is refused", async () => {
+      const { repository, builder, planSetId, approveAll } = await setUp();
+      await approveAll();
+      // A second planner's approved set for the same repository and number, made later: the gate picks it.
+      const other = `${PREFIX}agent-${suffix}-${++counter}`;
+      await db.agent.create({
+        data: {
+          id: other,
+          name: other,
+          systemPrompt: "Plan things.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 2,
+          kind: "coding",
+          ownerId: owner,
+          codingProfile: {
+            create: {
+              provider: "codex",
+              repository,
+              defaultTask: "Plan.",
+              protectedPaths: [],
+              planDocument: { store: "wardby", reviewers: [owner] },
+            },
+          },
+        },
+      });
+      const newer = await createPlanSetFixture(db, {
+        plannerId: other,
+        ownerId: owner,
+        repository,
+        number: 12,
+        documents: [{ path: "plan.md", content: PLAN_MD, version: 1 }],
+      });
+      const { executor } = fakeExecutor(null);
+      const start = (expectedPlanSetId: string) =>
+        dispatchRun({
+          db,
+          executor,
+          agentId: builder,
+          planNumber: 12,
+          planTicket: 1,
+          secretCipher: cipher,
+          expectedPlanSetId,
+        });
+      await expect(start(planSetId)).rejects.toThrow(/^plan_not_approved: the build would not use the plan set/);
+      expect(await runsOf(builder)).toEqual([]);
+      const own = await start(newer.planSetId);
+      expect((await codingRunOf(own!.run.id)).planSetId).toBe(newer.planSetId);
+      // A builder whose gate finds no set at all is refused too, never built ungated.
+      await expect(
+        dispatchRun({
+          db,
+          executor,
+          agentId: builder,
+          planNumber: 99,
+          secretCipher: cipher,
+          expectedPlanSetId: planSetId,
+        }),
+      ).rejects.toThrow(/^plan_not_approved/);
+    });
+
+    it("a continuation builds from its root's versions after a document is reopened (no plan_not_approved)", async () => {
+      const { repository, builder, planSetId, documentIds, approveAll } = await setUp();
+      await approveAll();
+      const { executor } = fakeExecutor(null);
+      const root = await dispatchRun({
+        db,
+        executor,
+        agentId: builder,
+        codingTask: "Build ticket 2.",
+        planNumber: 12,
+        planTicket: 2,
+        secretCipher: cipher,
+      });
+      const rootId = root!.run.id;
+      await finishWithPullRequest(rootId, repository);
+      // A reviewer reopens api.md and the planner publishes v2: a fresh build would now be refused.
+      await setReviewState(db, documentIds["api.md"], "in_review");
+      const v2 = await db.documentVersion.create({
+        data: {
+          documentId: documentIds["api.md"],
+          number: 2,
+          format: "markdown",
+          markdown: "# API\n\nPOST /feed (reopened)\n",
+          contentHash: `api-v2-${suffix}-${counter}`,
+          via: "agent",
+        },
+      });
+      await db.document.update({ where: { id: documentIds["api.md"] }, data: { currentVersionId: v2.id } });
+      await expect(
+        dispatchRun({ db, executor, agentId: builder, planNumber: 12, secretCipher: cipher }),
+      ).rejects.toThrow(/^plan_not_approved/);
+
+      // The fix round (a continuation of the root): built from the root's versions, never refused.
+      const fix = await dispatchRun({
+        db,
+        executor,
+        agentId: builder,
+        codingTask: "Fix the review findings.",
+        continuesCodingRunId: rootId,
+        secretCipher: cipher,
+      });
+      expect(fix!.run.status).not.toBe("refused");
+      const rootRow = await codingRunOf(rootId);
+      const fixRow = await codingRunOf(fix!.run.id);
+      expect(fixRow.rootCodingRunId).toBe(rootId);
+      expect(fixRow.planSetId).toBe(planSetId);
+      expect(fixRow.planVersions).toEqual(rootRow.planVersions);
+      expect(fixRow.planTicket).toBe(2);
+      expect(fixRow.request).toContain("Approved plan 12. Build exactly ticket 2 from this approved plan.");
+      expect(fixRow.request).toMatch(/<plan>\n[\s\S]*--- api\.md \(approved v1\) ---[\s\S]*\n<\/plan>/);
+      expect(fixRow.request).not.toContain("reopened");
+      const files = await loadPlanFiles(db, fix!.run.id, "input");
+      expect(files.map((f) => f.path)).toEqual([
+        "api.md",
+        "plan.md",
+        "screens/boards/home.html",
+        "screens/manifest.json",
+      ]);
+      expect(files.find((f) => f.path === "api.md")!.content).toBe("# API\n");
+    });
+
+    it("a continuation of a root that recorded no plan still passes the gate (plan_not_approved)", async () => {
+      const { repository, builder } = await setUp();
+      const { executor } = fakeExecutor(null);
+      // The root had no plan number, so it built from no plan; plan #12 still waits on api.md.
+      const root = await dispatchRun({ db, executor, agentId: builder, codingTask: "Build.", secretCipher: cipher });
+      expect((await codingRunOf(root!.run.id)).planSetId).toBeNull();
+      await finishWithPullRequest(root!.run.id, repository);
+      const before = await db.run.count({ where: { agentId: builder } });
+      const attempt = dispatchRun({
+        db,
+        executor,
+        agentId: builder,
+        codingTask: "Build plan 12.",
+        planNumber: 12,
+        continuesCodingRunId: root!.run.id,
+        secretCipher: cipher,
+      });
+      await expect(attempt).rejects.toBeInstanceOf(PlanRefusedError);
+      await expect(attempt).rejects.toThrow(/^plan_not_approved: .*api\.md/);
+      expect(await db.run.count({ where: { agentId: builder } })).toBe(before);
+    });
+
+    it("refuses a continuation of another owner's root before any of its plan is loaded", async () => {
+      const { repository, builder, approveAll } = await setUp();
+      await approveAll();
+      const { executor } = fakeExecutor(null);
+      const root = await dispatchRun({
+        db,
+        executor,
+        agentId: builder,
+        codingTask: "Build.",
+        planNumber: 12,
+        secretCipher: cipher,
+      });
+      expect((await codingRunOf(root!.run.id)).planSetId).not.toBeNull();
+      await finishWithPullRequest(root!.run.id, repository);
+      // Another owner's builder on the same repository names that root.
+      const otherOwner = `${PREFIX}other-owner-${suffix}-${++counter}`;
+      await db.principal.create({ data: { id: otherOwner, subject: otherOwner } });
+      const foreign = `${PREFIX}agent-${suffix}-${++counter}`;
+      await db.agent.create({
+        data: {
+          id: foreign,
+          name: foreign,
+          systemPrompt: "Build things.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 2,
+          kind: "coding",
+          ownerId: otherOwner,
+          codingProfile: {
+            create: { provider: "codex", repository, defaultTask: "Build.", protectedPaths: [], buildFromPlan: true },
+          },
+        },
+      });
+      // Every read of plan content goes through documentVersion or documentFile: none may happen.
+      const planReads: string[] = [];
+      const watched = new Proxy(db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target) as unknown;
+          if (prop === "documentVersion" || prop === "documentFile") {
+            return new Proxy(value as object, {
+              get(delegate, method) {
+                planReads.push(`${String(prop)}.${String(method)}`);
+                const fn = Reflect.get(delegate, method, delegate) as unknown;
+                return typeof fn === "function" ? (fn as (...a: unknown[]) => unknown).bind(delegate) : fn;
+              },
+            });
+          }
+          return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+      await expect(
+        dispatchRun({
+          db: watched,
+          executor,
+          agentId: foreign,
+          codingTask: "Fix.",
+          continuesCodingRunId: root!.run.id,
+          secretCipher: cipher,
+        }),
+      ).rejects.toEqual(new ContinuationRefusedError("other_owner"));
+      expect(planReads).toEqual([]);
+      expect(await db.run.count({ where: { agentId: foreign } })).toBe(0);
+    });
+
+    it("refuses without a secret cipher: the plan is never sent unredacted", async () => {
+      const { builder, approveAll } = await setUp();
+      await approveAll();
+      const { executor } = fakeExecutor(null);
+      await expect(dispatchRun({ db, executor, agentId: builder, planNumber: 12 })).rejects.toThrow(
+        /^plan_not_approved: secret values unavailable/,
+      );
+      expect(await runsOf(builder)).toEqual([]);
+    });
   });
 
   it("refuses an unlisted name before any run exists", async () => {

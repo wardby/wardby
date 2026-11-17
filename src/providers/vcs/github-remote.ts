@@ -220,6 +220,7 @@ export class GitHubRemote implements GitRemote {
       changedLockfiles: changedPaths.filter(isLockfilePath),
       ...(details?.issue ? { issue: details.issue } : {}),
       ...(details?.issueNumber !== undefined ? { issueNumber: details.issueNumber } : {}),
+      ...(details?.planLine ? { planLine: details.planLine } : {}),
       ...(details?.related ? { related: details.related } : {}),
     });
     let description: DescriptionWriteOutcome | undefined;
@@ -292,6 +293,7 @@ export class GitHubRemote implements GitRemote {
       changedLockfiles: changedPaths.filter(isLockfilePath),
       ...(details.issue ? { issue: details.issue } : {}),
       ...(details.issueNumber !== undefined ? { issueNumber: details.issueNumber } : {}),
+      ...(details.planLine ? { planLine: details.planLine } : {}),
       baseline: details.description.baseline,
     };
   }

@@ -25,6 +25,7 @@ export interface WorkerHandle {
 
 /** How long, after the worker exits, the bridge waits for its output streams to end. */
 const OUTPUT_DRAIN_MS = 2_000;
+export const PLAN_FILES_DEADLINE_MS = 2 * 60_000;
 /** The transcript is best effort: it never holds the result back for longer than this. */
 export const TRANSCRIPT_DEADLINE_MS = 2 * 60_000;
 
@@ -39,6 +40,8 @@ export interface SuperviseOptions {
   /** No transcript upload when absent. */
   transcriptPath?: string;
   transcriptDeadlineMs?: number;
+  /** The worker's plan-files.json; no upload when absent (or when the worker wrote none). */
+  planFilesPath?: string;
   tail: DiagnosticsTail;
   policy: RetryPolicy;
   log: Logger;
@@ -58,7 +61,7 @@ export function superviseWorker(
     ...[worker.stdout, worker.stderr].flatMap((stream) => (stream ? [output.follow(stream)] : [])),
     ...(worker.stderr ? [tail.tail.follow(worker.stderr)] : []),
   ]);
-  // The transcript, then the result, once the worker has exited. Of what this supervision uploads,
+  // The transcript, the plan files, then the result, once the worker has exited. Of what this supervision uploads,
   // the result (or, on no usable result, the diagnostics tail and then the exit report) comes last:
   // the control plane may read the transcript as soon as the result lands. The transcript is best
   // effort and bounded, and never blocks it. A one-actor run's workspace upload (codex.ts) follows
@@ -74,6 +77,19 @@ export function superviseWorker(
         log,
         "transcript",
         AbortSignal.any([signal, AbortSignal.timeout(options.transcriptDeadlineMs ?? TRANSCRIPT_DEADLINE_MS)]),
+      );
+    }
+    // The plan files, best effort and bounded like the transcript: the control plane reads them once
+    // the run is finished, so they go before the result that finishes it.
+    if (options.planFilesPath !== undefined) {
+      await uploadFile(
+        withRound(`${base}/plan-files`, round),
+        headers,
+        options.planFilesPath,
+        policy,
+        log,
+        "plan_files",
+        AbortSignal.any([signal, AbortSignal.timeout(PLAN_FILES_DEADLINE_MS)]),
       );
     }
     const outcome = await uploadFile(

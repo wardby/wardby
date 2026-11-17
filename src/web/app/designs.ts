@@ -34,7 +34,16 @@ import { DesignHistory } from "./design-history.js";
 import { exportsMenu } from "./exports-menu.js";
 import { openOverview } from "./overview.js";
 import { openPlay } from "./play.js";
-import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
+import {
+  coalesce,
+  HiddenStopper,
+  liveAction,
+  LiveConnection,
+  otherDocument,
+  statusConnected,
+  versionAction,
+} from "./live.js";
+import { planBarHost, renderPlanBar } from "./plan-bar.js";
 import { ReviewPanel } from "./review-ui.js";
 import { isLockedState, isReopenCopy } from "./review-model.js";
 
@@ -161,6 +170,8 @@ function mount(
   );
   const lockBanner = h("div", { class: "banner lock-banner", hidden: true, role: "note" });
   const reviewBanner = h("div", { class: "review-banner", role: "status" });
+  const planBar = planBarHost();
+  renderPlanBar(planBar, payload.planSet);
   const saveBanner = h("div", { class: "banner bad", hidden: true, role: "alert" });
 
   const deviceButtons = DEVICE_IDS.map((id) =>
@@ -265,6 +276,7 @@ function mount(
         account,
       ),
       reviewBanner,
+      planBar,
       banner,
       changedBanner,
       lockBanner,
@@ -829,6 +841,8 @@ function mount(
     } catch {
       return; // the next event, reconnect or save tries again
     }
+    // The plan bar follows every refetch, also while a newer version waits for unsaved edits.
+    renderPlanBar(planBar, next.planSet);
     const act = versionAction({
       shown: baseNumber,
       latest: next.version.number,
@@ -856,6 +870,15 @@ function mount(
       return;
     }
     applyPayload(next);
+  });
+
+  /** Another document of the plan set changed: only the plan bar is refetched. */
+  const refreshPlan = coalesce(async () => {
+    try {
+      renderPlanBar(planBar, (await api.load()).planSet);
+    } catch {
+      /* the next event or reconnect tries again */
+    }
   });
 
   // ---- the review banner and Review tab ----
@@ -951,6 +974,8 @@ function mount(
             const up = statusConnected(message.data);
             if (up !== null) serverHears = up;
             showLive(liveState);
+          } else if (act && otherDocument(message.data, boot.documentId)) {
+            void refreshPlan();
           } else if (act) {
             void refresh();
           }
@@ -982,9 +1007,18 @@ function mount(
     });
   }
 
+  /** A plan link to a board (`#board-<id>`) opens that board. */
+  const openBoardFromHash = () => {
+    // Board ids are [a-z0-9-] only, so the hash needs no decoding.
+    const id = /^#board-(.+)$/.exec(location.hash)?.[1] ?? "";
+    if (BOARD_ID.test(id)) afterMeasuring(() => boards.selectBoard(id));
+  };
+  addEventListener("hashchange", openBoardFromHash);
+
   void boards.ready.then(async () => {
     renderBoards();
     await runFidelity(baseNumber);
+    openBoardFromHash();
     // Marks the first fidelity pass done (it switches boards), for page tests and later steps.
     root.dataset.fidelityDone = "";
   });

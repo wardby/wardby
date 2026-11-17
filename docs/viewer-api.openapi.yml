@@ -653,6 +653,14 @@ components:
                     required:
                       - kind
                     additionalProperties: false
+                  - type: object
+                    properties:
+                      kind:
+                        type: string
+                        const: plan_approved
+                    required:
+                      - kind
+                    additionalProperties: false
               turns:
                 type: integer
               tokensIn:
@@ -1038,6 +1046,14 @@ components:
                 kind:
                   type: string
                   const: comment
+              required:
+                - kind
+              additionalProperties: false
+            - type: object
+              properties:
+                kind:
+                  type: string
+                  const: plan_approved
               required:
                 - kind
               additionalProperties: false

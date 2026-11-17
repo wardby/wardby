@@ -13,6 +13,7 @@ import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
 vi.mock("./documents/agent-loop.js", () => ({ sweepUnansweredDocumentRuns: vi.fn(async () => 0) }));
 import { sweepUnansweredDocumentRuns, type DocumentSweepDeps } from "./documents/agent-loop.js";
 import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
+import { setPlanChainHook } from "./plans/approval.js";
 import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 
 interface FakeRun {
@@ -108,6 +109,24 @@ describe("reconcileOnce", () => {
     expect(runs[0].status).toBe("lost");
     expect(runs[0].error).toMatch(/Orphaned/);
     expect(runs[0].finishedAt).toEqual(NOW);
+  });
+
+  it("a run it marks lost reaches the plan build chain (the shared run-end event)", async () => {
+    const onTicketFinished = vi.fn(async () => undefined);
+    setPlanChainHook({ onMerged: vi.fn(), onTicketFinished, buildTicketFromComment: vi.fn() });
+    try {
+      const runs = [baseRun({ heartbeatAt: STALE })];
+      const db = fakeDb(runs);
+      await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS);
+      expect(runs[0].status).toBe("lost");
+      expect(onTicketFinished).toHaveBeenCalledTimes(1);
+      expect(onTicketFinished.mock.calls[0]).toEqual([db, "r1"]);
+      // A second pass ends nothing, so it reports nothing.
+      await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS);
+      expect(onTicketFinished).toHaveBeenCalledTimes(1);
+    } finally {
+      setPlanChainHook(undefined);
+    }
   });
 
   it("answers comment threads of ended runs after the lost marking, only when given the document deps", async () => {

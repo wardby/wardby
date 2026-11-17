@@ -63,6 +63,7 @@ import {
   REPOSITORY_MOUNT_ROOT,
   SERVICES_ROOT,
   WARM_ROUNDS_ENV,
+  PLAN_FOLDER,
 } from "./constants.js";
 import { waitAtMost } from "./diagnostics.js";
 import { checkImage, ImageIncompleteError, type ImageCheck } from "./image-check.js";
@@ -120,6 +121,8 @@ export interface ToolOptions {
   env?: NodeJS.ProcessEnv;
   metadataDir?: string;
   workspace?: string;
+  /** Warm rounds: the plan folder, removed between rounds (default PLAN_FOLDER). */
+  planFolder?: string;
   /** Where the extra repositories are extracted, one folder each (default /repos). */
   reposRoot?: string;
   /** Where the services' script volumes are mounted, `<root>/<i>` each (default /run/wardby-services). */
@@ -650,6 +653,8 @@ export async function run(options: ToolOptions): Promise<ToolHandle> {
    */
   const nextRound = async (): Promise<boolean> => {
     await retireRunner();
+    // The previous round's plan folder: never collected or read by the next round.
+    await rm(options.planFolder ?? PLAN_FOLDER, { recursive: true, force: true });
     for (const { socket } of connections.values()) socket.destroy();
     connections.clear();
     round += 1;

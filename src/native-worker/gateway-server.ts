@@ -349,6 +349,7 @@ async function rebuild(deps: GatewayServerDeps, session: GatewaySessionRecord): 
       issueTrackers,
       reviewReads,
       deadlineAt: session.deadlineAt,
+      origin: providers.publicOrigin ?? null,
     }),
     finishContext: { runId: session.runId, db, providers, reviewHosts, repoAccess, issueTrackers },
     delegation: {
@@ -358,6 +359,7 @@ async function rebuild(deps: GatewayServerDeps, session: GatewaySessionRecord): 
       providers,
       db,
       issueTrackers,
+      origin: providers.publicOrigin ?? null,
       pollWindowMs: deps.pollWindowMs,
     },
   };

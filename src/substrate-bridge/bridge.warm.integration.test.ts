@@ -2,7 +2,7 @@
 // the real tool runner, a stub worker. The "launcher" steps between rounds are done by hand here.
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -251,12 +251,17 @@ describe("substrate bridges, warm rounds", () => {
     const stops: number[] = [];
     const kills: number[] = [];
     const exits: Array<(code: number) => void> = [];
+    // Round 1's plan folder on the tool actor, there before any round starts: only the tool bridge's
+    // removal between rounds can take it away.
+    await mkdir(join(dir, "plan"), { recursive: true });
+    await writeFile(join(dir, "plan", "plan.md"), "round one\n");
     tool = await runTool({
       imageCheck: false,
       proxyUrl,
       env,
       metadataDir: await names("tool"),
       workspace,
+      planFolder: join(dir, "plan"),
       socketPath,
       readyPort: 0,
       tempRoot: dir,
@@ -296,6 +301,7 @@ describe("substrate bridges, warm rounds", () => {
       inputPath,
       resultPath,
       transcriptPath,
+      planFilesPath: join(dir, "out", "plan-files.json"),
       socketPath: agentSocket,
       readyPort: 0,
       policy: FAST,
@@ -314,6 +320,7 @@ describe("substrate bridges, warm rounds", () => {
             stderr.end(`worker stderr of round ${round}\n`);
             // A previous round's output must be gone before this one starts.
             await expect(readFile(resultPath)).rejects.toThrow();
+            await expect(readFile(join(dir, "out", "plan-files.json"))).rejects.toThrow();
             const socket = connect(agentSocket);
             socket.setEncoding("utf8");
             let pending = "";
@@ -353,6 +360,7 @@ describe("substrate bridges, warm rounds", () => {
             await mkdir(join(dir, "out"), { recursive: true });
             if (round === options.failRound) return 1;
             await writeFile(resultPath, JSON.stringify({ runId: input.runId }));
+            await writeFile(join(dir, "out", "plan-files.json"), JSON.stringify({ round }));
             const header = {
               type: "wardby-transcript",
               version: 1,
@@ -389,6 +397,9 @@ describe("substrate bridges, warm rounds", () => {
     await stageRoundTwo();
     await waitFor(async () => ((await blobs.head(BLOB.done(TOKEN, 2))) ? true : undefined));
     await waitFor(async () => ((await blobs.head(BLOB.transcript(TOKEN, 2))) ? true : undefined));
+    await expect(lstat(join(dir, "plan"))).rejects.toThrow();
+    expect(JSON.parse((await blobs.get(BLOB.planFiles(TOKEN, 2))).toString())).toEqual({ round: 2 });
+    expect(JSON.parse((await blobs.get(BLOB.planFiles(TOKEN))).toString())).toEqual({ round: 1 });
     expect(inputs[1]).toEqual({ runId: "run-2", task: "round two", sessionResume: true, resumeSessionId: SESSION });
     expect(toolLists).toHaveLength(2);
     expect(toolLists[1]).toContain("run_command");

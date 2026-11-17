@@ -23,7 +23,6 @@ import {
   SHAREABLE_TYPES,
   accessRank,
   atLeast,
-  effectiveAccess,
   isLevel,
   isResourceType,
   principalGranteeKey,
@@ -31,6 +30,7 @@ import {
   type ResourceType,
 } from "../../core/grants.js";
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
+import { documentAccess } from "../../core/documents/access.js";
 import { agentNotFound, assertAgentAccess, agentAccess } from "../auth/access.js";
 import { permissionsOf } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
@@ -103,7 +103,7 @@ async function requireOwnedResource(
     const doc = await db.document.findUnique({ where: { id }, select: { id: true, ownerId: true } });
     // Missing and invisible look the same; a reader who isn't the owner gets 403.
     const access = doc
-      ? await effectiveAccess(db, "document", doc, ctx.principal.id, { operator: ctx.operator })
+      ? await documentAccess(db, doc.id, { kind: "principal", principalId: ctx.principal.id, operator: ctx.operator })
       : "none";
     if (!doc || !atLeast("document", access, "read")) {
       throw new McpError(404, `Document "${id}" not found.`);
@@ -123,6 +123,7 @@ type GrantTx = Pick<
   | "agent"
   | "mcpServer"
   | "document"
+  | "documentShareLink"
   | "principal"
   | "resourceGrant"
   | "agentSecret"

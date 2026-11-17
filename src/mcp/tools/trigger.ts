@@ -31,6 +31,7 @@
 import { ContinuationRefusedError, dispatchRun, type ContinuationRefusal } from "../../core/dispatch.js";
 import { isRunUnfinished, sameRepository } from "../../core/run-pull-request.js";
 import { atLeast } from "../../core/grants.js";
+import { refusalOf } from "../../core/plans/refusal.js";
 import { RepositoryRefUnreadableError, RepositorySetRefusedError } from "../../core/coding-repository-set.js";
 import { RepositoryChoiceRefusedError, resolveCodingRepository } from "../../core/coding-repository.js";
 import {
@@ -342,6 +343,8 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         if (err instanceof RepositorySetRefusedError || err instanceof RepositoryRefUnreadableError) {
           throw new McpError(400, err.message);
         }
+        const plan = refusalOf(err);
+        if (plan) throw new McpError(400, plan.message);
         throw err;
       };
       const repository =
@@ -396,6 +399,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         dispatched = await dispatchRun({
           db: ctx.db,
           executor: ctx.providers.executor,
+          secretCipher: ctx.providers.secrets,
           selfDefects: { db: ctx.db, issueTrackers: ctx.providers.issueTrackers },
           agentId: agent.id,
           trigger: "manual",

@@ -8,6 +8,7 @@ import { Prisma, type PrismaClient } from "#prisma";
 import { maybePruneHostEventDeliveries } from "./deliveries.js";
 import type { HostEventDb } from "../../core/host-events.js";
 import { routeHostEvent } from "../../core/host-events.js";
+import type { SecretCipher } from "../../core/plans/publish.js";
 import { logger } from "../../core/logger.js";
 import type { Executor } from "../../providers/executor/types.js";
 import { normalizeGitHubEvent, verifyGitHubSignature } from "../../providers/review-host/github-events.js";
@@ -27,6 +28,8 @@ export interface GitHubIngressDeps {
   repoAccess: RepoAccessGate;
   /** For a merged/closed PR's linked issue; absent → closed PRs are ignored. */
   issueTrackers?: IssueTrackerRegistry;
+  /** Reads a builder's secret values to redact its approved plan (spec §7). */
+  secretCipher?: SecretCipher;
   webhookSecret: string | undefined;
   /**
    * The App's id, slug, and owner (the owner is always served). Throwing fails
@@ -191,6 +194,7 @@ export async function handleGitHubEventIngress(
       hosts: deps.hosts,
       repoAccess: deps.repoAccess,
       ...(deps.issueTrackers ? { issueTrackers: deps.issueTrackers } : {}),
+      ...(deps.secretCipher ? { secretCipher: deps.secretCipher } : {}),
       mentionHandle: app.slug,
       ...(deps.mentionExplanations === false ? { mentionExplanations: false } : {}),
     });

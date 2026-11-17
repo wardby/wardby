@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Principal } from "#prisma";
 import { createPrismaClient } from "../db.js";
 import { attachSecret, createSecret } from "../secrets.js";
-import type { Viewer } from "./access.js";
+import { documentAccess, type Viewer } from "./access.js";
 import { createDocumentEventBus, type DocumentEvent } from "./events.js";
 import { createDocument, publishVersion } from "./service.js";
 import { createShareLink, registerGuest } from "./share-links.js";
@@ -127,6 +127,49 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     const level = (p: Principal) => grants.find((g) => g.granteePrincipalId === p.id)?.level;
     expect([level(ann), level(ben), level(cat)]).toEqual(["comment", "write", "comment"]);
     expect(grants.find((g) => g.granteePrincipalId === ann.id)?.source).toBe("document_review");
+  });
+
+  it("naming a reviewer who already comments through the plan's access agent writes no grant; it stays live", async () => {
+    const lead = `rv-lead-${s}`;
+    await db.agent.create({
+      data: { id: lead, name: lead, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner.id },
+    });
+    const set = await db.planSet.create({
+      data: {
+        agentId: agentId,
+        accessAgentId: lead,
+        repository: `o/rv-${s}`,
+        number: 1,
+        store: "wardby",
+        createdByRunId: "run-x",
+      },
+    });
+    const id = (await db.document.create({ data: { title: "Plan", ownerId: owner.id, planSetId: set.id } })).id;
+    const grant = await db.resourceGrant.create({
+      data: {
+        resourceType: "agent",
+        resourceId: lead,
+        granteeKind: "principal",
+        granteePrincipalId: ann.id,
+        granteeKey: `principal:${ann.id}`,
+        level: "read",
+      },
+    });
+    try {
+      await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+      expect(await db.resourceGrant.count({ where: { resourceType: "document", resourceId: id } })).toBe(0);
+      expect(await documentAccess(db, id, as(ann))).toBe("comment");
+      await db.resourceGrant.delete({ where: { id: grant.id } });
+      expect(await documentAccess(db, id, as(ann))).toBe("none");
+      expect((await db.documentReviewer.findMany({ where: { documentId: id } })).map((r) => r.principalId)).toEqual([
+        ann.id,
+      ]);
+    } finally {
+      await db.document.deleteMany({ where: { id } });
+      await db.planSet.deleteMany({ where: { id: set.id } });
+      await db.resourceGrant.deleteMany({ where: { resourceId: lead } });
+      await db.agent.deleteMany({ where: { id: lead } });
+    }
   });
 
   it("refuses an unknown reviewer, a guest of another document, a view-link guest and a too-long list", async () => {

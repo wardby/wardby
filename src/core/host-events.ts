@@ -5,6 +5,7 @@
  * module decides which agents run. See
  * docs/private/2026-09-25-code-review-host-design.md §6.3.
  */
+import type { SecretCipher } from "./plans/publish.js";
 import { Prisma, type PrismaClient } from "#prisma";
 import { codeProviderOf, pullRequestWebUrl } from "../coding/code-host.js";
 import type { Executor } from "../providers/executor/types.js";
@@ -23,6 +24,9 @@ import {
 } from "./attribution.js";
 import { headStoppedAtBudget, pushingRunInFlight } from "./budget-stopped-head.js";
 import { checkContinuation, dispatchRun, type DispatchTx } from "./dispatch.js";
+import { planChainHook } from "./plans/approval.js";
+import { PlanRefusedError } from "./plans/refusal.js";
+import { planRefusedReply } from "./plans/wording.js";
 import { rootFollowUpInFlight } from "./run-pull-request.js";
 import { mentionStatusRow, postMentionStatus } from "./host-status.js";
 import { githubIssueKey, handlePullRequestClosed } from "./issue-bridge.js";
@@ -78,6 +82,16 @@ export type HostEventDb = Pick<
   | "workItem"
   | "runAttribution"
   | "agentIssueProject"
+  // A buildFromPlan builder's approved plan (dispatch, spec §7).
+  | "planSet"
+  // The build chain's builder check before the next ticket (plans/approval.ts, R12).
+  | "principal"
+  | "documentVersion"
+  | "documentFile"
+  | "resourceGrant"
+  | "agentSecret"
+  | "agentMcpServer"
+  | "secret"
   | "$transaction"
   | "$queryRaw"
 >;
@@ -98,6 +112,8 @@ export interface RouteHostEventDeps {
    * so a deployment may keep what is linked there to itself. Absent = true.
    */
   mentionExplanations?: boolean;
+  /** Reads a builder's secret values to redact its approved plan (spec §7); absent refuses a build from a plan. */
+  secretCipher?: SecretCipher;
 }
 
 /** What starting a review needs: everything routing needs except the mention handle. */
@@ -125,6 +141,19 @@ export function isReviewCommand(body: string, mentionHandle: string): boolean {
   return new RegExp(`(^|[^\\w-])@${escapeRegExp(mentionHandle)}\\s+review(?![\\w-])`, "i").test(
     withoutMarkdownCode(body),
   );
+}
+
+/**
+ * The ticket of a `@app build ticket <t>` outside code (spec §7b), or null. On an issue only: it
+ * builds a ticket of the issue's approved plan.
+ */
+export function parseBuildTicketCommand(body: string, mentionHandle: string): number | null {
+  const match = new RegExp(
+    `(^|[^\\w-])@${escapeRegExp(mentionHandle)}\\s+build\\s+ticket\\s+(\\d{1,4})(?![\\w-])`,
+    "i",
+  ).exec(withoutMarkdownCode(body));
+  // Tickets are numbered from 1 (`### Ticket <t>:`).
+  return match && Number(match[2]) >= 1 ? Number(match[2]) : null;
 }
 
 type PushEvent = Extract<HostEvent, { kind: "push" }>;
@@ -722,6 +751,7 @@ export async function startReviews(
       const dispatched = await dispatchRun({
         db: deps.db,
         executor: deps.executor,
+        secretCipher: deps.secretCipher,
         selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
         agentId: target.agentId,
         trigger: "host_event",
@@ -1529,9 +1559,14 @@ async function releaseRequestHead(
 export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps): Promise<RouteResult> {
   const none: RouteResult = { runIds: [], followUps: [] };
   if (event.kind === "pr_closed") {
-    // Bookkeeping only: no agent runs, so no repository link is consulted.
+    // Bookkeeping, plus the next ticket of a plan's build chain (Task C3): no repository link is consulted.
     await handlePullRequestClosed(deps.db, deps.issueTrackers, {
       codeProvider: event.provider,
+      repository: event.repository,
+      number: event.prNumber,
+      merged: event.merged,
+    });
+    await planChainHook()?.onMerged(deps.db, {
       repository: event.repository,
       number: event.prNumber,
       merged: event.merged,
@@ -1612,6 +1647,7 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
           dispatched = await dispatchRun({
             db: deps.db,
             executor: deps.executor,
+            secretCipher: deps.secretCipher,
             selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
             agentId: watcher.agentId,
             trigger: "host_event",
@@ -1732,8 +1768,14 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const reviewCommand = event.isPullRequest && isReviewCommand(event.body, deps.mentionHandle);
       const responderLink = links.find((l) => l.access === "write" && l.triggers.includes("mention"));
       const candidates = reviewCommand ? reviewerLinks : responderLink ? [responderLink] : [];
+      // `build ticket <t>` on a GitHub issue starts the plan's builder (spec §7b), with no link of its
+      // own: a plan is numbered by its GitHub issue, so no other provider's mention is a plan command.
+      const buildTicket =
+        event.provider === "github" && !event.isPullRequest
+          ? parseBuildTicketCommand(event.body, deps.mentionHandle)
+          : null;
       // Explanations off and nothing to start: say nothing, and skip the author lookup.
-      if (candidates.length === 0 && deps.mentionExplanations === false) return none;
+      if (candidates.length === 0 && buildTicket === null && deps.mentionExplanations === false) return none;
       // H5-3: a mention drives a write-capable agent holding its owner's
       // tools and secrets, so its author needs real push access to the
       // repository (author_association, checked upstream, is only a
@@ -1770,6 +1812,17 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
             });
         };
         return { runIds: [], followUps: [refuse] };
+      }
+      // Only an author with write access gets here: the same gate as any mention that starts a run.
+      if (buildTicket !== null) {
+        const answer = await planChainHook()?.buildTicketFromComment(deps.db, {
+          repository: event.repository,
+          number: event.number,
+          ticket: buildTicket,
+          starterName: event.author,
+        });
+        // "started" and "refused" were answered on the issue by the hook; "none" goes on as a mention.
+        if (answer === "started" || answer === "refused") return { runIds: [], followUps: [react] };
       }
       // The author may use wardby here, so tell them why nothing started
       // instead of leaving the mention unanswered.
@@ -1837,45 +1890,73 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
             provider: "github",
             key: githubIssueKey(event.repository, event.number),
           });
-      const dispatched = await dispatchRun({
-        db: deps.db,
-        executor: deps.executor,
-        selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
-        agentId: allowed[0].agentId,
-        trigger: "host_event",
-        taskOverride: mentionTaskText(event, siblings),
-        attribution: event.isPullRequest
-          ? await linkedPullRequestAttribution(
-              deps.db,
-              deps.issueTrackers,
-              { codeProvider: host.provider, repository: event.repository, number: event.number },
-              RESPONSE_PATH_SNAPSHOT_BUDGET,
-            )
-          : // A mention on an issue is that issue's own run tree, like a Jira issue event's.
-            {
-              source: "issue_event",
-              item: await resolveWorkItem(
+      let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+      try {
+        dispatched = await dispatchRun({
+          db: deps.db,
+          executor: deps.executor,
+          secretCipher: deps.secretCipher,
+          selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
+          agentId: allowed[0].agentId,
+          trigger: "host_event",
+          taskOverride: mentionTaskText(event, siblings),
+          attribution: event.isPullRequest
+            ? await linkedPullRequestAttribution(
                 deps.db,
                 deps.issueTrackers,
-                "github",
-                githubIssueKey(event.repository, event.number),
+                { codeProvider: host.provider, repository: event.repository, number: event.number },
                 RESPONSE_PATH_SNAPSHOT_BUDGET,
-              ),
-            },
-        ...(priorRoot
-          ? {
-              beforePersist: async (tx: DispatchTx) => {
-                followUpRunning = await rootFollowUpInFlight(tx, priorRoot);
-                return !followUpRunning;
+              )
+            : // A mention on an issue is that issue's own run tree, like a Jira issue event's.
+              {
+                source: "issue_event",
+                item: await resolveWorkItem(
+                  deps.db,
+                  deps.issueTrackers,
+                  "github",
+                  githubIssueKey(event.repository, event.number),
+                  RESPONSE_PATH_SNAPSHOT_BUDGET,
+                ),
               },
-            }
-          : {}),
-        // Where to report, written with the run: even if this instance dies
-        // before the follow-up below, the run's outcome still gets a comment.
-        afterPersist: async (tx, run) => {
-          await tx.runHostStatus.create({ data: mentionStatusRow(host.provider, event, run.id) });
-        },
-      });
+          ...(priorRoot
+            ? {
+                beforePersist: async (tx: DispatchTx) => {
+                  followUpRunning = await rootFollowUpInFlight(tx, priorRoot);
+                  return !followUpRunning;
+                },
+              }
+            : {}),
+          // Where to report, written with the run: even if this instance dies
+          // before the follow-up below, the run's outcome still gets a comment.
+          afterPersist: async (tx, run) => {
+            await tx.runHostStatus.create({ data: mentionStatusRow(host.provider, event, run.id) });
+          },
+        });
+      } catch (err) {
+        // A buildFromPlan builder refused before anything was written (spec §7): say why on the
+        // issue, as a decline does, instead of failing the delivery. Always posted: the author asked
+        // this agent for a build, and the reply names only the plan's paths and the refusal code.
+        if (!(err instanceof PlanRefusedError)) throw err;
+        log.info(
+          { repository: event.repository, number: event.number, code: err.code },
+          "mention refused: the builder's plan refused the run",
+        );
+        const reply = async () => {
+          await host
+            .comment(event.repository, {
+              number: event.number,
+              body: planRefusedReply(err),
+              ...(event.replyToReviewCommentId ? { replyToReviewCommentId: event.replyToReviewCommentId } : {}),
+            })
+            .catch((postErr: unknown) => {
+              log.warn(
+                { err: postErr, repository: event.repository, number: event.number },
+                "could not post the refusal",
+              );
+            });
+        };
+        return { runIds: [], followUps: [reply] };
+      }
       if (!dispatched) return followUpRunning ? decline("follow_up_running") : none;
       log.info(
         { repository: event.repository, number: event.number, runId: dispatched.run.id },

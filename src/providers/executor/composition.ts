@@ -23,6 +23,25 @@ import { logger } from "../../core/logger.js";
 import { outsideRunContext } from "../../core/async-context.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { onDocumentRunFinished } from "../../core/documents/agent-loop.js";
+import { planRunFinishedHook } from "../../core/plans/hooks.js";
+import {
+  createPlanChainHook,
+  createPlanReviewHook,
+  issueNoticePoster,
+  planTicketStartBlock,
+  type TicketStartBlock,
+  setPlanChainHook,
+  setPlanReviewHook,
+  type PlanApprovalDeps,
+} from "../../core/plans/approval.js";
+import { refusalOf } from "../../core/plans/refusal.js";
+import { dispatchRun } from "../../core/dispatch.js";
+import { RepositorySetRefusedError } from "../../core/coding-repository-set.js";
+import { RESPONSE_PATH_SNAPSHOT_BUDGET, resolveWorkItem } from "../../core/attribution.js";
+import { documentSecretValues } from "../../core/documents/redact.js";
+import { planSummaryForRun } from "../../core/plans/publish.js";
+import { planSummaryLines } from "../../core/plans/wording.js";
+import { httpOrigin } from "../../mcp/tools/documents.js";
 import type { SelfDefectSink } from "../../core/self-defects.js";
 import { startDeferredForRequest } from "../../core/host-events.js";
 import { syncMergeOrderChecks } from "../../core/merge-order-check.js";
@@ -53,6 +72,7 @@ import {
   loadTranscriptMaxBytes,
   loadTranscriptRetentionDays,
 } from "../../coding/transcript/recorder.js";
+import { PlanFilesRecorder } from "../../coding/plan-files/recorder.js";
 import { loadAgentSecretValues } from "../../core/secret-guard.js";
 import { agentSecretVersions } from "../../core/secret-versions.js";
 import { createBlobStore } from "../storage/index.js";
@@ -258,7 +278,78 @@ export function buildSubstrateJobLauncher(options: {
 }
 
 /**
- * Builds container execution only when Docker or Kubernetes is explicitly
+ * Starts a plan ticket's builder run (spec §7b). Under the set's row lock (R16), only an approved set
+ * with no ticket run in flight; a refusal reports what that guard saw, not a later re-read. A run the
+ * chain follows (followedByChain) is recorded as the chain's run in the transaction that creates it,
+ * so a run that ends at once still finds itself the chain's run (plans/approval.ts onTicketFinished).
+ */
+export function planTicketStarter(deps: {
+  db: PrismaClient;
+  executor: () => Executor;
+  issueTrackers: Parameters<typeof resolveWorkItem>[1];
+  cipher?: ConfiguredExecutorOptions["secretCipher"];
+  dispatch?: typeof dispatchRun;
+}): PlanApprovalDeps["startTicket"] {
+  const dispatch = deps.dispatch ?? dispatchRun;
+  return async ({ builderAgentId, set, ticket, starterId, trigger, followedByChain }) => {
+    const guard: { blocked: TicketStartBlock | null } = { blocked: null };
+    try {
+      const attribution =
+        set.issueProvider && set.issueKey
+          ? {
+              source: "explicit" as const,
+              item: await resolveWorkItem(
+                deps.db,
+                deps.issueTrackers,
+                set.issueProvider,
+                set.issueKey,
+                RESPONSE_PATH_SNAPSHOT_BUDGET,
+              ),
+            }
+          : undefined;
+      const dispatched = await dispatch({
+        db: deps.db,
+        executor: deps.executor(),
+        selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
+        agentId: builderAgentId,
+        trigger,
+        ...(starterId ? { triggeredById: starterId } : {}),
+        codingRepository: set.repository,
+        codingTask: `Build ticket ${ticket} of plan ${set.number}.`,
+        planNumber: set.number,
+        planTicket: ticket,
+        // Only this set: the gate's newest visible set for the repository and number may be another's.
+        expectedPlanSetId: set.id,
+        ...(deps.cipher ? { secretCipher: deps.cipher } : {}),
+        ...(attribution ? { attribution } : {}),
+        // A reopen or a concurrent start (the chain's, or a build ticket comment's) waits for the lock.
+        beforePersist: async (tx) => {
+          guard.blocked = await planTicketStartBlock(tx, set.id);
+          return guard.blocked === null;
+        },
+        afterPersist: async (tx, run) => {
+          if (!followedByChain || (run.status !== "pending" && run.status !== "running")) return;
+          await tx.$queryRaw`
+            UPDATE "PlanSet" SET "chainRunId" = ${run.id}
+            WHERE "id" = ${set.id} AND "chainTicket" = ${ticket} AND "chainStopped" IS NULL
+            RETURNING "id"`;
+        },
+      });
+      if (!dispatched) return guard.blocked ?? { refused: "plan_not_approved" };
+      if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
+        return { refused: (dispatched.run.error ?? "refused").split(":")[0] };
+      }
+      return { runId: dispatched.run.id };
+    } catch (err) {
+      const refusal = refusalOf(err) ?? (err instanceof RepositorySetRefusedError ? { error: err.code } : undefined);
+      if (refusal) return { refused: refusal.error };
+      throw err;
+    }
+  };
+}
+
+/**
+ * Builds container execution only when Docker, Kubernetes or Substrate is explicitly
  * selected, and native sandbox routing whenever a sandbox executor is given.
  */
 export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Executor {
@@ -376,6 +467,27 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   // `composed` only when a run finishes, which is after this function returns.
   const blobStoreConfig = loadBlobStoreConfig(env);
   const cipher = options.secretCipher;
+  const origin = httpOrigin(env.MCP_CANONICAL_URI);
+  // Spec §7b: a plan set's approval notifies on its issue or starts its builder for ticket 1. startTicket
+  // reads `composed` only when it is called, after this function returns, as the terminal hooks do.
+  const planDeps: PlanApprovalDeps = {
+    postIssueNotice: issueNoticePoster({ db: options.db, reviewHosts, issueTrackers }),
+    mentionHandle: async () => (reviewHosts.github?.appSlug ? await reviewHosts.github.appSlug() : null),
+    secretValues: async (agentId) => {
+      if (!cipher) throw new Error("plan_secrets_unavailable");
+      return documentSecretValues(options.db, cipher, agentId);
+    },
+    startTicket: planTicketStarter({
+      db: options.db,
+      executor: () => composed,
+      issueTrackers,
+      ...(cipher ? { cipher } : {}),
+    }),
+  };
+  // Without the cipher no notice can be redacted, so no plan approval hook runs (as for the run hooks).
+  setPlanReviewHook(cipher ? createPlanReviewHook(planDeps) : undefined);
+  // The build chain (C3): a merged ticket PR starts the next ticket; a failed ticket run stops it.
+  setPlanChainHook(cipher ? createPlanChainHook(planDeps) : undefined);
   const transcripts = new RunTranscriptRecorder({
     db: options.db,
     blobs: blobStoreConfig && cipher ? createBlobStore(blobStoreConfig) : undefined,
@@ -388,23 +500,50 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     retentionDays: loadTranscriptRetentionDays(env),
     maxBytes: loadTranscriptMaxBytes(env),
   });
+  const planFiles = new PlanFilesRecorder({
+    db: options.db,
+    secretValues: async (agentId) => {
+      if (!cipher) throw new Error("plan_files_secrets_unavailable");
+      const named = await loadAgentSecretValues(options.db, cipher, agentId);
+      return named.flatMap((entry) => entry.values);
+    },
+    secretVersions: (agentId) => agentSecretVersions(options.db, agentId),
+  });
   const coding = new ContainerExecutor({
     transcripts,
+    planFiles,
+    planSummary: async (runId) => {
+      const s = await planSummaryForRun(options.db, runId, origin);
+      return s ? planSummaryLines(s) : [];
+    },
     ...(options.runSteps ? { runSteps: options.runSteps } : {}),
     store: new PrismaContainerExecutionStore(options.db, {
       maxConcurrent: concurrency.maxConcurrent,
       issueTrackers,
       warmRounds: jobs.warmRounds === true,
-      // Threads sent from a document: publish the run's edit and post its replies (never throws).
-      // Without the cipher the agent's secrets cannot be redacted, so nothing is posted.
+      // Threads sent from a document: publish the run's edit and post its replies; a planner run's
+      // plan files become its plan set, and a planner with no lead replies on its issue (neither throws). Without the
+      // cipher the agent's secrets cannot be redacted, so nothing is posted or published.
       ...(cipher
         ? {
-            onTerminal: documentRunFinishedHook(() => ({
-              db: options.db,
-              executor: composed,
-              cipher,
-              selfDefects: { db: options.db, issueTrackers },
-            })),
+            onTerminal: (() => {
+              const documentHook = documentRunFinishedHook(() => ({
+                db: options.db,
+                executor: composed,
+                cipher,
+                selfDefects: { db: options.db, issueTrackers },
+              }));
+              const planHook = planRunFinishedHook(() => ({
+                db: options.db,
+                cipher,
+                origin,
+                postIssueNotice: planDeps.postIssueNotice,
+              }));
+              return (runId: string) => {
+                documentHook(runId);
+                void planHook(runId);
+              };
+            })(),
           }
         : {}),
     }),
@@ -447,6 +586,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       hosts: reviewHosts,
       repoAccess,
       issueTrackers,
+      secretCipher: cipher,
     })),
     onSlotReleased: () => {
       void drainCodingQueue({

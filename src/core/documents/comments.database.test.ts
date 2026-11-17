@@ -17,6 +17,7 @@ import {
   setThreadStatus,
 } from "./comments.js";
 import { MAX_COMMENT_CHARS } from "./limits.js";
+import { reviewCandidates } from "./review.js";
 import { createDocument } from "./service.js";
 
 const SECRET = "s3cret-comment-456";
@@ -302,5 +303,75 @@ describe.skipIf(!process.env.DATABASE_URL)("comment service (database)", () => {
     const body = `${guests.join(" ")} @[nobody-after-cap-${s.slice(0, 8)}]`;
     const t = await createThread(db, cipher, { documentId: docId, viewer: asOwner(), anchor, body });
     expect(t.mentionsWithoutAccess).toEqual([]);
+  });
+
+  it("a plan document's candidates include the access agent's owner and grantees, live (R24)", async () => {
+    const lead = `cmt-lead-${s}`;
+    const [l, g, x] = await Promise.all(
+      ["l", "g", "x"].map((n) => db.principal.create({ data: { subject: `cmt-plan-${n}-${s}` } })),
+    );
+    await db.principalProfile.create({ data: { principalId: l.id, displayName: "Lea Lead", source: "oidc" } });
+    await db.principalProfile.create({ data: { principalId: g.id, displayName: "Gil Grantee", source: "oidc" } });
+    await db.principalProfile.create({ data: { principalId: x.id, displayName: "Sam Stranger", source: "oidc" } });
+    await db.agent.create({
+      data: { id: lead, name: lead, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: l.id },
+    });
+    const set = await db.planSet.create({
+      data: {
+        agentId: agent,
+        accessAgentId: lead,
+        repository: `o/r-${s}`,
+        number: 1,
+        store: "wardby",
+        createdByRunId: "run-x",
+      },
+    });
+    const d = (
+      await db.document.create({ data: { title: "Plan", ownerId: owner.id, planSetId: set.id, planPath: "plan.md" } })
+    ).id;
+    const grant = await db.resourceGrant.create({
+      data: {
+        resourceType: "agent",
+        resourceId: lead,
+        granteeKind: "principal",
+        granteePrincipalId: g.id,
+        granteeKey: `principal:${g.id}`,
+        level: "read",
+      },
+    });
+    try {
+      const ids = async () => (await mentionCandidates(db, d)).map((c) => c.principalId);
+      expect((await ids()).sort()).toEqual([owner.id, l.id, g.id].sort());
+      const members = (await reviewCandidates(db, d, asOwner())).members;
+      expect(members).toEqual(
+        expect.arrayContaining([
+          { principalId: l.id, name: "Lea Lead" },
+          { principalId: g.id, name: "Gil Grantee" },
+        ]),
+      );
+      expect(members.some((m) => m.principalId === x.id)).toBe(false);
+      await db.resourceGrant.delete({ where: { id: grant.id } });
+      expect(await ids()).not.toContain(g.id);
+      // An everyone grant on the agent offers every named principal, as it does on a document.
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "agent",
+          resourceId: lead,
+          granteeKind: "everyone",
+          granteeKey: "everyone",
+          level: "read",
+        },
+      });
+      expect(await ids()).toContain(x.id);
+      // A deleted access agent: the document's own candidates only.
+      await db.agent.delete({ where: { id: lead } });
+      expect(await ids()).toEqual([owner.id]);
+    } finally {
+      await db.resourceGrant.deleteMany({ where: { resourceId: lead } });
+      await db.agent.deleteMany({ where: { id: lead } });
+      await db.document.delete({ where: { id: d } });
+      await db.planSet.delete({ where: { id: set.id } });
+      await db.principalProfile.deleteMany({ where: { principalId: { in: [l.id, g.id, x.id] } } });
+    }
   });
 });

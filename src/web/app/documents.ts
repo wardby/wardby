@@ -25,9 +25,20 @@ import { append, clear, h } from "./dom.js";
 import { pdfExportButton } from "./exports-menu.js";
 import { EditsTray } from "./edits-ui.js";
 import { createEditor } from "./editor.js";
-import { coalesce, HiddenStopper, liveAction, LiveConnection, statusConnected, versionAction } from "./live.js";
+import {
+  coalesce,
+  HiddenStopper,
+  liveAction,
+  LiveConnection,
+  otherDocument,
+  statusConnected,
+  versionAction,
+} from "./live.js";
 import { isReopenCopy } from "./review-model.js";
+import { planLinkTargets } from "./extensions.js";
+import { planBarHost, renderPlanBar } from "./plan-bar.js";
 import { ReviewPanel } from "./review-ui.js";
+import { unresolvedLinksText } from "../../core/plans/page-payload.js";
 import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
 import { TextSurface } from "./text-surface.js";
 
@@ -91,6 +102,8 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const reviewBanner = h("div", { class: "review-banner", role: "status" });
   const banner = h("div", { class: "banner", hidden: true, role: "note" });
   const lossyNotice = h("div", { class: "banner", hidden: true, role: "note" }, LOSSY_NOTICE);
+  const planBar = planBarHost();
+  const planWarnings = h("div", { class: "plan-warnings", hidden: true, role: "note" });
   const changedBanner = h(
     "div",
     { class: "banner", hidden: true, role: "note" },
@@ -157,17 +170,36 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
         account,
       ),
       reviewBanner,
+      planBar,
       banner,
       changedBanner,
       lossyNotice,
+      planWarnings,
       toolbar,
       h("div", { class: "main" }, stage, side),
     ),
   );
   document.body.append(bubble);
 
+  // ---- the plan bar, and the plan's links (a plan document only) ----
+  let planTargets = planLinkTargets(payload.planLinks);
+  const renderPlan = (p: DocumentPayload) => {
+    renderPlanBar(planBar, p.planSet);
+    planTargets = planLinkTargets(p.planLinks);
+    clear(planWarnings);
+    const unresolved = p.planSet ? (p.planLinks?.unresolved ?? []) : [];
+    planWarnings.hidden = unresolved.length === 0;
+    if (p.planSet && unresolved.length > 0)
+      append(
+        planWarnings,
+        h("h2", {}, "Checks"),
+        h("ul", {}, h("li", {}, unresolvedLinksText(p.planSet.number, unresolved))),
+      );
+  };
+  renderPlan(payload);
+
   // ---- editor ----
-  const editor = createEditor(editorEl, markdown, canWrite);
+  const editor = createEditor(editorEl, markdown, canWrite, payload.planSet ? () => planTargets : undefined);
   // A document the editor can't keep as written opens comment-only for everyone (ruling R17).
   const lossless = isLosslessRoundTrip(markdown, editor.getMarkdown());
   const editable = canWrite && lossless;
@@ -439,6 +471,8 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     } catch {
       return; // the next event, reconnect or save tries again
     }
+    // The plan bar follows every refetch, also while a newer version waits for unsaved edits.
+    renderPlan(next);
     const act = versionAction({
       shown: baseNumber,
       latest: next.version.number,
@@ -465,6 +499,15 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     if (refusedLocked) {
       refusedLocked = false;
       if (!conflict && !saving) showSave(restingSaveText());
+    }
+  });
+
+  /** Another document of the plan set changed: only the plan bar is refetched. */
+  const refreshPlan = coalesce(async () => {
+    try {
+      renderPlan(await api.load());
+    } catch {
+      /* the next event or reconnect tries again */
     }
   });
 
@@ -512,6 +555,8 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
             const up = statusConnected(message.data);
             if (up !== null) serverHears = up;
             showLive(liveState);
+          } else if (act && otherDocument(message.data, boot.documentId)) {
+            void refreshPlan();
           } else if (act) {
             void refresh();
             // A new version only updates the Edits list; a version being viewed stays on screen.

@@ -13,8 +13,15 @@ import {
   dependencyCacheBudget,
   dependencyCacheTimeLimit,
 } from "../coding-worker/dependency-cache.mjs";
+import { PLAN_LIMITS, PLAN_ROOT as SHARED_PLAN_ROOT } from "../coding-worker/plan-folder.mjs";
 import {
   GIT_CHECK_TOOL,
+  PLAN_LIST_TOOL,
+  PLAN_PLACE_MAX_BASE64,
+  PLAN_PLACE_MAX_BYTES,
+  PLAN_PLACE_TOOL,
+  PLAN_READ_TOOL,
+  PLAN_ROOT,
   PREPARE_DEPENDENCIES_TOOL,
   RESULT_BUNDLE_TOOL,
   startToolRunner,
@@ -76,7 +83,7 @@ test("serves the bounded run_command MCP tool and the worker's internal git tool
     // The git tools are the worker's own (#536); the agent's SDK options disallow them (sdk.ts).
     assert.deepEqual(
       tools.result.tools.map((tool) => tool.name),
-      ["run_command", GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL],
+      ["run_command", GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL, PLAN_PLACE_TOOL, PLAN_LIST_TOOL, PLAN_READ_TOOL],
     );
   } finally {
     socket.destroy();
@@ -223,8 +230,16 @@ test("offers the prepare tool only on a dependency-cache run", async () => {
       assert.deepEqual(
         listed.result.tools.map((tool) => tool.name),
         dependencyCache
-          ? ["run_command", PREPARE_DEPENDENCIES_TOOL, GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL]
-          : ["run_command", GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL],
+          ? [
+              "run_command",
+              PREPARE_DEPENDENCIES_TOOL,
+              GIT_CHECK_TOOL,
+              RESULT_BUNDLE_TOOL,
+              PLAN_PLACE_TOOL,
+              PLAN_LIST_TOOL,
+              PLAN_READ_TOOL,
+            ]
+          : ["run_command", GIT_CHECK_TOOL, RESULT_BUNDLE_TOOL, PLAN_PLACE_TOOL, PLAN_LIST_TOOL, PLAN_READ_TOOL],
       );
     });
   }
@@ -657,4 +672,116 @@ test("the prepare of an adopted round writes nothing in the workspace", async ()
     assert.deepEqual(await readdir(workspace), before);
     assert.deepEqual(before, []);
   });
+});
+
+test("plan tools: the folder and the place cap match plan-folder.mjs", () => {
+  assert.equal(PLAN_ROOT, SHARED_PLAN_ROOT);
+  assert.equal(PLAN_ROOT, "/tmp/wardby-plan");
+  assert.equal(PLAN_PLACE_MAX_BASE64, Math.ceil(PLAN_LIMITS.maxFileBytes / 3) * 4);
+  assert.equal(PLAN_PLACE_MAX_BYTES, PLAN_LIMITS.maxFileBytes);
+});
+
+async function withPlanRunner(options, body) {
+  const directory = await mkdtemp(join(tmpdir(), "wardby-claude-plan-"));
+  const socketPath = join(directory, "runner.sock");
+  const workspace = join(directory, "workspace");
+  await mkdir(workspace);
+  const server = await startToolRunner(socketPath, parseToolSetup(undefined), {
+    workspacePath: workspace,
+    planRoot: join(directory, "plan"),
+    ...options,
+  });
+  const client = await connect(socketPath);
+  const call = async (name, args) =>
+    JSON.parse((await client.request("tools/call", { name, arguments: args })).result.content[0].text);
+  try {
+    await body(call, join(directory, "plan"));
+  } finally {
+    client.socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+test("plan place: a file over the size cap and malformed base64 are refused, nothing placed", async () => {
+  await withPlanRunner({}, async (call, planRoot) => {
+    const big = Buffer.alloc(PLAN_LIMITS.maxFileBytes + 1, 97).toString("base64");
+    assert.ok(big.length <= PLAN_PLACE_MAX_BASE64);
+    assert.deepEqual(await call(PLAN_PLACE_TOOL, { path: "big.md", content_base64: big }), {
+      ok: false,
+      reason: "plan_too_large",
+    });
+    for (const bad of ["not base64!", "abc", "ab=c"]) {
+      assert.deepEqual(await call(PLAN_PLACE_TOOL, { path: "bad.md", content_base64: bad }), {
+        ok: false,
+        reason: "plan_folder_invalid",
+      });
+    }
+    await assert.rejects(readFile(join(planRoot, "big.md")));
+    await assert.rejects(readFile(join(planRoot, "bad.md")));
+    const exact = Buffer.alloc(PLAN_LIMITS.maxFileBytes, 97).toString("base64");
+    assert.deepEqual(await call(PLAN_PLACE_TOOL, { path: "ok.md", content_base64: exact }), { ok: true });
+  });
+});
+
+test("plan list: the loader's failures are fixed codes and a read before any list is refused", async () => {
+  const loader = (collect) => async () => ({ isSafePlanPath: () => true, collectPlanFolder: collect });
+  const secret = "sk-test-NOT-A-REAL-KEY-0000000000";
+  await withPlanRunner(
+    { loadPlanFolder: loader(async () => ({ status: "error", error: "plan_too_large" })) },
+    async (call) => {
+      assert.deepEqual(await call(PLAN_READ_TOOL, { path: "plan.md" }), { ok: false, reason: "plan_path_invalid" });
+      assert.deepEqual(await call(PLAN_LIST_TOOL, {}), { ok: false, reason: "plan_too_large" });
+    },
+  );
+  await withPlanRunner(
+    { loadPlanFolder: loader(async () => ({ status: "error", error: "plan_folder_invalid" })) },
+    async (call) => assert.deepEqual(await call(PLAN_LIST_TOOL, {}), { ok: false, reason: "plan_folder_invalid" }),
+  );
+  await withPlanRunner(
+    {
+      loadPlanFolder: loader(async () => {
+        throw new Error(secret);
+      }),
+    },
+    async (call) => {
+      const answer = await call(PLAN_LIST_TOOL, {});
+      assert.deepEqual(answer, { ok: false, reason: "plan_folder_invalid" });
+      assert.ok(!JSON.stringify(answer).includes(secret));
+    },
+  );
+});
+
+test("plan tools: the worker places files before any command, then lists and reads them back", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "wardby-claude-plan-"));
+  const socketPath = join(directory, "runner.sock");
+  const planRoot = join(directory, "plan");
+  const workspace = join(directory, "workspace");
+  await mkdir(workspace);
+  const server = await startToolRunner(socketPath, parseToolSetup(undefined), { workspacePath: workspace, planRoot });
+  const client = await connect(socketPath);
+  const call = async (name, args) =>
+    JSON.parse((await client.request("tools/call", { name, arguments: args })).result.content[0].text);
+  try {
+    const b64 = Buffer.from("# Plan\n").toString("base64");
+    assert.deepEqual(await call(PLAN_PLACE_TOOL, { path: "plan.md", content_base64: b64 }), { ok: true });
+    assert.deepEqual(await call(PLAN_PLACE_TOOL, { path: "../x.md", content_base64: b64 }), {
+      ok: false,
+      reason: "plan_path_invalid",
+    });
+    assert.equal(await readFile(join(planRoot, "plan.md"), "utf8"), "# Plan\n");
+    await client.request("tools/call", { name: "run_command", arguments: { command: "true" } });
+    assert.deepEqual(await call(PLAN_PLACE_TOOL, { path: "late.md", content_base64: b64 }), {
+      ok: false,
+      reason: "already_started",
+    });
+    const listed = await call(PLAN_LIST_TOOL, {});
+    assert.deepEqual(listed, { ok: true, paths: ["plan.md"], skipped: [], skippedUnnamed: 0 });
+    assert.deepEqual(await call(PLAN_READ_TOOL, { path: "plan.md" }), { ok: true, content_base64: b64 });
+    assert.deepEqual(await call(PLAN_READ_TOOL, { path: "other.md" }), { ok: false, reason: "plan_path_invalid" });
+  } finally {
+    client.socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
 });

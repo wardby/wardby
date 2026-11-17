@@ -2,14 +2,21 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { base64Length, PLAN_FILES_LIMITS } from "../coding/protocol.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { BUDGET_MEASURE_TIMEOUT_MS, DEFAULT_TIMEOUTS } from "../coding-worker/dependency-cache.mjs";
 import {
   assertToolRunnerReachable,
   callGitCheck,
+  callPlanPlace,
   callPrepareDependencies,
   callResultBundle,
   GIT_CHECK_TOOL,
+  openPlanSession,
+  PLAN_LIST_TOOL,
+  PLAN_PLACE_TOOL,
+  PLAN_READ_RESPONSE_BYTES,
+  PLAN_READ_TOOL,
   RESULT_BUNDLE_TOOL,
   PREPARE_DEPENDENCIES_TIMEOUT_MS,
   PREPARE_DEPENDENCIES_TOOL,
@@ -213,5 +220,77 @@ describe("git tools (#536)", () => {
     ).rejects.toThrow(/^git_tool_failed$/);
     const silent = await fakeRunner((message) => (message.method === "initialize" ? mcpAnswer(message) : undefined));
     await expect(callGitCheck({ socketPath: silent.path, timeoutMs: 200 })).rejects.toThrow(/^git_tool_failed$/);
+  });
+});
+
+describe("plan tools", () => {
+  const frame = (payload: unknown) => ({ result: { content: [{ type: "text", text: JSON.stringify(payload) }] } });
+  const bigText = (bytes: number) => ({ ok: true, content_base64: "A".repeat(bytes) });
+
+  it("places a file, then lists and reads over one connection", async () => {
+    const { path, seen } = await fakeRunner((message) =>
+      message.method === "initialize" ? mcpAnswer(message) : frame({ ok: true }),
+    );
+    await expect(callPlanPlace({ path: "plan.md", contentBase64: "eA==" }, { socketPath: path })).resolves.toEqual({
+      ok: true,
+    });
+    expect(seen[2].params).toEqual({ name: PLAN_PLACE_TOOL, arguments: { path: "plan.md", content_base64: "eA==" } });
+
+    const session = await fakeRunner((message) =>
+      message.method === "initialize" ? mcpAnswer(message) : frame({ ok: true }),
+    );
+    const plan = await openPlanSession({ socketPath: session.path });
+    await plan.list();
+    await plan.read("plan.md");
+    plan.close();
+    expect(session.seen.map((entry) => entry.method)).toEqual([
+      "initialize",
+      "notifications/initialized",
+      "tools/call",
+      "tools/call",
+    ]);
+    expect(session.seen.slice(2).map((entry) => entry.params)).toEqual([
+      { name: PLAN_LIST_TOOL, arguments: {} },
+      { name: PLAN_READ_TOOL, arguments: { path: "plan.md" } },
+    ]);
+  });
+
+  it("accepts a maximum-size read answer and refuses one above the bound", async () => {
+    // A max-size file is ~1.4 MB of base64 in one line: well under PLAN_READ_RESPONSE_BYTES.
+    const fits = await fakeRunner((message) =>
+      message.method === "initialize"
+        ? mcpAnswer(message)
+        : frame(bigText(base64Length(PLAN_FILES_LIMITS.maxFileBytes))),
+    );
+    const ok = await openPlanSession({ socketPath: fits.path });
+    await expect(ok.read("a.md")).resolves.toMatchObject({ ok: true });
+    ok.close();
+
+    const tooBig = await fakeRunner((message) =>
+      message.method === "initialize" ? mcpAnswer(message) : `${"x".repeat(PLAN_READ_RESPONSE_BYTES + 1024)}`,
+    );
+    const refused = await openPlanSession({ socketPath: tooBig.path });
+    await expect(refused.read("a.md")).rejects.toThrow("plan_tool_failed");
+    refused.close();
+
+    // The default bound (place and other calls) stays small.
+    const small = await fakeRunner((message) =>
+      message.method === "initialize" ? mcpAnswer(message) : frame(bigText(300 * 1024)),
+    );
+    await expect(callPlanPlace({ path: "a.md", contentBase64: "eA==" }, { socketPath: small.path })).rejects.toThrow(
+      "plan_tool_failed",
+    );
+  });
+
+  it("a tool runner without the plan tools is plan_tool_unavailable", async () => {
+    const { path } = await fakeRunner((message) =>
+      message.method === "initialize" ? mcpAnswer(message) : { error: { code: -32602, message: "not found" } },
+    );
+    await expect(callPlanPlace({ path: "a.md", contentBase64: "eA==" }, { socketPath: path })).rejects.toThrow(
+      "plan_tool_unavailable",
+    );
+    const plan = await openPlanSession({ socketPath: path });
+    await expect(plan.list()).rejects.toThrow("plan_tool_unavailable");
+    plan.close();
   });
 });

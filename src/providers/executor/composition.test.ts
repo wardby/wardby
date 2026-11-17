@@ -13,10 +13,12 @@ import {
   assertSubstrateDigestImages,
   buildConfiguredExecutor,
   buildSubstrateJobLauncher,
+  planTicketStarter,
   reReviewOnCodingRunTerminal,
 } from "./composition.js";
 import { RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
+import type { dispatchRun as dispatchRunType } from "../../core/dispatch.js";
 
 const native: Executor = { async start() {}, async stop() {} };
 
@@ -616,5 +618,61 @@ describe("reReviewOnCodingRunTerminal", () => {
     expect(seen).toEqual([undefined, undefined]);
     reReview.mockRestore();
     release.mockRestore();
+  });
+});
+
+describe("planTicketStarter", () => {
+  const set = { id: "set-1", number: 12, repository: "o/r", issueProvider: null, issueKey: null } as never;
+  /** A transaction as the start's guard sees it under the set's lock. */
+  const tx = (approvedAt: Date | null, inFlight: number | null) => ({
+    $queryRaw: vi.fn(async () => [{ approvedAt }]),
+    codingRun: { findFirst: vi.fn(async () => (inFlight === null ? null : { planTicket: inFlight })) },
+  });
+  const starter = (seen: ReturnType<typeof tx>) =>
+    planTicketStarter({
+      db,
+      executor: () => native,
+      issueTrackers: undefined,
+      dispatch: vi.fn(async (options: Parameters<typeof dispatchRunType>[0]) => {
+        expect(await options.beforePersist!(seen as never, {} as never)).toBe(false);
+        return null;
+      }),
+    });
+  const input = {
+    builderAgentId: "b",
+    set,
+    ticket: 4,
+    starterId: null,
+    trigger: "comment" as const,
+    followedByChain: true,
+  };
+
+  it("a start the guard refuses reports what the guard saw under the lock, not plan_not_approved", async () => {
+    expect(await starter(tx(new Date(), 3))(input)).toEqual({ running: 3 });
+    expect(await starter(tx(null, null))(input)).toEqual({ refused: "plan_not_approved" });
+  });
+
+  it("asks dispatch to build from the started set only (expectedPlanSetId)", async () => {
+    const dispatch = vi.fn(async (_options: Parameters<typeof dispatchRunType>[0]) => null);
+    await planTicketStarter({ db, executor: () => native, issueTrackers: undefined, dispatch })(input);
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ expectedPlanSetId: "set-1", planTicket: 4 }));
+  });
+
+  it("records the run as the chain's only when the chain follows it", async () => {
+    for (const followedByChain of [true, false]) {
+      const write = vi.fn(async () => [{ id: "set-1" }]);
+      const start = planTicketStarter({
+        db,
+        executor: () => native,
+        issueTrackers: undefined,
+        dispatch: vi.fn(async (options: Parameters<typeof dispatchRunType>[0]) => {
+          const run = { id: "run-9", status: "pending", error: null };
+          await options.afterPersist!({ $queryRaw: write } as never, run as never);
+          return { run } as never;
+        }),
+      });
+      expect(await start({ ...input, followedByChain })).toEqual({ runId: "run-9" });
+      expect(write).toHaveBeenCalledTimes(followedByChain ? 1 : 0);
+    }
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./issue-bridge.js", () => ({ handlePullRequestClosed: vi.fn(async () => undefined) }));
 import { handlePullRequestClosed } from "./issue-bridge.js";
+import { setPlanChainHook } from "./plans/approval.js";
 import {
   PR_STATE_SYNC_BATCH,
   PR_STATE_SYNC_MIN_AGE_MS,
@@ -60,6 +61,25 @@ describe("syncOpenPullRequestStates", () => {
       where: { id: "r2", state: "open" },
       data: { updatedAt: NOW },
     });
+  });
+
+  it("a missed close it settles reaches the plan build chain too, merged or not", async () => {
+    const onMerged = vi.fn(async () => undefined);
+    setPlanChainHook({ onMerged, onTicketFinished: vi.fn(), buildTicketFromComment: vi.fn() });
+    try {
+      const { db, hosts, trackers } = setup({
+        "acme/bff#3": { state: "closed", merged: true },
+        "acme/app#4": { state: "open" },
+        "acme/web#5": { state: "closed", merged: false },
+      });
+      await syncOpenPullRequestStates(db, hosts, trackers, NOW);
+      expect(onMerged.mock.calls.map((c: unknown[]) => [c[0] === db, c[1]])).toEqual([
+        [true, { repository: "acme/bff", number: 3, merged: true }],
+        [true, { repository: "acme/web", number: 5, merged: false }],
+      ]);
+    } finally {
+      setPlanChainHook(undefined);
+    }
   });
 
   it("touches a row the host can't answer for and keeps going, never throwing", async () => {

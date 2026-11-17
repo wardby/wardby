@@ -81,6 +81,9 @@ describe("Claude SDK configuration", () => {
         "mcp__wardby_tools__wardby_prepare_dependencies",
         "mcp__wardby_tools__wardby_git_check",
         "mcp__wardby_tools__wardby_result_bundle",
+        "mcp__wardby_tools__wardby_plan_place",
+        "mcp__wardby_tools__wardby_plan_list",
+        "mcp__wardby_tools__wardby_plan_read",
       ]);
       expect(options.allowedTools).not.toContain("mcp__wardby_tools__wardby_prepare_dependencies");
       expect(options.allowedTools).not.toContain("mcp__wardby_tools");

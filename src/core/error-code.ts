@@ -62,6 +62,9 @@ export const GATEWAY_CAUSE_CODES: ReadonlySet<string> = new Set([
 export const CHILD_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
   ...GATEWAY_CAUSE_CODES,
   "coding_failure_turn_limit",
+  "plan_number_missing",
+  "plan_not_approved",
+  "plan_too_large",
   "coding_failure_service_unready",
   "coding_failure_preflight",
   "coding_failure_job",

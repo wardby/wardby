@@ -225,6 +225,20 @@ describe.skipIf(!process.env.DATABASE_URL)("loadGraph (PostgreSQL)", () => {
     }
   });
 
+  it("shows a run a plan's approval started as a plan_approved trigger", async () => {
+    const rid = id("plan-approved-run");
+    await db.run.create({
+      data: { id: rid, agentId: ids.C, trigger: "plan_approved", status: "running", startedAt: ago(1 * MIN) },
+    });
+    try {
+      const snap = await loadGraph(db, { since: ago(60 * MIN), limit: 500, now });
+      expect(snap.runs.find((r) => r.id === rid)?.trigger).toEqual({ kind: "plan_approved" });
+      expect(() => GraphSnapshotSchema.parse(snap)).not.toThrow();
+    } finally {
+      await db.run.deleteMany({ where: { id: rid } });
+    }
+  });
+
   it("parses since values", () => {
     expect(parseSince("15m", now)).toEqual(ago(15 * MIN));
     expect(parseSince("7d", now)).toEqual(new Date(now.getTime() - 7 * 86_400_000));

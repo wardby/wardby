@@ -124,6 +124,16 @@ describe("FakeJobLauncher controls", () => {
     await expect(launcher.status(handle)).rejects.toThrow("job_illegal_transition");
   });
 
+  it("returns the queued plan-files text, and undefined without one", async () => {
+    const launcher = new FakeJobLauncher();
+    launcher.queuePlan({ planFiles: '{"a":1}' });
+    const handle = await launcher.launch(spec("run_a"));
+    await expect(launcher.readPlanFiles(handle, 1024)).resolves.toBe('{"a":1}');
+    await expect(launcher.readPlanFiles(handle, 2)).rejects.toThrow("plan_files_too_large");
+    const other = await launcher.launch(spec("run_b"));
+    await expect(launcher.readPlanFiles(other, 1024)).resolves.toBeUndefined();
+  });
+
   it("rejects a terminal status that disagrees with its planned result", async () => {
     const launcher = new FakeJobLauncher();
     launcher.queuePlan({

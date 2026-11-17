@@ -115,6 +115,7 @@ describe("substrate names", () => {
         "seed",
         "result",
         "transcript",
+        "planFiles",
         "workspace",
         "exit",
         "done",

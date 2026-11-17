@@ -61,6 +61,7 @@ Codes such as `document_not_found`, `document_access_denied`, `document_too_larg
 - [Exporting designs and documents](document-exports.md)
 - [Document edits and restore](document-edits.md)
 - [Review and approve documents](document-review.md)
+- [Plan documents](plan-documents.md)
 - [Share a document by link](document-share-links.md)
 - [Send comment threads to a coding agent](comment-threads-and-agents.md)
 - [Browser sign-in for document pages](web-sign-in.md)

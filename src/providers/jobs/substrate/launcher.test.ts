@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { logger, setLogLineFilter } from "../../../core/logger.js";
+import { MAX_CODING_INPUT_BYTES } from "../../../coding/protocol.js";
 import { jobLauncherContract } from "../contract-suite.js";
 import { hostTarArchive } from "../kubernetes.js";
 import { createSubstrateRoutes } from "../../coding-proxy/substrate/routes.js";
@@ -58,6 +59,7 @@ const BLOB_KINDS = [
   "seed",
   "result",
   "transcript",
+  "planFiles",
   "workspace",
   "exit",
   "done",
@@ -697,6 +699,7 @@ describe("SubstrateJobLauncher", () => {
     const h = await makeHarness();
     const handle = await h.launcher.launch(h.spec);
     await h.blobs.put(BLOB.transcript(h.token), Buffer.from("{}\n"));
+    await h.blobs.put(BLOB.planFiles(h.token), Buffer.from("{}"));
     await h.blobs.put(BLOB.workspace(h.token), Buffer.from("tar"));
     await h.blobs.put(BLOB.exit(h.token), Buffer.from('{"code":0}'));
     await h.blobs.put(BLOB.started(h.token), Buffer.from("{}"));
@@ -939,7 +942,7 @@ describe("SubstrateJobLauncher", () => {
 
   it("fails the launch when the input artifact is too large", async () => {
     const h = await makeHarness();
-    await writeFile(h.spec.inputArtifact, Buffer.alloc(512 * 1024 + 1));
+    await writeFile(h.spec.inputArtifact, Buffer.alloc(MAX_CODING_INPUT_BYTES + 1));
     await expect(h.launcher.launch(h.spec)).rejects.toThrow("substrate_input_artifact_invalid");
   });
 
@@ -1072,6 +1075,25 @@ describe("SubstrateJobLauncher", () => {
     await h.blobs.put(BLOB.transcript(h.token), Buffer.from('{"type":"x"}\n'));
     expect(await h.launcher.readTranscript(handle, 100)).toBe('{"type":"x"}\n');
     await expect(h.launcher.readTranscript(handle, 4)).rejects.toThrow("transcript_too_large");
+  });
+
+  it("reads the plan-files output within its bound, and none once removed", async () => {
+    const h = await makeHarness();
+    const handle = await h.launcher.launch(h.spec);
+    expect(await h.launcher.readPlanFiles(handle, 100)).toBeUndefined();
+    await h.blobs.put(BLOB.planFiles(h.token), Buffer.from('{"schemaVersion":1}'));
+    expect(await h.launcher.readPlanFiles(handle, 100)).toBe('{"schemaVersion":1}');
+    await expect(h.launcher.readPlanFiles(handle, 4)).rejects.toThrow("plan_files_too_large");
+    await finish(h);
+    await h.launcher.remove(handle);
+    expect(await h.launcher.readPlanFiles(handle, 100)).toBeUndefined();
+    expect(await h.blobs.head(BLOB.planFiles(h.token))).toBeNull();
+  });
+
+  it("names a later round's plan-files blob per round (warm rounds)", async () => {
+    expect(BLOB.planFiles("wr-00000000000000000000", 3)).toBe(
+      "substrate/runs/wr-00000000000000000000/plan-files-3.json",
+    );
   });
 
   it("checks capacity by placing both actors on the workers' free room, and says yes when in doubt", async () => {
@@ -1239,6 +1261,14 @@ describe("Codex (single actor)", () => {
     await h.blobs.put(BLOB.started(h.token), Buffer.from("{}"));
     await h.blobs.delete(BLOB.toolSetup(h.token));
   };
+
+  it("reads the plan files a Codex run uploaded", async () => {
+    const h = await codex();
+    const handle = await h.launcher.launch(h.spec);
+    await started(h);
+    await h.blobs.put(BLOB.planFiles(h.token), Buffer.from('{"schemaVersion":1}'));
+    expect(await h.launcher.readPlanFiles(handle, 1024)).toBe('{"schemaVersion":1}');
+  });
 
   it("launches one actor from one Codex template, with the agent's rule only, and records the single shape", async () => {
     const h = await codex();

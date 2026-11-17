@@ -1227,3 +1227,63 @@ describe("runClaudeCodingWorker git history (#536)", () => {
     expect(JSON.stringify(result)).not.toContain("FAKESECRET");
   });
 });
+
+describe("plan file placement", () => {
+  const success = {
+    type: "result",
+    subtype: "success",
+    result: JSON.stringify({
+      schemaVersion: 1,
+      runId: input.runId,
+      outcome: "no_changes",
+      summary: "Nothing to do.",
+      tests: [],
+    }),
+  };
+  const planInput: CodingTaskInput = { ...input, planFiles: { files: [{ path: "plan.md", contentBase64: "eA==" }] } };
+
+  it("places every file before the agent's query exists", async () => {
+    const order: string[] = [];
+    await runClaudeCodingWorker({
+      input: planInput,
+      proxyBaseUrl: "http://proxy",
+      capability: "cap",
+      signal: new AbortController().signal,
+      createQuery: () => {
+        order.push("query");
+        return (async function* () {
+          yield success;
+        })();
+      },
+      placePlanFile: async (f) => {
+        order.push(`place:${f.path}`);
+        return { ok: true };
+      },
+    });
+    expect(order).toEqual(["place:plan.md", "query"]);
+  });
+
+  it("fails with a fixed code when the tool runner refuses, throws, or is absent", async () => {
+    const createQuery: ClaudeQueryFactory = () => {
+      throw new Error("query must not start");
+    };
+    for (const placePlanFile of [
+      async () => ({ ok: false, reason: "plan_path_invalid" }),
+      async () => {
+        throw new Error("plan_tool_unavailable");
+      },
+      undefined,
+    ]) {
+      await expect(
+        runClaudeCodingWorker({
+          input: planInput,
+          proxyBaseUrl: "http://proxy",
+          capability: "cap",
+          signal: new AbortController().signal,
+          createQuery,
+          ...(placePlanFile ? { placePlanFile } : {}),
+        }),
+      ).rejects.toThrow("worker_plan_files_failed");
+    }
+  });
+});

@@ -19,6 +19,7 @@ import type { Viewer } from "./access.js";
 import { markRunFailedFromExecutorError } from "../dispatch.js";
 import {
   AGENT_EDITED_NO_REPLY,
+  AGENT_NO_REPLY,
   AGENT_RUN_FAILED_REPLY,
   DOCUMENT_SWEEP_GRACE_MS,
   EDIT_NOT_APPLIED_NOTE,
@@ -41,6 +42,9 @@ import { BOARD_FORMAT_RULES } from "./boards/rules.js";
 import { anchorForElement, type ElementLike } from "./element-anchors.js";
 import { reviewDocument, setArchived, submitForReview } from "./review.js";
 import { createDocument, getDocument, publishVersion } from "./service.js";
+import { loadPlanFiles } from "../../coding/plan-files/store.js";
+import { PLAN_PUBLISH_WAIT_MS, publishPlanFromRun } from "../plans/publish.js";
+import { planRevisionNote } from "../plans/wording.js";
 
 const SECRET = "s3cret-agentloop-789";
 const anchor = (quote: string) => ({ type: "text", quote, prefix: "", suffix: "" });
@@ -75,6 +79,8 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
   let commenter: Principal;
   let codingAgentId: string;
   let nativeAgentId: string;
+  /** A coding agent with a planDocument setting (store repository): its linked documents are still plain sends. */
+  let plannerAgentId: string;
   const asWriter = (): Viewer => ({ kind: "principal", principalId: writer.id });
 
   beforeAll(async () => {
@@ -102,19 +108,41 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
         data: { name: `al-native-${s}`, systemPrompt: "p", model: "m", budgetUsd: 1, ownerId: owner.id },
       })
     ).id;
+    plannerAgentId = (
+      await db.agent.create({
+        data: {
+          name: `al-planner-${s}`,
+          systemPrompt: "Plan and edit docs.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 2,
+          kind: "coding",
+          ownerId: owner.id,
+          codingProfile: {
+            create: {
+              provider: "codex",
+              repository,
+              repositoryAuthorizedVia: "admin",
+              protectedPaths: [],
+              planDocument: { store: "repository", path: "plans/{n}/", reviewers: [owner.id] },
+            },
+          },
+        },
+      })
+    ).id;
     await createSecret(`AL_KEY_${s.slice(0, 8)}`, SECRET, owner.id, cipher, db);
     await attachSecret(codingAgentId, `AL_KEY_${s.slice(0, 8)}`, owner.id, db);
   });
 
   afterAll(async () => {
-    const agents = { agentId: { in: [codingAgentId, nativeAgentId] } };
+    const agents = { agentId: { in: [codingAgentId, nativeAgentId, plannerAgentId] } };
     await db.document.deleteMany({ where: { ownerId: owner.id } });
+    await db.planSet.deleteMany({ where: agents });
     await db.codingRun.deleteMany({ where: { run: agents } });
     await db.run.deleteMany({ where: agents });
     await db.agentSecret.deleteMany({ where: agents });
     await db.secret.deleteMany({ where: { ownerId: owner.id } });
     await db.codingAgentProfile.deleteMany({ where: agents });
-    await db.agent.deleteMany({ where: { id: { in: [codingAgentId, nativeAgentId] } } });
+    await db.agent.deleteMany({ where: { id: { in: [codingAgentId, nativeAgentId, plannerAgentId] } } });
     await db.principalProfile.deleteMany({ where: { principalId: { in: [owner.id, writer.id, commenter.id] } } });
     await db.principal.deleteMany({ where: { id: { in: [owner.id, writer.id, commenter.id] } } });
     await db.$disconnect();
@@ -226,6 +254,61 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       expect(r.sentAt).not.toBeNull();
       expect(r.sentVersionNumber).toBe(1);
       expect(r.answeredRunId).toBeNull();
+    }
+  });
+
+  describe("a document linked to an agent with a plan setting is a plain linked-document send", () => {
+    /** A document linked to the planner agent at `path`; optionally one of its repository-store plan sets. */
+    async function plannerDoc(asPlanDocument: boolean) {
+      const doc = await createDocument(db, cipher, {
+        ownerId: owner.id,
+        title: "Plan",
+        markdown: "hello world\n\nsecond para",
+        agentId: plannerAgentId,
+        repository,
+        path,
+        baseRef: "main",
+      });
+      await grant(doc.id, writer.id, "write");
+      if (asPlanDocument) {
+        const set = await db.planSet.create({
+          data: {
+            agentId: plannerAgentId,
+            repository,
+            number: 7,
+            store: "repository",
+            createdByRunId: "fixture",
+          },
+        });
+        await db.document.update({ where: { id: doc.id }, data: { planSetId: set.id, planPath: "plan.md" } });
+      }
+      return doc.id;
+    }
+
+    for (const asPlanDocument of [true, false]) {
+      it(`${asPlanDocument ? "a repository-store plan document" : "a non-plan document"}: the run starts and its file is published`, async () => {
+        const docId = await plannerDoc(asPlanDocument);
+        const t1 = await thread(docId, "hello", "Warmer");
+        const { runId } = await sendThreadsToAgent(db, deps, {
+          documentId: docId,
+          viewer: asWriter(),
+          threadIds: [t1.threadId],
+        });
+        const coding = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+        // No plan run: no number, no plan folder collected, no planner note.
+        expect(coding).toMatchObject({ planNumber: null, collectPlanFiles: false, planRepositoryPath: null });
+        expect(coding.request).not.toContain("Write plan");
+        const replies = [{ thread: t1.number, reply: "Warmed it up.", resolved: true }];
+        const sha = await finish(
+          runId,
+          "succeeded",
+          `Edited.\n\n\`\`\`wardby-thread-replies\n${JSON.stringify(replies)}\n\`\`\``,
+        );
+        files.set(`${sha}:${path}`, "hello lovely world\n\nsecond para");
+        await onDocumentRunFinished(db, deps, runId);
+        const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+        expect(doc.currentVersion).toMatchObject({ number: 2, runId, markdown: "hello lovely world\n\nsecond para" });
+      });
     }
   });
 
@@ -1907,5 +1990,481 @@ describe.skipIf(!process.env.DATABASE_URL)("designs", { timeout: 30_000 }, () =>
     const t = await menuThread(docId, "x");
     await expect(send(docId, [t.threadId])).rejects.toThrow("document_not_agent_linked");
     expect((await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } })).sentRunId).toBeNull();
+  });
+});
+
+describe.skipIf(!process.env.DATABASE_URL)("plan documents", { timeout: 30_000 }, () => {
+  const db = createPrismaClient();
+  const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
+  const s = randomUUID();
+  const repository = `acme/plan-${s.slice(0, 8)}`;
+  const PLAN_SECRET = "FAKE-planner-secret-7d3a91";
+  const executor: Executor = {
+    start: vi.fn(async () => {}),
+    async stop() {},
+    readCodingRepositoryFile: vi.fn(async () => null),
+  };
+  const allow: RateLimiter = { check: async () => {} };
+  const deps = { executor, cipher, rateLimiter: allow };
+  const manifest = JSON.stringify({
+    title: "Screens",
+    boards: [{ id: "home", name: "Home", file: "boards/home.html", width: 1280 }],
+  });
+  let owner: Principal;
+  const agents: string[] = [];
+  let n = 0;
+  const asOwner = (): Viewer => ({ kind: "principal", principalId: owner.id });
+
+  beforeAll(async () => {
+    owner = await db.principal.create({ data: { subject: `alp-owner-${s}` } });
+  });
+
+  afterAll(async () => {
+    const where = { agentId: { in: agents } };
+    await db.document.deleteMany({ where: { ownerId: owner.id } });
+    await db.planSet.deleteMany({ where });
+    await db.codingRun.deleteMany({ where: { run: where } });
+    await db.run.deleteMany({ where });
+    await db.agentSecret.deleteMany({ where });
+    await db.secret.deleteMany({ where: { ownerId: owner.id } });
+    await db.codingAgentProfile.deleteMany({ where });
+    await db.agent.deleteMany({ where: { id: { in: agents } } });
+    await db.principal.deleteMany({ where: { id: owner.id } });
+    await db.$disconnect();
+  });
+
+  /**
+   * A coding planner (store wardby) whose plan 12 holds plan.md (v1, with a value that is now its secret) and screens/.
+   * `extra`: other plan.md text and board, and more values that become its secrets after v1 was published.
+   */
+  async function planSet(extra: { planMd?: string; manifest?: string; board?: string; secrets?: string[] } = {}) {
+    const agentId = (
+      await db.agent.create({
+        data: {
+          name: `alp-planner-${s}-${++n}`,
+          systemPrompt: "Plan.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 2,
+          kind: "coding",
+          ownerId: owner.id,
+          codingProfile: {
+            create: {
+              provider: "codex",
+              repository,
+              repositoryAuthorizedVia: "admin",
+              protectedPaths: [],
+              planDocument: { store: "wardby", reviewers: [owner.id], onApproved: "notify" },
+            },
+          },
+        },
+      })
+    ).id;
+    agents.push(agentId);
+    const first = await db.run.create({ data: { agentId, status: "succeeded", trigger: "manual" } });
+    await db.codingRun.create({
+      data: {
+        runId: first.id,
+        task: "t",
+        repository,
+        baseRef: "main",
+        headRef: `wardby/run-${first.id}`,
+        provider: "codex",
+        model: "m",
+        timeoutSec: 60,
+        protectedPaths: [],
+        budgetReservedUsd: 0.1,
+        collectPlanFiles: true,
+        planNumber: 12,
+        planFilesStatus: "stored",
+      },
+    });
+    await db.codingRunPlanFile.createMany({
+      data: [
+        { path: "plan.md", content: extra.planMd ?? `# The plan\n\nUse key ${PLAN_SECRET} for now.\n\nShip it.\n` },
+        { path: "screens/manifest.json", content: extra.manifest ?? manifest },
+        { path: "screens/boards/home.html", content: extra.board ?? "<main>Home</main>" },
+      ].map((f) => ({ ...f, runId: first.id, direction: "output" })),
+    });
+    const published = await publishPlanFromRun(db, { cipher, origin: null }, first.id);
+    if (!published || "error" in published) throw new Error("plan set not published");
+    // Became the planner's secret after v1 was published.
+    const name = `ALP_KEY_${s.slice(0, 8)}_${n}`;
+    await createSecret(name, PLAN_SECRET, owner.id, cipher, db);
+    await attachSecret(agentId, name, owner.id, db);
+    for (const [i, value] of (extra.secrets ?? []).entries()) {
+      await createSecret(`${name}_X${i}`, value, owner.id, cipher, db);
+      await attachSecret(agentId, `${name}_X${i}`, owner.id, db);
+    }
+    const docs = await db.document.findMany({ where: { planSetId: published.planSetId } });
+    const byPath = Object.fromEntries(docs.map((d) => [d.planPath!, d.id]));
+    return { agentId, setId: published.planSetId, planId: byPath["plan.md"], screensId: byPath["screens/"] };
+  }
+
+  /** Ends the revision run as the recorder would: its plan folder stored as output rows. */
+  async function finishWith(runId: string, files: { path: string; content: string }[], summary: string) {
+    await db.codingRunPlanFile.createMany({
+      data: files.map((f) => ({ ...f, runId, direction: "output" })),
+    });
+    await db.run.update({
+      where: { id: runId },
+      data: {
+        status: "succeeded",
+        finalText: summary,
+        finishedAt: new Date(),
+        codingRun: { update: { planFilesStatus: "stored" } },
+      },
+    });
+  }
+  const repliesBlock = (entries: { thread: number; reply: string; resolved?: boolean }[]) =>
+    `Edited.\n\n\`\`\`wardby-thread-replies\n${JSON.stringify(entries)}\n\`\`\``;
+
+  it("starts the planner with the set's files in the plan folder, then publishes the threads' document and the rest of the set", async () => {
+    const { agentId, setId, planId, screensId } = await planSet();
+    const t = await createThread(db, cipher, {
+      documentId: planId,
+      viewer: asOwner(),
+      anchor: anchor("Ship it."),
+      body: "Add an API section",
+    });
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: planId,
+      viewer: asOwner(),
+      threadIds: [t.threadId],
+    });
+
+    const run = await db.run.findUniqueOrThrow({ where: { id: runId }, include: { codingRun: true } });
+    expect(run).toMatchObject({ trigger: "comment", agentId, triggeredById: owner.id });
+    expect(run.codingRun).toMatchObject({ planNumber: 12, collectPlanFiles: true, repository });
+    expect(run.codingRun!.request).toContain(planRevisionNote());
+    expect(run.codingRun!.request).not.toContain(PLAN_SECRET);
+    const inputs = await loadPlanFiles(db, runId, "input");
+    const planNow = await getDocument(db, planId);
+    const screensNow = await getDocument(db, screensId);
+    const screens = screensNow.content.format === "boards-v1" ? screensNow.content.files : {};
+    const planText = planNow.content.format === "markdown" ? planNow.content.markdown : "";
+    expect(planText).toContain(PLAN_SECRET);
+    expect(inputs).toEqual([
+      { path: "plan.md", content: planText.replace(PLAN_SECRET, "[REDACTED]") },
+      { path: "screens/boards/home.html", content: screens["boards/home.html"] },
+      { path: "screens/manifest.json", content: screens["manifest.json"] },
+    ]);
+    expect(JSON.stringify(inputs)).not.toContain(PLAN_SECRET);
+
+    const inputByPath = Object.fromEntries(inputs.map((f) => [f.path, f.content]));
+    await finishWith(
+      runId,
+      [
+        {
+          path: "plan.md",
+          content: "# The plan\n\nUse key [REDACTED] for now.\n\nShip it.\n\n## API\n\nSee api.md.\n",
+        },
+        { path: "api.md", content: "# API\n\nGET /things\n" },
+        { path: "screens/manifest.json", content: inputByPath["screens/manifest.json"] },
+        { path: "screens/boards/home.html", content: inputByPath["screens/boards/home.html"] },
+      ],
+      repliesBlock([{ thread: t.number, reply: "Added the API section.", resolved: true }]),
+    );
+    await onDocumentRunFinished(db, deps, runId);
+
+    const plan = await db.document.findUniqueOrThrow({ where: { id: planId }, include: { currentVersion: true } });
+    expect(plan.currentVersion).toMatchObject({ number: 2, via: "agent", runId });
+    expect(plan.currentVersion!.markdown).toContain("## API");
+    expect(await db.documentVersion.count({ where: { documentId: planId, runId } })).toBe(1);
+    const design = await db.document.findUniqueOrThrow({ where: { id: screensId }, include: { currentVersion: true } });
+    expect(design.currentVersion!.number).toBe(1);
+    const api = await db.document.findFirstOrThrow({
+      where: { planSetId: setId, planPath: "api.md" },
+      include: { currentVersion: true },
+    });
+    expect(api.currentVersion).toMatchObject({ number: 1, runId, markdown: "# API\n\nGET /things\n" });
+    const [v] = await listThreads(db, { documentId: planId, viewer: asOwner(), filter: "all" });
+    expect(v.status).toBe("resolved");
+    expect(v.comments.at(-1)!.body).toBe("Added the API section.");
+  });
+
+  it("redacts a JSON-escaped and an HTML-escaped secret from the revision's input files and task", async () => {
+    // Values whose stored forms differ from the raw value: JSON escapes the quote and the backslash,
+    // HTML escapes the angle bracket and the ampersand.
+    const jsonSecret = `wardby-fake"json\\secret-${s.slice(0, 8)}`;
+    const htmlSecret = `wardby-fake<html&secret-${s.slice(0, 8)}`;
+    const jsonEscaped = JSON.stringify(jsonSecret).slice(1, -1);
+    const htmlEscaped = htmlSecret.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    expect(jsonEscaped).not.toBe(jsonSecret);
+    expect(htmlEscaped).not.toBe(htmlSecret);
+    const { planId } = await planSet({
+      planMd: `# The plan\n\nkeys ${jsonEscaped} and ${htmlEscaped}\n\nShip it.\n`,
+      manifest: JSON.stringify({
+        title: jsonSecret,
+        boards: [{ id: "home", name: "Home", file: "boards/home.html", width: 1280 }],
+      }),
+      board: `<main>${htmlEscaped}</main>`,
+      secrets: [jsonSecret, htmlSecret],
+    });
+    const t = await createThread(db, cipher, {
+      documentId: planId,
+      viewer: asOwner(),
+      anchor: anchor("Ship it."),
+      body: "Tighten it",
+    });
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: planId,
+      viewer: asOwner(),
+      threadIds: [t.threadId],
+    });
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    const inputs = await loadPlanFiles(db, runId, "input");
+    // The stored forms really were in the set: the redaction, not their absence, keeps them out.
+    const stored = await getDocument(db, planId);
+    expect(stored.content.format === "markdown" ? stored.content.markdown : "").toContain(jsonEscaped);
+    for (const text of [run.task, run.request ?? "", ...inputs.map((f) => f.content)]) {
+      for (const form of [jsonSecret, jsonEscaped, htmlSecret, htmlEscaped]) expect(text).not.toContain(form);
+    }
+    expect(inputs.find((f) => f.path === "plan.md")!.content).toContain("[REDACTED]");
+    expect(inputs.find((f) => f.path === "screens/manifest.json")!.content).toContain("[REDACTED]");
+    expect(inputs.find((f) => f.path === "screens/boards/home.html")!.content).toContain("[REDACTED]");
+  });
+
+  it("another document of the set a person changed meanwhile is not reverted by the run's untouched copy", async () => {
+    const { planId, screensId } = await planSet();
+    const t = await createThread(db, cipher, {
+      documentId: planId,
+      viewer: asOwner(),
+      anchor: anchor("Ship it."),
+      body: "Ship it sooner",
+    });
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: planId,
+      viewer: asOwner(),
+      threadIds: [t.threadId],
+    });
+    const given = await loadPlanFiles(db, runId, "input");
+    const screens = await getDocument(db, screensId);
+    const files = screens.content.format === "boards-v1" ? screens.content.files : {};
+    await publishVersion(db, cipher, {
+      documentId: screensId,
+      files: { ...files, "boards/home.html": "<main>Home, by a person</main>" },
+      via: "editor",
+    });
+    await finishWith(
+      runId,
+      given.map((f) => (f.path === "plan.md" ? { ...f, content: f.content.replace("Ship it.", "Ship it today.") } : f)),
+      repliesBlock([{ thread: t.number, reply: "Sooner.", resolved: true }]),
+    );
+    await onDocumentRunFinished(db, deps, runId);
+
+    const plan = await db.document.findUniqueOrThrow({ where: { id: planId }, include: { currentVersion: true } });
+    expect(plan.currentVersion).toMatchObject({ number: 2, via: "agent", runId });
+    const design = await getDocument(db, screensId);
+    expect(design.version).toMatchObject({ number: 2, via: "editor" });
+    expect(design.content.format === "boards-v1" && design.content.files["boards/home.html"]).toContain(
+      "Home, by a person",
+    );
+    expect(await db.documentVersion.count({ where: { documentId: screensId, runId } })).toBe(0);
+  });
+
+  it("a document a person moved on meanwhile is not overwritten: one reconcile run with the latest files", async () => {
+    const { planId } = await planSet();
+    const t = await createThread(db, cipher, {
+      documentId: planId,
+      viewer: asOwner(),
+      anchor: anchor("Ship it."),
+      body: "Ship it sooner",
+    });
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: planId,
+      viewer: asOwner(),
+      threadIds: [t.threadId],
+    });
+    await publishVersion(db, cipher, {
+      documentId: planId,
+      markdown: "# The plan\n\nUse key [REDACTED] for now.\n\nShip it next week.\n",
+      via: "editor",
+    });
+    await finishWith(
+      runId,
+      [{ path: "plan.md", content: "# The plan\n\nUse key [REDACTED] for now.\n\nShip it today.\n" }],
+      repliesBlock([{ thread: t.number, reply: "Sooner.", resolved: true }]),
+    );
+    await onDocumentRunFinished(db, deps, runId);
+
+    const plan = await db.document.findUniqueOrThrow({ where: { id: planId }, include: { currentVersion: true } });
+    expect(plan.currentVersion).toMatchObject({ number: 2, via: "editor" });
+    expect(await db.documentVersion.count({ where: { documentId: planId, runId } })).toBe(0);
+    const row = await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } });
+    expect(row).toMatchObject({ reconcileOfRunId: runId, sentVersionNumber: 2, answeredRunId: null });
+    const reconcile = await db.run.findUniqueOrThrow({ where: { id: row.sentRunId! }, include: { codingRun: true } });
+    expect(reconcile.codingRun).toMatchObject({ planNumber: 12, collectPlanFiles: true });
+    expect(reconcile.codingRun!.request).toMatch(/newer version of the document \(version 2\)/);
+    expect(reconcile.codingRun!.request).toContain("Ship it today.");
+    const inputs = await loadPlanFiles(db, reconcile.id, "input");
+    expect(inputs.find((f) => f.path === "plan.md")!.content).toContain("Ship it next week.");
+    const [v] = await listThreads(db, { documentId: planId, viewer: asOwner(), filter: "all" });
+    expect(v.comments.at(-1)!.body).toBe(reconcilingReply(2));
+  });
+
+  /** A thread on the design's home board. */
+  async function homeThread(documentId: string, body: string) {
+    const { content } = await getDocument(db, documentId);
+    const html = content.format === "boards-v1" ? content.files["boards/home.html"] : "";
+    const dom = new JSDOM(html, { virtualConsole: new VirtualConsole() });
+    try {
+      const main = dom.window.document.querySelector("main") as unknown as ElementLike;
+      const at = anchorForElement("home", main, 0.5, 0.5, dom.window.document.body);
+      return await createThread(db, cipher, { documentId, viewer: asOwner(), anchor: at, body });
+    } finally {
+      dom.window.close();
+    }
+  }
+
+  /** A send on plan.md, its run finished with the given files (default: the files it was given). */
+  async function sendOnPlan(planId: string) {
+    const t = await createThread(db, cipher, {
+      documentId: planId,
+      viewer: asOwner(),
+      anchor: anchor("Ship it."),
+      body: "Ship it sooner",
+    });
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: planId,
+      viewer: asOwner(),
+      threadIds: [t.threadId],
+    });
+    return { t, runId, given: await loadPlanFiles(db, runId, "input") };
+  }
+
+  it("a design returned unchanged gets no new version and no edited reply (both sides prepared alike)", async () => {
+    const { screensId } = await planSet();
+    const t = await homeThread(screensId, "Looks fine?");
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: screensId,
+      viewer: asOwner(),
+      threadIds: [t.threadId],
+    });
+    const given = await loadPlanFiles(db, runId, "input");
+    await finishWith(runId, given, "No change needed.");
+    await onDocumentRunFinished(db, deps, runId);
+
+    expect(await db.documentVersion.count({ where: { documentId: screensId } })).toBe(1);
+    expect(await db.documentVersion.count({ where: { runId } })).toBe(0);
+    const [v] = await listThreads(db, { documentId: screensId, viewer: asOwner(), filter: "all" });
+    expect(v.comments.at(-1)!.body).toBe(AGENT_NO_REPLY);
+  });
+
+  it("a revision that deletes an approved design leaves it approved and in the set", async () => {
+    const { planId, screensId } = await planSet();
+    await db.document.update({ where: { id: screensId }, data: { reviewState: "approved" } });
+    const { t, runId, given } = await sendOnPlan(planId);
+    await finishWith(
+      runId,
+      given
+        .filter((f) => !f.path.startsWith("screens/"))
+        .map((f) => (f.path === "plan.md" ? { ...f, content: f.content.replace("Ship it.", "Ship it today.") } : f)),
+      repliesBlock([{ thread: t.number, reply: "Sooner.", resolved: true }]),
+    );
+    await onDocumentRunFinished(db, deps, runId);
+
+    const design = await db.document.findUniqueOrThrow({ where: { id: screensId } });
+    expect(design).toMatchObject({ reviewState: "approved", removedFromPlan: false });
+    expect(
+      (await db.document.findUniqueOrThrow({ where: { id: planId }, include: { currentVersion: true } }))
+        .currentVersion,
+    ).toMatchObject({ number: 2, runId });
+  });
+
+  it("a revision that deletes the threads' own file does not remove that document", async () => {
+    const { planId } = await planSet();
+    const { t, runId, given } = await sendOnPlan(planId);
+    await finishWith(
+      runId,
+      given.filter((f) => f.path !== "plan.md"),
+      repliesBlock([{ thread: t.number, reply: "Removed it." }]),
+    );
+    await onDocumentRunFinished(db, deps, runId);
+
+    const plan = await db.document.findUniqueOrThrow({ where: { id: planId }, include: { currentVersion: true } });
+    expect(plan.removedFromPlan).toBe(false);
+    expect(plan.currentVersion!.number).toBe(1);
+    const [v] = await listThreads(db, { documentId: planId, viewer: asOwner(), filter: "all" });
+    expect(v.comments.at(-1)!.body).toBe(`Removed it.\n\n${EDIT_NOT_APPLIED_NOTE}`);
+  });
+
+  it("refuses a send on a document removed from its plan: document_locked, nothing sent", async () => {
+    const { planId } = await planSet();
+    await db.document.update({ where: { id: planId }, data: { removedFromPlan: true } });
+    const t = await createThread(db, cipher, {
+      documentId: planId,
+      viewer: asOwner(),
+      anchor: anchor("Ship it."),
+      body: "x",
+    });
+    await expect(
+      sendThreadsToAgent(db, deps, { documentId: planId, viewer: asOwner(), threadIds: [t.threadId] }),
+    ).rejects.toThrow("document_locked");
+    expect((await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } })).sentRunId).toBeNull();
+  });
+
+  it("refuses a send when the document is linked to an agent other than the set's planner", async () => {
+    const { planId } = await planSet();
+    const other = await planSet();
+    await db.document.update({ where: { id: planId }, data: { agentId: other.agentId } });
+    const t = await createThread(db, cipher, {
+      documentId: planId,
+      viewer: asOwner(),
+      anchor: anchor("Ship it."),
+      body: "x",
+    });
+    await expect(
+      sendThreadsToAgent(db, deps, { documentId: planId, viewer: asOwner(), threadIds: [t.threadId] }),
+    ).rejects.toThrow("document_not_agent_linked");
+    expect((await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } })).sentRunId).toBeNull();
+  });
+
+  it("an edit refused because the set's lease was busy is not published by the tail either", async () => {
+    const { setId, planId } = await planSet();
+    const { t, runId, given } = await sendOnPlan(planId);
+    await finishWith(
+      runId,
+      given.map((f) => (f.path === "plan.md" ? { ...f, content: f.content.replace("Ship it.", "Ship it today.") } : f)),
+      repliesBlock([{ thread: t.number, reply: "Sooner.", resolved: true }]),
+    );
+    // Another publish holds the set's lease past the edit's wait bound (fake time), and not past the tail's.
+    let now = Date.now();
+    const planClock = { now: () => now, sleep: async (ms: number) => void (now += ms) };
+    const holder = await db.run.create({
+      data: {
+        agentId: (await db.planSet.findUniqueOrThrow({ where: { id: setId } })).agentId,
+        status: "running",
+        trigger: "manual",
+      },
+    });
+    await db.planSet.update({
+      where: { id: setId },
+      data: { publishLeaseRunId: holder.id, publishLeaseUntil: new Date(now + PLAN_PUBLISH_WAIT_MS + 5_000) },
+    });
+    await onDocumentRunFinished(db, { ...deps, planClock }, runId);
+
+    expect(await db.documentVersion.count({ where: { documentId: planId, runId } })).toBe(0);
+    const coding = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    // The tail did run (it got the lease once the holder's expired) and left the threads' document alone.
+    expect(coding.planPublishStatus).toBe("published");
+    const [v] = await listThreads(db, { documentId: planId, viewer: asOwner(), filter: "all" });
+    expect(v.status).toBe("open");
+    expect(v.comments.at(-1)!.body).toBe(`Sooner.\n\n${EDIT_NOT_APPLIED_NOTE}`);
+  });
+
+  it("a revision whose input files no longer pass the layout writes no other existing document", async () => {
+    const { planId, screensId } = await planSet();
+    const { t, runId, given } = await sendOnPlan(planId);
+    await db.codingRunPlanFile.deleteMany({ where: { runId, direction: "input" } });
+    await db.codingRunPlanFile.create({ data: { runId, direction: "input", path: "notes.txt", content: "x" } });
+    await finishWith(
+      runId,
+      given.map((f) => (f.path === "screens/boards/home.html" ? { ...f, content: "<main>Home, changed</main>" } : f)),
+      repliesBlock([{ thread: t.number, reply: "Nothing to do." }]),
+    );
+    await onDocumentRunFinished(db, deps, runId);
+
+    expect(await db.documentVersion.count({ where: { documentId: screensId } })).toBe(1);
+    expect((await db.document.findUniqueOrThrow({ where: { id: screensId } })).removedFromPlan).toBe(false);
   });
 });

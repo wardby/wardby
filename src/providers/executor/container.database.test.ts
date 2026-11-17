@@ -449,6 +449,48 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     }
   });
 
+  it("loads the root run's plan for the PR line, so a continuation by another agent keeps it", async () => {
+    const rootId = `container-plan-root-${randomUUID()}`;
+    const fixId = `container-plan-fix-${randomUUID()}`;
+    const versions = [
+      { documentId: "d1", path: "plan.md", kind: "document", versionNumber: 3 },
+      { documentId: "d2", path: "screens/", kind: "design", versionNumber: 2 },
+    ];
+    const coding = (runId: string, extra: object) => ({
+      runId,
+      task: "Fix it.",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: `wardby/run-${rootId}`,
+      provider: "codex",
+      model: "gpt-5.6-luna",
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+      budgetReservedUsd: 1,
+      ...extra,
+    });
+    try {
+      await db.run.create({ data: { id: rootId, agentId, executionManaged: true } });
+      await db.run.create({ data: { id: fixId, agentId, executionManaged: true } });
+      // planSetId is a plain column here (no PlanSet row needed): the root built from plan 12.
+      await db.codingRun.create({
+        data: coding(rootId, { planNumber: 12, planSetId: `set-${rootId}`, planVersions: versions }),
+      });
+      // A review fix round's run: no plan of its own.
+      await db.codingRun.create({ data: coding(fixId, { rootCodingRunId: rootId }) });
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.load(rootId)).resolves.toMatchObject({ planNumber: 12, planVersions: versions });
+      await expect(store.load(fixId)).resolves.toMatchObject({ planNumber: 12, planVersions: versions });
+      // A root that built from no plan set gives no plan line, even with a plan number (a planner's run).
+      await db.codingRun.update({ where: { runId: rootId }, data: { planSetId: null } });
+      await expect(store.load(fixId)).resolves.toMatchObject({ planNumber: null, planVersions: null });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: [fixId, rootId] } } });
+      await db.run.deleteMany({ where: { id: { in: [fixId, rootId] } } });
+    }
+  });
+
   it("persists a sanitized failure category and opaque diagnostic ID separately from the terminal state", async () => {
     const failedRunId = `container-failed-${randomUUID()}`;
     try {

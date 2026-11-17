@@ -2,7 +2,7 @@
  * The coding proxy's /substrate/ routes (experimental Substrate job launcher): the agent actor and the
  * tool actor of one run cannot reach each other, so the proxy relays their newline-delimited JSON-RPC
  * lines through a RelayStore and carries the run's files (input, tool setup, seed, result, transcript,
- * workspace) through the blob store.
+ * plan files, workspace) through the blob store.
  *
  * Callers: the agent actor authenticates with the run capability (`x-api-key`, injected by Substrate's
  * egress gateway); the tool actor with its Substrate actor JWT in `x-wardby-actor-jwt` (never
@@ -78,7 +78,7 @@ import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../../mcp/transport
 import { logger } from "../../../core/logger.js";
 import { redactExactSecretValues, withEscapedForms } from "../../../core/secret-spans.js";
 import { deriveRegistryToken } from "../../../coding/registry/token.js";
-import { isCodingRepositoryName } from "../../../coding/protocol.js";
+import { MAX_PLAN_FILES_WIRE_BYTES, isCodingRepositoryName } from "../../../coding/protocol.js";
 import {
   BLOB,
   BRIDGE_PROTOCOL_HEADER,
@@ -172,6 +172,7 @@ type RouteName =
   | "channels.poll"
   | "result"
   | "transcript"
+  | "plan-files"
   | "tool-setup"
   | "seed"
   | "events"
@@ -239,6 +240,8 @@ function match(method: string, rest: string): Matched | undefined {
       return { name: "result", caller: "agent" };
     case "POST transcript":
       return { name: "transcript", caller: "agent" };
+    case "POST plan-files":
+      return { name: "plan-files", caller: "agent" };
     case "GET tool-setup":
       return { name: "tool-setup", caller: "holder" };
     case "GET seed":
@@ -811,6 +814,19 @@ export function createSubstrateRoutes(
             request,
             BLOB.transcript(token, round),
             limits.transcriptBytes,
+            clearBodyTimer,
+          );
+          sendJson(response, 200, {});
+          return;
+        }
+        case "plan-files": {
+          // The worker's plan folder (plan-files.json): untrusted, stored as sent, bounded by the
+          // protocol's wire limit; the control plane parses, redacts and re-checks it (never logged here).
+          const round = await roundFor(url, token, "upload");
+          counters.bytes = await receiveBlob(
+            request,
+            BLOB.planFiles(token, round),
+            MAX_PLAN_FILES_WIRE_BYTES,
             clearBodyTimer,
           );
           sendJson(response, 200, {});

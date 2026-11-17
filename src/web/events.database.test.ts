@@ -12,6 +12,7 @@ import type { Principal } from "#prisma";
 import { createPrismaClient } from "../core/db.js";
 import { createThread, deleteComment, editComment, reply, setThreadStatus } from "../core/documents/comments.js";
 import { createDocumentEventBus, type DocumentEventBus } from "../core/documents/events.js";
+import { forceApprove, submitForReview } from "../core/documents/review.js";
 import { createDocument, publishVersion } from "../core/documents/service.js";
 import { createShareLink, registerGuest, revokeShareLink } from "../core/documents/share-links.js";
 import { buildMcpServer } from "../mcp/server.js";
@@ -193,6 +194,98 @@ describe.skipIf(!process.env.DATABASE_URL)("document event stream (database)", {
     await publishVersion(db, cipher, { documentId: docId, markdown: "hello world 3", via: "mcp" });
     await st.waitFor(/event: version\n/);
     expect(st.text()).not.toContain(otherDocId);
+  });
+
+  it("forwards review and version events of the other documents of a plan set, to viewers who can read them", async () => {
+    const viewer = { kind: "principal" as const, principalId: owner.id };
+    const agent = await db.agent.create({
+      data: { name: `events-planner-${s}`, systemPrompt: "p", model: "m", budgetUsd: 1, ownerId: owner.id },
+    });
+    const set = await db.planSet.create({
+      data: { agentId: agent.id, repository: `acme/events-${s}`, number: 12, store: "wardby", createdByRunId: "run" },
+    });
+    const make = async (title: string, planPath: string | null) => {
+      const id = (await createDocument(db, cipher, { ownerId: owner.id, title, markdown: "hello world" })).id;
+      if (planPath) await db.document.update({ where: { id }, data: { planSetId: set.id, planPath } });
+      return id;
+    };
+    const d1 = await make("Plan", "plan.md");
+    const d2 = await make("Api", "api.md");
+    const outside = await make("Outside", null);
+    const reader = await db.principal.create({ data: { subject: `events-reader-${s}` } });
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "document",
+        resourceId: d1,
+        granteeKind: "principal",
+        granteePrincipalId: reader.id,
+        granteeKey: `principal:${reader.id}`,
+        level: "read",
+      },
+    });
+    try {
+      const st = await liveStream(await memberCookie(owner.id), d1);
+      const narrow = await liveStream(await memberCookie(reader.id), d1);
+      await submitForReview(db, { documentId: d2, viewer, reviewers: [outsider.id] });
+      await forceApprove(db, cipher, { documentId: d2, viewer, note: `ok ${FAKE_SECRET}` });
+      await publishVersion(db, cipher, { documentId: outside, markdown: "hello world 2", via: "mcp" });
+      await submitForReview(db, { documentId: outside, viewer, reviewers: [outsider.id] });
+      await st.waitFor(new RegExp(`event: review\ndata: \\{"documentId":"${d2}","kind":"review"\\}`));
+      // A sentinel on the stream's own document: everything before it has been delivered.
+      await publishVersion(db, cipher, { documentId: d1, markdown: "hello world 3", via: "mcp" });
+      await st.waitFor(new RegExp(`"documentId":"${d1}","kind":"version"`));
+      await narrow.waitFor(new RegExp(`"documentId":"${d1}","kind":"version"`));
+      const frames = [...st.text().matchAll(/event: (\w+)\ndata: (\{"documentId".*)\n/g)];
+      for (const [, kind, data] of frames) {
+        const parsed = JSON.parse(data) as { documentId: string };
+        expect(parsed).toEqual({ documentId: parsed.documentId, kind });
+      }
+      expect(st.text()).not.toContain(outside);
+      expect(st.text()).not.toContain(FAKE_SECRET);
+      // The reader can open D1 only: nothing about D2 reaches their stream.
+      expect(narrow.text()).not.toContain(d2);
+    } finally {
+      await db.resourceGrant.deleteMany({ where: { granteePrincipalId: reader.id } });
+      await db.webSession.deleteMany({ where: { principalId: reader.id } });
+      await db.document.deleteMany({ where: { id: { in: [d1, d2, outside] } } });
+      await db.planSet.delete({ where: { id: set.id } });
+      await db.agent.delete({ where: { id: agent.id } });
+      await db.principal.delete({ where: { id: reader.id } });
+    }
+  });
+
+  it("tells a share-link guest on one plan document nothing about another document of the set", async () => {
+    const viewer = { kind: "principal" as const, principalId: owner.id };
+    const agent = await db.agent.create({
+      data: { name: `events-guest-planner-${s}`, systemPrompt: "p", model: "m", budgetUsd: 1, ownerId: owner.id },
+    });
+    const set = await db.planSet.create({
+      data: { agentId: agent.id, repository: `acme/events-g-${s}`, number: 13, store: "wardby", createdByRunId: "run" },
+    });
+    const make = async (title: string, planPath: string) => {
+      const id = (await createDocument(db, cipher, { ownerId: owner.id, title, markdown: "hello world" })).id;
+      await db.document.update({ where: { id }, data: { planSetId: set.id, planPath } });
+      return id;
+    };
+    const d1 = await make("Plan", "plan.md");
+    const d2 = await make("Api", "api.md");
+    try {
+      const link = await createShareLink(db, { documentId: d1, viewer, permission: "comment" });
+      const { guestId } = await registerGuest(db, { shareLinkId: link.id, name: `Gus ${s.slice(0, 8)}` });
+      const session = await createWebSession(db, { guestId, shareLinkId: link.id }, DEV);
+      const st = await liveStream(`wardby-dev-web=${session.token}`, d1);
+      await publishVersion(db, cipher, { documentId: d2, markdown: "hello world 2", via: "mcp" });
+      await submitForReview(db, { documentId: d2, viewer, reviewers: [outsider.id] });
+      await forceApprove(db, cipher, { documentId: d2, viewer, note: "ok" });
+      // A sentinel on the guest's own document: everything before it has been delivered.
+      await publishVersion(db, cipher, { documentId: d1, markdown: "hello world 3", via: "mcp" });
+      await st.waitFor(new RegExp(`"documentId":"${d1}","kind":"version"`));
+      expect(st.text()).not.toContain(d2);
+    } finally {
+      await db.document.deleteMany({ where: { id: { in: [d1, d2] } } });
+      await db.planSet.delete({ where: { id: set.id } });
+      await db.agent.delete({ where: { id: agent.id } });
+    }
   });
 
   it("lets a guest stream, and ends the stream when the link is revoked", async () => {
