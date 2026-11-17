@@ -1,3 +1,4 @@
+import type { V1Secret } from "@kubernetes/client-node";
 import { vi } from "vitest";
 import type { Power } from "../core/power.js";
 import { RecordingSecrets } from "../providers/jobs/substrate/launcher.test-support.js";
@@ -5,7 +6,7 @@ import type { SubstrateApi } from "../providers/substrate/api.js";
 import { FakeSubstrateApi, type FakeSubstrateOptions } from "../providers/substrate/fake-api.js";
 import { nativeActorName, substrateRunToken } from "../providers/substrate/names.js";
 import type { NativeCanaryResult, WorkerInput } from "./protocol.js";
-import { MemoryNativeCanaryStore, type NativeCanaryStore } from "./substrate-canary-store.js";
+import { canaryCapabilityHash, MemoryNativeCanaryStore, type NativeCanaryStore } from "./substrate-canary-store.js";
 import {
   SubstrateNativeWorkerLauncher,
   type NativeSubstrateCallFailure,
@@ -138,18 +139,45 @@ export function failNextCanary(
   };
 }
 
-/** RecordingSecrets whose calls also go to the shared order. */
+/**
+ * RecordingSecrets whose calls also go to the shared order. A startup canary's Secret (named
+ * `wr-…-canary`) is kept apart like the canary's Substrate calls: `canarySecrets` (by name) and
+ * `canaryCalls`, with `canaryBefore` hooks, so a run's Secret calls are the same with the canary as
+ * without it.
+ */
 class OrderedSecrets extends RecordingSecrets {
+  readonly canarySecrets = new Map<string, V1Secret>();
+  readonly canaryCalls: string[] = [];
+  readonly canaryBefore: { createSecret?: () => Promise<void>; deleteSecret?: () => Promise<void> } = {};
   constructor(private readonly order: string[]) {
     super();
   }
   override async createSecret(...args: Parameters<RecordingSecrets["createSecret"]>) {
+    const [namespace, body] = args;
+    const name = body.metadata?.name ?? "";
+    if (name.endsWith("-canary")) {
+      this.canaryCalls.push(`create ${namespace}/${name}`);
+      await this.canaryBefore.createSecret?.();
+      this.canarySecrets.set(name, structuredClone(body));
+      return body;
+    }
     this.order.push("createSecret");
     return super.createSecret(...args);
   }
   override async deleteSecret(...args: Parameters<RecordingSecrets["deleteSecret"]>) {
+    const [namespace, name] = args;
+    if (name.endsWith("-canary")) {
+      this.canaryCalls.push(`delete ${namespace}/${name}`);
+      await this.canaryBefore.deleteSecret?.();
+      this.canarySecrets.delete(name);
+      return;
+    }
     this.order.push("deleteSecret");
     return super.deleteSecret(...args);
+  }
+  /** The capability in a canary's Secret, as the egress gateway would read it. */
+  canaryCapability(actor: string): string | undefined {
+    return this.canarySecrets.get(actor)?.stringData?.capability;
   }
 }
 
@@ -176,9 +204,12 @@ export function nativeHarness(options: NativeHarnessOptions = {}) {
   const config = { ...NATIVE_CONFIG, ...options.config };
   const canaries = options.canaries ?? new MemoryNativeCanaryStore();
   const harness = { canaryVerdict: options.canaryVerdict ?? "pass" };
-  // The canary worker: probes, then posts its verdict through the gateway's route (the store).
+  // The canary worker: probes, then posts its verdict through the gateway's route (the store), with
+  // the capability the egress gateway reads from its Secret.
+  const reportAs = async (actor: string, result: NativeCanaryResult) =>
+    canaries.report(actor, canaryCapabilityHash(secrets.canaryCapability(actor) ?? ""), result, new Date());
   api.onCanaryResumed = async (actor) => {
-    if (harness.canaryVerdict !== "silent") await canaries.report(actor, harness.canaryVerdict, new Date());
+    if (harness.canaryVerdict !== "silent") await reportAs(actor, harness.canaryVerdict);
   };
   const launcher = new SubstrateNativeWorkerLauncher({
     api,
@@ -209,6 +240,8 @@ export function nativeHarness(options: NativeHarnessOptions = {}) {
     canaries,
     /** Set `canaryVerdict` to change what the next canary reports. */
     harness,
+    /** Reports a canary's verdict as its worker would (with the capability from its Secret). */
+    reportAs,
     order,
     sleeps,
     failures,

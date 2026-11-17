@@ -98,8 +98,10 @@ does not support, such as GKE Autopilot; Docker for a single host.
   must be 0: every run resumes from the template's golden snapshot instead, and
   the first runs after a template change wait while it builds.
 - The gateway's NetworkPolicy must admit Substrate's egress gateway pods on 8790.
-  Apply the migrations `20261128000000_native_gateway_worker_removed` and
-  `20261128000001_native_substrate_canary` with `prisma migrate deploy`, then
+  Apply the migrations `20261128000000_native_gateway_worker_removed`,
+  `20261128000001_native_substrate_canary` and
+  `20261129000000_native_substrate_canary_capability` with
+  `prisma migrate deploy`, then
   start the gateway and server of the same release.
 - Before any run launches, a startup canary per template proves that Substrate
   enforces the egress policy. If it finds the deny port or the outside

@@ -238,10 +238,11 @@ export const NATIVE_GATEWAY_CALL_PATH = "/native-gateway/v1/call";
 export const NATIVE_PLACEHOLDER_CAPABILITY = "wardby_native_placeholder_injected_by_egress_gateway";
 
 /**
- * Where a Substrate startup canary posts its verdict (POST, no credential): the canary actor never
- * holds a capability, so the route is unauthenticated. What makes that safe is on the gateway side:
- * the actor name is random and must already have a row, the result is a fixed enum, each row takes
- * one write within its report window (substrate-canary-store.ts), and every valid body gets the same answer.
+ * Where a Substrate startup canary posts its verdict (POST). The canary actor sends the public
+ * placeholder as its bearer, and the egress gateway replaces it with the canary's own short-lived
+ * capability (its Secret), as for a run. The gateway accepts that capability once, for that actor,
+ * within its report window (substrate-canary-store.ts); every valid body gets the same answer,
+ * whether or not it was taken, so the route is no oracle for capabilities.
  */
 export const NATIVE_GATEWAY_CANARY_PATH = "/native-gateway/v1/canary";
 /** A canary's verdicts: pass, or the first probe that failed, in the Kubernetes probe's order. */

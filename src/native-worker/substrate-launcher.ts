@@ -16,9 +16,10 @@
  * launch (`networkReadyAtLaunch`, D1): nothing runs in the actor before its egress is pinned.
  *
  * That trust is proven once per process and template by a startup canary (D1): an actor resumed from
- * the same template, under the run's rule minus the credential (nativeCanaryEgress), probes the
- * gateway, its deny port and the outside (substrate-canary.ts) and posts its verdict to the gateway,
- * which records it (NativeCanaryStore). Until the canary passes no run launches. An isolation failure
+ * the same template, under the run's rule with the canary's own short-lived capability in place of
+ * the run's (nativeCanaryEgress, its own Secret), probes the gateway, its deny port and the outside
+ * (substrate-canary.ts) and posts its verdict to the gateway, which records it once for that
+ * capability (NativeCanaryStore). Until the canary passes no run launches. An isolation failure
  * (deny_port_reachable, outside_reachable) refuses every launch with native_sandbox_network_unenforced
  * until the process restarts. An outcome that says nothing about the policy (gateway_unreachable,
  * canary_timeout, or a failed call) refuses that launch the same way, and the next launch runs a new
@@ -68,9 +69,15 @@ import { NATIVE_SANDBOX_CAPACITY, NATIVE_SANDBOX_NETWORK_UNENFORCED } from "./ku
 import { NATIVE_SANDBOX_LAUNCH_ABANDONED, type WorkerHandle, type WorkerLaunchOptions } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import type { ManagedWorkerLauncher } from "./sandbox-executor.js";
-import { CANARY_REPORT_WINDOW_MS, NATIVE_CANARY_TIMEOUT_MS, type NativeCanaryStore } from "./substrate-canary-store.js";
+import {
+  CANARY_REPORT_WINDOW_MS,
+  canaryCapabilityHash,
+  NATIVE_CANARY_TIMEOUT_MS,
+  type NativeCanaryStore,
+} from "./substrate-canary-store.js";
 import {
   nativeCanaryEgress,
+  nativeCanarySecret,
   nativeEgress,
   nativeRunSecret,
   nativeTemplate,
@@ -292,17 +299,20 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
   }
 
   /**
-   * One canary: first the sweep of any left by a dead process; then its row, an actor from the run
-   * template with the credential-free rule, the resume (with a run's golden-window retry), then the
-   * verdict, read every second up to canaryTimeoutMs. The actor (with its policy) and then the row
-   * are deleted, best effort; the row stays when the actor delete fails, so a later sweep retries.
-   * Never throws; the one log line is the template and the outcome.
+   * One canary: first the sweep of any left by a dead process; then its row (with its capability's
+   * hash), its Secret (the capability), an actor from the run template with the canary's rule, the
+   * resume (with a run's golden-window retry), then the verdict, read every second up to
+   * canaryTimeoutMs. The actor (with its policy), the Secret and then the row are deleted, best
+   * effort; the row stays when the actor or Secret delete fails, so a later sweep retries. Never
+   * throws; the one log line is the template and the outcome. The capability exists only here and
+   * in the Secret: never logged, never in an error.
    */
   private async runCanary(): Promise<CanaryOutcome> {
     const { canaries, config } = this.options;
     await this.sweepCanaries();
     const template = this.template.name;
     const actor = nativeCanaryActorName(randomBytes(16).toString("hex"));
+    const capability = randomBytes(32).toString("base64url");
     const call: NamedCall = async (name, fn, recoverable) => {
       try {
         return await fn();
@@ -319,14 +329,22 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
       }
     };
     let rowMade = false;
+    let secretMade = false;
     let actorMade = false;
     let outcome: CanaryOutcome;
     try {
-      await store("recordCanary", () => canaries.create(actor, template));
+      await store("recordCanary", () => canaries.create(actor, template, canaryCapabilityHash(capability)));
       rowMade = true;
+      secretMade = true;
+      // A Kubernetes error's message may quote the request (the Secret): only the call's name is kept.
+      await store("createSecret", () =>
+        this.options.secrets.createSecret(config.credentialsNamespace, nativeCanarySecret(actor, capability, config)),
+      );
       actorMade = true;
       await createFreshActor(this.api, this.atespace, actor, template, call);
-      await call("putEgressPolicy", () => this.api.putEgressPolicy(this.atespace, actor, nativeCanaryEgress(config)));
+      await call("putEgressPolicy", () =>
+        this.api.putEgressPolicy(this.atespace, actor, nativeCanaryEgress(actor, config)),
+      );
       await this.resume(undefined, actor, call);
       outcome = await this.awaitVerdict(actor, store);
     } catch (error) {
@@ -341,7 +359,13 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
         () => false,
       );
     }
-    if (rowMade && actorGone) await canaries.delete(actor).catch(() => {});
+    const secretGone = secretMade
+      ? await this.deleteSecret(actor).then(
+          () => true,
+          () => false,
+        )
+      : true;
+    if (rowMade && actorGone && secretGone) await canaries.delete(actor).catch(() => {});
     if (outcome.result === "pass")
       substrateNativeLog.info({ template, result: outcome.result }, "native substrate canary");
     else substrateNativeLog.warn({ template, result: outcome.result }, "native substrate canary");
@@ -349,10 +373,11 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
   }
 
   /**
-   * Deletes the actor, policy and row of every canary whose row is older than any canary can run
-   * (its golden wait plus its verdict timeout, at least the report window, plus a margin): only a
-   * process that died mid-canary, or a failed actor delete, leaves one. Best effort and never
-   * throws; a row whose actor cannot be deleted stays for the next sweep. Logs fixed fields only.
+   * Deletes the actor, policy, Secret and row of every canary whose row is older than any canary can
+   * run (its golden wait plus its verdict timeout, at least the report window, plus a margin): only a
+   * process that died mid-canary, or a failed actor or Secret delete, leaves one. Best effort and
+   * never throws; a row whose actor or Secret cannot be deleted stays for the next sweep. Logs fixed
+   * fields only.
    */
   private async sweepCanaries(): Promise<void> {
     const { canaries } = this.options;
@@ -370,6 +395,7 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     for (const actor of stale) {
       try {
         await deleteActorWithPolicy(this.api, this.atespace, actor);
+        await this.deleteSecret(actor);
         await canaries.delete(actor);
       } catch (error) {
         substrateNativeLog.warn(
@@ -579,9 +605,10 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     if (first) throw first;
   }
 
-  private async deleteSecret(token: string): Promise<void> {
+  /** Deletes a Secret by name (a run's token, or a canary's actor); a missing one is success. */
+  private async deleteSecret(name: string): Promise<void> {
     try {
-      await this.options.secrets.deleteSecret(this.options.config.credentialsNamespace, token);
+      await this.options.secrets.deleteSecret(this.options.config.credentialsNamespace, name);
     } catch (error) {
       if (!(error instanceof KubernetesNotFoundError)) throw error;
     }

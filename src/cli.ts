@@ -1141,7 +1141,7 @@ async function nativeGateway(): Promise<void> {
     providers,
     // Coding runs' MCP calls, forwarded by the coding proxy's /mcp route (its own token auth).
     codingMcp: { db: prisma, cipher: secrets, log: logger.child({ module: "coding-mcp" }) },
-    // Substrate startup canaries' verdicts (NATIVE_SANDBOX_LAUNCHER=substrate); no auth, see the route.
+    // Substrate startup canaries' verdicts (NATIVE_SANDBOX_LAUNCHER=substrate), each with its own capability.
     canaries: new PrismaNativeCanaryStore(prisma),
   });
   // The deny port (NATIVE_GATEWAY_DENY_PORT, default 8791) serves nothing: a worker that can reach the

@@ -506,9 +506,10 @@ native runs do not use:
 - This release's migrations, applied with `prisma migrate deploy`
   (`npm run prisma:migrate`) before the new gateway and server start:
   `20261128000000_native_gateway_worker_removed` (used by every launcher; it
-  records when a run's worker was removed) and
+  records when a run's worker was removed),
   `20261128000001_native_substrate_canary` (the startup check's results, written
-  by the gateway). Then start the new gateway, then the new server.
+  by the gateway) and `20261129000000_native_substrate_canary_capability` (the
+  hash of each check's one-use capability). Then start the new gateway, then the new server.
 
 ### Configure the server for Substrate
 
@@ -559,7 +560,11 @@ run's egress policy is in place before its actor resumes, and Wardby proves once
 per server process and template that Substrate enforces such a policy:
 
 1. It creates a **canary** actor (`wr-<20 hex>-canary`) from the same template,
-   with the run's egress rule minus the credential, and resumes it.
+   with the run's egress rule, and resumes it. In place of a run's capability
+   the rule names the canary's own short-lived random capability, held in a
+   Secret of its own (named after the canary actor, labelled
+   `wardby.dev/substrate-native-canary=<actor>`, in
+   `SUBSTRATE_CREDENTIALS_NAMESPACE`). The database keeps only its hash.
 2. Inside, the canary checks that the gateway's `/healthz` answers, that the
    gateway's deny port (`NATIVE_GATEWAY_DENY_PORT`, default 8791), an outside
    address and the cloud metadata endpoints are all denied, and that the
@@ -569,9 +574,12 @@ per server process and template that Substrate enforces such a policy:
    egress gateway denial: status `403`, a `server: envoy` header and the body
    `egress denied`. Any other answer, or none, on a connection that opens
    counts as reachable.
-3. It posts the verdict to the gateway (`POST /native-gateway/v1/canary`, no
-   credential), which records it in the database. The server reads it, then
-   deletes the canary actor.
+3. It posts the verdict to the gateway (`POST /native-gateway/v1/canary`). Like
+   a run, the canary holds only the public placeholder bearer, and Substrate's
+   egress gateway puts the canary's capability in its place. The gateway
+   records the verdict only with that capability, for that canary, once; every
+   other report gets the same answer and is not recorded. The server reads the
+   verdict, then deletes the canary actor, its policy and its Secret.
 
 No sandbox run launches until the check passes: a launch while it runs waits
 for it. A check that does not pass refuses the run with
@@ -579,13 +587,13 @@ for it. A check that does not pass refuses the run with
 before any Secret or actor of the run exists, and the message ends with the
 reason:
 
-| Reason                             | Meaning                                                                                                                                   | Next launch                       |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
-| `deny_port_reachable`              | The canary reached the gateway's deny port: the egress policy is not scoped to the gateway's port.                                        | Refused until the server restarts |
-| `outside_reachable`                | The canary reached an outside address or a metadata endpoint: the egress policy is not enforced.                                          | Refused until the server restarts |
-| `gateway_unreachable`              | The gateway's `/healthz` did not answer, before or after the probes. This says nothing about the policy.                                  | Runs a new check                  |
-| `canary_timeout`                   | No verdict within 2 minutes.                                                                                                              | Runs a new check                  |
-| `<call>_failed` or `canary_failed` | A call the check needed failed, such as `createActor_failed` (`recordCanary` and `readCanary` are the database), or something unexpected. | Runs a new check                  |
+| Reason                             | Meaning                                                                                                                                                            | Next launch                       |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
+| `deny_port_reachable`              | The canary reached the gateway's deny port: the egress policy is not scoped to the gateway's port.                                                                 | Refused until the server restarts |
+| `outside_reachable`                | The canary reached an outside address or a metadata endpoint: the egress policy is not enforced.                                                                   | Refused until the server restarts |
+| `gateway_unreachable`              | The gateway's `/healthz` did not answer, before or after the probes. This says nothing about the policy.                                                           | Runs a new check                  |
+| `canary_timeout`                   | No verdict within 2 minutes.                                                                                                                                       | Runs a new check                  |
+| `<call>_failed` or `canary_failed` | A call the check needed failed, such as `createActor_failed` or `createSecret_failed` (`recordCanary` and `readCanary` are the database), or something unexpected. | Runs a new check                  |
 
 A check whose actor could not start for lack of room fails the run with
 [`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md) instead,
@@ -598,8 +606,8 @@ own check; a passed one holds until the process restarts, and so does a
 `deny_port_reachable` or `outside_reachable` verdict.
 
 The server logs one line per check, `native substrate canary`, with the
-template and the result (info on a pass, warn otherwise). A canary actor left
-behind by a server that stopped mid-check is deleted by the next check any
+template and the result (info on a pass, warn otherwise). A canary actor (with
+its Secret) left behind by a server that stopped mid-check is deleted by the next check any
 server process runs (at the latest, after a restart), once it is older than any
 check can take; failures there log `native substrate canary sweep`. In rare
 cases, such as a rolling update that raises `SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC`,
@@ -1004,7 +1012,8 @@ skipped unless its script sets its flag:
   Look it up in the atespace with Substrate's CLI or Control API. Its Secret in
   `SUBSTRATE_CREDENTIALS_NAMESPACE` is named by the token and labelled
   `wardby.dev/substrate-native-run=<token>`. Startup-check actors end in
-  `-canary`.
+  `-canary`; each has a Secret of the same name, labelled
+  `wardby.dev/substrate-native-canary=<actor>`.
 - **Substrate: a worker exited non-zero.** The server logs
   `native worker exited non-zero` with `stderrTailOmitted: "not_available"`:
   Substrate gives the server no output to tail. The worker's own redacted

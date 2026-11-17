@@ -6,7 +6,7 @@ import {
 } from "../providers/substrate/api.js";
 import { nativeActorName, substrateRunToken } from "../providers/substrate/names.js";
 import { NATIVE_SANDBOX_LAUNCH_ABANDONED } from "./launch.js";
-import type { MemoryNativeCanaryStore } from "./substrate-canary-store.js";
+import { canaryCapabilityHash, type MemoryNativeCanaryStore } from "./substrate-canary-store.js";
 import {
   FAKE_NATIVE_CAP,
   FAKE_PROMPT,
@@ -18,18 +18,25 @@ import {
 import { nativeCanaryEgress, nativeEgress, nativeTemplate } from "./substrate-specs.js";
 
 const substrateWarn = vi.hoisted(() => vi.fn());
+const substrateInfo = vi.hoisted(() => vi.fn());
 vi.mock("../core/logger.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../core/logger.js")>();
   const child = real.logger.child.bind(real.logger);
   vi.spyOn(real.logger, "child").mockImplementation((bindings, options) => {
     const log = child(bindings, options);
-    if (bindings.module === "native-substrate-launcher") vi.spyOn(log, "warn").mockImplementation(substrateWarn);
+    if (bindings.module === "native-substrate-launcher") {
+      vi.spyOn(log, "warn").mockImplementation(substrateWarn);
+      vi.spyOn(log, "info").mockImplementation(substrateInfo);
+    }
     return log;
   });
   return real;
 });
 
-beforeEach(() => substrateWarn.mockReset());
+beforeEach(() => {
+  substrateWarn.mockReset();
+  substrateInfo.mockReset();
+});
 
 const CAPACITY = "native_sandbox_capacity: no Substrate worker has room for another native worker.";
 
@@ -215,7 +222,10 @@ describe("SubstrateNativeWorkerLauncher.launch", () => {
 
   it("fails a Secret it cannot create with a fixed code, and leaves nothing", async () => {
     const h = nativeHarness();
-    h.secrets.createSecret = async () => {
+    const real = h.secrets.createSecret.bind(h.secrets);
+    // The run's Secret fails; the startup canary's own Secret is made as usual.
+    h.secrets.createSecret = async (namespace, body) => {
+      if (body.metadata?.name?.endsWith("-canary")) return real(namespace, body);
       throw new Error("secrets is forbidden: " + FAKE_NATIVE_CAP);
     };
     const err = (await h.launcher.launch(h.input()).catch((e: unknown) => e)) as Error;
@@ -519,8 +529,13 @@ describe("SubstrateNativeWorkerLauncher startup canary", () => {
     const create = h.api.canaryCalls.find((c) => c.method === "createActor");
     expect(create?.args).toEqual([NATIVE_CONFIG.atespace, actor, nativeTemplate(NATIVE_CONFIG).name]);
     const policy = h.api.canaryCalls.find((c) => c.method === "putEgressPolicy");
-    expect(policy?.args).toEqual([NATIVE_CONFIG.atespace, actor, nativeCanaryEgress(NATIVE_CONFIG)]);
-    expect(JSON.stringify(policy?.args)).not.toContain("replaceHeaders");
+    expect(policy?.args).toEqual([NATIVE_CONFIG.atespace, actor, nativeCanaryEgress(actor, NATIVE_CONFIG)]);
+    // Its own Secret, made before its actor and deleted after it.
+    expect(h.secrets.canaryCalls).toEqual([
+      `create ${NATIVE_CONFIG.credentialsNamespace}/${actor}`,
+      `delete ${NATIVE_CONFIG.credentialsNamespace}/${actor}`,
+    ]);
+    expect(h.secrets.canarySecrets.size).toBe(0);
     expect(h.api.canaryCalls.map((c) => c.method)).toEqual([
       "createActor",
       "putEgressPolicy",
@@ -611,7 +626,7 @@ describe("SubstrateNativeWorkerLauncher startup canary", () => {
     const h = nativeHarness({ power: fakePower(ensureAwake) });
     // An asleep gateway: the canary could not reach it.
     h.api.onCanaryResumed = async (actor) => {
-      await h.canaries.report(actor, awake ? "pass" : "gateway_unreachable", new Date());
+      await h.reportAs(actor, awake ? "pass" : "gateway_unreachable");
     };
     h.api.canaryBefore.createActor = async () => void events.push("canary");
     await h.launcher.start();
@@ -631,7 +646,7 @@ describe("SubstrateNativeWorkerLauncher startup canary", () => {
     await h.api.ensureActorTemplate(nativeTemplate(NATIVE_CONFIG));
     for (const actor of [stale, fresh]) {
       await h.api.createActor(NATIVE_CONFIG.atespace, actor, nativeTemplate(NATIVE_CONFIG).name);
-      await h.api.putEgressPolicy(NATIVE_CONFIG.atespace, actor, nativeCanaryEgress(NATIVE_CONFIG));
+      await h.api.putEgressPolicy(NATIVE_CONFIG.atespace, actor, nativeCanaryEgress(actor, NATIVE_CONFIG));
     }
     // The stale row is older than any canary can run; the fresh one may be another replica's.
     store.rows.set(stale, { template: "wardby-native-0123456789abcdef", createdAt: new Date(0) });
@@ -639,6 +654,8 @@ describe("SubstrateNativeWorkerLauncher startup canary", () => {
     await h.launcher.launch(h.input());
     expect(h.api.actors.has(`${NATIVE_CONFIG.atespace}/${stale}`)).toBe(false);
     expect(h.api.egressPolicies.has(`${NATIVE_CONFIG.atespace}/${stale}`)).toBe(false);
+    expect(h.secrets.canaryCalls).toContain(`delete ${NATIVE_CONFIG.credentialsNamespace}/${stale}`);
+    expect(h.secrets.canaryCalls).not.toContain(`delete ${NATIVE_CONFIG.credentialsNamespace}/${fresh}`);
     expect(store.rows.has(stale)).toBe(false);
     expect(h.api.actors.has(`${NATIVE_CONFIG.atespace}/${fresh}`)).toBe(true);
     expect(store.rows.has(fresh)).toBe(true);
@@ -696,12 +713,71 @@ describe("SubstrateNativeWorkerLauncher startup canary", () => {
     expect(canaryActors(h)).toHaveLength(2);
   });
 
-  it("never gives the canary a credential", async () => {
+  it("gives the canary its own capability only in its Secret: never the run's, never in a policy or log", async () => {
     const h = nativeHarness();
+    let capability = "";
+    let rowHash: string | undefined;
+    h.api.canaryBefore.resumeActor = async (_atespace, actor) => {
+      capability = h.secrets.canaryCapability(actor as string) ?? "";
+      rowHash = (h.canaries as MemoryNativeCanaryStore).rows.get(actor as string)?.capabilityHash;
+    };
     await h.launcher.launch(h.input());
+    expect(capability).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // The row keeps only the hash.
+    expect(rowHash).toBe(canaryCapabilityHash(capability));
     const canary = JSON.stringify([h.api.canaryCalls, nativeTemplate(NATIVE_CONFIG)]);
-    expect(canary).not.toContain("credentialUri");
+    expect(canary).not.toContain(capability);
     expect(canary).not.toContain(FAKE_NATIVE_CAP);
-    expect(JSON.stringify(h.secrets.calls)).not.toContain("-canary");
+    expect(JSON.stringify([...h.secrets.secrets.values()])).not.toContain(capability);
+    expect(substrateInfo).toHaveBeenCalledWith(
+      { template: nativeTemplate(NATIVE_CONFIG).name, result: "pass" },
+      "native substrate canary",
+    );
+    const logged = JSON.stringify([substrateWarn.mock.calls, substrateInfo.mock.calls, h.failures]);
+    expect(logged).not.toContain(capability);
+  });
+
+  it("takes no verdict without the canary's capability, and a used capability counts once", async () => {
+    const h = nativeHarness({ canaryVerdict: "silent", launcher: { canaryTimeoutMs: 3_000 } });
+    const store = h.canaries as MemoryNativeCanaryStore;
+    h.api.onCanaryResumed = async (actor) => {
+      // A caller without the capability: refused. Then the canary's own report, then a replay.
+      expect(await store.report(actor, canaryCapabilityHash("fake_guess_0001"), "pass", new Date())).toBe(false);
+      expect(await h.reportAs(actor, "outside_reachable")).toBe(true);
+      expect(await h.reportAs(actor, "pass")).toBe(false);
+    };
+    await expect(h.launcher.launch(h.input())).rejects.toThrow(UNENFORCED("outside_reachable"));
+  });
+
+  it("keeps the canary's row when its Secret cannot be deleted, and the sweep deletes the Secret", async () => {
+    const h = nativeHarness();
+    const store = h.canaries as MemoryNativeCanaryStore;
+    h.secrets.canaryBefore.deleteSecret = async () => {
+      throw new Error("quoting " + FAKE_NATIVE_CAP);
+    };
+    await h.launcher.launch(h.input());
+    const [actor] = canaryActors(h);
+    expect(store.rows.has(actor)).toBe(true);
+    expect(h.secrets.canarySecrets.has(actor)).toBe(true);
+    // Much later, the next process's canary sweeps the row and deletes its Secret.
+    store.rows.get(actor)!.createdAt = new Date(0);
+    const next = nativeHarness({ canaries: store });
+    next.secrets.canarySecrets.set(actor, h.secrets.canarySecrets.get(actor)!);
+    await next.launcher.launch(next.input({ runId: "run-2" }));
+    expect(next.secrets.canaryCalls).toContain(`delete ${NATIVE_CONFIG.credentialsNamespace}/${actor}`);
+    expect(next.secrets.canarySecrets.has(actor)).toBe(false);
+    expect(store.rows.has(actor)).toBe(false);
+  });
+
+  it("refuses the launch with createSecret_failed when the canary's Secret cannot be made, and deletes its row", async () => {
+    const h = nativeHarness();
+    h.secrets.canaryBefore.createSecret = async () => {
+      throw new Error("quoting " + FAKE_NATIVE_CAP);
+    };
+    await expect(h.launcher.launch(h.input())).rejects.toThrow(UNENFORCED("createSecret_failed"));
+    expect(h.api.canaryCalls).toEqual([]);
+    expect((h.canaries as MemoryNativeCanaryStore).rows.size).toBe(0);
+    expect(h.secrets.calls).toEqual([]);
+    expect(JSON.stringify(substrateWarn.mock.calls)).not.toContain(FAKE_NATIVE_CAP);
   });
 });

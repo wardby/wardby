@@ -902,16 +902,20 @@ model NativeGatewaySession {
 }
 
 /// A Substrate native sandbox startup canary (NATIVE_SANDBOX_LAUNCHER=substrate): one probe actor
-/// per worker template and process, whose verdict the gateway records. No credential, no run data.
+/// per worker template and process, whose verdict the gateway records. No credential (only its
+/// capability's hash), no run data.
 model NativeSubstrateCanary {
-  /// The canary actor's name (wr-<20 hex>-canary): random, and the only key the gateway accepts.
-  actor      String    @id
+  /// The canary actor's name (wr-<20 hex>-canary): random; a report names it and carries its capability.
+  actor          String    @id
   /// The worker template it proves (wardby-native-<16 hex>).
-  template   String
+  template       String
   /// pass | gateway_unreachable | deny_port_reachable | outside_reachable; null until reported.
-  result     String?
-  createdAt  DateTime  @default(now())
-  reportedAt DateTime?
+  result         String?
+  createdAt      DateTime  @default(now())
+  reportedAt     DateTime?
+  /// SHA-256 hex of the canary's one-use capability (held only by its Secret); the report must carry
+  /// it. Null on rows from before it existed, which then take no report.
+  capabilityHash String?
 
   @@index([createdAt])
 }

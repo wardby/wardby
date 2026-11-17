@@ -115,13 +115,40 @@ export function nativeEgress(token: string, config: NativeSubstrateLaunchConfig)
   ];
 }
 
+/** The label every startup canary's Secret carries (value: the canary's actor name), for a sweep to find them. */
+export const NATIVE_CANARY_SECRET_LABEL = "wardby.dev/substrate-native-canary";
+
 /**
- * The startup canary's rule: the gateway host and port, like a run's, with no header replaced. The
- * canary holds no credential and needs none (the gateway's /healthz and canary route are open).
+ * The startup canary's rule: the gateway host and port, like a run's, Authorization ← "Bearer " +
+ * the canary's own capability from its Secret (named by the canary's actor). The canary actor holds
+ * only the placeholder; its report reaches the gateway's canary route with the capability.
  */
-export function nativeCanaryEgress(config: NativeSubstrateLaunchConfig): EgressRule[] {
+export function nativeCanaryEgress(actor: string, config: NativeSubstrateLaunchConfig): EgressRule[] {
   const { host, port } = gatewayTarget(config.gatewayUrl);
-  return [{ kind: "http", hostnames: [host], ports: [port] }];
+  return [
+    {
+      kind: "http",
+      hostnames: [host],
+      ports: [port],
+      replaceHeaders: [
+        {
+          header: "Authorization",
+          prefix: "Bearer ",
+          credentialUri: credentialUri(config.credentialsNamespace, actor, NATIVE_RUN_SECRET_KEY),
+        },
+      ],
+    },
+  ];
+}
+
+/** A startup canary's Secret (name = its actor, key capability, label wardby.dev/substrate-native-canary). Never log it. */
+export function nativeCanarySecret(actor: string, capability: string, config: NativeSubstrateLaunchConfig): V1Secret {
+  return substrateSecret({
+    name: actor,
+    namespace: config.credentialsNamespace,
+    label: { key: NATIVE_CANARY_SECRET_LABEL, value: actor },
+    data: { [NATIVE_RUN_SECRET_KEY]: capability },
+  });
 }
 
 /** The per-run Secret (name = token, key capability, label wardby.dev/substrate-native-run). Never log it. */

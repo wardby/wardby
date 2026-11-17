@@ -37,6 +37,7 @@ const { createGatewayServer, httpLog, MAX_CANARY_REQUEST_BYTES, MAX_INPUT_REQUES
   await import("./http-server.js");
 const { GATEWAY_INTERNAL_MESSAGE, GatewayError, NATIVE_GATEWAY_CANARY_PATH, NATIVE_GATEWAY_INPUT_PATH } =
   await import("./protocol.js");
+const { canaryCapabilityHash } = await import("./substrate-canary-store.js");
 
 let close: (() => Promise<void>) | undefined;
 afterEach(async () => {
@@ -164,7 +165,7 @@ describe("native gateway HTTP listener, input route", () => {
 });
 
 describe("native gateway HTTP listener, canary route", () => {
-  // Obviously fake: a run capability a caller might send. The route must never read or log it.
+  // Obviously fake: a canary's capability, as the egress gateway puts it on the report. Never logged.
   const FAKE_NATIVE_CAP = "fake_native_capability_" + "0".repeat(21);
   const ACTOR = "wr-0123456789abcdef0123-canary";
 
@@ -192,11 +193,18 @@ describe("native gateway HTTP listener, canary route", () => {
     } finally {
       spy.mockRestore();
     }
-    expect(canaries.report).toHaveBeenCalledWith(ACTOR, "pass", expect.any(Date));
+    // Only the capability's hash reaches the store.
+    expect(canaries.report).toHaveBeenCalledWith(
+      ACTOR,
+      canaryCapabilityHash(FAKE_NATIVE_CAP),
+      "pass",
+      expect.any(Date),
+    );
     expect(lines).toEqual([{ result: "pass", recorded: true }]);
     for (const line of lines)
       expect(Object.keys(line as object).every((k) => ["result", "recorded"].includes(k))).toBe(true);
     expect(inspect(lines, { depth: 10 })).not.toContain(FAKE_NATIVE_CAP);
+    expect(inspect(lines, { depth: 10 })).not.toContain(canaryCapabilityHash(FAKE_NATIVE_CAP));
     expect(inspect(lines, { depth: 10 })).not.toContain(ACTOR);
   });
 
@@ -209,10 +217,20 @@ describe("native gateway HTTP listener, canary route", () => {
       warnSpy.mockRestore();
     });
     const base = await listenOn({ canaries });
-    const response = await post(base, JSON.stringify({ actor: ACTOR, result: "outside_reachable" }));
+    const bearer = { authorization: `Bearer ${FAKE_NATIVE_CAP}` };
+    // An unknown or already used capability: the store takes nothing.
+    const response = await post(base, JSON.stringify({ actor: ACTOR, result: "outside_reachable" }), bearer);
     expect(response.status).toBe(204);
+    expect(await response.text()).toBe("");
     canaries.report.mockRejectedValueOnce(new Error("database down"));
+    expect((await post(base, JSON.stringify({ actor: ACTOR, result: "pass" }), bearer)).status).toBe(204);
+    // No bearer, or one that is not a bearer: the same answer, and the store is never asked.
+    canaries.report.mockClear();
     expect((await post(base, JSON.stringify({ actor: ACTOR, result: "pass" }))).status).toBe(204);
+    expect(
+      (await post(base, JSON.stringify({ actor: ACTOR, result: "pass" }), { authorization: "Basic x" })).status,
+    ).toBe(204);
+    expect(canaries.report).not.toHaveBeenCalled();
   });
 
   it("logs reports no row took as one summary line a minute at most, so the route cannot flood the log", async () => {
@@ -227,13 +245,16 @@ describe("native gateway HTTP listener, canary route", () => {
     });
     const base = await listenOn({ canaries });
     for (let i = 0; i < 20; i += 1) {
-      const response = await post(base, JSON.stringify({ actor: ACTOR, result: "pass" }));
+      const response = await post(base, JSON.stringify({ actor: ACTOR, result: "pass" }), {
+        authorization: `Bearer ${FAKE_NATIVE_CAP}`,
+      });
       expect(response.status).toBe(204);
     }
     expect(canaries.report).toHaveBeenCalledTimes(20);
     expect(info).toEqual([]);
     expect(warn).toEqual([{ unrecorded: 1 }]);
     expect(inspect(warn, { depth: 10 })).not.toContain(ACTOR);
+    expect(inspect(warn, { depth: 10 })).not.toContain(FAKE_NATIVE_CAP);
   });
 
   it.each([

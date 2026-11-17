@@ -1,15 +1,16 @@
 /**
  * The startup isolation canary of a Substrate native worker template (NATIVE_SANDBOX_LAUNCHER=
  * substrate), run inside a canary actor (`wr-<20 hex>-canary`) resumed from the same template as
- * every run, under an egress policy like a run's but with no credential. Worker-safe: Node built-ins
- * and protocol.ts only.
+ * every run, under an egress policy like a run's with the canary's own capability in place of the
+ * run's. Worker-safe: Node built-ins and protocol.ts only.
  *
  * The probes are the Kubernetes in-pod probe's (kubernetes-isolation.ts nativeEnforcementProbe), in
  * the same order: the gateway's /healthz must answer 200 {"ok":true}; then its deny port (the
  * template's NATIVE_GATEWAY_DENY_PORT, default 8791) and every outside target (the internet and the
  * cloud metadata endpoints) must be denied. The verdict is the first that failed, or pass. It is
- * posted to the gateway's canary route with no credential: the actor holds none, and the route
- * needs none (protocol.ts NATIVE_GATEWAY_CANARY_PATH says why).
+ * posted to the gateway's canary route with the public placeholder as its bearer: the egress
+ * gateway replaces it on the wire with the canary's own one-use capability, which the actor never
+ * holds (protocol.ts NATIVE_GATEWAY_CANARY_PATH).
  *
  * What counts as denied fails closed. A probe connects, sends one plain HTTP request (`GET /`,
  * `Connection: close`) and reads at most EGRESS_DENIAL_MAX_BYTES of the answer. The target is denied
@@ -27,6 +28,7 @@ import { connect as netConnect } from "node:net";
 import {
   NATIVE_CANARY_DENY_PORT,
   NATIVE_GATEWAY_CANARY_PATH,
+  NATIVE_PLACEHOLDER_CAPABILITY,
   NATIVE_PROBE_OUTSIDE_TARGETS,
   nativeGatewayRouteUrl,
   type NativeCanaryResult,
@@ -164,7 +166,10 @@ async function probe(gatewayUrl: string, options: NativeCanaryOptions): Promise<
   return "pass";
 }
 
-/** Posts the verdict, with no credential; throws native_substrate_canary_unreported when it cannot. */
+/**
+ * Posts the verdict with the placeholder bearer (the egress gateway puts the canary's capability in
+ * its place); throws native_substrate_canary_unreported when it cannot.
+ */
 async function report(
   gatewayUrl: string,
   actor: string,
@@ -178,7 +183,7 @@ async function report(
     try {
       const response = await fetchFn(url, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", authorization: `Bearer ${NATIVE_PLACEHOLDER_CAPABILITY}` },
         body: JSON.stringify({ actor, result }),
         signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS),
       });
@@ -194,7 +199,7 @@ async function report(
 /**
  * Probes from inside the actor: the gateway's /healthz must answer 200 {"ok":true}; its deny port
  * and every outside target must be denied (see the module comment for what counts). Then
- * posts the verdict to the gateway's canary route, with no credential, and returns it.
+ * posts the verdict to the gateway's canary route, with the placeholder bearer, and returns it.
  */
 export async function runNativeCanary(
   gatewayUrl: string,

@@ -21,7 +21,8 @@ export function nativeActorName(token: string): string {
 
 /**
  * A startup canary's actor name: a run-shaped token of `canary|<nonce>` plus `-canary`. The nonce is
- * random, so the name is unguessable: the gateway's unauthenticated canary route accepts only it.
+ * random, so the name is unguessable; it also names the canary's Secret, whose capability its report
+ * must carry.
  */
 export function nativeCanaryActorName(nonce: string): string {
   return `${substrateRunToken(`canary|${nonce}`)}${CANARY_ACTOR_SUFFIX}`;

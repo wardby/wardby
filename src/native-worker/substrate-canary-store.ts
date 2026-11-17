@@ -1,14 +1,16 @@
 /**
  * Where a Substrate startup canary's verdict waits for the launcher (substrate-launcher.ts): the
- * launcher creates the row before the canary actor starts, the gateway's unauthenticated canary
- * route records the verdict once, and the launcher reads it and deletes the actor and then the row.
- * A row left by a process that died mid-canary names an actor to sweep (`stale`).
+ * launcher creates the row before the canary actor starts, the gateway's canary route records the
+ * verdict once, and the launcher reads it and deletes the actor, its Secret and then the row. A row
+ * left by a process that died mid-canary names an actor (and Secret) to sweep (`stale`).
  *
- * The route takes no credential, so the row is what limits it: a report counts only for an actor
- * name that already has a row (random, `wr-<20 hex>-canary`), only once, and only within
+ * Each canary has its own short-lived capability, which only its Secret holds (the egress gateway
+ * puts it on the canary's report on the wire); the row keeps only its hash. A report counts only
+ * with that capability for that actor (random, `wr-<20 hex>-canary`), only once, and only within
  * CANARY_REPORT_WINDOW_MS of the row's creation. The row holds no credential and no run data.
  */
 
+import { createHash } from "node:crypto";
 import type { PrismaClient } from "#prisma";
 import { NATIVE_CANARY_RESULTS, type NativeCanaryResult } from "./protocol.js";
 
@@ -23,10 +25,18 @@ export const NATIVE_CANARY_TIMEOUT_MS = 120_000;
  */
 export const CANARY_REPORT_WINDOW_MS = SUBSTRATE_NATIVE_GOLDEN_WAIT_MAX_SEC * 1_000 + NATIVE_CANARY_TIMEOUT_MS + 60_000;
 
+/** What a canary row keeps of its capability: the SHA-256 hex digest, never the capability itself. */
+export function canaryCapabilityHash(capability: string): string {
+  return createHash("sha256").update(capability).digest("hex");
+}
+
 export interface NativeCanaryStore {
-  create(actor: string, template: string): Promise<void>;
-  /** Sets result and reportedAt once, for a row created within CANARY_REPORT_WINDOW_MS; whether a row took it. */
-  report(actor: string, result: NativeCanaryResult, at: Date): Promise<boolean>;
+  create(actor: string, template: string, capabilityHash: string): Promise<void>;
+  /**
+   * Sets result and reportedAt once, for the row of `actor` whose capability hashes to
+   * `capabilityHash` and which was created within CANARY_REPORT_WINDOW_MS; whether a row took it.
+   */
+  report(actor: string, capabilityHash: string, result: NativeCanaryResult, at: Date): Promise<boolean>;
   result(actor: string): Promise<NativeCanaryResult | undefined>;
   delete(actor: string): Promise<void>;
   /**
@@ -49,13 +59,18 @@ export type NativeCanaryDb = Pick<PrismaClient, "nativeSubstrateCanary">;
 export class PrismaNativeCanaryStore implements NativeCanaryStore {
   constructor(private readonly db: NativeCanaryDb) {}
 
-  async create(actor: string, template: string): Promise<void> {
-    await this.db.nativeSubstrateCanary.create({ data: { actor, template } });
+  async create(actor: string, template: string, capabilityHash: string): Promise<void> {
+    await this.db.nativeSubstrateCanary.create({ data: { actor, template, capabilityHash } });
   }
 
-  async report(actor: string, result: NativeCanaryResult, at: Date): Promise<boolean> {
+  async report(actor: string, capabilityHash: string, result: NativeCanaryResult, at: Date): Promise<boolean> {
     const { count } = await this.db.nativeSubstrateCanary.updateMany({
-      where: { actor, result: null, createdAt: { gte: new Date(at.getTime() - CANARY_REPORT_WINDOW_MS) } },
+      where: {
+        actor,
+        capabilityHash,
+        result: null,
+        createdAt: { gte: new Date(at.getTime() - CANARY_REPORT_WINDOW_MS) },
+      },
       data: { result, reportedAt: at },
     });
     return count === 1;
@@ -84,19 +99,20 @@ export class PrismaNativeCanaryStore implements NativeCanaryStore {
 export class MemoryNativeCanaryStore implements NativeCanaryStore {
   readonly rows = new Map<
     string,
-    { template: string; result?: NativeCanaryResult; createdAt: Date; reportedAt?: Date }
+    { template: string; capabilityHash?: string; result?: NativeCanaryResult; createdAt: Date; reportedAt?: Date }
   >();
 
   constructor(private readonly now: () => Date = () => new Date()) {}
 
-  async create(actor: string, template: string): Promise<void> {
+  async create(actor: string, template: string, capabilityHash: string): Promise<void> {
     if (this.rows.has(actor)) throw new Error("native_substrate_canary_exists");
-    this.rows.set(actor, { template, createdAt: this.now() });
+    this.rows.set(actor, { template, capabilityHash, createdAt: this.now() });
   }
 
-  async report(actor: string, result: NativeCanaryResult, at: Date): Promise<boolean> {
+  async report(actor: string, capabilityHash: string, result: NativeCanaryResult, at: Date): Promise<boolean> {
     const row = this.rows.get(actor);
     if (!row || row.result !== undefined) return false;
+    if (row.capabilityHash === undefined || row.capabilityHash !== capabilityHash) return false;
     if (row.createdAt.getTime() < at.getTime() - CANARY_REPORT_WINDOW_MS) return false;
     row.result = result;
     row.reportedAt = at;

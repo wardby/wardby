@@ -1,7 +1,7 @@
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createNetServer, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NATIVE_PROBE_OUTSIDE_TARGETS } from "./protocol.js";
+import { NATIVE_PLACEHOLDER_CAPABILITY, NATIVE_PROBE_OUTSIDE_TARGETS } from "./protocol.js";
 import { startDenyPortListener } from "../providers/coding-proxy/deny-port.js";
 import { EGRESS_DENIAL_MAX_BYTES, egressReachable, isEgressDenial, runNativeCanary } from "./substrate-canary.js";
 
@@ -32,7 +32,7 @@ const reachable =
     open.includes(`${host}:${port}`);
 
 describe("runNativeCanary", () => {
-  it("passes when the gateway answers and everything else is denied, and posts with no credential", async () => {
+  it("passes when the gateway answers and everything else is denied, and posts with the placeholder bearer", async () => {
     const { fetch, calls } = fakeFetch();
     const connect = vi.fn(reachable());
     expect(await runNativeCanary(GATEWAY_URL, ACTOR, { fetch, connect })).toBe("pass");
@@ -41,7 +41,8 @@ describe("runNativeCanary", () => {
     expect(posts[0].url).toBe(CANARY_URL);
     expect(JSON.parse(posts[0].init?.body as string)).toEqual({ actor: ACTOR, result: "pass" });
     const headers = new Headers(posts[0].init?.headers);
-    expect(headers.has("authorization")).toBe(false);
+    // Only the public placeholder: the egress gateway puts the canary's capability in its place.
+    expect(headers.get("authorization")).toBe(`Bearer ${NATIVE_PLACEHOLDER_CAPABILITY}`);
     // The Kubernetes probe's targets: the deny port, then every outside address.
     expect(connect.mock.calls).toEqual([
       [GATEWAY_HOST, 8791],

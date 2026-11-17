@@ -11,11 +11,18 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaNativeCanaryStore (database)",
 
   canaryStoreContract(() => new PrismaNativeCanaryStore(db));
 
-  it("holds no credential and no run data: exactly these columns", async () => {
+  it("holds no credential (only its hash) and no run data: exactly these columns", async () => {
     const columns = await db.$queryRaw<{ column_name: string }[]>`
       SELECT column_name FROM information_schema.columns
       WHERE table_schema = current_schema() AND table_name = 'NativeSubstrateCanary'
       ORDER BY column_name`;
-    expect(columns.map((c) => c.column_name)).toEqual(["actor", "createdAt", "reportedAt", "result", "template"]);
+    expect(columns.map((c) => c.column_name)).toEqual([
+      "actor",
+      "capabilityHash",
+      "createdAt",
+      "reportedAt",
+      "result",
+      "template",
+    ]);
   });
 });

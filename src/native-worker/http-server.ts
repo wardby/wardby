@@ -12,7 +12,8 @@
  *                                  the session's snapshot input (no gateway, no secrets) for a worker that
  *                                  starts without it (Substrate)
  *
- *   POST /native-gateway/v1/canary body { actor, result } (at most MAX_CANARY_REQUEST_BYTES), no auth → 204, or 400 { ok: false }:
+ *   POST /native-gateway/v1/canary body { actor, result } (at most MAX_CANARY_REQUEST_BYTES), bearer: the
+ *                                  canary's own capability → 204 (taken or not), or 400 { ok: false }:
  *                                  a Substrate startup canary's verdict (substrate-canary.ts). 404 when the
  *                                  listener was started without a canary store.
  *
@@ -38,7 +39,7 @@ import {
   NativeCanaryReportSchema,
   toGatewayError,
 } from "./protocol.js";
-import type { NativeCanaryStore } from "./substrate-canary-store.js";
+import { canaryCapabilityHash, type NativeCanaryStore } from "./substrate-canary-store.js";
 
 /** The HTTP listener's own log. Exported so tests can watch it. */
 export const httpLog = logger.child({ module: "native-gateway-http" });
@@ -94,11 +95,12 @@ function readSmallBody(req: IncomingMessage, limit: number): Promise<string | un
 }
 
 /**
- * POST /native-gateway/v1/canary: a Substrate startup canary's verdict. Unauthenticated, because the
- * canary actor holds no credential; what limits it is the store (a report counts only for a random
- * actor name that already has a row, once, within its report window) and the schema (that
- * name's shape and a fixed enum). Every valid body gets 204 whether or not a row took it, so the
- * route tells a caller nothing (no oracle). The body is never logged and no header is read. A
+ * POST /native-gateway/v1/canary: a Substrate startup canary's verdict, with the canary's own
+ * capability as its bearer (the egress gateway puts it there; the actor holds only the
+ * placeholder). The store takes it only for the actor's row whose capability hash matches, once,
+ * within its report window; the schema allows only that name's shape and a fixed enum. Every valid
+ * body gets 204 whether or not a row took it, and whatever its bearer (none, unknown, already used),
+ * so the route tells a caller nothing (no oracle). Neither the body nor the bearer is logged. A
  * recorded verdict logs its result enum (each row takes one, so these are bounded by the canaries
  * launched); reports no row took are counted and logged as one summary line a minute at most, so a
  * caller repeating the route cannot flood the log.
@@ -130,7 +132,10 @@ async function serveCanary(
     return;
   }
   const { actor, result } = parsed.data;
-  const recorded = await canaries.report(actor, result, new Date()).catch(() => false);
+  const capability = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1];
+  const recorded = capability
+    ? await canaries.report(actor, canaryCapabilityHash(capability), result, new Date()).catch(() => false)
+    : false;
   if (recorded) httpLog.info({ result, recorded }, "native substrate canary reported");
   else unrecorded.add();
   res.writeHead(204);
