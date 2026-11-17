@@ -501,6 +501,39 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     expect(await removedAt(run.id)).toBeInstanceOf(Date);
   });
 
+  it("moves a row whose remove fails behind the others, so failing rows never starve newer ones", async () => {
+    const fake = fakeLauncher({ listsWorkers: false });
+    const stuck = await sandboxRun();
+    const newer = await sandboxRun();
+    const remove = vi.fn(async (runId: string) => {
+      if (runId === stuck.id) throw new Error("delete failed");
+      fake.removed.push(runId);
+    });
+    // One row a pass stands in for a full page of rows that always fail.
+    const executor = new NativeSandboxExecutor({
+      db,
+      providers,
+      launcher: { ...fake.launcher, remove },
+      gatewayUrl,
+      stopGraceMs: 0,
+      sweepBatchSize: 1,
+    });
+    for (const run of [stuck, newer]) {
+      await executor.start(run.id);
+      await db.run.update({ where: { id: run.id }, data: { status: "succeeded" } });
+    }
+    // The two oldest rows in the shared table, stuck first, whatever other test files wrote.
+    await db.nativeGatewaySession.update({ where: { runId: stuck.id }, data: { updatedAt: new Date(1_000) } });
+    await db.nativeGatewaySession.update({ where: { runId: newer.id }, data: { updatedAt: new Date(2_000) } });
+    await executor.sweep();
+    expect(remove).toHaveBeenCalledWith(stuck.id);
+    expect(await removedAt(stuck.id)).toBeNull();
+    await executor.sweep();
+    expect(fake.removed).toContain(newer.id);
+    expect(await removedAt(newer.id)).toBeInstanceOf(Date);
+    expect(await removedAt(stuck.id)).toBeNull();
+  });
+
   it("sweeps every interval only when the launcher lists no workers", async () => {
     const fake = fakeLauncher({ listsWorkers: false });
     const executor = new NativeSandboxExecutor({

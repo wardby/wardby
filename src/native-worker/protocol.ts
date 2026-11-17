@@ -241,7 +241,7 @@ export const NATIVE_PLACEHOLDER_CAPABILITY = "wardby_native_placeholder_injected
  * Where a Substrate startup canary posts its verdict (POST, no credential): the canary actor never
  * holds a capability, so the route is unauthenticated. What makes that safe is on the gateway side:
  * the actor name is random and must already have a row, the result is a fixed enum, each row takes
- * one write within 10 minutes of its creation, and every valid body gets the same answer.
+ * one write within its report window (substrate-canary-store.ts), and every valid body gets the same answer.
  */
 export const NATIVE_GATEWAY_CANARY_PATH = "/native-gateway/v1/canary";
 /** A canary's verdicts: pass, or the first probe that failed, in the Kubernetes probe's order. */

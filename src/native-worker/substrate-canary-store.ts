@@ -12,12 +12,20 @@
 import type { PrismaClient } from "#prisma";
 import { NATIVE_CANARY_RESULTS, type NativeCanaryResult } from "./protocol.js";
 
-/** How long after its row is created a canary's report is accepted. */
-export const CANARY_REPORT_WINDOW_MS = 10 * 60_000;
+/** The upper bound of SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC (config/providers.ts). */
+export const SUBSTRATE_NATIVE_GOLDEN_WAIT_MAX_SEC = 600;
+/** How long the launcher waits for a canary's verdict after its actor resumes. */
+export const NATIVE_CANARY_TIMEOUT_MS = 120_000;
+/**
+ * How long after its row is created a canary's report is accepted: at least the longest a canary
+ * can run (the longest golden wait for its resume, then the verdict timeout), plus a minute for
+ * the calls in between. A report later than that has no launcher waiting for it.
+ */
+export const CANARY_REPORT_WINDOW_MS = SUBSTRATE_NATIVE_GOLDEN_WAIT_MAX_SEC * 1_000 + NATIVE_CANARY_TIMEOUT_MS + 60_000;
 
 export interface NativeCanaryStore {
   create(actor: string, template: string): Promise<void>;
-  /** Sets result and reportedAt once, for a row created in the last 10 minutes; whether a row took it. */
+  /** Sets result and reportedAt once, for a row created within CANARY_REPORT_WINDOW_MS; whether a row took it. */
   report(actor: string, result: NativeCanaryResult, at: Date): Promise<boolean>;
   result(actor: string): Promise<NativeCanaryResult | undefined>;
   delete(actor: string): Promise<void>;

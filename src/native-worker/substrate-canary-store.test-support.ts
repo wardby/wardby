@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { expect, it } from "vitest";
-import type { NativeCanaryStore } from "./substrate-canary-store.js";
+import { CANARY_REPORT_WINDOW_MS, type NativeCanaryStore } from "./substrate-canary-store.js";
 
 /** A canary actor name no other test uses. */
 export const canaryActor = () => `wr-${randomBytes(10).toString("hex")}-canary`;
@@ -24,11 +24,19 @@ export function canaryStoreContract(make: () => NativeCanaryStore): void {
     await store.delete(actor);
   });
 
-  it("refuses a report more than 10 minutes after the row was created", async () => {
+  it("takes a report from the longest canary, late in its window", async () => {
     const store = make();
     const actor = canaryActor();
     await store.create(actor, TEMPLATE);
-    expect(await store.report(actor, "pass", new Date(Date.now() + 11 * 60_000))).toBe(false);
+    expect(await store.report(actor, "pass", new Date(Date.now() + CANARY_REPORT_WINDOW_MS - 30_000))).toBe(true);
+    await store.delete(actor);
+  });
+
+  it("refuses a report after the report window", async () => {
+    const store = make();
+    const actor = canaryActor();
+    await store.create(actor, TEMPLATE);
+    expect(await store.report(actor, "pass", new Date(Date.now() + CANARY_REPORT_WINDOW_MS + 60_000))).toBe(false);
     expect(await store.result(actor)).toBeUndefined();
     await store.delete(actor);
   });

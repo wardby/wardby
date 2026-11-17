@@ -272,7 +272,8 @@ describe("SubstrateNativeWorkerLauncher.launch", () => {
     h.api.failNext("resumeActor", () => new SubstrateExhaustedError("x"), 100);
     let checks = 0;
     const err = (await h.launcher
-      .launch(h.input(), { stillWanted: async () => ++checks === 1 })
+      // Wanted after the wake and after the canary; ended during the golden wait.
+      .launch(h.input(), { stillWanted: async () => ++checks <= 2 })
       .catch((e: unknown) => e)) as Error;
     expect(err.message).toMatch(new RegExp(`^${NATIVE_SANDBOX_LAUNCH_ABANDONED}: `));
     expect(h.order.filter((c) => c === "resumeActor")).toHaveLength(1);
@@ -297,6 +298,41 @@ describe("SubstrateNativeWorkerLauncher.launch", () => {
     expect(JSON.stringify(h.failures)).not.toContain(FAKE_NATIVE_CAP);
     // The ended session keeps workerRemovedAt null, so the executor's sweep calls remove (Task 6).
     await h.launcher.remove("run-1");
+    expectNothingLeft(h);
+  });
+
+  it("abandons a run stopped during a slow canary: no Secret, no actor", async () => {
+    const h = nativeHarness();
+    const canaryResumed = deferred();
+    const release = deferred();
+    h.api.canaryBefore.resumeActor = async () => {
+      canaryResumed.resolve();
+      await release.promise;
+    };
+    let wanted = true;
+    const launching = h.launcher.launch(h.input(), { stillWanted: async () => wanted }).catch((e: unknown) => e);
+    await canaryResumed.promise;
+    // stop_run lands while the canary is still waiting for its verdict.
+    wanted = false;
+    release.resolve();
+    const err = (await launching) as Error;
+    expect(err.message).toMatch(new RegExp(`^${NATIVE_SANDBOX_LAUNCH_ABANDONED}: `));
+    expect(h.secrets.calls).toEqual([]);
+    expect(h.api.calls.filter((c) => c.method === "createActor")).toEqual([]);
+    expectNothingLeft(h);
+  });
+
+  it("abandons a run stopped while its actor resumed, and removes what it created", async () => {
+    const h = nativeHarness();
+    let wanted = true;
+    h.api.before.resumeActor = async () => {
+      wanted = false;
+    };
+    const err = (await h.launcher
+      .launch(h.input(), { stillWanted: async () => wanted })
+      .catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(new RegExp(`^${NATIVE_SANDBOX_LAUNCH_ABANDONED}: `));
+    expect(h.order.filter((c) => c === "resumeActor")).toHaveLength(1);
     expectNothingLeft(h);
   });
 

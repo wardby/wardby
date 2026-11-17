@@ -203,12 +203,37 @@ describe("native gateway HTTP listener, canary route", () => {
   it("answers 204 whether or not a row took the report (no oracle)", async () => {
     const canaries = store(false);
     const spy = vi.spyOn(httpLog, "info").mockImplementation(() => {});
-    onTestFinished(() => spy.mockRestore());
+    const warnSpy = vi.spyOn(httpLog, "warn").mockImplementation(() => {});
+    onTestFinished(() => {
+      spy.mockRestore();
+      warnSpy.mockRestore();
+    });
     const base = await listenOn({ canaries });
     const response = await post(base, JSON.stringify({ actor: ACTOR, result: "outside_reachable" }));
     expect(response.status).toBe(204);
     canaries.report.mockRejectedValueOnce(new Error("database down"));
     expect((await post(base, JSON.stringify({ actor: ACTOR, result: "pass" }))).status).toBe(204);
+  });
+
+  it("logs reports no row took as one summary line a minute at most, so the route cannot flood the log", async () => {
+    const canaries = store(false);
+    const info: unknown[] = [];
+    const warn: unknown[] = [];
+    const infoSpy = vi.spyOn(httpLog, "info").mockImplementation((obj: unknown) => void info.push(obj));
+    const warnSpy = vi.spyOn(httpLog, "warn").mockImplementation((obj: unknown) => void warn.push(obj));
+    onTestFinished(() => {
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+    const base = await listenOn({ canaries });
+    for (let i = 0; i < 20; i += 1) {
+      const response = await post(base, JSON.stringify({ actor: ACTOR, result: "pass" }));
+      expect(response.status).toBe(204);
+    }
+    expect(canaries.report).toHaveBeenCalledTimes(20);
+    expect(info).toEqual([]);
+    expect(warn).toEqual([{ unrecorded: 1 }]);
+    expect(inspect(warn, { depth: 10 })).not.toContain(ACTOR);
   });
 
   it.each([

@@ -96,12 +96,19 @@ function readSmallBody(req: IncomingMessage, limit: number): Promise<string | un
 /**
  * POST /native-gateway/v1/canary: a Substrate startup canary's verdict. Unauthenticated, because the
  * canary actor holds no credential; what limits it is the store (a report counts only for a random
- * actor name that already has a row, once, within 10 minutes of its creation) and the schema (that
+ * actor name that already has a row, once, within its report window) and the schema (that
  * name's shape and a fixed enum). Every valid body gets 204 whether or not a row took it, so the
- * route tells a caller nothing (no oracle). The body is never logged; the log line is the result
- * enum and whether it was recorded. No header is read.
+ * route tells a caller nothing (no oracle). The body is never logged and no header is read. A
+ * recorded verdict logs its result enum (each row takes one, so these are bounded by the canaries
+ * launched); reports no row took are counted and logged as one summary line a minute at most, so a
+ * caller repeating the route cannot flood the log.
  */
-async function serveCanary(req: IncomingMessage, res: ServerResponse, canaries: NativeCanaryStore): Promise<void> {
+async function serveCanary(
+  req: IncomingMessage,
+  res: ServerResponse,
+  canaries: NativeCanaryStore,
+  unrecorded: UnrecordedCanaryLog,
+): Promise<void> {
   const text = await readSmallBody(req, MAX_CANARY_REQUEST_BYTES);
   let parsed: ReturnType<typeof NativeCanaryReportSchema.safeParse> | undefined;
   if (text !== undefined) {
@@ -124,9 +131,27 @@ async function serveCanary(req: IncomingMessage, res: ServerResponse, canaries: 
   }
   const { actor, result } = parsed.data;
   const recorded = await canaries.report(actor, result, new Date()).catch(() => false);
-  httpLog.info({ result, recorded }, "native substrate canary reported");
+  if (recorded) httpLog.info({ result, recorded }, "native substrate canary reported");
+  else unrecorded.add();
   res.writeHead(204);
   res.end();
+}
+
+/** How often, at most, the canary route logs the reports no row took. */
+const UNRECORDED_CANARY_LOG_MS = 60_000;
+
+/** Counts canary reports no row took; logs the count at most once per UNRECORDED_CANARY_LOG_MS. */
+class UnrecordedCanaryLog {
+  private count = 0;
+  private loggedAt = -Infinity;
+  add(): void {
+    this.count += 1;
+    const now = Date.now();
+    if (now - this.loggedAt < UNRECORDED_CANARY_LOG_MS) return;
+    httpLog.warn({ unrecorded: this.count }, "native substrate canary reports not recorded");
+    this.count = 0;
+    this.loggedAt = now;
+  }
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -148,6 +173,7 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 export function createGatewayServer(deps: GatewayServerDeps): Server {
+  const unrecordedCanaries = new UnrecordedCanaryLog();
   return createServer({ maxHeaderSize: 16 * 1024 }, (req, res) => {
     void (async () => {
       const send = (status: number, body: unknown) => {
@@ -178,7 +204,7 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
         return;
       }
       if (req.method === "POST" && req.url === NATIVE_GATEWAY_CANARY_PATH && deps.canaries) {
-        await serveCanary(req, res, deps.canaries);
+        await serveCanary(req, res, deps.canaries, unrecordedCanaries);
         return;
       }
       if (req.method !== "POST" || req.url !== NATIVE_GATEWAY_PATH) {

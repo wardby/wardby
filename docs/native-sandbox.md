@@ -614,7 +614,9 @@ the server process first used the template. So the first runs after a template
 change, and after a server restart before Substrate reports the snapshot ready,
 can wait up to that long. Past it, the run fails with
 [`native_sandbox_capacity`](../help/errors/native-sandbox-capacity.md). A run
-stopped during the wait gets no actor
+stopped during the wait or during the startup canary gets no actor and no
+Secret, and one stopped while its actor starts has them removed before the
+launch returns
 ([`native_sandbox_launch_abandoned`](../help/errors/native-sandbox-launch-abandoned.md)).
 
 If the golden snapshot fails, the waiting run fails with

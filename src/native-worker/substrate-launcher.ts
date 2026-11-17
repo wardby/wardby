@@ -68,7 +68,7 @@ import { NATIVE_SANDBOX_CAPACITY, NATIVE_SANDBOX_NETWORK_UNENFORCED } from "./ku
 import { NATIVE_SANDBOX_LAUNCH_ABANDONED, type WorkerHandle, type WorkerLaunchOptions } from "./launch.js";
 import type { WorkerInput } from "./protocol.js";
 import type { ManagedWorkerLauncher } from "./sandbox-executor.js";
-import { CANARY_REPORT_WINDOW_MS, type NativeCanaryStore } from "./substrate-canary-store.js";
+import { CANARY_REPORT_WINDOW_MS, NATIVE_CANARY_TIMEOUT_MS, type NativeCanaryStore } from "./substrate-canary-store.js";
 import {
   nativeCanaryEgress,
   nativeEgress,
@@ -160,7 +160,7 @@ interface CanaryOutcome {
 
 /** How often the launcher reads the canary's verdict. */
 const CANARY_POLL_MS = 1_000;
-const DEFAULT_CANARY_TIMEOUT_MS = 120_000;
+const DEFAULT_CANARY_TIMEOUT_MS = NATIVE_CANARY_TIMEOUT_MS;
 /** Verdicts that prove or disprove the policy: kept for the life of the process. */
 const FINAL_VERDICTS: ReadonlySet<string> = new Set(["pass", "deny_port_reachable", "outside_reachable"]);
 /** Added to a canary's longest possible run before its row counts as left by a dead process. */
@@ -409,12 +409,13 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     const runId = input.runId;
     if (!input.gateway) throw new Error(`${NATIVE_SANDBOX_SUBSTRATE_FAILED}: launch: input_invalid`);
     const capability = input.gateway.capability;
+    const { stillWanted } = launchOptions;
     // Low-power mode: the gateway may be scaled to zero; wake it before anything is created.
     if (this.power.enabled) {
       await this.power.ensureAwake("gateway", { timeoutMs: wakeTimeoutMs(120_000), runId });
     }
     // A wake can take minutes: a run stopped meanwhile gets no actor.
-    if (launchOptions.stillWanted && !(await launchOptions.stillWanted())) {
+    if (stillWanted && !(await stillWanted())) {
       throw new Error(ABANDONED_MESSAGE);
     }
     // Never race the background ensure (start).
@@ -433,6 +434,10 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
       const proof = await this.prove();
       if (proof.noRoom) throw new NoRoom();
       if (proof.result !== "pass") throw new Unenforced(unenforcedMessage(proof.result));
+      // A canary can take minutes on a process's first launch: a run stopped meanwhile gets no
+      // Secret and no actor. Its session may already be marked removed, so the row sweep would
+      // never find anything created after this point.
+      if (stillWanted && !(await stillWanted())) throw new Abandoned();
       secretMade = true;
       await this.createSecret(runId, token, capability);
       actorMade = true;
@@ -440,7 +445,10 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
       await call("putEgressPolicy", () =>
         this.api.putEgressPolicy(this.atespace, actor, nativeEgress(token, this.options.config)),
       );
-      await this.resume(runId, actor, call, launchOptions.stillWanted);
+      await this.resume(runId, actor, call, stillWanted);
+      // Once more after the resume: a stop that landed while the Secret, actor and policy were
+      // being made is cleaned up here, not left to a sweep that may already have passed the run.
+      if (stillWanted && !(await stillWanted())) throw new Abandoned();
     } catch (error) {
       await this.cleanUp(runId, token, actor, { secret: secretMade, actor: actorMade });
       throw launchError(error);

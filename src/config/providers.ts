@@ -15,6 +15,7 @@ import {
   type KubernetesPlatform,
 } from "../providers/jobs/kubernetes-platform.js";
 import { NATIVE_GATEWAY_DENY_PORT } from "../native-worker/docker-isolation.js";
+import { SUBSTRATE_NATIVE_GOLDEN_WAIT_MAX_SEC } from "../native-worker/substrate-canary-store.js";
 import { CODING_PROXY_PORT } from "../providers/jobs/docker-isolation.js";
 import type { BlobStoreConfig } from "../providers/storage/index.js";
 import {
@@ -587,7 +588,7 @@ export function loadNativeSandboxConfig(env: NodeJS.ProcessEnv = process.env): N
         env.SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC?.trim() || undefined,
         "SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC",
         0,
-        600,
+        SUBSTRATE_NATIVE_GOLDEN_WAIT_MAX_SEC,
       ) ?? 60;
     const denyPort =
       optionalBoundedInteger(

@@ -74,6 +74,8 @@ export interface NativeSandboxExecutorOptions {
   heartbeatIntervalMs?: number;
   /** How often a launcher that lists no workers is swept from session rows (default NATIVE_SANDBOX_SWEEP_INTERVAL_MS). */
   sweepIntervalMs?: number;
+  /** How many session rows one row sweep pass takes (default NATIVE_SANDBOX_SWEEP_BATCH_SIZE). */
+  sweepBatchSize?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -83,6 +85,8 @@ export const NATIVE_SANDBOX_STOP_GRACE_MS = 5_000;
 
 /** The sweep interval for a launcher that lists no workers. */
 export const NATIVE_SANDBOX_SWEEP_INTERVAL_MS = 60_000;
+/** The rows one row sweep pass takes. */
+export const NATIVE_SANDBOX_SWEEP_BATCH_SIZE = 100;
 
 export const NATIVE_SANDBOX_WORKER_EXITED = "native_sandbox_worker_exited";
 export const NATIVE_SANDBOX_DEADLINE = "native_sandbox_deadline_exceeded";
@@ -389,8 +393,10 @@ export class NativeSandboxExecutor implements Executor {
         ],
       },
       select: { runId: true },
-      orderBy: { createdAt: "asc" },
-      take: 100,
+      // Least recently tried first: a failed remove touches its row (below), so rows that keep
+      // failing go to the back and never hold a whole page against newer ones.
+      orderBy: [{ updatedAt: "asc" }, { runId: "asc" }],
+      take: this.options.sweepBatchSize ?? NATIVE_SANDBOX_SWEEP_BATCH_SIZE,
     });
     let removed = 0;
     for (const { runId } of due) {
@@ -398,8 +404,11 @@ export class NativeSandboxExecutor implements Executor {
         await this.removeWorker(runId);
         removed += 1;
       } catch (err) {
-        // Left null: the next pass tries again.
+        // Left null: the next pass tries again, after the rows it has not tried yet.
         executorLog.warn({ err, runId }, "removing a native sandbox worker failed; the next sweep will retry");
+        await db.nativeGatewaySession
+          .updateMany({ where: { runId, workerRemovedAt: null }, data: { updatedAt: new Date() } })
+          .catch(() => {});
       }
     }
     return removed;
