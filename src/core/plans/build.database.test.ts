@@ -215,6 +215,24 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveBuildPlan (database)", () => 
     }
   });
 
+  it("matches the repository exactly: `_`, `%` and `\\` are not wildcards", async () => {
+    // A set for acme/my-repo never gates a builder on acme/my_repo (nor acme/my%repo).
+    const dashed = await planSet(baseDocuments(), undefined, { repository: `acme-${s}/my-repo` });
+    for (const asked of [`acme-${s}/my_repo`, `acme-${s}/my%repo`, `acme-${s}/my%`]) {
+      expect(await resolve(dashed.number, { repository: asked })).toBeNull();
+    }
+    // A set whose name holds the characters still matches itself, in any case.
+    const underscored = await planSet(baseDocuments(), undefined, { repository: `acme-${s}/My_Repo` });
+    await expect(resolve(underscored.number, { repository: `acme-${s}/my_repo` })).rejects.toThrow(
+      /^plan_not_approved: .*api\.md/,
+    );
+    const backslashed = await planSet(baseDocuments(), undefined, { repository: `local-${s}\\a_b%c` });
+    await expect(resolve(backslashed.number, { repository: `LOCAL-${s}\\A_B%C` })).rejects.toThrow(
+      /^plan_not_approved: .*api\.md/,
+    );
+    expect(await resolve(backslashed.number, { repository: `local-${s}\\axb%c` })).toBeNull();
+  });
+
   it("builds from the newest of two visible plan sets for one repository and number", async () => {
     const otherPlanner = await makeAgent(owner, { planDocument: { store: "wardby", reviewers: [owner] } });
     const number = ++nextNumber;

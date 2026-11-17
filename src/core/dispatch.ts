@@ -977,11 +977,14 @@ export async function copyRootRepositoryRows(
 /**
  * The plan a continuation's root run was built from (spec §7), or null when the root built from none.
  * Read before the transaction; the transaction's continuation check decides whether the root may be
- * continued at all.
+ * continued at all. The root's owner and repository are checked first, cheaply, so another owner's
+ * plan (or another repository's) is never loaded: another owner's root is refused here with the
+ * transaction's own other_owner; a root in another repository gives no recorded plan.
  */
 async function recordedRootPlan(
   db: Pick<DispatchDb, "codingRun">,
   continuesCodingRunId: string,
+  dispatching: { ownerId: string | null; repository: string | undefined },
 ): Promise<{ planSetId: string; number: number; versions: BuildPlan["versions"]; ticket: number | null } | null> {
   const marked = await db.codingRun.findUnique({
     where: { runId: continuesCodingRunId },
@@ -990,10 +993,23 @@ async function recordedRootPlan(
   if (!marked) return null;
   const root = await db.codingRun.findUnique({
     where: { runId: marked.rootCodingRunId ?? marked.runId },
-    select: { planSetId: true, planNumber: true, planVersions: true, planTicket: true },
+    select: {
+      repository: true,
+      planSetId: true,
+      planNumber: true,
+      planVersions: true,
+      planTicket: true,
+      run: { select: { agent: { select: { ownerId: true } } } },
+    },
   });
-  const versions = readPlanVersions(root?.planVersions);
-  if (!root?.planSetId || root.planNumber === null || !versions) return null;
+  if (!root) return null;
+  const rootOwnerId = root.run?.agent?.ownerId ?? null;
+  if (dispatching.ownerId === null || rootOwnerId === null || rootOwnerId !== dispatching.ownerId) {
+    throw new ContinuationRefusedError("other_owner");
+  }
+  if (dispatching.repository === undefined || !sameRepository(root.repository, dispatching.repository)) return null;
+  const versions = readPlanVersions(root.planVersions);
+  if (!root.planSetId || root.planNumber === null || !versions) return null;
   return { planSetId: root.planSetId, number: root.planNumber, versions, ticket: root.planTicket };
 }
 
@@ -1165,20 +1181,25 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   const buildRepository = previewTarget?.repository ?? options.codingRepository ?? preview?.codingProfile?.repository;
   if (preview?.kind === "coding" && preview.codingProfile?.buildFromPlan && planRefusal === undefined) {
     try {
-      if (options.continuesCodingRunId !== undefined) {
-        // A continuation (a fix round, a follow-up) builds from exactly the versions its root was built
-        // from: no approval gate, so reopening a document never refuses work on a build already made.
-        const recorded = await recordedRootPlan(options.db, options.continuesCodingRunId);
-        if (recorded) {
-          runPlanTicket = options.planTicket ?? recorded.ticket;
-          buildPlan = await resolveRecordedBuildPlan(options.db, options.secretCipher, {
-            builderAgentId: options.agentId,
-            planSetId: recorded.planSetId,
-            number: recorded.number,
-            versions: recorded.versions,
-            ...(runPlanTicket !== null ? { ticket: runPlanTicket } : {}),
-          });
-        }
+      // A continuation (a fix round, a follow-up) of a root that recorded a plan builds from exactly
+      // the versions its root was built from: no approval gate, so reopening a document never refuses
+      // work on a build already made. Any other continuation passes the gate like a fresh build.
+      const recorded =
+        options.continuesCodingRunId !== undefined
+          ? await recordedRootPlan(options.db, options.continuesCodingRunId, {
+              ownerId: preview.ownerId ?? null,
+              repository: buildRepository,
+            })
+          : null;
+      if (recorded) {
+        runPlanTicket = options.planTicket ?? recorded.ticket;
+        buildPlan = await resolveRecordedBuildPlan(options.db, options.secretCipher, {
+          builderAgentId: options.agentId,
+          planSetId: recorded.planSetId,
+          number: recorded.number,
+          versions: recorded.versions,
+          ...(runPlanTicket !== null ? { ticket: runPlanTicket } : {}),
+        });
       } else if (planNumber !== undefined && buildRepository) {
         buildPlan = await resolveBuildPlan(options.db, options.secretCipher, {
           builderAgentId: options.agentId,

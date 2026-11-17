@@ -52,6 +52,15 @@ function planRepositoryKey(repository: string): string {
 }
 
 /**
+ * The key as an exact ILIKE pattern: Prisma's case-insensitive `equals` compiles to ILIKE without
+ * escaping, so `_` and `%` would be wildcards (acme/my_repo matching acme/my-repo). Postgres's
+ * default LIKE escape character is the backslash, so it is escaped first.
+ */
+function exactInsensitivePattern(key: string): string {
+  return key.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/**
  * The approved plan for a builder's run, or null when no plan set it may see exists (the run goes
  * ahead as today). Throws PlanRefusedError: plan_not_approved (a counted document still waiting, an
  * ownerless builder, or no way to read the builder's secret values) or plan_too_large (the approved
@@ -74,7 +83,10 @@ export async function resolveBuildPlan(
     throw new PlanRefusedError("plan_not_approved", "the builder has no owner to check the plan's access against");
   }
   const sets = await db.planSet.findMany({
-    where: { repository: { equals: planRepositoryKey(input.repository), mode: "insensitive" }, number: input.number },
+    where: {
+      repository: { equals: exactInsensitivePattern(planRepositoryKey(input.repository)), mode: "insensitive" },
+      number: input.number,
+    },
     include: {
       agent: { select: { id: true, ownerId: true } },
       documents: { where: { removedFromPlan: false, planPath: { not: null } }, include: { currentVersion: true } },

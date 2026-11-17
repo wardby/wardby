@@ -411,6 +411,28 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       return { repository, builder, planSetId, documentIds, approveAll };
     }
     const codingRunOf = (runId: string) => db.codingRun.findUniqueOrThrow({ where: { runId } });
+    /** Marks a root run finished with an opened pull request, so it can be continued. */
+    async function finishWithPullRequest(rootId: string, repository: string): Promise<void> {
+      await db.run.update({ where: { id: rootId }, data: { status: "succeeded" } });
+      await db.codingRun.update({
+        where: { runId: rootId },
+        data: {
+          result: {
+            schemaVersion: 1,
+            outcome: "pull_request_opened",
+            repository,
+            baseRef: "main",
+            headRef: `wardby/run-${rootId}`,
+            commitSha: "a".repeat(40),
+            pullRequestUrl: `https://github.com/${repository}/pull/5`,
+            pullRequestNumber: 5,
+            summary: "Opened the PR",
+            tests: [],
+            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+          },
+        },
+      });
+    }
 
     it("refuses while a document waits, leaving no run; a scheduled build commits a refused run", async () => {
       const { builder } = await setUp();
@@ -534,25 +556,7 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
         secretCipher: cipher,
       });
       const rootId = root!.run.id;
-      await db.run.update({ where: { id: rootId }, data: { status: "succeeded" } });
-      await db.codingRun.update({
-        where: { runId: rootId },
-        data: {
-          result: {
-            schemaVersion: 1,
-            outcome: "pull_request_opened",
-            repository,
-            baseRef: "main",
-            headRef: `wardby/run-${rootId}`,
-            commitSha: "a".repeat(40),
-            pullRequestUrl: `https://github.com/${repository}/pull/5`,
-            pullRequestNumber: 5,
-            summary: "Opened the PR",
-            tests: [],
-            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
-          },
-        },
-      });
+      await finishWithPullRequest(rootId, repository);
       // A reviewer reopens api.md and the planner publishes v2: a fresh build would now be refused.
       await setReviewState(db, documentIds["api.md"], "in_review");
       const v2 = await db.documentVersion.create({
@@ -597,6 +601,91 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
         "screens/manifest.json",
       ]);
       expect(files.find((f) => f.path === "api.md")!.content).toBe("# API\n");
+    });
+
+    it("a continuation of a root that recorded no plan still passes the gate (plan_not_approved)", async () => {
+      const { repository, builder } = await setUp();
+      const { executor } = fakeExecutor(null);
+      // The root had no plan number, so it built from no plan; plan #12 still waits on api.md.
+      const root = await dispatchRun({ db, executor, agentId: builder, codingTask: "Build.", secretCipher: cipher });
+      expect((await codingRunOf(root!.run.id)).planSetId).toBeNull();
+      await finishWithPullRequest(root!.run.id, repository);
+      const before = await db.run.count({ where: { agentId: builder } });
+      const attempt = dispatchRun({
+        db,
+        executor,
+        agentId: builder,
+        codingTask: "Build plan 12.",
+        planNumber: 12,
+        continuesCodingRunId: root!.run.id,
+        secretCipher: cipher,
+      });
+      await expect(attempt).rejects.toBeInstanceOf(PlanRefusedError);
+      await expect(attempt).rejects.toThrow(/^plan_not_approved: .*api\.md/);
+      expect(await db.run.count({ where: { agentId: builder } })).toBe(before);
+    });
+
+    it("refuses a continuation of another owner's root before any of its plan is loaded", async () => {
+      const { repository, builder, approveAll } = await setUp();
+      await approveAll();
+      const { executor } = fakeExecutor(null);
+      const root = await dispatchRun({
+        db,
+        executor,
+        agentId: builder,
+        codingTask: "Build.",
+        planNumber: 12,
+        secretCipher: cipher,
+      });
+      expect((await codingRunOf(root!.run.id)).planSetId).not.toBeNull();
+      await finishWithPullRequest(root!.run.id, repository);
+      // Another owner's builder on the same repository names that root.
+      const otherOwner = `${PREFIX}other-owner-${suffix}-${++counter}`;
+      await db.principal.create({ data: { id: otherOwner, subject: otherOwner } });
+      const foreign = `${PREFIX}agent-${suffix}-${++counter}`;
+      await db.agent.create({
+        data: {
+          id: foreign,
+          name: foreign,
+          systemPrompt: "Build things.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 2,
+          kind: "coding",
+          ownerId: otherOwner,
+          codingProfile: {
+            create: { provider: "codex", repository, defaultTask: "Build.", protectedPaths: [], buildFromPlan: true },
+          },
+        },
+      });
+      // Every read of plan content goes through documentVersion or documentFile: none may happen.
+      const planReads: string[] = [];
+      const watched = new Proxy(db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target) as unknown;
+          if (prop === "documentVersion" || prop === "documentFile") {
+            return new Proxy(value as object, {
+              get(delegate, method) {
+                planReads.push(`${String(prop)}.${String(method)}`);
+                const fn = Reflect.get(delegate, method, delegate) as unknown;
+                return typeof fn === "function" ? (fn as (...a: unknown[]) => unknown).bind(delegate) : fn;
+              },
+            });
+          }
+          return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+      await expect(
+        dispatchRun({
+          db: watched,
+          executor,
+          agentId: foreign,
+          codingTask: "Fix.",
+          continuesCodingRunId: root!.run.id,
+          secretCipher: cipher,
+        }),
+      ).rejects.toEqual(new ContinuationRefusedError("other_owner"));
+      expect(planReads).toEqual([]);
+      expect(await db.run.count({ where: { agentId: foreign } })).toBe(0);
     });
 
     it("refuses without a secret cipher: the plan is never sent unredacted", async () => {
