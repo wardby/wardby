@@ -96,6 +96,16 @@ export function statusConnected(data: string): boolean | null {
   }
 }
 
+/** Whether an event is about another document (of the page's plan set) than the page's own. */
+export function otherDocument(data: string, ownId: string): boolean {
+  try {
+    const v = (JSON.parse(data) as { documentId?: unknown }).documentId;
+    return typeof v === "string" && v !== ownId;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * What to do when the server has a version: nothing (already showing it),
  * load it in place, show the "document changed" banner (unsaved local

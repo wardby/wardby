@@ -7,6 +7,7 @@ import {
   HiddenStopper,
   liveAction,
   LiveConnection,
+  otherDocument,
   SseParser,
   statusConnected,
   versionAction,
@@ -242,5 +243,14 @@ describe("LiveConnection", () => {
     calls++;
     expect(f.calls).toHaveLength(calls);
     live.stop();
+  });
+});
+
+describe("otherDocument", () => {
+  it("tells a plan set's other documents from the page's own", () => {
+    expect(otherDocument('{"documentId":"d2","kind":"review"}', "d1")).toBe(true);
+    expect(otherDocument('{"documentId":"d1","kind":"review"}', "d1")).toBe(false);
+    expect(otherDocument("{}", "d1")).toBe(false);
+    expect(otherDocument("not json", "d1")).toBe(false);
   });
 });

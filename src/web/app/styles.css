@@ -874,6 +874,83 @@ img.ProseMirror-separator {
   color: var(--muted);
   border-color: var(--border);
 }
+/* ---- the plan bar (a plan set's documents, under the review banner) ---- */
+.plan-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+  padding: 0.3rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 0.85rem;
+}
+.plan-bar[hidden] {
+  display: none;
+}
+.plan-count {
+  font-weight: 600;
+}
+.plan-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.plan-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+  color: var(--text);
+  text-decoration: none;
+}
+.plan-chip:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.plan-chip.current {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+.plan-chip .plan-state {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.plan-chip.state-in_review .plan-state {
+  color: var(--accent);
+}
+.plan-chip.state-changes_requested .plan-state {
+  color: var(--warn);
+}
+.plan-chip.state-approved .plan-state {
+  color: var(--ok);
+}
+.plan-chips s .plan-chip {
+  color: var(--muted);
+}
+.plan-link-missing {
+  border-bottom: 1px dotted var(--warn);
+}
+.plan-warnings {
+  margin: 0.6rem 0.9rem 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.plan-warnings h2 {
+  margin: 0 0 0.25rem;
+  font-size: 0.9rem;
+  color: var(--warn);
+}
+.plan-warnings ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
 .app.archived .stage,
 .app.archived .design-main {
   filter: grayscale(1);

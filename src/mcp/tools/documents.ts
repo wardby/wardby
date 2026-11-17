@@ -5,7 +5,7 @@ import { McpError } from "../errors.js";
 import { createShareLink, listShareLinks, MAX_SHARE_DAYS, revokeShareLink } from "../../core/documents/share-links.js";
 import type { Viewer } from "../../core/documents/access.js";
 import { textResult } from "./text-result.js";
-import { documentAccess, requireDocumentAccess } from "../../core/documents/access.js";
+import { requireDocumentAccess } from "../../core/documents/access.js";
 import { createDocument, linkDocument, publishVersion } from "../../core/documents/service.js";
 import { type VersionContent } from "../../core/documents/content.js";
 import { loadContent } from "../../core/documents/files.js";
@@ -36,6 +36,7 @@ import {
 } from "../../core/documents/comments.js";
 import type { ThreadView } from "../../core/documents/comments.js";
 import { listDocumentsFor } from "../../core/documents/list.js";
+import { readablePlanSet } from "../../core/plans/set-view.js";
 import { UNTRUSTED_CONTEXT_TAG, UNTRUSTED_TOOL_OUTPUT_TAG, wrapUntrusted } from "../../core/untrusted-content.js";
 import { MAX_THREADS_PER_SEND, sendThreadsToAgent } from "../../core/documents/agent-loop.js";
 import { requireScope } from "../auth/resource-server.js";
@@ -434,37 +435,9 @@ const sendArgs = z.object({ documentId: id, threadIds: z.array(id).min(1).max(MA
  * kind, path and state only: titles are people-written and stay in the wrapped text of each document.
  */
 async function planSetPayload(db: McpRequestContext["db"], planSetId: string, viewer: Viewer) {
-  const set = await db.planSet.findUnique({
-    where: { id: planSetId },
-    select: {
-      number: true,
-      documents: {
-        orderBy: { planPath: "asc" },
-        select: {
-          id: true,
-          kind: true,
-          planPath: true,
-          reviewState: true,
-          removedFromPlan: true,
-          currentVersion: { select: { number: true } },
-        },
-      },
-    },
-  });
+  const set = await readablePlanSet(db, planSetId, viewer);
   if (!set) return null;
-  const documents = [];
-  for (const d of set.documents) {
-    if ((await documentAccess(db, d.id, viewer)) === "none") continue;
-    documents.push({
-      id: d.id,
-      kind: d.kind === "design" ? "design" : "document",
-      path: d.planPath ?? "",
-      reviewState: d.reviewState,
-      versionNumber: d.currentVersion?.number ?? 0,
-      removed: d.removedFromPlan,
-    });
-  }
-  return { number: set.number, documents };
+  return { number: set.number, documents: set.documents.map(({ title: _title, ...d }) => d) };
 }
 
 /** Thread metadata without any person-written text, plus ONE wrapped text rendering of everything written. */
