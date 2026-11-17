@@ -3,7 +3,7 @@ id: agent-flows
 title: See how your agents work together (flows)
 summary: list_agent_links returns the agents you can read, how they link (delegation, pull request review, fix rounds, after-merge, Jira status hand-offs) and how they start, grouped into flows. The Claude Code pane's Agents tab draws them.
 audience: operator
-tags: [flows, agent links, list_agent_links, agents tab, which agents work together, sub-agents, review fix rounds, jira statuses, triggerStatuses, approval]
+tags: [flows, agent links, list_agent_links, agents tab, sub-agents, review fix rounds, jira statuses, approval]
 appliesTo: >=0.9.14
 ---
 

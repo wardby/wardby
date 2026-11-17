@@ -119,8 +119,8 @@ const KNOWN_UNDOCUMENTED_CODES = new Set<string>([
   ...["tracker_api_error"],
   // Delegate tool errors (delegate_to_*).
   ...["validation_failed", "already_dispatched", "subagent_not_authorized", "cross_owner_not_allowed"],
-  ...["continuation_requires_coding_agent", "subagent_wait_timed_out", "parent_cancelled", "no_such_subagent"],
-  ...["continuation_refused", "dispatch_failed", "delegation_unavailable"],
+  ...["subagent_wait_timed_out", "parent_cancelled", "no_such_subagent"],
+  ...["dispatch_failed", "delegation_unavailable"],
   // A run's error codes (CHILD_RUN_FAILURE_CODES).
   ...["coding_profile_missing", "message_too_large", "message_not_json", "message_invalid"],
   ...["unsupported_protocol_version", "invalid_merge_order", "coding_worker_image_invalid", "run_tree_exhausted"],
@@ -137,7 +137,7 @@ const KNOWN_UNDOCUMENTED_CODES = new Set<string>([
   ...["coding_dispatch_unavailable", "coding_head_ref_invalid", "coding_input_invalid_file"],
   ...["coding_job_handle_conflict", "coding_job_handle_mismatch", "coding_job_status_unavailable"],
   ...["coding_output_invalid", "coding_output_missing", "coding_output_run_mismatch", "coding_output_size_limit"],
-  ...["coding_provider_unsupported", "coding_queue_timeout", "coding_recovery_incomplete"],
+  ...["coding_provider_unsupported", "coding_recovery_incomplete"],
   ...["coding_recovery_unavailable", "coding_resource_limits_invalid", "coding_result_missing"],
   ...["coding_result_run_mismatch", "coding_run_budget_invalid", "coding_run_no_longer_active"],
   ...["coding_run_not_active", "coding_run_not_found", "coding_run_ownership_invalid"],
@@ -176,7 +176,7 @@ const KNOWN_UNDOCUMENTED_TOOLS = new Set<string>([
   ...["create_datastore", "list_datastores", "delete_datastore"],
   ...["detach_datastore", "datastore_get", "datastore_list", "datastore_delete", "detach_subagent"],
   ...["get_agent_memory", "list_agent_memory", "delete_agent_memory"],
-  ...["detach_secret", "create_webhook"],
+  ...["create_webhook"],
 ]);
 
 /** Every environment variable the code reads, with the first file that reads it. */
@@ -208,6 +208,10 @@ const INTERNAL_ENV: Record<string, string> = {
   NATIVE_WORKER_INPUT_WAIT_MS: "set by the native sandbox launcher for a warm-pool worker",
   WARDBY_NATIVE_SUBSTRATE: "set by the Substrate native launcher on the worker template it creates",
   WARDBY_CANARY_PROXY_IP: "set by the Kubernetes preflight for its own canary pod",
+  WARDBY_CAPABILITY_HEADER: "set by the Substrate bridges for the coding worker they start (credential mode)",
+  WARDBY_REGISTRY_TOKEN: "set by the Substrate bridges for the coding worker they start (package registry)",
+  WARDBY_SUBSTRATE_WARM_ROUNDS:
+    "set by the Substrate launcher in a template's env to switch the bridges into warm rounds",
   WARDBY_DOCKER_SEED_DEBUG: "test-only: read only when NODE_ENV=test",
   WARDBY_MERGE_STATE_MSG: "not a variable: the name of a file in a git directory",
   WARDBY_TEST_SIMULATORS: "test-only: the release suite's simulator switch, refused alongside production configuration",
@@ -219,7 +223,7 @@ const INTERNAL_ENV: Record<string, string> = {
 /** Operator-facing variables named nowhere in the operator docs when this suite was written: finding D3. */
 const KNOWN_UNDOCUMENTED_ENV = new Set<string>([
   ...["EMAIL_PROVIDER", "SECRET_CIPHER", "DATASTORE", "ENGINE", "VCS_PROVIDER"],
-  ...["GITHUB_API_VERSION", "VCS_MAX_CHANGED_FILES", "VCS_MAX_DIFF_BYTES", "KUBERNETES_PREFLIGHT_TIMEOUT_MS"],
+  ...["GITHUB_API_VERSION", "KUBERNETES_PREFLIGHT_TIMEOUT_MS"],
   ...["MCP_SECRET_ELICITATION_PROTOCOL", "LOG_LEVEL", "METRICS_ALLOW_NON_LOOPBACK", "BEDROCK_REGION"],
   ...["WARDBY_LOAD_MOCK_JITTER_MS"],
 ]);
