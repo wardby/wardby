@@ -1,4 +1,5 @@
 import { PLAN_FOLDER_PATH } from "../../coding/protocol.js";
+import { defuseMentions } from "../reply-parts.js";
 import type { PlanSummary, PublishedPlan } from "./publish.js";
 import type { PlanRefusedError } from "./refusal.js";
 
@@ -88,4 +89,20 @@ export function planRefusedReply(err: PlanRefusedError): string {
     case "plan_number_missing":
       return "ℹ️ I didn't start a run: it needs an issue or a plan number (`plan_number_missing`).";
   }
+}
+
+/** A bare URL (`https://…`, `www.…`) with its scheme broken by a zero-width space, so nothing autolinks it. */
+export const defuseAutolinks = (text: string): string =>
+  text.replace(/(https?|ftp)(:\/\/)/gi, "$1\u200b$2").replace(/(www)(\.)/gi, "$1\u200b$2");
+
+/** A plan path in a notice or a PR body: one line, never a code-span delimiter, a design without its trailing slash. */
+export const shownPlanPath = (path: string): string =>
+  defuseAutolinks(path.replace(/\/$/, "").replace(/[`\r\n]+/g, ""));
+
+/** @-mentions outside `code` spans defused: names and paths ping nobody; a code-span hint stays copyable. */
+export function defuseNotice(text: string): string {
+  return text
+    .split(/(`[^`\n]*`)/)
+    .map((part, i) => (i % 2 === 1 ? part : defuseMentions(part)))
+    .join("");
 }

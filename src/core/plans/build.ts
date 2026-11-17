@@ -20,6 +20,7 @@ import { wrapUntrusted } from "../untrusted-content.js";
 import { rewriteLinksForBuilder } from "./links.js";
 import type { SecretCipher } from "./publish.js";
 import { PlanRefusedError } from "./refusal.js";
+import { defuseNotice, shownPlanPath } from "./wording.js";
 
 export interface BuildPlan {
   planSetId: string;
@@ -86,6 +87,28 @@ export async function newestVisiblePlanSet<T extends { agent: { id: string; owne
   return undefined;
 }
 
+const documentCount = (n: number) => `${n} ${n === 1 ? "document" : "documents"}`;
+
+/**
+ * Plan paths for a refusal (its message reaches the requester: an issue reply, a tool result, a
+ * refused run's error), redacted by exact value against the planner's secret values. Null when those
+ * can't be read: the refusal then gives a count instead of any path.
+ */
+async function plannerRedactedPaths(
+  db: BuildPlanDb,
+  cipher: SecretCipher | undefined,
+  plannerAgentId: string,
+  paths: readonly string[],
+): Promise<string[] | null> {
+  if (!cipher) return null;
+  try {
+    const values = (await loadAgentSecretValues(db, cipher, plannerAgentId)).flatMap((e) => e.values);
+    return paths.map((path) => redactExactSecretValues(path, values));
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The approved plan for a builder's run, or null when no plan set it may see exists (the run goes
  * ahead as today). Throws PlanRefusedError: plan_not_approved (a counted document still waiting, an
@@ -125,7 +148,12 @@ export async function resolveBuildPlan(
   const documents = [...set.documents].sort(byPlanOrder);
   const waiting = documents.filter((d) => d.reviewState !== "approved" || !d.currentVersion).map((d) => d.planPath!);
   if (waiting.length > 0) {
-    throw new PlanRefusedError("plan_not_approved", `still waiting: ${waiting.join(", ")}`, waiting);
+    const shown = await plannerRedactedPaths(db, cipher, set.agent.id, waiting);
+    throw new PlanRefusedError(
+      "plan_not_approved",
+      `still waiting: ${shown ? shown.join(", ") : documentCount(waiting.length)}`,
+      shown ?? [],
+    );
   }
   // An approved document is locked: its current version is the approved one.
   return composeBuildPlan(
@@ -170,7 +198,12 @@ export async function resolveRecordedBuildPlan(
   });
   const missing = input.versions.filter((_, i) => documents[i] === null).map((v) => v.path);
   if (missing.length > 0) {
-    throw new PlanRefusedError("plan_not_approved", `approved version no longer available: ${missing.join(", ")}`);
+    const planner = await db.planSet.findUnique({ where: { id: input.planSetId }, select: { agentId: true } });
+    const shown = planner ? await plannerRedactedPaths(db, cipher, planner.agentId, missing) : null;
+    throw new PlanRefusedError(
+      "plan_not_approved",
+      `approved version no longer available: ${shown ? shown.join(", ") : documentCount(missing.length)}`,
+    );
   }
   return composeBuildPlan(
     db,
@@ -279,7 +312,10 @@ export function readPlanVersions(value: unknown): BuildPlan["versions"] | null {
 
 /** The PR body's line: names and version numbers only, e.g. "Plan 12: plan.md v3, screens v2". */
 export function planPullRequestLine(number: number, versions: BuildPlan["versions"]): string {
-  return `Plan ${number}: ${versions.map((v) => `${v.path.replace(/\/$/, "")} v${v.versionNumber}`).join(", ")}`;
+  // Paths shown as in a notice: a path's @-mention pings nobody, its URL autolinks nowhere.
+  return defuseNotice(
+    `Plan ${number}: ${versions.map((v) => `${shownPlanPath(v.path)} v${v.versionNumber}`).join(", ")}`,
+  );
 }
 
 /** Ticket number -> title, from `plan.md`'s `## Tickets` section (`### Ticket <t>: <title>` headings). */

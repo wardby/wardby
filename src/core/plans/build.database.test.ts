@@ -17,6 +17,7 @@ import {
 } from "./build.js";
 import { createPlanSetFixture, setReviewState, type FixtureDocument } from "./build.test-support.js";
 import { PlanRefusedError } from "./refusal.js";
+import { planRefusedReply } from "./wording.js";
 
 const FAKE_SECRET = "wardby-fake-build-secret-7c2d";
 
@@ -176,6 +177,42 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveBuildPlan (database)", () => 
     for (const file of plan.planInputFiles) expect(file.content).not.toContain(FAKE_SECRET);
     expect(plan.planInputFiles.find((f) => f.path === "plan.md")!.content).toContain("[REDACTED]");
     expect(plan.planInputFiles.find((f) => f.path === "screens/boards/home.html")!.content).toContain("[REDACTED]");
+  });
+
+  it("redacts the planner's secret values from the waiting paths of a refusal; without them, gives a count", async () => {
+    const secretPlanner = await makeAgent(owner, { planDocument: { store: "wardby", reviewers: [owner] } });
+    const name = `PLANNER_SECRET_${s}`;
+    await createSecret(name, FAKE_SECRET, owner, cipher, db);
+    await attachSecret(secretPlanner, name, owner, db);
+    const { number } = await planSet(
+      [
+        { path: "plan.md", content: PLAN_MD, version: 1 },
+        { path: `notes-${FAKE_SECRET}.md`, content: "# N\n", version: 1, reviewState: "in_review" },
+      ],
+      undefined,
+      { plannerId: secretPlanner },
+    );
+    const refused = await resolve(number).catch((err: unknown) => err);
+    expect(refused).toBeInstanceOf(PlanRefusedError);
+    const err = refused as PlanRefusedError;
+    expect(err.message).not.toContain(FAKE_SECRET);
+    expect(err.waiting.join(" ")).not.toContain(FAKE_SECRET);
+    expect(err.waiting).toEqual(["notes-[REDACTED].md"]);
+    expect(planRefusedReply(err)).not.toContain(FAKE_SECRET);
+
+    const unreadable = await resolveBuildPlan(db, undefined, {
+      builderAgentId: builder,
+      builderOwnerId: owner,
+      repository,
+      number,
+    }).then(
+      () => {
+        throw new Error("expected a refusal");
+      },
+      (e: unknown) => e as PlanRefusedError,
+    );
+    expect(unreadable.message).toBe("plan_not_approved: still waiting: 1 document");
+    expect(unreadable.waiting).toEqual([]);
   });
 
   it("refuses without a cipher: unredacted text never passes the gate", async () => {
@@ -339,6 +376,14 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveBuildPlan (database)", () => 
       { documentId: "c", path: "screens/", kind: "design", versionNumber: 2 },
     ];
     expect(planPullRequestLine(12, versions)).toBe("Plan 12: plan.md v3, api.md v1, screens v2");
+
+    // A path is shown as in a notice: its @-mention pings nobody, its URL and backticks do nothing.
+    const line = planPullRequestLine(12, [
+      { documentId: "d", path: "@octocat-notes.md", kind: "document", versionNumber: 1 },
+      { documentId: "e", path: "see`https://example.com`/", kind: "design", versionNumber: 2 },
+    ]);
+    expect(line).toBe("Plan 12: @\u200boctocat-notes.md v1, seehttps\u200b://example.com v2");
+    expect(line).not.toMatch(/@octocat/);
   });
 
   it("reads ticket titles from the Tickets section only", () => {

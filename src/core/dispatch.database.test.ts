@@ -542,6 +542,66 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       expect(await runsOf(builder)).toEqual([]);
     });
 
+    it("a plan ticket start builds only from its own set: another planner's newer set, or none, is refused", async () => {
+      const { repository, builder, planSetId, approveAll } = await setUp();
+      await approveAll();
+      // A second planner's approved set for the same repository and number, made later: the gate picks it.
+      const other = `${PREFIX}agent-${suffix}-${++counter}`;
+      await db.agent.create({
+        data: {
+          id: other,
+          name: other,
+          systemPrompt: "Plan things.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 2,
+          kind: "coding",
+          ownerId: owner,
+          codingProfile: {
+            create: {
+              provider: "codex",
+              repository,
+              defaultTask: "Plan.",
+              protectedPaths: [],
+              planDocument: { store: "wardby", reviewers: [owner] },
+            },
+          },
+        },
+      });
+      const newer = await createPlanSetFixture(db, {
+        plannerId: other,
+        ownerId: owner,
+        repository,
+        number: 12,
+        documents: [{ path: "plan.md", content: PLAN_MD, version: 1 }],
+      });
+      const { executor } = fakeExecutor(null);
+      const start = (expectedPlanSetId: string) =>
+        dispatchRun({
+          db,
+          executor,
+          agentId: builder,
+          planNumber: 12,
+          planTicket: 1,
+          secretCipher: cipher,
+          expectedPlanSetId,
+        });
+      await expect(start(planSetId)).rejects.toThrow(/^plan_not_approved: the build would not use the plan set/);
+      expect(await runsOf(builder)).toEqual([]);
+      const own = await start(newer.planSetId);
+      expect((await codingRunOf(own!.run.id)).planSetId).toBe(newer.planSetId);
+      // A builder whose gate finds no set at all is refused too, never built ungated.
+      await expect(
+        dispatchRun({
+          db,
+          executor,
+          agentId: builder,
+          planNumber: 99,
+          secretCipher: cipher,
+          expectedPlanSetId: planSetId,
+        }),
+      ).rejects.toThrow(/^plan_not_approved/);
+    });
+
     it("a continuation builds from its root's versions after a document is reopened (no plan_not_approved)", async () => {
       const { repository, builder, planSetId, documentIds, approveAll } = await setUp();
       await approveAll();

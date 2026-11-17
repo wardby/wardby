@@ -618,6 +618,12 @@ describe("planTicketStarter", () => {
     expect(await starter(tx(null, null))(input)).toEqual({ refused: "plan_not_approved" });
   });
 
+  it("asks dispatch to build from the started set only (expectedPlanSetId)", async () => {
+    const dispatch = vi.fn(async (_options: Parameters<typeof dispatchRunType>[0]) => null);
+    await planTicketStarter({ db, executor: () => native, issueTrackers: undefined, dispatch })(input);
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ expectedPlanSetId: "set-1", planTicket: 4 }));
+  });
+
   it("records the run as the chain's only when the chain follows it", async () => {
     for (const followedByChain of [true, false]) {
       const write = vi.fn(async () => [{ id: "set-1" }]);

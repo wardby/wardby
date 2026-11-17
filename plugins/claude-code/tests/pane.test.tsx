@@ -520,6 +520,19 @@ test("rows show the trigger and task, and the status and text filters narrow the
   await ui.unmount();
 });
 
+test("a run started by a plan approval shows its trigger as plan approved", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  recordingServer(on, () => [{ ...runRow("r1", "running", 30_000), agentName: "builder", trigger: "plan_approved" }]);
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  expect(await ui.find({ type: "Text", text: /plan approved/ })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: /plan_approved/ })).toBeUndefined();
+  await ui.unmount();
+});
+
 test("Continue locally pipes the link to wardby resume and shows only the command, never the link", async ($, on) => {
   const clock = mock.clock(on, { now: NOW });
   engine(on, []);

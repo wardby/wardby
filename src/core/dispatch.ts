@@ -243,6 +243,12 @@ export interface DispatchRunOptions {
    * Without it a `buildFromPlan` run with a plan set is refused (plan_not_approved): never unredacted.
    */
   secretCipher?: SecretCipher;
+  /**
+   * The plan set a plan ticket start (the build chain, a `build ticket <t>` comment) was made for: the
+   * run is refused with plan_not_approved unless the build gate picks exactly this set. Another set for
+   * the same repository and number (a second planner's, say), or none, never builds in its place.
+   */
+  expectedPlanSetId?: string;
 }
 
 export interface DispatchRunResult {
@@ -1225,6 +1231,16 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
       if (planRefusal === undefined) throw err;
     }
     if (buildPlan) planSections.push(buildPlan.taskSection);
+  }
+  // A plan ticket start builds only from the set it was started for, checked after the gate.
+  if (
+    options.expectedPlanSetId !== undefined &&
+    planRefusal === undefined &&
+    buildPlan?.planSetId !== options.expectedPlanSetId
+  ) {
+    const err = new PlanRefusedError("plan_not_approved", "the build would not use the plan set it was started for");
+    planRefusal = setRefusalOf(err);
+    if (planRefusal === undefined) throw err;
   }
   const runPlanInputFiles = options.planInputFiles ?? buildPlan?.planInputFiles ?? [];
   if (planSections.length > 0 && planRefusal === undefined) {

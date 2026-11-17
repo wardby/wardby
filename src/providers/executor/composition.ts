@@ -321,6 +321,8 @@ export function planTicketStarter(deps: {
         codingTask: `Build ticket ${ticket} of plan ${set.number}.`,
         planNumber: set.number,
         planTicket: ticket,
+        // Only this set: the gate's newest visible set for the repository and number may be another's.
+        expectedPlanSetId: set.id,
         ...(deps.cipher ? { secretCipher: deps.cipher } : {}),
         ...(attribution ? { attribution } : {}),
         // A reopen or a concurrent start (the chain's, or a build ticket comment's) waits for the lock.

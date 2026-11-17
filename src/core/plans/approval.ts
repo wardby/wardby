@@ -3,7 +3,9 @@
  * last counted document of a set approved (a verdict, a force approve, or a removal that leaves only
  * approved documents) fires this once per approval: a reopen clears the approval and a new approval
  * fires it again. `onApproved: "notify"` posts a notice on the plan's issue; `"build"` starts the
- * builder for ticket 1, after checking the builder again (R12).
+ * builder for ticket 1, after checking the builder again (R12), on the set's first approval only: a
+ * set whose chain ran before (stopped, reopened or done) gets a notice naming the ticket to build next.
+ * A reopen during a live chain posts a notice that the build stops after the current ticket.
  *
  * Every notice holds plan numbers, plan paths, ticket numbers, refusal codes and (for a build) the
  * display name of the person whose verdict completed the approval: never a document's text or a
@@ -19,14 +21,15 @@ import { GITHUB_ISSUE_KEY, projectOf } from "../../providers/issue-tracker/types
 import type { ReviewHostRegistry } from "../../providers/review-host/types.js";
 import { principalNames } from "../documents/comments.js";
 import { logger } from "../logger.js";
-import { defuseMentions } from "../reply-parts.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { newestVisiblePlanSet, planRepositoryFilter, ticketTitles, type BuildPlan } from "./build.js";
 import type { PlanChainDb, PlanChainHook, PlanChainMergeDb } from "./chain-hook.js";
 import type { PostIssueNotice } from "./hooks.js";
 import { planNumberFromIssueKey } from "./number.js";
+import { defuseAutolinks, defuseNotice, shownPlanPath } from "./wording.js";
 import { checkPlanDocumentSetting, type PlanSettingsDb } from "./settings.js";
 
+export { defuseNotice } from "./wording.js";
 export {
   planChainHook,
   setPlanChainHook,
@@ -77,20 +80,8 @@ export function planReviewHook(): PlanReviewHook | undefined {
   return hook;
 }
 
-/** @-mentions outside `code` spans defused: names and paths ping nobody; the hint stays copyable. */
-export function defuseNotice(text: string): string {
-  return text
-    .split(/(`[^`\n]*`)/)
-    .map((part, i) => (i % 2 === 1 ? part : defuseMentions(part)))
-    .join("");
-}
-
-/** A bare URL (`https://…`, `www.…`) with its scheme broken by a zero-width space, so nothing autolinks it. */
-const defuseAutolinks = (text: string) =>
-  text.replace(/(https?|ftp)(:\/\/)/gi, "$1\u200b$2").replace(/(www)(\.)/gi, "$1\u200b$2");
-
-/** A plan path in a notice: one line, never a code-span delimiter, a design without its trailing slash. */
-const shownPath = (path: string) => defuseAutolinks(path.replace(/\/$/, "").replace(/[`\r\n]+/g, ""));
+/** A plan path in a notice (wording.ts). */
+const shownPath = shownPlanPath;
 
 /**
  * A person's display name in a public notice: people-written, so one line, no backtick (which would
@@ -384,12 +375,14 @@ export async function planSetChanged(db: PrismaClient, planSetId: string): Promi
 /** Bounds for the set's row-lock transaction: a wait for the lock counts toward its timeout. */
 const PLAN_TX = { maxWait: 5_000, timeout: 20_000 } as const;
 
-type ApprovedSet = NonNullable<Awaited<ReturnType<typeof claimApproval>>>;
+type ClaimedApproval = NonNullable<Awaited<ReturnType<typeof claimApproval>>>;
+type ApprovedSet = Extract<ClaimedApproval, { approved: true }>["set"];
 
 /**
  * Under the set's row lock, so review events on one set are decided one at a time on the states they
  * see: ends the approval when a counted document is no longer approved, or claims it (approvedAt from
- * null) when every one is. Returns the set only to the event that claimed it.
+ * null) when every one is. Returns what it wrote: the set to the event that claimed the approval, or
+ * the set and the chain's ticket to the event that stopped a live chain with "reopened"; else null.
  */
 async function claimApproval(db: PrismaClient, planSetId: string, actorId: string | null) {
   return db.$transaction(async (tx) => {
@@ -410,19 +403,18 @@ async function claimApproval(db: PrismaClient, planSetId: string, actorId: strin
     if (!allApproved) {
       // A reopen (or a new waiting document) ends the approval; a running chain stops before its next
       // ticket, unless it already stopped for a reason of its own (that code is kept).
-      if (set.approvedAt) {
-        await tx.planSet.update({
-          where: { id: set.id },
-          data: {
-            approvedAt: null,
-            approvedById: null,
-            ...(set.chainTicket !== null && set.chainStopped === null
-              ? { chainStopped: "reopened", chainRunId: null }
-              : {}),
-          },
-        });
-      }
-      return null;
+      if (!set.approvedAt) return null;
+      const stopsChain = set.chainTicket !== null && set.chainStopped === null;
+      const { documents: _documents, agent: _agent, ...row } = set;
+      const ended = await tx.planSet.update({
+        where: { id: set.id },
+        data: {
+          approvedAt: null,
+          approvedById: null,
+          ...(stopsChain ? { chainStopped: "reopened", chainRunId: null } : {}),
+        },
+      });
+      return stopsChain ? { approved: false as const, set: ended, ticket: row.chainTicket! } : null;
     }
     // Exactly once per approval: only the event that sets approvedAt from null goes on.
     if (set.approvedAt) return null;
@@ -431,7 +423,10 @@ async function claimApproval(db: PrismaClient, planSetId: string, actorId: strin
       where: { id: set.id },
       data: { approvedAt: new Date(), approvedById: actorId },
     });
-    return { ...set, approvedAt: approved.approvedAt, approvedById: approved.approvedById };
+    return {
+      approved: true as const,
+      set: { ...set, approvedAt: approved.approvedAt, approvedById: approved.approvedById },
+    };
   }, PLAN_TX);
 }
 
@@ -456,6 +451,18 @@ async function afterApproval(
   const handle = set.issueProvider === "github" ? await deps.mentionHandle().catch(() => null) : null;
   if (setting.onApproved === "notify") {
     await postPlanNotice(deps, set, planApprovedNotice(set.number, versions, handle));
+    return;
+  }
+  // A set built before (its chain stopped, or it ran, or it finished): a re-approval never starts a
+  // build by itself. The notice says which ticket to build next; after a finished chain, any ticket.
+  if (set.chainTicket !== null || set.chainStopped !== null) {
+    const done = set.chainStopped === "done";
+    const next = done ? "<t>" : String(set.chainTicket ?? 1);
+    await postPlanNotice(
+      deps,
+      set,
+      `${planApprovedNotice(set.number, versions, null)}${hint(handle, next, done ? "to build one again" : "to continue")}`,
+    );
     return;
   }
   const builderAgentId = await checkedBuilder(db, set.agent);
@@ -507,10 +514,19 @@ export function createPlanReviewHook(deps: PlanApprovalDeps): PlanReviewHook {
     try {
       const doc = await db.document.findUnique({ where: { id: documentId }, select: { planSetId: true } });
       if (!doc?.planSetId) return;
-      const set = await claimApproval(db, doc.planSetId, actorId);
-      if (!set) return;
+      const claimed = await claimApproval(db, doc.planSetId, actorId);
+      if (!claimed) return;
+      const set = claimed.set;
       // The review action returns now; host calls and the ticket start follow in the background.
-      const work = afterApproval(db, deps, set, actorId).catch(logFailure({ documentId, planSetId: set.id }));
+      const work = (
+        claimed.approved
+          ? afterApproval(db, deps, claimed.set, actorId)
+          : postPlanNotice(
+              deps,
+              set,
+              `Plan ${set.number}: a document was reopened; the build stops after ticket ${claimed.ticket}.`,
+            )
+      ).catch(logFailure({ documentId, planSetId: set.id }));
       deps.track?.(work);
     } catch (err) {
       // Never throws: a review verdict is never undone by its plan follow-up.
@@ -601,7 +617,8 @@ export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
       background("merge", async () => {
         const runs = await db.codingRun.findMany({
           where: {
-            repository: pr.repository,
+            // Matched as the host compares names (case-insensitively, exactly), like every plan lookup.
+            repository: planRepositoryFilter(pr.repository),
             planSetId: { not: null },
             planTicket: { not: null },
             result: { path: ["pullRequestNumber"], equals: pr.number },
@@ -640,9 +657,10 @@ export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
         const tickets = ticketTitles(documents[0]?.currentVersion?.markdown ?? "");
         const next = ticket + 1;
         if (!tickets.has(next)) {
+          // Recorded as done (not cleared), so a later re-approval knows the plan was built.
           const cleared = await db.planSet.updateMany({
             where: following,
-            data: { chainTicket: null, chainRunId: null },
+            data: { chainStopped: "done", chainRunId: null },
           });
           if (cleared.count === 1)
             await postPlanNotice(deps, row, `Plan ${set.number}: all ${tickets.size} tickets built.`);

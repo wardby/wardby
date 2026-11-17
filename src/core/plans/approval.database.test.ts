@@ -287,6 +287,30 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     expect((await setRow(planSetId)).chainStopped).toBe("plan_builder_invalid");
   });
 
+  it("R12: a builder whose owner can't execute the planner stops with plan_builder_invalid and starts nothing", async () => {
+    const builder = await makeAgent({ buildFromPlan: true, allowWebhookTaskOverride: true });
+    // Ada owns the builder; the planner's owner may execute it, but Ada can't execute the planner.
+    await db.agent.update({ where: { id: builder }, data: { ownerId: ada.id } });
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "agent",
+        resourceId: builder,
+        granteeKind: "principal",
+        granteePrincipalId: owner.id,
+        granteeKey: `principal:${owner.id}`,
+        level: "execute",
+        source: "owner",
+      },
+    });
+    const { planSetId, documentIds } = await makeSet({ onApproved: "build", builderAgentId: builder });
+    await approveAll(documentIds);
+    expect(starts).toEqual([]);
+    expect(notices.map((x) => x.text)).toEqual([
+      "Plan 12 approved, but its builder cannot build it now (plan_builder_invalid). Comment `@wardby build ticket 1` once it is fixed.",
+    ]);
+    expect((await setRow(planSetId)).chainStopped).toBe("plan_builder_invalid");
+  });
+
   it("a refused start stops the chain; a running ticket is reported", async () => {
     const builder = await makeAgent({ buildFromPlan: true });
     startResult = { refused: "plan_not_approved" };
@@ -615,7 +639,8 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
       await merged(second);
       expect(starts).toEqual([]);
       expect(notices.map((x) => x.text)).toEqual(["Plan 12: all 2 tickets built."]);
-      expect(await setRow(planSetId)).toMatchObject({ chainTicket: null, chainStopped: null, chainRunId: null });
+      // Recorded as done, not cleared: a later re-approval knows the plan was built.
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: "done", chainRunId: null });
       // A repeat delivery of the last merge posts nothing more.
       await merged(second);
       expect(notices).toHaveLength(1);
@@ -638,9 +663,14 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
         chainRunId: null,
       });
       await approve(documentIds["api.md"]);
+      // A re-approval never starts a build by itself: the build ticket comment restarts the chain.
+      expect(starts).toEqual([]);
+      await db.planSet.updateMany({ where: { repository, id: { not: planSetId } }, data: { approvedAt: null } });
+      await chain().buildTicketFromComment(db, { repository, number: 12, ticket: 1, starterName: "octocat" });
+      await settle();
       expect(starts.map((x) => x.ticket)).toEqual([1]);
       const again = await setRow(planSetId);
-      expect(again).toMatchObject({ chainTicket: 1, chainStopped: null, approvedById: ada.id });
+      expect(again).toMatchObject({ chainTicket: 1, chainStopped: null });
       expect(again.chainRunId).not.toBe(run1);
 
       starts = [];
@@ -746,7 +776,8 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
       expect((await setRow(planSetId)).chainStopped).toBe("reopened");
       await merged(number);
       expect(starts).toEqual([]);
-      expect(notices).toEqual([]);
+      // The reopen says so on the issue, in the background; the merge posts nothing.
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: a document was reopened; the build stops after ticket 1."]);
       expect((await setRow(planSetId)).chainTicket).toBe(1);
     });
 
@@ -801,6 +832,83 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
         chainRunId: null,
       });
       expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (plan_not_approved)."]);
+    });
+
+    it("a reopen during a live chain posts a notice, in the background, naming the ticket it stops after", async () => {
+      const { planSetId, documentIds } = await building();
+      // The review action does not wait for the notice: the poster has not been called when it returns.
+      let posted = false;
+      const slow = vi.spyOn(deps, "postIssueNotice").mockImplementation(async (set, text) => {
+        await new Promise((r) => setTimeout(r, 50));
+        posted = true;
+        notices.push({ issueKey: set.issueKey, text });
+      });
+      const hook = createPlanReviewHook({ ...deps, track: () => undefined });
+      await db.document.update({ where: { id: documentIds["api.md"] }, data: { reviewState: "in_review" } });
+      await hook(db, documentIds["api.md"], owner.id);
+      expect(posted).toBe(false);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(slow).toHaveBeenCalledTimes(1);
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: a document was reopened; the build stops after ticket 1."]);
+      expect((await setRow(planSetId)).chainStopped).toBe("reopened");
+      // Another review event on the reopened set posts nothing more; nor does a reopen of a stopped chain.
+      await hook(db, documentIds["plan.md"], owner.id);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(notices).toHaveLength(1);
+    });
+
+    it("a re-approval after a reopen during ticket k names ticket k and starts nothing", async () => {
+      const { planSetId, documentIds, run1 } = await building();
+      const first = ++pr;
+      await finish(run1, "succeeded", first);
+      await merged(first);
+      expect(starts.map((x) => x.ticket)).toEqual([2]);
+      notices = [];
+      starts = [];
+      await reopenDocument(db, cipher, { documentId: documentIds["api.md"], viewer: as(owner) });
+      await approve(documentIds["api.md"]);
+      expect(starts).toEqual([]);
+      expect(notices.map((x) => x.text)).toEqual([
+        "Plan 12: a document was reopened; the build stops after ticket 2.",
+        expect.stringMatching(
+          /^Plan 12 approved \(plan\.md v3, api\.md v\d+, screens v2\)\. Comment `@wardby build ticket 2` to continue\.$/,
+        ),
+      ]);
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: "reopened", chainRunId: null });
+      expect((await setRow(planSetId)).approvedAt).not.toBeNull();
+    });
+
+    it("a re-approval after every ticket was built starts nothing and asks for any ticket", async () => {
+      const { planSetId, documentIds, run1 } = await building();
+      const first = ++pr;
+      await finish(run1, "succeeded", first);
+      await merged(first);
+      const second = ++pr;
+      await finish((await setRow(planSetId)).chainRunId!, "succeeded", second);
+      await merged(second);
+      expect(notices.at(-1)?.text).toBe("Plan 12: all 2 tickets built.");
+      notices = [];
+      starts = [];
+      // A done chain is not live: its reopen posts nothing.
+      await reopenDocument(db, cipher, { documentId: documentIds["api.md"], viewer: as(owner) });
+      await settle();
+      expect(notices).toEqual([]);
+      await approve(documentIds["api.md"]);
+      expect(starts).toEqual([]);
+      expect(notices.map((x) => x.text)).toEqual([
+        expect.stringMatching(/^Plan 12 approved \(.*\)\. Comment `@wardby build ticket <t>` to build one again\.$/),
+      ]);
+      expect((await setRow(planSetId)).chainStopped).toBe("done");
+    });
+
+    it("a merge heard under another case of the repository name moves the chain", async () => {
+      const { planSetId, run1 } = await building();
+      const number = ++pr;
+      await finish(run1, "succeeded", number);
+      await chain().onMerged(db, { repository: repository.toUpperCase(), number, merged: true });
+      await settle();
+      expect(starts.map((x) => x.ticket)).toEqual([2]);
+      expect((await setRow(planSetId)).chainTicket).toBe(2);
     });
 
     it("the builder is checked again before every chain start: plan_builder_invalid starts nothing", async () => {
@@ -956,7 +1064,10 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
       });
       await merged(number);
       expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: "reopened", chainRunId: null });
-      expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (plan_not_approved)."]);
+      expect(notices.map((x) => x.text).sort()).toEqual([
+        "Plan 12: a document was reopened; the build stops after ticket 2.",
+        "Plan 12: ticket 2 did not start (plan_not_approved).",
+      ]);
     });
 
     it("planTicketStartBlock: says what held a start back, as seen under the lock", async () => {

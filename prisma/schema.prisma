@@ -2452,7 +2452,7 @@ model PlanSet {
   approvedAt        DateTime?
   /// The principal whose verdict completed the approval (null for a publish): the starter of every ticket run it starts.
   approvedById      String?
-  /// Build chain (§7b "build"): the ticket running or next, and why it stopped.
+  /// Build chain (§7b "build"): the ticket running or next, and why it stopped ("done" once every ticket was built).
   chainTicket       Int?
   chainStopped      String?
   /// The ticket run the chain follows: only its pull request's merge moves the chain on. Null when stopped or done.
