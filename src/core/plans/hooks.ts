@@ -6,7 +6,7 @@
 import type { PrismaClient } from "#prisma";
 import { outsideRunContext } from "../async-context.js";
 import { logger } from "../logger.js";
-import { defuseNotice, planChainHook } from "./approval.js";
+import { defuseNotice } from "./approval.js";
 import { publishPlanFromRun, type SecretCipher } from "./publish.js";
 import { planSummaryLines } from "./wording.js";
 
@@ -31,8 +31,6 @@ export function planRunFinishedHook(
       Promise.resolve()
         .then(async () => {
           const { db, cipher, origin, postIssueNotice } = deps();
-          // A ticket run that ended without success stops its plan's build chain (C3; never throws).
-          await planChainHook()?.onTicketFinished(db, runId);
           // R11: a revision (a run given the set's files as input plan files) is published by B8's
           // onDocumentRunFinished, which then calls publishPlanFromRun for the rest of the set. Its input
           // files are written with the run, so this holds even after startReconcileRun re-stamps the

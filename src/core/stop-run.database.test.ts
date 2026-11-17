@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "./db.js";
 import { NativeEngine } from "./engine-native.js";
 import type { NativeRunProviders } from "./runner.js";
+import { setPlanChainHook } from "./plans/approval.js";
 import { stopRun } from "./stop-run.js";
 import { InProcessExecutor } from "../providers/executor/in-process.js";
 import {
@@ -142,5 +143,23 @@ describe.skipIf(!process.env.DATABASE_URL)("stopRun (database)", () => {
     });
     await stopRun({ db, executor, runId: native.id, stoppedBy: ownerId });
     expect(removed).toEqual([codingAgentId, codingAgentId]);
+  });
+
+  it("a pending run this stop ends reaches the plan build chain (the shared run-end event), once", async () => {
+    const onTicketFinished = vi.fn(async () => undefined);
+    setPlanChainHook({ onMerged: vi.fn(), onTicketFinished, buildTicketFromComment: vi.fn() });
+    try {
+      // An executor that ends nothing: stopRun's own write makes the run cancelled.
+      const executor = { stop: async () => undefined };
+      const pending = await db.run.create({ data: { agentId: codingAgentId } });
+      await stopRun({ db, executor, runId: pending.id, stoppedBy: ownerId });
+      expect((await row(pending.id)).status).toBe("cancelled");
+      expect(onTicketFinished).toHaveBeenCalledTimes(1);
+      expect((onTicketFinished.mock.calls[0] as unknown[])[1]).toBe(pending.id);
+      await stopRun({ db, executor, runId: pending.id, stoppedBy: ownerId });
+      expect(onTicketFinished).toHaveBeenCalledTimes(1);
+    } finally {
+      setPlanChainHook(undefined);
+    }
   });
 });

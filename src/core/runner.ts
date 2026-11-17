@@ -511,6 +511,8 @@ export type RunnerDb = Pick<
   | "deferredReview"
   | "runAttribution"
   | "planSet"
+  // The plan build chain's builder check (host events, plans/approval.ts).
+  | "principal"
   | "documentVersion"
   | "documentFile"
 >;

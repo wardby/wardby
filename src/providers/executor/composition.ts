@@ -28,6 +28,7 @@ import {
   createPlanChainHook,
   createPlanReviewHook,
   issueNoticePoster,
+  lockPlanSetForTicketStart,
   runningPlanTicket,
   setPlanChainHook,
   setPlanReviewHook,
@@ -435,10 +436,23 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
           planTicket: ticket,
           ...(cipher ? { secretCipher: cipher } : {}),
           ...(attribution ? { attribution } : {}),
-          // R16, spec §7b: never more than one ticket run of a set at a time, checked in the transaction.
-          beforePersist: async (tx) => (await runningPlanTicket(tx, set.id)) === null,
+          // R16, spec §7b: under the set's row lock, only an approved set with no ticket run in flight;
+          // a reopen or a concurrent start (the chain's, or a build ticket comment's) waits for it.
+          beforePersist: (tx) => lockPlanSetForTicketStart(tx, set.id),
+          // The chain follows the run from the transaction that creates it, so a run that ends at
+          // once still finds itself the chain's run (plans/approval.ts onTicketFinished).
+          afterPersist: async (tx, run) => {
+            if (run.status !== "pending" && run.status !== "running") return;
+            await tx.$queryRaw`
+              UPDATE "PlanSet" SET "chainRunId" = ${run.id}
+              WHERE "id" = ${set.id} AND "chainTicket" = ${ticket} AND "chainStopped" IS NULL
+              RETURNING "id"`;
+          },
         });
-        if (!dispatched) return { running: (await runningPlanTicket(options.db, set.id)) ?? ticket };
+        if (!dispatched) {
+          const running = await runningPlanTicket(options.db, set.id);
+          return running !== null ? { running } : { refused: "plan_not_approved" };
+        }
         if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
           return { refused: (dispatched.run.error ?? "refused").split(":")[0] };
         }

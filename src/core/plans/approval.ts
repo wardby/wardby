@@ -22,9 +22,18 @@ import { logger } from "../logger.js";
 import { defuseMentions } from "../reply-parts.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { ticketTitles, type BuildPlan } from "./build.js";
+import type { PlanChainDb, PlanChainHook, PlanChainMergeDb } from "./chain-hook.js";
 import type { PostIssueNotice } from "./hooks.js";
 import { planNumberFromIssueKey } from "./number.js";
-import { checkPlanDocumentSetting } from "./settings.js";
+import { checkPlanDocumentSetting, type PlanSettingsDb } from "./settings.js";
+
+export {
+  planChainHook,
+  setPlanChainHook,
+  type PlanChainDb,
+  type PlanChainHook,
+  type PlanChainMergeDb,
+} from "./chain-hook.js";
 
 const planLog = logger.child({ module: "plans" });
 
@@ -47,38 +56,13 @@ export interface PlanApprovalDeps {
   mentionHandle: () => Promise<string | null>;
   /** The planner's secret values: every notice is redacted against them before it is posted. */
   secretValues: (agentId: string) => Promise<readonly string[]>;
-  /** Given the background work an approval starts (its notice, the ticket start); tests await it. */
+  /** Given the background work an approval or the build chain starts (notices, ticket starts); tests await it. */
   track?: (work: Promise<void>) => void;
 }
 
 export type PlanReviewHook = (db: PrismaClient, documentId: string, actorId: string | null) => Promise<void>;
 
-/** What the build chain reads and writes (C3, C4). */
-export type PlanChainDb = Pick<PrismaClient, "planSet" | "codingRun">;
-
-/** The build chain (R13): built by `createPlanChainHook(deps)` in composition (C3), with the deps above. */
-export interface PlanChainHook {
-  /** A pull request closed (pr_closed); only a merged PR of the chain's current ticket starts the next one. */
-  onMerged(db: PlanChainDb, pr: { repository: string; number: number; merged: boolean }): Promise<void>;
-  /** A run ended (B6's terminal hook): a ticket run that did not succeed stops the chain. */
-  onTicketFinished(db: PlanChainDb, runId: string): Promise<void>;
-  /** `@<handle> build ticket <t>` on the plan's issue (C4). */
-  buildTicketFromComment(
-    db: PlanChainDb,
-    input: { repository: string; number: number; ticket: number; starterName: string },
-  ): Promise<"started" | "refused" | "none">;
-}
-
 let hook: PlanReviewHook | undefined;
-let chainHook: PlanChainHook | undefined;
-
-export function setPlanChainHook(next: PlanChainHook | undefined): void {
-  chainHook = next;
-}
-
-export function planChainHook(): PlanChainHook | undefined {
-  return chainHook;
-}
 
 export function setPlanReviewHook(next: PlanReviewHook | undefined): void {
   hook = next;
@@ -127,6 +111,22 @@ export function planApprovedNotice(number: number, versions: BuildPlan["versions
 
 export function planBuildStartedNotice(number: number, ticket: number, starterName: string | null): string {
   return `Plan ${number}: building ticket ${ticket}${starterName ? `, started by ${shownName(starterName)}` : ""}.`;
+}
+
+/**
+ * The guard of a ticket start (R16), in the start's persist transaction: takes the set's row lock,
+ * then lets the start through only while the set is approved and no ticket run of it is pending or
+ * running. A reopen, or another start (the chain's, or C4's build ticket), waits for the lock and then
+ * sees this start's run.
+ */
+export async function lockPlanSetForTicketStart(
+  tx: Pick<PrismaClient, "codingRun" | "$queryRaw">,
+  planSetId: string,
+): Promise<boolean> {
+  const rows = await tx.$queryRaw<{ approvedAt: Date | null }[]>`
+    SELECT "approvedAt" FROM "PlanSet" WHERE "id" = ${planSetId} FOR UPDATE`;
+  if (!rows[0]?.approvedAt) return false;
+  return (await runningPlanTicket(tx, planSetId)) === null;
 }
 
 /** The ticket of a pending or running build run of the set, or null. Works on a transaction too. */
@@ -202,27 +202,83 @@ export async function reportTicketStart(
   else if ("running" in started) text = `Plan ${set.number}: already building ticket ${started.running}.`;
   else {
     const code = refusalCode(started.refused);
-    await db.planSet.update({ where: { id: set.id }, data: { chainStopped: code } });
+    await db.planSet.update({ where: { id: set.id }, data: { chainStopped: code, chainRunId: null } });
     text = `Plan ${set.number}: ticket ${ticket} did not start (${code}).`;
   }
   await postPlanNotice(deps, set, prefix ? `${prefix}\n${text}` : text);
 }
 
 /**
- * A start that found another ticket of the set already pending or running (R16): the chain follows that
- * ticket, so its merge (not the one asked for) moves the chain on.
+ * A start that found a ticket run of the set already pending or running (R16): the chain follows that
+ * run, so its merge (not the one asked for) moves the chain on.
  */
-async function followRunningTicket(
-  db: Pick<PrismaClient, "planSet">,
-  planSetId: string,
-  asked: number,
-  started: StartTicketResult,
-): Promise<void> {
-  if (!("running" in started) || started.running === asked) return;
-  await db.planSet.updateMany({
-    where: { id: planSetId, chainTicket: asked },
-    data: { chainTicket: started.running },
+async function followRunningTicket(db: PlanChainDb, planSetId: string, asked: number, running: number): Promise<void> {
+  const run = await db.codingRun.findFirst({
+    where: { planSetId, planTicket: running, run: { status: { in: ["pending", "running"] } } },
+    select: { runId: true },
   });
+  await db.planSet.updateMany({
+    where: { id: planSetId, chainTicket: asked, chainStopped: null },
+    data: { chainTicket: running, chainRunId: run?.runId ?? null },
+  });
+}
+
+/**
+ * Starts a ticket of the chain and makes the chain follow the run it started (or the one already
+ * running). A start that throws (not a refusal) becomes `start_failed`, so the chain stops with a
+ * notice instead of staying silent. Only the error's name is logged.
+ */
+async function startOrStartFailed(
+  db: PlanChainDb,
+  deps: Pick<PlanApprovalDeps, "startTicket">,
+  input: StartTicketInput,
+): Promise<StartTicketResult> {
+  const started = await deps.startTicket(input).catch((err: unknown): StartTicketResult => {
+    planLog.warn(
+      { planSetId: input.set.id, errorName: err instanceof Error ? err.name : typeof err },
+      "ticket start failed",
+    );
+    return { refused: "start_failed" };
+  });
+  if ("runId" in started) {
+    // The start's own transaction records it too (composition); this covers any other startTicket.
+    await db.planSet.updateMany({
+      where: { id: input.set.id, chainTicket: input.ticket, chainStopped: null },
+      data: { chainRunId: started.runId },
+    });
+  } else if ("running" in started) {
+    await followRunningTicket(db, input.set.id, input.ticket, started.running);
+  }
+  return started;
+}
+
+type PlanAgent = { id: string; ownerId: string | null; codingProfile: { planDocument: unknown } | null };
+
+/**
+ * R12, spec §7b: the builder is checked again before every start, against the access the owner has
+ * today. Reviewers are not re-checked here (publish checks them), so only the builder can fail.
+ * The builder's agent id, or null when it cannot build now (plan_builder_invalid).
+ */
+async function checkedBuilder(db: PlanSettingsDb, agent: PlanAgent): Promise<string | null> {
+  let setting: ReturnType<typeof readPlanDocument>;
+  try {
+    setting = readPlanDocument(agent.codingProfile?.planDocument, agent.ownerId);
+  } catch {
+    return null;
+  }
+  if (!setting?.builderAgentId) return null;
+  const builderOnly: PlanDocumentInput = {
+    store: setting.store,
+    onApproved: setting.onApproved,
+    ...(setting.path ? { path: setting.path } : {}),
+    builderAgentId: setting.builderAgentId,
+  };
+  try {
+    await checkPlanDocumentSetting(db, { id: agent.id, ownerId: agent.ownerId }, builderOnly);
+  } catch {
+    return null;
+  }
+  return setting.builderAgentId;
 }
 
 /**
@@ -283,7 +339,7 @@ type ApprovedSet = NonNullable<Awaited<ReturnType<typeof claimApproval>>>;
  * see: ends the approval when a counted document is no longer approved, or claims it (approvedAt from
  * null) when every one is. Returns the set only to the event that claimed it.
  */
-async function claimApproval(db: PrismaClient, planSetId: string) {
+async function claimApproval(db: PrismaClient, planSetId: string, actorId: string | null) {
   return db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT 1 FROM "PlanSet" WHERE "id" = ${planSetId} FOR UPDATE`;
     const set = await tx.planSet.findUnique({
@@ -307,7 +363,10 @@ async function claimApproval(db: PrismaClient, planSetId: string) {
           where: { id: set.id },
           data: {
             approvedAt: null,
-            ...(set.chainTicket !== null && set.chainStopped === null ? { chainStopped: "reopened" } : {}),
+            approvedById: null,
+            ...(set.chainTicket !== null && set.chainStopped === null
+              ? { chainStopped: "reopened", chainRunId: null }
+              : {}),
           },
         });
       }
@@ -315,8 +374,12 @@ async function claimApproval(db: PrismaClient, planSetId: string) {
     }
     // Exactly once per approval: only the event that sets approvedAt from null goes on.
     if (set.approvedAt) return null;
-    await tx.planSet.update({ where: { id: set.id }, data: { approvedAt: new Date() } });
-    return set;
+    // The approver: the recorded starter of every ticket run this approval starts.
+    const approved = await tx.planSet.update({
+      where: { id: set.id },
+      data: { approvedAt: new Date(), approvedById: actorId },
+    });
+    return { ...set, approvedAt: approved.approvedAt, approvedById: approved.approvedById };
   }, PLAN_TX);
 }
 
@@ -343,18 +406,12 @@ async function afterApproval(
     await postPlanNotice(deps, set, planApprovedNotice(set.number, versions, handle));
     return;
   }
-  // R12, spec §7b: the builder is checked again now, against the access the owner has today.
-  // Reviewers are not re-checked here (publish checks them), so only the builder can fail.
-  const builderOnly: PlanDocumentInput = {
-    store: setting.store,
-    onApproved: setting.onApproved,
-    ...(setting.path ? { path: setting.path } : {}),
-    ...(setting.builderAgentId ? { builderAgentId: setting.builderAgentId } : {}),
-  };
-  try {
-    await checkPlanDocumentSetting(db, { id: set.agent.id, ownerId: set.agent.ownerId }, builderOnly);
-  } catch {
-    await db.planSet.update({ where: { id: set.id }, data: { chainStopped: "plan_builder_invalid" } });
+  const builderAgentId = await checkedBuilder(db, set.agent);
+  if (!builderAgentId) {
+    await db.planSet.update({
+      where: { id: set.id },
+      data: { chainStopped: "plan_builder_invalid", chainRunId: null },
+    });
     await postPlanNotice(
       deps,
       set,
@@ -371,26 +428,16 @@ async function afterApproval(
     );
     return;
   }
-  await db.planSet.update({ where: { id: set.id }, data: { chainTicket: 1, chainStopped: null } });
+  await db.planSet.update({ where: { id: set.id }, data: { chainTicket: 1, chainStopped: null, chainRunId: null } });
   // The set's own row only: no document text goes to the start.
   const { documents: _documents, agent: _agent, ...row } = set;
-  const started = await deps
-    .startTicket({
-      builderAgentId: setting.builderAgentId!,
-      set: row,
-      ticket: 1,
-      starterId: actorId,
-      trigger: "plan_approved",
-    })
-    .catch((err: unknown): StartTicketResult => {
-      // A start that threw (not a refusal) stops the chain with a notice instead of leaving it silent.
-      planLog.warn(
-        { planSetId: set.id, errorName: err instanceof Error ? err.name : typeof err },
-        "ticket start failed",
-      );
-      return { refused: "start_failed" };
-    });
-  await followRunningTicket(db, set.id, 1, started);
+  const started = await startOrStartFailed(db, deps, {
+    builderAgentId,
+    set: row,
+    ticket: 1,
+    starterId: actorId,
+    trigger: "plan_approved",
+  });
   const starterName = actorId ? ((await principalNames(db, [actorId])).get(actorId) ?? null) : null;
   await reportTicketStart(db, deps, row, 1, started, starterName, planApprovedNotice(set.number, versions, null));
 }
@@ -405,7 +452,7 @@ export function createPlanReviewHook(deps: PlanApprovalDeps): PlanReviewHook {
     try {
       const doc = await db.document.findUnique({ where: { id: documentId }, select: { planSetId: true } });
       if (!doc?.planSetId) return;
-      const set = await claimApproval(db, doc.planSetId);
+      const set = await claimApproval(db, doc.planSetId, actorId);
       if (!set) return;
       // The review action returns now; host calls and the ticket start follow in the background.
       const work = afterApproval(db, deps, set, actorId).catch(logFailure({ documentId, planSetId: set.id }));
@@ -420,106 +467,129 @@ export function createPlanReviewHook(deps: PlanApprovalDeps): PlanReviewHook {
 /** RunStatus values (schema.prisma `enum RunStatus`) that end a ticket run without success. */
 const STOPPING_STATUSES = new Set<string>(["failed", "refused", "lost", "budget_exhausted", "cancelled"]);
 
+/** The PR number a coding run's result records, if any. */
+const pullRequestOf = (result: unknown): number | null => {
+  const n = (result as { pullRequestNumber?: unknown } | null)?.pullRequestNumber;
+  return typeof n === "number" ? n : null;
+};
+
 /**
- * The build chain (spec §7b, R13): a merged PR of the chain's current ticket starts the next ticket
- * (never while another ticket run of the set is pending or running), and a ticket run that ends
- * without success, or a reopen (claimApproval), stops it. Each step is claimed with a conditional
- * update on the set's chain fields, so a repeated delivery acts once. Notices hold plan and ticket
- * numbers and a status only: never a ticket title. Never throws.
+ * The build chain (spec §7b, R13). The chain follows one ticket run (PlanSet.chainRunId), set by every
+ * ticket start: only that run's pull request moves it. Merged, the next ticket starts (never while
+ * another ticket run of the set is pending or running), recorded as started by the approver; closed
+ * unmerged, the chain stops (pr_closed). That run ending without success, or with no pull request
+ * (no_pull_request), stops it too, as does a reopen (claimApproval). Each step is claimed with a
+ * conditional update on the set's chain fields, so a repeated delivery acts once. The work runs in the
+ * background (deps.track), so neither the webhook nor the run's terminal write waits for host calls.
+ * Notices hold plan and ticket numbers and a code only: never a ticket title. Never throws.
  */
 export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
-  const guard = async (what: string, work: () => Promise<void>) => {
-    try {
-      await work();
-    } catch (err) {
+  const background = (what: string, work: () => Promise<void>): Promise<void> => {
+    const done = work().catch((err: unknown) => {
       planLog.warn({ errorName: err instanceof Error ? err.name : typeof err }, `plan chain ${what} failed`);
-    }
+    });
+    deps.track?.(done);
+    return Promise.resolve();
+  };
+  const postStopped = async (set: PlanSet, ticket: number, code: string) => {
+    // The `build ticket <t>` command is a GitHub mention (C4): a Jira issue's notice has no hint.
+    const handle = set.issueProvider === "github" ? await deps.mentionHandle().catch(() => null) : null;
+    await postPlanNotice(
+      deps,
+      set,
+      `Plan ${set.number} stopped at ticket ${ticket} (${refusalCode(code)}).${hint(handle, String(ticket), "to continue")}`,
+    );
   };
   return {
     onMerged: (db, pr) =>
-      guard("merge", async () => {
-        if (!pr.merged) return;
-        const coding = await db.codingRun.findFirst({
+      background("merge", async () => {
+        const merging: PlanChainMergeDb = db;
+        const runs = await merging.codingRun.findMany({
           where: {
             repository: pr.repository,
             planSetId: { not: null },
             planTicket: { not: null },
             result: { path: ["pullRequestNumber"], equals: pr.number },
           },
-          orderBy: { run: { startedAt: "desc" } },
-          select: { planTicket: true, planSetId: true },
+          select: { runId: true },
         });
-        if (!coding?.planSetId || coding.planTicket === null) return;
-        const ticket = coding.planTicket;
-        const set = await db.planSet.findUnique({
-          where: { id: coding.planSetId },
+        if (runs.length === 0) return;
+        // Only the PR of the run the chain follows: an older run's PR of the same ticket (before a
+        // reopen, say) never moves a re-approved chain.
+        const set = await merging.planSet.findFirst({
+          where: { chainRunId: { in: runs.map((r) => r.runId) }, chainStopped: null },
           include: {
             documents: {
               where: { removedFromPlan: false, planPath: "plan.md" },
               include: { currentVersion: { select: { markdown: true } } },
             },
-            agent: { select: { ownerId: true, codingProfile: { select: { planDocument: true } } } },
+            agent: { select: { id: true, ownerId: true, codingProfile: { select: { planDocument: true } } } },
           },
         });
-        if (!set || set.chainTicket !== ticket || set.chainStopped !== null || !set.approvedAt) return;
-        if ((await runningPlanTicket(db, set.id)) !== null) return;
+        if (!set?.chainRunId || set.chainTicket === null) return;
         const { documents, agent, ...row } = set;
+        const ticket = set.chainTicket;
+        const following = { id: set.id, chainRunId: set.chainRunId, chainStopped: null };
+        if (!pr.merged) {
+          const stopped = await merging.planSet.updateMany({
+            where: following,
+            data: { chainStopped: "pr_closed", chainRunId: null },
+          });
+          if (stopped.count === 1) await postStopped(row, ticket, "pr_closed");
+          return;
+        }
+        if (!set.approvedAt) return;
+        if ((await runningPlanTicket(merging, set.id)) !== null) return;
         const tickets = ticketTitles(documents[0]?.currentVersion?.markdown ?? "");
         const next = ticket + 1;
         if (!tickets.has(next)) {
-          const cleared = await db.planSet.updateMany({
-            where: { id: set.id, chainTicket: ticket, chainStopped: null },
-            data: { chainTicket: null },
+          const cleared = await merging.planSet.updateMany({
+            where: following,
+            data: { chainTicket: null, chainRunId: null },
           });
           if (cleared.count === 1)
             await postPlanNotice(deps, row, `Plan ${set.number}: all ${tickets.size} tickets built.`);
           return;
         }
-        const claimed = await db.planSet.updateMany({
-          where: { id: set.id, chainTicket: ticket, chainStopped: null, approvedAt: { not: null } },
-          data: { chainTicket: next },
+        const claimed = await merging.planSet.updateMany({
+          where: { ...following, approvedAt: { not: null } },
+          data: { chainTicket: next, chainRunId: null },
         });
         if (claimed.count !== 1) return;
-        let builderAgentId: string | undefined;
-        try {
-          builderAgentId = readPlanDocument(agent.codingProfile?.planDocument, agent.ownerId)?.builderAgentId;
-        } catch {
-          builderAgentId = undefined;
-        }
+        const builderAgentId = await checkedBuilder(merging, agent);
         const started: StartTicketResult = builderAgentId
-          ? await deps
-              .startTicket({ builderAgentId, set: row, ticket: next, starterId: null, trigger: "plan_approved" })
-              .catch((err: unknown): StartTicketResult => {
-                planLog.warn(
-                  { planSetId: set.id, errorName: err instanceof Error ? err.name : typeof err },
-                  "ticket start failed",
-                );
-                return { refused: "start_failed" };
-              })
+          ? await startOrStartFailed(merging, deps, {
+              builderAgentId,
+              set: row,
+              ticket: next,
+              starterId: set.approvedById,
+              trigger: "plan_approved",
+            })
           : { refused: "plan_builder_invalid" };
-        await followRunningTicket(db, set.id, next, started);
-        await reportTicketStart(db, deps, row, next, started, null);
+        await reportTicketStart(merging, deps, row, next, started, null);
       }),
     onTicketFinished: (db, runId) =>
-      guard("finish", async () => {
+      background("finish", async () => {
         const coding = await db.codingRun.findUnique({
           where: { runId },
-          select: { planTicket: true, planSetId: true, run: { select: { status: true } } },
+          select: { planTicket: true, planSetId: true, result: true, run: { select: { status: true } } },
         });
-        if (!coding?.planSetId || coding.planTicket === null || !STOPPING_STATUSES.has(coding.run.status)) return;
+        if (!coding?.planSetId || coding.planTicket === null) return;
+        const status = coding.run.status;
+        const code = STOPPING_STATUSES.has(status)
+          ? status
+          : status === "succeeded" && pullRequestOf(coding.result) === null
+            ? "no_pull_request"
+            : null;
+        if (!code) return;
+        // Only the run the chain follows: a fix round of its PR, or an older run, never stops it.
         const stopped = await db.planSet.updateMany({
-          where: { id: coding.planSetId, chainTicket: coding.planTicket, chainStopped: null },
-          data: { chainStopped: coding.run.status },
+          where: { id: coding.planSetId, chainRunId: runId, chainStopped: null },
+          data: { chainStopped: code, chainRunId: null },
         });
         if (stopped.count !== 1) return;
         const set = await db.planSet.findUniqueOrThrow({ where: { id: coding.planSetId } });
-        // The `build ticket <t>` command is a GitHub mention (C4): a Jira issue's notice has no hint.
-        const handle = set.issueProvider === "github" ? await deps.mentionHandle().catch(() => null) : null;
-        await postPlanNotice(
-          deps,
-          set,
-          `Plan ${set.number} stopped at ticket ${coding.planTicket} (${coding.run.status}).${hint(handle, String(coding.planTicket), "to continue")}`,
-        );
+        await postStopped(set, set.chainTicket ?? coding.planTicket, code);
       }),
     // `@<handle> build ticket <t>` (C4).
     buildTicketFromComment: async () => "none",

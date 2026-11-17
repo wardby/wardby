@@ -9,6 +9,7 @@
 import type { PrismaClient } from "#prisma";
 import { pullRequestWebUrl } from "../coding/code-host.js";
 import { packageAuditDigest } from "../coding/registry/audit-mode.js";
+import { planChainHook } from "./plans/chain-hook.js";
 import { blockingRefusals, collectPackageAudit, collectRunOutcome, isBlockedByRefusals } from "./host-status.js";
 import { logger } from "./logger.js";
 import { dedupeKeys, emitWorkflowEvent, RUN_END_STATUSES, shortReason, type RunEndStatus } from "./workflow-events.js";
@@ -19,24 +20,42 @@ const VERDICTS = new Set(["APPROVE", "CHANGES_REQUESTED", "COMMENT"]);
 
 export type RunEventsDb = Pick<
   PrismaClient,
-  "agent" | "runHostCheck" | "run" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord" | "runHook"
+  | "agent"
+  | "runHostCheck"
+  | "run"
+  | "runBudgetEvent"
+  | "registryFetch"
+  | "registryAuditRecord"
+  | "runHook"
+  | "planSet"
+  | "codingRun"
 >;
 
 export type RunCompletedDb = Pick<
   PrismaClient,
-  "run" | "runHook" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord"
+  "run" | "runHook" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord" | "planSet" | "codingRun"
 >;
 
 const RUN_END_STATUSES_SET = new Set<string>(RUN_END_STATUSES);
 
 /**
- * run_completed for a finished run, for run hooks only (Slack links never
- * match it). Every terminal status of a top-level run; a child run only when
- * a hook on its agent asks for child runs. The payload is metadata: the final
- * text is read at delivery time, never stored on the event. Recorded only
- * when a hook on the agent wants it. Never throws.
+ * The shared run-end event: every write that makes a run terminal calls it
+ * once (the container store's complete/terminate, the runner's finalizers
+ * through emitRunFinishedEvents, the reconciler's lost marking, the coding
+ * queue's timeout, stop_run's own cancel). First the plan build chain hears
+ * of it (a ticket run that ended without success stops its chain; its work
+ * runs in the background). Then run_completed, for run hooks only (Slack
+ * links never match it): every terminal status of a top-level run; a child
+ * run only when a hook on its agent asks for child runs. The payload is
+ * metadata: the final text is read at delivery time, never stored on the
+ * event. Recorded only when a hook on the agent wants it. Never throws.
  */
 export async function emitRunCompletedEvent(db: RunCompletedDb, runId: string): Promise<void> {
+  try {
+    await planChainHook()?.onTicketFinished(db, runId);
+  } catch (err) {
+    log.warn({ errorName: err instanceof Error ? err.name : typeof err, runId }, "plan chain run end failed");
+  }
   try {
     const run = await db.run.findUnique({
       where: { id: runId },

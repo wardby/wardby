@@ -88,6 +88,10 @@ export type ReconcilerDb = Pick<
   | "registryAuditRecord"
   | "agent"
   | "agentRepository"
+  // The plan build chain, from the run-end event and the PR state sync (plans/chain-hook.ts).
+  | "planSet"
+  | "principal"
+  | "resourceGrant"
   | "$transaction"
   | "$queryRaw"
 >;

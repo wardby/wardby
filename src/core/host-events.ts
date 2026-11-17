@@ -84,6 +84,8 @@ export type HostEventDb = Pick<
   | "agentIssueProject"
   // A buildFromPlan builder's approved plan (dispatch, spec §7).
   | "planSet"
+  // The build chain's builder check before the next ticket (plans/approval.ts, R12).
+  | "principal"
   | "documentVersion"
   | "documentFile"
   | "resourceGrant"

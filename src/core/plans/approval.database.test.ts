@@ -6,6 +6,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Principal } from "#prisma";
+import type { Executor } from "../../providers/executor/types.js";
+import { drainCodingQueue } from "../coding-queue.js";
 import { createPrismaClient } from "../db.js";
 import { documentSecretValues } from "../documents/redact.js";
 import { reopenDocument, reviewDocument, submitForReview } from "../documents/review.js";
@@ -15,9 +17,11 @@ import {
   createPlanReviewHook,
   defuseNotice,
   issueNoticePoster,
+  lockPlanSetForTicketStart,
   planApprovedNotice,
   planBuildStartedNotice,
   runningPlanTicket,
+  setPlanChainHook,
   setPlanReviewHook,
   type PlanApprovalDeps,
   type StartTicketInput,
@@ -48,7 +52,8 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
 
   let notices: { issueKey: string | null; text: string }[];
   let starts: StartTicketInput[];
-  let startResult: StartTicketResult;
+  /** "real": the start creates a running ticket run of the set and returns its id. */
+  let startResult: StartTicketResult | "real";
   let handle: string | null;
   let background: Promise<void>[] = [];
   /** Awaits the work the hook started in the background (the notice and the ticket start). */
@@ -61,7 +66,8 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     },
     startTicket: async (input) => {
       starts.push(input);
-      return startResult;
+      if (startResult !== "real") return startResult;
+      return { runId: await ticketRun(input.builderAgentId, input.set.id, input.ticket, "running") };
     },
     mentionHandle: async () => handle,
     secretValues: (agentId) => documentSecretValues(db, cipher, agentId),
@@ -165,6 +171,35 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
   };
   const setRow = (id: string) => db.planSet.findUniqueOrThrow({ where: { id } });
 
+  /** A ticket run of the builder on the set, with the PR it opened (when given). */
+  async function ticketRun(
+    builder: string,
+    planSetId: string | null,
+    planTicket: number | null,
+    status: "pending" | "running" | "succeeded" | "failed" | "cancelled",
+    prNumber?: number,
+  ) {
+    const run = await db.run.create({ data: { agentId: builder, status, trigger: "plan_approved" } });
+    await db.codingRun.create({
+      data: {
+        runId: run.id,
+        task: "t",
+        repository,
+        baseRef: "main",
+        headRef: `wardby/run-${run.id}`,
+        provider: "codex",
+        model: "m",
+        timeoutSec: 60,
+        protectedPaths: [],
+        budgetReservedUsd: 0.1,
+        planSetId,
+        planTicket,
+        ...(prNumber !== undefined ? { result: { pullRequestNumber: prNumber } } : {}),
+      },
+    });
+    return run.id;
+  }
+
   it("notify: the last approval posts one notice with the hint; a reopen and a new approval post again", async () => {
     const { planSetId, documentIds } = await makeSet({ onApproved: "notify" });
     await approve(documentIds["plan.md"]);
@@ -228,7 +263,12 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     });
     expect(starts[0].set).toMatchObject({ id: planSetId, number: 12 });
     expect(starts[0].set).not.toHaveProperty("documents");
-    expect(await setRow(planSetId)).toMatchObject({ chainTicket: 1, chainStopped: null });
+    expect(await setRow(planSetId)).toMatchObject({
+      chainTicket: 1,
+      chainStopped: null,
+      chainRunId: "run-1",
+      approvedById: ada.id,
+    });
     expect(notices.map((x) => x.text)).toEqual([`${APPROVED}\nPlan 12: building ticket 1, started by Ada.`]);
   });
 
@@ -510,70 +550,66 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
   describe("build chain", () => {
     const chain = () => createPlanChainHook(deps);
     let pr = 4000;
-    /** A ticket run of the builder on the set, with the PR it opened (when given). */
-    async function ticketRun(
-      builder: string,
-      planSetId: string | null,
-      planTicket: number | null,
-      status: "pending" | "running" | "succeeded" | "failed" | "cancelled",
-      prNumber?: number,
-    ) {
-      const run = await db.run.create({ data: { agentId: builder, status, trigger: "plan_approved" } });
-      await db.codingRun.create({
-        data: {
-          runId: run.id,
-          task: "t",
-          repository,
-          baseRef: "main",
-          headRef: `wardby/run-${run.id}`,
-          provider: "codex",
-          model: "m",
-          timeoutSec: 60,
-          protectedPaths: [],
-          budgetReservedUsd: 0.1,
-          planSetId,
-          planTicket,
-          ...(prNumber !== undefined ? { result: { pullRequestNumber: prNumber } } : {}),
-        },
-      });
-      return run.id;
-    }
-    /** A "build" plan approved with ticket 1 started; the notices and starts of the approval cleared. */
+    beforeEach(() => {
+      startResult = "real";
+    });
+    afterEach(() => setPlanChainHook(undefined));
+    /** A "build" plan approved by Ada, ticket 1's run started; the notices and starts of the approval cleared. */
     async function building() {
       const builder = await makeAgent({ buildFromPlan: true });
       const made = await makeSet({ onApproved: "build", builderAgentId: builder });
       await approveAll(made.documentIds);
-      expect(await setRow(made.planSetId)).toMatchObject({ chainTicket: 1, chainStopped: null });
+      const row = await setRow(made.planSetId);
+      expect(row).toMatchObject({ chainTicket: 1, chainStopped: null, approvedById: ada.id });
+      expect(row.chainRunId).not.toBeNull();
       notices = [];
       starts = [];
-      return { builder, ...made };
+      return { builder, run1: row.chainRunId!, ...made };
     }
-    const merged = (number: number, isMerged = true) => chain().onMerged(db, { repository, number, merged: isMerged });
+    /** The run ends; a succeeded one opened `prNumber` (when given). */
+    async function finish(runId: string, status: "succeeded" | "failed" | "cancelled", prNumber?: number) {
+      await db.run.update({ where: { id: runId }, data: { status, finishedAt: new Date() } });
+      if (prNumber !== undefined) {
+        await db.codingRun.update({ where: { runId }, data: { result: { pullRequestNumber: prNumber } } });
+      }
+    }
+    const closed = async (number: number, isMerged = true) => {
+      await chain().onMerged(db, { repository, number, merged: isMerged });
+      await settle();
+    };
+    const merged = (number: number) => closed(number, true);
+    const finished = async (runId: string) => {
+      await chain().onTicketFinished(db, runId);
+      await settle();
+    };
 
-    it("ticket 1 merged starts ticket 2; ticket 2 merged ends the chain", async () => {
-      const { builder, planSetId } = await building();
+    it("ticket 1 merged starts ticket 2 as the approver; ticket 2 merged ends the chain", async () => {
+      const { builder, planSetId, run1 } = await building();
       const first = ++pr;
-      await ticketRun(builder, planSetId, 1, "succeeded", first);
+      await finish(run1, "succeeded", first);
       await merged(first);
       expect(starts).toHaveLength(1);
       expect(starts[0]).toMatchObject({
         builderAgentId: builder,
         ticket: 2,
         trigger: "plan_approved",
-        starterId: null,
+        // Every ticket the approval starts records the approver as its starter.
+        starterId: ada.id,
       });
       expect(starts[0].set).toMatchObject({ id: planSetId, number: 12 });
-      expect((await setRow(planSetId)).chainTicket).toBe(2);
+      const row = await setRow(planSetId);
+      expect(row.chainTicket).toBe(2);
+      expect(row.chainRunId).not.toBe(run1);
       expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 2."]);
 
       notices = [];
       starts = [];
       const second = ++pr;
-      await ticketRun(builder, planSetId, 2, "succeeded", second);
+      await finish(row.chainRunId!, "succeeded", second);
       await merged(second);
       expect(starts).toEqual([]);
       expect(notices.map((x) => x.text)).toEqual(["Plan 12: all 2 tickets built."]);
-      expect(await setRow(planSetId)).toMatchObject({ chainTicket: null, chainStopped: null });
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: null, chainStopped: null, chainRunId: null });
       // A repeat delivery of the last merge posts nothing more.
       await merged(second);
       expect(notices).toHaveLength(1);
@@ -584,20 +620,64 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
       }
     });
 
-    it("a closed but unmerged PR does nothing", async () => {
-      const { builder, planSetId } = await building();
-      const number = ++pr;
-      await ticketRun(builder, planSetId, 1, "succeeded", number);
-      await merged(number, false);
+    it("a stale PR of the current ticket from before a reopen never moves the re-approved chain", async () => {
+      const { planSetId, documentIds, run1 } = await building();
+      const old = ++pr;
+      await finish(run1, "succeeded", old);
+      await reopenDocument(db, cipher, { documentId: documentIds["api.md"], viewer: as(owner) });
+      expect(await setRow(planSetId)).toMatchObject({
+        approvedAt: null,
+        approvedById: null,
+        chainStopped: "reopened",
+        chainRunId: null,
+      });
+      await approve(documentIds["api.md"]);
+      expect(starts.map((x) => x.ticket)).toEqual([1]);
+      const again = await setRow(planSetId);
+      expect(again).toMatchObject({ chainTicket: 1, chainStopped: null, approvedById: ada.id });
+      expect(again.chainRunId).not.toBe(run1);
+
+      starts = [];
+      notices = [];
+      await merged(old);
       expect(starts).toEqual([]);
       expect(notices).toEqual([]);
-      expect((await setRow(planSetId)).chainTicket).toBe(1);
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 1, chainRunId: again.chainRunId });
+
+      const fresh = ++pr;
+      await finish(again.chainRunId!, "succeeded", fresh);
+      await merged(fresh);
+      expect(starts.map((x) => x.ticket)).toEqual([2]);
+      expect((await setRow(planSetId)).chainTicket).toBe(2);
+    });
+
+    it("the current ticket's PR closed unmerged stops the chain; another PR's close does nothing", async () => {
+      const { builder, planSetId, run1 } = await building();
+      const other = ++pr;
+      await ticketRun(builder, planSetId, 1, "succeeded", other);
+      await closed(other, false);
+      expect(notices).toEqual([]);
+      expect((await setRow(planSetId)).chainStopped).toBeNull();
+
+      const number = ++pr;
+      await finish(run1, "succeeded", number);
+      await closed(number, false);
+      expect(starts).toEqual([]);
+      expect(notices.map((x) => x.text)).toEqual([
+        "Plan 12 stopped at ticket 1 (pr_closed). Comment `@wardby build ticket 1` to continue.",
+      ]);
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 1, chainStopped: "pr_closed", chainRunId: null });
+      // A repeat (the state sync settling the same close) posts nothing more; a later merge starts nothing.
+      await closed(number, false);
+      await merged(number);
+      expect(notices).toHaveLength(1);
+      expect(starts).toEqual([]);
     });
 
     it("two deliveries of the same merge start one run", async () => {
-      const { builder, planSetId } = await building();
+      const { planSetId, run1 } = await building();
       const number = ++pr;
-      await ticketRun(builder, planSetId, 1, "succeeded", number);
+      await finish(run1, "succeeded", number);
       await Promise.all([merged(number), merged(number)]);
       expect(starts).toHaveLength(1);
       expect(notices).toHaveLength(1);
@@ -605,43 +685,57 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     });
 
     it("a failed ticket run stops the chain; a later merge of its PR starts nothing", async () => {
-      const { builder, planSetId } = await building();
+      const { planSetId, run1 } = await building();
       const number = ++pr;
-      const runId = await ticketRun(builder, planSetId, 1, "failed", number);
-      await chain().onTicketFinished(db, runId);
+      await finish(run1, "failed", number);
+      await finished(run1);
       expect(notices.map((x) => x.text)).toEqual([
         "Plan 12 stopped at ticket 1 (failed). Comment `@wardby build ticket 1` to continue.",
       ]);
-      expect((await setRow(planSetId)).chainStopped).toBe("failed");
+      expect(await setRow(planSetId)).toMatchObject({ chainStopped: "failed", chainRunId: null });
       // A second terminal call (a repeat) posts nothing more.
-      await chain().onTicketFinished(db, runId);
+      await finished(run1);
       expect(notices).toHaveLength(1);
       await merged(number);
       expect(starts).toEqual([]);
       expect(notices).toHaveLength(1);
     });
 
-    it("a stop without an App handle has no hint; a succeeded or non-ticket run does nothing", async () => {
-      const { builder, planSetId } = await building();
-      const succeeded = await ticketRun(builder, planSetId, 1, "succeeded");
-      await chain().onTicketFinished(db, succeeded);
+    it("a ticket run that succeeds without a PR stops the chain with no_pull_request", async () => {
+      const { planSetId, run1 } = await building();
+      await finish(run1, "succeeded");
+      await finished(run1);
+      expect(notices.map((x) => x.text)).toEqual([
+        "Plan 12 stopped at ticket 1 (no_pull_request). Comment `@wardby build ticket 1` to continue.",
+      ]);
+      expect(await setRow(planSetId)).toMatchObject({ chainStopped: "no_pull_request", chainRunId: null });
+    });
+
+    it("a stop without an App handle has no hint; a succeeded run with a PR, or another run, does nothing", async () => {
+      const { builder, planSetId, run1 } = await building();
+      await finish(run1, "succeeded", ++pr);
+      await finished(run1);
       const planless = await ticketRun(builder, null, null, "failed");
-      await chain().onTicketFinished(db, planless);
+      await finished(planless);
       const noTicket = await ticketRun(builder, planSetId, null, "failed");
-      await chain().onTicketFinished(db, noTicket);
+      await finished(noTicket);
+      // A run of the set that is not the chain's run (a fix round of the ticket's PR, say).
+      const other = await ticketRun(builder, planSetId, 1, "failed");
+      await finished(other);
       expect(notices).toEqual([]);
       expect((await setRow(planSetId)).chainStopped).toBeNull();
 
       handle = null;
-      const cancelled = await ticketRun(builder, planSetId, 1, "cancelled");
-      await chain().onTicketFinished(db, cancelled);
+      const second = await building();
+      await finish(second.run1, "cancelled");
+      await finished(second.run1);
       expect(notices.map((x) => x.text)).toEqual(["Plan 12 stopped at ticket 1 (cancelled)."]);
     });
 
     it("a reopen of any document stops the chain before its next ticket", async () => {
-      const { builder, planSetId, documentIds } = await building();
+      const { planSetId, documentIds, run1 } = await building();
       const number = ++pr;
-      await ticketRun(builder, planSetId, 1, "succeeded", number);
+      await finish(run1, "succeeded", number);
       await reopenDocument(db, cipher, { documentId: documentIds["api.md"], viewer: as(owner) });
       expect((await setRow(planSetId)).chainStopped).toBe("reopened");
       await merged(number);
@@ -651,9 +745,9 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     });
 
     it("never more than one run at a time: a pending ticket run of the set holds the next start", async () => {
-      const { builder, planSetId } = await building();
+      const { builder, planSetId, run1 } = await building();
       const number = ++pr;
-      await ticketRun(builder, planSetId, 1, "succeeded", number);
+      await finish(run1, "succeeded", number);
       await ticketRun(builder, planSetId, 2, "pending");
       await merged(number);
       expect(starts).toEqual([]);
@@ -661,28 +755,143 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
       expect((await setRow(planSetId)).chainTicket).toBe(1);
     });
 
-    it("an approval that finds ticket 2 already running follows that ticket: its merge ends the chain", async () => {
+    it("an approval that finds ticket 2 already running follows that run: its merge ends the chain", async () => {
       const builder = await makeAgent({ buildFromPlan: true });
-      startResult = { running: 2 };
       const { planSetId, documentIds } = await makeSet({ onApproved: "build", builderAgentId: builder });
+      const running = await ticketRun(builder, planSetId, 2, "running");
+      startResult = { running: 2 };
       await approveAll(documentIds);
-      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: null });
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: null, chainRunId: running });
       notices = [];
       const number = ++pr;
-      await ticketRun(builder, planSetId, 2, "succeeded", number);
+      await finish(running, "succeeded", number);
       await merged(number);
       expect(starts).toHaveLength(1);
       expect(notices.map((x) => x.text)).toEqual(["Plan 12: all 2 tickets built."]);
     });
 
     it("a next start that throws or is refused stops the chain with a notice", async () => {
-      const { builder, planSetId } = await building();
+      const first = await building();
       const number = ++pr;
-      await ticketRun(builder, planSetId, 1, "succeeded", number);
+      await finish(first.run1, "succeeded", number);
       vi.spyOn(deps, "startTicket").mockRejectedValueOnce(new Error(`boom ${FAKE_SECRET}`));
       await merged(number);
-      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: "start_failed" });
+      expect(await setRow(first.planSetId)).toMatchObject({
+        chainTicket: 2,
+        chainStopped: "start_failed",
+        chainRunId: null,
+      });
       expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (start_failed)."]);
+
+      notices = [];
+      const second = await building();
+      const next = ++pr;
+      await finish(second.run1, "succeeded", next);
+      startResult = { refused: "plan_not_approved" };
+      await merged(next);
+      expect(await setRow(second.planSetId)).toMatchObject({
+        chainTicket: 2,
+        chainStopped: "plan_not_approved",
+        chainRunId: null,
+      });
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (plan_not_approved)."]);
+    });
+
+    it("the builder is checked again before every chain start: plan_builder_invalid starts nothing", async () => {
+      const { builder, planSetId, run1 } = await building();
+      const number = ++pr;
+      await finish(run1, "succeeded", number);
+      await db.codingAgentProfile.update({ where: { agentId: builder }, data: { buildFromPlan: false } });
+      await merged(number);
+      expect(starts).toEqual([]);
+      expect(await setRow(planSetId)).toMatchObject({ chainStopped: "plan_builder_invalid", chainRunId: null });
+      expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (plan_builder_invalid)."]);
+    });
+
+    it("the merge webhook does not wait for the next start", async () => {
+      const { planSetId, run1 } = await building();
+      const number = ++pr;
+      await finish(run1, "succeeded", number);
+      let release!: (result: StartTicketResult) => void;
+      vi.spyOn(deps, "startTicket").mockImplementationOnce(
+        () => new Promise<StartTicketResult>((resolve) => (release = resolve)),
+      );
+      const handled = chain()
+        .onMerged(db, { repository, number, merged: true })
+        .then(() => "returned" as const);
+      const timeout = new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 3_000));
+      expect(await Promise.race([handled, timeout])).toBe("returned");
+      await vi.waitFor(() => expect(release).toBeDefined());
+      release({ refused: "plan_not_approved" });
+      await settle();
+      expect((await setRow(planSetId)).chainStopped).toBe("plan_not_approved");
+    });
+
+    it("a queue timeout of the chain's run stops the chain (the shared run-end event)", async () => {
+      setPlanChainHook(chain());
+      const { planSetId, run1 } = await building();
+      await db.run.update({ where: { id: run1 }, data: { status: "pending" } });
+      await db.codingRun.update({ where: { runId: run1 }, data: { queuedAt: new Date(Date.now() - 3_600_000) } });
+      const executor = { start: vi.fn() } as unknown as Executor;
+      const drained = await drainCodingQueue({ db, executor, maxConcurrent: 0, queueTimeoutSec: 60 });
+      expect(drained.timedOut).toBeGreaterThanOrEqual(1);
+      await settle();
+      expect(await setRow(planSetId)).toMatchObject({ chainStopped: "failed", chainRunId: null });
+      expect(notices.map((x) => x.text)).toEqual([
+        "Plan 12 stopped at ticket 1 (failed). Comment `@wardby build ticket 1` to continue.",
+      ]);
+    });
+
+    it("lockPlanSetForTicketStart: under the set's row lock, an approved set with no ticket run in flight", async () => {
+      const builder = await makeAgent({ buildFromPlan: true });
+      const { planSetId, documentIds } = await makeSet({ onApproved: "notify" });
+      const guard = () => db.$transaction((tx) => lockPlanSetForTicketStart(tx, planSetId));
+      expect(await guard()).toBe(false);
+      await approveAll(documentIds);
+      expect(await guard()).toBe(true);
+      const pending = await ticketRun(builder, planSetId, 1, "pending");
+      expect(await guard()).toBe(false);
+      await finish(pending, "failed");
+      expect(await guard()).toBe(true);
+
+      // A start that holds the lock and persists its run: a start waiting on the lock then sees that run.
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      const holder = db.$transaction(
+        async (tx) => {
+          expect(await lockPlanSetForTicketStart(tx, planSetId)).toBe(true);
+          locked();
+          await released;
+          await tx.run.create({
+            data: { id: `held-${s}`, agentId: builder, status: "pending", trigger: "plan_approved" },
+          });
+          await tx.codingRun.create({
+            data: {
+              runId: `held-${s}`,
+              task: "t",
+              repository,
+              baseRef: "main",
+              headRef: `wardby/run-held-${s}`,
+              provider: "codex",
+              model: "m",
+              timeoutSec: 60,
+              protectedPaths: [],
+              budgetReservedUsd: 0.1,
+              planSetId,
+              planTicket: 2,
+            },
+          });
+        },
+        { timeout: 20_000 },
+      );
+      await isLocked;
+      const waiting = guard();
+      await waitForLockWaiter();
+      release();
+      await holder;
+      expect(await waiting).toBe(false);
     });
   });
 

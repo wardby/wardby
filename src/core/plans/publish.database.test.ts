@@ -410,21 +410,16 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     });
   });
 
-  it("C3 hook: every run end goes to the build chain first, a revision run's too", async () => {
+  it("C3: the plan run-end hook leaves the build chain to the shared run-end event", async () => {
     const onTicketFinished = vi.fn(async () => undefined);
     setPlanChainHook({ onMerged: vi.fn(), onTicketFinished, buildTicketFromComment: vi.fn() });
     try {
       const hook = planRunFinishedHook(() => ({ db, cipher, origin: null }));
       const agentId = await planner();
-      const revision = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n" }]);
-      await db.codingRunPlanFile.create({
-        data: { runId: revision, direction: "input", path: "plan.md", content: "# Plan\n" },
-      });
-      await hook(revision);
-      expect(onTicketFinished).toHaveBeenCalledTimes(1);
-      const [calledDb, calledRunId] = onTicketFinished.mock.calls[0] as unknown[];
-      expect(calledDb).toBe(db);
-      expect(calledRunId).toBe(revision);
+      const runId = await makeRun(agentId, [{ path: "plan.md", content: "# Plan\n" }]);
+      await hook(runId);
+      // emitRunCompletedEvent, which every terminal write reaches, calls it: never a second time here.
+      expect(onTicketFinished).not.toHaveBeenCalled();
     } finally {
       setPlanChainHook(undefined);
     }
