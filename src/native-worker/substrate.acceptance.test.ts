@@ -119,6 +119,7 @@ describe.skipIf(!enabled)("native sandbox on Substrate (acceptance, launcher onl
         config,
         // No session exists for these runs.
         sessionActive: async () => false,
+        workerExits: { exitCode: async () => undefined },
         goldenWaitMs: GOLDEN_TIMEOUT_MS,
         canaries,
       });

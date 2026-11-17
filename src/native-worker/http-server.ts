@@ -17,6 +17,10 @@
  *                                  a Substrate startup canary's verdict (substrate-canary.ts). 404 when the
  *                                  listener was started without a canary store.
  *
+ *   POST /native-gateway/v1/exit   body { code } (at most MAX_EXIT_REQUEST_BYTES); the same bearer auth as the
+ *                                  input route → { ok: true, result: null }, 401, or 400 { ok: false }: a
+ *                                  Substrate worker's exit code, from its supervisor (substrate-supervisor.ts)
+ *
  *   POST /coding-mcp               a coding run's MCP calls, forwarded by the coding proxy's /mcp route
  *                                  (src/core/coding-mcp.ts); its own auth: the run's MCP token, not a
  *                                  gateway capability. 404 when the listener was started without it.
@@ -28,15 +32,17 @@ import { parseListenAddress, type ListenAddress } from "../core/listen-address.j
 import { logger } from "../core/logger.js";
 import { HTTP_LIMITS, HttpBoundaryError, readBody as readLimitedBody } from "../mcp/transport/http-limits.js";
 import { logUnexpectedError } from "./gateway.js";
-import { serveGatewayInput, serveGatewayRequest, type GatewayServerDeps } from "./gateway-server.js";
+import { serveGatewayInput, serveGatewayRequest, serveWorkerExit, type GatewayServerDeps } from "./gateway-server.js";
 import {
   GATEWAY_INTERNAL_MESSAGE,
   GatewayError,
   MAX_MESSAGE_BYTES,
   NATIVE_GATEWAY_CALL_PATH,
   NATIVE_GATEWAY_CANARY_PATH,
+  NATIVE_GATEWAY_EXIT_PATH,
   NATIVE_GATEWAY_INPUT_PATH,
   NativeCanaryReportSchema,
+  NativeWorkerExitSchema,
   toGatewayError,
 } from "./protocol.js";
 import { canaryCapabilityHash, type NativeCanaryStore } from "./substrate-canary-store.js";
@@ -142,6 +148,45 @@ async function serveCanary(
   res.end();
 }
 
+/** The exit route's body is one small integer; anything longer is refused. */
+export const MAX_EXIT_REQUEST_BYTES = 256;
+
+/**
+ * POST /native-gateway/v1/exit: reads at most MAX_EXIT_REQUEST_BYTES, refuses anything but
+ * `{ code }` (an integer 0-255) with 400, then serveWorkerExit (auth, record once). The body is
+ * never logged.
+ */
+async function serveExit(req: IncomingMessage, res: ServerResponse, deps: GatewayServerDeps): Promise<void> {
+  const text = await readSmallBody(req, MAX_EXIT_REQUEST_BYTES);
+  let parsed: ReturnType<typeof NativeWorkerExitSchema.safeParse> | undefined;
+  if (text !== undefined) {
+    try {
+      parsed = NativeWorkerExitSchema.safeParse(JSON.parse(text));
+    } catch {
+      parsed = undefined;
+    }
+  }
+  res.setHeader("content-type", "application/json");
+  if (!parsed?.success) {
+    if (text === undefined) {
+      // Cut off: answer, then drop the connection rather than read the rest.
+      res.setHeader("connection", "close");
+      res.on("finish", () => req.destroy());
+    }
+    res.writeHead(400);
+    res.end(JSON.stringify({ ok: false }));
+    return;
+  }
+  const response = await serveWorkerExit(deps, req.headers.authorization, parsed.data.code);
+  // The route only ever answers JSON.
+  const { status, body } =
+    response.kind === "json"
+      ? response
+      : { status: 500, body: { ok: false, error: { code: "internal", message: GATEWAY_INTERNAL_MESSAGE } } };
+  res.writeHead(status);
+  res.end(JSON.stringify(body));
+}
+
 /** How often, at most, the canary route logs the reports no row took. */
 const UNRECORDED_CANARY_LOG_MS = 60_000;
 
@@ -206,6 +251,10 @@ export function createGatewayServer(deps: GatewayServerDeps): Server {
         if (response.kind === "json") send(response.status, response.body);
         // The route only ever answers JSON; anything else is a fault, answered rather than left hanging.
         else send(500, { ok: false, error: { code: "internal", message: GATEWAY_INTERNAL_MESSAGE } });
+        return;
+      }
+      if (req.method === "POST" && req.url === NATIVE_GATEWAY_EXIT_PATH) {
+        await serveExit(req, res, deps);
         return;
       }
       if (req.method === "POST" && req.url === NATIVE_GATEWAY_CANARY_PATH && deps.canaries) {

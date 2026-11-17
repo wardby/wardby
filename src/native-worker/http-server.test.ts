@@ -10,11 +10,16 @@ const streamFailure = vi.hoisted(() => ({
   error: undefined as unknown as Error,
   handlerThrows: undefined as Error | undefined,
 }));
+const exitRoute = vi.hoisted(() => ({ calls: [] as unknown[][] }));
 const inputRoute = vi.hoisted(() => {
   const response: unknown = { kind: "json", status: 200, body: { ok: true, result: { input: {} } } };
   return { response, delayMs: 0, calls: 0 };
 });
 vi.mock("./gateway-server.js", () => ({
+  serveWorkerExit: async (...args: unknown[]) => {
+    exitRoute.calls.push(args);
+    return { kind: "json", status: 200, body: { ok: true, result: null } };
+  },
   serveGatewayInput: async () => {
     inputRoute.calls += 1;
     await new Promise((done) => setTimeout(done, inputRoute.delayMs));
@@ -33,10 +38,21 @@ vi.mock("./gateway-server.js", () => ({
   },
 }));
 
-const { createGatewayServer, httpLog, MAX_CANARY_REQUEST_BYTES, MAX_INPUT_REQUEST_BYTES, NATIVE_GATEWAY_PATH } =
-  await import("./http-server.js");
-const { GATEWAY_INTERNAL_MESSAGE, GatewayError, NATIVE_GATEWAY_CANARY_PATH, NATIVE_GATEWAY_INPUT_PATH } =
-  await import("./protocol.js");
+const {
+  createGatewayServer,
+  httpLog,
+  MAX_CANARY_REQUEST_BYTES,
+  MAX_EXIT_REQUEST_BYTES,
+  MAX_INPUT_REQUEST_BYTES,
+  NATIVE_GATEWAY_PATH,
+} = await import("./http-server.js");
+const {
+  GATEWAY_INTERNAL_MESSAGE,
+  GatewayError,
+  NATIVE_GATEWAY_CANARY_PATH,
+  NATIVE_GATEWAY_EXIT_PATH,
+  NATIVE_GATEWAY_INPUT_PATH,
+} = await import("./protocol.js");
 const { canaryCapabilityHash } = await import("./substrate-canary-store.js");
 
 let close: (() => Promise<void>) | undefined;
@@ -47,6 +63,7 @@ afterEach(async () => {
   inputRoute.response = { kind: "json", status: 200, body: { ok: true, result: { input: {} } } };
   inputRoute.delayMs = 0;
   inputRoute.calls = 0;
+  exitRoute.calls = [];
 });
 
 async function listenOn(deps: object = {}): Promise<string> {
@@ -161,6 +178,52 @@ describe("native gateway HTTP listener, input route", () => {
       (err: unknown) => (err instanceof Error && err.name === "TimeoutError" ? "timeout" : "closed"),
     );
     expect(outcome).toBe("closed");
+  });
+});
+
+describe("native gateway HTTP listener, exit route", () => {
+  // Obviously fake: the run's capability on the supervisor's report. The route never logs it.
+  const FAKE_NATIVE_CAP = "fake_native_capability_" + "1".repeat(21);
+  const post = (base: string, body: string, headers: Record<string, string> = {}) =>
+    fetch(`${base}${NATIVE_GATEWAY_EXIT_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body,
+      signal: AbortSignal.timeout(5_000),
+    });
+
+  it("passes the bearer and the code to the gateway, and answers its JSON, logging nothing", async () => {
+    const info = vi.spyOn(httpLog, "info");
+    const warn = vi.spyOn(httpLog, "warn");
+    onTestFinished(() => {
+      info.mockRestore();
+      warn.mockRestore();
+    });
+    const base = await listenOn({});
+    const response = await post(base, JSON.stringify({ code: 1 }), { authorization: `Bearer ${FAKE_NATIVE_CAP}` });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, result: null });
+    expect(exitRoute.calls).toHaveLength(1);
+    expect(exitRoute.calls[0].slice(1)).toEqual([`Bearer ${FAKE_NATIVE_CAP}`, 1]);
+    expect(info).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an extra field", JSON.stringify({ code: 1, extra: 1 })],
+    ["a code that is not an integer", JSON.stringify({ code: 1.5 })],
+    ["a negative code", JSON.stringify({ code: -1 })],
+    ["a code above 255", JSON.stringify({ code: 256 })],
+    ["a code as text", JSON.stringify({ code: "1" })],
+    ["no code", "{}"],
+    ["a body that is not JSON", "1"],
+    ["a body past its bound", JSON.stringify({ code: 1, pad: "x".repeat(2 * MAX_EXIT_REQUEST_BYTES) })],
+  ])("refuses %s with 400 and asks the gateway nothing", async (_name, body) => {
+    const base = await listenOn({});
+    const response = await post(base, body, { authorization: `Bearer ${FAKE_NATIVE_CAP}` });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ ok: false });
+    expect(exitRoute.calls).toEqual([]);
   });
 });
 

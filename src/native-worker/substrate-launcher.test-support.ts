@@ -198,6 +198,8 @@ export function nativeHarness(options: NativeHarnessOptions = {}) {
   const api = new RecordingSubstrateApi({ workers: 1, ...options.fake }, order);
   const secrets = new OrderedSecrets(order);
   const sessions = new Map<string, boolean>();
+  /** The exit codes the gateway recorded, by run (the supervisor's reports). */
+  const exits = new Map<string, number>();
   let clock = 1_000_000;
   const sleeps: number[] = [];
   const failures: NativeSubstrateCallFailure[] = [];
@@ -216,6 +218,7 @@ export function nativeHarness(options: NativeHarnessOptions = {}) {
     secrets,
     config,
     sessionActive: async (runId) => sessions.get(runId) ?? false,
+    workerExits: { exitCode: async (runId) => exits.get(runId) },
     goldenWaitMs: options.goldenWaitMs ?? 60_000,
     canaries,
     pollMs: 5,
@@ -235,6 +238,7 @@ export function nativeHarness(options: NativeHarnessOptions = {}) {
     api,
     secrets,
     sessions,
+    exits,
     launcher,
     config,
     canaries,

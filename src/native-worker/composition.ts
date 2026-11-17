@@ -96,6 +96,8 @@ export function buildNativeSandboxExecutor(options: {
             sessionActive: async (runId) =>
               (await options.db.nativeGatewaySession.findUnique({ where: { runId }, select: { status: true } }))
                 ?.status === "active",
+            // Substrate never shows the worker's exit: its supervisor reports it, the gateway records it.
+            workerExits: { exitCode: (runId) => new PrismaGatewayLedger(options.db).workerExitCode(runId) },
             goldenWaitMs: config.goldenWaitSec * 1000,
             // The startup canary's verdict, recorded by the gateway's canary route.
             canaries: new PrismaNativeCanaryStore(options.db),

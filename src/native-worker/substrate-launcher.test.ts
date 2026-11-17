@@ -379,6 +379,50 @@ describe("SubstrateNativeWorkerLauncher state", () => {
     await handle.exited;
   });
 
+  it("reports the exit code the supervisor reported, while the actor itself stays RUNNING", async () => {
+    const h = nativeHarness();
+    h.sessions.set("run-1", true);
+    const handle = await h.launcher.launch(h.input());
+    expect(await h.launcher.inspect("run-1")).toEqual({ state: "running" });
+    h.exits.set("run-1", 1);
+    expect(h.api.actors.get(h.actorKey)?.state).toBe("RUNNING");
+    expect(await h.launcher.inspect("run-1")).toEqual({ state: "exited", exitCode: 1 });
+    // A reported exit stands whether or not the session has ended.
+    h.sessions.set("run-1", false);
+    expect(await h.launcher.inspect("run-1")).toEqual({ state: "exited", exitCode: 1 });
+    h.exits.set("run-1", 0);
+    expect(await h.launcher.inspect("run-1")).toEqual({ state: "exited", exitCode: 0 });
+    await handle.exited;
+  });
+
+  it("its handle resolves with a reported non-zero exit and logs fixed fields only", async () => {
+    const h = nativeHarness();
+    h.sessions.set("run-1", true);
+    const handle = await h.launcher.launch(h.input());
+    h.exits.set("run-1", 137);
+    expect(await handle.exited).toBe(137);
+    expect(substrateWarn).toHaveBeenCalledTimes(1);
+    expect(substrateWarn.mock.calls[0][0]).toEqual({ runId: "run-1", code: 137, stderrTailOmitted: "not_available" });
+    expect(JSON.stringify(substrateWarn.mock.calls)).not.toContain(FAKE_NATIVE_CAP);
+  });
+
+  it("rejects with a fixed code when the recorded exit cannot be read", async () => {
+    const h = nativeHarness({
+      launcher: {
+        workerExits: {
+          exitCode: async () => {
+            throw new Error("prisma says " + FAKE_NATIVE_CAP);
+          },
+        },
+      },
+    });
+    await h.api.ensureActorTemplate(nativeTemplate(h.config));
+    await h.api.createActor(h.config.atespace, h.actor, nativeTemplate(h.config).name);
+    const err = (await h.launcher.inspect("run-1").catch((e: unknown) => e)) as Error;
+    expect(err.message).toBe("native_sandbox_substrate_failed: workerExit: unexpected");
+    expect(err.cause).toBeUndefined();
+  });
+
   it("rejects with a fixed code when the actor cannot be read", async () => {
     const h = nativeHarness();
     h.api.failNext("getActor", new SubstrateUnavailableError("quoting " + FAKE_NATIVE_CAP));

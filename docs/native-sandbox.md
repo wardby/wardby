@@ -468,6 +468,15 @@ How a run starts:
   a call, with no body; the gateway reads at most 1 KiB of the request body and
   cuts off the rest) once its actor is running. Neither the template nor the policy
   carries anything of a run, and nothing secret: Substrate logs both.
+- The worker's first process is a small supervisor that runs the worker as its
+  child. Substrate's actor state does not show a process exit (an actor whose
+  first process exits stays `RUNNING`), so when the worker exits the supervisor
+  reports its exit code to the gateway (`POST /native-gateway/v1/exit`, the
+  same authentication as the input route, a body of at most 256 bytes, with no
+  output), which records it once on the run's session; a signal is reported as
+  128 plus its number. The supervisor then stays up until the actor is deleted.
+  A worker whose exit is never recorded (the report could not reach the
+  gateway) is stopped at the run's deadline.
 - When the run ends Wardby deletes the policy, the actor and the Secret.
 
 ### Substrate requirements
@@ -509,7 +518,9 @@ native runs do not use:
   records when a run's worker was removed),
   `20261128000001_native_substrate_canary` (the startup check's results, written
   by the gateway) and `20261129000000_native_substrate_canary_capability` (the
-  hash of each check's one-use capability). Then start the new gateway, then the new server.
+  hash of each check's one-use capability) and
+  `20261129000001_native_gateway_worker_exit` (a Substrate worker's exit code,
+  reported by its supervisor). Then start the new gateway, then the new server.
 
 ### Configure the server for Substrate
 
@@ -1017,7 +1028,13 @@ skipped unless its script sets its flag:
 - **Substrate: a worker exited non-zero.** The server logs
   `native worker exited non-zero` with `stderrTailOmitted: "not_available"`:
   Substrate gives the server no output to tail. The worker's own redacted
-  output is in the actor's log in Substrate.
+  output is in the actor's log in Substrate, followed by the supervisor's line
+  `native sandbox worker exited: code <n>, exit <outcome>`. The outcome is
+  `reported` (the gateway recorded it, which logs
+  `native worker exit reported` with the run id and code), `refused`,
+  `unreported` (the gateway could not be reached after four tries: the run
+  ends at its deadline instead), or `skipped` (a startup check actor, or no
+  `NATIVE_GATEWAY_URL`).
 - **Substrate: call failures.** Failed Substrate calls log
   `substrate_call_failed` (module `native-substrate-launcher`) with the run id,
   the call and a fixed error code, never Substrate's message. A template that

@@ -13,6 +13,7 @@ import {
   runSecretValues,
   serveGatewayInput,
   serveGatewayRequest,
+  serveWorkerExit,
   streamModel,
 } from "./gateway-server.js";
 import {
@@ -681,6 +682,95 @@ describe("serveGatewayInput", () => {
     let response;
     try {
       response = await serveGatewayInput(deps, `Bearer ${FAKE_NATIVE_CAP}`);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(response).toMatchObject({ status: 500 });
+    expect(JSON.stringify(response)).not.toContain(FAKE_NATIVE_CAP);
+    expect(JSON.stringify(logged)).not.toContain(FAKE_NATIVE_CAP);
+  });
+});
+
+describe("serveWorkerExit", () => {
+  // Obviously fake: the run's capability, as the egress gateway puts it on the supervisor's report.
+  const FAKE_NATIVE_CAP = "fake_native_capability_value_0011";
+  const depsFor = (row: Record<string, unknown> | null, recorded = 1) => {
+    const findUnique = vi.fn(async (_args: unknown) => row);
+    const updateMany = vi.fn(async (_args: unknown) => ({ count: recorded }));
+    const deps = {
+      db: { nativeGatewaySession: { findUnique, updateMany } },
+      providers: {},
+    } as unknown as Parameters<typeof serveWorkerExit>[0];
+    return { deps, findUnique, updateMany };
+  };
+  const session = (over: Record<string, unknown> = {}) => ({
+    id: "sess-1",
+    runId: "run-1",
+    status: "active",
+    deadlineAt: new Date(Date.now() + 60_000),
+    budgetUsd: 1,
+    snapshot: {},
+    networkReadyAt: new Date(),
+    ...over,
+  });
+
+  it("refuses a request without a bearer, and the placeholder itself, with 401", async () => {
+    const none = depsFor(session());
+    expect(await serveWorkerExit(none.deps, undefined, 1)).toMatchObject({ status: 401 });
+    expect(none.findUnique).not.toHaveBeenCalled();
+    const unknown = depsFor(null);
+    expect(await serveWorkerExit(unknown.deps, `Bearer ${NATIVE_PLACEHOLDER_CAPABILITY}`, 1)).toMatchObject({
+      status: 401,
+    });
+    expect(JSON.stringify(unknown.findUnique.mock.calls)).not.toContain(NATIVE_PLACEHOLDER_CAPABILITY);
+    expect(unknown.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("records the code once on the capability's session and logs only the run id and code", async () => {
+    const logged: unknown[][] = [];
+    const spy = vi.spyOn(gatewayLog, "info").mockImplementation((...args: unknown[]) => void logged.push(args));
+    try {
+      const { deps, updateMany } = depsFor(session());
+      const response = await serveWorkerExit(deps, `Bearer ${FAKE_NATIVE_CAP}`, 137);
+      expect(response).toEqual({ kind: "json", status: 200, body: { ok: true, result: null } });
+      expect(updateMany).toHaveBeenCalledWith({
+        where: { id: "sess-1", workerExitCode: null },
+        data: { workerExitCode: 137, workerExitedAt: expect.any(Date) },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(logged).toEqual([[{ runId: "run-1", code: 137 }, "native worker exit reported"]]);
+    expect(JSON.stringify(logged)).not.toContain(FAKE_NATIVE_CAP);
+  });
+
+  it("answers a repeat the same way, changes nothing, and logs nothing", async () => {
+    const spy = vi.spyOn(gatewayLog, "info").mockImplementation(() => {});
+    try {
+      const response = await serveWorkerExit(depsFor(session(), 0).deps, `Bearer ${FAKE_NATIVE_CAP}`, 1);
+      expect(response).toMatchObject({ status: 200 });
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("records an exit after the session ended", async () => {
+    const { deps, updateMany } = depsFor(session({ status: "finished", deadlineAt: new Date(0) }));
+    expect(await serveWorkerExit(deps, `Bearer ${FAKE_NATIVE_CAP}`, 1)).toMatchObject({ status: 200 });
+    expect(updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the capability out of a failure's body and log", async () => {
+    const logged: unknown[] = [];
+    const spy = vi.spyOn(gatewayLog, "error").mockImplementation((obj: unknown) => void logged.push(obj));
+    const deps = {
+      db: { nativeGatewaySession: { findUnique: async () => Promise.reject(new Error(FAKE_NATIVE_CAP)) } },
+      providers: {},
+    } as unknown as Parameters<typeof serveWorkerExit>[0];
+    let response;
+    try {
+      response = await serveWorkerExit(deps, `Bearer ${FAKE_NATIVE_CAP}`, 1);
     } finally {
       spy.mockRestore();
     }

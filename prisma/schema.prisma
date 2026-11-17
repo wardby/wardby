@@ -888,6 +888,11 @@ model NativeGatewaySession {
   /// launcher). A launcher that cannot list its workers (Substrate) is swept from the sessions where
   /// this is null and the run ended or the deadline passed.
   workerRemovedAt   DateTime?
+  /// The worker's exit code, as its supervisor reported it (Substrate, whose actor state never shows
+  /// an exit); recorded once. Null until then, and always on the other launchers.
+  workerExitCode    Int?
+  /// When workerExitCode was recorded.
+  workerExitedAt    DateTime?
   /// What the run's review tools have read (ReviewReadsState), saved between gateway requests
   /// for repo_publish_review's unread_files check. Null until the run reads a pull request.
   reviewReads       Json?

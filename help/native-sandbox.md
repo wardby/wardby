@@ -99,15 +99,19 @@ does not support, such as GKE Autopilot; Docker for a single host.
   the first runs after a template change wait while it builds.
 - The gateway's NetworkPolicy must admit Substrate's egress gateway pods on 8790.
   Apply the migrations `20261128000000_native_gateway_worker_removed`,
-  `20261128000001_native_substrate_canary` and
-  `20261129000000_native_substrate_canary_capability` with
+  `20261128000001_native_substrate_canary`,
+  `20261129000000_native_substrate_canary_capability` and
+  `20261129000001_native_gateway_worker_exit` with
   `prisma migrate deploy`, then
   start the gateway and server of the same release.
 - Before any run launches, a startup canary per template proves that Substrate
   enforces the egress policy. If it finds the deny port or the outside
   reachable, every run is refused with
   [native_sandbox_network_unenforced](errors/native-sandbox-network-unenforced.md)
-  until the server restarts. Launch failures are
+  until the server restarts. Substrate does not show a worker's exit, so the
+  worker runs under a small supervisor that reports its exit code to the
+  gateway (`native_sandbox_worker_exited` then carries that code). Launch
+  failures are
   `native_sandbox_substrate_failed` (article
   `errors/native-sandbox-substrate-failed`, Wardby 0.10.1 and later).
 - Old templates are not removed automatically; delete them with Substrate's

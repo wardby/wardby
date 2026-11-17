@@ -228,6 +228,18 @@ export type WorkerInput = z.infer<typeof WorkerInputSchema>;
 
 /** Where a worker that starts without its input fetches it (POST, same bearer auth as a call). */
 export const NATIVE_GATEWAY_INPUT_PATH = "/native-gateway/v1/input";
+/**
+ * Where a Substrate worker's supervisor reports the worker's exit (POST { code }, the same bearer auth
+ * as the input route): Substrate's actor state never shows a process exit, so the gateway records it.
+ */
+export const NATIVE_GATEWAY_EXIT_PATH = "/native-gateway/v1/exit";
+/** The exit route's body: the worker's exit code (a signal is 128 + its number). */
+export const NativeWorkerExitSchema = z.object({ code: z.number().int().min(0).max(255) }).strict();
+/**
+ * Set by the Substrate supervisor (substrate-supervisor.ts, PID 1) on the worker it starts, so the
+ * same entry runs the worker rather than another supervisor. Never a secret.
+ */
+export const NATIVE_SUPERVISED_ENV = "WARDBY_NATIVE_SUPERVISED";
 /** The gateway's call route (http-server.ts NATIVE_GATEWAY_PATH): NATIVE_GATEWAY_URL ends with it. */
 export const NATIVE_GATEWAY_CALL_PATH = "/native-gateway/v1/call";
 

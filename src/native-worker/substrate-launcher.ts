@@ -35,9 +35,12 @@
  * exists), and nothing secret is in the template or the policy (Substrate logs both). Run errors
  * and log lines are a fixed code plus enums: Substrate's and Kubernetes's messages are never read.
  *
- * `inspect` reads the run's session as well as the actor: the worker idles after its `finish`
- * (an exited PID 1 would show as a crash), so a running actor whose session has ended is reported
- * as exited 0. A CRASHED actor is exited 1; a deleted one is missing.
+ * `inspect` reads the run's session as well as the actor. Substrate's actor state never shows a
+ * process exit (an actor whose PID 1 exits stays RUNNING), so the worker runs under a supervisor
+ * (substrate-supervisor.ts) that reports its exit code to the gateway, which records it on the
+ * session: a recorded code is the worker's exit. The worker idles after its `finish`, so a running
+ * actor whose session has ended is reported as exited 0. A CRASHED actor is exited 1; a deleted one
+ * is missing. A worker whose exit was never recorded runs until its deadline, the backstop.
  *
  * No warm pool: golden snapshots make a cold start cheap, and the composition refuses
  * NATIVE_SANDBOX_WARM_POOL_SIZE with this launcher. There is no actor list in our SubstrateApi, so
@@ -97,12 +100,20 @@ export interface NativeSubstrateCallFailure {
   errorCode: string;
 }
 
+/** Where the gateway records a Substrate worker's exit, reported by its supervisor (composition: the ledger). */
+export interface NativeWorkerExitStore {
+  /** The run's worker's recorded exit code, or undefined for none. */
+  exitCode(runId: string): Promise<number | undefined>;
+}
+
 export interface SubstrateNativeWorkerLauncherOptions {
   api: SubstrateApi;
   secrets: Pick<KubernetesApi, "createSecret" | "deleteSecret">;
   config: NativeSubstrateLaunchConfig;
   /** Whether the run's gateway session is still active (composition: the ledger). */
   sessionActive: (runId: string) => Promise<boolean>;
+  /** The worker's exit code as the gateway recorded it (composition: the ledger). */
+  workerExits: NativeWorkerExitStore;
   /** SUBSTRATE_NATIVE_GOLDEN_WAIT_SEC in ms. */
   goldenWaitMs: number;
   /** Where the gateway records the startup canary's verdict (composition: Prisma). */
@@ -651,6 +662,15 @@ export class SubstrateNativeWorkerLauncher implements ManagedWorkerLauncher {
     }
     if (!info) return { state: "missing" };
     if (info.state === "CRASHED") return { state: "exited", exitCode: 1 };
+    let reported: number | undefined;
+    try {
+      reported = await this.options.workerExits.exitCode(runId);
+    } catch {
+      // A fixed code, like getActor's: the database's message never reaches the executor's log.
+      throw new Error(`${NATIVE_SANDBOX_SUBSTRATE_FAILED}: workerExit: unexpected`);
+    }
+    // The supervisor's report: the actor itself stays RUNNING after its worker exits.
+    if (reported !== undefined) return { state: "exited", exitCode: reported };
     let active: boolean;
     try {
       active = await this.options.sessionActive(runId);
