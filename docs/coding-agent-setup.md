@@ -466,15 +466,15 @@ A coding agent can publish its plan as [Wardby documents](documents.md) for
 people to review, and a second coding agent can build only from the approved
 plan. The short version is the help article `plan-documents`.
 
-| Setting                        | Meaning                                                                                                         |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| `planDocument.store`           | `wardby` (default): the plan stays in Wardby. `repository`: it is also written to `path`, with a branch and PR. |
-| `planDocument.path`            | Required for `repository`: a repository folder holding `{n}` once, such as `docs/plans/issue-{n}/`.             |
-| `planDocument.reviewers`       | 1 to 50 people who can read the agent; default the agent's owner.                                               |
-| `planDocument.finalApproverId` | Optional person who may force an approval.                                                                      |
-| `planDocument.onApproved`      | `notify` (default) or `build`.                                                                                  |
-| `planDocument.builderAgentId`  | The coding agent started by `build`; it needs `buildFromPlan`.                                                  |
-| `buildFromPlan`                | Refuse to build while a plan for the issue has documents that are not approved (`plan_not_approved`).           |
+| Setting                        | Meaning                                                                                                                |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| `planDocument.store`           | `wardby` (default): the plan stays in Wardby. `repository`: it is also written to `path`, with a branch and PR.        |
+| `planDocument.path`            | Required for `repository`: a repository folder holding `{n}` once, such as `docs/plans/issue-{n}/`.                    |
+| `planDocument.reviewers`       | 1 to 50 people who can read the agent; default the agent's owner.                                                      |
+| `planDocument.finalApproverId` | Optional person who may force an approval.                                                                             |
+| `planDocument.onApproved`      | On approval: `notify` (default) posts a notice on the issue; `build` starts the builder on ticket 1, then the chain.   |
+| `planDocument.builderAgentId`  | The coding agent started by `build` or `build ticket <t>`; it needs `buildFromPlan`.                                   |
+| `buildFromPlan`                | Build only from an approved plan: refused while the plan for the issue has unapproved documents (`plan_not_approved`). |
 
 Set `planDocument` and `buildFromPlan` with `update_agent` on a coding agent you
 own. `planDocument: null` turns planning off.
@@ -493,10 +493,58 @@ all, a Markdown document to 60,000 characters and one design's files to 1 MiB
 (`plan_too_large`). A later run versions changed files, adds new ones and marks a
 removed file `removedFromPlan`; approved documents are never changed by a run.
 
+A document's title is its first heading, or its file name without one; a
+design's title is its folder name.
+
 **Review.** Documents are submitted to the reviewers and approved one by one.
-Comments sent to the agent are revised by the plan's own planner. Anyone with a
+Comments sent to the agent are revised by the plan's own planner, which gets the
+current version of every document still in the plan (removed ones are left out). Anyone with a
 grant on the triggered agent, and its owner, can comment on the plan's documents
 (see [Documents](documents.md#plan-sets)).
+
+**Building.** A run of a `buildFromPlan` builder looks up the plan for its
+repository (matched exactly, ignoring case) and plan number. Only a plan whose
+planner the builder's owner can execute counts, and the newest one wins. With
+no such plan, the run goes ahead as usual. With one, every document still in it
+must be approved, or the run is refused with `plan_not_approved` and nothing
+starts; when it was asked for on an issue (a GitHub mention or a Jira trigger),
+Wardby replies there with the waiting documents by path, even when mention
+explanations are off. An ownerless builder, or one whose secret values cannot be
+read, is refused the same way. Otherwise the builder gets the approved Markdown
+in its request and every approved document as files in `/tmp/wardby-plan`,
+redacted against its secret values, and its pull request body gets a line such
+as `Plan 12: plan.md v3, screens v2`. A fix round or follow-up of a build uses
+exactly the versions that build was given.
+
+**When the plan is approved** (the review event that leaves every document
+approved), `notify` posts "Plan N approved" with the versions on the issue; on
+GitHub it ends with a `build ticket <t>` hint. `build` checks the builder again
+and starts ticket 1 with trigger `plan_approved`, recorded as started by the
+approver; a builder that can no longer build (not a coding agent with
+`buildFromPlan`, or one the planner's owner can no longer execute or give a
+task) starts nothing, and the notice says `plan_builder_invalid`.
+
+**The chain.** `plan.md` numbers its tickets in a `## Tickets` section
+(`### Ticket <t>: <title>`). With `build`, the next ticket starts when the pull
+request of the chain's own ticket run merges (or, while a fix round of that
+ticket is still running, when it ends), with the builder checked again each
+time. The chain stops
+with a notice naming the ticket and a code when that run ends `failed` (a queue
+timeout included), `cancelled`, `refused`, `lost` or `budget_exhausted`, succeeds
+with no pull request (`no_pull_request`), or its pull request closes unmerged
+(`pr_closed`), and when the next ticket cannot start (`start_failed`,
+`plan_builder_invalid`, or the start's refusal code). Reopening a document stops
+it without a notice (`reopened`).
+
+**`build ticket <t>`.** On the plan's GitHub issue, `@<app> build ticket <t>`
+from someone with the access any mention needs starts ticket `<t>` of the newest
+approved plan whose planner names a builder (the plan the builder's own lookup
+picks). For a `notify` planner it builds that ticket only; for a `build`
+planner it restarts the chain from `<t>`. A ticket `plan.md` does not list is
+refused when it lists any, and while any ticket run of the plan (a fix round
+included) is pending or running nothing starts. Jira has no `build ticket`
+command, and Jira notices carry no hint. A run started this way has the trigger
+`comment`.
 
 **Upgrade.** Plan documents need a current driver image (`driver-v37` or later
 for Codex), tool runner and, on Substrate, bridge images: see

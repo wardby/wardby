@@ -69,6 +69,24 @@ export function planRepositoryFilter(repository: string): { equals: string; mode
 }
 
 /**
+ * The visibility rule of a builder's plan lookup: of the sets sharing a repository and number (newest
+ * first), the first whose planner the builder's owner can execute. A builder never pulls in a plan its
+ * owner cannot see. Shared by the build gate (resolveBuildPlan) and the `build ticket <t>` command
+ * (approval.ts), so both always pick the same set.
+ */
+export async function newestVisiblePlanSet<T extends { agent: { id: string; ownerId: string | null } }>(
+  db: Pick<PrismaClient, "resourceGrant">,
+  newestFirst: readonly T[],
+  builderOwnerId: string,
+): Promise<T | undefined> {
+  for (const candidate of newestFirst) {
+    const access = await effectiveAccess(db, "agent", candidate.agent, builderOwnerId);
+    if (atLeast("agent", access, "execute")) return candidate;
+  }
+  return undefined;
+}
+
+/**
  * The approved plan for a builder's run, or null when no plan set it may see exists (the run goes
  * ahead as today). Throws PlanRefusedError: plan_not_approved (a counted document still waiting, an
  * ownerless builder, or no way to read the builder's secret values) or plan_too_large (the approved
@@ -101,15 +119,7 @@ export async function resolveBuildPlan(
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
-  // A builder never pulls in a plan its owner cannot see: only a planner the owner can execute counts.
-  let set: (typeof sets)[number] | undefined;
-  for (const candidate of sets) {
-    const access = await effectiveAccess(db, "agent", candidate.agent, input.builderOwnerId);
-    if (atLeast("agent", access, "execute")) {
-      set = candidate;
-      break;
-    }
-  }
+  const set = await newestVisiblePlanSet(db, sets, input.builderOwnerId);
   if (!set) return null;
 
   const documents = [...set.documents].sort(byPlanOrder);

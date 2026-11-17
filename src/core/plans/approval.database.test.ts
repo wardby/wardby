@@ -29,6 +29,7 @@ import {
   type StartTicketInput,
   type StartTicketResult,
 } from "./approval.js";
+import { resolveBuildPlan } from "./build.js";
 import { createPlanSetFixture, type FixtureDocument } from "./build.test-support.js";
 import { publishPlanFromRun } from "./publish.js";
 
@@ -901,6 +902,35 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
       expect(starts).toHaveLength(1);
     });
 
+    it("a merge waiting on a fix round claims the chain's ticket as read: a ticket moved since is never overwritten", async () => {
+      const { builder, planSetId, run1 } = await building();
+      const number = ++pr;
+      await finish(run1, "succeeded", number);
+      const fixRound = await ticketRun(builder, planSetId, 1, "running");
+      await db.codingRun.update({ where: { runId: fixRound }, data: { rootCodingRunId: run1 } });
+      // The chain's ticket moves right after the merge reads the set (as another delivery could move it).
+      const bound = <T extends object>(target: T, prop: string | symbol) => {
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      };
+      const planSet = new Proxy(db.planSet, {
+        get: (target, prop) =>
+          prop === "findFirst"
+            ? async (args: Parameters<typeof db.planSet.findFirst>[0]) => {
+                const row = await db.planSet.findFirst(args);
+                if (row) await db.planSet.update({ where: { id: row.id }, data: { chainTicket: 5 } });
+                return row;
+              }
+            : bound(target, prop),
+      });
+      const stale = new Proxy(db, { get: (target, prop) => (prop === "planSet" ? planSet : bound(target, prop)) });
+      await chain().onMerged(stale, { repository, number, merged: true });
+      await settle();
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 5, chainRunId: run1, chainStopped: null });
+      expect(starts).toEqual([]);
+      await finish(fixRound, "succeeded", number);
+    });
+
     it("a fix round that ends before the chain's PR merges starts nothing; the merge then starts the next ticket", async () => {
       const { builder, planSetId, run1 } = await building();
       const number = ++pr;
@@ -1092,6 +1122,30 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
         expect(await build(1)).toBe("none");
         expect(starts).toEqual([]);
         expect(notices).toEqual([]);
+      });
+
+      it("acts on the set the builder's own lookup picks: a newer set its owner cannot see is passed over", async () => {
+        const older = await approvedNotify();
+        const newer = await approvedNotify();
+        // The newer planner belongs to someone the builder's owner has no grant from.
+        const stranger = await db.principal.create({ data: { subject: `appr-stranger-${s}` } });
+        await db.agent.update({ where: { id: newer.plannerId }, data: { ownerId: stranger.id } });
+        try {
+          expect(await build(1)).toBe("started");
+          expect(starts.map((x) => [x.builderAgentId, x.set.id])).toEqual([[older.builder, older.planSetId]]);
+          // The build gate picks the same set for that builder.
+          const gate = await resolveBuildPlan(db, cipher, {
+            builderAgentId: older.builder,
+            builderOwnerId: owner.id,
+            repository,
+            number: 12,
+          });
+          expect(gate?.planSetId).toBe(older.planSetId);
+        } finally {
+          await db.run.updateMany({ where: { agentId: older.builder }, data: { status: "succeeded" } });
+          await db.agent.update({ where: { id: newer.plannerId }, data: { ownerId: owner.id } });
+          await db.principal.delete({ where: { id: stranger.id } });
+        }
       });
 
       it("the repository matches whatever its case in the event", async () => {

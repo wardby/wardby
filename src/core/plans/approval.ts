@@ -21,7 +21,7 @@ import { principalNames } from "../documents/comments.js";
 import { logger } from "../logger.js";
 import { defuseMentions } from "../reply-parts.js";
 import { redactExactSecretValues } from "../secret-spans.js";
-import { planRepositoryFilter, ticketTitles, type BuildPlan } from "./build.js";
+import { newestVisiblePlanSet, planRepositoryFilter, ticketTitles, type BuildPlan } from "./build.js";
 import type { PlanChainDb, PlanChainHook, PlanChainMergeDb } from "./chain-hook.js";
 import type { PostIssueNotice } from "./hooks.js";
 import { planNumberFromIssueKey } from "./number.js";
@@ -654,7 +654,10 @@ export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
         }
         // A fix round in flight (R16): the merge is recorded by moving the chain on to the next ticket
         // while it still follows the merged run, and the fix round's end starts it (onTicketFinished).
-        const waiting = await db.planSet.updateMany({ where: following, data: { chainTicket: next } });
+        const waiting = await db.planSet.updateMany({
+          where: { ...following, chainTicket: ticket },
+          data: { chainTicket: next },
+        });
         if (waiting.count !== 1) return;
         // The fix round may have ended in between, before it could see the chain waiting.
         if ((await runningPlanTicket(db, set.id)) !== null) return;
@@ -707,30 +710,45 @@ export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
         await postStopped(set, set.chainTicket ?? coding.planTicket, code);
       }),
     buildTicketFromComment: async (db, input) => {
-      // The issue's newest approved plan set (as the builder's own lookup, plans/build.ts): a GitHub
-      // issue numbers its plan, so a Jira plan is never matched here. Its planner must name a builder.
+      // The issue's newest approved plan set whose planner names a builder, and which that builder's
+      // own lookup would pick (plans/build.ts newestVisiblePlanSet): the command and the build gate
+      // always agree on the set. A GitHub issue numbers its plan, so a Jira plan is never matched here.
       let set: PlanSet;
       let agent: PlanAgent;
       let setting: ReturnType<typeof readPlanDocument>;
       let tickets: Map<number, string>;
       try {
-        const found = await db.planSet.findFirst({
-          where: {
-            repository: planRepositoryFilter(input.repository),
-            number: input.number,
-            approvedAt: { not: null },
-            OR: [{ issueProvider: "github" }, { issueProvider: null }],
-          },
+        // Every set of the repository and number, as the gate sees them (approved or not, any tracker).
+        const sets = await db.planSet.findMany({
+          where: { repository: planRepositoryFilter(input.repository), number: input.number },
           include: chainSetInclude,
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         });
-        if (!found) return "none";
-        try {
-          setting = readPlanDocument(found.agent.codingProfile?.planDocument, found.agent.ownerId);
-        } catch {
-          setting = null;
+        let found: (typeof sets)[number] | undefined;
+        setting = null;
+        for (const candidate of sets) {
+          if (!candidate.approvedAt || (candidate.issueProvider !== null && candidate.issueProvider !== "github")) {
+            continue;
+          }
+          let named: ReturnType<typeof readPlanDocument>;
+          try {
+            named = readPlanDocument(candidate.agent.codingProfile?.planDocument, candidate.agent.ownerId);
+          } catch {
+            named = null;
+          }
+          if (!named?.builderAgentId) continue;
+          const builder = await db.agent.findUnique({
+            where: { id: named.builderAgentId },
+            select: { ownerId: true },
+          });
+          // A missing or ownerless builder is the set's to refuse (plan_builder_invalid at the R12 check,
+          // or the gate's plan_not_approved), so the set is still the one the command acts on.
+          if (builder?.ownerId && (await newestVisiblePlanSet(db, sets, builder.ownerId)) !== candidate) continue;
+          found = candidate;
+          setting = named;
+          break;
         }
-        if (!setting?.builderAgentId) return "none";
+        if (!found || !setting) return "none";
         const { documents, agent: planner, ...row } = found;
         set = row;
         agent = planner;

@@ -222,6 +222,19 @@
                 "kind"
               ],
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "plan_approved"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
             }
           ]
         },

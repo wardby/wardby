@@ -281,10 +281,6 @@ export function buildSubstrateJobLauncher(options: {
 }
 
 /**
- * Builds container execution only when Docker or Kubernetes is explicitly
- * selected, and native sandbox routing whenever a sandbox executor is given.
- */
-/**
  * Starts a plan ticket's builder run (spec §7b). Under the set's row lock (R16), only an approved set
  * with no ticket run in flight; a refusal reports what that guard saw, not a later re-read. A run the
  * chain follows (followedByChain) is recorded as the chain's run in the transaction that creates it,
@@ -353,6 +349,10 @@ export function planTicketStarter(deps: {
   };
 }
 
+/**
+ * Builds container execution only when Docker, Kubernetes or Substrate is explicitly
+ * selected, and native sandbox routing whenever a sandbox executor is given.
+ */
 export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Executor {
   const env = options.env ?? process.env;
   const providerConfig = options.providerConfig ?? loadProviderConfig(env);
