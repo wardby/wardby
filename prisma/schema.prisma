@@ -711,6 +711,7 @@ model CodingRun {
   @@index([queuedAt])
   @@index([rootCodingRunId])
   @@index([mergeOrder])
+  @@index([planSetId])
 }
 
 /// A coding run's session transcript for local resume: metadata only. The redacted content lives in
