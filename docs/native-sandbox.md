@@ -465,7 +465,8 @@ How a run starts:
   the Secret in each request's `Authorization` header.
 - The worker holds only a fixed, public placeholder bearer. It fetches its input
   from the gateway (`POST /native-gateway/v1/input`, the same authentication as
-  a call) once its actor is running. Neither the template nor the policy
+  a call, with no body; the gateway reads at most 1 KiB of the request body and
+  cuts off the rest) once its actor is running. Neither the template nor the policy
   carries anything of a run, and nothing secret: Substrate logs both.
 - When the run ends Wardby deletes the policy, the actor and the Secret.
 
@@ -951,7 +952,7 @@ them back to `control-plane` first if they should keep running.
 
 ## Acceptance tests
 
-Three opt-in checks exercise the real isolation against a real runtime. Each is
+Four opt-in checks exercise the real isolation against a real runtime. Each is
 skipped unless its script sets its flag:
 
 - `npm run test:native-docker`: the Docker launcher on the local Docker host.
@@ -965,6 +966,16 @@ skipped unless its script sets its flag:
   `NATIVE_TEST_FORBIDDEN`, a comma-separated list of `host:port` addresses that
   must be unreachable from a worker (for example the database's private IP on
   port 3307).
+- `npm run test:native-substrate`: launcher-only checks against a real Substrate
+  cluster and the deployed gateway. It builds the worker template's golden
+  snapshot, then launches a worker with a capability the gateway never issued
+  and expects it to be refused and to crash, and that its actor and Secret are
+  removed. Set `NATIVE_TEST_WORKER_IMAGE` (required, a registry digest),
+  `NATIVE_TEST_GATEWAY_URL` (required, the gateway's `http://<hostname>:<port>`
+  URL), the `SUBSTRATE_*` connection variables the server uses, and
+  `NATIVE_TEST_CANARY_DATABASE_URL`, the database the deployed gateway records
+  its startup canary in. Without that database only the golden snapshot check
+  runs, because a launch waits for the canary.
 
 ## Troubleshooting
 
