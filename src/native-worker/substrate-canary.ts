@@ -11,14 +11,16 @@
  * posted to the gateway's canary route with no credential: the actor holds none, and the route
  * needs none (protocol.ts NATIVE_GATEWAY_CANARY_PATH says why).
  *
- * What counts as denied fails closed: a target is denied only when its TCP connection never opens
- * (refused, unreachable, or not open within 3 s). Any connection that opens is reachable, whatever
- * follows: an HTTP answer of any status, silence, a close or a reset. So an egress path that
- * accepts the connection and answers its own denial page fails every canary, which is visible
- * (native_sandbox_network_unenforced), never a pass with an unscoped policy.
- *
- * Follow-up: once the kind spike shows the form of Substrate's egress denial, that exact form may be
- * matched literally (a pinned constant, not a comparison) and counted as denied.
+ * What counts as denied fails closed. A probe connects, sends one plain HTTP request (`GET /`,
+ * `Connection: close`) and reads at most EGRESS_DENIAL_MAX_BYTES of the answer. The target is denied
+ * only when its TCP connection never opens (refused, unreachable, a name that does not resolve, or
+ * not open within 3 s), or when the whole answer is exactly the egress gateway's own denial
+ * (EGRESS_DENIAL): status 403, a single `server: envoy` header, and a body of exactly
+ * `egress denied`. Anything else on an opened connection is reachable: any other status, header or
+ * body, a longer answer, silence, a close or a reset. So an egress path that answers some other
+ * page fails every canary, which is visible (native_sandbox_network_unenforced), never a pass with
+ * an unscoped policy. The gateway's deny port never answers at all (it accepts and closes), so a
+ * policy that lets the probe reach it is reachable.
  */
 
 import { connect as netConnect } from "node:net";
@@ -30,7 +32,7 @@ import {
   type NativeCanaryResult,
 } from "./protocol.js";
 
-/** How long a probe waits for a connection to open. */
+/** How long a probe waits for a connection to open, and then for its answer. */
 export const CANARY_PROBE_TIMEOUT_MS = 3_000;
 const GATEWAY_TIMEOUT_MS = 10_000;
 const REPORT_ATTEMPTS = 3;
@@ -38,7 +40,7 @@ const REPORT_RETRY_MS = 1_000;
 
 export interface NativeCanaryOptions {
   fetch?: typeof globalThis.fetch;
-  /** Whether host:port is reachable (true) or denied (false). Default: connectionOpens. */
+  /** Whether host:port is reachable (true) or denied (false). Default: egressReachable. */
   connect?: (host: string, port: number) => Promise<boolean>;
   sleep?: (ms: number) => Promise<void>;
   /** The gateway's deny port (the template's NATIVE_GATEWAY_DENY_PORT). Default 8791. */
@@ -46,23 +48,86 @@ export interface NativeCanaryOptions {
 }
 
 /**
- * The default probe: whether a TCP connection to host:port opens within `timeoutMs`. Nothing is
- * sent; the socket is closed as soon as it opens. An error or the timeout before it opens is false.
+ * The egress gateway's denial: the only answer on an opened connection that counts as denied. Matched
+ * literally, in full: status, the one `server` header's value, and the whole body.
  */
-export function connectionOpens(host: string, port: number, timeoutMs = CANARY_PROBE_TIMEOUT_MS): Promise<boolean> {
+export const EGRESS_DENIAL = Object.freeze({ status: 403, server: "envoy", body: "egress denied" });
+/** The most of an answer a probe reads; a longer one is not the denial (reachable). */
+export const EGRESS_DENIAL_MAX_BYTES = 2_048;
+
+/**
+ * Whether `raw` (the whole answer read, `ended` when the peer closed after it) is exactly
+ * EGRESS_DENIAL. Pure, and strict: no head/body split, a status other than 403, no or several
+ * `server` headers or a value other than `envoy`, a transfer-encoding, a content-length other than
+ * the body's, or a body other than `egress denied` (byte for byte) is not the denial. A body with no
+ * content-length counts only once the peer has closed (`ended`), so a cut-off answer never matches.
+ */
+export function isEgressDenial(raw: Buffer, ended: boolean): boolean {
+  if (raw.length > EGRESS_DENIAL_MAX_BYTES) return false;
+  const split = raw.indexOf("\r\n\r\n");
+  if (split < 0) return false;
+  const [statusLine, ...headerLines] = raw.subarray(0, split).toString("latin1").split("\r\n");
+  if (!new RegExp(`^HTTP/1\\.[01] ${EGRESS_DENIAL.status}(?: |$)`).test(statusLine)) return false;
+  const headers = new Map<string, string[]>();
+  for (const line of headerLines) {
+    const colon = line.indexOf(":");
+    if (colon <= 0) return false;
+    const name = line.slice(0, colon).trim().toLowerCase();
+    headers.set(name, [...(headers.get(name) ?? []), line.slice(colon + 1).trim()]);
+  }
+  const server = headers.get("server");
+  if (server?.length !== 1 || server[0] !== EGRESS_DENIAL.server) return false;
+  if (headers.has("transfer-encoding")) return false;
+  const body = raw.subarray(split + 4);
+  const length = headers.get("content-length");
+  if (length !== undefined) {
+    if (length.length !== 1 || !/^[0-9]{1,5}$/.test(length[0]) || Number(length[0]) !== body.length) return false;
+  } else if (!ended) {
+    return false;
+  }
+  return body.equals(Buffer.from(EGRESS_DENIAL.body, "latin1"));
+}
+
+/**
+ * The default probe: whether host:port is reachable (see the module comment). It connects within
+ * `timeoutMs`, sends one `GET /` with `Connection: close`, and reads the answer for up to `timeoutMs`
+ * more, at most EGRESS_DENIAL_MAX_BYTES. Denied (false) only when the connection never opens or the
+ * whole answer is EGRESS_DENIAL; anything else is reachable (true). Nothing read is kept or logged.
+ */
+export function egressReachable(host: string, port: number, timeoutMs = CANARY_PROBE_TIMEOUT_MS): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
+    let opened = false;
+    const chunks: Buffer[] = [];
+    let size = 0;
     const socket = netConnect({ host, port });
-    const finish = (opened: boolean) => {
+    const finish = (reachable: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       socket.destroy();
-      resolve(opened);
+      resolve(reachable);
     };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    socket.once("connect", () => finish(true));
-    socket.once("error", () => finish(false));
+    const answer = () => Buffer.concat(chunks, size);
+    let timer = setTimeout(() => finish(false), timeoutMs);
+    socket.once("connect", () => {
+      opened = true;
+      clearTimeout(timer);
+      // Opened: from here on the target is reachable unless its whole answer is the denial.
+      timer = setTimeout(() => finish(!isEgressDenial(answer(), false)), timeoutMs);
+      const target = host.includes(":") ? `[${host}]` : host;
+      socket.write(`GET / HTTP/1.1\r\nHost: ${target}:${port}\r\nConnection: close\r\n\r\n`);
+    });
+    socket.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > EGRESS_DENIAL_MAX_BYTES) return finish(true);
+      chunks.push(chunk);
+      // A complete denial (by its content-length) settles at once; anything else waits for the close.
+      if (isEgressDenial(answer(), false)) finish(false);
+    });
+    socket.once("end", () => finish(!isEgressDenial(answer(), true)));
+    socket.once("error", () => finish(opened ? !isEgressDenial(answer(), true) : false));
+    socket.once("close", () => finish(opened ? !isEgressDenial(answer(), true) : false));
   });
 }
 
@@ -84,7 +149,7 @@ async function gatewayHealthy(gatewayUrl: string, fetchFn: typeof globalThis.fet
 async function probe(gatewayUrl: string, options: NativeCanaryOptions): Promise<NativeCanaryResult> {
   const fetchFn = options.fetch ?? globalThis.fetch;
   if (!(await gatewayHealthy(gatewayUrl, fetchFn))) return "gateway_unreachable";
-  const connect = options.connect ?? ((host: string, port: number) => connectionOpens(host, port));
+  const connect = options.connect ?? ((host: string, port: number) => egressReachable(host, port));
   const host = new URL(gatewayUrl).hostname.replace(/^\[|\]$/g, "");
   // Concurrent, as each dropped connect waits the full timeout; read in a fixed order, so the
   // verdict is the same whichever answers first.

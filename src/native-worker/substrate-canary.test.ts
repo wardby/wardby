@@ -2,7 +2,8 @@ import { createServer as createHttpServer, type Server as HttpServer } from "nod
 import { createServer as createNetServer, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NATIVE_PROBE_OUTSIDE_TARGETS } from "./protocol.js";
-import { connectionOpens, runNativeCanary } from "./substrate-canary.js";
+import { startDenyPortListener } from "../providers/coding-proxy/deny-port.js";
+import { EGRESS_DENIAL_MAX_BYTES, egressReachable, isEgressDenial, runNativeCanary } from "./substrate-canary.js";
 
 const GATEWAY_URL = "http://wardby-native-gateway.wardby.svc.cluster.local:8790/native-gateway/v1/call";
 const GATEWAY_HOST = "wardby-native-gateway.wardby.svc.cluster.local";
@@ -132,7 +133,58 @@ describe("runNativeCanary deny port", () => {
   });
 });
 
-describe("connectionOpens (the default probe)", () => {
+/** The egress gateway's denial, byte for byte as the spike saw it, with `edit` applied. */
+const DENIAL =
+  "HTTP/1.1 403 Forbidden\r\ncontent-length: 13\r\ncontent-type: text/plain\r\nserver: envoy\r\nconnection: close\r\n\r\negress denied";
+
+describe("isEgressDenial", () => {
+  it("matches the egress gateway's denial exactly", () => {
+    expect(isEgressDenial(Buffer.from(DENIAL), false)).toBe(true);
+    expect(isEgressDenial(Buffer.from(DENIAL), true)).toBe(true);
+    // Header names are case-insensitive; HTTP/1.0 is the same answer.
+    expect(isEgressDenial(Buffer.from(DENIAL.replace("server:", "Server:")), true)).toBe(true);
+    expect(isEgressDenial(Buffer.from(DENIAL.replace("HTTP/1.1", "HTTP/1.0")), true)).toBe(true);
+  });
+
+  it("matches a close-delimited denial only once the peer has closed", () => {
+    const closeDelimited = DENIAL.replace("content-length: 13\r\n", "");
+    expect(isEgressDenial(Buffer.from(closeDelimited), true)).toBe(true);
+    expect(isEgressDenial(Buffer.from(closeDelimited), false)).toBe(false);
+  });
+
+  it.each([
+    ["another status", DENIAL.replace("403 Forbidden", "404 Not Found")],
+    ["status 4030", DENIAL.replace("403 Forbidden", "4030 Forbidden")],
+    ["no server header", DENIAL.replace("server: envoy\r\n", "")],
+    ["another server", DENIAL.replace("server: envoy", "server: nginx")],
+    ["server envoy with more", DENIAL.replace("server: envoy", "server: envoy/1.30")],
+    ["two server headers", DENIAL.replace("server: envoy", "server: envoy\r\nserver: envoy")],
+    [
+      "another body",
+      DENIAL.replace("content-length: 13", "content-length: 15").replace("egress denied", "egress allowed!"),
+    ],
+    ["the body in another case", DENIAL.replace("egress denied", "Egress denied")],
+    ["the body with a newline", DENIAL.replace("content-length: 13", "content-length: 14") + "\n"],
+    ["more than the content-length", DENIAL + "x"],
+    ["less than the content-length", DENIAL.slice(0, -1)],
+    ["a content-length that is not the body's", DENIAL.replace("content-length: 13", "content-length: 12")],
+    ["two content-lengths", DENIAL.replace("content-length: 13", "content-length: 13\r\ncontent-length: 13")],
+    ["a chunked body", DENIAL.replace("content-length: 13", "transfer-encoding: chunked")],
+    ["no blank line", DENIAL.replace("\r\n\r\n", "\r\n")],
+    ["a header line with no colon", DENIAL.replace("connection: close", "connection close")],
+    ["not HTTP", "SSH-2.0-OpenSSH_9.6\r\n\r\negress denied"],
+    ["nothing", ""],
+  ])("does not match %s", (_name, raw) => {
+    expect(isEgressDenial(Buffer.from(raw), true)).toBe(false);
+  });
+
+  it("does not match an answer longer than it reads", () => {
+    const padded = DENIAL.replace("server: envoy", `server: envoy\r\nx-pad: ${"a".repeat(EGRESS_DENIAL_MAX_BYTES)}`);
+    expect(isEgressDenial(Buffer.from(padded), true)).toBe(false);
+  });
+});
+
+describe("egressReachable (the default probe)", () => {
   const servers: (HttpServer | NetServer)[] = [];
   const sockets: Socket[] = [];
   afterEach(async () => {
@@ -145,16 +197,49 @@ describe("connectionOpens (the default probe)", () => {
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
     return (server.address() as AddressInfo).port;
   };
-  const answering = (status: number, body: string) =>
+  const answering = (status: number, body: string, headers: Record<string, string> = {}) =>
     createHttpServer((_req, res) => {
-      res.writeHead(status);
+      res.writeHead(status, headers);
       res.end(body);
     });
+  /** Writes `raw` as the whole answer once the request has arrived, then closes (or not). */
+  const raw = (answer: string, close = true) =>
+    createNetServer((socket) => {
+      socket.once("data", () => {
+        if (close) socket.end(answer);
+        else socket.write(answer);
+      });
+    });
 
-  it("is denied only for a connection that never opens (refused)", async () => {
+  it("is denied for a connection that never opens (refused)", async () => {
     const port = await listen(createNetServer());
     await new Promise((done) => servers.pop()?.close(done));
-    expect(await connectionOpens("127.0.0.1", port)).toBe(false);
+    expect(await egressReachable("127.0.0.1", port)).toBe(false);
+  });
+
+  it("is denied for the egress gateway's exact denial (by content-length, before any close)", async () => {
+    expect(await egressReachable("127.0.0.1", await listen(raw(DENIAL)), 500)).toBe(false);
+    expect(await egressReachable("127.0.0.1", await listen(raw(DENIAL, false)), 500)).toBe(false);
+  });
+
+  it("is denied for the denial from a real HTTP server (headers as Node writes them)", async () => {
+    const headers = { server: "envoy", "content-type": "text/plain", "content-length": "13" };
+    const port = await listen(answering(403, "egress denied", headers));
+    expect(await egressReachable("127.0.0.1", port, 500)).toBe(false);
+  });
+
+  it("sends one GET with Connection: close and nothing else", async () => {
+    let request = "";
+    const port = await listen(
+      createNetServer((socket) => {
+        socket.on("data", (chunk) => {
+          request += chunk.toString();
+          if (request.includes("\r\n\r\n")) socket.end(DENIAL);
+        });
+      }),
+    );
+    expect(await egressReachable("127.0.0.1", port, 500)).toBe(false);
+    expect(request).toBe(`GET / HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`);
   });
 
   it.each([
@@ -162,9 +247,33 @@ describe("connectionOpens (the default probe)", () => {
     ["accepted and silent", () => createNetServer(() => {})],
     ["answering 403 forbidden by egress policy", () => answering(403, "forbidden by egress policy")],
     ["answering 502 Bad Gateway", () => answering(502, "<html>502 Bad Gateway</html>")],
+    ["answering the denial's body with status 200", () => answering(200, "egress denied", { server: "envoy" })],
+    ["answering the denial without server: envoy", () => answering(403, "egress denied")],
+    ["answering the denial chunked", () => answering(403, "egress denied", { server: "envoy" })],
+    ["answering the denial from another server", () => answering(403, "egress denied", { server: "nginx" })],
+    ["answering 403 envoy with another body", () => answering(403, "egress denied.", { server: "envoy" })],
+    ["answering the denial and more", () => raw(`${DENIAL}HTTP/1.1 200 OK\r\n\r\n`)],
+    ["answering half the denial and going silent", () => raw(DENIAL.slice(0, 40), false)],
+    [
+      "answering a close-delimited denial and staying open",
+      () => raw(DENIAL.replace("content-length: 13\r\n", ""), false),
+    ],
+    [
+      "answering more than a probe reads",
+      () => raw(`HTTP/1.1 403 Forbidden\r\nserver: envoy\r\n\r\n${"x".repeat(4096)}`),
+    ],
   ])("is reachable for a connection %s", async (_name, server) => {
     const port = await listen(server());
-    expect(await connectionOpens("127.0.0.1", port, 500)).toBe(true);
+    expect(await egressReachable("127.0.0.1", port, 500)).toBe(true);
+  });
+
+  it("is reachable against the gateway's real deny-port listener, which never answers the denial", async () => {
+    const listener = await startDenyPortListener("127.0.0.1", 0);
+    try {
+      expect(await egressReachable("127.0.0.1", listener.port, 500)).toBe(true);
+    } finally {
+      await listener.close();
+    }
   });
 
   it.each([
@@ -173,18 +282,28 @@ describe("connectionOpens (the default probe)", () => {
     ["answers HTTP 403", () => answering(403, "forbidden by egress policy")],
   ])("fails the canary with deny_port_reachable when the deny port %s", async (_name, server) => {
     const denyPort = await listen(server());
-    const { fetch } = (() => {
-      const f = (async (url: string | URL) =>
-        String(url).endsWith("/healthz")
-          ? json({ ok: true })
-          : new Response(null, { status: 204 })) as unknown as typeof globalThis.fetch;
-      return { fetch: f };
-    })();
+    const fetch = (async (url: string | URL) =>
+      String(url).endsWith("/healthz")
+        ? json({ ok: true })
+        : new Response(null, { status: 204 })) as unknown as typeof globalThis.fetch;
     // The outside targets are not dialled for real here: only the gateway host is.
     const connect = (host: string, port: number) =>
-      host === "127.0.0.1" ? connectionOpens(host, port, 500) : Promise.resolve(false);
+      host === "127.0.0.1" ? egressReachable(host, port, 500) : Promise.resolve(false);
     expect(
       await runNativeCanary("http://127.0.0.1:8790/native-gateway/v1/call", ACTOR, { fetch, connect, denyPort }),
     ).toBe("deny_port_reachable");
+  });
+
+  it("passes the canary when the deny port and the outside answer only the egress gateway's denial", async () => {
+    const denyPort = await listen(raw(DENIAL));
+    const fetch = (async (url: string | URL) =>
+      String(url).endsWith("/healthz")
+        ? json({ ok: true })
+        : new Response(null, { status: 204 })) as unknown as typeof globalThis.fetch;
+    const connect = (host: string, port: number) =>
+      host === "127.0.0.1" ? egressReachable(host, port, 500) : egressReachable("127.0.0.1", denyPort, 500);
+    expect(
+      await runNativeCanary("http://127.0.0.1:8790/native-gateway/v1/call", ACTOR, { fetch, connect, denyPort }),
+    ).toBe("pass");
   });
 });

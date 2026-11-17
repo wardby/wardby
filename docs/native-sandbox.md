@@ -563,9 +563,12 @@ per server process and template that Substrate enforces such a policy:
 2. Inside, the canary checks that the gateway's `/healthz` answers, that the
    gateway's deny port (`NATIVE_GATEWAY_DENY_PORT`, default 8791), an outside
    address and the cloud metadata endpoints are all denied, and that the
-   gateway still answers afterwards. A target counts as denied only when its
-   connection never opens: any connection that opens counts as reachable,
-   whatever comes back.
+   gateway still answers afterwards. Each probe opens a connection, sends one
+   plain `GET /` and reads the answer. A target counts as denied only when its
+   connection never opens, or when the whole answer is exactly Substrate's
+   egress gateway denial: status `403`, a `server: envoy` header and the body
+   `egress denied`. Any other answer, or none, on a connection that opens
+   counts as reachable.
 3. It posts the verdict to the gateway (`POST /native-gateway/v1/canary`, no
    credential), which records it in the database. The server reads it, then
    deletes the canary actor.
