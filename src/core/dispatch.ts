@@ -38,7 +38,7 @@ import { KNOWLEDGE_CONFIG_MAX_BYTES, KNOWLEDGE_CONFIG_PATH, resolveKnowledgeLoca
 import { KNOWLEDGE_INDEX_READ_MAX_BYTES, knowledgeSection, type KnowledgeNoteInput } from "../knowledge/note.js";
 import { logger } from "./logger.js";
 import { assertPlanFilesWithinLimits, savePlanInputFiles, type PlanFile } from "../coding/plan-files/store.js";
-import { planChainHook, type PlanChainDb } from "./plans/chain-hook.js";
+import { planChainHook, type PlanChainMergeDb } from "./plans/chain-hook.js";
 import { PlanRefusedError } from "./plans/refusal.js";
 import { readPlanVersions, resolveBuildPlan, resolveRecordedBuildPlan, type BuildPlan } from "./plans/build.js";
 import type { SecretCipher } from "./plans/publish.js";
@@ -91,6 +91,7 @@ export type DispatchDb = Pick<
   | "documentVersion"
   | "documentFile"
   | "resourceGrant"
+  | "principal"
   | "agentSecret"
   | "agentMcpServer"
   | "secret"
@@ -310,7 +311,7 @@ export function isTransactionUnavailable(err: unknown): boolean {
  * than overwrite whatever landed in between.
  */
 export async function markRunFailedFromExecutorError(
-  db: Pick<DispatchDb, "run"> & PlanChainDb,
+  db: Pick<DispatchDb, "run"> & PlanChainMergeDb,
   runId: string,
   err: unknown,
   selfDefects?: SelfDefectSink,

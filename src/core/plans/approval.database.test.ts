@@ -874,19 +874,46 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
       expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (start_failed)."]);
     });
 
-    it("a merge while a fix round of the same ticket is in flight still starts the next ticket", async () => {
+    it("a merge during a fix round of the chain's ticket starts the next ticket when the fix round ends", async () => {
       const { builder, planSetId, run1 } = await building();
       const number = ++pr;
       await finish(run1, "succeeded", number);
       const fixRound = await ticketRun(builder, planSetId, 1, "running");
       await db.codingRun.update({ where: { runId: fixRound }, data: { rootCodingRunId: run1 } });
-      expect(await runningPlanTicket(db, planSetId)).toBeNull();
+      // A fix round still counts as a ticket run in flight (R16).
+      expect(await runningPlanTicket(db, planSetId)).toBe(1);
       await merged(number);
+      expect(starts).toEqual([]);
+      expect(notices).toEqual([]);
+      // A repeat delivery of the merge while it waits starts nothing either.
+      await merged(number);
+      expect(starts).toEqual([]);
+      await finish(fixRound, "succeeded", number);
+      await finished(fixRound);
       expect(starts.map((x) => x.ticket)).toEqual([2]);
       expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 2."]);
       const row = await setRow(planSetId);
-      expect(row.chainTicket).toBe(2);
+      expect(row).toMatchObject({ chainTicket: 2, chainStopped: null });
+      expect(row.chainRunId).not.toBe(run1);
       expect(row.chainRunId).not.toBe(fixRound);
+      // The fix round's end is heard once: a repeat starts nothing more.
+      await finished(fixRound);
+      expect(starts).toHaveLength(1);
+    });
+
+    it("a fix round that ends before the chain's PR merges starts nothing; the merge then starts the next ticket", async () => {
+      const { builder, planSetId, run1 } = await building();
+      const number = ++pr;
+      await finish(run1, "succeeded", number);
+      const fixRound = await ticketRun(builder, planSetId, 1, "running");
+      await db.codingRun.update({ where: { runId: fixRound }, data: { rootCodingRunId: run1 } });
+      await finish(fixRound, "succeeded", number);
+      await finished(fixRound);
+      expect(starts).toEqual([]);
+      expect(notices).toEqual([]);
+      expect(await setRow(planSetId)).toMatchObject({ chainTicket: 1, chainRunId: run1 });
+      await merged(number);
+      expect(starts.map((x) => x.ticket)).toEqual([2]);
     });
 
     it("a refused start never overwrites a stop recorded meanwhile (a reopen)", async () => {
@@ -937,35 +964,76 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
         return { builder, ...made };
       }
 
-      it("starts the planner's builder for the ticket, by the comment's author, and the chain follows it", async () => {
-        const { builder, planSetId } = await approvedNotify();
-        expect(await build(2)).toBe("started");
-        expect(starts).toHaveLength(1);
-        expect(starts[0]).toMatchObject({ builderAgentId: builder, ticket: 2, starterId: null, trigger: "comment" });
-        expect(starts[0].set).toMatchObject({ id: planSetId, number: 12 });
-        const row = await setRow(planSetId);
-        expect(row).toMatchObject({ chainTicket: 2, chainStopped: null });
-        expect(row.chainRunId).not.toBeNull();
-        expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 2, started by octocat."]);
-        // Its merge moves the chain on: ticket 2 is the plan's last.
+      /** A "build" chain stopped at ticket 1 (its run failed); notices and starts cleared. */
+      async function stoppedChain() {
+        const made = await building();
+        await finish(made.run1, "failed");
+        await finished(made.run1);
+        expect((await setRow(made.planSetId)).chainStopped).toBe("failed");
         notices = [];
+        starts = [];
+        return made;
+      }
+
+      it("notify: builds only the ticket asked for; its merge starts nothing and the chain is untouched", async () => {
+        const { builder, planSetId } = await approvedNotify();
+        expect(await build(1)).toBe("started");
+        expect(starts).toHaveLength(1);
+        expect(starts[0]).toMatchObject({
+          builderAgentId: builder,
+          ticket: 1,
+          starterId: null,
+          trigger: "comment",
+          followedByChain: false,
+        });
+        expect(starts[0].set).toMatchObject({ id: planSetId, number: 12 });
+        expect(await setRow(planSetId)).toMatchObject({ chainTicket: null, chainStopped: null, chainRunId: null });
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 1, started by octocat."]);
+        // Ticket 1's merge starts nothing: ticket 2 exists, but a notify planner builds only what is asked.
+        notices = [];
+        starts = [];
+        const run = await db.codingRun.findFirstOrThrow({
+          where: { planSetId, planTicket: 1 },
+          orderBy: { createdAt: "desc" },
+          select: { runId: true },
+        });
+        const number = ++pr;
+        await finish(run.runId, "succeeded", number);
+        await merged(number);
+        expect(starts).toEqual([]);
+        expect(notices).toEqual([]);
+        expect(await setRow(planSetId)).toMatchObject({ chainTicket: null, chainStopped: null, chainRunId: null });
+      });
+
+      it("notify: a refused start is answered but leaves the chain untouched", async () => {
+        const { planSetId } = await approvedNotify();
+        startResult = { refused: "plan_not_approved" };
+        expect(await build(2)).toBe("refused");
+        expect(await setRow(planSetId)).toMatchObject({ chainTicket: null, chainStopped: null, chainRunId: null });
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: ticket 2 did not start (plan_not_approved)."]);
+      });
+
+      it("build: restarts a stopped chain from the ticket asked for, and its merge moves the chain on", async () => {
+        const { builder, planSetId, run1 } = await stoppedChain();
+        expect(await build(1)).toBe("started");
+        expect(starts[0]).toMatchObject({
+          builderAgentId: builder,
+          ticket: 1,
+          trigger: "comment",
+          followedByChain: true,
+        });
+        const row = await setRow(planSetId);
+        expect(row).toMatchObject({ chainTicket: 1, chainStopped: null });
+        expect(row.chainRunId).not.toBeNull();
+        expect(row.chainRunId).not.toBe(run1);
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 1, started by octocat."]);
+        notices = [];
+        starts = [];
         const number = ++pr;
         await finish(row.chainRunId!, "succeeded", number);
         await merged(number);
-        expect(notices.map((x) => x.text)).toEqual(["Plan 12: all 2 tickets built."]);
-      });
-
-      it("restarts a stopped chain from the ticket asked for", async () => {
-        const { planSetId, run1 } = await building();
-        await finish(run1, "failed");
-        await finished(run1);
-        expect((await setRow(planSetId)).chainStopped).toBe("failed");
-        notices = [];
-        expect(await build(1)).toBe("started");
-        const row = await setRow(planSetId);
-        expect(row).toMatchObject({ chainTicket: 1, chainStopped: null });
-        expect(row.chainRunId).not.toBe(run1);
-        expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 1, started by octocat."]);
+        expect(starts.map((x) => x.ticket)).toEqual([2]);
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: building ticket 2."]);
       });
 
       it("R16: while a ticket run of the set is pending it starts nothing and says so", async () => {
@@ -975,6 +1043,68 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
         expect(starts).toEqual([]);
         expect(notices.map((x) => x.text)).toEqual(["Plan 12: already building ticket 1."]);
         expect((await setRow(planSetId)).chainTicket).toBeNull();
+      });
+
+      it("R16: a fix round of an earlier ticket still in flight refuses the build", async () => {
+        const { builder, planSetId, run1 } = await building();
+        const number = ++pr;
+        await finish(run1, "succeeded", number);
+        const fixRound = await ticketRun(builder, planSetId, 1, "running");
+        await db.codingRun.update({ where: { runId: fixRound }, data: { rootCodingRunId: run1 } });
+        expect(await build(2)).toBe("refused");
+        expect(starts).toEqual([]);
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12: already building ticket 1."]);
+        expect(await setRow(planSetId)).toMatchObject({ chainTicket: 1, chainStopped: null, chainRunId: run1 });
+      });
+
+      it("a ticket plan.md does not list is refused; without a Tickets section any ticket may be built", async () => {
+        const { planSetId } = await approvedNotify();
+        expect(await build(7)).toBe("refused");
+        expect(starts).toEqual([]);
+        expect(notices.map((x) => x.text)).toEqual(["Plan 12 has no ticket 7."]);
+        expect(await setRow(planSetId)).toMatchObject({ chainTicket: null, chainStopped: null, chainRunId: null });
+
+        await db.planSet.updateMany({ where: { repository }, data: { approvedAt: null } });
+        notices = [];
+        const builder = await makeAgent({ buildFromPlan: true });
+        const plain = await makeSet({ onApproved: "notify", builderAgentId: builder }, [
+          { path: "plan.md", content: "# Plan\n\nNo tickets here.\n", version: 1, reviewState: "draft" },
+        ]);
+        await approveAll(plain.documentIds);
+        notices = [];
+        expect(await build(7)).toBe("started");
+        expect(starts.map((x) => x.ticket)).toEqual([7]);
+      });
+
+      it("the newest approved set wins; a newest one without a builder answers none", async () => {
+        const older = await approvedNotify();
+        const newer = await approvedNotify();
+        expect(await build(1)).toBe("started");
+        expect(starts.map((x) => [x.builderAgentId, x.set.id])).toEqual([[newer.builder, newer.planSetId]]);
+        expect(older.planSetId).not.toBe(newer.planSetId);
+
+        starts = [];
+        notices = [];
+        await db.run.updateMany({ where: { agentId: newer.builder }, data: { status: "succeeded" } });
+        const plain = await makeSet({ onApproved: "notify" });
+        await approveAll(plain.documentIds);
+        notices = [];
+        expect(await build(1)).toBe("none");
+        expect(starts).toEqual([]);
+        expect(notices).toEqual([]);
+      });
+
+      it("the repository matches whatever its case in the event", async () => {
+        const { planSetId } = await approvedNotify();
+        const shouted = await chain().buildTicketFromComment(db, {
+          repository: repository.toUpperCase(),
+          number: 12,
+          ticket: 2,
+          starterName: "octocat",
+        });
+        await settle();
+        expect(shouted).toBe("started");
+        expect(starts.map((x) => x.set.id)).toEqual([planSetId]);
       });
 
       it('"none", posting nothing: a set not approved, a planner without a builder, no set, a Jira plan', async () => {
@@ -998,8 +1128,8 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
         expect(notices).toEqual([]);
       });
 
-      it("a refused start stops the chain with the refusal's code", async () => {
-        const { planSetId } = await approvedNotify();
+      it("build: a refused start stops the chain with the refusal's code", async () => {
+        const { planSetId } = await stoppedChain();
         startResult = { refused: "plan_not_approved" };
         expect(await build(2)).toBe("refused");
         expect(await setRow(planSetId)).toMatchObject({ chainTicket: 2, chainStopped: "plan_not_approved" });
@@ -1007,7 +1137,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
       });
 
       it("R12: a builder that cannot build any more is refused with plan_builder_invalid", async () => {
-        const { builder, planSetId } = await approvedNotify();
+        const { builder, planSetId } = await stoppedChain();
         await db.codingAgentProfile.update({ where: { agentId: builder }, data: { buildFromPlan: false } });
         expect(await build(2)).toBe("refused");
         expect(starts).toEqual([]);

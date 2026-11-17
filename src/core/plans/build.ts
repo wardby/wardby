@@ -61,6 +61,14 @@ function exactInsensitivePattern(key: string): string {
 }
 
 /**
+ * The `where` filter for a plan set's repository, matched the way the host compares names
+ * (case-insensitively, exactly). Shared by every lookup of a set by its repository and number.
+ */
+export function planRepositoryFilter(repository: string): { equals: string; mode: "insensitive" } {
+  return { equals: exactInsensitivePattern(planRepositoryKey(repository)), mode: "insensitive" };
+}
+
+/**
  * The approved plan for a builder's run, or null when no plan set it may see exists (the run goes
  * ahead as today). Throws PlanRefusedError: plan_not_approved (a counted document still waiting, an
  * ownerless builder, or no way to read the builder's secret values) or plan_too_large (the approved
@@ -84,7 +92,7 @@ export async function resolveBuildPlan(
   }
   const sets = await db.planSet.findMany({
     where: {
-      repository: { equals: exactInsensitivePattern(planRepositoryKey(input.repository)), mode: "insensitive" },
+      repository: planRepositoryFilter(input.repository),
       number: input.number,
     },
     include: {

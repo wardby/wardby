@@ -1768,8 +1768,12 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       const reviewCommand = event.isPullRequest && isReviewCommand(event.body, deps.mentionHandle);
       const responderLink = links.find((l) => l.access === "write" && l.triggers.includes("mention"));
       const candidates = reviewCommand ? reviewerLinks : responderLink ? [responderLink] : [];
-      // `build ticket <t>` on an issue starts the plan's builder (spec §7b), with no link of its own.
-      const buildTicket = event.isPullRequest ? null : parseBuildTicketCommand(event.body, deps.mentionHandle);
+      // `build ticket <t>` on a GitHub issue starts the plan's builder (spec §7b), with no link of its
+      // own: a plan is numbered by its GitHub issue, so no other provider's mention is a plan command.
+      const buildTicket =
+        event.provider === "github" && !event.isPullRequest
+          ? parseBuildTicketCommand(event.body, deps.mentionHandle)
+          : null;
       // Explanations off and nothing to start: say nothing, and skip the author lookup.
       if (candidates.length === 0 && buildTicket === null && deps.mentionExplanations === false) return none;
       // H5-3: a mention drives a write-capable agent holding its owner's

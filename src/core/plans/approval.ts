@@ -21,7 +21,7 @@ import { principalNames } from "../documents/comments.js";
 import { logger } from "../logger.js";
 import { defuseMentions } from "../reply-parts.js";
 import { redactExactSecretValues } from "../secret-spans.js";
-import { ticketTitles, type BuildPlan } from "./build.js";
+import { planRepositoryFilter, ticketTitles, type BuildPlan } from "./build.js";
 import type { PlanChainDb, PlanChainHook, PlanChainMergeDb } from "./chain-hook.js";
 import type { PostIssueNotice } from "./hooks.js";
 import { planNumberFromIssueKey } from "./number.js";
@@ -44,6 +44,11 @@ export interface StartTicketInput {
   /** The principal who started it (Run.triggeredById), when known. */
   starterId: string | null;
   trigger: "plan_approved" | "comment";
+  /**
+   * True: the build chain follows the run (its merge starts the next ticket). False: a single-ticket
+   * build (`build ticket <t>` on a "notify" planner), which never touches the chain's fields.
+   */
+  followedByChain: boolean;
 }
 
 /** running: a ticket run of the set is already pending or running (R16); it names that ticket. */
@@ -143,14 +148,13 @@ export async function lockPlanSetForTicketStart(
 }
 
 /**
- * A ticket run of the set in flight: pending or running, and not a fix-round continuation of an
- * earlier ticket run (rootCodingRunId set). A continuation works on its root's pull request; it is
- * never the chain's run, so it neither holds back the next ticket when that PR merges nor is followed.
+ * A ticket run of the set in flight: pending or running. A fix-round continuation of an earlier ticket
+ * run (rootCodingRunId set) counts too (R16: never more than one run at a time), but it is never the
+ * chain's run: it is never followed, and the merge of its root's PR waits for it (onMerged).
  */
 const inFlightTicketRun = (planSetId: string) => ({
   planSetId,
   planTicket: { not: null },
-  rootCodingRunId: null,
   run: { status: { in: ["pending" as const, "running" as const] } },
 });
 
@@ -218,7 +222,7 @@ export async function reportTicketStart(
   ticket: number,
   started: StartTicketResult,
   starterName: string | null,
-  prefix?: string,
+  options: { prefix?: string; stopsChain?: boolean } = {},
 ): Promise<void> {
   // Redacted raw, before shownName escapes it: an escaped secret (`a\\_b`) would no longer match.
   const name = starterName === null ? null : redactExactSecretValues(starterName, await deps.secretValues(set.agentId));
@@ -228,14 +232,16 @@ export async function reportTicketStart(
   else {
     const code = refusalCode(started.refused);
     // Only while the chain is still on this ticket and not stopped: a reopen, or another stop already
-    // recorded, keeps its own code.
-    await db.planSet.updateMany({
-      where: { id: set.id, chainTicket: ticket, chainStopped: null },
-      data: { chainStopped: code, chainRunId: null },
-    });
+    // recorded, keeps its own code. A single-ticket build (stopsChain false) never touches the chain.
+    if (options.stopsChain !== false) {
+      await db.planSet.updateMany({
+        where: { id: set.id, chainTicket: ticket, chainStopped: null },
+        data: { chainStopped: code, chainRunId: null },
+      });
+    }
     text = `Plan ${set.number}: ticket ${ticket} did not start (${code}).`;
   }
-  await postPlanNotice(deps, set, prefix ? `${prefix}\n${text}` : text);
+  await postPlanNotice(deps, set, options.prefix ? `${options.prefix}\n${text}` : text);
 }
 
 /**
@@ -249,8 +255,9 @@ async function followRunningTicket(
   asked: number,
   running: number,
 ): Promise<boolean> {
+  // Never a fix round: the chain follows a ticket's own run, whose PR a merge moves on.
   const run = await db.codingRun.findFirst({
-    where: { ...inFlightTicketRun(planSetId), planTicket: running },
+    where: { ...inFlightTicketRun(planSetId), planTicket: running, rootCodingRunId: null },
     select: { runId: true },
   });
   if (!run) return false;
@@ -262,9 +269,10 @@ async function followRunningTicket(
 }
 
 /**
- * Starts a ticket of the chain and makes the chain follow the run it started (or the one already
- * running). A start that throws (not a refusal) becomes `start_failed`, so the chain stops with a
- * notice instead of staying silent. Only the error's name is logged.
+ * Starts a ticket and, when the chain follows it (input.followedByChain), makes the chain follow the
+ * run it started (or the one already running). A start that throws (not a refusal) becomes
+ * `start_failed`, so the chain stops with a notice instead of staying silent. Only the error's name
+ * is logged.
  */
 async function startOrStartFailed(
   db: PlanChainDb,
@@ -278,6 +286,7 @@ async function startOrStartFailed(
     );
     return { refused: "start_failed" };
   });
+  if (!input.followedByChain) return started;
   if ("runId" in started) {
     // The start's own transaction records it too (composition); this covers any other startTicket.
     await db.planSet.updateMany({
@@ -480,9 +489,12 @@ async function afterApproval(
     ticket: 1,
     starterId: actorId,
     trigger: "plan_approved",
+    followedByChain: true,
   });
   const starterName = actorId ? ((await principalNames(db, [actorId])).get(actorId) ?? null) : null;
-  await reportTicketStart(db, deps, row, 1, started, starterName, planApprovedNotice(set.number, versions, null));
+  await reportTicketStart(db, deps, row, 1, started, starterName, {
+    prefix: planApprovedNotice(set.number, versions, null),
+  });
 }
 
 /** Only the error's name is logged: never its message, which could carry a document's text. */
@@ -543,38 +555,75 @@ export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
       `Plan ${set.number} stopped at ticket ${ticket} (${refusalCode(code)}).${hint(handle, String(ticket), "to continue")}`,
     );
   };
+  /** The set as the chain reads it: plan.md's text (for its tickets) and the planner (for R12). */
+  const chainSetInclude = {
+    documents: {
+      where: { removedFromPlan: false, planPath: "plan.md" },
+      include: { currentVersion: { select: { markdown: true } } },
+    },
+    agent: { select: { id: true, ownerId: true, codingProfile: { select: { planDocument: true } } } },
+  } as const;
+  type ChainSet = PlanSet & {
+    documents: { currentVersion: { markdown: string | null } | null }[];
+    agent: PlanAgent;
+  };
+  /**
+   * Starts ticket `next` after the chain's ticket merged, recorded as started by the approver. Claimed
+   * with a conditional update against the chain's state as read (`from`), so a repeat acts once.
+   */
+  const startNext = async (
+    db: PlanChainMergeDb,
+    set: ChainSet,
+    from: { chainTicket: number; chainRunId: string },
+    next: number,
+  ): Promise<void> => {
+    const { documents: _documents, agent, ...row } = set;
+    const claimed = await db.planSet.updateMany({
+      where: { id: set.id, ...from, chainStopped: null, approvedAt: { not: null } },
+      data: { chainTicket: next, chainRunId: null },
+    });
+    if (claimed.count !== 1) return;
+    const builderAgentId = await checkedBuilder(db, agent);
+    const started: StartTicketResult = builderAgentId
+      ? await startOrStartFailed(db, deps, {
+          builderAgentId,
+          set: row,
+          ticket: next,
+          starterId: set.approvedById,
+          trigger: "plan_approved",
+          followedByChain: true,
+        })
+      : { refused: "plan_builder_invalid" };
+    await reportTicketStart(db, deps, row, next, started, null);
+  };
   return {
     onMerged: (db, pr) =>
       background("merge", async () => {
-        const merging: PlanChainMergeDb = db;
-        const runs = await merging.codingRun.findMany({
+        const runs = await db.codingRun.findMany({
           where: {
             repository: pr.repository,
             planSetId: { not: null },
             planTicket: { not: null },
             result: { path: ["pullRequestNumber"], equals: pr.number },
           },
-          select: { runId: true },
+          select: { runId: true, planTicket: true },
         });
         if (runs.length === 0) return;
         // Only the PR of the run the chain follows: an older run's PR of the same ticket (before a
         // reopen, say) never moves a re-approved chain.
-        const set = await merging.planSet.findFirst({
+        const set: ChainSet | null = await db.planSet.findFirst({
           where: { chainRunId: { in: runs.map((r) => r.runId) }, chainStopped: null },
-          include: {
-            documents: {
-              where: { removedFromPlan: false, planPath: "plan.md" },
-              include: { currentVersion: { select: { markdown: true } } },
-            },
-            agent: { select: { id: true, ownerId: true, codingProfile: { select: { planDocument: true } } } },
-          },
+          include: chainSetInclude,
         });
         if (!set?.chainRunId || set.chainTicket === null) return;
-        const { documents, agent, ...row } = set;
+        const { documents, agent: _agent, ...row } = set;
         const ticket = set.chainTicket;
-        const following = { id: set.id, chainRunId: set.chainRunId, chainStopped: null };
+        const chainRunId = set.chainRunId;
+        // The chain already moved on past this run (its merge was heard while a fix round ran): a repeat.
+        if (runs.find((r) => r.runId === chainRunId)?.planTicket !== ticket) return;
+        const following = { id: set.id, chainRunId, chainStopped: null };
         if (!pr.merged) {
-          const stopped = await merging.planSet.updateMany({
+          const stopped = await db.planSet.updateMany({
             where: following,
             data: { chainStopped: "pr_closed", chainRunId: null },
           });
@@ -582,11 +631,16 @@ export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
           return;
         }
         if (!set.approvedAt) return;
-        if ((await runningPlanTicket(merging, set.id)) !== null) return;
+        // R16: another ticket's own run in flight holds the next start. A fix round is handled below.
+        const otherTicket = await db.codingRun.findFirst({
+          where: { ...inFlightTicketRun(set.id), rootCodingRunId: null },
+          select: { runId: true },
+        });
+        if (otherTicket) return;
         const tickets = ticketTitles(documents[0]?.currentVersion?.markdown ?? "");
         const next = ticket + 1;
         if (!tickets.has(next)) {
-          const cleared = await merging.planSet.updateMany({
+          const cleared = await db.planSet.updateMany({
             where: following,
             data: { chainTicket: null, chainRunId: null },
           });
@@ -594,30 +648,48 @@ export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
             await postPlanNotice(deps, row, `Plan ${set.number}: all ${tickets.size} tickets built.`);
           return;
         }
-        const claimed = await merging.planSet.updateMany({
-          where: { ...following, approvedAt: { not: null } },
-          data: { chainTicket: next, chainRunId: null },
-        });
-        if (claimed.count !== 1) return;
-        const builderAgentId = await checkedBuilder(merging, agent);
-        const started: StartTicketResult = builderAgentId
-          ? await startOrStartFailed(merging, deps, {
-              builderAgentId,
-              set: row,
-              ticket: next,
-              starterId: set.approvedById,
-              trigger: "plan_approved",
-            })
-          : { refused: "plan_builder_invalid" };
-        await reportTicketStart(merging, deps, row, next, started, null);
+        if ((await runningPlanTicket(db, set.id)) === null) {
+          await startNext(db, set, { chainTicket: ticket, chainRunId }, next);
+          return;
+        }
+        // A fix round in flight (R16): the merge is recorded by moving the chain on to the next ticket
+        // while it still follows the merged run, and the fix round's end starts it (onTicketFinished).
+        const waiting = await db.planSet.updateMany({ where: following, data: { chainTicket: next } });
+        if (waiting.count !== 1) return;
+        // The fix round may have ended in between, before it could see the chain waiting.
+        if ((await runningPlanTicket(db, set.id)) !== null) return;
+        await startNext(db, { ...set, chainTicket: next }, { chainTicket: next, chainRunId }, next);
       }),
     onTicketFinished: (db, runId) =>
       background("finish", async () => {
         const coding = await db.codingRun.findUnique({
           where: { runId },
-          select: { planTicket: true, planSetId: true, result: true, run: { select: { status: true } } },
+          select: {
+            planTicket: true,
+            planSetId: true,
+            rootCodingRunId: true,
+            result: true,
+            run: { select: { status: true } },
+          },
         });
         if (!coding?.planSetId || coding.planTicket === null) return;
+        if (coding.rootCodingRunId !== null) {
+          // A fix round ended. It never stops the chain; when the chain waits on it (the PR of the run
+          // the chain follows merged meanwhile, onMerged), the next ticket starts now.
+          const set: ChainSet | null = await db.planSet.findFirst({
+            where: { id: coding.planSetId, chainRunId: { not: null }, chainStopped: null, approvedAt: { not: null } },
+            include: chainSetInclude,
+          });
+          if (!set?.chainRunId || set.chainTicket === null) return;
+          const followed = await db.codingRun.findUnique({
+            where: { runId: set.chainRunId },
+            select: { planTicket: true },
+          });
+          if (followed?.planTicket === null || followed?.planTicket === set.chainTicket) return;
+          if ((await runningPlanTicket(db, set.id)) !== null) return;
+          await startNext(db, set, { chainTicket: set.chainTicket, chainRunId: set.chainRunId }, set.chainTicket);
+          return;
+        }
         const status = coding.run.status;
         const code = STOPPING_STATUSES.has(status)
           ? status
@@ -625,7 +697,7 @@ export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
             ? "no_pull_request"
             : null;
         if (!code) return;
-        // Only the run the chain follows: a fix round of its PR, or an older run, never stops it.
+        // Only the run the chain follows: an older run never stops it.
         const stopped = await db.planSet.updateMany({
           where: { id: coding.planSetId, chainRunId: runId, chainStopped: null },
           data: { chainStopped: code, chainRunId: null },
@@ -635,59 +707,70 @@ export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
         await postStopped(set, set.chainTicket ?? coding.planTicket, code);
       }),
     buildTicketFromComment: async (db, input) => {
-      // The issue's approved plan set whose planner names a builder: the first one made, if several
-      // planners answered the issue. A GitHub issue numbers its plan; a Jira plan is never matched here.
+      // The issue's newest approved plan set (as the builder's own lookup, plans/build.ts): a GitHub
+      // issue numbers its plan, so a Jira plan is never matched here. Its planner must name a builder.
       let set: PlanSet;
       let agent: PlanAgent;
+      let setting: ReturnType<typeof readPlanDocument>;
+      let tickets: Map<number, string>;
       try {
-        const sets = await db.planSet.findMany({
+        const found = await db.planSet.findFirst({
           where: {
-            repository: input.repository,
+            repository: planRepositoryFilter(input.repository),
             number: input.number,
             approvedAt: { not: null },
             OR: [{ issueProvider: "github" }, { issueProvider: null }],
           },
-          include: {
-            agent: { select: { id: true, ownerId: true, codingProfile: { select: { planDocument: true } } } },
-          },
-          orderBy: { createdAt: "asc" },
-        });
-        const found = sets.find((candidate) => {
-          try {
-            return Boolean(
-              readPlanDocument(candidate.agent.codingProfile?.planDocument, candidate.agent.ownerId)?.builderAgentId,
-            );
-          } catch {
-            return false;
-          }
+          include: chainSetInclude,
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         });
         if (!found) return "none";
-        ({ agent, ...set } = found);
+        try {
+          setting = readPlanDocument(found.agent.codingProfile?.planDocument, found.agent.ownerId);
+        } catch {
+          setting = null;
+        }
+        if (!setting?.builderAgentId) return "none";
+        const { documents, agent: planner, ...row } = found;
+        set = row;
+        agent = planner;
+        tickets = ticketTitles(documents[0]?.currentVersion?.markdown ?? "");
       } catch (err) {
         planLog.warn({ errorName: err instanceof Error ? err.name : typeof err }, "plan build ticket lookup failed");
         return "none";
       }
       // From here the comment was a plan command: it is answered on the issue, never passed on as a mention.
-      const notice = (started: StartTicketResult, starterName: string | null) => {
-        const work = reportTicketStart(db, deps, set, input.ticket, started, starterName).catch((err: unknown) => {
+      const posted = (work: Promise<void>) => {
+        const done = work.catch((err: unknown) => {
           planLog.warn({ errorName: err instanceof Error ? err.name : typeof err }, "plan build ticket notice failed");
         });
-        deps.track?.(work);
+        deps.track?.(done);
       };
+      // "build" (re)starts the chain from this ticket; "notify" builds this ticket only (R13).
+      const chained = setting.onApproved === "build";
+      const notice = (started: StartTicketResult, starterName: string | null) =>
+        posted(reportTicketStart(db, deps, set, input.ticket, started, starterName, { stopsChain: chained }));
       try {
-        // R16, spec §7b: never more than one ticket run at a time (the start's guard checks again).
+        // A plan.md that lists its tickets: only one of them can be built.
+        if (tickets.size > 0 && !tickets.has(input.ticket)) {
+          posted(postPlanNotice(deps, set, `Plan ${set.number} has no ticket ${input.ticket}.`));
+          return "refused";
+        }
+        // R16, spec §7b: never more than one ticket run at a time, a fix round included (the start's
+        // guard checks again).
         const running = await runningPlanTicket(db, set.id);
         if (running !== null) {
           notice({ running }, null);
           return "refused";
         }
-        // A manual build (re)starts the chain from this ticket: a stop code is cleared, and its merge
-        // moves the chain on as the approval's own start would.
-        await db.planSet.updateMany({
-          where: { id: set.id, approvedAt: { not: null } },
-          data: { chainTicket: input.ticket, chainStopped: null, chainRunId: null },
-        });
-        set = { ...set, chainTicket: input.ticket, chainStopped: null, chainRunId: null };
+        if (chained) {
+          // A stop code is cleared, and this ticket's merge moves the chain on as the approval's own start would.
+          await db.planSet.updateMany({
+            where: { id: set.id, approvedAt: { not: null } },
+            data: { chainTicket: input.ticket, chainStopped: null, chainRunId: null },
+          });
+          set = { ...set, chainTicket: input.ticket, chainStopped: null, chainRunId: null };
+        }
         // R12: the builder is checked again before every start.
         const builderAgentId = await checkedBuilder(db, agent);
         const started: StartTicketResult = builderAgentId
@@ -698,6 +781,7 @@ export function createPlanChainHook(deps: PlanApprovalDeps): PlanChainHook {
               // Mention runs record no principal; the notice names the comment's author.
               starterId: null,
               trigger: "comment",
+              followedByChain: chained,
             })
           : { refused: "plan_builder_invalid" };
         notice(started, input.starterName);

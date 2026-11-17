@@ -284,6 +284,75 @@ export function buildSubstrateJobLauncher(options: {
  * Builds container execution only when Docker or Kubernetes is explicitly
  * selected, and native sandbox routing whenever a sandbox executor is given.
  */
+/**
+ * Starts a plan ticket's builder run (spec §7b). Under the set's row lock (R16), only an approved set
+ * with no ticket run in flight; a refusal reports what that guard saw, not a later re-read. A run the
+ * chain follows (followedByChain) is recorded as the chain's run in the transaction that creates it,
+ * so a run that ends at once still finds itself the chain's run (plans/approval.ts onTicketFinished).
+ */
+export function planTicketStarter(deps: {
+  db: PrismaClient;
+  executor: () => Executor;
+  issueTrackers: Parameters<typeof resolveWorkItem>[1];
+  cipher?: ConfiguredExecutorOptions["secretCipher"];
+  dispatch?: typeof dispatchRun;
+}): PlanApprovalDeps["startTicket"] {
+  const dispatch = deps.dispatch ?? dispatchRun;
+  return async ({ builderAgentId, set, ticket, starterId, trigger, followedByChain }) => {
+    const guard: { blocked: TicketStartBlock | null } = { blocked: null };
+    try {
+      const attribution =
+        set.issueProvider && set.issueKey
+          ? {
+              source: "explicit" as const,
+              item: await resolveWorkItem(
+                deps.db,
+                deps.issueTrackers,
+                set.issueProvider,
+                set.issueKey,
+                RESPONSE_PATH_SNAPSHOT_BUDGET,
+              ),
+            }
+          : undefined;
+      const dispatched = await dispatch({
+        db: deps.db,
+        executor: deps.executor(),
+        selfDefects: { db: deps.db, issueTrackers: deps.issueTrackers },
+        agentId: builderAgentId,
+        trigger,
+        ...(starterId ? { triggeredById: starterId } : {}),
+        codingRepository: set.repository,
+        codingTask: `Build ticket ${ticket} of plan ${set.number}.`,
+        planNumber: set.number,
+        planTicket: ticket,
+        ...(deps.cipher ? { secretCipher: deps.cipher } : {}),
+        ...(attribution ? { attribution } : {}),
+        // A reopen or a concurrent start (the chain's, or a build ticket comment's) waits for the lock.
+        beforePersist: async (tx) => {
+          guard.blocked = await planTicketStartBlock(tx, set.id);
+          return guard.blocked === null;
+        },
+        afterPersist: async (tx, run) => {
+          if (!followedByChain || (run.status !== "pending" && run.status !== "running")) return;
+          await tx.$queryRaw`
+            UPDATE "PlanSet" SET "chainRunId" = ${run.id}
+            WHERE "id" = ${set.id} AND "chainTicket" = ${ticket} AND "chainStopped" IS NULL
+            RETURNING "id"`;
+        },
+      });
+      if (!dispatched) return guard.blocked ?? { refused: "plan_not_approved" };
+      if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
+        return { refused: (dispatched.run.error ?? "refused").split(":")[0] };
+      }
+      return { runId: dispatched.run.id };
+    } catch (err) {
+      const refusal = refusalOf(err) ?? (err instanceof RepositorySetRefusedError ? { error: err.code } : undefined);
+      if (refusal) return { refused: refusal.error };
+      throw err;
+    }
+  };
+}
+
 export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Executor {
   const env = options.env ?? process.env;
   const providerConfig = options.providerConfig ?? loadProviderConfig(env);
@@ -408,63 +477,12 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       if (!cipher) throw new Error("plan_secrets_unavailable");
       return documentSecretValues(options.db, cipher, agentId);
     },
-    startTicket: async ({ builderAgentId, set, ticket, starterId, trigger }) => {
-      // What the guard saw under the set's lock, so a refusal reports that (not a later re-read).
-      const guard: { blocked: TicketStartBlock | null } = { blocked: null };
-      try {
-        const attribution =
-          set.issueProvider && set.issueKey
-            ? {
-                source: "explicit" as const,
-                item: await resolveWorkItem(
-                  options.db,
-                  issueTrackers,
-                  set.issueProvider,
-                  set.issueKey,
-                  RESPONSE_PATH_SNAPSHOT_BUDGET,
-                ),
-              }
-            : undefined;
-        const dispatched = await dispatchRun({
-          db: options.db,
-          executor: composed,
-          selfDefects: { db: options.db, issueTrackers },
-          agentId: builderAgentId,
-          trigger,
-          ...(starterId ? { triggeredById: starterId } : {}),
-          codingRepository: set.repository,
-          codingTask: `Build ticket ${ticket} of plan ${set.number}.`,
-          planNumber: set.number,
-          planTicket: ticket,
-          ...(cipher ? { secretCipher: cipher } : {}),
-          ...(attribution ? { attribution } : {}),
-          // R16, spec §7b: under the set's row lock, only an approved set with no ticket run in flight;
-          // a reopen or a concurrent start (the chain's, or a build ticket comment's) waits for it.
-          beforePersist: async (tx) => {
-            guard.blocked = await planTicketStartBlock(tx, set.id);
-            return guard.blocked === null;
-          },
-          // The chain follows the run from the transaction that creates it, so a run that ends at
-          // once still finds itself the chain's run (plans/approval.ts onTicketFinished).
-          afterPersist: async (tx, run) => {
-            if (run.status !== "pending" && run.status !== "running") return;
-            await tx.$queryRaw`
-              UPDATE "PlanSet" SET "chainRunId" = ${run.id}
-              WHERE "id" = ${set.id} AND "chainTicket" = ${ticket} AND "chainStopped" IS NULL
-              RETURNING "id"`;
-          },
-        });
-        if (!dispatched) return guard.blocked ?? { refused: "plan_not_approved" };
-        if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
-          return { refused: (dispatched.run.error ?? "refused").split(":")[0] };
-        }
-        return { runId: dispatched.run.id };
-      } catch (err) {
-        const refusal = refusalOf(err) ?? (err instanceof RepositorySetRefusedError ? { error: err.code } : undefined);
-        if (refusal) return { refused: refusal.error };
-        throw err;
-      }
-    },
+    startTicket: planTicketStarter({
+      db: options.db,
+      executor: () => composed,
+      issueTrackers,
+      ...(cipher ? { cipher } : {}),
+    }),
   };
   // Without the cipher no notice can be redacted, so no plan approval hook runs (as for the run hooks).
   setPlanReviewHook(cipher ? createPlanReviewHook(planDeps) : undefined);

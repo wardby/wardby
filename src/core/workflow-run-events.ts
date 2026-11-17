@@ -29,11 +29,22 @@ export type RunEventsDb = Pick<
   | "runHook"
   | "planSet"
   | "codingRun"
+  | "principal"
+  | "resourceGrant"
 >;
 
 export type RunCompletedDb = Pick<
   PrismaClient,
-  "run" | "runHook" | "runBudgetEvent" | "registryFetch" | "registryAuditRecord" | "planSet" | "codingRun"
+  | "run"
+  | "runHook"
+  | "runBudgetEvent"
+  | "registryFetch"
+  | "registryAuditRecord"
+  | "planSet"
+  | "codingRun"
+  | "principal"
+  | "agent"
+  | "resourceGrant"
 >;
 
 const RUN_END_STATUSES_SET = new Set<string>(RUN_END_STATUSES);

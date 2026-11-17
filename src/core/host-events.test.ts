@@ -916,6 +916,15 @@ describe("routeHostEvent: build ticket <t> on an issue", () => {
     await routeHostEvent(issueMention("see `@wardby build ticket 2` @wardby hi"), d);
     expect(hook).not.toHaveBeenCalled();
   });
+
+  it("is not a plan command from a provider other than GitHub", async () => {
+    const hook = recording("started");
+    const base = deps([{ agentId: "a3", triggers: ["mention"], checkName: null }]);
+    const d = { ...base, hosts: { github: base.hosts.github, local: base.hosts.github } };
+    await routeHostEvent(issueMention("@wardby build ticket 2", { provider: "local" }), d);
+    expect(d.repoAccess.authorizeHostUser).toHaveBeenCalledTimes(1);
+    expect(hook).not.toHaveBeenCalled();
+  });
 });
 
 describe("routeHostEvent repository authorization (H5-1) and mention gate (H5-3)", () => {

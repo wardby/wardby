@@ -18,8 +18,12 @@ export interface PlanChainHook {
    * chain's run starts the next ticket; one closed unmerged stops the chain.
    */
   onMerged(db: PlanChainMergeDb, pr: { repository: string; number: number; merged: boolean }): Promise<void>;
-  /** A run ended (the shared run-end event): the chain's run that did not succeed, or opened no PR, stops it. */
-  onTicketFinished(db: PlanChainDb, runId: string): Promise<void>;
+  /**
+   * A run ended (the shared run-end event): the chain's run that did not succeed, or opened no PR, stops
+   * it; a fix round of a ticket whose PR already merged starts the next ticket (R12: the builder is
+   * checked again, so this needs the settings tables too).
+   */
+  onTicketFinished(db: PlanChainMergeDb, runId: string): Promise<void>;
   /** `@<handle> build ticket <t>` on the plan's issue (C4). */
   buildTicketFromComment(
     db: PlanChainMergeDb,
