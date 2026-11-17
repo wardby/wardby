@@ -841,7 +841,6 @@ function pullRequestsOf(
   return { pullRequest: prs[0], ...(prs.length > 1 ? { pullRequests: prs } : {}) };
 }
 
-/** The results stored on a coding run's writable extra repositories' rows, in set order. Empty on a read failure. */
 /** The planner child's plan for the lead's result; null for any other run, and when it cannot be read. */
 async function planSummaryOf(db: RunnerDb, runId: string, origin: string | null): Promise<PlanSummary | null> {
   // RunnerDb is the real client at runtime; planSummaryForRun reads plan tables RunnerDb does not name:
@@ -852,6 +851,7 @@ async function planSummaryOf(db: RunnerDb, runId: string, origin: string | null)
   });
 }
 
+/** The results stored on a coding run's writable extra repositories' rows, in set order. Empty on a read failure. */
 async function extraRepositoryResults(db: Pick<RunnerDb, "codingRunRepository">, runId: string): Promise<unknown[]> {
   try {
     const rows = await db.codingRunRepository.findMany({

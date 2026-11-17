@@ -249,6 +249,12 @@ export interface DispatchRunOptions {
    * the same repository and number (a second planner's, say), or none, never builds in its place.
    */
   expectedPlanSetId?: string;
+  /**
+   * The agent's planDocument setting is treated as absent for this run: a document send that is not a
+   * plan revision (a repository-store plan document, or any document linked to a planner) runs as a
+   * plain linked-document run, with no plan number, plan note or plan folder.
+   */
+  withoutPlanDocument?: boolean;
 }
 
 export interface DispatchRunResult {
@@ -1154,7 +1160,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
   // A malformed stored setting is treated as no plan setting (logged by agent id only, never the
   // value) so a bad row cannot stop every dispatch of the agent.
   let planSetting: ReturnType<typeof readPlanDocument> = null;
-  if (preview?.kind === "coding") {
+  if (preview?.kind === "coding" && options.withoutPlanDocument !== true) {
     try {
       planSetting = readPlanDocument(preview.codingProfile?.planDocument, preview.ownerId ?? null);
     } catch {

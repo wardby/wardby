@@ -79,6 +79,8 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
   let commenter: Principal;
   let codingAgentId: string;
   let nativeAgentId: string;
+  /** A coding agent with a planDocument setting (store repository): its linked documents are still plain sends. */
+  let plannerAgentId: string;
   const asWriter = (): Viewer => ({ kind: "principal", principalId: writer.id });
 
   beforeAll(async () => {
@@ -106,19 +108,41 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
         data: { name: `al-native-${s}`, systemPrompt: "p", model: "m", budgetUsd: 1, ownerId: owner.id },
       })
     ).id;
+    plannerAgentId = (
+      await db.agent.create({
+        data: {
+          name: `al-planner-${s}`,
+          systemPrompt: "Plan and edit docs.",
+          model: "gpt-5.6-luna",
+          budgetUsd: 2,
+          kind: "coding",
+          ownerId: owner.id,
+          codingProfile: {
+            create: {
+              provider: "codex",
+              repository,
+              repositoryAuthorizedVia: "admin",
+              protectedPaths: [],
+              planDocument: { store: "repository", path: "plans/{n}/", reviewers: [owner.id] },
+            },
+          },
+        },
+      })
+    ).id;
     await createSecret(`AL_KEY_${s.slice(0, 8)}`, SECRET, owner.id, cipher, db);
     await attachSecret(codingAgentId, `AL_KEY_${s.slice(0, 8)}`, owner.id, db);
   });
 
   afterAll(async () => {
-    const agents = { agentId: { in: [codingAgentId, nativeAgentId] } };
+    const agents = { agentId: { in: [codingAgentId, nativeAgentId, plannerAgentId] } };
     await db.document.deleteMany({ where: { ownerId: owner.id } });
+    await db.planSet.deleteMany({ where: agents });
     await db.codingRun.deleteMany({ where: { run: agents } });
     await db.run.deleteMany({ where: agents });
     await db.agentSecret.deleteMany({ where: agents });
     await db.secret.deleteMany({ where: { ownerId: owner.id } });
     await db.codingAgentProfile.deleteMany({ where: agents });
-    await db.agent.deleteMany({ where: { id: { in: [codingAgentId, nativeAgentId] } } });
+    await db.agent.deleteMany({ where: { id: { in: [codingAgentId, nativeAgentId, plannerAgentId] } } });
     await db.principalProfile.deleteMany({ where: { principalId: { in: [owner.id, writer.id, commenter.id] } } });
     await db.principal.deleteMany({ where: { id: { in: [owner.id, writer.id, commenter.id] } } });
     await db.$disconnect();
@@ -230,6 +254,61 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
       expect(r.sentAt).not.toBeNull();
       expect(r.sentVersionNumber).toBe(1);
       expect(r.answeredRunId).toBeNull();
+    }
+  });
+
+  describe("a document linked to an agent with a plan setting is a plain linked-document send", () => {
+    /** A document linked to the planner agent at `path`; optionally one of its repository-store plan sets. */
+    async function plannerDoc(asPlanDocument: boolean) {
+      const doc = await createDocument(db, cipher, {
+        ownerId: owner.id,
+        title: "Plan",
+        markdown: "hello world\n\nsecond para",
+        agentId: plannerAgentId,
+        repository,
+        path,
+        baseRef: "main",
+      });
+      await grant(doc.id, writer.id, "write");
+      if (asPlanDocument) {
+        const set = await db.planSet.create({
+          data: {
+            agentId: plannerAgentId,
+            repository,
+            number: 7,
+            store: "repository",
+            createdByRunId: "fixture",
+          },
+        });
+        await db.document.update({ where: { id: doc.id }, data: { planSetId: set.id, planPath: "plan.md" } });
+      }
+      return doc.id;
+    }
+
+    for (const asPlanDocument of [true, false]) {
+      it(`${asPlanDocument ? "a repository-store plan document" : "a non-plan document"}: the run starts and its file is published`, async () => {
+        const docId = await plannerDoc(asPlanDocument);
+        const t1 = await thread(docId, "hello", "Warmer");
+        const { runId } = await sendThreadsToAgent(db, deps, {
+          documentId: docId,
+          viewer: asWriter(),
+          threadIds: [t1.threadId],
+        });
+        const coding = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+        // No plan run: no number, no plan folder collected, no planner note.
+        expect(coding).toMatchObject({ planNumber: null, collectPlanFiles: false, planRepositoryPath: null });
+        expect(coding.request).not.toContain("Write plan");
+        const replies = [{ thread: t1.number, reply: "Warmed it up.", resolved: true }];
+        const sha = await finish(
+          runId,
+          "succeeded",
+          `Edited.\n\n\`\`\`wardby-thread-replies\n${JSON.stringify(replies)}\n\`\`\``,
+        );
+        files.set(`${sha}:${path}`, "hello lovely world\n\nsecond para");
+        await onDocumentRunFinished(db, deps, runId);
+        const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
+        expect(doc.currentVersion).toMatchObject({ number: 2, runId, markdown: "hello lovely world\n\nsecond para" });
+      });
     }
   });
 
@@ -1954,8 +2033,11 @@ describe.skipIf(!process.env.DATABASE_URL)("plan documents", { timeout: 30_000 }
     await db.$disconnect();
   });
 
-  /** A coding planner (store wardby) whose plan 12 holds plan.md (v1, with a value that is now its secret) and screens/. */
-  async function planSet() {
+  /**
+   * A coding planner (store wardby) whose plan 12 holds plan.md (v1, with a value that is now its secret) and screens/.
+   * `extra`: other plan.md text and board, and more values that become its secrets after v1 was published.
+   */
+  async function planSet(extra: { planMd?: string; manifest?: string; board?: string; secrets?: string[] } = {}) {
     const agentId = (
       await db.agent.create({
         data: {
@@ -1998,9 +2080,9 @@ describe.skipIf(!process.env.DATABASE_URL)("plan documents", { timeout: 30_000 }
     });
     await db.codingRunPlanFile.createMany({
       data: [
-        { path: "plan.md", content: `# The plan\n\nUse key ${PLAN_SECRET} for now.\n\nShip it.\n` },
-        { path: "screens/manifest.json", content: manifest },
-        { path: "screens/boards/home.html", content: "<main>Home</main>" },
+        { path: "plan.md", content: extra.planMd ?? `# The plan\n\nUse key ${PLAN_SECRET} for now.\n\nShip it.\n` },
+        { path: "screens/manifest.json", content: extra.manifest ?? manifest },
+        { path: "screens/boards/home.html", content: extra.board ?? "<main>Home</main>" },
       ].map((f) => ({ ...f, runId: first.id, direction: "output" })),
     });
     const published = await publishPlanFromRun(db, { cipher, origin: null }, first.id);
@@ -2009,6 +2091,10 @@ describe.skipIf(!process.env.DATABASE_URL)("plan documents", { timeout: 30_000 }
     const name = `ALP_KEY_${s.slice(0, 8)}_${n}`;
     await createSecret(name, PLAN_SECRET, owner.id, cipher, db);
     await attachSecret(agentId, name, owner.id, db);
+    for (const [i, value] of (extra.secrets ?? []).entries()) {
+      await createSecret(`${name}_X${i}`, value, owner.id, cipher, db);
+      await attachSecret(agentId, `${name}_X${i}`, owner.id, db);
+    }
     const docs = await db.document.findMany({ where: { planSetId: published.planSetId } });
     const byPath = Object.fromEntries(docs.map((d) => [d.planPath!, d.id]));
     return { agentId, setId: published.planSetId, planId: byPath["plan.md"], screensId: byPath["screens/"] };
@@ -2094,6 +2180,48 @@ describe.skipIf(!process.env.DATABASE_URL)("plan documents", { timeout: 30_000 }
     const [v] = await listThreads(db, { documentId: planId, viewer: asOwner(), filter: "all" });
     expect(v.status).toBe("resolved");
     expect(v.comments.at(-1)!.body).toBe("Added the API section.");
+  });
+
+  it("redacts a JSON-escaped and an HTML-escaped secret from the revision's input files and task", async () => {
+    // Values whose stored forms differ from the raw value: JSON escapes the quote and the backslash,
+    // HTML escapes the angle bracket and the ampersand.
+    const jsonSecret = `wardby-fake"json\\secret-${s.slice(0, 8)}`;
+    const htmlSecret = `wardby-fake<html&secret-${s.slice(0, 8)}`;
+    const jsonEscaped = JSON.stringify(jsonSecret).slice(1, -1);
+    const htmlEscaped = htmlSecret.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    expect(jsonEscaped).not.toBe(jsonSecret);
+    expect(htmlEscaped).not.toBe(htmlSecret);
+    const { planId } = await planSet({
+      planMd: `# The plan\n\nkeys ${jsonEscaped} and ${htmlEscaped}\n\nShip it.\n`,
+      manifest: JSON.stringify({
+        title: jsonSecret,
+        boards: [{ id: "home", name: "Home", file: "boards/home.html", width: 1280 }],
+      }),
+      board: `<main>${htmlEscaped}</main>`,
+      secrets: [jsonSecret, htmlSecret],
+    });
+    const t = await createThread(db, cipher, {
+      documentId: planId,
+      viewer: asOwner(),
+      anchor: anchor("Ship it."),
+      body: "Tighten it",
+    });
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: planId,
+      viewer: asOwner(),
+      threadIds: [t.threadId],
+    });
+    const run = await db.codingRun.findUniqueOrThrow({ where: { runId } });
+    const inputs = await loadPlanFiles(db, runId, "input");
+    // The stored forms really were in the set: the redaction, not their absence, keeps them out.
+    const stored = await getDocument(db, planId);
+    expect(stored.content.format === "markdown" ? stored.content.markdown : "").toContain(jsonEscaped);
+    for (const text of [run.task, run.request ?? "", ...inputs.map((f) => f.content)]) {
+      for (const form of [jsonSecret, jsonEscaped, htmlSecret, htmlEscaped]) expect(text).not.toContain(form);
+    }
+    expect(inputs.find((f) => f.path === "plan.md")!.content).toContain("[REDACTED]");
+    expect(inputs.find((f) => f.path === "screens/manifest.json")!.content).toContain("[REDACTED]");
+    expect(inputs.find((f) => f.path === "screens/boards/home.html")!.content).toContain("[REDACTED]");
   });
 
   it("another document of the set a person changed meanwhile is not reverted by the run's untouched copy", async () => {

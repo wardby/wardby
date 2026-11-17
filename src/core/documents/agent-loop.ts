@@ -338,7 +338,8 @@ async function startDocumentRun(
         collectPlanFiles: true,
         planNumber: link.plan.number,
       }
-    : {};
+    : // Not a plan revision: the agent's plan setting (if any) does not make this a planner run.
+      { withoutPlanDocument: true };
 
   // Counted last: a send refused for any other reason uses none of the hourly allowance.
   try {
