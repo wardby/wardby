@@ -17,6 +17,7 @@ import { createDocument, publishVersion } from "../documents/service.js";
 import { atLeast, effectiveAccess } from "../grants.js";
 import { TERMINAL_RUN_STATUSES } from "../host-status.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
+import { planSetChanged } from "./approval.js";
 import { parsePlanLayout, type PlanLayoutDocument } from "./layout.js";
 
 export type SecretCipher = Parameters<typeof loadAgentSecretValues>[1];
@@ -431,7 +432,12 @@ export async function publishPlanFromRun(
     await markPublish(db, runId, PLAN_PUBLISH_FAILED).catch(() => undefined);
     throw err;
   } finally {
-    if (held && set) await releaseLease(db, set.id, runId).catch(() => undefined);
+    if (held && set) {
+      await releaseLease(db, set.id, runId).catch(() => undefined);
+      // Spec §7b: a removal that leaves only approved documents approves the set; a new waiting
+      // document ends its approval. After the lease, since a build start may take a while. Never throws.
+      await planSetChanged(db, set.id);
+    }
   }
 }
 

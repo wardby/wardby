@@ -25,6 +25,7 @@ import { preferIndexScans, withSerializableRetry } from "../serializable-retry.j
 import { documentAccess, requireDocumentAccess, type Viewer } from "./access.js";
 import { mentionCandidates, principalNames } from "./comments.js";
 import { notifyDocumentChange } from "./events.js";
+import { planReviewHook } from "../plans/approval.js";
 import { loadContent } from "./files.js";
 import { formatFor } from "./formats/index.js";
 import { DOCUMENT_WRITE_ATTEMPTS, MAX_REVIEW_EVENTS, MAX_REVIEW_NOTE_CHARS, MAX_REVIEWERS } from "./limits.js";
@@ -317,6 +318,7 @@ export async function submitForReview(
     });
   });
   await notifyDocumentChange(db, input.documentId, "review");
+  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
   return getReviewView(db, input.documentId, input.viewer);
 }
 
@@ -369,7 +371,11 @@ export async function reviewDocument(
     });
     return true;
   });
-  if (changed) await notifyDocumentChange(db, input.documentId, "review");
+  if (changed) {
+    await notifyDocumentChange(db, input.documentId, "review");
+    // Spec §7b: the verdict that approves a plan set's last document notifies or starts a build.
+    await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
+  }
   return getReviewView(db, input.documentId, input.viewer);
 }
 
@@ -416,6 +422,7 @@ export async function forceApprove(
     return ids;
   });
   await notifyDocumentChange(db, input.documentId, "review");
+  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
   return { view: await getReviewView(db, input.documentId, input.viewer), overridden };
 }
 
@@ -493,6 +500,7 @@ export async function reopenDocument(
   // As a publish does (open pages load the new version), and as a review action does.
   await notifyDocumentChange(db, input.documentId, "version");
   await notifyDocumentChange(db, input.documentId, "review");
+  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
   return getReviewView(db, input.documentId, input.viewer);
 }
 
@@ -526,6 +534,7 @@ export async function setArchived(
     });
   });
   await notifyDocumentChange(db, input.documentId, "review");
+  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
   return getReviewView(db, input.documentId, input.viewer);
 }
 

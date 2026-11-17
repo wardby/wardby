@@ -24,6 +24,18 @@ import { outsideRunContext } from "../../core/async-context.js";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { onDocumentRunFinished } from "../../core/documents/agent-loop.js";
 import { planRunFinishedHook } from "../../core/plans/hooks.js";
+import {
+  createPlanReviewHook,
+  issueNoticePoster,
+  runningPlanTicket,
+  setPlanReviewHook,
+  type PlanApprovalDeps,
+} from "../../core/plans/approval.js";
+import { refusalOf } from "../../core/plans/refusal.js";
+import { dispatchRun } from "../../core/dispatch.js";
+import { RepositorySetRefusedError } from "../../core/coding-repository-set.js";
+import { RESPONSE_PATH_SNAPSHOT_BUDGET, resolveWorkItem } from "../../core/attribution.js";
+import { documentSecretValues } from "../../core/documents/redact.js";
 import { planSummaryForRun } from "../../core/plans/publish.js";
 import { planSummaryLines } from "../../core/plans/wording.js";
 import { httpOrigin } from "../../mcp/tools/documents.js";
@@ -384,6 +396,60 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   const blobStoreConfig = loadBlobStoreConfig(env);
   const cipher = options.secretCipher;
   const origin = httpOrigin(env.MCP_CANONICAL_URI);
+  // Spec §7b: a plan set's approval notifies on its issue or starts its builder for ticket 1. startTicket
+  // reads `composed` only when it is called, after this function returns, as the terminal hooks do.
+  const planDeps: PlanApprovalDeps = {
+    postIssueNotice: issueNoticePoster({ db: options.db, reviewHosts, issueTrackers }),
+    mentionHandle: async () => (reviewHosts.github?.appSlug ? await reviewHosts.github.appSlug() : null),
+    secretValues: async (agentId) => {
+      if (!cipher) throw new Error("plan_secrets_unavailable");
+      return documentSecretValues(options.db, cipher, agentId);
+    },
+    startTicket: async ({ builderAgentId, set, ticket, starterId, trigger }) => {
+      try {
+        const attribution =
+          set.issueProvider && set.issueKey
+            ? {
+                source: "explicit" as const,
+                item: await resolveWorkItem(
+                  options.db,
+                  issueTrackers,
+                  set.issueProvider,
+                  set.issueKey,
+                  RESPONSE_PATH_SNAPSHOT_BUDGET,
+                ),
+              }
+            : undefined;
+        const dispatched = await dispatchRun({
+          db: options.db,
+          executor: composed,
+          selfDefects: { db: options.db, issueTrackers },
+          agentId: builderAgentId,
+          trigger,
+          ...(starterId ? { triggeredById: starterId } : {}),
+          codingRepository: set.repository,
+          codingTask: `Build ticket ${ticket} of plan ${set.number}.`,
+          planNumber: set.number,
+          planTicket: ticket,
+          ...(cipher ? { secretCipher: cipher } : {}),
+          ...(attribution ? { attribution } : {}),
+          // R16, spec §7b: never more than one ticket run of a set at a time, checked in the transaction.
+          beforePersist: async (tx) => (await runningPlanTicket(tx, set.id)) === null,
+        });
+        if (!dispatched) return { running: (await runningPlanTicket(options.db, set.id)) ?? ticket };
+        if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
+          return { refused: (dispatched.run.error ?? "refused").split(":")[0] };
+        }
+        return { runId: dispatched.run.id };
+      } catch (err) {
+        const refusal = refusalOf(err) ?? (err instanceof RepositorySetRefusedError ? { error: err.code } : undefined);
+        if (refusal) return { refused: refusal.error };
+        throw err;
+      }
+    },
+  };
+  // Without the cipher no notice can be redacted, so no plan approval hook runs (as for the run hooks).
+  setPlanReviewHook(cipher ? createPlanReviewHook(planDeps) : undefined);
   const transcripts = new RunTranscriptRecorder({
     db: options.db,
     blobs: blobStoreConfig && cipher ? createBlobStore(blobStoreConfig) : undefined,
@@ -418,7 +484,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
       issueTrackers,
       warmRounds: jobs.warmRounds === true,
       // Threads sent from a document: publish the run's edit and post its replies; a planner run's
-      // plan files become its plan set (neither throws; postIssueNotice is wired by C2). Without the
+      // plan files become its plan set, and a planner with no lead replies on its issue (neither throws). Without the
       // cipher the agent's secrets cannot be redacted, so nothing is posted or published.
       ...(cipher
         ? {
@@ -429,7 +495,12 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
                 cipher,
                 selfDefects: { db: options.db, issueTrackers },
               }));
-              const planHook = planRunFinishedHook(() => ({ db: options.db, cipher, origin }));
+              const planHook = planRunFinishedHook(() => ({
+                db: options.db,
+                cipher,
+                origin,
+                postIssueNotice: planDeps.postIssueNotice,
+              }));
               return (runId: string) => {
                 documentHook(runId);
                 void planHook(runId);

@@ -292,6 +292,10 @@ export class GitHubReviewHost implements CodeReviewHost {
     return (await this.client.appIdentity()).ownerLogin;
   }
 
+  async appSlug(): Promise<string> {
+    return (await this.client.appIdentity()).slug;
+  }
+
   /** Runs `action` with a token for exactly `permissions`, translating failures to ReviewHostError. */
   protected async withToken<T>(
     repository: string,

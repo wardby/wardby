@@ -355,6 +355,8 @@ export interface CodeReviewHost {
   readonly provider: ReviewHostProvider;
   /** The GitHub App's owner account (always served; see WARDBY_GITHUB_ALLOWED_ACCOUNTS). Hosts without an App omit it. */
   appOwnerLogin?(): Promise<string>;
+  /** The GitHub App's @-handle (its slug). Hosts without an App omit it. */
+  appSlug?(): Promise<string>;
   /**
    * The user's effective permission on `repository`, asked with the App's own
    * installation credential (never a user token). Answers only for the user
