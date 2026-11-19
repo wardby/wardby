@@ -276,22 +276,13 @@ describe.skipIf(!process.env.DATABASE_URL)("lifecycle races (database)", () => {
     ).toBeGreaterThan(4);
   });
 
-  // FINDING: L1, unconfirmed; see regression-phase1-report.md. PrismaContainerExecutionStore.complete reads the run, checks
-  // it is not terminal, then writes it with an unconditional update, in one READ COMMITTED
-  // transaction that takes no row lock first. A terminate (stop_run, a failure, the reconciler)
-  // that commits between the read and the write is overwritten: the row ends `succeeded`, while
-  // terminate reported it ended the run, so ContainerExecutor.stop goes on to emit `cancelled`,
-  // kill the job and mark the pull request's check failed.
-  // Known finding, expected to fail until fixed in the order of docs/private/2026-10-26-regression-findings-fix-order.md;
-  // the fixing PR turns this into a normal `it`.
-  it.fails(
-    "a coding run's finish racing a stop or a failure, with the finish first: one terminal write, the first one",
-    async () => {
-      await sweepCoding([
-        [completeOk, cancel],
-        [completeOk, fail],
-        [completeBudget, cancel],
-      ]);
-    },
-  );
+  // complete locks the run's row before it reads the status, so a terminate that commits in between
+  // is seen, never overwritten.
+  it("a coding run's finish racing a stop or a failure, with the finish first: one terminal write, the first one", async () => {
+    await sweepCoding([
+      [completeOk, cancel],
+      [completeOk, fail],
+      [completeBudget, cancel],
+    ]);
+  });
 });

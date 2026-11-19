@@ -146,7 +146,7 @@ const KNOWN_UNDOCUMENTED_CODES = new Set<string>([
   ...["coding_stream_agent_exited", "coding_stream_failed", "coding_stream_proxy_denied"],
   ...["coding_stream_proxy_unreachable", "coding_stream_rate_limited", "coding_stream_timeout"],
   ...["coding_stream_upstream_error", "coding_toolchain_unsupported", "coding_turn_failed"],
-  ...["coding_workspace_lost", "model_not_allowed", "executor_run_not_found", "run_not_drivable"],
+  ...["model_not_allowed", "executor_run_not_found", "run_not_drivable"],
   ...["ownership_lost", "step_replay_mismatch", "worker_error", "worker_tool_runner_unreachable"],
   ...["sandbox_dispatch_unavailable", "native_sandbox_invalid_run_id", "native_sandbox_invalid_warm_token"],
   ...["native_sandbox_platform_unsupported", "native_sandbox_recovery_unavailable"],
@@ -173,10 +173,9 @@ function mcpTools(): string[] {
 /** MCP tools named nowhere in docs/ or help/ when this suite was written: finding D2. */
 const KNOWN_UNDOCUMENTED_TOOLS = new Set<string>([
   ...["update_budget_group", "list_budget_groups", "delete_budget_group", "detach_tool"],
-  ...["create_datastore", "list_datastores", "delete_datastore"],
+  ...["list_datastores", "delete_datastore"],
   ...["detach_datastore", "datastore_get", "datastore_list", "datastore_delete", "detach_subagent"],
   ...["get_agent_memory", "list_agent_memory", "delete_agent_memory"],
-  ...["create_webhook"],
 ]);
 
 /** Every environment variable the code reads, with the first file that reads it. */
@@ -224,8 +223,8 @@ const INTERNAL_ENV: Record<string, string> = {
 /** Operator-facing variables named nowhere in the operator docs when this suite was written: finding D3. */
 const KNOWN_UNDOCUMENTED_ENV = new Set<string>([
   ...["EMAIL_PROVIDER", "SECRET_CIPHER", "DATASTORE", "ENGINE", "VCS_PROVIDER"],
-  ...["GITHUB_API_VERSION", "KUBERNETES_PREFLIGHT_TIMEOUT_MS"],
-  ...["MCP_SECRET_ELICITATION_PROTOCOL", "LOG_LEVEL", "METRICS_ALLOW_NON_LOOPBACK", "BEDROCK_REGION"],
+  ...["GITHUB_API_VERSION"],
+  ...["MCP_SECRET_ELICITATION_PROTOCOL", "LOG_LEVEL", "BEDROCK_REGION"],
   ...["WARDBY_LOAD_MOCK_JITTER_MS"],
 ]);
 

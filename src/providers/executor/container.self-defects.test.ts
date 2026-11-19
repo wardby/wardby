@@ -58,6 +58,8 @@ function harness(initialStatus: string) {
     },
   };
   db.$transaction = async (fn: any) => fn(db);
+  // complete() locks the run's row first; nothing to lock in this fake.
+  db.$queryRaw = vi.fn(async () => []);
   const tracker = {
     provider: "jira",
     createIssue: vi.fn(async () => ({ id: "1", key: "OPS-3", url: "https://your-site.atlassian.net/browse/OPS-3" })),

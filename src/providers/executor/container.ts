@@ -1671,6 +1671,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
   ): Promise<void> {
     const finishedAt = new Date();
     const finished = await this.db.$transaction(async (tx) => {
+      // Lock the row before reading its status: another terminal write (terminate, which queues its
+      // follow-ups in the same transaction) may hold it uncommitted, and the unconditional update below
+      // would otherwise overwrite that run's terminal status once it commits.
+      await tx.$queryRaw`SELECT 1 FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
       const run = await tx.run.findUnique({ where: { id: runId }, include: { codingRun: true } });
       if (!run?.codingRun) throw new Error("coding_run_not_found");
       if (TERMINAL_STATUSES.has(run.status)) {
