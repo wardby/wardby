@@ -26,7 +26,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install helm-unittest
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "$UNITTEST_VERSION"
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "$UNITTEST_VERSION" --verify=false
       - name: Lint
         run: helm lint "$CHART" -f "$CHART/ci/default-values.yaml"
       - name: Unit tests

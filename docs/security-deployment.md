@@ -950,11 +950,11 @@ an optional peer. The migration image keeps the full build tree -- the Prisma
 CLI and `prisma.config.ts`.
 
 **Development tree (repository, CI, build and migration images).** The Prisma
-CLI (a devDependency since the Prisma 7 upgrade) still carries two flagged
-packages, both forced to patched versions by `overrides` in `package.json`:
+CLI (a devDependency since the Prisma 7 upgrade) still carries three flagged
+packages, all forced to patched versions by `overrides` in `package.json`:
 
 ```json
-"overrides": { "deepmerge-ts": "8.0.2", "mysql2": "3.24.4" }
+"overrides": { "deepmerge-ts": "8.0.2", "effect": "3.22.5", "mysql2": "3.24.4" }
 ```
 
 - `deepmerge-ts`: `@prisma/config` 7.10.0 still pins 7.1.5 exactly. The 8.x
@@ -964,13 +964,16 @@ packages, both forced to patched versions by `overrides` in `package.json`:
 - `mysql2` (GHSA-3f6p-5ww8-9rcr, GHSA-rgwj-5xj2-c3m3, high): `prisma` 7.10.0
   pins 3.15.3 exactly; it is used only by Prisma Studio's MySQL executor
   (`createPool` from `mysql2/promise`), never by wardby, which is
-  PostgreSQL-only. 3.24.4 is the same major. After changing either override,
+  PostgreSQL-only. 3.24.4 is the same major.
+- `effect` (GHSA-7589-6fvf-x4pw, high): `@prisma/config` 7.10.0 pins 3.20.0
+  exactly and uses it only to load and check `prisma.config.ts`, never at
+  runtime. 3.22.5 is the same major. After changing any of these overrides,
   re-run `prisma generate`, `prisma validate`, the `migrate diff` drift check,
   and the migration image's `migrate deploy`.
 
 ESLint and `typescript-eslint` still ask for `minimatch` 10, which is flagged
 (GHSA-g3hv-75wg-m249, moderate, fixed in 11.0.1), so `overrides` also forces
-`minimatch` to 11.0.3. It is development-only and never reaches a production
+`minimatch` to 11.0.4. It is development-only and never reaches a production
 image. After changing it, confirm `npm run lint` checks the same files and
 still reports problems.
 
