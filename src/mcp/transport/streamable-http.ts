@@ -302,7 +302,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
       await handleOAuthCallback(url, res, opts.oauthCallback);
       return;
     }
-    if (url.pathname.startsWith(VIEWER_API_PREFIX)) {
+    if (url.pathname.startsWith(VIEWER_API_PREFIX) || url.pathname === "/admin" || url.pathname === "/admin/") {
       if (opts.viewer && (await opts.viewer.handle(req, res, url))) return;
       sendJson(res, 404, { error: "not_found" });
       return;
@@ -318,7 +318,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         token: "",
         clientId: ctx.principal.subject,
         scopes: [...ctx.scopes],
-        extra: { principal: ctx.principal, roles: ctx.roles },
+        extra: { principal: ctx.principal, roles: ctx.roles, actsFor: ctx.actsFor, teamIds: ctx.teamIds },
       };
       await nodeHandler(req, res, body);
       return;

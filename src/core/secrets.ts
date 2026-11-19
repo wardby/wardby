@@ -244,8 +244,12 @@ export async function setSecretBroker(
 }
 
 /** Names/metadata only — never a value or ciphertext. */
-export async function listSecrets(ownerId: string, db: PrismaClient): Promise<SecretMetadata[]> {
-  const secrets = await db.secret.findMany({ where: { ownerId } });
+export async function listSecrets(
+  ownerId: string,
+  db: PrismaClient,
+  opts: { all?: boolean } = {},
+): Promise<SecretMetadata[]> {
+  const secrets = await db.secret.findMany({ where: opts.all ? {} : { ownerId } });
   return secrets.map((s) => ({
     id: s.id,
     name: s.name,

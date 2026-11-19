@@ -975,6 +975,144 @@ describe("repository tools", () => {
     await client.close();
   });
 
+  it("defaults reviewDrafts to false, stores true, and rejects it without the pull_request trigger", async () => {
+    const { mcp } = setup([{ id: "a1", name: "reviewer", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const base = { agentId: "a1", repository: "openai/example", access: "write", triggers: ["pull_request"] };
+    const byDefault = await client.callTool({
+      name: "link_repository",
+      arguments: { ...base, checkName: "wardby review" },
+    });
+    expect((parseText(byDefault as never) as { link: Record<string, unknown> }).link).toMatchObject({
+      reviewDrafts: false,
+    });
+
+    const optedIn = await client.callTool({
+      name: "link_repository",
+      arguments: { ...base, checkName: "wardby review", reviewDrafts: true },
+    });
+    expect((parseText(optedIn as never) as { link: Record<string, unknown> }).link).toMatchObject({
+      reviewDrafts: true,
+    });
+
+    const relinked = await client.callTool({
+      name: "link_repository",
+      arguments: { ...base, checkName: "wardby review" },
+    });
+    expect((parseText(relinked as never) as { link: Record<string, unknown> }).link).toMatchObject({
+      reviewDrafts: false,
+    });
+
+    const noTrigger = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "openai/other",
+        access: "write",
+        triggers: ["mention"],
+        reviewDrafts: true,
+      },
+    });
+    expect(noTrigger.isError).toBeTruthy();
+    expect(errorText(noTrigger as never)).toContain("reviewDrafts needs the pull_request trigger");
+    await client.close();
+  });
+
+  it("defaults reviewOnPush to false, stores true, and rejects it without the pull_request trigger", async () => {
+    const { mcp } = setup([{ id: "a1", name: "reviewer", ownerId: "p1", kind: "native" }], "p1");
+    const client = await connectClient(mcp);
+    const base = { agentId: "a1", repository: "openai/example", access: "write", triggers: ["pull_request"] };
+    const byDefault = await client.callTool({
+      name: "link_repository",
+      arguments: { ...base, checkName: "wardby review" },
+    });
+    expect((parseText(byDefault as never) as { link: Record<string, unknown> }).link).toMatchObject({
+      reviewOnPush: false,
+    });
+
+    const optedIn = await client.callTool({
+      name: "link_repository",
+      arguments: { ...base, checkName: "wardby review", reviewOnPush: true },
+    });
+    expect((parseText(optedIn as never) as { link: Record<string, unknown> }).link).toMatchObject({
+      reviewOnPush: true,
+    });
+
+    const relinked = await client.callTool({
+      name: "link_repository",
+      arguments: { ...base, checkName: "wardby review" },
+    });
+    expect((parseText(relinked as never) as { link: Record<string, unknown> }).link).toMatchObject({
+      reviewOnPush: false,
+    });
+
+    const noTrigger = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "openai/other",
+        access: "write",
+        triggers: ["mention"],
+        reviewOnPush: true,
+      },
+    });
+    expect(noTrigger.isError).toBeTruthy();
+    expect(errorText(noTrigger as never)).toContain("reviewOnPush needs the pull_request trigger");
+    await client.close();
+  });
+
+  it("defaults reviewOnOpen to false, stores true, resets it on re-link, and rejects it without the pull_request trigger", async () => {
+    const { mcp } = setup(
+      [
+        { id: "a1", name: "reviewer", ownerId: "p1", kind: "native" },
+        { id: "c1", name: "coder", ownerId: "p1", kind: "coding" },
+      ],
+      "p1",
+    );
+    const client = await connectClient(mcp);
+    const base = { agentId: "a1", repository: "openai/example", access: "write", triggers: ["pull_request"] };
+    const link = (res: unknown) => (parseText(res as never) as { link: Record<string, unknown> }).link;
+
+    const byDefault = await client.callTool({
+      name: "link_repository",
+      arguments: { ...base, checkName: "wardby review" },
+    });
+    expect(link(byDefault)).toMatchObject({ reviewOnOpen: false });
+
+    const optedIn = await client.callTool({
+      name: "link_repository",
+      arguments: { ...base, checkName: "wardby review", reviewOnOpen: true },
+    });
+    expect(link(optedIn)).toMatchObject({ reviewOnOpen: true });
+
+    const relinked = await client.callTool({
+      name: "link_repository",
+      arguments: { ...base, checkName: "wardby review" },
+    });
+    expect(link(relinked)).toMatchObject({ reviewOnOpen: false });
+
+    const noTrigger = await client.callTool({
+      name: "link_repository",
+      arguments: {
+        agentId: "a1",
+        repository: "openai/other",
+        access: "write",
+        triggers: ["mention"],
+        reviewOnOpen: true,
+      },
+    });
+    expect(noTrigger.isError).toBeTruthy();
+    expect(errorText(noTrigger as never)).toContain("reviewOnOpen needs the pull_request trigger");
+
+    const coding = await client.callTool({
+      name: "link_repository",
+      arguments: { agentId: "c1", repository: "openai/example", access: "read", ref: "main", reviewOnOpen: true },
+    });
+    expect(coding.isError).toBeTruthy();
+    expect(errorText(coding as never)).toContain("reviewOnOpen");
+    await client.close();
+  });
+
   it("stores markReadyWhenPassing on a write link", async () => {
     const { mcp } = setup([{ id: "a1", name: "reviewer", ownerId: "p1", kind: "native" }], "p1");
     const client = await connectClient(mcp);

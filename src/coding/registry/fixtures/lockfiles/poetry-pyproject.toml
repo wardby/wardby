@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "app"
+version = "0.1.0"
+description = ""
+authors = ["Example <dev@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+acme-core = { version = "^1.4", source = "corp" }
+requests = "^2.32"
+
+[[tool.poetry.source]]
+name = "corp"
+url = "https://example.jfrog.io/acme/api/pypi/pypi/simple" # primary index
+priority = "primary"
+
+[[tool.poetry.source]]
+name = "pypi-public"
+url = 'https://pypi.org/simple/'
+priority = "supplemental"
+
+[[tool.poetry.source]]
+name = "PyPI"
+priority = "explicit"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

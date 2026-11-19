@@ -1,0 +1,96 @@
+suite: coding proxy
+templates:
+  - coding_proxy.yaml
+values:
+  - ../ci/default-values.yaml
+tests:
+  - it: serves no metrics by default
+    asserts:
+      - notContains:
+          path: spec.ports
+          content: { name: metrics, port: 9464, targetPort: 9464 }
+        documentIndex: 0
+      - notContains:
+          path: spec.template.spec.containers[0].ports
+          content: { name: metrics, containerPort: 9464 }
+        documentIndex: 1
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: METRICS_BIND, value: 0.0.0.0:9464 }
+        documentIndex: 1
+      - lengthEqual:
+          path: spec.ingress
+          count: 1
+        documentIndex: 2
+  - it: serves metrics on the pod IP when enabled
+    set:
+      codingProxy.metrics.enabled: true
+    asserts:
+      - equal:
+          path: spec.ports[2]
+          value: { name: metrics, port: 9464, targetPort: 9464 }
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.containers[0].ports[2]
+          value: { name: metrics, containerPort: 9464 }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: METRICS_BIND, value: 0.0.0.0:9464 }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: METRICS_ALLOW_NON_LOOPBACK, value: "true" }
+        documentIndex: 1
+  - it: admits no scraper unless ingressFrom names one
+    set:
+      codingProxy.metrics.enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.ingress
+          count: 1
+        documentIndex: 2
+  - it: admits the named scrapers on the metrics port only
+    set:
+      codingProxy.metrics.enabled: true
+      codingProxy.metrics.port: 9500
+      codingProxy.metrics.ingressFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+    asserts:
+      - equal:
+          path: spec.ingress[1]
+          value:
+            from:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: monitoring
+            ports:
+              - port: 9500
+                protocol: TCP
+        documentIndex: 2
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: METRICS_BIND, value: 0.0.0.0:9500 }
+        documentIndex: 1
+  - it: ignores ingressFrom while metrics are off
+    set:
+      codingProxy.metrics.ingressFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+    asserts:
+      - lengthEqual:
+          path: spec.ingress
+          count: 1
+        documentIndex: 2
+  - it: lets codingProxy.env override a metrics variable
+    set:
+      codingProxy.metrics.enabled: true
+      codingProxy.env.METRICS_BIND: 127.0.0.1:9464
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: METRICS_BIND, value: 127.0.0.1:9464 }
+        documentIndex: 1

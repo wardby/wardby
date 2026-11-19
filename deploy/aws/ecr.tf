@@ -9,9 +9,13 @@ locals {
     "migration",
     "coding-worker",
     "coding-worker-node-python",
+    "coding-worker-node-python-3-13",
+    "coding-worker-node-python-3-14",
     "claude-coding-worker",
     "claude-tool-runner",
     "claude-tool-runner-node-python",
+    "claude-tool-runner-node-python-3-13",
+    "claude-tool-runner-node-python-3-14",
     "native-worker",
     # Optional PNG/PDF export renderer: built from the renderer bake target, not in its default group.
     "renderer",

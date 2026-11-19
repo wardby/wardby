@@ -500,6 +500,10 @@ export type HostEvent =
       prNumber: number;
       headSha: string;
       isFork: boolean;
+      /** The PR is a draft; absent means unknown, treated as not a draft. */
+      isDraft?: boolean;
+      /** New commits were pushed to the PR (not opened, reopened or marked ready); absent means not. */
+      isPush?: boolean;
     }
   | {
       /** The PR was merged or closed; only drives bookkeeping on issue/PR pairs wardby recorded. */

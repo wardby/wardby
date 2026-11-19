@@ -116,8 +116,8 @@ run id. The full guide has a log error sweeper recipe.
 A Jira-linked native agent can delegate to a coding sub-agent (attach it with
 `attach_subagent`; its `codingProfile.repository` is `your-org/your-repo`).
 Attach the coding agent directly to the Jira-linked agent: a coding agent
-further down a delegation chain still gets `[PROJ-123]` in its pull request
-title, but no web link, status moves or follow-up hint.
+further down a delegation chain still gets `(PROJ-123)` at the end of its pull
+request title, but no web link, status moves or follow-up hint.
 Link the native agent with `triggers: ["transitioned"]`,
 `triggerStatuses: ["Ready for AI"]`, `allowedTransitions: ["In Progress"]` and,
 optionally, `onPullRequestOpened: "In Review"` and
@@ -126,7 +126,9 @@ gated by `allowedTransitions`, write access only, names in the service
 account's language). The prompt should say: read the ticket, move it to In
 Progress, ask instead of delegating if it is underspecified, delegate a
 precise task, and for follow-ups pass the run id from the run message as
-`continuePriorRun`. The pull request title starts with `[PROJ-123]` and the
+`continuePriorRun`. The pull request title ends with `(PROJ-123)` (see
+[pull request titles](help://pull-request-titles)), its branch is
+`wardby/PROJ-123` (see [coding branch names](help://coding-branch-names)), and the
 issue gets a web link to it (needs Link issues); Jira's development panel
 shows it only if the Jira and GitHub integration is installed. Merge and close
 comments and the merged status move need the GitHub App to deliver

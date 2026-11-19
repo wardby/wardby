@@ -15,7 +15,8 @@ wardby server instead of a GitHub repository. You write the repository as
 
 - A **coding agent** clones the repository's committed history, works in the
   sandbox as usual, and wardby pushes the result into your repository as a new
-  branch `wardby/run-<run id>`. Wardby clones; it does not create a git
+  branch under `wardby/` (`wardby/run-<run id>` unless you name it, see
+  [Coding branch names](help://coding-branch-names)). Wardby clones; it does not create a git
   worktree in your repository.
 - A **review agent** reviews a branch of the repository against a base branch
   when you ask for it with `trigger_agent`.
@@ -29,7 +30,7 @@ The easiest way to try it is the optional coding step of
 - **A single-user or personal server.** Set `LOCAL_REPO_ROOTS` only on a
   server that you alone use. Every principal who can create or update agents
   or link repositories can use every repository under the trusted folders:
-  its committed code is sent to the model, and runs push `wardby/run-*`
+  its committed code is sent to the model, and runs push `wardby/*`
   branches into it. Anyone with execute access to a local coding agent can
   trigger such pushes.
 - **Trusted folders.** Set `LOCAL_REPO_ROOTS` on the wardby server to the
@@ -60,7 +61,7 @@ The easiest way to try it is the optional coding step of
 
 Create a coding agent with `create_agent` and
 `codingProfile.repository: "local:/abs/path"`, or change an existing agent with
-`update_agent`. Start it with `trigger_agent {agentId, task, baseRef?}`.
+`update_agent`. Start it with `trigger_agent {agentId, task, baseRef?, branch?}`.
 `baseRef` defaults to the profile's base ref.
 
 What happens:
@@ -69,7 +70,7 @@ What happens:
    uncommitted files, such as a `.env.local`, never leave your machine.
 2. The worker makes its changes in the sandbox, as it does for GitHub.
 3. Wardby validates the result and pushes a single commit to the branch
-   `wardby/run-<run id>` in your repository. Your working tree, index and
+   `wardby/<name>` in your repository. Your working tree, index and
    checked-out branch are never modified.
 4. `get_run` shows `resultBranch` and `baseSha` (the commit the run started
    from). Merge the branch the way you merge any branch.
@@ -82,8 +83,8 @@ Things to know:
   submodules or Git LFS files. The run still starts, but uncommitted files are
   not included and submodules and LFS are **not supported**: submodules are not
   initialized and LFS files are not fetched.
-- A run can start from an earlier result: pass `baseRef: "wardby/run-<run id>"`
-  to build on that branch. A continuation of a run (a lead agent revising its
+- A run can start from an earlier result: pass `baseRef` set to that run's
+  branch to build on it. A continuation of a run (a lead agent revising its
   earlier work) fast-forwards the same branch. If that branch has moved, or is
   checked out in your repository, the run fails with `local_branch_conflict`.
 - To keep working on a run's branch yourself, pass
@@ -94,7 +95,7 @@ Things to know:
   continuation can also resume the previous round's workspace (help article
   `substrate-warm-rounds`); the pushed branch is still what it continues.
 - Wardby never deletes result branches. Remove one you no longer need with
-  `git branch -D wardby/run-<run id>`.
+  `git branch -D <branch>`.
 - `.wardby/services.yaml` works for local runs. It is read from the committed
   file at the run's base ref, never from your working tree, and fails with the
   same errors as on GitHub (for example `service_declaration_invalid`). See
@@ -148,7 +149,9 @@ then:
   for Codex and Claude Code, with `pytest` and `ruff`, so it can run the tests.
   The images come from `CODING_WORKER_IMAGE_NODE_PYTHON_3_12` (Codex) and
   `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` (Claude Code); set them to
-  override. If this version has no Python image, quickstart says so and the
+  override. For a project that needs Python 3.13 or 3.14, set `toolchainVersion`
+  to `3.13` or `3.14` on the agent and set the matching `_3_13` or `_3_14`
+  variable to the image built for that version. If this version has no Python image, quickstart says so and the
   builder uses the Node workspace (it can edit but not run Python tests). Other
   languages need a bring-your-own image via `workerImageRef`. See the BYO
   worker images guide in the long-form docs;

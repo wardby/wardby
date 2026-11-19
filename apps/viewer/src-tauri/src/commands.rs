@@ -602,6 +602,33 @@ fn edit_servers<T>(
     Ok(out)
 }
 
+/// Launch configuration: `WARDBY_VIEWER_SERVER_URL` (with an optional
+/// `WARDBY_VIEWER_SERVER_NAME`) adds or updates a saved server at startup, so a
+/// dev loop can open the app already pointed at its server. Only the address
+/// travels this way. A credential in the environment would show up in process
+/// listings, so sign-in still happens in the browser.
+pub fn seed_server_from_env(app: &AppHandle) -> Result<(), AppError> {
+    let Ok(url) = std::env::var("WARDBY_VIEWER_SERVER_URL") else {
+        return Ok(());
+    };
+    let name = std::env::var("WARDBY_VIEWER_SERVER_NAME").ok();
+    edit_servers(app, &app.state::<AppState>(), |list| {
+        seed_server(list, &url, name.as_deref())
+    })
+}
+
+/// An empty URL seeds nothing; otherwise the same rules as adding by hand.
+fn seed_server(
+    list: &mut Vec<ServerConfig>,
+    url: &str,
+    name: Option<&str>,
+) -> Result<(), AppError> {
+    if url.trim().is_empty() {
+        return Ok(());
+    }
+    upsert_server(list, name.unwrap_or(""), url, None)
+}
+
 fn find_server(list: &[ServerConfig], url: &str) -> Result<ServerConfig, AppError> {
     list.iter()
         .find(|c| c.url == url)
@@ -1533,6 +1560,23 @@ mod tests {
         assert!(upsert_server(&mut list, "bad", "http://remote.example", None).is_err());
         assert!(upsert_server(&mut list, "bad", "https://u:p@h.example", None).is_err());
         assert!(upsert_server(&mut list, "bad", "https://h.example/?q=1", None).is_err());
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn seeding_from_launch_config_adds_updates_and_ignores_empty() {
+        let mut list = Vec::new();
+        seed_server(&mut list, "  ", Some("ignored")).unwrap();
+        assert!(list.is_empty());
+        seed_server(&mut list, "http://127.0.0.1:8080/", Some("local")).unwrap();
+        assert_eq!(list, vec![cfg("local", "http://127.0.0.1:8080", None)]);
+        // Seeding again keeps one entry and a client id the sign-in already saved.
+        list[0].client_id = Some("cid".into());
+        seed_server(&mut list, "http://127.0.0.1:8080", None).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].client_id.as_deref(), Some("cid"));
+        // The same validation as adding by hand: no plain http to a remote host.
+        assert!(seed_server(&mut list, "http://remote.example", None).is_err());
         assert_eq!(list.len(), 1);
     }
 

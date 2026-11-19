@@ -158,8 +158,12 @@ describe("CodingTaskInputSchema", () => {
     }
   });
 
-  it("requires a deterministic head ref", () => {
-    expect(() => CodingTaskInputSchema.parse({ ...input, headRef: "attacker/branch" })).toThrow(/runId/);
+  it("requires a wardby/ head ref", () => {
+    expect(() => CodingTaskInputSchema.parse({ ...input, headRef: "attacker/branch" })).toThrow(/wardby/);
+    for (const headRef of ["wardby/DEVXP-123", "wardby/DEVXP-123-2", "wardby/fix-invoice"]) {
+      expect(CodingTaskInputSchema.parse({ ...input, headRef }).headRef).toBe(headRef);
+    }
+    expect(() => CodingTaskInputSchema.parse({ ...input, headRef: "wardby/a/b" })).toThrow(/wardby/);
   });
 
   it("enforces task bytes and control-character rules", () => {
@@ -312,6 +316,38 @@ describe("CodingAgentOutputSchema", () => {
     // OpenAI's strict Structured Outputs mode requires every property in required, so the worker
     // always emits a "tag" key — null, not omitted, means "no tag" (see coding-worker/driver.ts).
     expect(CodingAgentOutputSchema.parse({ ...output, tag: null }).tag).toBeUndefined();
+  });
+
+  it("accepts the commit fields, absent or null, and normalizes them instead of failing the run", () => {
+    const absent = CodingAgentOutputSchema.parse(output);
+    expect([absent.commitType, absent.commitScope, absent.commitTitle]).toEqual([undefined, undefined, undefined]);
+    const nulls = CodingAgentOutputSchema.parse({ ...output, commitType: null, commitScope: null, commitTitle: null });
+    expect([nulls.commitType, nulls.commitScope, nulls.commitTitle]).toEqual([undefined, undefined, undefined]);
+
+    expect(
+      CodingAgentOutputSchema.parse({
+        ...output,
+        commitType: " Feat ",
+        commitScope: "Jira Webhooks!",
+        commitTitle: "feat: add retry\nto webhooks.",
+      }),
+    ).toMatchObject({ commitType: "feat", commitScope: "jira-webhooks", commitTitle: "add retry to webhooks" });
+  });
+
+  it("drops an unlisted commit type and unusable scope or title rather than rejecting the output", () => {
+    const parsed = CodingAgentOutputSchema.parse({
+      ...output,
+      commitType: "feature",
+      commitScope: "!!!",
+      commitTitle: "  ",
+    });
+    expect([parsed.commitType, parsed.commitScope, parsed.commitTitle]).toEqual([undefined, undefined, undefined]);
+  });
+
+  it("redacts a token-shaped commit title", () => {
+    expect(
+      CodingAgentOutputSchema.parse({ ...output, commitTitle: `leak ghp_${"a".repeat(20)}` }).commitTitle,
+    ).toContain("[REDACTED]");
   });
 });
 

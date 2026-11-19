@@ -7,6 +7,7 @@
 import type { PrismaClient } from "#prisma";
 import type { AuthProvider } from "../../providers/auth/types.js";
 import { resolvePrincipal } from "./principal.js";
+import { resolveStanding } from "../../core/teams/standing.js";
 import { McpError, unauthorized, insufficientScope } from "../errors.js";
 import type { McpRequestContext, McpProviders } from "../context.js";
 
@@ -43,9 +44,12 @@ export const SCOPES_SUPPORTED = [
   // Register host providers and approve their tools (docs/host-providers.md).
   // Bound tools decide who has permission and who wrote a comment.
   "hosts:admin",
+  "teams:manage",
   // Documents: read/list, and create/change/share (no role needed; document access itself is per document).
   "documents:read",
   "documents:write",
+  // wardby_owner only: read/write on every owner's management resources (isOwnerAll).
+  "owner:all",
 ];
 
 /**
@@ -59,7 +63,9 @@ export const SCOPES_SUPPORTED = [
  * which prices every principal's runs; power:manage scales the shared coding
  * proxy and native gateway to zero (power_sleep) and reads their state;
  * hosts:admin registers host providers, whose approved tools run in the push
- * and pull request flow.
+ * and pull request flow; teams:manage creates, renames and deletes teams and
+ * edits their membership (assigning a team's roles stays admin-only);
+ * owner:all acts as the owner of every owner's management resources (isOwnerAll).
  * A token scope only DELEGATES — it never authorizes on its own:
  * requireScope/requireAnyScope honour one only when one of the caller's
  * roles (McpRequestContext.roles, resolved live per request) grants it.
@@ -72,6 +78,8 @@ export const PRIVILEGED_SCOPES: readonly string[] = [
   "models:admin",
   "power:manage",
   "hosts:admin",
+  "teams:manage",
+  "owner:all",
 ];
 
 /**
@@ -87,11 +95,31 @@ export const ROLE_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
     "models:admin",
     "power:manage",
     "hosts:admin",
+    "teams:manage",
+  ],
+  // Superset of admin: also read/write on every owner's management resources
+  // (agents, runs, tools, budget groups, MCP servers, documents, webhooks,
+  // grants, datastores, secrets metadata), owner-only fields, bindings and task
+  // ownership. Secret values are never returned. Assign to people, not broad teams.
+  wardby_owner: [
+    "agents:admin",
+    "packages:approve",
+    "services:manage",
+    "admin:view",
+    "models:admin",
+    "power:manage",
+    "hosts:admin",
+    "teams:manage",
+    "owner:all",
   ],
   "package-approver": ["packages:approve"],
   "service-manager": ["services:manage"],
   "model-manager": ["models:admin"],
+  // Read-only, deployment-wide viewer access (admin:view) without the rest of admin.
+  viewer: ["admin:view"],
   "host-manager": ["hosts:admin"],
+  // Team create/rename/delete and membership; assigning a team's roles stays admin-only.
+  "team-manager": ["teams:manage"],
 };
 export const ROLE_NAMES: readonly string[] = Object.keys(ROLE_PERMISSIONS);
 
@@ -102,6 +130,38 @@ export function isRoleName(name: string): boolean {
 /** The permissions granted by `roles`; unknown role names grant nothing. */
 export function permissionsOf(roles: readonly string[] | null | undefined): Set<string> {
   return new Set((roles ?? []).filter(isRoleName).flatMap((r) => ROLE_PERMISSIONS[r]));
+}
+
+/**
+ * AUTH_OWNER_ALL_ROLE_ONLY: `true` lets a caller whose roles grant owner:all act as
+ * owner-all without the owner:all scope on the token, for deployments whose identity
+ * provider cannot issue that scope yet. Unset or `false` keeps the scope required.
+ * Anything else is a startup error.
+ */
+export function parseOwnerAllRoleOnly(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.AUTH_OWNER_ALL_ROLE_ONLY?.trim();
+  if (raw === undefined || raw === "" || raw === "false") return false;
+  if (raw === "true") return true;
+  throw new Error(`AUTH_OWNER_ALL_ROLE_ONLY must be "true" or "false", got "${raw}".`);
+}
+
+/** A token's scopes, plus owner:all when AUTH_OWNER_ALL_ROLE_ONLY is on and a role grants it. */
+export function effectiveScopes(
+  tokenScopes: Iterable<string>,
+  roles: readonly string[] | null | undefined,
+  ownerAllRoleOnly: boolean,
+): Set<string> {
+  const scopes = new Set(tokenScopes);
+  if (ownerAllRoleOnly && permissionsOf(roles).has("owner:all")) scopes.add("owner:all");
+  return scopes;
+}
+
+/**
+ * True when the caller holds the owner:all scope AND a role granting it
+ * (wardby_owner): treated like the stdio operator for access checks.
+ */
+export function isOwnerAll(ctx: Pick<McpRequestContext, "scopes" | "roles">): boolean {
+  return ctx.scopes.has("owner:all") && permissionsOf(ctx.roles).has("owner:all");
 }
 
 /** Intersects a space-delimited scope string with `allowed`, deduplicated, keeping request order. */
@@ -170,12 +230,17 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
   }
 
   const principal = await resolvePrincipal(verified.subject, deps.db);
+  // Direct roles are decided by the provider on THIS request (self-hosted:
+  // AuthUser.roles read from the database; delegating: the configured signed
+  // role claim). Standing adds the roles and principals of the caller's teams,
+  // read live, never cached: removing a member bites on their next request.
+  const standing = await resolveStanding(deps.db, principal.id, verified.wardbyRoles ?? []);
   return {
     principal,
     scopes: new Set(verified.scopes),
-    // Decided by the provider on THIS request (self-hosted: AuthUser.roles
-    // read from the database; delegating: the configured signed role claim).
-    roles: (verified.wardbyRoles ?? []).filter(isRoleName),
+    roles: [...standing.roles],
+    actsFor: standing.actsFor,
+    teamIds: standing.teamIds,
     canonicalUri: deps.canonicalUri,
     providers: deps.providers,
     db: deps.db,
@@ -190,13 +255,23 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
 }
 
 /**
+ * Whether the token carries `scope`. An owner-all caller (owner:all + wardby_owner)
+ * holds every privileged scope implicitly: owner:all is the consent to act as an
+ * owner of everything, so it never needs to be re-consented scope by scope. The role
+ * check (requirePermission) still applies, and wardby_owner grants all of them.
+ */
+function holdsScope(ctx: McpRequestContext, scope: string): boolean {
+  return ctx.scopes.has(scope) || (PRIVILEGED_SCOPES.includes(scope) && isOwnerAll(ctx));
+}
+
+/**
  * Throws a 403 insufficient_scope McpError listing every scope this
  * operation needs (not just the ones the caller is missing) — so a client
  * can re-auth once with the full required set instead of round-tripping
  * per missing scope.
  */
 export function requireScope(ctx: McpRequestContext, canonicalUri: string, ...scopes: string[]): void {
-  const held = scopes.every((s) => ctx.scopes.has(s));
+  const held = scopes.every((s) => holdsScope(ctx, s));
   if (!held) throw insufficientScope(scopes, protectedResourceMetadataUrl(canonicalUri));
   requirePermission(ctx, scopes);
 }
@@ -207,7 +282,7 @@ export function requireScope(ctx: McpRequestContext, canonicalUri: string, ...sc
  * one named in the insufficient_scope challenge.
  */
 export function requireAnyScope(ctx: McpRequestContext, canonicalUri: string, ...alternatives: string[]): void {
-  const held = alternatives.filter((s) => ctx.scopes.has(s));
+  const held = alternatives.filter((s) => holdsScope(ctx, s));
   if (held.length === 0) throw insufficientScope(alternatives.slice(0, 1), protectedResourceMetadataUrl(canonicalUri));
   // One held alternative that is non-privileged, or that a role permits, suffices.
   const permitted = permissionsOf(ctx.roles);

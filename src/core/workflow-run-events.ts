@@ -3,12 +3,15 @@
  * run that did not succeed, run_blocked for package refusals without changes
  * (children are summarized by their parent), packages_audited when its coding
  * children installed anything under package audit mode, and
- * review_posted when the run published a verdict on its own check. Called
- * only by the finalizer that made the run terminal. Never throws.
+ * review_posted when the run published a verdict on its own check. Also writes
+ * the run's `run.finished` log line. Called only by the finalizer that made the
+ * run terminal. Never throws.
  */
+import { errorName } from "./run-follow-ups.js";
 import type { PrismaClient } from "#prisma";
 import { pullRequestWebUrl } from "../coding/code-host.js";
 import { packageAuditDigest } from "../coding/registry/audit-mode.js";
+import { logRunFinished } from "../observability/run-finished.js";
 import { planChainHook } from "./plans/chain-hook.js";
 import { blockingRefusals, collectPackageAudit, collectRunOutcome, isBlockedByRefusals } from "./host-status.js";
 import { logger } from "./logger.js";
@@ -134,6 +137,7 @@ export async function emitRunFinishedEvents(
   db: RunEventsDb,
   run: { id: string; agentId: string; status: string; error: string | null; parentRunId: string | null },
 ): Promise<void> {
+  await logRunFinished(db, run.id);
   try {
     const agentName =
       (await db.agent.findUnique({ where: { id: run.agentId }, select: { name: true } }))?.name ?? run.agentId;
@@ -196,7 +200,7 @@ export async function emitRunFinishedEvents(
       });
     }
   } catch (err) {
-    log.warn({ err, runId: run.id }, "could not emit run workflow events");
+    log.warn({ error: errorName(err), runId: run.id }, "could not emit run workflow events");
   }
   await emitRunCompletedEvent(db, run.id);
 }

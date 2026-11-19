@@ -1,0 +1,484 @@
+# Default values for wardby. The defaults target GKE Autopilot with Cloud SQL
+# for PostgreSQL; every cloud-specific piece can be switched off or replaced.
+#
+# Resource names are fixed (wardby-control-plane, wardby-coding-proxy, ...):
+# the control plane addresses run pods, the proxy and the gateway by those
+# names, so install one release per cluster. For the same reason the coding
+# proxy (8787, deny 8788) and native gateway (8790, deny 8791) ports are fixed.
+
+# -- Labels added to every resource.
+commonLabels: {}
+
+# -- Labels added to every pod. Pods carry no chart or version labels, so a chart upgrade alone never restarts them.
+podLabels: {}
+
+# -- Annotations added to every pod (each workload's `podAnnotations` adds to or overrides them).
+# Changing them restarts the pods.
+podAnnotations: {}
+
+image:
+  # -- Registry prefix for every wardby image.
+  registry: ghcr.io/wardby
+  # -- Image pull policy for the wardby workloads.
+  pullPolicy: IfNotPresent
+  # -- Images the chart runs (under `image.registry`), by `digest` when set, otherwise by `tag`.
+  # An empty tag means the chart's appVersion. Keep all images on the same build.
+  runtime:
+    repository: wardby-runtime
+    tag: ""
+    digest: ""
+  migration:
+    repository: wardby-migration
+    tag: ""
+    digest: ""
+  # -- Images the control plane launches for coding runs and sandbox turns. The launcher
+  # runs them only by digest, so each needs `digest`; set `repository: ""` to leave an
+  # optional worker unconfigured.
+  codingWorker:
+    repository: wardby-coding-worker
+    digest: ""
+  # The node-python images are built once per Python version, because `python` in one is the
+  # version it is built for. `codingWorkerNodePython` is 3.12, the others are named for theirs.
+  codingWorkerNodePython:
+    repository: wardby-coding-worker-node-python
+    digest: ""
+  codingWorkerNodePython313:
+    repository: wardby-coding-worker-node-python-3-13
+    digest: ""
+  codingWorkerNodePython314:
+    repository: wardby-coding-worker-node-python-3-14
+    digest: ""
+  claudeCodingWorker:
+    repository: wardby-claude-coding-worker
+    digest: ""
+  claudeToolRunner:
+    repository: wardby-claude-tool-runner
+    digest: ""
+  claudeToolRunnerNodePython:
+    repository: wardby-claude-tool-runner-node-python
+    digest: ""
+  claudeToolRunnerNodePython313:
+    repository: wardby-claude-tool-runner-node-python-3-13
+    digest: ""
+  claudeToolRunnerNodePython314:
+    repository: wardby-claude-tool-runner-node-python-3-14
+    digest: ""
+  nativeWorker:
+    repository: wardby-native-worker
+    digest: ""
+
+# -- Pull secrets for every pod the chart creates.
+imagePullSecrets: []
+
+# -- Public hostname of the control plane, without scheme (for example `wardby.example.com`).
+# Sets MCP_CANONICAL_URI and AUTH_AUDIENCE to `https://<hostname>/mcp`, the readiness
+# probe's Host header, and the Gateway listeners.
+hostname: ""
+
+# -- Pod security context of the wardby workloads and the migration Job.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Security context of every container the chart runs.
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+database:
+  # -- Egress the workloads need to reach the database: the Cloud SQL instance's
+  # private IP (port 3307 with the Auth Proxy) or your PostgreSQL host (usually 5432).
+  egress:
+    cidrs: []
+    port: 3307
+  # -- DATABASE_URL per workload. Leave empty to supply DATABASE_URL from the
+  # workload's env Secret instead (required when the URL carries a password).
+  urls:
+    controlPlane: ""
+    codingProxy: ""
+    nativeGateway: ""
+    migration: ""
+  cloudSqlProxy:
+    # -- Run the Cloud SQL Auth Proxy as a native sidecar on 127.0.0.1:`port`.
+    enabled: true
+    # -- Cloud SQL instance connection name, `<project>:<region>:<instance>`.
+    instanceConnectionName: ""
+    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.26.3@sha256:f333a9c59890c3c67b8505166c5dbdcc0b29fca9173a2e09ca0446ab6997a736
+    # -- Local port the proxy listens on; the DATABASE_URLs connect to 127.0.0.1 on it.
+    port: 5432
+    # -- Port of the proxy's health endpoints, used by its startup probe.
+    healthPort: 9090
+    # -- Log in as the pod's Google identity (IAM database authentication).
+    autoIamAuthn: true
+    # -- Connect over the instance's private IP.
+    privateIp: true
+    # -- Log as JSON (`--structured-logs`).
+    structuredLogs: true
+    # -- Exit 0 on SIGTERM (`--exit-zero-on-sigterm`), so a stopping pod is not reported failed.
+    exitZeroOnSigterm: true
+    # -- Further proxy flags, before the instance connection name.
+    extraArgs: []
+    # -- How long the workload waits for the proxy to connect (periodSeconds x failureThreshold).
+    startupProbe:
+      periodSeconds: 2
+      failureThreshold: 60
+    resources:
+      requests: { cpu: 100m, memory: 128Mi, ephemeral-storage: 100Mi }
+      limits: { cpu: 100m, memory: 128Mi, ephemeral-storage: 100Mi }
+    # -- The metadata server the proxy gets the pod's Google credentials from.
+    metadataServer:
+      cidrs:
+        - 169.254.169.254/32
+        - 169.254.169.252/32
+      ports: [80, 988]
+
+# -- Annotations per ServiceAccount, e.g. `iam.gke.io/gcp-service-account` for Workload Identity.
+serviceAccounts:
+  controlPlane:
+    name: wardby-control-plane
+    annotations: {}
+  codingProxy:
+    name: wardby-coding-proxy
+    annotations: {}
+  nativeGateway:
+    name: wardby-native-gateway
+    annotations: {}
+  migration:
+    name: wardby-migrator
+    annotations: {}
+
+priorityClasses:
+  # -- Create the three cluster-scoped PriorityClasses. Disable if another release already created them.
+  create: true
+  # -- Priority of the control plane, coding proxy and native gateway.
+  controlPlane: 1000000
+  # -- Priority of coding-run and sandbox pods; they wait for capacity and never preempt.
+  codingRun: 1000
+  # -- Priority of the headroom placeholder, the first pod evicted when a node is short.
+  headroom: -10
+
+# -- Namespace ResourceQuota that coding-run and sandbox pods are admitted against.
+# Size it for codingRuns and nativeSandbox (maxConcurrent x per-pod resources).
+resourceQuota:
+  hard:
+    limits.cpu: "11"
+    limits.memory: 20Gi
+    pods: "26"
+    requests.cpu: "11"
+    requests.ephemeral-storage: 64Gi
+    requests.memory: 20Gi
+
+headroom:
+  # -- Run a lowest-priority placeholder pod that holds spare node capacity for coding runs.
+  enabled: true
+  image: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+  replicas: 1
+  resources:
+    requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 100Mi }
+    limits: { cpu: 250m, memory: 512Mi, ephemeral-storage: 100Mi }
+  terminationGracePeriodSeconds: 0
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65535
+    runAsGroup: 65535
+    seccompProfile:
+      type: RuntimeDefault
+  # -- Prefers the control plane's node, so the capacity it holds is next to the launcher.
+  affinity:
+    podAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: wardby-control-plane
+  # -- Annotations added to this workload's pods, over `podAnnotations`. Changing them restarts the pods.
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+
+models:
+  # -- Existing Secret holding model provider keys (ANTHROPIC_API_KEY, OPENAI_API_KEY),
+  # added to the control plane, coding proxy and native gateway. Optional when each
+  # workload's env Secret already carries them.
+  providerSecret: ""
+  # -- WARDBY_MODEL_CATALOG_REFRESH_SECONDS. Empty uses the server default.
+  catalogRefreshSeconds: ""
+
+codingRuns:
+  # -- CODING_MAX_CONCURRENT: coding runs in flight at once.
+  maxConcurrent: 3
+  # Per-run limits. Empty uses the server default, shown in brackets.
+  # -- CODING_CPUS per run [1].
+  cpus: ""
+  # -- CODING_MEMORY_MB per run [2048].
+  memoryMb: ""
+  # -- CODING_DISK_MB: a run's default workspace disk [2048].
+  diskMb: ""
+  # -- CODING_MAX_DISK_MB: the most disk an agent may request, 64-32768 [diskMb].
+  maxDiskMb: ""
+  # -- CODING_PIDS: process limit per run [128].
+  pids: ""
+  # -- KUBERNETES_PLATFORM: the admission rules run pods are conformed to.
+  platform: gke-autopilot
+  # -- KUBERNETES_RUNTIME_CLASS for run and sandbox pods. Empty runs them without one.
+  runtimeClass: gvisor
+  # -- KUBERNETES_PREFLIGHT_TIMEOUT_MS.
+  preflightTimeoutMs: 600000
+  # -- KUBERNETES_READY_TIMEOUT_MS: how long a run pod may take to become ready (node scale-up included).
+  readyTimeoutMs: 600000
+
+nativeSandbox:
+  # -- NATIVE_SANDBOX_CPUS per sandbox pod.
+  cpus: "0.5"
+  # -- NATIVE_SANDBOX_MEMORY_MB per sandbox pod.
+  memoryMb: 512
+  # -- NATIVE_SANDBOX_PIDS per sandbox pod. Empty uses the server default [128].
+  pids: ""
+  # -- NATIVE_SANDBOX_MAX_CONCURRENT.
+  maxConcurrent: 4
+  # -- NATIVE_SANDBOX_WARM_POOL_SIZE (0-50): idle sandbox pods kept ready.
+  warmPoolSize: 0
+  # -- NATIVE_SANDBOX_WARM_MAX_AGE_MS: how long a warm pod may wait before it is replaced. Empty uses the server default [1800000].
+  warmMaxAgeMs: ""
+  # -- NATIVE_SANDBOX_READY_TIMEOUT_MS.
+  readyTimeoutMs: 600000
+  # -- NATIVE_SANDBOX_ENFORCEMENT_TIMEOUT_MS.
+  enforcementTimeoutMs: 60000
+
+controlPlane:
+  # -- Control-plane copies. Two keep MCP, webhooks and the scheduler up through a node drain: a run stays on the
+  # copy that started it, and if that copy is lost another one takes the run over. See docs/availability.md.
+  replicas: 1
+  # -- Port the MCP server listens on (MCP_HTTP_BIND) and the Service exposes.
+  port: 8080
+  # -- Seconds a new pod must stay ready before it counts as available; keeps the load balancer serving across a rollout.
+  minReadySeconds: 180
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  # -- Time a stopping pod gets to finish in-flight work.
+  terminationGracePeriodSeconds: 720
+  # -- Seconds a stopping pod keeps serving while the load balancer drains it.
+  preStopSleepSeconds: 30
+  # -- Timing of the readiness probe (GET /.well-known/oauth-protected-resource with the canonical Host).
+  readinessProbe:
+    periodSeconds: 5
+  # -- The /tmp emptyDir.
+  tmpVolume:
+    sizeLimit: 3Gi
+  # -- Existing Secret loaded with envFrom (SECRET_APP_KEY, GitHub App credentials, ...).
+  # -- Order of the container's environment variables, by name; unlisted ones follow in the default order.
+  # Changing the order restarts the pods, so match it when adopting an existing Deployment.
+  envOrder: []
+  envFromSecret: wardby-control-plane-env
+  # -- Optional Secrets/ConfigMaps loaded with envFrom after `envFromSecret`.
+  extraEnvFrom:
+    - secretRef: { name: wardby-jira-env, optional: true }
+    - secretRef: { name: wardby-slack-env, optional: true }
+  # -- Plain environment variables, as a map. They override the chart's own.
+  env:
+    WARDBY_MOBILE_ENABLED: "false"
+    AUTH_MAX_CLIENTS: "20"
+  # -- Extra environment entries, as a list (for secretKeyRef and similar).
+  extraEnv: []
+  auth:
+    # -- AUTH_PROVIDER. `delegating` validates tokens from your identity provider.
+    provider: ""
+    issuer: ""
+    jwksUri: ""
+    roleClaim: ""
+    # -- AUTH_ROLE_MAP, e.g. `wardby-admin=admin,wardby-models=model-manager`.
+    roleMap: ""
+  kubernetesApi:
+    # -- KUBERNETES_SERVICE_HOST override, e.g. a private cluster's API-server endpoint.
+    host: ""
+    port: 443
+    # -- CIDR the control plane may reach the API server at; needed when it is in a private range.
+    cidr: ""
+  resources:
+    requests: { cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi }
+    limits: { cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi }
+  metrics:
+    # -- Serve the control plane's Prometheus metrics (the coding-run lifecycle) at `/metrics` on `port`, on the
+    # pod IP (sets `METRICS_BIND` and `METRICS_ALLOW_NON_LOOPBACK`), and add the port to the container and the Service.
+    enabled: false
+    # -- Port of the metrics endpoint.
+    port: 9464
+    # -- NetworkPolicy peers allowed to scrape the metrics port, e.g. `[{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}]`.
+    # Empty admits no one: the control plane's policy keeps the port closed.
+    ingressFrom: []
+  # -- Annotations added to this workload's pods, over `podAnnotations`. Changing them restarts the pods.
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  # -- Topology spread constraints for this workload's pods, e.g. spreading replicas across nodes with
+  # `[{maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: ScheduleAnyway, labelSelector: {matchLabels: {app.kubernetes.io/name: wardby-control-plane}}}]`.
+  topologySpreadConstraints: []
+  podDisruptionBudget:
+    # -- Render a PodDisruptionBudget. It protects nothing at one replica; at two, a drain takes one control plane down at a time.
+    enabled: true
+    # -- Pods a voluntary disruption (a node drain or upgrade) may take down at once. Set `minAvailable` instead to
+    # require that many to stay up. A pod that is not ready may always be evicted.
+    maxUnavailable: 1
+
+codingProxy:
+  # -- Coding-proxy copies. The chart runs one; losing it breaks the model streams of coding runs in flight.
+  replicas: 1
+  # -- Timing of the readiness probe (TCP on the proxy port).
+  readinessProbe:
+    periodSeconds: 5
+  # -- Time a stopping pod gets to finish the model requests and package downloads in flight. A model
+  # request still running when it ends is cut off, its budget hold stays held, and the worker's retry is refused.
+  terminationGracePeriodSeconds: 600
+  # -- Seconds a stopping pod keeps accepting requests while the Service stops routing to it.
+  preStopSleepSeconds: 10
+  tmpVolume:
+    medium: Memory
+    sizeLimit: 64Mi
+  # -- Order of the container's environment variables, by name; unlisted ones follow in the default order.
+  # Changing the order restarts the pods, so match it when adopting an existing Deployment.
+  envOrder: []
+  envFromSecret: wardby-coding-proxy-env
+  extraEnvFrom: []
+  env: {}
+  extraEnv: []
+  resources:
+    requests: { cpu: "1", memory: 3Gi }
+    limits: { cpu: "1", memory: 3Gi }
+  metrics:
+    # -- Serve the proxy's Prometheus metrics at `/metrics` on `port`, on the pod IP (sets `METRICS_BIND` and
+    # `METRICS_ALLOW_NON_LOOPBACK`), and add the port to the container and the Service.
+    enabled: false
+    # -- Port of the metrics endpoint.
+    port: 9464
+    # -- NetworkPolicy peers allowed to scrape the metrics port, e.g. `[{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}]`.
+    # Empty admits no one: the default-deny policy keeps the port closed.
+    ingressFrom: []
+  # -- Annotations added to this workload's pods, over `podAnnotations`. Changing them restarts the pods.
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  # -- Topology spread constraints for this workload's pods, e.g. spreading replicas across nodes with
+  # `[{maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: ScheduleAnyway, labelSelector: {matchLabels: {app.kubernetes.io/name: wardby-coding-proxy}}}]`.
+  topologySpreadConstraints: []
+  podDisruptionBudget:
+    # -- Render a PodDisruptionBudget. Off by default: the proxy runs one replica, and a budget that blocks its only pod blocks node drains.
+    enabled: false
+    # -- Pods a voluntary disruption (a node drain or upgrade) may take down at once. Set `minAvailable` instead to
+    # require that many to stay up. A pod that is not ready may always be evicted.
+    maxUnavailable: 1
+
+nativeGateway:
+  replicas: 2
+  # -- Timing of the readiness probe (GET /healthz).
+  readinessProbe:
+    periodSeconds: 5
+  tmpVolume:
+    medium: Memory
+    sizeLimit: 64Mi
+  # -- Order of the container's environment variables, by name; unlisted ones follow in the default order.
+  # Changing the order restarts the pods, so match it when adopting an existing Deployment.
+  envOrder: []
+  envFromSecret: wardby-native-gateway-env
+  extraEnvFrom:
+    - secretRef: { name: wardby-jira-env, optional: true }
+  env: {}
+  extraEnv: []
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: 250m, memory: 512Mi }
+  # -- Annotations added to this workload's pods, over `podAnnotations`. Changing them restarts the pods.
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  # -- Topology spread constraints for this workload's pods, e.g. spreading replicas across nodes with
+  # `[{maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: ScheduleAnyway, labelSelector: {matchLabels: {app.kubernetes.io/name: wardby-native-gateway}}}]`.
+  topologySpreadConstraints: []
+  podDisruptionBudget:
+    # -- Render a PodDisruptionBudget, so a drain takes one gateway replica down at a time.
+    enabled: true
+    # -- Pods a voluntary disruption (a node drain or upgrade) may take down at once. Set `minAvailable` instead to
+    # require that many to stay up. A pod that is not ready may always be evicted.
+    maxUnavailable: 1
+
+migration:
+  # -- Run `prisma migrate deploy` and the DBOS migration as a pre-install/pre-upgrade hook.
+  enabled: true
+  activeDeadlineSeconds: 900
+  # -- Retries before the migration (and the release) fails.
+  backoffLimit: 0
+  tmpVolume:
+    sizeLimit: 3Gi
+  envFromSecret: ""
+  env: {}
+  extraEnv: []
+  resources:
+    requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 2Gi }
+    limits: { cpu: 500m, memory: 1Gi, ephemeral-storage: 2Gi }
+  # -- Annotations added to this workload's pods, over `podAnnotations`. Changing them restarts the pods.
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+
+networkPolicy:
+  # -- DNS egress. `nodeLocalDns` also admits NodeLocal DNSCache, which GKE Dataplane V2 redirects to.
+  dns:
+    nodeLocalDns: true
+    cidrs:
+      - 169.254.20.10/32
+      - 169.254.169.254/32
+  # -- Public egress (model providers, GitHub, registries) is open on these ports...
+  publicEgressPorts: [443]
+  # -- ...to 0.0.0.0/0 except these ranges.
+  publicEgressExcept:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 169.254.0.0/16
+    - 100.64.0.0/10
+
+gateway:
+  # -- Publish the control plane through a Gateway API Gateway with an HTTPS listener and an HTTP->HTTPS redirect.
+  enabled: false
+  className: gke-l7-global-external-managed
+  annotations: {}
+  # -- Gateway `spec.addresses`, e.g. `[{type: NamedAddress, value: wardby-control-plane}]`.
+  addresses: []
+  httpsPort: 443
+  # -- Plain-HTTP listener that only redirects to HTTPS. Set `enabled: false` to serve HTTPS only.
+  httpRedirect:
+    enabled: true
+    port: 80
+    statusCode: 301
+  # -- Secret holding the TLS certificate. Leave empty when the Gateway gets its certificate another way (e.g. a GKE certmap annotation).
+  tlsSecretName: ""
+  # -- Annotations on the HTTPS HTTPRoute (e.g. external-dns).
+  routeAnnotations: {}
+  # -- Source CIDRs of the load balancer, admitted to the control plane's port.
+  # The defaults are Google Cloud's load-balancer and health-check ranges.
+  loadBalancerCidrs:
+    - 130.211.0.0/22
+    - 35.191.0.0/16
+  certManager:
+    # -- Request the TLS certificate from cert-manager into `tlsSecretName`.
+    enabled: false
+    issuerRef: {}
+    # -- Extra Certificate spec fields, e.g. `privateKey`, `duration`, `renewBefore`.
+    extraSpec: {}
+  gke:
+    # -- Render GKE's HealthCheckPolicy and GCPBackendPolicy for the control-plane Service.
+    enabled: true
+    # -- Cloud Armor security policy to attach. Empty attaches none.
+    securityPolicy: ""
+    # -- Backend timeout; long-lived event streams need more than the 30 s default.
+    timeoutSec: 3600
+    # -- Load balancer request logging, e.g. `{enabled: true, sampleRate: 1000000}`.
+    logging: {}

@@ -15,6 +15,7 @@ import {
 import type { Dirent } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { commitIssueKey, conventionalCommitMessage } from "../../coding/commit-subject.js";
 import { gitExcludePathspecs, isCollectExcluded, normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import {
   WARDBY_PROTECTED_PATHS,
@@ -34,6 +35,7 @@ import {
   isCodingRepositoryName,
   redactTokenShapedValues,
   normalizeGitRef,
+  isWardbyHeadRef,
 } from "../../coding/protocol.js";
 import type { RepositoryFileInput } from "./types.js";
 import { isSafeGitAuthToken, type GitRemote } from "./remote.js";
@@ -54,6 +56,7 @@ import type {
   TargetMerge,
   VcsPrepareInput,
   VcsProvider,
+  WorkspaceRebuild,
 } from "./types.js";
 
 export const DEFAULT_MAX_CHANGED_FILES = 1_000;
@@ -96,6 +99,8 @@ const SAFE_GIT_USERNAME = /^[A-Za-z0-9._-]{1,64}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 /** Where a continuation's target branch is fetched to (never under refs/remotes, so baseCommit's ref is untouched). */
 const MERGE_TARGET_REF = "refs/wardby/merge-target";
+/** Where a rebuilt checkout's recorded base commit is fetched to before baseCommit's own ref is pointed at it. */
+const REBUILD_BASE_REF = "refs/wardby/rebuild-base";
 /** Where the head branch is re-fetched while deepening history (see fetchMergeTarget). */
 const MERGE_HEAD_REF = "refs/wardby/merge-head";
 /**
@@ -430,6 +435,15 @@ function safeGitRef(value: string): string | null {
   }
 }
 
+/** A rebuild's recorded inputs, checked the way a fetched ref is: they come from the run record, not from a worker. */
+function validateRebuild(rebuild: WorkspaceRebuild): WorkspaceRebuild {
+  if (!COMMIT_SHA.test(rebuild.baseCommit)) throw new Error("vcs_rebuild_invalid");
+  if (!rebuild.targetMerge) return { baseCommit: rebuild.baseCommit };
+  const ref = safeGitRef(rebuild.targetMerge.ref);
+  if (!ref || !COMMIT_SHA.test(rebuild.targetMerge.targetCommit)) throw new Error("vcs_rebuild_invalid");
+  return { baseCommit: rebuild.baseCommit, targetMerge: { ref, targetCommit: rebuild.targetMerge.targetCommit } };
+}
+
 const MAX_LOCAL_CONFIG_BYTES = 64 * 1024;
 
 /** A repository config with no credential, transport, filter or token-shaped content (see assertSafeLocalConfig). */
@@ -534,6 +548,16 @@ export class GitVcsProvider implements VcsProvider {
   }
 
   async prepareWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace> {
+    return this.prepare(input);
+  }
+
+  /**
+   * Clones the run's checkout. With `rebuild` (recoverWorkspace found none: another control-plane
+   * process prepared it) the same clone is pinned to what that process recorded -- the commit it
+   * started from and, for a continuation, the target commit it merged -- instead of to whatever the
+   * branches point at now. Anything that cannot be reproduced exactly fails vcs_rebuild_base_unavailable.
+   */
+  private async prepare(input: VcsPrepareInput, rebuild?: WorkspaceRebuild): Promise<PreparedWorkspace> {
     const normalized = this.validateInput(input);
     await this.remote.assertContinuationOpen(normalized);
     await ensurePrivateDirectory(this.rootDir);
@@ -562,7 +586,14 @@ export class GitVcsProvider implements VcsProvider {
     const cloneBranch = normalized.continuation ? normalized.headRef : normalized.baseRef;
     // A continuation is first brought up to date with the branch its pull
     // request targets now (a person may have retargeted it since the root run).
-    const target = normalized.continuation ? await this.remote.pullRequestBase?.(normalized) : null;
+    // A rebuild merges what was recorded, never the pull request's target as it is now.
+    const target = rebuild
+      ? rebuild.targetMerge
+        ? { ref: rebuild.targetMerge.ref }
+        : null
+      : normalized.continuation
+        ? await this.remote.pullRequestBase?.(normalized)
+        : null;
     const mergeRef = target ? safeGitRef(target.ref) : null;
     let mergeFetched = false;
 
@@ -607,15 +638,25 @@ export class GitVcsProvider implements VcsProvider {
           ],
           { cwd: base, ...auth },
         );
-        if (mergeRef && mergeRef !== normalized.headRef) {
-          mergeFetched = await this.fetchMergeTarget(
-            gitMetadataPath,
-            workspacePath,
-            cloneBranch,
-            mergeRef,
-            auth,
-            normalized.gitHistory,
-          );
+        if (rebuild) await this.pinRebuildBase(gitMetadataPath, workspacePath, cloneBranch, rebuild.baseCommit, auth);
+        if (mergeRef && (rebuild || mergeRef !== normalized.headRef)) {
+          const pinned = rebuild?.targetMerge
+            ? { base: rebuild.baseCommit, target: rebuild.targetMerge.targetCommit }
+            : undefined;
+          try {
+            mergeFetched = await this.fetchMergeTarget(
+              gitMetadataPath,
+              workspacePath,
+              cloneBranch,
+              mergeRef,
+              auth,
+              pinned,
+              normalized.gitHistory,
+            );
+          } catch (error) {
+            if (rebuild) throw new Error("vcs_rebuild_base_unavailable", { cause: error });
+            throw error;
+          }
         }
       });
       for (const remote of normalized.remotes ?? []) {
@@ -658,10 +699,20 @@ export class GitVcsProvider implements VcsProvider {
         "HEAD",
         `refs/heads/${normalized.headRef}`,
       ]);
-      const merged =
-        mergeFetched && mergeRef
-          ? await this.mergeTargetBranch(gitMetadataPath, workspacePath, baseCommit, mergeRef)
-          : null;
+      let merged: Awaited<ReturnType<GitVcsProvider["mergeTargetBranch"]>> = null;
+      try {
+        merged =
+          mergeFetched && mergeRef
+            ? await this.mergeTargetBranch(gitMetadataPath, workspacePath, baseCommit, mergeRef)
+            : null;
+      } catch (error) {
+        if (rebuild) throw new Error("vcs_rebuild_base_unavailable", { cause: error });
+        throw error;
+      }
+      // The merge must be the one that was recorded: a rebuild that merged anything else would push a different tree.
+      if (rebuild && (merged?.targetMerge.targetCommit ?? null) !== (rebuild.targetMerge?.targetCommit ?? null)) {
+        throw new Error("vcs_rebuild_base_unavailable");
+      }
       // A history run's merge is committed now, as M0 (parents baseCommit and the target): the
       // worker starts at it, and its own commits are measured against it.
       const historyBase =
@@ -721,8 +772,10 @@ export class GitVcsProvider implements VcsProvider {
       const metadata = await lstat(expected.base);
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("vcs_workspace_path_invalid");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // No local checkout: another control-plane process prepared it. A caller that recorded
+      // what it was gets it rebuilt; everyone else (cleanup) just learns there is none.
+      return input.rebuild ? this.prepare(input, validateRebuild(input.rebuild)) : null;
     }
 
     const cloneBranch = normalized.continuation ? normalized.headRef : normalized.baseRef;
@@ -888,7 +941,12 @@ export class GitVcsProvider implements VcsProvider {
     if (currentHead === prepared.baseCommit && merge) {
       commitSha = await this.commitMerge(prepared, merge);
     } else if (currentHead === prepared.baseCommit) {
-      await this.gitFor(prepared, ["commit", "--no-verify", "--no-gpg-sign", "-m", `Wardby run ${prepared.runId}`]);
+      const message = conventionalCommitMessage({
+        runId: prepared.runId,
+        ...details?.commit,
+        issueKey: commitIssueKey(details?.issue?.key, details?.tag),
+      });
+      await this.gitFor(prepared, ["commit", "--no-verify", "--no-gpg-sign", "-m", message]);
       commitSha = await this.revParse(prepared, "HEAD");
     } else {
       const parent = await this.revParse(prepared, "HEAD^");
@@ -1327,13 +1385,11 @@ export class GitVcsProvider implements VcsProvider {
     const repository = this.remote.normalizeRepository(input.repository);
     const baseRef = normalizeGitRef(input.baseRef);
     const headRef = normalizeGitRef(input.headRef);
-    // Revision-in-place: a continuation's headRef legitimately belongs to a
-    // DIFFERENT run (the one that originally opened the PR), so it can't
-    // match this run's own derived pattern -- it must instead match that
-    // run's. The caller (dispatch.ts) is responsible for having verified,
-    // against the database, that this run is actually allowed to continue
-    // that branch before ever setting `continuation`; this is a structural
-    // check only, not the security boundary.
+    // Revision-in-place: a continuation's headRef belongs to the run that
+    // originally opened the PR. The caller (dispatch.ts) is responsible for having
+    // verified, against the database, that this run may continue that branch before
+    // setting `continuation`, and for storing each fresh run's own unique branch;
+    // this is a structural check only, not the security boundary.
     // branchRunId: a writable extra whose branch is named for another run (a
     // continuation's root) but does not exist yet, so it is created off
     // baseRef like a fresh run's; dispatch chose it, this checks only its shape.
@@ -1348,9 +1404,7 @@ export class GitVcsProvider implements VcsProvider {
     if (continuation && input.branchRunId !== undefined && input.branchRunId !== continuation.rootRunId) {
       throw new Error("vcs_head_ref_invalid");
     }
-    if (headRef !== `wardby/run-${continuation?.rootRunId ?? input.branchRunId ?? input.runId}`) {
-      throw new Error("vcs_head_ref_invalid");
-    }
+    if (!isWardbyHeadRef(headRef)) throw new Error("vcs_head_ref_invalid");
     if (input.slot !== undefined && !isCodingRepositoryName(input.slot.name)) throw new Error("vcs_slot_invalid");
     const protectedPaths = [...new Set(input.protectedPaths.map(validateProtectedPath))];
     if (protectedPaths.length === 0 || protectedPaths.length > 128) throw new Error("vcs_protected_paths_invalid");
@@ -1614,6 +1668,47 @@ export class GitVcsProvider implements VcsProvider {
   }
 
   /**
+   * A rebuild's clone starts at the branch's tip today; points the clone's own ref for that
+   * branch at the recorded base commit instead, fetching it from the same `origin` when the branch has
+   * moved. Throws vcs_rebuild_base_unavailable when the commit cannot be had (a force-push removed it).
+   */
+  private async pinRebuildBase(
+    gitMetadataPath: string,
+    workspacePath: string,
+    cloneBranch: string,
+    baseCommit: string,
+    auth: { authToken?: string; authUsername?: string },
+  ): Promise<void> {
+    const remoteRef = `refs/remotes/origin/${cloneBranch}`;
+    try {
+      const tip = await this.revParseRaw(gitMetadataPath, workspacePath, `${remoteRef}^{commit}`);
+      if (tip === baseCommit) return;
+      await this.gitForPaths(
+        gitMetadataPath,
+        workspacePath,
+        [
+          ...this.remote.gitConfig,
+          "fetch",
+          "--no-tags",
+          "--no-write-fetch-head",
+          "--depth",
+          "1",
+          "origin",
+          `+${baseCommit}:${REBUILD_BASE_REF}`,
+        ],
+        auth,
+      );
+      if ((await this.revParseRaw(gitMetadataPath, workspacePath, `${REBUILD_BASE_REF}^{commit}`)) !== baseCommit) {
+        throw new Error("vcs_rebuild_base_unavailable");
+      }
+      await this.gitForPaths(gitMetadataPath, workspacePath, ["update-ref", remoteRef, baseCommit]);
+      await this.gitForPaths(gitMetadataPath, workspacePath, ["update-ref", "-d", REBUILD_BASE_REF]);
+    } catch (error) {
+      throw new Error("vcs_rebuild_base_unavailable", { cause: error });
+    }
+  }
+
+  /**
    * Fetches a continuation's target branch from the same `origin` the clone
    * came from (never another URL, so never a fork) and deepens the depth-1
    * clone step by step until the head and the target share a merge base.
@@ -1626,6 +1721,8 @@ export class GitVcsProvider implements VcsProvider {
     cloneBranch: string,
     ref: string,
     auth: { authToken?: string; authUsername?: string },
+    /** A rebuild fetches the recorded commits themselves, not whatever the branches point at now. */
+    pinned?: { base: string; target: string },
     gitHistory?: GitHistorySetting,
   ): Promise<boolean> {
     const fetch = (depth: readonly string[], refspec: string) =>
@@ -1635,10 +1732,10 @@ export class GitVcsProvider implements VcsProvider {
         [...this.remote.gitConfig, "fetch", "--no-tags", "--no-write-fetch-head", ...depth, "origin", refspec],
         auth,
       );
-    const target = `+refs/heads/${ref}:${MERGE_TARGET_REF}`;
+    const target = `+${pinned ? pinned.target : `refs/heads/${ref}`}:${MERGE_TARGET_REF}`;
     // The head is deepened through its own ref under refs/wardby, so the clone's
     // refs/remotes/origin/<head> (baseCommit) never moves.
-    const head = `+refs/heads/${cloneBranch}:${MERGE_HEAD_REF}`;
+    const head = `+${pinned ? pinned.base : `refs/heads/${cloneBranch}`}:${MERGE_HEAD_REF}`;
     try {
       // The target comes at the clone's own depth: 1, a history run's depth, or in full (#536).
       await fetch(depthArgs(gitHistory), target);

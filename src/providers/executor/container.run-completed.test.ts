@@ -26,6 +26,7 @@ function harness(initialStatus: string, onTerminal?: (runId: string) => void) {
     },
     codingRun: { update: vi.fn(async ({ data }: any) => Object.assign(row.codingRun, data)) },
     codingRunRepository: { updateMany: vi.fn(async () => ({ count: 1 })) },
+    runFollowUp: { createMany: vi.fn(async () => ({ count: 0 })) },
   };
   db.$transaction = async (fn: any) => fn(db);
   return new PrismaContainerExecutionStore(db as PrismaClient, onTerminal ? { onTerminal } : {});

@@ -3,7 +3,7 @@ id: coding-packages
 title: Approve packages for coding agents
 summary: Let coding workers install vetted npm (also with pnpm or yarn) and PyPI dependencies through Wardby's registry proxy.
 audience: operator
-tags: [coding-agents, packages, npm, pnpm, yarn, pypi, uv, supply-chain, refusals, lockfile, extras, pip-extras]
+tags: [coding-agents, packages, npm, pnpm, yarn, pypi, uv, poetry, supply-chain, refusals, lockfile, extras, pip-extras]
 appliesTo: >=0.2.1
 ---
 
@@ -30,7 +30,10 @@ an override installs a version its parent doesn't ask for, so Wardby approves
 it, and what it depends on, only when its name is on the allowlist.
 
 Registry mode works for Codex and Claude Code runs alike, on the `node`
-toolchain (npm) and the `node-python` toolchain (npm and pip). Claude Code runs
+toolchain (npm) and the `node-python` toolchain (npm, pip and uv; the image also
+has poetry, which cannot reach the registry and works only with dependencies
+already installed). The `node-python` images ship CPython 3.12, 3.13 and 3.14 for
+`uv venv --python <version>` (`python` is the version the image is built for), since a run cannot download an interpreter. Claude Code runs
 its shell commands in a separate, credential-free tool-runner container that
 reaches the registry through the run's proxy network. Use a pinned custom
 worker image when an agent needs system packages, another runtime, or
@@ -127,8 +130,12 @@ work with either: `pip install -r requirements.txt`, `uv pip install …`.
   no wheel, not reachable).
 - **`uv sync`, `uv run`, `uv add` with a committed `uv.lock`** work: the
   worker's `uv` verifies the lock and points its PyPI URLs at the registry
-  for the command, then puts the file back (a committed lock never names
-  the registry).
+  for the command. Before the changes are collected, every registry URL in
+  the lock, including packages the run added or upgraded, is replaced with
+  the address the registry itself reads the file from (PyPI, or Artifactory
+  when it is configured), so a committed lock never names the registry. If
+  an address cannot be found the run fails with
+  [`coding_pypi_lockfile_unresolved`](errors/coding-pypi-lockfile-unresolved.md).
 - **Project installs** (`pip install .`, `uv sync`, `uv run`) need the build
   backend from `[build-system] requires` (`hatchling`, `setuptools`, …)
   allowlisted, plus what it asks for while building (hatchling: `editables`
@@ -196,6 +203,12 @@ with `create_agent` or `update_agent` (needs `packages:approve` or
 
 Read [`docs/coding-packages.md`](../docs/coding-packages.md) for allowlist
 syntax (including [PyPI extras](../docs/coding-packages.md#pypi-extras)), package-policy controls, lockfile behavior, and refusal errors.
+
+## Private packages from JFrog Artifactory
+
+An operator can point the proxy at a JFrog Artifactory so runs install private
+packages. See the `jfrog-artifactory` help article, "Private packages from
+JFrog Artifactory".
 
 ## Dependency cache
 

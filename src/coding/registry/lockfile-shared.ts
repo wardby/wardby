@@ -11,7 +11,8 @@
 import semver from "semver";
 import { parseDocument } from "yaml";
 import { PACKAGE_NAME } from "./npm-lockfile.js";
-import { RegistryError, type LockfileEntry, type ParsedLockfile } from "./types.js";
+import { sourceAllowedFor } from "./private-registry.js";
+import { RegistryError, type LockfileEntry, type LockfileParseOptions, type ParsedLockfile } from "./types.js";
 
 /** yarn classic's default registry host, which it writes into `resolved`. */
 export const YARN_CLASSIC_REGISTRY = "https://registry.yarnpkg.com/";
@@ -42,8 +43,10 @@ export function isLocal(range: string): boolean {
   return LOCAL_PROTOCOLS.some((protocol) => range.startsWith(protocol));
 }
 
-export function fromRegistry(url: string, proxyRegistryUrl: string): boolean {
-  return [...PUBLIC_REGISTRIES, proxyRegistryUrl].some((base) => url.startsWith(base));
+/** Whether `url` is where `name` may be downloaded from: a public registry
+ *  (or the private one, for a name in its scopes) or the proxy. */
+export function fromRegistry(name: string, url: string, options: LockfileParseOptions): boolean {
+  return sourceAllowedFor(name, url, { ...options, publicBases: PUBLIC_REGISTRIES });
 }
 
 export function entryOf(

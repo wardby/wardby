@@ -292,3 +292,135 @@ describe("continuations merge the pull request's target branch (real git)", { ti
     await expect(f.provider.prepareWorkspace(input(f))).rejects.toThrow("vcs_target_merge_failed");
   });
 });
+
+describe("rebuilding a checkout another control-plane process prepared (real git)", { timeout: 30_000 }, () => {
+  /** What prepare recorded on the run: the base commit and, when it merged one, the target branch and commit. */
+  function recorded(workspace: PreparedWorkspace): NonNullable<VcsPrepareInput["rebuild"]> {
+    return {
+      baseCommit: workspace.baseCommit,
+      ...(workspace.targetMerge
+        ? { targetMerge: { ref: workspace.targetMerge.ref, targetCommit: workspace.targetMerge.targetCommit } }
+        : {}),
+    };
+  }
+  /** The launching process is gone with its disk. */
+  async function lose(workspace: PreparedWorkspace): Promise<void> {
+    await rm(dirname(workspace.workspacePath), { recursive: true, force: true });
+  }
+
+  it("rebuilds a fresh run's checkout at the recorded base, even after the branch moved on", async () => {
+    const f = await fixture();
+    const first = await f.provider.prepareWorkspace(
+      input(f, { runId: "r5", headRef: "wardby/run-r5", continuation: undefined }),
+    );
+    await lose(first);
+    await commit(f.src, { "later.txt": "pushed after the run started\n" }, "main moves on");
+    expect(await git(f.src, ["rev-parse", "main"])).not.toBe(first.baseCommit);
+
+    const rebuilt = await f.provider.recoverWorkspace({
+      ...input(f, { runId: "r5", headRef: "wardby/run-r5", continuation: undefined }),
+      rebuild: recorded(first),
+    });
+    expect(rebuilt?.baseCommit).toBe(first.baseCommit);
+    expect(rebuilt?.targetMerge).toBeUndefined();
+    // The agent's work is copied in at finish; the push lands on the original base, not today's tip.
+    await writeFile(join(rebuilt!.workspacePath, "agent.txt"), "agent\n");
+    const result = await f.provider.finalizeChanges(rebuilt!);
+    if (!("commitSha" in result)) throw new Error("unreachable");
+    expect(await parents(f.src, result.commitSha)).toEqual([first.baseCommit]);
+    expect(await readFile(join(rebuilt!.workspacePath, "later.txt"), "utf8").catch(() => null)).toBeNull();
+  });
+
+  it("rebuilds a continuation's target merge from the recorded commits, not the target as it is now", async () => {
+    const f = await fixture({
+      mainFiles: { "shared.txt": "one\nMAIN\nthree\n" },
+      prFiles: { "shared.txt": "one\nPR\nthree\n" },
+    });
+    const first = await f.provider.prepareWorkspace(input(f));
+    const mergedTarget = first.targetMerge!.targetCommit;
+    expect(first.targetMerge?.conflictedPaths).toEqual(["shared.txt"]);
+    await lose(first);
+    await commit(f.src, { "after.txt": "main moved again\n" }, "main moves on");
+
+    const rebuilt = await f.provider.recoverWorkspace({ ...input(f), rebuild: recorded(first) });
+    expect(rebuilt?.baseCommit).toBe(first.baseCommit);
+    expect(rebuilt?.targetMerge).toEqual({ ref: "main", targetCommit: mergedTarget, conflictedPaths: ["shared.txt"] });
+    // The same conflict state the original workspace had: markers until the agent's resolution is copied in.
+    expect(await readFile(join(rebuilt!.workspacePath, "shared.txt"), "utf8")).toContain("<<<<<<<");
+    await writeFile(join(rebuilt!.workspacePath, "shared.txt"), "one\nBOTH\nthree\n");
+    const result = await f.provider.finalizeChanges(rebuilt!);
+    if (result.outcome !== "pull_request_updated") throw new Error("unreachable");
+    expect(await parents(f.src, result.commitSha)).toEqual([first.baseCommit, mergedTarget]);
+    expect(await git(f.src, ["show", `${result.commitSha}:shared.txt`])).toBe("one\nBOTH\nthree");
+  });
+
+  it("rebuilds a continuation that merged nothing without merging anything", async () => {
+    const f = await fixture({ mainCommits: 0 });
+    const first = await f.provider.prepareWorkspace(input(f));
+    expect(first.targetMerge).toBeUndefined();
+    await lose(first);
+    await commit(f.src, { "after.txt": "main moved\n" }, "main moves on");
+
+    const rebuilt = await f.provider.recoverWorkspace({ ...input(f), rebuild: recorded(first) });
+    expect(rebuilt?.baseCommit).toBe(first.baseCommit);
+    expect(rebuilt?.targetMerge).toBeUndefined();
+  });
+
+  it("fails with vcs_rebuild_base_unavailable, leaving nothing behind, when the base commit no longer exists", async () => {
+    const f = await fixture();
+    const first = await f.provider.prepareWorkspace(input(f));
+    await lose(first);
+    const missing = { ...recorded(first), baseCommit: "e".repeat(40) };
+    await expect(f.provider.recoverWorkspace({ ...input(f), rebuild: missing })).rejects.toThrow(
+      "vcs_rebuild_base_unavailable",
+    );
+    await expect(f.provider.recoverWorkspace(input(f))).resolves.toBeNull();
+  });
+
+  it("fails with vcs_rebuild_base_unavailable when the merged target commit no longer exists", async () => {
+    const f = await fixture();
+    const first = await f.provider.prepareWorkspace(input(f));
+    await lose(first);
+    const missing = {
+      baseCommit: first.baseCommit,
+      targetMerge: { ref: "main", targetCommit: "e".repeat(40) },
+    };
+    await expect(f.provider.recoverWorkspace({ ...input(f), rebuild: missing })).rejects.toThrow(
+      "vcs_rebuild_base_unavailable",
+    );
+  });
+
+  it("rejects malformed recorded inputs before touching the remote", async () => {
+    const f = await fixture();
+    await expect(
+      f.provider.recoverWorkspace({ ...input(f), rebuild: { baseCommit: "--upload-pack=evil" } }),
+    ).rejects.toThrow("vcs_rebuild_invalid");
+    await expect(
+      f.provider.recoverWorkspace({
+        ...input(f),
+        rebuild: { baseCommit: "a".repeat(40), targetMerge: { ref: "../x", targetCommit: "a".repeat(40) } },
+      }),
+    ).rejects.toThrow("vcs_rebuild_invalid");
+  });
+
+  it("never clones when the caller recorded nothing to rebuild from, and leaves a present checkout alone", async () => {
+    const f = await fixture();
+    await expect(f.provider.recoverWorkspace(input(f, { runId: "nothing" }))).resolves.toBeNull();
+    const first = await f.provider.prepareWorkspace(input(f));
+    const marker = join(first.workspacePath, "marker.txt");
+    await writeFile(marker, "kept\n");
+    const again = await f.provider.recoverWorkspace({ ...input(f), rebuild: recorded(first) });
+    expect(again?.baseCommit).toBe(first.baseCommit);
+    expect(await readFile(marker, "utf8")).toBe("kept\n");
+  });
+
+  it("a rebuilt checkout is recovered and cleaned up like any other", async () => {
+    const f = await fixture();
+    const first = await f.provider.prepareWorkspace(input(f));
+    await lose(first);
+    const rebuilt = await f.provider.recoverWorkspace({ ...input(f), rebuild: recorded(first) });
+    await expect(f.provider.recoverWorkspace(input(f))).resolves.toMatchObject({ baseCommit: first.baseCommit });
+    await f.provider.cleanup(rebuilt!);
+    await expect(f.provider.recoverWorkspace(input(f))).resolves.toBeNull();
+  });
+});

@@ -767,19 +767,26 @@ describe("request time limits with the cache on", () => {
 });
 
 describe("each upload writes its own blob object", () => {
-  it("keeps the winner's bytes when two replicas upload the same key at once, and deletes the loser's", async () => {
+  it("refuses a second replica's upload of the same key while the first streams, and writes nothing for it", async () => {
     // run-1 and run-2 share a repository, so they derive the same key.
     const { base, startPod, store, dir } = await setup({ run: { repository: "owner/repo" } });
     const otherPod = await startPod();
     const winner = streamingUpload(base, TOKEN, "winner ");
-    const loser = streamingUpload(otherPod, OTHER_TOKEN, "loser ");
-    await settle(); // both past their checks and streaming
+    await settle(); // the winner holds its claim and is streaming
+    expect(store.claims).toHaveLength(1);
+    const loser = await fetch(`${otherPod}/cache/npm/blob?lock=${LOCK}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${OTHER_TOKEN}` },
+      body: archive,
+    });
+    expect(loser.status).toBe(409);
+    expect(await loser.json()).toEqual({ error: "upload_in_progress" });
     expect(await winner.finish("bytes")).toEqual({
       status: 201,
       body: { stored: true, sha256: hex("winner bytes"), sizeBytes: 12 },
     });
-    expect(await loser.finish("other bytes")).toEqual({ status: 200, body: { stored: false, reason: "exists" } });
     expect(store.rows).toHaveLength(1);
+    expect(store.claims).toEqual([]);
     const files = await storedFiles(dir);
     expect(files).toEqual([join(dir, store.rows[0].blobKey)]);
     const bytes = await readFile(files[0]);
@@ -787,24 +794,39 @@ describe("each upload writes its own blob object", () => {
     expect(bytes.byteLength).toBe(store.rows[0].sizeBytes);
   });
 
-  it("an upload refused after the seal leaves a committed snapshot's blob intact", async () => {
-    const { base, startPod, store, dir, seal } = await setup({ run: { repository: "owner/repo" } });
-    const otherPod = await startPod();
+  it("releases an upload's claim when the upload fails, so the key can be uploaded again", async () => {
+    const { base, store, upload, dir } = await setup({ maxSnapshotBytes: 16 });
+    const refused = await new Promise<number | "reset">((resolve) => {
+      const request = httpRequest(
+        `${base}/cache/npm/blob?lock=${LOCK}`,
+        { method: "PUT", headers: { authorization: `Bearer ${TOKEN}`, "transfer-encoding": "chunked" } },
+        (response) => {
+          response.resume();
+          resolve(response.statusCode ?? 0);
+        },
+      );
+      request.on("error", () => resolve("reset"));
+      request.write(new Uint8Array(10));
+      request.write(new Uint8Array(10));
+      request.end();
+    });
+    expect([413, "reset"]).toContain(refused);
+    await waitFor(() => store.claims.length === 0);
+    expect(await storedFiles(dir)).toEqual([]);
+    expect((await upload(new TextEncoder().encode("small"))).status).toBe(201);
+    expect(store.claims).toEqual([]);
+  });
+
+  it("an upload refused after the seal releases its claim and leaves nothing behind", async () => {
+    const { base, store, dir, seal } = await setup();
     const refused = streamingUpload(base, TOKEN, "late ");
     await settle();
-    const committed = await fetch(`${otherPod}/cache/npm/blob?lock=${LOCK}`, {
-      method: "PUT",
-      headers: { authorization: `Bearer ${OTHER_TOKEN}` },
-      body: archive,
-    });
-    expect(committed.status).toBe(201);
+    expect(store.claims).toHaveLength(1);
     expect((await seal()).status).toBe(200);
     expect(await refused.finish("bytes")).toEqual({ status: 409, body: { error: "sealed" } });
-    expect(store.rows).toHaveLength(1);
-    const files = await storedFiles(dir);
-    expect(files).toEqual([join(dir, store.rows[0].blobKey)]);
-    expect(hex(await readFile(files[0]))).toBe(hex(archive));
-    expect(store.rows[0].sha256).toBe(hex(archive));
+    expect(store.rows).toEqual([]);
+    expect(store.claims).toEqual([]);
+    expect(await storedFiles(dir)).toEqual([]);
   });
 
   it("writes a new object per upload under the key's prefix", async () => {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as delayFor } from "node:timers/promises";
 import type { RunStepsLevel } from "../../core/run-steps/config.js";
 import {
   isPackageAuditMode,
@@ -62,7 +63,9 @@ import {
   withTargetMerge,
 } from "../../coding/merge-wording.js";
 import { budgetSentence, overrunSentence } from "../../core/budget-wording.js";
-import { fileSelfDefect } from "../../core/self-defects.js";
+import { completeRunFollowUp } from "../../core/run-follow-ups.js";
+import type { RunFollowUpHandlers } from "../../core/run-follow-ups.js";
+import { CODING_FOLLOW_UP_KINDS, enqueueCodingRunFollowUps } from "./container-follow-ups.js";
 import { emitRunCompletedEvent } from "../../core/workflow-run-events.js";
 import { isTransactionUnavailable } from "../../core/dispatch.js";
 import { topUpCodingBudget, type TopUpOutcome } from "../../core/budget-topup.js";
@@ -83,6 +86,7 @@ import {
 } from "../../core/repo-access.js";
 import { ensurePrivateDirectory } from "../../core/private-directory.js";
 import { codingRunObserver, type CodingRunObserver } from "../../coding/observability.js";
+import { logRunFinished } from "../../observability/run-finished.js";
 import {
   cappedClaudeCommandTimeouts,
   DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS,
@@ -97,6 +101,7 @@ import {
   MAX_CODING_BASE_INPUT_BYTES,
   RESERVED_REPOSITORY_NAME,
   isLocalRepository,
+  isWardbyHeadRef,
   parseCodingWorkerOutputJson,
   redactAndTruncate,
   restoredDependencyFolders,
@@ -112,6 +117,7 @@ import {
 import { parseStoredEntry } from "../llm/catalog-types.js";
 import { resolveCodingEntry } from "../../core/run-pricing.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT, isImmutableDockerImage } from "../jobs/docker-isolation.js";
+import { configuredRegistryAdapters } from "../../coding/registry/adapters.js";
 import { normalizeRegistryLockfiles } from "../../coding/registry/lockfiles.js";
 import { warningRefusals } from "../../coding/registry/report.js";
 import type { ProxyModelTerms, ProxyProtocol } from "../coding-proxy/types.js";
@@ -148,6 +154,7 @@ import { RUN_ID } from "../jobs/kubernetes-isolation.js";
 import { WARM_START_STEP_ID, warmStartLine } from "../../coding/warm-start-wording.js";
 import type { RunStepSink } from "../../core/run-steps/types.js";
 import type {
+  ContinuationFinishedDetails,
   ContinuationOutcome,
   ContinuationTarget,
   DescriptionWriteOutcome,
@@ -162,7 +169,13 @@ import type {
 } from "../vcs/types.js";
 import { countWorkspaceEntries, protectedPathMatcher } from "../vcs/git.js";
 import { collectPlanFolder, type PlanFolderResult } from "../../coding-worker/plan-folder.mjs";
-import type { CodingImageSelector, ExecutionRecoveryResult, Executor, PersistedExecutionHandle } from "./types.js";
+import {
+  ExecutorClosingError,
+  type CodingImageSelector,
+  type ExecutionRecoveryResult,
+  type Executor,
+  type PersistedExecutionHandle,
+} from "./types.js";
 import { ISSUE_KEY, issueReference } from "../issue-tracker/types.js";
 import { HEARTBEAT_TIMEOUT_MS } from "../../core/timing.js";
 import { isTestOutcome, type TestOutcome } from "../../coding/test-outcomes.js";
@@ -180,6 +193,13 @@ const containerLog = logger.child({ module: "container-executor" });
 
 /** A transcript read and store must not hold up the job's removal for long. */
 const TRANSCRIPT_RECORD_TIMEOUT_MS = 60_000;
+/** Attempts at reading a transcript from a live pod; then the capture ends as not_captured and the job is removed. */
+export const TRANSCRIPT_MAX_ATTEMPTS = 5;
+
+class TranscriptUnreadable extends Error {
+  override readonly name = "TranscriptUnreadable";
+}
+
 /**
  * Plan documents are recorded before the run's terminal write, so a hung read or store must not hold
  * the run (and its job, cleanup and slot) open. On timeout the run's plan outcome is plan_files_failed.
@@ -238,13 +258,15 @@ function proxyProtocol(provider: string): ProxyProtocol {
 /**
  * Claude Code's commands run in its tool runner, which never reports back through the agent, so the
  * host rewrites registry-proxy download URLs in collected lockfiles itself (the Codex driver does it
- * in the worker). Best effort and symlink-safe (lockfiles.ts); a Codex workspace is left alone.
+ * in the worker, without the JFrog settings). Best effort and symlink-safe (lockfiles.ts); a Codex workspace is left alone.
  */
 export async function normalizeCollectedLockfiles(provider: string, workspacePath: string): Promise<string[]> {
   if (provider !== "claude-code") return [];
   return normalizeRegistryLockfiles({
     workspace: workspacePath,
     proxyBaseUrl: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+    // The host's own (non-secret) JFrog settings: scoped names go back to the private registry's URLs.
+    adapters: configuredRegistryAdapters(),
   });
 }
 
@@ -258,6 +280,16 @@ function pushedRecord(finalized: Awaited<ReturnType<VcsProvider["finalizeChanges
   return {
     baseSha: finalized.baseCommit,
     ...(finalized.outcome === "branch_pushed" ? { resultBranch: finalized.headRef } : {}),
+  };
+}
+
+/** What a prepared checkout records with the job handle, so another process can rebuild it (see WorkspaceBase). */
+function workspaceBase(workspace: PreparedWorkspace): WorkspaceBase {
+  return {
+    baseSha: workspace.baseCommit,
+    ...(workspace.targetMerge
+      ? { targetMergeRef: workspace.targetMerge.ref, targetMergeSha: workspace.targetMerge.targetCommit }
+      : {}),
   };
 }
 
@@ -349,6 +381,19 @@ const isNoLongerActive = (error: unknown) => error instanceof Error && error.mes
 function restoredDependenciesFor(output: CodingWorkerOutput): { restoredDependencies?: string[] } {
   const folders = restoredDependencyFolders(output.dependencyCache);
   return folders.length > 0 ? { restoredDependencies: folders } : {};
+}
+
+/** The model's conventional-commit subject parts for the commit and the PR title: nothing when it gave none. */
+function commitFor(output: CodingWorkerOutput): { commit?: { type?: string; scope?: string; title?: string } } {
+  const { commitType: type, commitScope: scope, commitTitle: title } = output;
+  if (type === undefined && scope === undefined && title === undefined) return {};
+  return {
+    commit: {
+      ...(type !== undefined ? { type } : {}),
+      ...(scope !== undefined ? { scope } : {}),
+      ...(title !== undefined ? { title } : {}),
+    },
+  };
 }
 
 /** Columns on CodingRun recorded when a run completes, beyond its result JSON. */
@@ -752,6 +797,15 @@ export interface ContainerRunSnapshot {
   tokensOut: number;
   costUsd: number;
   jobHandle: JobHandle | null;
+  /**
+   * What the launching process recorded about the run's checkout, with the job handle: the commit the
+   * clone started from and, for a continuation that merged its pull request's target branch, the
+   * branch and commit merged. A process that finishes the run without the checkout rebuilds it from
+   * these. Absent or null on runs launched before they were recorded (they cannot be rebuilt).
+   */
+  baseSha?: string | null;
+  targetMergeRef?: string | null;
+  targetMergeSha?: string | null;
   provisioningClaim: string | null;
   proxySessionId: string | null;
   result: unknown;
@@ -837,8 +891,20 @@ export interface ContainerRunSnapshot {
  */
 export type ProvisioningClaim = "claimed" | "unavailable" | "queued";
 
+/** A run's checkout as prepared: persisted with the job handle (see ContainerRunSnapshot.baseSha). */
+export interface WorkspaceBase {
+  baseSha: string;
+  targetMergeRef?: string;
+  targetMergeSha?: string;
+}
+
 export interface ContainerExecutionStore {
   load(runId: string): Promise<ContainerRunSnapshot | null>;
+  /**
+   * Marks one of the run's queued chores (CODING_FOLLOW_UP_KINDS) done, for the process that did it
+   * itself, so the drain leaves it. Optional: a store with no outbox omits it.
+   */
+  completeFollowUp?(runId: string, kind: string): Promise<void>;
   claimProvisioning(runId: string, claimId: string): Promise<ProvisioningClaim>;
   /**
    * Puts a pending, unclaimed run in the coding queue (sets CodingRun.queuedAt if unset), for a run
@@ -846,7 +912,8 @@ export interface ContainerExecutionStore {
    * scheduler tick, until CODING_QUEUE_TIMEOUT_SEC.
    */
   markQueued?(runId: string): Promise<void>;
-  persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void>;
+  /** `base` is written in the same step as the handle, so a launched run always has one. */
+  persistHandle(runId: string, claimId: string, handle: JobHandle, base?: WorkspaceBase): Promise<void>;
   /**
    * Returns a run whose launch the backend refused for capacity (JobCapacityError) to the coding
    * queue: pending, no job handle, no proxy session, and queuedAt the run's dispatch time, so it
@@ -1008,17 +1075,6 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     }
   }
 
-  /** Best effort (bounded, never throws): only called by the write that made the row terminal, so it files once. */
-  private async selfDefect(run: {
-    id: string;
-    agentId: string;
-    status: string;
-    error: string | null;
-    finishedAt: Date;
-  }) {
-    if (this.hasTrackers) await fileSelfDefect(this.db, this.options.issueTrackers, run);
-  }
-
   /** An empty registry (no Jira site configured) means no self-defect queries at all. */
   private get hasTrackers(): boolean {
     return Object.values(this.options.issueTrackers ?? {}).some(Boolean);
@@ -1094,6 +1150,9 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
           ? { backend: row.codingRun.jobBackend, id: row.codingRun.jobHandle }
           : null,
       provisioningClaim: row.codingRun.jobBackend === PROVISIONING_BACKEND ? (row.codingRun.jobHandle ?? null) : null,
+      baseSha: row.codingRun.baseSha,
+      targetMergeRef: row.codingRun.targetMergeRef,
+      targetMergeSha: row.codingRun.targetMergeSha,
       proxySessionId: row.codingRun.proxySession?.id ?? null,
       result: row.codingRun.result,
       workerImage: row.codingRun.workerImage,
@@ -1557,7 +1616,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     }
   }
 
-  async persistHandle(runId: string, claimId: string, handle: JobHandle): Promise<void> {
+  async persistHandle(runId: string, claimId: string, handle: JobHandle, base?: WorkspaceBase): Promise<void> {
     await this.db.$transaction(async (tx) => {
       const coding = await tx.codingRun.findUnique({ where: { runId }, include: { run: true } });
       if (!coding) throw new Error("coding_run_not_found");
@@ -1572,7 +1631,17 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       }
       const persisted = await tx.codingRun.updateMany({
         where: { runId, jobBackend: PROVISIONING_BACKEND, jobHandle: claimId },
-        data: { jobBackend: handle.backend, jobHandle: handle.id },
+        data: {
+          jobBackend: handle.backend,
+          jobHandle: handle.id,
+          ...(base
+            ? {
+                baseSha: base.baseSha,
+                targetMergeRef: base.targetMergeRef ?? null,
+                targetMergeSha: base.targetMergeSha ?? null,
+              }
+            : {}),
+        },
       });
       if (persisted.count !== 1) throw new Error("coding_job_handle_conflict");
       await tx.run.update({
@@ -1580,6 +1649,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         data: { status: "running", heartbeatAt: new Date() },
       });
     });
+  }
+
+  completeFollowUp(runId: string, kind: string): Promise<void> {
+    return completeRunFollowUp(this.db, runId, kind);
   }
 
   async heartbeat(runId: string): Promise<void> {
@@ -1619,13 +1692,15 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
           error: null,
         },
       });
-      return { id: runId, agentId: run.agentId };
+      // With the status, so a process that dies after this commit cannot lose them.
+      await enqueueCodingRunFollowUps(tx, runId, {
+        selfDefect: status === "budget_exhausted" && this.hasTrackers,
+        now: finishedAt,
+      });
+      return true;
     });
-    if (finished && status === "budget_exhausted") {
-      await this.selfDefect({ ...finished, status, error: null, finishedAt });
-    }
-    // Only the write that made the row terminal emits (never throws).
     if (finished) {
+      await logRunFinished(this.db, runId);
       await emitRunCompletedEvent(this.db, runId);
       this.notifyTerminal(runId);
     }
@@ -1642,12 +1717,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
     },
   ): Promise<void> {
     const finishedAt = new Date();
-    const agentId = await this.db.$transaction(async (tx) => {
-      const ended = await tx.run.updateMany({
+    const ended = await this.db.$transaction(async (tx) => {
+      const updated = await tx.run.updateMany({
         where: { id: runId, status: { in: ["pending", "running"] } },
         data: { status: "failed", error: input.error, finishedAt, heartbeatAt: new Date() },
       });
-      if (!ended.count) return null;
+      if (!updated.count) return false;
       await tx.codingRun.update({
         where: { runId },
         data: {
@@ -1658,12 +1733,14 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         },
       });
       await writeExtraRecords(tx, runId, input.extras);
-      const row = await tx.run.findUnique({ where: { id: runId }, select: { agentId: true } });
-      return row?.agentId ?? null;
+      // With the status, so a process that dies after this commit cannot lose them.
+      await enqueueCodingRunFollowUps(tx, runId, { selfDefect: this.hasTrackers, now: finishedAt });
+      return true;
     });
-    if (!agentId) return;
-    await this.selfDefect({ id: runId, agentId, status: "failed", error: input.error, finishedAt });
+    if (!ended) return;
+    await logRunFinished(this.db, runId);
     await emitRunCompletedEvent(this.db, runId);
+    this.notifyTerminal(runId);
   }
 
   async recordBudgetRefusal(runId: string, sessionId: string): Promise<void> {
@@ -1699,12 +1776,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
   ): Promise<boolean> {
     const finishedAt = new Date();
     let changed = false;
-    const agentId = await this.db.$transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       const updated = await tx.run.updateMany({
         where: { id: runId, status: { in: ["pending", "running"] } },
         data: { status, error, finishedAt, heartbeatAt: new Date() },
       });
-      if (!updated.count) return null;
+      if (!updated.count) return;
       changed = true;
       if (audit) {
         await tx.codingRun.update({
@@ -1712,13 +1789,12 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
           data: { failureCategory: audit.failureCategory, diagnosticId: audit.diagnosticId },
         });
       }
-      if (!this.hasTrackers) return null;
-      const row = await tx.run.findUnique({ where: { id: runId }, select: { agentId: true } });
-      return row?.agentId ?? null;
+      // With the status, so a process that dies after this commit cannot lose them. The self-defect
+      // handler reads the final row (failure category included); cancelled/refused are skipped there.
+      await enqueueCodingRunFollowUps(tx, runId, { selfDefect: this.hasTrackers, now: finishedAt });
     });
-    // After commit, so the failure category is readable; cancelled/refused are skipped inside fileSelfDefect.
-    if (agentId) await this.selfDefect({ id: runId, agentId, status, error, finishedAt });
     if (changed) {
+      await logRunFinished(this.db, runId);
       await emitRunCompletedEvent(this.db, runId);
       this.notifyTerminal(runId);
     }
@@ -1998,6 +2074,13 @@ export class ContainerExecutor implements Executor {
    * process: another replica's drain may start the run again inside the backoff.
    */
   private readonly capacityRefusedAt = new Map<string, number>();
+  /**
+   * Set by close(). A poll loop that sees it returns without touching its job, session or
+   * workspace: the run is healthy and another process adopts it through recover().
+   */
+  private closing = false;
+  /** Aborted by close(), so the default poll sleep ends at once instead of holding the process open. */
+  private readonly closeController = new AbortController();
 
   constructor(private readonly options: ContainerExecutorOptions) {
     this.artifactRoot = resolve(options.artifactRoot);
@@ -2041,12 +2124,26 @@ export class ContainerExecutor implements Executor {
       throw new Error("coding_resource_limits_invalid");
     }
     this.sleep =
-      options.sleep ?? ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
+      options.sleep ??
+      ((milliseconds) =>
+        delayFor(milliseconds, undefined, { signal: this.closeController.signal }).catch(() => undefined));
     this.now = options.now ?? (() => new Date());
     this.observer = options.observer ?? codingRunObserver;
   }
 
+  /**
+   * Stops this process's poll loops and timers and waits for them to exit, without stopping,
+   * removing or failing any job: the coding pods keep running, and another process finds the
+   * runs through the reconciler's recover(). Call it after the control plane stops starting runs.
+   */
+  async close(): Promise<void> {
+    this.closing = true;
+    this.closeController.abort();
+    await Promise.allSettled([...this.active.values()]);
+  }
+
   async start(runId: string): Promise<void> {
+    if (this.closing) throw new ExecutorClosingError();
     const current = this.active.get(runId);
     if (current) return current;
     // Refused for capacity a moment ago: keep its place and clock in the queue, untouched.
@@ -2055,9 +2152,7 @@ export class ContainerExecutor implements Executor {
     this.emit({ stage: "queued", runId });
     const execution = this.execute(runId).finally(async () => {
       this.active.delete(runId);
-      if (!this.options.onSlotReleased) return;
-      const after = await this.options.store.load(runId).catch(() => null);
-      if (after && TERMINAL_STATUSES.has(after.status)) this.options.onSlotReleased();
+      await this.releaseSlotIfTerminal(runId);
     });
     this.active.set(runId, execution);
     return execution;
@@ -2076,7 +2171,7 @@ export class ContainerExecutor implements Executor {
     if (!(await this.options.store.terminate(runId, "cancelled", failure.error, failure.audit))) return;
     this.emit({ stage: "stopping", runId, jobId: run.jobHandle?.id });
     await this.recordRefusal(runId, run.proxySessionId);
-    this.terminal(run, "cancelled", failure.audit);
+    await this.terminal(run, "cancelled", failure.audit);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
     if (run.jobHandle) {
       await this.options.jobs.stop(run.jobHandle, reason).catch(() => undefined);
@@ -2093,6 +2188,7 @@ export class ContainerExecutor implements Executor {
   }
 
   async recover(handle: PersistedExecutionHandle): Promise<ExecutionRecoveryResult> {
+    if (this.closing) throw new ExecutorClosingError();
     const run = await this.options.store.load(handle.runId);
     if (!run) return { state: "lost", reason: "coding_run_not_found" };
     if (TERMINAL_STATUSES.has(run.status)) {
@@ -2121,6 +2217,7 @@ export class ContainerExecutor implements Executor {
     await this.reportMissingWarmStart(run, run.jobHandle);
     if (status.state === "pending" || status.state === "running") {
       await this.options.store.heartbeat(run.runId);
+      this.adopt(run, run.jobHandle);
       return { state: "active" };
     }
     await this.finishTerminal(run, run.jobHandle, status.state);
@@ -2264,12 +2361,13 @@ export class ContainerExecutor implements Executor {
         // Backends whose handle is derivable (Kubernetes) persist it first, so a crash between the
         // launch and the write still leaves a handle `abandon()` can stop and remove the run with.
         planned = this.options.jobs.plannedHandle?.(spec);
-        if (planned) await this.options.store.persistHandle(runId, claimId!, planned);
+        const base = workspaceBase(workspace);
+        if (planned) await this.options.store.persistHandle(runId, claimId!, planned, base);
         handle = await this.whileHeartbeating(runId, () => this.options.jobs.launch(spec));
         if (planned && (planned.backend !== handle.backend || planned.id !== handle.id)) {
           throw new Error("coding_job_handle_mismatch");
         }
-        await this.options.store.persistHandle(runId, claimId!, handle);
+        await this.options.store.persistHandle(runId, claimId!, handle, base);
         this.capacityRefusedAt.delete(runId);
         this.options.capabilities.delete(runId);
         this.emit({ stage: "launched", runId, jobId: handle.id, budgetReservedUsd: run.budgetUsd });
@@ -2277,39 +2375,21 @@ export class ContainerExecutor implements Executor {
       }
       if (resumed) await this.reportMissingWarmStart(run, handle);
 
-      let delay = this.options.pollMinMs ?? 250;
-      const maximumDelay = this.options.pollMaxMs ?? 5_000;
-      let observedRunning = false;
-      // Overrun from available room: asked on each poll until it is granted in full or refused once.
-      let asksForTopUps = run.budgetLimitUsd !== undefined && run.budgetLimitUsd > run.budgetUsd;
-      for (;;) {
-        const status = await this.options.jobs.status(handle);
-        if (status.state !== "pending" && status.state !== "running") {
-          const finishing = launchFingerprint ? { ...run, warmFingerprint: launchFingerprint } : run;
-          await this.finishTerminal(finishing, handle, status.state, workspaces ?? workspace, sessionId);
-          return;
-        }
-        if (status.state === "running" && !observedRunning) {
-          observedRunning = true;
-          this.emit({ stage: "running", runId, jobId: handle.id });
-        }
-        await this.options.store.heartbeat(runId);
-        if (asksForTopUps && this.options.store.topUpBudget) {
-          const topUp = await this.options.store.topUpBudget(runId).catch((error: unknown) => {
-            containerLog.warn({ runId, error: safeError(error) }, "coding run top-up failed; asking again next poll");
-            return { outcome: "not_needed" as const, near: true };
-          });
-          if (topUp.outcome === "unavailable" || topUp.outcome === "closed") asksForTopUps = false;
-          // Near its grant: poll often, so the next step lands before a request no longer fits.
-          else if (topUp.near) delay = Math.min(delay, TOP_UP_NEAR_POLL_MS);
-        }
-        await this.sleep(delay);
-        delay = Math.min(maximumDelay, Math.max(delay + 1, Math.ceil(delay * 1.5)));
-        run = (await this.options.store.load(runId)) ?? run;
-        if (TERMINAL_STATUSES.has(run.status)) return;
-      }
+      await this.pollLaunched(run, handle, {
+        workspace: workspaces ?? workspace,
+        sessionId,
+        announceRunning: true,
+        warmFingerprint: launchFingerprint,
+        onRun: (latest) => {
+          run = latest;
+        },
+      });
     } catch (error) {
       this.options.capabilities.delete(runId);
+      // Shutting down with the job launched: an error here (the database going away under the loop)
+      // says nothing about the run, so it is not stopped, removed or failed. The next process
+      // adopts it through recover().
+      if (this.closing && handle) return this.leaveForAdoption(runId, handle, error);
       if (error instanceof JobCapacityError && claimId && this.options.store.requeueAfterCapacityRefusal) {
         // The cluster has no room for the pod (Kubernetes: the namespace quota): the run waits in
         // the queue again rather than failing. The launcher already removed what it created, so
@@ -2360,7 +2440,7 @@ export class ContainerExecutor implements Executor {
       // Plan output is intentionally not recorded here: the job's state is unknown (it may never have
       // started), so there is nothing trustworthy to read and planFilesStatus stays null.
       await this.options.store.terminate(runId, status, failure.error, failure.audit);
-      this.terminal(run, status, failure.audit);
+      await this.terminal(run, status, failure.audit);
       if (handle) await this.options.jobs.remove(handle).catch(() => undefined);
       // A service sidecar that never became ready (kubernetes.ts waitForKeeper) is named on the host.
       const unreadyService = outOfBudget ? null : serviceUnreadyName(error);
@@ -2376,6 +2456,102 @@ export class ContainerExecutor implements Executor {
       }
       this.emit({ stage: "cleanup", runId, jobId: handle?.id, cleanupSucceeded: true });
     }
+  }
+
+  /**
+   * Observes a launched run until it ends or close() begins: its status, a heartbeat, and an overrun
+   * top-up while it asks for one. The launching process's loop and the loop of a process that adopted
+   * the run (adopt()) are this one, so an adopted run is topped up and finished exactly as its
+   * launcher would have. `onRun` is given each fresh snapshot of the run.
+   */
+  private async pollLaunched(
+    run: ContainerRunSnapshot,
+    handle: JobHandle,
+    ctx: {
+      workspace: PreparedWorkspace | RunWorkspaces | null;
+      sessionId: string | null | undefined;
+      /** The launcher reports the first running observation; an adopter's run was running already. */
+      announceRunning: boolean;
+      /** Warm rounds: the fingerprint this process launched the run with, when it launched it. */
+      warmFingerprint?: string;
+      onRun?: (run: ContainerRunSnapshot) => void;
+    },
+  ): Promise<void> {
+    const runId = run.runId;
+    let delay = this.options.pollMinMs ?? 250;
+    const maximumDelay = this.options.pollMaxMs ?? 5_000;
+    let observedRunning = !ctx.announceRunning;
+    // Overrun from available room: asked on each poll until it is granted in full or refused once.
+    let asksForTopUps = run.budgetLimitUsd !== undefined && run.budgetLimitUsd > run.budgetUsd;
+    for (;;) {
+      if (this.closing) return this.leaveForAdoption(runId, handle);
+      const status = await this.options.jobs.status(handle);
+      if (status.state !== "pending" && status.state !== "running") {
+        const finishing = ctx.warmFingerprint ? { ...run, warmFingerprint: ctx.warmFingerprint } : run;
+        await this.finishTerminal(finishing, handle, status.state, ctx.workspace, ctx.sessionId);
+        return;
+      }
+      if (status.state === "running" && !observedRunning) {
+        observedRunning = true;
+        this.emit({ stage: "running", runId, jobId: handle.id });
+      }
+      await this.options.store.heartbeat(runId);
+      if (asksForTopUps && this.options.store.topUpBudget) {
+        const topUp = await this.options.store.topUpBudget(runId).catch((error: unknown) => {
+          containerLog.warn({ runId, error: safeError(error) }, "coding run top-up failed; asking again next poll");
+          return { outcome: "not_needed" as const, near: true };
+        });
+        if (topUp.outcome === "unavailable" || topUp.outcome === "closed") asksForTopUps = false;
+        // Near its grant: poll often, so the next step lands before a request no longer fits.
+        else if (topUp.near) delay = Math.min(delay, TOP_UP_NEAR_POLL_MS);
+      }
+      await this.sleep(delay);
+      if (this.closing) return this.leaveForAdoption(runId, handle);
+      delay = Math.min(maximumDelay, Math.max(delay + 1, Math.ceil(delay * 1.5)));
+      run = (await this.options.store.load(runId)) ?? run;
+      ctx.onRun?.(run);
+      if (TERMINAL_STATUSES.has(run.status)) return;
+    }
+  }
+
+  /**
+   * Takes over observing a run another process launched: recover() calls it for a run that is still
+   * running. One loop per run per process. An error in it is only logged: the heartbeat goes stale and
+   * the reconciler hands the run to the next adopter, so observing never fails a healthy run.
+   */
+  private adopt(run: ContainerRunSnapshot, handle: JobHandle): void {
+    if (this.active.has(run.runId)) return;
+    const observing = this.pollLaunched(run, handle, {
+      workspace: null,
+      sessionId: run.proxySessionId,
+      announceRunning: false,
+    })
+      .catch((error: unknown) => {
+        containerLog.warn(
+          { runId: run.runId, error: safeError(error) },
+          "adopted coding run observation failed; the reconciler will adopt it again",
+        );
+      })
+      .finally(async () => {
+        this.active.delete(run.runId);
+        await this.releaseSlotIfTerminal(run.runId);
+      });
+    this.active.set(run.runId, observing);
+  }
+
+  /** Tells the control plane a concurrency slot is free once the run this process observed has ended. */
+  private async releaseSlotIfTerminal(runId: string): Promise<void> {
+    if (!this.options.onSlotReleased) return;
+    const after = await this.options.store.load(runId).catch(() => null);
+    if (after && TERMINAL_STATUSES.has(after.status)) this.options.onSlotReleased();
+  }
+
+  /** A poll loop's exit when close() began: touches nothing, so another process can adopt the run. */
+  private leaveForAdoption(runId: string, handle: JobHandle, error?: unknown): void {
+    containerLog.info(
+      { runId, jobId: handle.id, ...(error === undefined ? {} : { error: safeError(error) }) },
+      "coding run left running for another process: this executor is closing",
+    );
   }
 
   /**
@@ -2706,8 +2882,7 @@ export class ContainerExecutor implements Executor {
         timeoutSec: run.timeoutSec,
         protectedPaths: run.protectedPaths,
       });
-      const expectedHeadRunId = run.rootCodingRunId ?? run.runId;
-      if (run.headRef !== `wardby/run-${expectedHeadRunId}`) throw new Error("coding_head_ref_invalid");
+      if (!isWardbyHeadRef(run.headRef)) throw new Error("coding_head_ref_invalid");
       const continuationOf = run.rootCodingRunId ? { runId: run.rootCodingRunId } : undefined;
       CodingTaskInputSchema.parse({
         schemaVersion: CODING_PROTOCOL_VERSION,
@@ -2735,6 +2910,27 @@ export class ContainerExecutor implements Executor {
     } catch (error) {
       throw new PreflightError(safeError(error), { cause: error });
     }
+  }
+
+  /**
+   * preflight() for a launched run whose changes are about to be pushed: when this process has no
+   * checkout of it (another one prepared the run and was replaced by a deploy), the VCS provider
+   * rebuilds it from what was recorded at launch (WorkspaceBase). A run with no recorded base (launched
+   * before they were recorded) gets none, and still ends coding_workspace_lost. Only a push wants this:
+   * cleanup and the no-push finish signals have no use for a checkout that is gone.
+   */
+  private finishInput(run: ContainerRunSnapshot): VcsPrepareInput {
+    const input = this.preflight(run, { launched: true });
+    if (!run.baseSha) return input;
+    return {
+      ...input,
+      rebuild: {
+        baseCommit: run.baseSha,
+        ...(run.targetMergeRef && run.targetMergeSha
+          ? { targetMerge: { ref: run.targetMergeRef, targetCommit: run.targetMergeSha } }
+          : {}),
+      },
+    };
   }
 
   private async finishTerminal(
@@ -2798,7 +2994,7 @@ export class ContainerExecutor implements Executor {
           await this.recordRefusal(run.runId, sessionId);
           const failure = await this.budgetFailure(run.runId, `job_${reason}`, { issues: collected?.diagnosticIssues });
           await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
-          this.terminal(run, "budget_exhausted", failure.audit);
+          await this.terminal(run, "budget_exhausted", failure.audit);
           outcome = "budget_exhausted";
           return;
         }
@@ -2810,7 +3006,7 @@ export class ContainerExecutor implements Executor {
         providerClass = provider?.class;
         await this.recordRefusal(run.runId, sessionId);
         await this.options.store.terminate(run.runId, status, failure.error, failure.audit);
-        this.terminal(run, status, failure.audit);
+        await this.terminal(run, status, failure.audit);
         return;
       }
       const collected = await this.options.jobs.collect(handle);
@@ -2835,7 +3031,7 @@ export class ContainerExecutor implements Executor {
           kept.extras,
         );
         for (const pushed of kept.pushed) this.emit({ stage: pushed.outcome, runId: run.runId, jobId: handle.id });
-        this.terminal(latest, "budget_exhausted");
+        await this.terminal(latest, "budget_exhausted");
         // Kept changes in any writable repository are reported: the default repository's first, else
         // the first extra's (named by its repository, since the comment is on the default one's PR).
         const reported = kept.main?.finalized ?? kept.pushed[0];
@@ -2866,7 +3062,7 @@ export class ContainerExecutor implements Executor {
         if (kept) {
           await this.options.store.complete(run.runId, "budget_exhausted", kept.result, kept.record);
           this.emit({ stage: kept.finalized.outcome, runId: run.runId, jobId: handle.id });
-          this.terminal(kept.current, "budget_exhausted");
+          await this.terminal(kept.current, "budget_exhausted");
           changesPushed =
             kept.finalized.outcome === "branch_pushed" ? {} : { pullRequestNumber: kept.finalized.pullRequestNumber };
           if (kept.finalized.outcome === "pull_request_updated" && kept.finalized.targetMerge) {
@@ -2881,7 +3077,7 @@ export class ContainerExecutor implements Executor {
             this.resultFor(output, latest, "budget_exhausted"),
             dependencyCacheRecord(output),
           );
-          this.terminal(latest, "budget_exhausted");
+          await this.terminal(latest, "budget_exhausted");
         }
         outcome = "budget_exhausted";
         return;
@@ -2915,7 +3111,7 @@ export class ContainerExecutor implements Executor {
           ...dependencyCacheRecord(output),
           ...description,
         });
-        this.terminal(current, "succeeded");
+        await this.terminal(current, "succeeded");
         outcome = "succeeded";
         overrun = this.overrunDetails(current);
         finishedSummary = output.summary;
@@ -2951,7 +3147,7 @@ export class ContainerExecutor implements Executor {
       if (finalized.outcome !== "no_changes") {
         this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
       }
-      this.terminal(pushed.current, "succeeded");
+      await this.terminal(pushed.current, "succeeded");
       outcome = "succeeded";
       if (finalized.outcome !== "no_changes" && credentialsRevoked) {
         retention = this.retentionFor(run, finalized.commitSha);
@@ -2971,23 +3167,35 @@ export class ContainerExecutor implements Executor {
         await this.recordRefusal(run.runId, sessionId);
         const failure = await this.budgetFailure(run.runId, error);
         await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
-        this.terminal(run, "budget_exhausted", failure.audit);
+        await this.terminal(run, "budget_exhausted", failure.audit);
         outcome = "budget_exhausted";
       } else {
         await this.recordRefusal(run.runId, sessionId);
         const failure = this.failure(error);
         await this.options.store.terminate(run.runId, "failed", failure.error, failure.audit);
-        this.terminal(run, "failed", failure.audit);
+        await this.terminal(run, "failed", failure.audit);
         protectedPath = protectedPathFromError(error) ?? undefined;
         conflictMarkersPath = conflictMarkersPathFromError(error) ?? undefined;
       }
     } finally {
-      if (run.sessionResume) await this.recordTranscript(run, handle);
-      await this.releaseJob(handle, outcome === "succeeded" ? retention : undefined);
+      // The terminal write queued these chores (store.complete/terminate). This process does them now and
+      // marks each row done, so the scheduler leader has work only when this process died first (or a
+      // chore failed here, which leaves its row for the drain).
+      const captureWindow = new AbortController();
+      const captureTimer = setTimeout(() => captureWindow.abort(), TRANSCRIPT_RECORD_TIMEOUT_MS);
+      captureTimer.unref();
+      try {
+        await this.inlineFollowUp(run.runId, CODING_FOLLOW_UP_KINDS.releaseJob, () =>
+          this.releaseJob(run, handle, 1, captureWindow.signal, outcome === "succeeded" ? retention : undefined),
+        );
+      } finally {
+        clearTimeout(captureTimer);
+      }
       const workspace = await this.cleanupWorkspaces(run, heldWorkspaces);
       // A run another process launched has no workspace here; its pull request still gets the final status.
       const target = workspace ?? this.continuationTargetOf(run);
-      if (target) {
+      await this.inlineFollowUp(run.runId, CODING_FOLLOW_UP_KINDS.hostNotify, async () => {
+        if (!target) return;
         // The publish hook may still be running, so this can be the "being published" line (R10d).
         const planLines =
           this.options.planSummary && outcome === "succeeded"
@@ -3008,10 +3216,10 @@ export class ContainerExecutor implements Executor {
             ? { conflictMarkersSentence: conflictMarkersSentence(conflictMarkersPath) }
             : {}),
         });
-      }
+      });
       await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
       this.emit({ stage: "cleanup", runId: run.runId, jobId: handle.id, cleanupSucceeded: true });
-      await this.notifyTerminal(run.runId);
+      await this.inlineFollowUp(run.runId, CODING_FOLLOW_UP_KINDS.terminalHook, () => this.runTerminalHook(run.runId));
     }
   }
 
@@ -3043,16 +3251,160 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
-   * A finished run's job: retained for the next round when `retention` is set (a delivered success
-   * on a launcher that retains), removed otherwise, exactly as before. Never throws.
+   * The chores the scheduler leader runs for a coding run that became terminal, by kind. Each loads the
+   * run from the database (a payload holds ids only), so it works on a pod that never ran the job, and
+   * is safe to run again. What only this process knows (the pull request comment's summary, the merge
+   * sentence) is not here: the leader posts the comment from the stored run, as cleanupTerminal does.
    */
-  private async releaseJob(handle: JobHandle, retention: JobRetention | undefined): Promise<void> {
+  followUpHandlers(): RunFollowUpHandlers {
+    return {
+      [CODING_FOLLOW_UP_KINDS.releaseJob]: async ({ runId, attempt, signal }) => {
+        const run = await this.options.store.load(runId);
+        if (run?.jobHandle) await this.releaseJob(run, run.jobHandle, attempt, signal);
+      },
+      [CODING_FOLLOW_UP_KINDS.hostNotify]: ({ runId }) => this.notifyHostFromStoredRun(runId),
+      [CODING_FOLLOW_UP_KINDS.terminalHook]: ({ runId }) => this.runTerminalHook(runId),
+    };
+  }
+
+  /**
+   * Does one queued chore in this process and marks its row done. A failure is logged by its name only
+   * and leaves the row, which the drain then retries; it never reaches the terminal path.
+   */
+  private async inlineFollowUp(runId: string, kind: string, chore: () => Promise<void>): Promise<void> {
+    try {
+      await chore();
+      await this.options.store.completeFollowUp?.(runId, kind);
+    } catch (error) {
+      containerLog.warn(
+        { runId, kind, error: error instanceof Error ? error.name : "UnknownError" },
+        "coding run follow-up failed here; the scheduler leader will retry it",
+      );
+    }
+  }
+
+  /**
+   * Captures the run's transcript (session resume), then removes the job. In that order, and the removal
+   * is skipped when the capture should be retried: a removed pod has nothing left to read. A job that is
+   * already gone cannot be captured, which ends the capture without a retry.
+   */
+  private async releaseJob(
+    run: ContainerRunSnapshot,
+    handle: JobHandle,
+    attempt: number,
+    signal: AbortSignal,
+    retention?: JobRetention,
+  ): Promise<void> {
+    if (run.sessionResume) await this.captureTranscript(run, handle, attempt, signal);
     const { jobs } = this.options;
+    // Warm rounds: a delivered success on a launcher that retains keeps the job for the next round; any
+    // other end (and a retry of this chore by the scheduler leader, which has no retention) removes it.
     if (retention && this.warmRounds && jobs.retain) {
       await jobs.retain(handle, retention).catch(() => jobs.remove(handle).catch(() => undefined));
       return;
     }
-    await jobs.remove(handle).catch(() => undefined);
+    await jobs.remove(handle);
+  }
+
+  /**
+   * Session resume: stores the transcript, or settles that it cannot be. The recorder redacts and writes the
+   * row; only a status code is logged. Throws (so the chore is retried, with the pod still there) when the
+   * pod was there but could not be read, up to TRANSCRIPT_MAX_ATTEMPTS; the last attempt keeps the
+   * recorder's `not_captured` row. The run capability is already gone from the vault, so it is not passed
+   * (the recorder removes its fixed token shape).
+   */
+  private async captureTranscript(
+    run: ContainerRunSnapshot,
+    handle: JobHandle,
+    attempt: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const recorder = this.options.transcripts;
+    if (!recorder) return;
+    const jobs = this.options.jobs;
+    // A removed or unknown job has no pod: nothing to retry for, so the recorder gets "nothing to read".
+    const jobGone = await jobs.status(handle).then(
+      () => false,
+      (error: unknown) =>
+        error instanceof Error && (error.message === "job_removed" || error.message === "job_not_found"),
+    );
+    let unreadable = false;
+    const timedOut = new Promise<"timeout">((resolve) => {
+      if (signal.aborted) resolve("timeout");
+      else signal.addEventListener("abort", () => resolve("timeout"), { once: true });
+    });
+    // The recorder reports its own failures as a status; one that throws anyway is a failed capture, not a retry.
+    const recording = Promise.resolve()
+      .then(() =>
+        recorder.record({
+          runId: run.runId,
+          agentId: run.agentId,
+          provider: run.provider,
+          ...(run.launchSecretVersions ? { launchSecretVersions: run.launchSecretVersions } : {}),
+          read: async (maxBytes) => {
+            if (jobGone || !jobs.readTranscript) return undefined;
+            try {
+              return await jobs.readTranscript(handle, maxBytes);
+            } catch (error) {
+              // A transcript over the limit is final; anything else on a live pod is worth another try.
+              if (!(error instanceof Error && error.message === "transcript_too_large")) unreadable = true;
+              throw error;
+            }
+          },
+        }),
+      )
+      .catch(() => "failed" as const);
+    // An abandoned capture may still finish (the recorder's write is an upsert), so a retry is safe.
+    const result = await Promise.race([recording, timedOut]);
+    if (result !== "stored") containerLog.info({ runId: run.runId, transcript: result }, "run transcript not stored");
+    if ((unreadable || result === "timeout") && attempt < TRANSCRIPT_MAX_ATTEMPTS) throw new TranscriptUnreadable();
+  }
+
+  /** The terminal hook (onCodingRunTerminal); a failure is thrown so the chore is retried. */
+  private async runTerminalHook(runId: string): Promise<void> {
+    await this.options.onCodingRunTerminal?.(runId);
+  }
+
+  /** The final status on the run's pull request, from the stored run (the drain's version of the inline one). */
+  private async notifyHostFromStoredRun(runId: string): Promise<void> {
+    const run = await this.options.store.load(runId);
+    if (!run) return;
+    const input = this.preflightForCleanup(run);
+    const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
+    const target = workspace ?? this.continuationTargetOf(run);
+    if (!target) return;
+    const { outcome, details } = await this.storedFinishDetails(run);
+    await this.options.vcs.notifyContinuationFinished?.(target, outcome, details);
+  }
+
+  /**
+   * What the stored run alone says about how it ended, for the pull request comment. No path survives to the
+   * stored run (only the category does, see protected-path-wording.ts), so a protected-path failure can only
+   * use the pathless sentence; the summary and merge sentence are not stored at all.
+   */
+  private async storedFinishDetails(
+    run: ContainerRunSnapshot,
+  ): Promise<{ outcome: ContinuationOutcome; details: ContinuationFinishedDetails }> {
+    const outcome: ContinuationOutcome =
+      run.status === "succeeded" ? "succeeded" : run.status === "budget_exhausted" ? "budget_exhausted" : "failed";
+    const providerClass = run.status === "failed" ? providerClassOfCategory(run.failureCategory) : null;
+    const unreadyServices =
+      run.status === "failed" && run.failureCategory === SERVICE_UNREADY_CATEGORY
+        ? storedServiceNames(run.services)
+        : null;
+    const protectedPathFailed = run.status === "failed" && run.failureCategory === PROTECTED_PATH_CATEGORY;
+    return {
+      outcome,
+      details: {
+        agentName: run.agentName,
+        ...(outcome === "succeeded" ? this.overrunDetails(run) : {}),
+        ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
+        ...(outcome === "budget_exhausted" ? storedChangesPushed(run.result) : {}),
+        ...(providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
+        ...(unreadyServices ? { serviceSentence: serviceUnreadySentence(unreadyServices) } : {}),
+        ...(protectedPathFailed ? { protectedPathSentence: protectedPathSentence(null) } : {}),
+      },
+    };
   }
 
   /** Whether the run's workspace merged its pull request's target branch (PreparedWorkspace.targetMerge). */
@@ -3089,7 +3441,7 @@ export class ContainerExecutor implements Executor {
     finalized: Awaited<ReturnType<VcsProvider["finalizeChanges"]>>;
     descriptionState: DescriptionState;
   }> {
-    const preparedInput = this.preflight(collectedFor, { launched: true });
+    const preparedInput = this.finishInput(collectedFor);
     const workspace = existingWorkspace ?? (await this.options.vcs.recoverWorkspace(preparedInput));
     if (!workspace) throw new Error("coding_workspace_lost");
     const collected = await this.materialize(handle, workspace);
@@ -3162,6 +3514,7 @@ export class ContainerExecutor implements Executor {
       summary,
       tests: output.tests,
       tag: output.tag,
+      ...commitFor(output),
       ...report,
       ...restoredDependenciesFor(output),
       ...(await this.issueSourceFor(current)),
@@ -3204,7 +3557,7 @@ export class ContainerExecutor implements Executor {
     try {
       let workspace = existingWorkspace;
       if (continuesPullRequest) {
-        workspace ??= await this.options.vcs.recoverWorkspace(this.preflight(current, { launched: true }));
+        workspace ??= await this.options.vcs.recoverWorkspace(this.finishInput(current));
         if (!workspace) throw new Error("coding_workspace_lost");
         if (!(await this.continuationStillDraft(current, workspace))) {
           containerLog.info(
@@ -3316,7 +3669,7 @@ export class ContainerExecutor implements Executor {
       // The default repository did not fail, so it has a result.
       await this.options.store.complete(run.runId, "succeeded", records.mainResult!, records.record, records.extras);
       for (const finalized of pushed) this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
-      this.terminal(latest, "succeeded");
+      await this.terminal(latest, "succeeded");
       return { outcome: "succeeded", current: latest, ...(records.main ? { main: records.main } : {}) };
     }
     // Each failure is logged under its own diagnostic id; Run.error names categories only.
@@ -3342,7 +3695,7 @@ export class ContainerExecutor implements Executor {
       audit,
     });
     for (const finalized of pushed) this.emit({ stage: finalized.outcome, runId: run.runId, jobId: handle.id });
-    this.terminal(latest, "failed", audit);
+    await this.terminal(latest, "failed", audit);
     return { outcome: "failed", current: latest };
   }
 
@@ -4078,17 +4431,6 @@ export class ContainerExecutor implements Executor {
     } catch (err) {
       containerLog.warn({ err, runId: run.runId }, "could not refresh the pull request description");
       return { prDescriptionOutcome: "skipped:error" };
-    }
-  }
-
-  /** Runs the onCodingRunTerminal hook; nothing it does, throws, or rejects reaches the caller. */
-  private async notifyTerminal(runId: string): Promise<void> {
-    const hook = this.options.onCodingRunTerminal;
-    if (!hook) return;
-    try {
-      await hook(runId);
-    } catch (err) {
-      containerLog.warn({ err, runId }, "coding run terminal hook failed");
     }
   }
 
@@ -4931,42 +5273,6 @@ export class ContainerExecutor implements Executor {
     }
   }
 
-  /**
-   * Session resume: never throws, never changes the run's outcome. The recorder redacts; only a status
-   * code is logged. The run capability is already gone from the vault, so it is not passed (the recorder
-   * removes its fixed token shape).
-   */
-  private async recordTranscript(run: ContainerRunSnapshot, handle: JobHandle): Promise<void> {
-    const recorder = this.options.transcripts;
-    if (!recorder) return;
-    const jobs = this.options.jobs;
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      const recording = Promise.resolve()
-        .then(() =>
-          recorder.record({
-            runId: run.runId,
-            agentId: run.agentId,
-            provider: run.provider,
-            ...(run.launchSecretVersions ? { launchSecretVersions: run.launchSecretVersions } : {}),
-            read: (maxBytes) =>
-              jobs.readTranscript ? jobs.readTranscript(handle, maxBytes) : Promise.resolve(undefined),
-          }),
-        )
-        .catch(() => "failed" as const);
-      const timeout = new Promise<"timeout">((resolve) => {
-        timer = setTimeout(() => resolve("timeout"), TRANSCRIPT_RECORD_TIMEOUT_MS);
-        timer.unref();
-      });
-      const result = await Promise.race([recording, timeout]);
-      if (result !== "stored") containerLog.info({ runId: run.runId, transcript: result }, "run transcript not stored");
-    } catch {
-      // never changes the run's outcome
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-
   private preflightForCleanup(run: ContainerRunSnapshot): VcsPrepareInput | null {
     if (!Array.isArray(run.protectedPaths) || !run.protectedPaths.every((path) => typeof path === "string"))
       return null;
@@ -4992,7 +5298,7 @@ export class ContainerExecutor implements Executor {
   private async abandon(run: ContainerRunSnapshot, reason: string): Promise<void> {
     const failure = this.failure(reason);
     await this.options.store.terminate(run.runId, "lost", failure.error, failure.audit);
-    this.terminal(run, "lost", failure.audit);
+    await this.terminal(run, "lost", failure.audit);
     await this.recordRefusal(run.runId, run.proxySessionId);
     if (run.proxySessionId) await this.options.sessions.cancelSession(run.proxySessionId).catch(() => undefined);
     if (run.jobHandle) {
@@ -5028,30 +5334,10 @@ export class ContainerExecutor implements Executor {
     const workspace = input ? await this.options.vcs.recoverWorkspace(input).catch(() => null) : null;
     if (workspace) {
       await this.options.vcs.cleanup(workspace).catch(() => undefined);
-      // Safety-net retry for an already-terminal run recovered later (e.g.
-      // a crash between an earlier store.complete/terminate and this
-      // notification actually firing) -- safe to call again because
-      // notifyContinuationFinished is find-and-update-or-no-op, never
-      // find-or-create.
-      const outcome: ContinuationOutcome =
-        run.status === "succeeded" ? "succeeded" : run.status === "budget_exhausted" ? "budget_exhausted" : "failed";
-      const providerClass = run.status === "failed" ? providerClassOfCategory(run.failureCategory) : null;
-      const unreadyServices =
-        run.status === "failed" && run.failureCategory === SERVICE_UNREADY_CATEGORY
-          ? storedServiceNames(run.services)
-          : null;
-      // No path survives to the stored run (only the category does -- see
-      // protected-path-wording.ts), so this can only ever use the pathless sentence.
-      const protectedPathFailed = run.status === "failed" && run.failureCategory === PROTECTED_PATH_CATEGORY;
-      await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, {
-        agentName: run.agentName,
-        ...(outcome === "succeeded" ? this.overrunDetails(run) : {}),
-        ...(outcome === "budget_exhausted" ? { budgetSentence: await this.budgetSentence(run) } : {}),
-        ...(outcome === "budget_exhausted" ? storedChangesPushed(run.result) : {}),
-        ...(providerClass ? { providerSentence: providerSentence(providerClass) } : {}),
-        ...(unreadyServices ? { serviceSentence: serviceUnreadySentence(unreadyServices) } : {}),
-        ...(protectedPathFailed ? { protectedPathSentence: protectedPathSentence(null) } : {}),
-      });
+      // Safety-net retry for an already-terminal run recovered later -- safe to call again because
+      // notifyContinuationFinished is find-and-update-or-no-op, never find-or-create.
+      const { outcome, details } = await this.storedFinishDetails(run);
+      await this.options.vcs.notifyContinuationFinished?.(workspace, outcome, details);
     }
     await rm(this.artifactPath(run.runId), { recursive: true, force: true }).catch(() => undefined);
     this.emit({ stage: "cleanup", runId: run.runId, jobId: run.jobHandle?.id, cleanupSucceeded: true });
@@ -5152,12 +5438,15 @@ export class ContainerExecutor implements Executor {
     }
   }
 
-  private terminal(
+  private async terminal(
     run: ContainerRunSnapshot,
     outcome: "succeeded" | "failed" | "refused" | "lost" | "budget_exhausted" | "cancelled",
     audit?: CodingFailureAudit,
-  ): void {
+  ): Promise<void> {
     this.capacityRefusedAt.delete(run.runId);
+    // The proxy adds each reply's cost to the run as it settles, so a snapshot loaded before the
+    // run ended can miss its last model calls: report what the run was finally charged.
+    const latest = await this.options.store.load(run.runId).catch(() => null);
     this.emit({
       stage: "terminal",
       runId: run.runId,
@@ -5166,7 +5455,7 @@ export class ContainerExecutor implements Executor {
       failureCategory: audit?.failureCategory,
       diagnosticId: audit?.diagnosticId,
       durationMs: this.duration(run.runId),
-      budgetActualUsd: run.costUsd,
+      budgetActualUsd: latest?.costUsd ?? run.costUsd,
       ...(run.provider === "codex" || run.provider === "claude-code"
         ? { workerProvider: run.provider, proxyProtocol: proxyProtocol(run.provider) }
         : {}),

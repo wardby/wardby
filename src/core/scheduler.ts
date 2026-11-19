@@ -13,9 +13,16 @@ import type { Agent } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import { dueWindow } from "./cron.js";
 import { dispatchRun, type DispatchDb } from "./dispatch.js";
-import { tryAcquireLease } from "./lease.js";
+import { releaseLease, tryAcquireLease } from "./lease.js";
 import { prisma as defaultDb } from "./db.js";
-import { LEASE_RENEW_INTERVAL_MS, LEASE_TTL_MS, TICK_INTERVAL_MS } from "./timing.js";
+import { startInterval } from "./interval.js";
+import {
+  LEASE_RENEW_INTERVAL_MS,
+  LEASE_TICK_TIMEOUT_MS,
+  LEASE_TTL_MS,
+  LOOP_TICK_TIMEOUT_MS,
+  TICK_INTERVAL_MS,
+} from "./timing.js";
 import { logger } from "./logger.js";
 import type { SelfDefectSink } from "./self-defects.js";
 
@@ -106,7 +113,11 @@ export interface SchedulerOptions {
 }
 
 export interface SchedulerHandle {
-  stop(): void;
+  /**
+   * Stops both loops, waits for a pass already in flight to finish or time out, then releases the
+   * leader lease so another copy takes over on its next lease tick instead of after the TTL.
+   */
+  stop(): Promise<void>;
   isLeader(): boolean;
 }
 
@@ -156,20 +167,34 @@ export function startScheduler(options: SchedulerOptions): SchedulerHandle {
     }
   }
 
-  const leaseTimer = setInterval(() => {
-    leaseTick().catch((err) => schedulerLog.error({ err }, "lease error"));
-  }, LEASE_RENEW_INTERVAL_MS);
-  const tickTimer = setInterval(() => {
-    tick().catch((err) => schedulerLog.error({ err }, "tick error"));
-  }, TICK_INTERVAL_MS);
-
-  // Acquire immediately rather than waiting a full renew interval to start.
-  leaseTick().catch((err) => schedulerLog.error({ err }, "lease error"));
+  const leaseLoop = startInterval({
+    name: "scheduler-lease",
+    everyMs: LEASE_RENEW_INTERVAL_MS,
+    timeoutMs: LEASE_TICK_TIMEOUT_MS,
+    tick: leaseTick,
+    // Acquire immediately rather than waiting a full renew interval to start.
+    runImmediately: true,
+  });
+  const tickLoop = startInterval({
+    name: "scheduler-tick",
+    everyMs: TICK_INTERVAL_MS,
+    timeoutMs: LOOP_TICK_TIMEOUT_MS,
+    tick,
+  });
 
   return {
-    stop() {
-      clearInterval(leaseTimer);
-      clearInterval(tickTimer);
+    async stop() {
+      await Promise.all([leaseLoop.stop(), tickLoop.stop()]);
+      // After the loops: a lease tick still in flight would otherwise renew the row just deleted.
+      const wasLeader = leader;
+      leader = false;
+      // Best effort: if the delete fails the lease simply expires after its TTL, as for a crash.
+      await releaseLease(db, scope, instanceId).then(
+        (released) => {
+          if (released && wasLeader) log(`released leadership for scope "${scope}"`);
+        },
+        (err: unknown) => schedulerLog.warn({ err }, "could not release the scheduler lease; it expires on its own"),
+      );
     },
     isLeader() {
       return leader;

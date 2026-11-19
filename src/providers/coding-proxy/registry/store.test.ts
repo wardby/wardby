@@ -59,3 +59,41 @@ describe("MemoryRegistryStore package audit mode", () => {
     });
   });
 });
+
+describe("MemoryRegistryStore shared run state", () => {
+  const now = new Date("2026-11-16T00:00:00Z");
+  const later = new Date(now.getTime() + 60_000);
+
+  it("takes a plan lease that lapses on its own, and refuses past the plan limit", async () => {
+    const store = new MemoryRegistryStore();
+    expect(await store.startPlan("r", { max: 3, leaseUntil: later, now })).toBe("started");
+    expect(await store.startPlan("r", { max: 3, leaseUntil: later, now })).toBe("busy");
+    // The replica that held the lease died: once it lapses, the next plan may start.
+    expect(await store.startPlan("r", { max: 3, leaseUntil: later, now: later })).toBe("started");
+    await store.endPlan("r");
+    expect(await store.startPlan("r", { max: 3, leaseUntil: later, now: later })).toBe("started");
+    await store.endPlan("r");
+    expect(await store.startPlan("r", { max: 3, leaseUntil: later, now: later })).toBe("limit");
+  });
+
+  it("keeps a run's plan fallback per ecosystem, without duplicates", async () => {
+    const store = new MemoryRegistryStore();
+    expect(await store.planFallback("r")).toEqual([]);
+    await store.addPlanFallback("r", "npm");
+    await store.addPlanFallback("r", "npm");
+    expect(await store.planFallback("r")).toEqual(["npm"]);
+    expect(await store.planFallback("other")).toEqual([]);
+  });
+
+  it("reserves files against served rows and live reservations, and sums bytes for a sync", async () => {
+    const store = new MemoryRegistryStore();
+    await store.recordFetch({ runId: "r", ecosystem: "npm", name: "a", outcome: "served", sizeBytes: 10 });
+    const first = await store.reserveDownload("r", { sizeBytes: 5, maxFiles: 3, leaseUntil: later, now });
+    const second = await store.reserveDownload("r", { sizeBytes: null, maxFiles: 3, leaseUntil: later, now });
+    expect(first).not.toBeNull();
+    expect(await store.reserveDownload("r", { sizeBytes: 1, maxFiles: 3, leaseUntil: later, now })).toBeNull();
+    expect(await store.syncDownload("r", second!, { streamedBytes: 7, leaseUntil: later, now })).toBe(22);
+    await store.releaseDownload(first!);
+    expect(await store.syncDownload("r", second!, { streamedBytes: 7, leaseUntil: later, now })).toBe(17);
+  });
+});

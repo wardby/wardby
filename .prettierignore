@@ -7,4 +7,5 @@ coverage
 package-lock.json
 apps/
 src/coding/registry/fixtures/lockfiles
+deploy/helm/*/templates
 src/core/documents/boards/fixtures

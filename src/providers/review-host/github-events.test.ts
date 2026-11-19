@@ -46,8 +46,17 @@ describe("normalizeGitHubEvent", () => {
         prNumber: 7,
         headSha: SHA,
         isFork: false,
+        isDraft: false,
+        isPush: action === "synchronize",
       });
     }
+    expect(
+      normalizeGitHubEvent(
+        "pull_request",
+        { ...pr("opened"), pull_request: { ...pr("opened").pull_request, draft: true } },
+        APP,
+      ),
+    ).toMatchObject({ kind: "pr_updated", isDraft: true });
     expect(normalizeGitHubEvent("pull_request", pr("opened", "stranger/x"), APP)).toMatchObject({ isFork: true });
     for (const action of ["edited", "labeled", "assigned", "converted_to_draft"]) {
       expect(normalizeGitHubEvent("pull_request", pr(action), APP)).toBeNull();

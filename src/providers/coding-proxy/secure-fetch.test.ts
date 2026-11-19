@@ -72,4 +72,42 @@ describe("pinned coding-proxy egress", () => {
     expect(connect).toHaveBeenCalledTimes(1);
     expect(redirect.destroyed).toBe(true);
   });
+
+  it("hands a redirect back unfollowed when asked for it manually", async () => {
+    const redirect = response(302, { location: "https://storage.example.com/x" });
+    const connect = vi.fn(async () => redirect);
+    const fetch = createPinnedProxyFetch({
+      allowedHosts: ["api.example.com"],
+      resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+      connect,
+    });
+
+    const result = await fetch("https://api.example.com/file", { redirect: "manual" });
+
+    expect(result.status).toBe(302);
+    expect(result.headers.get("location")).toBe("https://storage.example.com/x");
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(redirect.destroyed).toBe(true);
+  });
+
+  it("reaches any public host with anyPublicHost, but never a private or metadata address", async () => {
+    const connect = vi.fn(async () => response(200, {}, [Buffer.from("ok")]));
+    const open = createPinnedProxyFetch({
+      allowedHosts: ["api.example.com"],
+      anyPublicHost: true,
+      resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+      connect,
+    });
+    expect(await (await open("https://storage.example.com/x")).text()).toBe("ok");
+
+    const internal = createPinnedProxyFetch({
+      allowedHosts: ["api.example.com"],
+      anyPublicHost: true,
+      resolve: async () => [{ address: "169.254.169.254", family: 4 }],
+      connect: vi.fn(),
+    });
+    await expect(internal("https://storage.example.com/x")).rejects.toThrow("proxy_egress_blocked");
+    await expect(open("http://storage.example.com/x")).rejects.toThrow("proxy_egress_blocked");
+    await expect(open("https://93.184.216.34/x")).rejects.toThrow("proxy_egress_blocked");
+  });
 });

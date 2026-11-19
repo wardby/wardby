@@ -5,6 +5,7 @@ import { DBOS } from "@dbos-inc/dbos-sdk";
 import pg from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { dbosLaunchConfig, DbosExecutor } from "./dbos.js";
+import { ExecutorClosingError } from "./types.js";
 
 // Keeps the executor's "DBOS executor launched" lines out of the test output.
 vi.mock("../../core/logger.js", () => {
@@ -258,5 +259,34 @@ describe("DbosExecutor system database pool", () => {
     } finally {
       if (saved !== undefined) process.env.DATABASE_AUTH = saved;
     }
+  });
+});
+
+describe("DbosExecutor after close()", () => {
+  const closedExecutor = async () => {
+    const executor = new DbosExecutor({} as never, config, {} as never);
+    await executor.close();
+    const launch = vi.spyOn(executor, "launch");
+    return { executor, launch };
+  };
+
+  it("refuses to start a run instead of relaunching DBOS in a closing process", async () => {
+    const { executor, launch } = await closedExecutor();
+    await expect(executor.start("run-1")).rejects.toBeInstanceOf(ExecutorClosingError);
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("refuses to recover a run instead of relaunching DBOS", async () => {
+    const { executor, launch } = await closedExecutor();
+    await expect(executor.recover({ runId: "run-1", backend: "dbos", id: "run-1" })).rejects.toBeInstanceOf(
+      ExecutorClosingError,
+    );
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("refuses to stop a run instead of relaunching DBOS", async () => {
+    const { executor, launch } = await closedExecutor();
+    await expect(executor.stop("run-1")).rejects.toBeInstanceOf(ExecutorClosingError);
+    expect(launch).not.toHaveBeenCalled();
   });
 });

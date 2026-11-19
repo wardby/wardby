@@ -26,6 +26,8 @@ WORKDIR /opt/wardby
 COPY --from=worker-dependencies /worker/node_modules ./node_modules
 COPY --from=build /build/dist/coding-worker ./coding-worker
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
+# The driver imports the conventional-commit subject builder, which imports protocol.js.
+COPY --from=build /build/dist/coding/commit-subject.js ./coding/commit-subject.js
 # The shared secret redactor (debug-trace.js -> coding/redact.js), which imports
 # core/secret-spans.js and coding/protocol.js.
 COPY --from=build /build/dist/coding/redact.js ./coding/redact.js

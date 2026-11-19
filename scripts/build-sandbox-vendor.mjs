@@ -11,7 +11,7 @@
 // resolves this directory relative to its own compiled location).
 
 import { build } from "esbuild";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -39,7 +39,15 @@ async function bundleGlobal(entryContents, globalName, outfile) {
     minify: true,
   });
   const code = result.outputFiles[0].text;
-  await Promise.all(outDirs.map((dir) => writeFile(path.join(dir, outfile), code, "utf8")));
+  // Skip identical content: a file watcher treats any write as a change and
+  // would otherwise re-run this build forever.
+  await Promise.all(
+    outDirs.map(async (dir) => {
+      const file = path.join(dir, outfile);
+      const existing = await readFile(file, "utf8").catch(() => undefined);
+      if (existing !== code) await writeFile(file, code, "utf8");
+    }),
+  );
   console.log(`wrote ${outfile} (${(code.length / 1024).toFixed(1)} KiB) to ${outDirs.length} location(s)`);
 }
 

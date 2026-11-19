@@ -1,0 +1,34 @@
+suite: migration
+templates:
+  - migration.yaml
+set:
+  database.cloudSqlProxy.instanceConnectionName: project:region:instance
+tests:
+  - it: runs as a pre-install and pre-upgrade hook
+    documentIndex: 2
+    asserts:
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+  - it: creates its ServiceAccount before the Job
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-10"
+  - it: renders nothing when disabled
+    set:
+      migration.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: runs the migration image by its own tag, defaulting to appVersion
+    documentIndex: 2
+    set:
+      image.migration.tag: 2610.12.0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/wardby/wardby-migration:2610.12.0

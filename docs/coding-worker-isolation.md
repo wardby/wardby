@@ -63,7 +63,9 @@ The proxy accepts a run-scoped capability, resolves only exact configured HTTPS
 hostnames, rejects IP literals and every private, loopback, link-local,
 documentation, transition, multicast, and metadata address, rejects mixed DNS
 answers, and pins the vetted address into the socket lookup. Redirects are
-denied. Injected fetch implementations are a test seam and must not be used in
+denied for model requests; the package registry's one exception, a signed-URL
+redirect from a configured Artifactory, is described in
+[Installing packages in coding runs](coding-packages.md). Injected fetch implementations are a test seam and must not be used in
 production composition.
 
 The Codex worker retries a failed model request, or a response stream that
@@ -566,7 +568,10 @@ To let agents use git repositories on the control plane's own machine
 (`local:/absolute/path`), also set `LOCAL_REPO_ROOTS` to the trusted folders; see
 [Local repositories](coding-agent-setup.md#local-repositories).
 `VCS_WORK_ROOT`, `CODING_JOB_STATE_ROOT`, and `CODING_ARTIFACT_ROOT` must be
-trusted host-only directories. Resource limits are controlled by
+trusted host-only directories. `VCS_WORK_ROOT` holds each run's git checkout,
+and it is per control-plane copy: it needs no shared volume. A copy that finishes
+a run another copy launched rebuilds the checkout there from the base commit
+recorded at launch (see [Availability](availability.md#failures-and-recovery)). Resource limits are controlled by
 `CODING_CPUS`, `CODING_MEMORY_MB`, `CODING_PIDS`, and `CODING_DISK_MB`.
 `CODING_MAX_DISK_MB` (must be an integer between 64 and 32768 and at least
 the effective `CODING_DISK_MB`; **defaults to the effective `CODING_DISK_MB`
@@ -813,7 +818,7 @@ use, each a **registry digest** (`repo@sha256:<64 hex>` — a bare `sha256:`
 local image ID is rejected; a cluster cannot pull it): `CODING_WORKER_IMAGE`
 for Codex agents, and `CODING_CLAUDE_WORKER_IMAGE` plus
 `CODING_CLAUDE_TOOL_RUNNER_IMAGE` (and, for Claude agents on the `node-python`
-toolchain, `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`) for Claude Code
+toolchain, `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`, `_3_13` or `_3_14`) for Claude Code
 agents. At least one provider's images must be set, and the control plane
 refuses to start if any image that is set is anything but a registry digest.
 Without `CODING_WORKER_IMAGE`, a Codex agent that doesn't name its own

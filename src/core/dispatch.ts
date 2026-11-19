@@ -1,5 +1,5 @@
 import type { Prisma, PrismaClient, Run, RunTrigger, Task } from "#prisma";
-import type { Executor } from "../providers/executor/types.js";
+import { ExecutorClosingError, type Executor } from "../providers/executor/types.js";
 import { codeProviderOf } from "../coding/code-host.js";
 import {
   CODING_PROTOCOL_VERSION,
@@ -29,6 +29,7 @@ import {
   unstartableServiceSentence,
 } from "../coding/services/wording.js";
 import { attributeRun, type AttributionIntent } from "./attribution.js";
+import { chooseHeadRef, isRepeatOf, namedHeadRefBase } from "./coding-branch.js";
 import {
   effectiveBudgetForRun,
   MIN_RESERVATION_USD,
@@ -118,6 +119,7 @@ export type DispatchTx = Pick<
   | "resourceGrant"
   | "workItem"
   | "localPullRequest"
+  | "issuePullRequest"
   | "runAttribution"
   | "commentThread"
   | "$queryRaw"
@@ -133,6 +135,12 @@ export interface DispatchRunOptions {
   trigger?: RunTrigger;
   codingTask?: string;
   codingBaseRef?: string;
+  /**
+   * A name for a fresh run's branch (`wardby/<name>`, cleaned to a safe slug); without it the
+   * linked issue's key names it, else the run id (core/coding-branch.ts). Not valid with
+   * `continuesCodingRunId`, which keeps the original branch. Coding agents only.
+   */
+  codingBranch?: string;
   /**
    * Revision-in-place: the id of a prior CodingRun whose branch/PR this
    * dispatch should push a new
@@ -329,6 +337,8 @@ export async function markRunFailedFromExecutorError(
   err: unknown,
   selfDefects?: SelfDefectSink,
 ): Promise<void> {
+  // The executor was closing, not the run failing: leave the run for the next process to start.
+  if (err instanceof ExecutorClosingError) return;
   const updated = await db.run.updateMany({
     where: { id: runId, status: { in: ["pending", "running"] } },
     data: {
@@ -584,6 +594,42 @@ function codingTarget(
 }
 
 /**
+ * The earlier run a fresh dispatch should add to instead of opening another PR: the newest run
+ * in this repository whose branch is the named one (the caller's `branch`, else the issue key)
+ * or a numbered repeat of it, that opened a pull request, passes the continuation checks
+ * (same repository, same owner), and is not known to be merged or closed. Wardby records a PR's
+ * state only for issue-linked PRs (IssuePullRequest), so a PR with no such record counts as open.
+ * Undefined when the dispatch names no branch, or sets its own base or continuation.
+ */
+async function findContinuableRun(
+  reader: Pick<DispatchTx, "codingRun" | "codingRunRepository" | "issuePullRequest">,
+  options: DispatchRunOptions,
+  profile: { repository: string },
+  ownerId: string | null,
+  issueKey: string | undefined,
+): Promise<string | undefined> {
+  if (options.continuesCodingRunId !== undefined || options.codingBaseRef !== undefined) return undefined;
+  const base = namedHeadRefBase({ requestedName: options.codingBranch, issueKey });
+  if (base === undefined) return undefined;
+  const candidates = await reader.codingRun.findMany({
+    where: { repository: profile.repository, headRef: { startsWith: base }, rootCodingRunId: null },
+    orderBy: [{ run: { startedAt: "desc" } }, { runId: "desc" }],
+    select: { runId: true, headRef: true },
+    take: 20,
+  });
+  for (const candidate of candidates) {
+    if (!isRepeatOf(base, candidate.headRef)) continue;
+    const closed = await reader.issuePullRequest.findFirst({
+      where: { openedByRunId: candidate.runId, state: { in: ["merged", "closed"] } },
+      select: { id: true },
+    });
+    if (closed) continue;
+    if ((await checkContinuation(reader, candidate.runId, profile.repository, ownerId)).ok) return candidate.runId;
+  }
+  return undefined;
+}
+
+/**
  * Resolves a coding run's branch: an override, else a continuation root's
  * (see checkContinuation), else the profile's base.
  */
@@ -597,6 +643,9 @@ async function resolveCodingBranch(
   if (options.continuesCodingRunId === undefined) return { baseRef: options.codingBaseRef ?? profile.baseRef };
   if (options.codingBaseRef !== undefined) {
     throw new Error("continuesCodingRunId cannot be combined with codingBaseRef.");
+  }
+  if (options.codingBranch !== undefined) {
+    throw new Error("continuesCodingRunId cannot be combined with codingBranch.");
   }
   const root = await continuationRoot(reader, options.continuesCodingRunId, profile.repository, ownerId);
   const rootHistory = await reader.codingRun.findUniqueOrThrow({
@@ -1437,9 +1486,26 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           const budgetUsd = codingBudget.budgetUsd;
 
           // Resolved once: before the transaction when the declaration was read from it.
-          const branch = declarationRead?.branch ?? (await resolveCodingBranch(tx, options, target, agent.ownerId));
+          const continuesRunId = declarationRead?.branch
+            ? undefined
+            : await findContinuableRun(tx, options, target, agent.ownerId, attributed?.key);
+          const branch =
+            declarationRead?.branch ??
+            (await resolveCodingBranch(
+              tx,
+              continuesRunId ? { ...options, codingBranch: undefined, continuesCodingRunId: continuesRunId } : options,
+              target,
+              agent.ownerId,
+            ));
           const { baseRef, continuationOf, rootCodingRunId, mergeOrder: inheritedMergeOrder, gitHistory } = branch;
-          const headRef = branch.headRef ?? `wardby/run-${run.id}`;
+          const headRef =
+            branch.headRef ??
+            (await chooseHeadRef(tx, {
+              repository: agent.codingProfile.repository,
+              runId: run.id,
+              requestedName: options.codingBranch,
+              issueKey: attributed?.key,
+            }));
           const mergeOrder = resolveMergeOrder(options, inheritedMergeOrder);
 
           const input = CodingTaskInputSchema.parse({
@@ -1564,6 +1630,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           agent.kind !== "coding" &&
           (options.codingTask !== undefined ||
             options.codingBaseRef !== undefined ||
+            options.codingBranch !== undefined ||
             options.continuesCodingRunId !== undefined ||
             options.codingRepository !== undefined ||
             options.codingRepositories !== undefined)

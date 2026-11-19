@@ -93,8 +93,10 @@ function auditDetail(vuln: OsvVuln): { severity?: string; summary?: string } {
 }
 
 /** What the audit needs from an adapter: which OSV ecosystem to query, how
- *  names compare, and how versions order. */
-export type AuditAdapter = Pick<RegistryAdapter, "osvEcosystem" | "normalizeName" | "compareVersions">;
+ *  names compare, how versions order, and which names are private (OSV
+ *  being unreachable never fails an install for those). */
+export type AuditAdapter = Pick<RegistryAdapter, "osvEcosystem" | "normalizeName" | "compareVersions"> &
+  Partial<Pick<RegistryAdapter, "isPrivateName">>;
 
 export interface AdvisoryIndex {
   /** Ids of the blocking advisories (HIGH, CRITICAL or malware) that affect
@@ -346,7 +348,8 @@ export class OsvAudit {
     try {
       return indexOf(await load, adapter);
     } catch {
-      if (this.options.failOpen) return EMPTY_INDEX;
+      // A private name is still audited, but no answer from OSV never blocks it.
+      if (this.options.failOpen || adapter.isPrivateName?.(name)) return EMPTY_INDEX;
       throw new RegistryError(
         503,
         "wardby_audit_unavailable",
@@ -365,11 +368,32 @@ export class OsvAudit {
     versions: readonly AuditedVersion[],
     signal?: AbortSignal,
   ): Promise<WithheldVersions> {
+    const isPrivate = adapter.isPrivateName;
+    const privateVersions = isPrivate ? versions.filter((entry) => isPrivate(entry.name)) : [];
+    if (privateVersions.length === 0) return this.auditExact(adapter, versions, signal, this.options.failOpen);
+    // Public and private names are audited apart, so OSV being unreachable
+    // spares only the private ones: public names keep the configured policy.
+    const publicVersions = versions.filter((entry) => !isPrivate!(entry.name));
+    const [publicResult, privateResult] = await Promise.all([
+      publicVersions.length > 0
+        ? this.auditExact(adapter, publicVersions, signal, this.options.failOpen)
+        : new Map<string, WithheldAdvisory[]>(),
+      this.auditExact(adapter, privateVersions, signal, true),
+    ]);
+    return new Map([...publicResult, ...privateResult]);
+  }
+
+  private async auditExact(
+    adapter: AuditAdapter,
+    versions: readonly AuditedVersion[],
+    signal: AbortSignal | undefined,
+    failOpen: boolean,
+  ): Promise<WithheldVersions> {
     try {
       return await this.loadVersions(adapter, versions, signal);
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (this.options.failOpen) return new Map();
+      if (failOpen) return new Map();
       throw new RegistryError(
         503,
         "wardby_audit_unavailable",

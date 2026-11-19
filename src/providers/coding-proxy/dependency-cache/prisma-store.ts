@@ -8,6 +8,8 @@ import {
   type SnapshotIdentity,
   type SnapshotRow,
   type SnapshotScope,
+  type StoredUploadClaim,
+  type UploadClaim,
 } from "./store.js";
 
 /** How long one eviction pass may hold the lock (its transaction) before Postgres releases it. */
@@ -141,6 +143,40 @@ export class PrismaDependencyCacheStore implements DependencyCacheStore {
       select: { id: true, repository: true, blobKey: true, sizeBytes: true, createdAt: true, lastUsedAt: true },
     });
     return rows.map((row) => ({ ...row, sizeBytes: Number(row.sizeBytes) }));
+  }
+
+  async claimUpload(claim: UploadClaim): Promise<"claimed" | "in_progress"> {
+    try {
+      await this.db.dependencyUploadClaim.create({
+        data: {
+          ecosystem: claim.ecosystem,
+          repository: claim.repository,
+          projectPath: claim.projectPath,
+          lockHash: claim.lockHash,
+          workerImage: claim.workerImage,
+          blobKey: claim.blobKey,
+          runId: claim.runId,
+          ownerId: claim.ownerId,
+        },
+      });
+      return "claimed";
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return "in_progress";
+      throw error;
+    }
+  }
+
+  async releaseUpload(blobKey: string): Promise<void> {
+    await this.db.dependencyUploadClaim.deleteMany({ where: { blobKey } });
+  }
+
+  async listStaleUploads(cutoff: Date): Promise<StoredUploadClaim[]> {
+    return this.db.dependencyUploadClaim.findMany({ where: { createdAt: { lte: cutoff } } });
+  }
+
+  async hasSnapshotBlob(blobKey: string): Promise<boolean> {
+    const row = await this.db.dependencySnapshot.findUnique({ where: { blobKey }, select: { id: true } });
+    return row !== null;
   }
 
   /**

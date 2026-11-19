@@ -133,6 +133,8 @@ function buildExecutor(llm: LlmProvider, childExecutor: Executor, executorId: st
     { systemDatabaseUrl: process.env.DATABASE_URL, schemaName: process.env.DBOS_SCHEMA ?? "dbos_xver", executorId },
     db,
     /* heartbeatIntervalMs */ 50,
+    // close() waits this long for a running workflow; the tests hold one open on purpose.
+    /* shutdownTimeoutMs */ 500,
   );
 }
 

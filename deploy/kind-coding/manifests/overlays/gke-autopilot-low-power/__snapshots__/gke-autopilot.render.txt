@@ -466,6 +466,10 @@ spec:
           value: wardby-coding-worker-image
         - name: CODING_WORKER_IMAGE_NODE_PYTHON_3_12
           value: wardby-coding-worker-image-node-python-3-12
+        - name: CODING_WORKER_IMAGE_NODE_PYTHON_3_13
+          value: wardby-coding-worker-image-node-python-3-13
+        - name: CODING_WORKER_IMAGE_NODE_PYTHON_3_14
+          value: wardby-coding-worker-image-node-python-3-14
         - name: CODING_CLAUDE_WORKER_IMAGE
           value: wardby-claude-coding-worker-image
         - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE
@@ -488,6 +492,10 @@ spec:
           value: "60000"
         - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12
           value: wardby-claude-tool-runner-image-node-python-3-12
+        - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_13
+          value: wardby-claude-tool-runner-image-node-python-3-13
+        - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_14
+          value: wardby-claude-tool-runner-image-node-python-3-14
         envFrom:
         - secretRef:
             name: wardby-control-plane-env

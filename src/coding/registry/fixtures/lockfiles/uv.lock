@@ -1,0 +1,68 @@
+version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[[package]]
+name = "app"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "acme-core" },
+    { name = "local-lib" },
+    { name = "requests" },
+    { name = "tool" },
+    { name = "typing-extensions" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "acme-core", specifier = ">=1", index = "https://example.jfrog.io/acme/api/pypi/pypi/simple" },
+    { name = "local-lib", path = "../local-lib" },
+    { name = "requests", specifier = ">=2" },
+    { name = "tool", git = "https://github.com/example/tool" },
+    { name = "typing-extensions", specifier = ">=4" },
+]
+
+[[package]]
+name = "acme-core"
+version = "1.4.2"
+source = { registry = "https://example.jfrog.io/acme/api/pypi/pypi/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "typing-extensions", version = "4.12.2", source = { registry = "https://pypi.org/simple" } },
+]
+sdist = { url = "https://example.jfrog.io/acme/api/pypi/pypi/packages/ab/cd/acme_core-1.4.2.tar.gz", hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111", size = 1200 }
+wheels = [
+    { url = "https://example.jfrog.io/acme/api/pypi/pypi/packages/ab/cd/acme_core-1.4.2-py3-none-any.whl", hash = "sha256:2222222222222222222222222222222222222222222222222222222222222222", size = 900 },
+]
+
+[[package]]
+name = "local-lib"
+version = "0.0.1"
+source = { editable = "../local-lib" }
+
+[[package]]
+name = "requests"
+version = "2.32.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/63/70/requests-2.32.3.tar.gz", hash = "sha256:3333333333333333333333333333333333333333333333333333333333333333", size = 131218, upload-time = "2024-05-29T15:37:49.536Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/9b/requests-2.32.3-py3-none-any.whl", hash = "sha256:4444444444444444444444444444444444444444444444444444444444444444", size = 64928, upload-time = "2024-05-29T15:37:47.027Z" },
+]
+
+[[package]]
+name = "tool"
+version = "0.3.0"
+source = { git = "https://github.com/example/tool?rev=0123456789abcdef0123456789abcdef01234567#0123456789abcdef0123456789abcdef01234567" }
+
+[[package]]
+name = "typing-extensions"
+version = "4.12.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/df/db/typing_extensions-4.12.2.tar.gz", hash = "sha256:5555555555555555555555555555555555555555555555555555555555555555", size = 85321 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/26/9f/typing_extensions-4.12.2-py3-none-any.whl", hash = "sha256:6666666666666666666666666666666666666666666666666666666666666666", size = 37438 },
+]

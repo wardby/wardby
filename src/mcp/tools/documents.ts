@@ -39,7 +39,7 @@ import { listDocumentsFor } from "../../core/documents/list.js";
 import { readablePlanSet } from "../../core/plans/set-view.js";
 import { UNTRUSTED_CONTEXT_TAG, UNTRUSTED_TOOL_OUTPUT_TAG, wrapUntrusted } from "../../core/untrusted-content.js";
 import { MAX_THREADS_PER_SEND, sendThreadsToAgent } from "../../core/documents/agent-loop.js";
-import { requireScope } from "../auth/resource-server.js";
+import { isOwnerAll, requireScope } from "../auth/resource-server.js";
 import { isLocalRepository } from "../../coding/protocol.js";
 import { canonicalLocalRepository } from "../auth/repo-authorization.js";
 import { assertAgentAccess } from "../auth/access.js";
@@ -128,10 +128,10 @@ async function mapped<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-const viewerOf = (ctx: { principal: { id: string }; operator?: boolean }): Viewer => ({
+const viewerOf = (ctx: Pick<McpRequestContext, "principal" | "operator" | "scopes" | "roles">): Viewer => ({
   kind: "principal",
   principalId: ctx.principal.id,
-  ...(ctx.operator === true ? { operator: true } : {}),
+  ...(ctx.operator === true || isOwnerAll(ctx) ? { operator: true } : {}),
 });
 
 /**

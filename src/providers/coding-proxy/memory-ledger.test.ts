@@ -182,6 +182,344 @@ describe("MemoryProxyLedger previousReply", () => {
   });
 });
 
+describe("MemoryProxyLedger request leases", () => {
+  const PRICING = { version: "v", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 };
+  const usage = { inputTokens: 10, outputTokens: 2, cachedInputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
+  const START = new Date("2026-11-03T12:00:00.000Z");
+  const LEASE_MS = 30_000;
+  const setup = async () => {
+    let now = START;
+    const ledger = new MemoryProxyLedger({ now: () => now });
+    await ledger.createSession({
+      id: "s1",
+      runId: "r1",
+      capabilityHash: "hash",
+      credentialRef: "openai/test",
+      protocol: "openai-responses",
+      allowedModels: ["m"],
+      deadlineAt: new Date(START.getTime() + 24 * 60 * 60_000),
+      budgetUsd: 1,
+      registryTokenHash: "registry-hash",
+    });
+    const reserve = (id: string, extra: { ownerId?: string; leaseMs?: number } = {}) =>
+      ledger.reserve({
+        id,
+        sessionId: "s1",
+        requestKey: id,
+        requestFingerprint: id,
+        model: "m",
+        reservationUsd: 0.2,
+        pricing: PRICING,
+        now,
+        maxOutputTokens: 100,
+        ...extra,
+      });
+    return { ledger, reserve, advance: (ms: number) => (now = new Date(now.getTime() + ms)) };
+  };
+
+  it("leases a request to its owner from the ledger's clock", async () => {
+    const { ledger, reserve } = await setup();
+    await reserve("a", { ownerId: "owner-1", leaseMs: LEASE_MS });
+    expect(await ledger.getRequest("a")).toMatchObject({
+      ownerId: "owner-1",
+      maxOutputTokens: 100,
+      leaseUntil: new Date(START.getTime() + LEASE_MS),
+    });
+  });
+
+  it("leaves a request without an owner or a lease length unleased, and never lists it", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("no-lease");
+    await reserve("no-owner", { leaseMs: LEASE_MS });
+    expect((await ledger.getRequest("no-lease"))?.leaseUntil).toBeNull();
+    expect((await ledger.getRequest("no-owner"))?.leaseUntil).toBeNull();
+    advance(24 * 60 * 60_000);
+    expect(await ledger.expiredLeases(10)).toEqual([]);
+    expect(await ledger.settleExpired("no-lease")).toBe(false);
+  });
+
+  it("renews only the owner's own reserved requests", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("mine", { ownerId: "owner-1", leaseMs: LEASE_MS });
+    await reserve("theirs", { ownerId: "owner-2", leaseMs: LEASE_MS });
+    await reserve("done", { ownerId: "owner-1", leaseMs: LEASE_MS });
+    await ledger.complete("done", usage, 0.01, 200);
+    advance(10_000);
+    expect(await ledger.renewLeases("owner-1", ["mine", "theirs", "done", "unknown"], LEASE_MS)).toEqual({
+      renewed: ["mine"],
+      cancelled: [],
+    });
+    const renewed = new Date(START.getTime() + 10_000 + LEASE_MS);
+    expect((await ledger.getRequest("mine"))?.leaseUntil).toEqual(renewed);
+    expect((await ledger.getRequest("theirs"))?.leaseUntil).toEqual(new Date(START.getTime() + LEASE_MS));
+    expect((await ledger.getRequest("done"))?.leaseUntil).toBeNull();
+  });
+
+  it("lists the renewed requests whose session was cancelled", async () => {
+    const { ledger, reserve } = await setup();
+    await reserve("mine", { ownerId: "owner-1", leaseMs: LEASE_MS });
+    await ledger.cancelSession("s1");
+    expect(await ledger.renewLeases("owner-1", ["mine"], LEASE_MS)).toEqual({ renewed: ["mine"], cancelled: ["mine"] });
+  });
+
+  it("lists only reserved requests whose lease has passed, oldest lease first", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("early", { ownerId: "o", leaseMs: LEASE_MS });
+    advance(5_000);
+    await reserve("late", { ownerId: "o", leaseMs: LEASE_MS });
+    advance(LEASE_MS - 6_000);
+    expect(await ledger.expiredLeases(10)).toEqual([]);
+    advance(2_000);
+    const expired = await ledger.expiredLeases(10);
+    expect(expired.map((item) => item.request.id)).toEqual(["early"]);
+    expect(expired[0]).toMatchObject({ runId: "r1", createdAt: START });
+    advance(5_000);
+    expect((await ledger.expiredLeases(10)).map((item) => item.request.id)).toEqual(["early", "late"]);
+    expect(await ledger.expiredLeases(1)).toHaveLength(1);
+  });
+
+  it("settles an expired request at an estimate, so it counts at it and not at its hold", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("a", { ownerId: "o", leaseMs: LEASE_MS });
+    advance(LEASE_MS + 1);
+    expect(await ledger.settleExpired("a", { usage, costUsd: 0.01 })).toBe(true);
+    expect(await ledger.getRequest("a")).toMatchObject({
+      status: "uncertain",
+      costEstimated: true,
+      actualCostUsd: 0.01,
+      leaseUntil: null,
+      ownerId: "o",
+    });
+    // 0.01 spent + 0.2 would not fit beside a 0.85 hold if the old hold still counted: 0.2 + 0.85 >= 1.
+    expect((await reserve("b")).outcome).toBe("reserved");
+  });
+
+  it("settles without an estimate by keeping the hold, and settles a request once", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("a", { ownerId: "o", leaseMs: LEASE_MS });
+    advance(LEASE_MS + 1);
+    expect(await ledger.settleExpired("a")).toBe(true);
+    expect((await ledger.getRequest("a"))?.costEstimated).toBeFalsy();
+    expect(await ledger.settleExpired("a", { usage, costUsd: 0.01 })).toBe(false);
+    expect((await ledger.getRequest("a"))?.actualCostUsd).toBeUndefined();
+  });
+
+  it("leaves a request alone when its owner renewed it before the sweep settled it", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("a", { ownerId: "o", leaseMs: LEASE_MS });
+    advance(LEASE_MS + 1);
+    await ledger.renewLeases("o", ["a"], LEASE_MS);
+    expect(await ledger.settleExpired("a", { usage, costUsd: 0.01 })).toBe(false);
+    expect((await ledger.getRequest("a"))?.status).toBe("reserved");
+  });
+
+  it("clears the lease, and keeps the owner, when a request settles any other way", async () => {
+    const { ledger, reserve } = await setup();
+    for (const id of ["completed", "released", "uncertain"]) await reserve(id, { ownerId: "o", leaseMs: LEASE_MS });
+    await ledger.complete("completed", usage, 0.01, 200);
+    await ledger.release("released", 500);
+    await ledger.markUncertain("uncertain", 502);
+    for (const id of ["completed", "released", "uncertain"]) {
+      expect(await ledger.getRequest(id)).toMatchObject({ leaseUntil: null, ownerId: "o" });
+    }
+  });
+
+  it("lets a swept request finish at its real cost", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("a", { ownerId: "o", leaseMs: LEASE_MS });
+    advance(LEASE_MS + 1);
+    await ledger.settleExpired("a", { usage, costUsd: 0.01 });
+    expect(await ledger.complete("a", { ...usage, outputTokens: 50 }, 0.07, 200)).toMatchObject({
+      status: "completed",
+      costEstimated: false,
+      actualCostUsd: 0.07,
+    });
+  });
+});
+
+describe("MemoryProxyLedger request attempts", () => {
+  const PRICING = { version: "v", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 };
+  const usage = { inputTokens: 10, outputTokens: 2, cachedInputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
+  const estimate = { usage, costUsd: 0.05 };
+  const START = new Date("2026-11-04T12:00:00.000Z");
+  const LEASE_MS = 30_000;
+  const setup = async (budgetUsd = 1) => {
+    let now = START;
+    const ledger = new MemoryProxyLedger({ now: () => now });
+    await ledger.createSession({
+      id: "s1",
+      runId: "r1",
+      capabilityHash: "hash",
+      credentialRef: "openai/test",
+      protocol: "openai-responses",
+      allowedModels: ["m"],
+      deadlineAt: new Date(START.getTime() + 24 * 60 * 60_000),
+      budgetUsd,
+      registryTokenHash: "registry-hash",
+    });
+    // One request key ("k") and body ("body"), tried again under a new id each time.
+    const reserve = (
+      id: string,
+      extra: Partial<Parameters<MemoryProxyLedger["reserve"]>[0]> = {},
+      lease: { ownerId?: string; leaseMs?: number } = { ownerId: "o", leaseMs: LEASE_MS },
+    ) =>
+      ledger.reserve({
+        id,
+        sessionId: "s1",
+        requestKey: "k",
+        requestFingerprint: "body",
+        model: "m",
+        reservationUsd: 0.2,
+        pricing: PRICING,
+        now,
+        maxOutputTokens: 100,
+        maxAttempts: 3,
+        ...lease,
+        ...extra,
+      });
+    return { ledger, reserve, advance: (ms: number) => (now = new Date(now.getTime() + ms)) };
+  };
+
+  it("answers a retry inside the lease as in progress, with the lease's remaining time", async () => {
+    const { reserve, advance } = await setup();
+    await reserve("a");
+    advance(10_000);
+    expect(await reserve("b")).toMatchObject({
+      outcome: "in_progress",
+      request: { id: "a", status: "reserved" },
+      retryAfterMs: 20_000,
+    });
+  });
+
+  it("reports a request whose lease ran out as orphaned, and changes nothing until told to take it over", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("a");
+    advance(LEASE_MS + 1);
+    expect(await reserve("b")).toMatchObject({
+      outcome: "orphaned",
+      orphan: { runId: "r1", createdAt: START, request: { id: "a", attempt: 1 } },
+    });
+    expect(await ledger.getRequest("a")).toMatchObject({ status: "reserved" });
+    expect(await ledger.getRequest("b")).toBeNull();
+  });
+
+  it("takes an orphan over: settles it at the estimate and reserves the next attempt", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("a");
+    advance(LEASE_MS + 1);
+    const result = await reserve("b", { takeover: { requestId: "a", estimate } });
+    expect(result).toMatchObject({
+      outcome: "reserved",
+      request: { id: "b", attempt: 2, requestKey: "k", status: "reserved" },
+      tookOver: { requestId: "a" },
+    });
+    expect(await ledger.getRequest("a")).toMatchObject({
+      status: "uncertain",
+      costEstimated: true,
+      actualCostUsd: 0.05,
+      leaseUntil: null,
+      attempt: 1,
+    });
+    expect((await ledger.getRequest("a"))?.orphanedAt).toBeInstanceOf(Date);
+  });
+
+  it("counts the first attempt's estimate and the new attempt's hold against the budget", async () => {
+    // 0.05 estimate + 0.2 new hold + a third 0.8 would not fit in 1; the old 0.2 hold alone would not have mattered.
+    const { reserve, advance } = await setup(0.5);
+    await reserve("a");
+    advance(LEASE_MS + 1);
+    await reserve("b", { takeover: { requestId: "a", estimate } });
+    expect(await reserve("c", { requestKey: "other", reservationUsd: 0.26 })).toMatchObject({
+      outcome: "budget_exhausted",
+      details: { spentUsd: 0.05, heldReservedUsd: 0.2, heldUncertainUsd: 0 },
+    });
+    expect((await reserve("d", { requestKey: "other", reservationUsd: 0.2 })).outcome).toBe("reserved");
+  });
+
+  it("still settles the orphan when the budget then refuses the new attempt", async () => {
+    const { ledger, reserve, advance } = await setup(0.2);
+    await reserve("a", { reservationUsd: 0.1 });
+    advance(LEASE_MS + 1);
+    expect(await reserve("b", { reservationUsd: 0.2, takeover: { requestId: "a", estimate } })).toMatchObject({
+      outcome: "budget_exhausted",
+    });
+    expect(await ledger.getRequest("a")).toMatchObject({ status: "uncertain", costEstimated: true });
+  });
+
+  it("takes over a request the sweep already settled, without settling it again", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("a");
+    advance(LEASE_MS + 1);
+    await ledger.settleExpired("a", estimate);
+    expect(await reserve("b")).toMatchObject({
+      outcome: "reserved",
+      request: { id: "b", attempt: 2 },
+      tookOver: { requestId: "a" },
+    });
+    expect(await ledger.getRequest("a")).toMatchObject({ status: "uncertain", actualCostUsd: 0.05 });
+  });
+
+  it("only one of two takeovers of the same orphan wins; the other sees the new attempt in progress", async () => {
+    const { reserve, advance } = await setup();
+    await reserve("a");
+    advance(LEASE_MS + 1);
+    const [first, second] = await Promise.all([
+      reserve("b", { takeover: { requestId: "a", estimate } }),
+      reserve("c", { takeover: { requestId: "a", estimate } }),
+    ]);
+    expect(first.outcome).toBe("reserved");
+    expect(second).toMatchObject({ outcome: "in_progress", request: { id: "b", attempt: 2 } });
+  });
+
+  it("reads the newest attempt of a key and refuses once the attempts are used", async () => {
+    const { ledger, reserve, advance } = await setup();
+    await reserve("a");
+    advance(LEASE_MS + 1);
+    await reserve("b", { takeover: { requestId: "a", estimate }, maxAttempts: 2 });
+    advance(LEASE_MS + 1);
+    expect(await reserve("c", { maxAttempts: 2 })).toMatchObject({
+      outcome: "attempts_exhausted",
+      request: { id: "b", attempt: 2 },
+    });
+    expect(await ledger.getRequest("c")).toBeNull();
+    // A cap of 3 would still have let it through to the next takeover.
+    expect((await reserve("c", { maxAttempts: 3 })).outcome).toBe("orphaned");
+  });
+
+  it("keeps answering duplicate for completed, live-uncertain, released, unleased and different-body requests", async () => {
+    const { ledger, reserve, advance } = await setup();
+    const duplicateOf = async (id: string, extra: Parameters<typeof reserve>[1] = {}) => {
+      const result = await reserve(`retry-${id}`, { requestKey: id, ...extra });
+      return result.outcome === "duplicate" ? result.request.id : result.outcome;
+    };
+    await reserve("completed", { requestKey: "completed" });
+    await ledger.complete("completed", usage, 0.01, 200);
+    await reserve("uncertain", { requestKey: "uncertain" });
+    await ledger.markUncertain("uncertain", 502, estimate);
+    await reserve("released", { requestKey: "released" });
+    await ledger.release("released", 500);
+    await reserve("unleased", { requestKey: "unleased" }, {});
+    await reserve("body", { requestKey: "body" });
+    advance(24 * 60 * 60_000 - 1);
+
+    expect(await duplicateOf("completed")).toBe("completed");
+    expect(await duplicateOf("uncertain")).toBe("uncertain");
+    expect(await duplicateOf("released")).toBe("released");
+    expect(await duplicateOf("unleased")).toBe("unleased");
+    expect(await duplicateOf("body", { requestFingerprint: "another body" })).toBe("body");
+  });
+
+  it("never takes a row over when the caller sets no attempt cap", async () => {
+    const { reserve, advance } = await setup();
+    await reserve("a");
+    advance(LEASE_MS + 1);
+    expect(await reserve("b", { maxAttempts: undefined })).toMatchObject({
+      outcome: "duplicate",
+      request: { id: "a" },
+    });
+  });
+});
+
 describe("MemoryProxyLedger MCP sessions", () => {
   const pin = {
     exposedName: "docs__search",

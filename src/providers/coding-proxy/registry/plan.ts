@@ -110,7 +110,8 @@ export interface PlanInput {
   accepted?: ReadonlySet<string>;
   /** The run's package audit mode (CodingRun.packageAuditMode); absent or null = normal enforcement. */
   auditMode?: PackageAuditMode | null;
-  hostAllowed(url: string): boolean;
+  /** Whether `url` is a host the package `name` may be downloaded from. */
+  hostAllowed(url: string, name: string): boolean;
   signal: AbortSignal;
   factConcurrency?: number;
   timeConcurrency?: number;
@@ -526,7 +527,7 @@ function checkedFact(input: PlanInput, fact: StoredVersionFact): FactOutcome {
         intrinsic: true,
       },
     };
-  if (!input.hostAllowed(fact.downloadUrl))
+  if (!input.hostAllowed(fact.downloadUrl, fact.name))
     return {
       refusal: {
         code: "wardby_upstream_host_not_allowed",

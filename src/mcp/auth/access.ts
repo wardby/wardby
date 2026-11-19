@@ -9,10 +9,10 @@
  * - The helpers take a `db` argument so a Serializable transaction reads the
  *   grant rows through `tx`; a concurrent revoke then conflicts instead of
  *   racing.
- * - `ctx.operator` (stdio's local operator, never an HTTP principal) is
- *   owner of every agent for access checks and sees every agent in
- *   listings, but does NOT bypass requireBindingOwner: one owner's secrets,
- *   datastores and repositories never reach another owner's agent.
+ * - `ctx.operator` (stdio's local operator, never an HTTP principal) and an
+ *   owner-all caller (owner:all scope + wardby_owner role, see isOwnerAll)
+ *   are owner of every agent for access checks and see every agent in
+ *   listings; only an owner-all caller also passes requireBindingOwner.
  */
 import type { Prisma, PrismaClient } from "#prisma";
 import {
@@ -26,6 +26,7 @@ import {
 } from "../../core/grants.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
+import { isOwnerAll } from "./resource-server.js";
 
 export type AgentLevel = Level<"agent">;
 export type AgentAccess = Access<"agent">;
@@ -49,7 +50,7 @@ export function insufficientAgentAccess(id: string, required: AgentLevel | "owne
 
 /** The caller's access to an agent row already read. */
 export function agentAccess(ctx: McpRequestContext, agent: AgentRef, db: GrantDb = ctx.db): Promise<AgentAccess> {
-  return effectiveAccess(db, "agent", agent, ctx.principal.id, { operator: ctx.operator === true });
+  return effectiveAccess(db, "agent", agent, ctx.principal.id, { operator: ctx.operator === true || isOwnerAll(ctx) });
 }
 
 /** For a row already read (inside a transaction, or with includes): 404 below read, 403 below `required`. */
@@ -81,9 +82,12 @@ export async function requireAgentAccess(
 /**
  * Bindings (secrets, datastores, repositories, capability grants): strict
  * ownership, whatever the grants. The stdio operator does NOT bypass this:
- * it can adopt the agent first (make_owner / grants adopt-public).
+ * it can adopt the agent first (make_owner / grants adopt-public). An
+ * owner-all caller (owner:all + wardby_owner) does bypass it: it may bind its
+ * own secrets and datastores to any agent.
  */
 export function requireBindingOwner(ctx: McpRequestContext, agent: AgentRef): void {
+  if (isOwnerAll(ctx)) return;
   if (agent.ownerId === null) {
     throw new McpError(
       403,
@@ -119,7 +123,7 @@ export async function readableAgentsWhere(
   ctx: McpRequestContext,
   db: GrantDb = ctx.db,
 ): Promise<Prisma.AgentWhereInput> {
-  if (ctx.operator) return {};
+  if (ctx.operator || isOwnerAll(ctx)) return {};
   const ids = await grantedIds(db, "agent", ctx.principal.id, "read");
   return { OR: [{ ownerId: ctx.principal.id }, { id: { in: ids } }] };
 }
@@ -129,7 +133,7 @@ export async function agentAccessResolver(
   ctx: McpRequestContext,
   db: GrantDb = ctx.db,
 ): Promise<(agent: AgentRef) => AgentAccess> {
-  if (ctx.operator) return () => "owner";
+  if (ctx.operator || isOwnerAll(ctx)) return () => "owner";
   const granted = await grantedAccessMap(db, "agent", ctx.principal.id);
   return (agent) =>
     agent.ownerId !== null && agent.ownerId === ctx.principal.id ? "owner" : (granted.get(agent.id) ?? "none");

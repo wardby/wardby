@@ -1,3 +1,4 @@
+import { errorName } from "../../core/run-follow-ups.js";
 import { tmpdir } from "node:os";
 import type { RunStepSink } from "../../core/run-steps/types.js";
 import { resolve } from "node:path";
@@ -90,37 +91,40 @@ const compositionLog = logger.child({ module: "executor-composition" });
  * The coding-run terminal hook: a review-fix round's coding run that made no change re-reviews
  * the PR once (core/review-fix.ts), and the reviews of its pull request that waited for it (a
  * draft's head it may have pushed before recording its result, core/host-events.ts) are
- * released. Started in the background so the executor's terminal path (and the slot release
- * after it) never waits on the host; idempotent (released rows are claimed), and never throws.
- * Started outside the caller's async context: a delegated coding run finishes inside its lead's
- * delegation step, and a review started from there would be refused by DBOS as a workflow
+ * released. Run from the run-follow-up outbox (the executor's coding_run_terminal_hook chore, by
+ * this process right after the terminal write or by the scheduler leader if it died), so it
+ * resolves when both are done and a throw is retried; both are idempotent (released rows are
+ * claimed). Started outside the caller's async context: a delegated coding run finishes inside its
+ * lead's delegation step, and a review started from there would be refused by DBOS as a workflow
  * started from inside a step. `deps` is read only when a run finishes, after composition returned.
  */
-export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: string) => void {
+export function reReviewOnCodingRunTerminal(deps: () => ReReviewDeps): (runId: string) => Promise<void> {
   return (runId) =>
-    outsideRunContext(() => {
-      void Promise.resolve()
-        .then(() => reReviewAfterNoChangeFix(runId, deps()))
-        .catch((err: unknown) => compositionLog.warn({ err, runId }, "no-change re-review hook failed"));
-      // Never throws (logs its own failures).
-      void Promise.resolve()
-        .then(() => startDeferredForRequest(deps(), runId))
-        .catch((err: unknown) =>
-          compositionLog.warn({ err, runId }, "could not release the reviews waiting for this run"),
-        );
-      // A top-level coding run of a change with pull requests in several repositories (#537), its
-      // root or a follow-up that continued it, is its own request set: no lead ends after it to list
-      // them in each other's Related sections or to post their merge order checks. Both never throw.
-      void Promise.resolve()
-        .then(async () => {
-          const { db, hosts, issueTrackers } = deps();
-          if (!(await ownsPullRequestSet(db, runId))) return;
-          await updateRelatedPullRequests(db, { id: runId }, hosts, issueTrackers);
-          await syncMergeOrderChecks({ db, hosts }, runId);
-        })
-        .catch((err: unknown) =>
-          compositionLog.warn({ err, runId }, "could not update the related pull requests of this run"),
-        );
+    outsideRunContext(async () => {
+      // Independent: one failing does not stop the other, and the outbox retries the pair.
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => reReviewAfterNoChangeFix(runId, deps())),
+        Promise.resolve().then(() => startDeferredForRequest(deps(), runId)),
+        // A top-level coding run of a change with pull requests in several repositories (#537), its
+        // root or a follow-up that continued it, is its own request set: no lead ends after it to list
+        // them in each other's Related sections or to post their merge order checks.
+        // Best effort, never thrown: a failure here is not retried, as it was not before the outbox.
+        Promise.resolve()
+          .then(async () => {
+            const { db, hosts, issueTrackers } = deps();
+            if (!(await ownsPullRequestSet(db, runId))) return;
+            await updateRelatedPullRequests(db, { id: runId }, hosts, issueTrackers);
+            await syncMergeOrderChecks({ db, hosts }, runId);
+          })
+          .catch((err: unknown) =>
+            compositionLog.warn({ err, runId }, "could not update the related pull requests of this run"),
+          ),
+      ]);
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failed) {
+        compositionLog.warn({ runId, error: errorName(failed.reason) }, "coding run terminal hook failed");
+        throw failed.reason;
+      }
     });
 }
 
@@ -221,11 +225,12 @@ function assertDigestImages(
       );
     }
   }
-  const claudePython = config.claudeToolRunnerImages["node-python"]?.["3.12"];
-  if (claudePython !== undefined && !isRegistryDigest(claudePython)) {
-    throw new Error(
-      `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=${launcher}.`,
-    );
+  for (const [version, image] of Object.entries(config.claudeToolRunnerImages["node-python"] ?? {})) {
+    if (!isRegistryDigest(image)) {
+      throw new Error(
+        `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_${version.replace(".", "_")} must be a registry digest (repo@sha256:...) when JOB_LAUNCHER=${launcher}.`,
+      );
+    }
   }
 }
 

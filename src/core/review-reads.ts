@@ -4,8 +4,10 @@
  * CHANGES_REQUESTED that would judge a source, test or config file the run never read. A file
  * counts once its whole patch arrived, or once a contiguous chain of parts from offset 0 reached
  * its last part; one repo_read_file read of the path at the head (any window) also counts.
- * In memory for a control-plane attempt. A sandbox run's gateway rebuilds the tools for every
- * request, so it saves the ledger on the gateway session (toJSON) and restores it (fromJSON).
+ * In memory for a control-plane attempt, which saves it in each read's recorded tool step so a
+ * resume on another pod restores it (see EngineRunContext.toolState). A sandbox run's gateway
+ * rebuilds the tools for every request, so it saves the ledger on the gateway session (toJSON)
+ * and restores it (fromJSON).
  * A head is gated only when the ledger saw its first page (a repo_pr_read without patchCursor),
  * so a resume whose earlier pages were replayed without reaching the handler is never refused
  * for them. A head's code files only ever add up across its reads, so a narrower list (a
@@ -47,7 +49,10 @@ interface HeadReads {
   basesKnown: boolean;
 }
 
-/** A ledger as JSON, for a sandbox run's gateway session. */
+/** The review tools that record reads (repo_publish_review checks them). */
+export const REVIEW_READ_TOOLS: ReadonlySet<string> = new Set(["repo_pr_read", "repo_read_file"]);
+
+/** A ledger as JSON, for a sandbox run's gateway session or a control-plane run's recorded tool step. */
 export interface ReviewReadsState {
   v: 1;
   heads: Record<

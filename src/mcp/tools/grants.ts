@@ -32,7 +32,7 @@ import {
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { documentAccess } from "../../core/documents/access.js";
 import { agentNotFound, assertAgentAccess, agentAccess } from "../auth/access.js";
-import { permissionsOf } from "../auth/resource-server.js";
+import { isOwnerAll, permissionsOf } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -94,7 +94,7 @@ async function requireOwnedResource(
   if (type === "mcp_server") {
     const server = await db.mcpServer.findUnique({ where: { id } });
     // Missing and someone else's look the same. The stdio operator owns everything.
-    if (!server || (!ctx.operator && server.ownerId !== ctx.principal.id)) {
+    if (!server || (!ctx.operator && !isOwnerAll(ctx) && server.ownerId !== ctx.principal.id)) {
       throw new McpError(404, `MCP server "${id}" not found.`);
     }
     return server;
@@ -103,7 +103,11 @@ async function requireOwnedResource(
     const doc = await db.document.findUnique({ where: { id }, select: { id: true, ownerId: true } });
     // Missing and invisible look the same; a reader who isn't the owner gets 403.
     const access = doc
-      ? await documentAccess(db, doc.id, { kind: "principal", principalId: ctx.principal.id, operator: ctx.operator })
+      ? await documentAccess(db, doc.id, {
+          kind: "principal",
+          principalId: ctx.principal.id,
+          operator: ctx.operator === true || isOwnerAll(ctx),
+        })
       : "none";
     if (!doc || !atLeast("document", access, "read")) {
       throw new McpError(404, `Document "${id}" not found.`);
@@ -328,7 +332,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       if (type === "mcp_server") {
         const server = await ctx.db.mcpServer.findUnique({ where: { id: args.resourceId } });
         // Owner, stdio operator or admin; anyone else sees a missing server.
-        if (!server || (!ctx.operator && !isAdmin(ctx) && server.ownerId !== ctx.principal.id)) {
+        if (!server || (!ctx.operator && !isOwnerAll(ctx) && !isAdmin(ctx) && server.ownerId !== ctx.principal.id)) {
           throw new McpError(404, `MCP server "${args.resourceId}" not found.`);
         }
         resource = server;
@@ -338,7 +342,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
           select: { id: true, ownerId: true },
         });
         // Owner, stdio operator or admin; anyone else sees a missing document.
-        if (!doc || (!ctx.operator && !isAdmin(ctx) && doc.ownerId !== ctx.principal.id)) {
+        if (!doc || (!ctx.operator && !isOwnerAll(ctx) && !isAdmin(ctx) && doc.ownerId !== ctx.principal.id)) {
           throw new McpError(404, `Document "${args.resourceId}" not found.`);
         }
         resource = doc;

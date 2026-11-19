@@ -1,0 +1,30 @@
+# The minimum a default install needs; used by CI to lint and render the chart.
+hostname: wardby.example.com
+database:
+  cloudSqlProxy:
+    instanceConnectionName: example-project:us-central1:wardby
+image:
+  runtime:
+    tag: "0.10.2"
+  migration:
+    tag: "0.10.2"
+  codingWorker:
+    digest: "sha256:ababababababababababababababababababababababababababababababab01"
+  codingWorkerNodePython:
+    digest: "sha256:ababababababababababababababababababababababababababababababab02"
+  codingWorkerNodePython313:
+    digest: "sha256:1313131313131313131313131313131313131313131313131313131313131301"
+  codingWorkerNodePython314:
+    digest: "sha256:1414141414141414141414141414141414141414141414141414141414141401"
+  claudeCodingWorker:
+    digest: "sha256:ababababababababababababababababababababababababababababababab03"
+  claudeToolRunner:
+    digest: "sha256:ababababababababababababababababababababababababababababababab04"
+  claudeToolRunnerNodePython:
+    digest: "sha256:ababababababababababababababababababababababababababababababab05"
+  claudeToolRunnerNodePython313:
+    digest: "sha256:1313131313131313131313131313131313131313131313131313131313131302"
+  claudeToolRunnerNodePython314:
+    digest: "sha256:1414141414141414141414141414141414141414141414141414141414141402"
+  nativeWorker:
+    digest: "sha256:ababababababababababababababababababababababababababababababab06"

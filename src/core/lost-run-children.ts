@@ -1,3 +1,4 @@
+import { errorName } from "./run-follow-ups.js";
 import type { PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import { DRIVABLE } from "./run-status.js";
@@ -22,7 +23,7 @@ export async function stopChildrenOfLostRun(
       select: { id: true },
     });
   } catch (err) {
-    log.error({ err, runId }, "could not list the children of a lost run");
+    log.error({ error: errorName(err), runId }, "could not list the children of a lost run");
     return 0;
   }
   let stopped = 0;
@@ -31,7 +32,7 @@ export async function stopChildrenOfLostRun(
       await executor.stop(child.id, PARENT_LOST_REASON);
       stopped++;
     } catch (err) {
-      log.error({ err, runId, childRunId: child.id }, "could not stop a child of a lost run");
+      log.error({ error: errorName(err), runId, childRunId: child.id }, "could not stop a child of a lost run");
     }
   }
   return stopped;

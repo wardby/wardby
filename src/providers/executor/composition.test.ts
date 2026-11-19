@@ -443,6 +443,23 @@ describe("buildConfiguredExecutor", () => {
     ).toThrow("CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12 must be a registry digest");
   });
 
+  it("rejects a Claude node-python 3.14 tool-runner image that isn't a registry digest on Kubernetes", () => {
+    const REGISTRY_IMAGE = `registry.example/wardby-coding-worker@sha256:${"a".repeat(64)}`;
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: {
+          ...baseEnv,
+          JOB_LAUNCHER: "kubernetes",
+          CODING_WORKER_IMAGE: REGISTRY_IMAGE,
+          CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_14: LOCAL_IMAGE,
+        },
+        kubernetesApi: new FakeKubernetesApi(),
+      }),
+    ).toThrow("CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_14 must be a registry digest");
+  });
+
   it("refuses to compose a kubernetes launcher on gke-autopilot without gvisor", () => {
     expect(() =>
       buildConfiguredExecutor({
@@ -545,25 +562,27 @@ describe("buildConfiguredExecutor", () => {
 });
 
 describe("reReviewOnCodingRunTerminal", () => {
-  it("starts the no-change re-review in the background and swallows its failure", async () => {
-    const review = await import("../../core/review-fix.js");
-    const spy = vi.spyOn(review, "reReviewAfterNoChangeFix");
-    spy.mockRejectedValueOnce(new Error("boom"));
-    const deps = { db, executor: native, hosts: {}, repoAccess: {} } as never;
-    const hook = reReviewOnCodingRunTerminal(() => deps);
-    expect(hook("run-1")).toBeUndefined();
-    await vi.waitFor(() => expect(spy).toHaveBeenCalledWith("run-1", deps));
-    spy.mockRestore();
-  });
-
-  it("releases the reviews that waited for the finished run, swallowing a failure", async () => {
+  it("resolves once both are done, so the outbox chore ends only then", async () => {
     const review = await import("../../core/review-fix.js");
     const events = await import("../../core/host-events.js");
     const reReview = vi.spyOn(review, "reReviewAfterNoChangeFix").mockResolvedValueOnce(undefined);
-    const release = vi.spyOn(events, "startDeferredForRequest").mockRejectedValueOnce(new Error("boom"));
+    const release = vi.spyOn(events, "startDeferredForRequest").mockResolvedValueOnce(undefined);
     const deps = { db, executor: native, hosts: {}, repoAccess: {} } as never;
-    expect(reReviewOnCodingRunTerminal(() => deps)("run-2")).toBeUndefined();
-    await vi.waitFor(() => expect(release).toHaveBeenCalledWith(deps, "run-2"));
+    await reReviewOnCodingRunTerminal(() => deps)("run-1");
+    expect(reReview).toHaveBeenCalledWith("run-1", deps);
+    expect(release).toHaveBeenCalledWith(deps, "run-1");
+    reReview.mockRestore();
+    release.mockRestore();
+  });
+
+  it("rejects when either fails, after trying both, so the chore is retried", async () => {
+    const review = await import("../../core/review-fix.js");
+    const events = await import("../../core/host-events.js");
+    const reReview = vi.spyOn(review, "reReviewAfterNoChangeFix").mockRejectedValueOnce(new Error("boom"));
+    const release = vi.spyOn(events, "startDeferredForRequest").mockResolvedValueOnce(undefined);
+    const deps = { db, executor: native, hosts: {}, repoAccess: {} } as never;
+    await expect(reReviewOnCodingRunTerminal(() => deps)("run-2")).rejects.toThrow("boom");
+    expect(release).toHaveBeenCalledWith(deps, "run-2");
     reReview.mockRestore();
     release.mockRestore();
   });
@@ -586,7 +605,7 @@ describe("reReviewOnCodingRunTerminal", () => {
       codingRunRepository: { findFirst },
     };
     const deps = { db: changeDb, executor: native, hosts: {}, repoAccess: {} } as never;
-    reReviewOnCodingRunTerminal(() => deps)("cont");
+    await reReviewOnCodingRunTerminal(() => deps)("cont");
     await vi.waitFor(() => expect(sync).toHaveBeenCalledWith({ db: changeDb, hosts: {} }, "cont"));
     expect(update).toHaveBeenCalledWith(changeDb, { id: "cont" }, {}, undefined);
     expect(findFirst).toHaveBeenCalledWith({
@@ -613,8 +632,8 @@ describe("reReviewOnCodingRunTerminal", () => {
       seen.push(step.getStore());
     });
     const deps = { db, executor: native, hosts: {}, repoAccess: {} } as never;
-    step.run("turn:1:tool:0", () => reReviewOnCodingRunTerminal(() => deps)("run-3"));
-    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    await step.run("turn:1:tool:0", () => reReviewOnCodingRunTerminal(() => deps)("run-3"));
+    expect(seen).toHaveLength(2);
     expect(seen).toEqual([undefined, undefined]);
     reReview.mockRestore();
     release.mockRestore();

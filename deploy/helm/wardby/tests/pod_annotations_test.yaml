@@ -1,0 +1,76 @@
+suite: pod annotations
+values:
+  - ../ci/default-values.yaml
+tests:
+  - it: adds no annotations by default
+    templates:
+      - coding_proxy.yaml
+      - control_plane.yaml
+      - native_gateway.yaml
+    documentSelector:
+      path: kind
+      value: Deployment
+      matchMany: true
+    asserts:
+      - notExists:
+          path: spec.template.metadata.annotations
+  - it: adds podAnnotations to every workload's pods
+    templates:
+      - coding_proxy.yaml
+      - control_plane.yaml
+      - native_gateway.yaml
+      - headroom.yaml
+    documentSelector:
+      path: kind
+      value: Deployment
+      matchMany: true
+    set:
+      podAnnotations:
+        example.com/team: platform
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations
+          value: { example.com/team: platform }
+  - it: adds podAnnotations to the migration Job's pods
+    templates:
+      - migration.yaml
+    documentSelector:
+      path: kind
+      value: Job
+    set:
+      podAnnotations:
+        example.com/team: platform
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations
+          value: { example.com/team: platform }
+  - it: merges a workload's podAnnotations over the shared ones
+    templates:
+      - coding_proxy.yaml
+    documentSelector:
+      path: kind
+      value: Deployment
+      matchMany: true
+    set:
+      podAnnotations:
+        example.com/team: platform
+        example.com/tier: shared
+      codingProxy.podAnnotations:
+        example.com/tier: proxy
+    asserts:
+      - equal:
+          path: spec.template.metadata.annotations
+          value: { example.com/team: platform, example.com/tier: proxy }
+  - it: keeps one workload's podAnnotations off the others
+    templates:
+      - control_plane.yaml
+    documentSelector:
+      path: kind
+      value: Deployment
+      matchMany: true
+    set:
+      codingProxy.podAnnotations:
+        example.com/tier: proxy
+    asserts:
+      - notExists:
+          path: spec.template.metadata.annotations

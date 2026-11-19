@@ -213,6 +213,7 @@ export class GitHubRemote implements GitRemote {
       summary: details?.summary,
       tests: details?.tests,
       tag: details?.tag,
+      ...(details?.commit ? { commit: details.commit } : {}),
       packages: details?.packages,
       packageRefusals: details?.packageRefusals,
       ...(details?.packageAudit ? { packageAudit: details.packageAudit } : {}),

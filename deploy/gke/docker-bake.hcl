@@ -15,9 +15,13 @@ group "default" {
     "migration",
     "coding-worker",
     "coding-worker-node-python",
+    "coding-worker-node-python-3-13",
+    "coding-worker-node-python-3-14",
     "claude-coding-worker",
     "claude-tool-runner",
     "claude-tool-runner-node-python",
+    "claude-tool-runner-node-python-3-13",
+    "claude-tool-runner-node-python-3-14",
     "native-worker",
   ]
 }
@@ -50,7 +54,22 @@ target "coding-worker" {
 target "coding-worker-node-python" {
   inherits   = ["_gke"]
   dockerfile = "src/coding-worker/Dockerfile.node-python"
+  args       = { PYTHON_DEFAULT_VERSION = "3.12" }
   tags       = ["${REGISTRY}/coding-worker-node-python:latest"]
+}
+
+# `python` in a node-python image is the version it is built for (PYTHON_DEFAULT_VERSION, 3.12 by
+# default), so each toolchainVersion has its own image.
+target "coding-worker-node-python-3-13" {
+  inherits   = ["coding-worker-node-python"]
+  args       = { PYTHON_DEFAULT_VERSION = "3.13" }
+  tags       = ["${REGISTRY}/coding-worker-node-python-3-13:latest"]
+}
+
+target "coding-worker-node-python-3-14" {
+  inherits   = ["coding-worker-node-python"]
+  args       = { PYTHON_DEFAULT_VERSION = "3.14" }
+  tags       = ["${REGISTRY}/coding-worker-node-python-3-14:latest"]
 }
 
 target "claude-coding-worker" {
@@ -69,7 +88,20 @@ target "claude-tool-runner-node-python" {
   inherits   = ["_gke"]
   dockerfile = "src/claude-tool-runner/Dockerfile"
   target     = "node-python"
+  args       = { PYTHON_DEFAULT_VERSION = "3.12" }
   tags       = ["${REGISTRY}/claude-tool-runner-node-python:latest"]
+}
+
+target "claude-tool-runner-node-python-3-13" {
+  inherits = ["claude-tool-runner-node-python"]
+  args     = { PYTHON_DEFAULT_VERSION = "3.13" }
+  tags     = ["${REGISTRY}/claude-tool-runner-node-python-3-13:latest"]
+}
+
+target "claude-tool-runner-node-python-3-14" {
+  inherits = ["claude-tool-runner-node-python"]
+  args     = { PYTHON_DEFAULT_VERSION = "3.14" }
+  tags     = ["${REGISTRY}/claude-tool-runner-node-python-3-14:latest"]
 }
 
 # The native sandbox worker (docs/native-sandbox.md): sandbox-mode native agents run in it, one pod

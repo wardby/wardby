@@ -142,7 +142,7 @@ import { RoutingLlmProvider } from "../providers/llm/routing.js";
 import { ModelUnavailableError } from "../providers/llm/catalog-types.js";
 import { trackRun } from "./in-flight-runs.js";
 import { dispatchRunStepsLevel } from "./run-steps/config.js";
-import { ReviewReadLedger } from "./review-reads.js";
+import { REVIEW_READ_TOOLS, ReviewReadLedger } from "./review-reads.js";
 import { refusalOf } from "./plans/refusal.js";
 import { MAX_PLAN_NUMBER } from "./plans/number.js";
 import { planSummaryForRun, type PlanSummary } from "./plans/publish.js";
@@ -1981,6 +1981,13 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     return builtin ? builtin(argsJson, callId) : runUserTool(name, argsJson);
   };
 
+  // A control-plane run keeps the read ledger in memory, so each read's recorded tool step carries it
+  // and a run resumed on another pod restores it as it replays (EngineRunContext.toolState).
+  const toolState = {
+    capture: (toolName: string): unknown => (REVIEW_READ_TOOLS.has(toolName) ? reviewReads.toJSON() : undefined),
+    restore: (state: unknown): void => reviewReads.merge(ReviewReadLedger.fromJSON(state)),
+  };
+
   return {
     toolsByName,
     builtinHandler,
@@ -1988,6 +1995,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     readableSecretValues,
     runUserTool,
     runSandboxTool,
+    toolState,
     toolTimeoutMs,
     watchStop: () => watchRunStop(db, runId),
     /** Every secret value of the agent's attached MCP servers (never handed to a worker; redaction only). */
@@ -2843,6 +2851,7 @@ async function executeTrackedRun(
       tools: loaded.tools,
       providers: { llm },
       runSandboxTool,
+      toolState: tools.toolState,
       // A replay recorded before this flag existed has none: its delegations stay sequential.
       ...(loaded.parallelDelegations
         ? { runsConcurrently: (toolName: string) => toolName.startsWith(DELEGATE_TOOL_PREFIX) }

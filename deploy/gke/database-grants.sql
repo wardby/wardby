@@ -6,8 +6,10 @@
 --
 -- Privileges go to NOLOGIN group roles, so nothing below names a project; the
 -- IAM users only become members. If the coding proxy's code starts using
--- another table, deploy/gke/database-grants.database.test.mjs fails: extend
--- wardby_proxy here; up.sh applies this file after its migrations. Each statement ends with a
+-- another table, or a privilege on one it already uses that is not granted
+-- below, deploy/gke/proxy-code-grants.test.mjs fails (no database needed), and
+-- deploy/gke/database-grants.database.test.mjs checks the grants against a real
+-- database: extend wardby_proxy here; up.sh applies this file after its migrations. Each statement ends with a
 -- "-- ;;" line, which is how the test splits the file.
 --
 -- The bootstrap runs the whole file in one transaction: a refused statement
@@ -127,6 +129,12 @@ DO $$ BEGIN
   IF to_regclass('public."RegistryAuditRecord"') IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, INSERT ON public.%I TO wardby_proxy', 'RegistryAuditRecord');
   END IF;
+  -- Download reservations: each download takes one before it streams, extends
+  -- it while it streams (UPDATE), and releases it when it ends (DELETE); the
+  -- proxy also deletes expired ones and counts and sums a run's live ones.
+  IF to_regclass('public."RegistryReservation"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO wardby_proxy', 'RegistryReservation');
+  END IF;
   -- Lockfile verification: immutable per-version facts (reused forever, never
   -- changed) and the exact versions a run's plan approved or refused.
   IF to_regclass('public."RegistryVersionFact"') IS NOT NULL THEN
@@ -144,6 +152,11 @@ DO $$ BEGIN
   -- table-wide CodingProxySession grant above.)
   IF to_regclass('public."DependencySnapshot"') IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO wardby_proxy', 'DependencySnapshot');
+  END IF;
+  -- Uploads in flight: the proxy claims one before storing a snapshot, releases
+  -- it when the upload ends, and deletes the ones an abandoned upload left.
+  IF to_regclass('public."DependencyUploadClaim"') IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT, DELETE ON public.%I TO wardby_proxy', 'DependencyUploadClaim');
   END IF;
   -- Experimental Substrate launcher: the proxy relays lines between a run's
   -- agent and tool actors through these tables. Taking a run's row lock

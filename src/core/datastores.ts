@@ -23,8 +23,12 @@ export async function createDatastore(name: string, ownerId: string, db: PrismaC
   return db.datastore.create({ data: { name, ownerId } });
 }
 
-export async function listDatastores(ownerId: string, db: PrismaClient): Promise<DatastoreMetadata[]> {
-  const rows = await db.datastore.findMany({ where: { ownerId } });
+export async function listDatastores(
+  ownerId: string,
+  db: PrismaClient,
+  opts: { all?: boolean } = {},
+): Promise<DatastoreMetadata[]> {
+  const rows = await db.datastore.findMany({ where: opts.all ? {} : { ownerId } });
   return rows.map(({ id, name, ownerId: owner, createdAt, updatedAt }) => ({
     id,
     name,

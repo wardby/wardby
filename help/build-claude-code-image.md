@@ -33,8 +33,9 @@ when the language or version is unclear.
 
 Ask the user for the value of `CODING_CLAUDE_TOOL_RUNNER_IMAGE` in the Wardby
 server's settings (on a quickstart install, `.wardby/.env` in the Wardby project
-directory). Use `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` instead when
-the project also needs Python. This image comes from the same Wardby release as
+directory). Use `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` (or `_3_13`,
+`_3_14`, to match the Python version the project needs) instead when the
+project also needs Python. This image comes from the same Wardby release as
 the server, which the custom image must match.
 
 If the value is a bare local ID (`sha256:...`), tag it first, because Docker

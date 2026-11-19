@@ -40,6 +40,7 @@ import {
   type ChatProviderRegistry,
 } from "../providers/chat/types.js";
 import { pullRequestWebUrl } from "../coding/code-host.js";
+import { startInterval } from "./interval.js";
 import { tryAcquireLease } from "./lease.js";
 import { logger } from "./logger.js";
 import {
@@ -50,7 +51,8 @@ import {
   senderName,
   type ThreadStatus,
 } from "./notification-templates.js";
-import { spendLine } from "./issue-status.js";
+import { spendLine } from "./run-spend.js";
+import { LOOP_TICK_TIMEOUT_MS } from "./timing.js";
 import { shortReason, type ThreadSubject, type WorkflowPayload } from "./workflow-events.js";
 
 const log = logger.child({ module: "notification-dispatcher" });
@@ -397,17 +399,18 @@ export async function pruneWorkflowEvents(
 }
 
 export interface DispatcherHandle {
-  stop(): void;
+  /** Resolves once a pass already in flight has finished or timed out; no pass starts after. */
+  stop(): Promise<void>;
 }
 
 export function startNotificationDispatcher(deps: DispatcherDeps & { intervalMs?: number }): DispatcherHandle {
   deps.state ??= {};
-  let running = false;
   let lastPrune = 0;
-  const tick = async () => {
-    if (running) return;
-    running = true;
-    try {
+  const loop = startInterval({
+    name: "notification-dispatcher",
+    everyMs: deps.intervalMs ?? 2000,
+    timeoutMs: LOOP_TICK_TIMEOUT_MS,
+    tick: async () => {
       await dispatchOnce(deps);
       const nowMs = Date.now();
       if (nowMs - lastPrune >= PRUNE_EVERY_MS) {
@@ -415,13 +418,7 @@ export function startNotificationDispatcher(deps: DispatcherDeps & { intervalMs?
         const pruned = await pruneWorkflowEvents(deps.db, new Date(nowMs));
         if (pruned > 0) log.info({ pruned }, "pruned old workflow events");
       }
-    } finally {
-      running = false;
-    }
-  };
-  const timer = setInterval(() => {
-    tick().catch((err: unknown) => log.error({ err }, "notification dispatch tick failed"));
-  }, deps.intervalMs ?? 2000);
-  timer.unref?.();
-  return { stop: () => clearInterval(timer) };
+    },
+  });
+  return { stop: () => loop.stop() };
 }

@@ -78,6 +78,8 @@ import { scheduleStartFields } from "./core/schedule-start.js";
 import { assertAgentModelAvailable } from "./core/run-pricing.js";
 import { markRunFailedFromExecutorError } from "./core/dispatch.js";
 import { startScheduler } from "./core/scheduler.js";
+import { runFollowUpHandlersFor } from "./core/run-follow-up-handlers.js";
+import { drainRunFollowUps } from "./core/run-follow-ups.js";
 import { RunStepSweeper } from "./core/run-steps/sweep.js";
 import { buildRunStepWriter } from "./core/run-steps/writer.js";
 import { startReconciler } from "./core/reconciler.js";
@@ -1085,6 +1087,10 @@ async function scheduler(args: string[]): Promise<void> {
         beforeStart: (runId) => resolveDeferredCodingRun({ db: prisma, executor, runId }),
         onStartFailed: (runId, err) => markRunFailedFromExecutorError(prisma, runId, err, selfDefects),
       });
+      await drainRunFollowUps({
+        db: prisma,
+        handlers: runFollowUpHandlersFor({ db: prisma, executor, issueTrackers }),
+      });
       await power.sleepIfIdle().catch((err) => cliLog.warn({ err }, "power_sleep_failed"));
       await runStepSweeper.maybeSweep();
     },
@@ -1095,11 +1101,10 @@ async function scheduler(args: string[]): Promise<void> {
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       console.log("\nwardby scheduler shutting down...");
-      sched.stop();
-      reconciler.stop();
-      notifications.stop();
+      // Wait for a pass already in flight before the executor closes under it.
       runHooks.stop();
-      void Promise.resolve(executor.close?.())
+      void Promise.all([sched.stop(), reconciler.stop(), notifications.stop()])
+        .then(() => executor.close?.())
         .catch((err: unknown) => cliLog.warn({ err }, "executor close failed during scheduler shutdown"))
         .finally(() => {
           modelCatalog.close();

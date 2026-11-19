@@ -85,6 +85,36 @@ export async function callPrepareDependencies({
   });
 }
 
+/** The tool runner's internal tool (claude-tool-runner/main.mjs); the agent's SDK options disallow it (sdk.ts). */
+export const RESTORE_PYPI_LOCKFILES_TOOL = "wardby_restore_pypi_lockfiles";
+/** A walk of the workspace, a few file writes, and the proxy's address lookups (each request is bounded at 30 s; a long lock takes a few). */
+export const RESTORE_PYPI_LOCKFILES_TIMEOUT_MS = 180_000;
+
+/**
+ * The worker's call once the agent has finished a changes_ready run: the tool runner points the uv.lock
+ * files that name the proxy back at real registry addresses (asked of the proxy) and puts the original
+ * Poetry files back. Resolves with the tool's JSON (`{ restored, warnings, unresolved }`, unchecked).
+ * Fails only with `pypi_lockfiles_tool_unavailable` (a tool
+ * runner without the tool: no registry, or an older image) or `pypi_lockfiles_tool_failed`.
+ */
+export async function callRestorePypiLockfiles({
+  socketPath = TOOL_SOCKET_PATH,
+  timeoutMs = RESTORE_PYPI_LOCKFILES_TIMEOUT_MS,
+  signal,
+}: { socketPath?: string; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<unknown> {
+  return callToolRunner(
+    RESTORE_PYPI_LOCKFILES_TOOL,
+    {},
+    {
+      socketPath,
+      timeoutMs,
+      signal,
+      unavailable: "pypi_lockfiles_tool_unavailable",
+      failed: "pypi_lockfiles_tool_failed",
+    },
+  );
+}
+
 /** The tool runner's git tools (#536, claude-tool-runner/main.mjs); the agent's SDK options disallow both (sdk.ts). */
 export const GIT_CHECK_TOOL = "wardby_git_check";
 export const RESULT_BUNDLE_TOOL = "wardby_result_bundle";

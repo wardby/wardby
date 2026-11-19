@@ -1,0 +1,293 @@
+suite: control plane
+templates:
+  - control_plane.yaml
+values:
+  - ../ci/default-values.yaml
+tests:
+  - it: derives the canonical URI and audience from the hostname
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MCP_CANONICAL_URI, value: https://wardby.example.com/mcp }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: AUTH_AUDIENCE, value: https://wardby.example.com/mcp }
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.httpHeaders[0].value
+          value: wardby.example.com
+  - it: fails without a hostname
+    set:
+      hostname: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: hostname is required
+  - it: lets controlPlane.env override a chart-derived variable
+    documentIndex: 1
+    set:
+      controlPlane.env.CODING_MAX_CONCURRENT: "9"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_MAX_CONCURRENT, value: "9" }
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_MAX_CONCURRENT, value: "3" }
+  - it: pins images by digest when one is set
+    documentIndex: 1
+    set:
+      image.runtime.digest: sha256:abc
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/wardby/wardby-runtime@sha256:abc
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: DBOS__APPVERSION, value: sha256:abc }
+  - it: runs the Cloud SQL Auth Proxy as a native sidecar
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].restartPolicy
+          value: Always
+      - contains:
+          path: spec.template.spec.initContainers[0].args
+          content: example-project:us-central1:wardby
+  - it: omits the sidecar when the proxy is disabled
+    documentIndex: 1
+    set:
+      database.cloudSqlProxy.enabled: false
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+  - it: opens egress to a private API server only when a CIDR is given
+    documentIndex: 2
+    set:
+      controlPlane.kubernetesApi.cidr: 172.16.0.2/32
+    asserts:
+      - contains:
+          path: spec.egress
+          content:
+            ports: [{ port: 443, protocol: TCP }]
+            to: [{ ipBlock: { cidr: 172.16.0.2/32 } }]
+  - it: refuses a launched worker image without a digest
+    set:
+      image.codingWorker.digest: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: 'image.codingWorker.digest is required: the launcher runs worker images only by digest (sha256:...). Set image.codingWorker.repository to "" to leave it unconfigured'
+  - it: leaves out an optional worker whose repository is unset
+    documentIndex: 1
+    set:
+      image.codingWorker.digest: sha256:0000000000000000000000000000000000000000000000000000000000000001
+      image.codingWorkerNodePython.repository: ""
+      image.codingWorkerNodePython.digest: ""
+      image.codingWorkerNodePython313.repository: ""
+      image.codingWorkerNodePython313.digest: ""
+      image.codingWorkerNodePython314.repository: ""
+      image.codingWorkerNodePython314.digest: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_WORKER_IMAGE_NODE_PYTHON_3_12 }
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_WORKER_IMAGE_NODE_PYTHON_3_13 }
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_WORKER_IMAGE_NODE_PYTHON_3_14 }
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_WORKER_IMAGE
+            value: ghcr.io/wardby/wardby-coding-worker@sha256:0000000000000000000000000000000000000000000000000000000000000001
+  - it: serves each node-python version from the image built for it
+    documentIndex: 1
+    set:
+      image.codingWorkerNodePython.digest: sha256:0000000000000000000000000000000000000000000000000000000000000002
+      image.codingWorkerNodePython313.digest: sha256:0000000000000000000000000000000000000000000000000000000000000004
+      image.codingWorkerNodePython314.digest: sha256:0000000000000000000000000000000000000000000000000000000000000005
+      image.claudeToolRunnerNodePython.digest: sha256:0000000000000000000000000000000000000000000000000000000000000003
+      image.claudeToolRunnerNodePython313.digest: sha256:0000000000000000000000000000000000000000000000000000000000000006
+      image.claudeToolRunnerNodePython314.digest: sha256:0000000000000000000000000000000000000000000000000000000000000007
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_WORKER_IMAGE_NODE_PYTHON_3_12
+            value: ghcr.io/wardby/wardby-coding-worker-node-python@sha256:0000000000000000000000000000000000000000000000000000000000000002
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_WORKER_IMAGE_NODE_PYTHON_3_13
+            value: ghcr.io/wardby/wardby-coding-worker-node-python-3-13@sha256:0000000000000000000000000000000000000000000000000000000000000004
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_WORKER_IMAGE_NODE_PYTHON_3_14
+            value: ghcr.io/wardby/wardby-coding-worker-node-python-3-14@sha256:0000000000000000000000000000000000000000000000000000000000000005
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12
+            value: ghcr.io/wardby/wardby-claude-tool-runner-node-python@sha256:0000000000000000000000000000000000000000000000000000000000000003
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_13
+            value: ghcr.io/wardby/wardby-claude-tool-runner-node-python-3-13@sha256:0000000000000000000000000000000000000000000000000000000000000006
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_14
+            value: ghcr.io/wardby/wardby-claude-tool-runner-node-python-3-14@sha256:0000000000000000000000000000000000000000000000000000000000000007
+  - it: serves and binds on controlPlane.port
+    set:
+      controlPlane.port: 9000
+    asserts:
+      - equal:
+          path: spec.ports[0].port
+          value: 9000
+        documentIndex: 0
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: MCP_HTTP_BIND, value: 0.0.0.0:9000 }
+        documentIndex: 1
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 9000
+        documentIndex: 1
+  - it: orders the environment by envOrder, then the rest in the default order
+    documentIndex: 1
+    set:
+      controlPlane.envOrder: [MCP_TRANSPORT, NODE_ENV]
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: MCP_TRANSPORT
+      - equal:
+          path: spec.template.spec.containers[0].env[1].name
+          value: NODE_ENV
+      - equal:
+          path: spec.template.spec.containers[0].env[2].name
+          value: AUTH_AUDIENCE
+  - it: puts only the selector label and podLabels on the pod, so a chart upgrade does not restart it
+    documentIndex: 1
+    set:
+      podLabels: { team: platform }
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels
+          value:
+            app.kubernetes.io/name: wardby-control-plane
+            team: platform
+  - it: runs the runtime image by its own tag when no digest is set
+    documentIndex: 1
+    set:
+      image.runtime.tag: 2610.12.0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/wardby/wardby-runtime:2610.12.0
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: DBOS__APPVERSION, value: 2610.12.0 }
+  - it: prefers the digest when both a tag and a digest are set
+    documentIndex: 1
+    set:
+      image.runtime.tag: 2610.12.0
+      image.runtime.digest: sha256:abc
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/wardby/wardby-runtime@sha256:abc
+  - it: serves no metrics by default
+    asserts:
+      - notContains:
+          path: spec.ports
+          content: { name: metrics, port: 9464, targetPort: 9464 }
+        documentIndex: 0
+      - notContains:
+          path: spec.template.spec.containers[0].ports
+          content: { name: metrics, containerPort: 9464 }
+        documentIndex: 1
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: METRICS_BIND, value: 0.0.0.0:9464 }
+        documentIndex: 1
+      - notExists:
+          path: spec.ingress
+        documentIndex: 2
+  - it: serves metrics on the pod IP when enabled
+    set:
+      controlPlane.metrics.enabled: true
+    asserts:
+      - equal:
+          path: spec.ports[1]
+          value: { name: metrics, port: 9464, targetPort: 9464 }
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.containers[0].ports[1]
+          value: { name: metrics, containerPort: 9464 }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: METRICS_BIND, value: 0.0.0.0:9464 }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: METRICS_ALLOW_NON_LOOPBACK, value: "true" }
+        documentIndex: 1
+  - it: admits no scraper unless ingressFrom names one
+    set:
+      controlPlane.metrics.enabled: true
+    asserts:
+      - notExists:
+          path: spec.ingress
+        documentIndex: 2
+  - it: admits the named scrapers on the metrics port only
+    set:
+      controlPlane.metrics.enabled: true
+      controlPlane.metrics.port: 9500
+      controlPlane.metrics.ingressFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+    asserts:
+      - equal:
+          path: spec.ingress
+          value:
+            - from:
+                - namespaceSelector:
+                    matchLabels:
+                      kubernetes.io/metadata.name: monitoring
+              ports:
+                - port: 9500
+                  protocol: TCP
+        documentIndex: 2
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: METRICS_BIND, value: 0.0.0.0:9500 }
+        documentIndex: 1
+  - it: ignores ingressFrom while metrics are off
+    set:
+      controlPlane.metrics.ingressFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+    asserts:
+      - notExists:
+          path: spec.ingress
+        documentIndex: 2
+  - it: lets controlPlane.env override a metrics variable
+    set:
+      controlPlane.metrics.enabled: true
+      controlPlane.env.METRICS_BIND: 127.0.0.1:9464
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: METRICS_BIND, value: 127.0.0.1:9464 }
+        documentIndex: 1

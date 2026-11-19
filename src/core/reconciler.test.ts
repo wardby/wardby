@@ -12,8 +12,9 @@ vi.mock("./host-events.js", () => ({ startDeferredReviews: vi.fn(async () => [])
 import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
 vi.mock("./documents/agent-loop.js", () => ({ sweepUnansweredDocumentRuns: vi.fn(async () => 0) }));
 import { sweepUnansweredDocumentRuns, type DocumentSweepDeps } from "./documents/agent-loop.js";
-import { reconcileOnce, type ReconcilerDb } from "./reconciler.js";
-import { setPlanChainHook } from "./plans/approval.js";
+import { MAX_START_RESTARTS, reconcileOnce, type ReconcilerDb } from "./reconciler.js";
+import { buildRunFollowUpHandlers, type RunFollowUpHandlerDeps } from "./run-follow-up-handlers.js";
+import { setPlanChainHook } from "./plans/chain-hook.js";
 import { setWorkflowEventSink, type WorkflowEventInput } from "./workflow-events.js";
 
 interface FakeRun {
@@ -30,6 +31,7 @@ interface FakeRun {
   codingRun: { jobBackend: string | null; jobHandle: string | null } | null;
   parentRunId?: string | null;
   executionWorkflowId?: string | null;
+  startAttempts?: number;
 }
 
 /** Minimal Prisma-`where`-filter matcher: equality, `{lt}`, `null`, and nested `OR` arrays. */
@@ -57,23 +59,51 @@ function matches(run: FakeRun, where: Record<string, unknown>): boolean {
   return true;
 }
 
-function fakeDb(runs: FakeRun[]): ReconcilerDb {
-  const byId = new Map(runs.map((r) => [r.id, r]));
+/** The chores a pass queued with a lost write, in order. */
+type QueuedFollowUps = { followUps: { runId: string; kind: string }[] };
 
-  return {
+/** Runs the queued chores' handlers once each, the way the scheduler leader's drain does. */
+async function runQueuedFollowUps(db: ReconcilerDb & QueuedFollowUps, deps: Partial<RunFollowUpHandlerDeps> = {}) {
+  const handlers = buildRunFollowUpHandlers({ db: db, ...deps });
+  for (const { runId, kind } of db.followUps) {
+    await handlers[kind]({ runId, kind, payload: {}, attempt: 1, signal: new AbortController().signal });
+  }
+}
+
+function fakeDb(runs: FakeRun[]): ReconcilerDb & QueuedFollowUps {
+  const byId = new Map(runs.map((r) => [r.id, r]));
+  const followUps: QueuedFollowUps["followUps"] = [];
+
+  const db = {
+    followUps,
+    runFollowUp: {
+      createMany: async ({ data }: { data: { runId: string; kind: string }[] }) => {
+        followUps.push(...data.map(({ runId, kind }) => ({ runId, kind })));
+        return { count: data.length };
+      },
+    },
+    // The fake has no rollback: a transaction is the callback run against the same tables.
+    $transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     run: {
+      count: (async ({ where }: any) => [...byId.values()].filter((run) => matches(run, where)).length) as any,
+      findUnique: (async ({ where }: any) => byId.get(where.id) ?? null) as any,
       findMany: (async ({ where }: any) => [...byId.values()].filter((run) => matches(run, where))) as any,
       updateMany: (async ({ where, data }: any) => {
         let count = 0;
         for (const run of byId.values()) {
           if (!matches(run, where)) continue;
-          Object.assign(run, data);
+          for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+            const target = run as unknown as Record<string, unknown>;
+            const inc = (value as { increment?: number } | null)?.increment;
+            target[key] = inc === undefined ? value : ((target[key] as number | undefined) ?? 0) + inc;
+          }
           count += 1;
         }
         return { count };
       }) as any,
     },
-  } as unknown as ReconcilerDb;
+  } as unknown as ReconcilerDb & QueuedFollowUps;
+  return db;
 }
 
 const HEARTBEAT_TIMEOUT_MS = 45_000;
@@ -94,6 +124,7 @@ function baseRun(overrides: Partial<FakeRun>): FakeRun {
     executionBackend: null,
     agent: { kind: "native" },
     codingRun: null,
+    startAttempts: 0,
     ...overrides,
   };
 }
@@ -119,11 +150,14 @@ describe("reconcileOnce", () => {
       const db = fakeDb(runs);
       await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS);
       expect(runs[0].status).toBe("lost");
+      // The run-end event is a queued chore (run_finished_events), run by the scheduler leader's drain.
+      await runQueuedFollowUps(db);
       expect(onTicketFinished).toHaveBeenCalledTimes(1);
-      expect(onTicketFinished.mock.calls[0]).toEqual([db, "r1"]);
-      // A second pass ends nothing, so it reports nothing.
+      expect((onTicketFinished.mock.calls as unknown[][])[0]?.[1]).toBe("r1");
+      // A second pass ends nothing, so it queues nothing and reports nothing.
+      const queued = db.followUps.length;
       await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS);
-      expect(onTicketFinished).toHaveBeenCalledTimes(1);
+      expect(db.followUps).toHaveLength(queued);
     } finally {
       setPlanChainHook(undefined);
     }
@@ -157,23 +191,55 @@ describe("reconcileOnce", () => {
     expect(order).toEqual(["sweep:lost"]);
   });
 
-  describe("children of a lead marked lost", () => {
+  describe("chores of a run marked lost", () => {
     const child = () => baseRun({ id: "child", parentRunId: "r1", status: "pending", startedAt: NOW });
+    const stopper = (runs: FakeRun[], stops: [string, string | undefined][]): Executor => ({
+      async start() {},
+      async stop(id, reason) {
+        stops.push([id, reason]);
+        runs.find((run) => run.id === id)!.status = "cancelled";
+      },
+    });
+
+    it("queues the lost run's chores with the lost write, in order, once", async () => {
+      const runs = [baseRun({ heartbeatAt: STALE })];
+      const db = fakeDb(runs);
+
+      await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS);
+      expect(db.followUps).toEqual([
+        { runId: "r1", kind: "stop_children" },
+        { runId: "r1", kind: "self_defect" },
+        { runId: "r1", kind: "run_finished_events" },
+      ]);
+
+      // A second pass finds nothing stale and queues nothing more.
+      await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS);
+      expect(db.followUps).toHaveLength(3);
+    });
+
+    it("does nothing in the pass itself: the chores wait for the drain", async () => {
+      const runs = [baseRun({ heartbeatAt: STALE }), child()];
+      const stops: [string, string | undefined][] = [];
+
+      await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, stopper(runs, stops));
+
+      expect(stops).toEqual([]);
+      expect(runs[1].status).toBe("pending");
+    });
 
     it("stops the pending child when a durable lead is reported lost", async () => {
       const runs = [baseRun({ heartbeatAt: STALE, executionBackend: "dbos" }), child()];
       const stops: [string, string | undefined][] = [];
       const executor: Executor = {
-        async start() {},
-        async stop(id, reason) {
-          stops.push([id, reason]);
-        },
+        ...stopper(runs, stops),
         async recover() {
           return { state: "lost", reason: "gone" };
         },
       };
+      const db = fakeDb(runs);
 
-      const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+      const count = await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, executor);
+      await runQueuedFollowUps(db, { executor });
 
       expect(count).toBe(1);
       expect(stops).toEqual([["child", "parent run lost"]]);
@@ -182,16 +248,28 @@ describe("reconcileOnce", () => {
     it("stops the pending child when a stale lead falls through to the generic lost write", async () => {
       const runs = [baseRun({ heartbeatAt: STALE }), child()];
       const stops: [string, string | undefined][] = [];
-      const executor: Executor = {
-        async start() {},
-        async stop(id, reason) {
-          stops.push([id, reason]);
-        },
-      };
+      const executor = stopper(runs, stops);
+      const db = fakeDb(runs);
 
-      await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, executor);
+      await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, executor);
+      await runQueuedFollowUps(db, { executor });
 
       expect(stops).toEqual([["child", "parent run lost"]]);
+    });
+
+    it("keeps the chore failing while a child is still drivable, so the drain retries it", async () => {
+      const runs = [baseRun({ heartbeatAt: STALE }), child()];
+      const executor: Executor = {
+        async start() {},
+        async stop() {
+          throw new Error("executor unavailable");
+        },
+      };
+      const db = fakeDb(runs);
+
+      await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, executor);
+
+      await expect(runQueuedFollowUps(db, { executor })).rejects.toThrow();
     });
   });
 
@@ -223,6 +301,64 @@ describe("reconcileOnce", () => {
 
     expect(count).toBe(1);
     expect(runs[0].status).toBe("lost");
+  });
+
+  describe("a pending run that never started", () => {
+    const executor = () => {
+      const started: string[] = [];
+      const exec: Executor = {
+        async start(id) {
+          started.push(id);
+        },
+        async stop() {},
+      };
+      return { started, exec };
+    };
+
+    it("restarts it through the executor instead of marking it lost", async () => {
+      const runs = [baseRun({ status: "pending", heartbeatAt: null, startedAt: STALE })];
+      const { started, exec } = executor();
+
+      const count = await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, exec);
+
+      expect(count).toBe(0);
+      expect(started).toEqual(["r1"]);
+      expect(runs[0]).toMatchObject({ status: "pending", startAttempts: 1 });
+    });
+
+    it("gives up and marks it lost once the restarts are used up", async () => {
+      const runs = [
+        baseRun({ status: "pending", heartbeatAt: null, startedAt: STALE, startAttempts: MAX_START_RESTARTS }),
+      ];
+      const { started, exec } = executor();
+
+      const db = fakeDb(runs);
+
+      const count = await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, exec);
+
+      expect(count).toBe(1);
+      expect(started).toEqual([]);
+      expect(runs[0].status).toBe("lost");
+      expect(runs[0].error).toMatch(/Never started/);
+      // Its chores are queued with the lost write, like the other lost paths.
+      expect(db.followUps).toEqual([
+        { runId: "r1", kind: "stop_children" },
+        { runId: "r1", kind: "self_defect" },
+        { runId: "r1", kind: "run_finished_events" },
+      ]);
+    });
+
+    it("leaves a run an execution backend already holds to recovery, not a restart", async () => {
+      const runs = [baseRun({ status: "pending", heartbeatAt: null, startedAt: STALE, executionBackend: "dbos" })];
+      const { started, exec } = executor();
+
+      await reconcileOnce(fakeDb(runs), NOW, HEARTBEAT_TIMEOUT_MS, {
+        ...exec,
+        recover: async () => ({ state: "active" }),
+      });
+
+      expect(started).toEqual([]);
+    });
   });
 
   it("leaves a scheduled run pending for less than the timeout alone", async () => {
@@ -804,8 +940,10 @@ describe("reconcileOnce self-defects", () => {
     };
     db.codingRun = { findUnique: vi.fn(async () => null) };
     db.runIssueStatus = { findMany: vi.fn(async () => []) };
+    const base = { run: db.run, runFollowUp: db.runFollowUp };
     db.$transaction = async (fn: any) =>
       fn({
+        ...base,
         $executeRaw: async () => 0,
         issueFingerprint: {
           findFirst: async () => null,
@@ -828,6 +966,8 @@ describe("reconcileOnce self-defects", () => {
     const tracker = jira();
     const count = await reconcileOnce(db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });
     expect(count).toBe(1);
+    expect(tracker.createIssue).not.toHaveBeenCalled();
+    await runQueuedFollowUps(db as never, { issueTrackers: { jira: tracker } });
     expect(tracker.createIssue).toHaveBeenCalledTimes(1);
     const input = vi.mocked(tracker.createIssue).mock.calls[0][0];
     expect(input).toMatchObject({
@@ -843,8 +983,10 @@ describe("reconcileOnce self-defects", () => {
     const tracker = jira();
     const optedOut = selfDefectDb([baseRun({ heartbeatAt: STALE })], { optedIn: false });
     await reconcileOnce(optedOut.db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });
+    await runQueuedFollowUps(optedOut.db as never, { issueTrackers: { jira: tracker } });
     const fresh = selfDefectDb([baseRun({ heartbeatAt: FRESH })], { optedIn: true });
     await reconcileOnce(fresh.db, NOW, HEARTBEAT_TIMEOUT_MS, undefined, undefined, { jira: tracker });
+    await runQueuedFollowUps(fresh.db as never, { issueTrackers: { jira: tracker } });
     expect(tracker.createIssue).not.toHaveBeenCalled();
     expect((fresh.db as any).agent.findUnique).not.toHaveBeenCalled();
   });
@@ -862,6 +1004,8 @@ describe("reconcileOnce workflow events", () => {
     });
     try {
       expect(await reconcileOnce(db as ReconcilerDb, NOW, HEARTBEAT_TIMEOUT_MS)).toBe(1);
+      expect(events).toEqual([]);
+      await runQueuedFollowUps(db);
       expect(events).toEqual([
         {
           dedupeKey: "run_failed:r1",

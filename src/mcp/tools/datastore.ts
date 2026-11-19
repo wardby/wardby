@@ -2,6 +2,7 @@ import { Prisma, type PrismaClient } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import type { DatastoreValue } from "../../providers/index.js";
 import { requireOwnedDatastore, canRead, assertCanMutate } from "../auth/ownership.js";
+import { isOwnerAll } from "../auth/resource-server.js";
 import { requireAgentAccess, requireBindable, requireBindingOwner } from "../auth/access.js";
 import {
   createDatastore,
@@ -40,10 +41,11 @@ async function requireReadableSharedDatastore(
   agentId: string,
   boundName: string,
   principalId: string,
+  ownerAll = false,
 ): Promise<void> {
   const datastore = await findAttachedDatastore(db, agentId, boundName);
   if (!datastore) return;
-  if (!canRead(datastore.ownerId, principalId)) {
+  if (!ownerAll && !canRead(datastore.ownerId, principalId)) {
     throw new McpError(404, `Datastore bound as "${boundName}" not found.`);
   }
 }
@@ -53,10 +55,16 @@ async function requireMutableSharedDatastore(
   agentId: string,
   boundName: string,
   principalId: string,
+  ownerAll = false,
 ): Promise<void> {
   const datastore = await findAttachedDatastore(db, agentId, boundName);
   if (!datastore) return;
-  assertCanMutate(datastore.ownerId, principalId, `Datastore bound as "${boundName}" is not owned by the caller.`);
+  assertCanMutate(
+    datastore.ownerId,
+    principalId,
+    `Datastore bound as "${boundName}" is not owned by the caller.`,
+    ownerAll,
+  );
 }
 
 export function registerDatastoreTools(mcp: WardbyMcpServer): void {
@@ -86,7 +94,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
     scope: "datastore:write",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
-      const datastores = await listDatastores(ctx.principal.id, ctx.db);
+      const datastores = await listDatastores(ctx.principal.id, ctx.db, { all: isOwnerAll(ctx) });
       return textResult(datastores);
     },
   });
@@ -96,7 +104,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
     scope: "datastore:write",
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
     handler: async (args: { id: string }, ctx) => {
-      await requireOwnedDatastore(ctx.db, args.id, ctx.principal.id);
+      await requireOwnedDatastore(ctx.db, args.id, ctx.principal.id, isOwnerAll(ctx));
       try {
         await deleteDatastore(args.id, ctx.db);
       } catch (err) {
@@ -173,7 +181,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
     handler: async (args: { agentId: string; key: string; boundName?: string }, ctx) => {
       await requireAgentAccess(ctx, args.agentId, "owner");
       if (args.boundName) {
-        await requireReadableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
+        await requireReadableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id, isOwnerAll(ctx));
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
         const value = await accessor.get(args.boundName, args.key);
         return textResult({ value: value ?? null });
@@ -194,7 +202,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
     handler: async (args: { agentId: string; prefix?: string; boundName?: string }, ctx) => {
       await requireAgentAccess(ctx, args.agentId, "owner");
       if (args.boundName) {
-        await requireReadableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
+        await requireReadableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id, isOwnerAll(ctx));
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
         const keys = await accessor.list(args.boundName, args.prefix);
         return textResult(keys);
@@ -227,7 +235,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
       await requireAgentAccess(ctx, args.agentId, "owner");
       try {
         if (args.boundName) {
-          await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
+          await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id, isOwnerAll(ctx));
           const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
           await accessor.set(args.boundName, args.key, args.value, { pii: args.pii });
           return textResult({ ok: true });
@@ -254,7 +262,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
     handler: async (args: { agentId: string; key: string; boundName?: string }, ctx) => {
       await requireAgentAccess(ctx, args.agentId, "owner");
       if (args.boundName) {
-        await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id);
+        await requireMutableSharedDatastore(ctx.db, args.agentId, args.boundName, ctx.principal.id, isOwnerAll(ctx));
         const accessor = buildSharedDatastoreAccessor(args.agentId, ctx.providers.datastore, ctx.db);
         await accessor.delete(args.boundName, args.key);
         return textResult({ ok: true });

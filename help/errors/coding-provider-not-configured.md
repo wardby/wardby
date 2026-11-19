@@ -23,7 +23,7 @@ runs recorded it) when `CODING_WORKER_IMAGE` has since been unset.
 - **`coding_provider_not_configured:codex`**: `CODING_WORKER_IMAGE` (the Codex
   worker) isn't set, and the agent names no worker image of its own
   (`codingProfile.workerImageRef`). An agent that sets `workerImageRef`, or uses
-  a toolchain with its own image (such as `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`),
+  a toolchain with its own image (such as `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`, `_3_13` or `_3_14`),
   still runs without `CODING_WORKER_IMAGE`.
 - **`coding_provider_not_configured:claude-code`**: `CODING_CLAUDE_WORKER_IMAGE`
   or `CODING_CLAUDE_TOOL_RUNNER_IMAGE` isn't set. Claude Code needs both, even

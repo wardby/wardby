@@ -119,7 +119,12 @@ describe.skipIf(!process.env.DATABASE_URL)("NativeSandboxExecutor (database)", (
     const run = await sandboxRun();
     const executor = new NativeSandboxExecutor({ db, providers, launcher: slow, gatewayUrl, heartbeatIntervalMs: 5 });
     const started = executor.start(run.id);
-    await vi.waitFor(async () => expect((await row(run.id)).heartbeatAt).not.toBeNull());
+    // The beat can land before the session setup marks the run running: wait for both.
+    await vi.waitFor(async () => {
+      const current = await row(run.id);
+      expect(current.heartbeatAt).not.toBeNull();
+      expect(current.status).toBe("running");
+    });
 
     // Long after the run started, but its heartbeat is fresh: nothing to recover, nothing lost.
     const recover = vi.spyOn(executor, "recover");

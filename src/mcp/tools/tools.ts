@@ -40,11 +40,11 @@ import {
 } from "../../core/tool-admin.js";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
-import { requireOwnedTool, assertStrictlyOwnedTool, visibleToPrincipal, canRead } from "../auth/ownership.js";
+import { requireOwnedTool, assertStrictlyOwnedTool, visibleTo, canReadFor } from "../auth/ownership.js";
 import { agentAccessResolver, assertAgentAccess, requireAgentAccess } from "../auth/access.js";
 import { atLeast, isPublicWritable } from "../../core/grants.js";
 import type { McpRequestContext } from "../context.js";
-import { permissionsOf } from "../auth/resource-server.js";
+import { isOwnerAll, permissionsOf } from "../auth/resource-server.js";
 import { textResult } from "./text-result.js";
 import { brokerCompatibilityWarnings } from "./secret-broker-compat.js";
 
@@ -68,9 +68,9 @@ async function describeAgents(agents: AttachedAgent[], ctx: McpRequestContext): 
  * tool apart from the caller's own same-named one (names are unique per
  * owner, not globally). Shared by list_tools and get_agent.
  */
-export function projectTool(tool: ToolWithGrants, principalId: string) {
+export function projectTool(tool: ToolWithGrants, principalId: string, ownerAll = false) {
   const { connectionGrants, ...row } = tool;
-  if (row.ownerId !== null && row.ownerId === principalId) return row;
+  if (ownerAll || (row.ownerId !== null && row.ownerId === principalId)) return row;
   // timeoutMs is not code: anyone who sees the tool sees how long its calls may take.
   const shown = { id: row.id, name: row.name, description: row.description, timeoutMs: row.timeoutMs };
   if (row.ownerId !== null) return { ...shown, public: false, ownerIsCaller: false };
@@ -100,7 +100,7 @@ function isToolAdmin(ctx: McpRequestContext): boolean {
  */
 function assertChangeableTool(tool: Tool | null, id: string, ctx: McpRequestContext): Tool {
   if (tool && tool.ownerId === null && isToolAdmin(ctx)) return tool;
-  return assertStrictlyOwnedTool(tool, id, ctx.principal.id);
+  return assertStrictlyOwnedTool(tool, id, ctx.principal.id, isOwnerAll(ctx));
 }
 
 const TIMEOUT_MS_DESCRIPTION =
@@ -454,7 +454,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           // make_owner transfer, so the tool check does not apply.
           const tool = existing
             ? await tx.tool.findUniqueOrThrow({ where: { id: args.toolId } })
-            : await requireOwnedTool(tx, args.toolId, ctx.principal.id);
+            : await requireOwnedTool(tx, args.toolId, ctx.principal.id, isOwnerAll(ctx));
           // The runtime dispatches by name, and names are only unique per
           // owner: a second same-named tool on one agent would be a
           // duplicate tool name to the model and silently shadow one of them.
@@ -464,9 +464,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
             // The clashing tool may be another principal's private one (a
             // write-grantee's, or one left from before a transfer): name its
             // id only when the caller could read it anyway.
-            const which = canRead(clash.ownerId, ctx.principal.id)
-              ? ` (${clash.id})`
-              : " (a tool owned by another principal)";
+            const which = canReadFor(ctx, clash.ownerId) ? ` (${clash.id})` : " (a tool owned by another principal)";
             throw new McpError(
               409,
               `Agent "${args.agentId}" already has a different tool named "${tool.name}" attached${which}; detach it first.`,
@@ -536,7 +534,8 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     inputSchema: { type: "object", properties: { agentId: { type: "string" } } },
     handler: async (args: { agentId?: string }, ctx) => {
       // Zod 3 window: the caller's own tools carry their warnings (cached per paramsZod text).
-      const project = (tool: ToolWithGrants) => withZod3ToolWarnings(projectTool(tool, ctx.principal.id));
+      const project = (tool: ToolWithGrants) =>
+        withZod3ToolWarnings(projectTool(tool, ctx.principal.id, isOwnerAll(ctx)));
       if (args.agentId) {
         const { access } = await requireAgentAccess(ctx, args.agentId, "read");
         const rows = await ctx.db.agentTool.findMany({
@@ -549,18 +548,16 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           await Promise.all(
             rows
               .map((r) => r.tool)
-              .filter((tool) => access === "owner" || canRead(tool.ownerId, ctx.principal.id))
+              .filter((tool) => access === "owner" || canReadFor(ctx, tool.ownerId))
               .map(project),
           ),
         );
       }
       const tools = await ctx.db.tool.findMany({
-        where: visibleToPrincipal(ctx.principal.id),
+        where: visibleTo(ctx),
         include: TOOL_GRANTS_INCLUDE,
       });
-      return textResult(
-        await Promise.all(tools.filter((tool) => canRead(tool.ownerId, ctx.principal.id)).map(project)),
-      );
+      return textResult(await Promise.all(tools.filter((tool) => canReadFor(ctx, tool.ownerId)).map(project)));
     },
   });
 }

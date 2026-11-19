@@ -352,6 +352,10 @@ spec:
             # worker image above.
             - name: CODING_WORKER_IMAGE_NODE_PYTHON_3_12
               value: wardby-coding-worker-image-node-python-3-12
+            - name: CODING_WORKER_IMAGE_NODE_PYTHON_3_13
+              value: wardby-coding-worker-image-node-python-3-13
+            - name: CODING_WORKER_IMAGE_NODE_PYTHON_3_14
+              value: wardby-coding-worker-image-node-python-3-14
             # Claude Code runs (agents whose provider is "claude-code"): the agent image
             # and its credential-free tool runner. Placeholders, substituted like the
             # worker images above; the launcher refuses anything that is not a digest.
@@ -389,6 +393,10 @@ spec:
             # toolchainVersion "3.12" (Python with pytest and ruff). Substituted the same way.
             - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12
               value: wardby-claude-tool-runner-image-node-python-3-12
+            - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_13
+              value: wardby-claude-tool-runner-image-node-python-3-13
+            - name: CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_14
+              value: wardby-claude-tool-runner-image-node-python-3-14
           ports:
             - name: mcp
               containerPort: 8080

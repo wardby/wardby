@@ -1,0 +1,38 @@
+suite: gateway
+templates:
+  - gateway.yaml
+set:
+  hostname: wardby.example.com
+tests:
+  - it: renders nothing by default
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: references the TLS Secret from the HTTPS listener
+    set:
+      gateway.enabled: true
+      gateway.tlsSecretName: wardby-tls
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.listeners[0].tls.certificateRefs[0].name
+          value: wardby-tls
+  - it: leaves out the GKE policies when gke is disabled
+    set:
+      gateway.enabled: true
+      gateway.gke.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 4
+  - it: serves HTTPS only when the redirect is disabled
+    set:
+      gateway.enabled: true
+      gateway.httpRedirect.enabled: false
+      gateway.gke.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 3
+      - lengthEqual:
+          path: spec.listeners
+          count: 1
+        documentIndex: 0

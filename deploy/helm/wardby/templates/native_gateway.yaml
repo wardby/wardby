@@ -1,0 +1,152 @@
+{{- $w := .Values.nativeGateway }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: wardby-native-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: wardby-native-gateway
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wardby-native-gateway
+  ports:
+    - name: gateway
+      port: 8790
+      targetPort: 8790
+    - name: deny
+      port: 8791
+      targetPort: 8791
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-native-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: wardby-native-gateway
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $w.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  template:
+    metadata:
+      {{- with include "wardby.podAnnotations" (list $ $w) | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: wardby-native-gateway
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccounts.nativeGateway.name }}
+      automountServiceAccountToken: false
+      priorityClassName: wardby-control-plane
+      {{- with include "wardby.podScheduling" (list $ $w) | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with include "wardby.cloudSqlProxy" . | trim }}
+      initContainers:
+        {{- . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: gateway
+          image: {{ include "wardby.image" (list $ "runtime") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "dist/cli.js", "native-gateway"]
+          {{- with include "wardby.envFrom" (list $ $w) | trim }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          env:
+            {{- include "wardby.env" (list $ $w "nativeGateway" (dict "NATIVE_GATEWAY_LISTEN" "0.0.0.0:8790" "NATIVE_GATEWAY_DENY_PORT" "8791")) | nindent 12 }}
+          ports:
+            - name: gateway
+              containerPort: 8790
+            - name: deny
+              containerPort: 8791
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8790
+            {{- toYaml $w.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml $w.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "wardby.tmpVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "wardby.tmpVolume" $w | nindent 8 }}
+---
+# Admits native sandbox pods on the gateway port and on the deny port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-native-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              wardby.io/component: native-run
+      ports:
+        - port: 8790
+          protocol: TCP
+        - port: 8791
+          protocol: TCP
+  egress:
+    {{- include "wardby.kubeDnsEgress" . | nindent 4 }}
+    {{- include "wardby.publicHttpsEgress" . | nindent 4 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-native-gateway-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  policyTypes:
+    - Egress
+  egress:
+    {{- include "wardby.dnsEgress" . | nindent 4 }}
+{{- with include "wardby.databaseEgress" . | trim }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-native-gateway-database
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-native-gateway
+  policyTypes:
+    - Egress
+  egress:
+    {{- . | nindent 4 }}
+{{- end }}
+{{- with include "wardby.podDisruptionBudget" (list $ $w "wardby-native-gateway") | trim }}
+---
+{{ . }}
+{{- end }}

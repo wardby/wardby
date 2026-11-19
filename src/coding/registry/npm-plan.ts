@@ -9,18 +9,20 @@
  */
 import semver from "semver";
 import { PACKAGE_NAME } from "./npm-lockfile.js";
+import { PUBLIC_NPM_REGISTRY, npmUpstreamFor, sourceAllowedFor } from "./private-registry.js";
 import { JsonMemberTooLarge, scanTopLevelMember } from "./json-scan.js";
 import {
   RegistryError,
   type DeclaredDependency,
   type LockfileEntry,
+  type LockfileParseOptions,
   type LockfilePlanSupport,
   type ParsedLockfile,
+  type PrivateRegistry,
   type UpstreamFetch,
   type VersionFact,
 } from "./types.js";
 
-const UPSTREAM = "https://registry.npmjs.org/";
 const NODE_MODULES = "node_modules/";
 /** The largest `time` object kept from a packument (a package with tens of
  *  thousands of versions has a few MB of it). */
@@ -92,20 +94,18 @@ function installFolder(path: string): string | undefined {
   return path.slice(at + NODE_MODULES.length);
 }
 
-/** Whether `resolved` names a registry download: the public registry, or
- *  the proxy's own npm route (a lockfile written through the proxy before
- *  it is normalized at collection). A missing `resolved` is a registry
- *  entry too: npm omits it for one it will fetch from the registry. */
-function fromRegistry(resolved: unknown, proxyRegistryUrl: string): boolean {
+/** Whether `resolved` names a registry download for `name`: the public
+ *  registry (or the private one, for a name in its scopes), or the proxy's
+ *  own npm route (a lockfile written through the proxy before it is
+ *  normalized at collection). A missing `resolved` is a registry entry too:
+ *  npm omits it for one it will fetch from the registry. */
+function fromRegistry(name: string, resolved: unknown, options: LockfileParseOptions): boolean {
   if (resolved === undefined) return true;
   if (typeof resolved !== "string") return false;
-  return resolved.startsWith(UPSTREAM) || resolved.startsWith(proxyRegistryUrl);
+  return sourceAllowedFor(name, resolved, { ...options, publicBases: [PUBLIC_NPM_REGISTRY] });
 }
 
-export function parseNpmLockfile(
-  body: string,
-  options: { maxEntries: number; proxyRegistryUrl: string },
-): ParsedLockfile {
+export function parseNpmLockfile(body: string, options: LockfileParseOptions): ParsedLockfile {
   let document: unknown;
   try {
     document = JSON.parse(body);
@@ -169,7 +169,7 @@ export function parseNpmLockfile(
         kind: "unsupported",
         unsupportedReason: "not a registry package name and exact version",
       };
-    } else if (!fromRegistry(value.resolved, options.proxyRegistryUrl)) {
+    } else if (!fromRegistry(name, value.resolved, options)) {
       entry = {
         path,
         name,
@@ -224,11 +224,15 @@ export async function fetchNpmVersionFact(
   version: string,
   upstream: UpstreamFetch,
   signal?: AbortSignal,
+  privateRegistry?: PrivateRegistry,
 ): Promise<VersionFact | null> {
-  const response = await upstream(`${UPSTREAM}${encodedName(name)}/${encodeURIComponent(version)}`, {
-    accept: "application/json",
-    signal,
-  });
+  const response = await upstream(
+    `${npmUpstreamFor(name, privateRegistry)}${encodedName(name)}/${encodeURIComponent(version)}`,
+    {
+      accept: "application/json",
+      signal,
+    },
+  );
   if (response.status === 404) {
     await response.body?.cancel().catch(() => undefined);
     return null;
@@ -254,8 +258,9 @@ export async function fetchNpmPublishTimes(
   versions: readonly string[],
   upstream: UpstreamFetch,
   options: { maxBytes: number; signal: AbortSignal },
+  privateRegistry?: PrivateRegistry,
 ): Promise<Map<string, Date>> {
-  const response = await upstream(`${UPSTREAM}${encodedName(name)}`, {
+  const response = await upstream(`${npmUpstreamFor(name, privateRegistry)}${encodedName(name)}`, {
     accept: "application/json",
     acceptEncoding: "gzip",
     signal: options.signal,
@@ -308,9 +313,18 @@ export function npmEdgeSatisfies(version: string, range: string): boolean {
   }
 }
 
-export const npmLockfilePlan: LockfilePlanSupport = {
-  parse: parseNpmLockfile,
-  fetchVersionFact: fetchNpmVersionFact,
-  fetchPublishTimes: fetchNpmPublishTimes,
-  edgeSatisfies: npmEdgeSatisfies,
-};
+/** The npm lockfile plan hooks; with `privateRegistry`, names in its scopes
+ *  are read from it instead of public npm. */
+export function createNpmLockfilePlan(privateRegistry?: PrivateRegistry): LockfilePlanSupport {
+  return {
+    parse: parseNpmLockfile,
+    ...(privateRegistry ? { privateRegistry } : {}),
+    fetchVersionFact: (name, version, upstream, signal) =>
+      fetchNpmVersionFact(name, version, upstream, signal, privateRegistry),
+    fetchPublishTimes: (name, versions, upstream, options) =>
+      fetchNpmPublishTimes(name, versions, upstream, options, privateRegistry),
+    edgeSatisfies: npmEdgeSatisfies,
+  };
+}
+
+export const npmLockfilePlan: LockfilePlanSupport = createNpmLockfilePlan();

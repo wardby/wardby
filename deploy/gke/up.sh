@@ -591,7 +591,7 @@ echo "==> 3/${TOTAL_STEPS} build and push images (linux/amd64)"
 # concurrently from one context, and the Dockerfiles compile JavaScript on the
 # builder's own platform, so an arm64 Mac only emulates what actually ships.
 REGISTRY="$REGISTRY" docker buildx bake -f deploy/gke/docker-bake.hcl --load >/dev/null
-IMAGES=(runtime migration coding-worker coding-worker-node-python claude-coding-worker claude-tool-runner claude-tool-runner-node-python native-worker)
+IMAGES=(runtime migration coding-worker coding-worker-node-python coding-worker-node-python-3-13 coding-worker-node-python-3-14 claude-coding-worker claude-tool-runner claude-tool-runner-node-python claude-tool-runner-node-python-3-13 claude-tool-runner-node-python-3-14 native-worker)
 if [[ "$WARDBY_RENDERER" = true ]]; then
   # Not in bake's default group: only a deployment that turns the renderer on builds it.
   REGISTRY="$REGISTRY" docker buildx bake -f deploy/gke/docker-bake.hcl renderer --load >/dev/null
@@ -629,10 +629,16 @@ digest_of() {
 RUNTIME_IMAGE="$(digest_of runtime)"
 MIGRATION_IMAGE="$(digest_of migration)"
 WORKER_IMAGE="$(digest_of coding-worker)"
+# `python` in a node-python image is the version it is built for (PYTHON_DEFAULT_VERSION in the
+# Dockerfile, set per target in docker-bake.hcl), so each toolchainVersion has its own image.
 WORKER_IMAGE_NODE_PYTHON="$(digest_of coding-worker-node-python)"
+WORKER_IMAGE_NODE_PYTHON_313="$(digest_of coding-worker-node-python-3-13)"
+WORKER_IMAGE_NODE_PYTHON_314="$(digest_of coding-worker-node-python-3-14)"
 CLAUDE_WORKER_IMAGE="$(digest_of claude-coding-worker)"
 CLAUDE_TOOL_RUNNER_IMAGE="$(digest_of claude-tool-runner)"
 CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON="$(digest_of claude-tool-runner-node-python)"
+CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_313="$(digest_of claude-tool-runner-node-python-3-13)"
+CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_314="$(digest_of claude-tool-runner-node-python-3-14)"
 NATIVE_WORKER_IMAGE="$(digest_of native-worker)"
 RENDERER_IMAGE=""
 if [[ "$WARDBY_RENDERER" = true ]]; then
@@ -643,29 +649,38 @@ echo "==> 4/${TOTAL_STEPS} verify the worker images have tar, head and test"
 # Seeding and collection shell out to these. Without them every launch hangs
 # until its deadline, with nothing naming the cause. The keeper of a Claude
 # run runs from the Claude worker image, so it needs the same check.
-for image in "$WORKER_IMAGE" "$WORKER_IMAGE_NODE_PYTHON" "$CLAUDE_WORKER_IMAGE"; do
+for image in "$WORKER_IMAGE" "$WORKER_IMAGE_NODE_PYTHON" "$WORKER_IMAGE_NODE_PYTHON_313" "$WORKER_IMAGE_NODE_PYTHON_314" "$CLAUDE_WORKER_IMAGE"; do
   if ! docker run --rm --platform linux/amd64 --entrypoint sh "$image" -c 'command -v tar && command -v head && command -v test' >/dev/null; then
     echo "up.sh: worker image ${image} is missing tar, head or test." >&2
     exit 1
   fi
 done
-# The node-python image exists to run a Python project's own checks.
-if ! docker run --rm --platform linux/amd64 --entrypoint sh "$WORKER_IMAGE_NODE_PYTHON" -c 'python --version && python -m pytest --version && python -m ruff --version' >/dev/null; then
-  echo "up.sh: the node-python worker image is missing python, pytest or ruff." >&2
-  exit 1
-fi
+# The node-python images exist to run a Python project's own checks, and `python` in each is the
+# version it is built for.
+for entry in "3.12:$WORKER_IMAGE_NODE_PYTHON" "3.13:$WORKER_IMAGE_NODE_PYTHON_313" "3.14:$WORKER_IMAGE_NODE_PYTHON_314"; do
+  version="${entry%%:*}"
+  image="${entry#*:}"
+  if ! docker run --rm --platform linux/amd64 --entrypoint sh "$image" -c "python --version | grep -q '^Python ${version}\\.' && python -m pytest --version && python -m ruff --version" >/dev/null; then
+    echo "up.sh: the node-python worker image for Python ${version} does not run Python ${version} with pytest and ruff." >&2
+    exit 1
+  fi
+done
 # Claude's tool runner answers the pod's startup probe with `test -S`.
-for image in "$CLAUDE_TOOL_RUNNER_IMAGE" "$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON"; do
+for image in "$CLAUDE_TOOL_RUNNER_IMAGE" "$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON" "$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_313" "$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_314"; do
   if ! docker run --rm --platform linux/amd64 --entrypoint sh "$image" -c 'command -v test' >/dev/null; then
     echo "up.sh: the Claude tool runner image ${image} is missing test." >&2
     exit 1
   fi
 done
-# Claude's node-python tool runner runs a Python project's own checks, like the Codex one.
-if ! docker run --rm --platform linux/amd64 --entrypoint sh "$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON" -c 'python --version && python -m pytest --version && python -m ruff --version' >/dev/null; then
-  echo "up.sh: the Claude node-python tool runner image is missing python, pytest or ruff." >&2
-  exit 1
-fi
+# Claude's node-python tool runners run a Python project's own checks, like the Codex ones.
+for entry in "3.12:$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON" "3.13:$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_313" "3.14:$CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_314"; do
+  version="${entry%%:*}"
+  image="${entry#*:}"
+  if ! docker run --rm --platform linux/amd64 --entrypoint sh "$image" -c "python --version | grep -q '^Python ${version}\\.' && python -m pytest --version && python -m ruff --version" >/dev/null; then
+    echo "up.sh: the Claude node-python tool runner image for Python ${version} does not run Python ${version} with pytest and ruff." >&2
+    exit 1
+  fi
+done
 
 # The native sandbox worker: its in-pod isolation probe runs `node`, and it carries no network
 # tooling a tool escape could use (its Dockerfile asserts the same at build time).
@@ -893,7 +908,11 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
   | sed -e "s|image: wardby-runtime|image: ${RUNTIME_IMAGE}|" \
         -e "s|value: wardby-dbos-app-version|value: \"${RUNTIME_IMAGE##*@}\"|" \
         -e "s|value: wardby-coding-worker-image-node-python-3-12$|value: ${WORKER_IMAGE_NODE_PYTHON}|" \
+        -e "s|value: wardby-coding-worker-image-node-python-3-13$|value: ${WORKER_IMAGE_NODE_PYTHON_313}|" \
+        -e "s|value: wardby-coding-worker-image-node-python-3-14$|value: ${WORKER_IMAGE_NODE_PYTHON_314}|" \
         -e "s|value: wardby-claude-tool-runner-image-node-python-3-12$|value: ${CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON}|" \
+        -e "s|value: wardby-claude-tool-runner-image-node-python-3-13$|value: ${CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_313}|" \
+        -e "s|value: wardby-claude-tool-runner-image-node-python-3-14$|value: ${CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_314}|" \
         -e "s|value: wardby-claude-tool-runner-image$|value: ${CLAUDE_TOOL_RUNNER_IMAGE}|" \
         -e "s|value: wardby-claude-coding-worker-image$|value: ${CLAUDE_WORKER_IMAGE}|" \
         -e "s|value: wardby-coding-worker-image$|value: ${WORKER_IMAGE}|" \

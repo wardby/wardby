@@ -578,7 +578,7 @@ are the only boundary.
 Set `LOCAL_REPO_ROOTS` only on a single-user or personal server. Every
 principal who can create or update agents or link repositories can use every
 repository under the trusted folders: its committed code is sent to the model,
-and runs push `wardby/run-*` branches into it. Anyone with execute access to a
+and runs push `wardby/*` branches into it. Anyone with execute access to a
 local coding agent can trigger such pushes.
 
 Set these on the control plane:
@@ -622,31 +622,39 @@ JOB_LAUNCHER=docker
 2. The worker runs in the usual sandbox. `.wardby/services.yaml` works: it is
    read from the committed file at the base ref (never the working tree) and
    fails with the same errors as on GitHub (see [coding-services.md](coding-services.md)).
-3. Wardby validates the result and pushes one commit (with `gitHistory` on, the
-   agent's own commits, rewritten to Wardby's identity) to the branch
-   `wardby/run-<run id>` in the source repository. Your working tree, index
+3. Wardby validates the result and pushes one commit to the run's branch
+   (`wardby/<name>`, see [Branch names](#branch-names)) in the source repository. The commit message is a
+   conventional-commit subject plus a `Wardby-Run` line (see
+   [Pull request titles and commit messages](#pull-request-titles-and-commit-messages)). Your working tree, index
    and checked-out branch are never modified. `get_run` reports `resultBranch`
    and `baseSha`.
 4. The repository's own receive-side hooks (`pre-receive`, `update`,
    `post-receive`) run on that push, as they would for any push.
 
-To build on an earlier result, trigger with `baseRef: "wardby/run-<run id>"`. A
+To build on an earlier result, trigger with `baseRef` set to that run's branch (`get_run` shows it as `resultBranch`). A
 continuation of a run (a lead agent revising its earlier work) fast-forwards the
 same branch; if the branch has moved, or is checked out, the run fails with
 `local_branch_conflict` and nothing is pushed. A local repository has no pull
 requests, so a continuation there does not merge any other branch first.
 
 Result branches accumulate, and wardby does not delete them. Clean up with
-`git branch -D wardby/run-<run id>`.
+`git branch -D <branch>`.
 
 ### Toolchains for local repositories
 
 The default workspace is Node. A coding agent whose `codingProfile` sets
-`toolchain: "node-python"` and `toolchainVersion: "3.12"` runs in a Node +
-Python 3.12 workspace with `pytest` and `ruff`, for Codex and for Claude Code.
-The server selects the image from `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`
-(Codex) or `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` (Claude Code); a
-`node-python` agent is refused when the variable for its provider is unset.
+`toolchain: "node-python"` and `toolchainVersion` set to `3.12`, `3.13` or
+`3.14` runs in a Node + Python workspace with `pytest` and `ruff`, for Codex
+and for Claude Code. The release publishes one `node-python` image per Python
+version, and in each `python` is that version (the other two stay installed
+for `uv`). The server selects the image from the variable for the version,
+`CODING_WORKER_IMAGE_NODE_PYTHON_3_12`, `_3_13` or `_3_14` (Codex), or
+`CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`, `_3_13` or `_3_14` (Claude
+Code). Set each variable you want to offer to the image built for that
+version. When you build the images yourself, pass the version as a build
+argument, for example `--build-arg PYTHON_DEFAULT_VERSION=3.13` (the default is
+`3.12`). A `node-python` agent is refused when the variable for its provider
+and version is unset.
 `quickstart` sets this up for you when the repository has a Python marker file
 (`pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` or `requirements*.txt`)
 at its committed root; see
@@ -710,8 +718,11 @@ CODING_WORKER_IMAGE=sha256:replace-with-worker-image-id
 # Claude Code agents only (both or neither):
 CODING_CLAUDE_WORKER_IMAGE=sha256:replace-with-claude-worker-image-id
 CODING_CLAUDE_TOOL_RUNNER_IMAGE=sha256:replace-with-claude-tool-runner-image-id
-# Only for Claude Code agents on the node-python toolchain (version 3.12):
+# Only for Claude Code agents on the node-python toolchain. Set one variable per
+# toolchainVersion you offer (3.12, 3.13, 3.14), each to the image built for that version:
 CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12=sha256:replace-with-claude-tool-runner-node-python-image-id
+CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_13=sha256:replace-with-claude-tool-runner-node-python-3-13-image-id
+CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_14=sha256:replace-with-claude-tool-runner-node-python-3-14-image-id
 CODING_PROXY_CONTAINER=wardby-coding-proxy
 VCS_WORK_ROOT=/tmp/wardby-vcs
 CODING_JOB_STATE_ROOT=/tmp/wardby-docker-jobs
@@ -894,6 +905,92 @@ agent, `workerImageRef` replaces only the tool runner (the container that runs
 the agent's commands); Claude Code itself always runs on
 `CODING_CLAUDE_WORKER_IMAGE`. See
 [Bring-Your-Own Coding-Worker Images](coding-worker-byo-images.md).
+
+## Branch names
+
+A coding run pushes to a branch under `wardby/`. Wardby picks the name when it
+creates the run, in this order:
+
+1. **A name you pass.** `trigger_agent` takes an optional `branch`. It is
+   cleaned to lowercase letters, digits and hyphens, at most 40 characters,
+   and `wardby/` is added: `branch: "readme-update"` gives
+   `wardby/readme-update`. Typing the `wardby/` prefix yourself is fine. Only
+   the agent's owner may pass it, unless the owner allows non-owner overrides
+   (`codingProfile.allowWebhookTaskOverride`).
+2. **The linked issue's key.** A run started for a Jira issue, or by
+   `trigger_agent` with `issue`, uses the key: `wardby/PROJ-123`. A key that is
+   not a plain word is cleaned the same way (a GitHub issue
+   `your-org/your-repo#12` gives `wardby/your-org-your-repo-12`). Jira's
+   GitHub integration links a branch to an issue when its name contains the
+   key.
+3. **The run id**, when neither is available: `wardby/run-<run id>`.
+
+Names are per repository. A name that another run in the same repository holds
+(one still going, or one that pushed a branch) gets `-2`, `-3`, and so on. A
+run that failed or changed nothing never pushed, so its name is free again.
+
+### Adding to an existing pull request
+
+Triggering with a name, or an issue, that an earlier run already used does not
+open a second pull request. Wardby adds a commit to the newest earlier run's
+branch and pull request when that run opened a pull request, was started by the
+same owner, and is in the same repository. Passing `baseRef` starts a new branch
+instead. To get a separate pull request for the same issue, pass a different
+`branch`.
+
+Wardby tracks whether a pull request is still open only for issue-linked pull
+requests; it skips one it knows is merged or closed. For any other pull
+request it assumes the pull request is open, so after closing or merging one on
+the host, use a new `branch` name for the next run.
+
+## Pull request titles and commit messages
+
+Every coding run's commit, and the draft pull request it opens, use a
+[Conventional Commits](https://www.conventionalcommits.org/) subject:
+
+```text
+feat(webhooks): add retry to Jira webhook delivery (PROJ-123)
+```
+
+The commit message adds a blank line and a trailer naming the run:
+
+```text
+feat(webhooks): add retry to Jira webhook delivery (PROJ-123)
+
+Wardby-Run: <run id>
+```
+
+How the subject is built:
+
+- **Type, scope and title come from the agent.** With its result the agent
+  returns `commitType`, `commitScope` (optional) and `commitTitle`, describing
+  that run's own change. The type is one of `feat`, `fix`, `docs`, `style`,
+  `refactor`, `perf`, `test`, `build`, `ci` or `chore`. The agent picks it from
+  the task and what it changed, so saying what kind of change you want in the
+  task ("fix a bug", "only change documentation") steers it.
+- **The model's output is normalized, never rejected.** A missing or unlisted
+  type becomes `chore`. A scope becomes a lowercase slug or is dropped. A title
+  becomes one plain line: a repeated `type:` prefix and a trailing period are
+  removed. With no usable title the subject is `chore: Wardby run <run id>`.
+  The whole subject is cut to 72 characters by shortening the title; the key
+  is never cut.
+- **The issue key goes at the end, in parentheses.** It is the key of the
+  issue that started the run (see [Jira agents](jira-agents.md)), or else the
+  agent's `tag` when that is itself an issue key such as `GH-42`. A key the
+  agent also wrote into its title is not repeated. A run with no key has no
+  suffix.
+- **The pull request title is set once**, from the run that opens the pull
+  request, and is not rewritten by later runs. Each follow-up run on the same
+  pull request adds a commit with its own subject describing that run's
+  change.
+- **The branch name is fixed when the run is created** (see
+  [Branch names](#branch-names)). The `Wardby-Run` line repeats the run id in
+  the commit itself. It shows when you open the
+  commit, or expand it in the pull request's Commits tab, and
+  `git log --grep=<run id>` finds the commit.
+
+Wardby does not add a `Signed-off-by` line to its commits. The format and its
+limits are not configurable.
 
 ## Budgets
 
@@ -1251,6 +1348,13 @@ cannot be loaded, nothing is stored.
 **Which runs.** Claude Code runs that finish, stop at their budget, or fail.
 A run stopped with `stop_run` or ended by its timeout is not captured, because
 its worker is removed before the transcript can be collected.
+
+**When it is captured.** After the run's final status is written and before its
+job is removed, so a control-plane copy that dies in between does not lose it:
+another copy captures it, and the job stays until it has. A pod that cannot be
+read is retried up to five times, then recorded as `not_captured`; a job that is
+already gone is recorded as `not_captured` without retries (see
+[Availability](availability.md#failures-and-recovery)).
 
 **Who can read it.** Transcripts are stored from the first run
 with `sessionResume` on. Anyone who can read a run (its triggerer and the

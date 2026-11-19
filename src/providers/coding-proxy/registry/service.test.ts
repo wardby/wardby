@@ -294,6 +294,13 @@ describe("RegistryService", () => {
       findPlanRefusal: (runId, ecosystem, name, version) => inner.findPlanRefusal(runId, ecosystem, name, version),
       recordDependencyCacheLockHash: (runId, lockHash, max) =>
         inner.recordDependencyCacheLockHash(runId, lockHash, max),
+      planFallback: (runId) => inner.planFallback(runId),
+      addPlanFallback: (runId, ecosystem) => inner.addPlanFallback(runId, ecosystem),
+      startPlan: (runId, input) => inner.startPlan(runId, input),
+      endPlan: (runId) => inner.endPlan(runId),
+      reserveDownload: (runId, input) => inner.reserveDownload(runId, input),
+      syncDownload: (runId, reservationId, input) => inner.syncDownload(runId, reservationId, input),
+      releaseDownload: (reservationId) => inner.releaseDownload(reservationId),
     };
     const hangingBody = new ReadableStream<Uint8Array>({
       pull: () => new Promise<void>(() => {}), // never resolves
@@ -364,9 +371,9 @@ describe("RegistryService", () => {
   it("enforces the per-run file limit across concurrent downloads via an in-flight reservation, not just a per-request snapshot", async () => {
     // A store.usage() snapshot taken once per request would let all three
     // downloads see the same "0 files served" baseline and all proceed,
-    // since none of them has recorded a served row yet. The in-process
-    // in-flight reservation must be what stops the third — before any of
-    // the three streams is even read.
+    // since none of them has recorded a served row yet. The store-held
+    // reservation must be what stops the third — before any of the three
+    // streams is even read.
     const { registry, store } = service({ limits: { maxFiles: 2 } });
     const [first, second, third] = await Promise.all([
       registry.handle(request("dl/app/1.0.0")),
@@ -385,7 +392,7 @@ describe("RegistryService", () => {
   it("holds a download's reservation until its served record actually lands, not just until its bytes finish (round 2 ordering)", async () => {
     // If release() ran before the served recordFetch resolved, there would
     // be a window — between the release and the row actually landing in the
-    // store — where neither `inFlight` nor store.usage() counts this file,
+    // store — where neither the reservation nor store.usage() counts this file,
     // and a concurrent request could be admitted past maxFiles. Gating the
     // served recordFetch call lets this test hold open exactly that window
     // and prove nothing slips through it.
@@ -489,6 +496,76 @@ describe("RegistryService file-metadata misses", () => {
     expect(download).toMatchObject({ status: 200 });
     if ("stream" in download) await download.stream.cancel();
     expect(fetched).toContain("app");
+  });
+});
+
+describe("RegistryService with several proxy replicas sharing one store", () => {
+  /** Two services over one store: two proxy pods over one database. */
+  const replicas = (overrides: Parameters<typeof service>[0] = {}) => {
+    const store = overrides.store ?? new MemoryRegistryStore();
+    return { a: service({ ...overrides, store }).registry, b: service({ ...overrides, store }).registry, store };
+  };
+
+  it("enforces the per-run file limit once in total across replicas", async () => {
+    const { a, b } = replicas({ limits: { maxFiles: 2 } });
+    const responses = await Promise.all([
+      a.handle(request("dl/app/1.0.0")),
+      b.handle(request("dl/app/1.0.0")),
+      a.handle(request("dl/app/1.0.0")),
+    ]);
+    // Which request loses depends on arrival order; that exactly one does is the point.
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 200, 429]);
+    // A fourth, on the replica that has served nothing yet, is refused too.
+    await expect(b.handle(request("dl/app/1.0.0"))).resolves.toMatchObject({ status: 429 });
+  });
+
+  it("counts another replica's in-flight download against the per-run byte limit", async () => {
+    // maxTotalBytes admits one 13-byte package, not two: B's download is cut off while A's is still open.
+    const { a, b } = replicas({ limits: { maxTotalBytes: 20 } });
+    const open = await a.handle(request("dl/app/1.0.0"));
+    const second = await b.handle(request("dl/app/1.0.0"));
+    if (!("stream" in second)) throw new Error(`expected a stream, got ${second.status}`);
+    await expect(new Response(second.stream).arrayBuffer()).rejects.toThrow(/wardby_package_limit/);
+    if ("stream" in open) await open.stream.cancel();
+  });
+
+  it("frees a download's reservation when it completes, so another replica can serve", async () => {
+    const { a, b, store } = replicas({ limits: { maxFiles: 2 } });
+    for (const replica of [a, b]) {
+      const response = await replica.handle(request("dl/app/1.0.0"));
+      if ("stream" in response) await new Response(response.stream).arrayBuffer();
+    }
+    expect(store.reservations.size).toBe(0);
+    await expect(a.handle(request("dl/app/1.0.0"))).resolves.toMatchObject({ status: 429 });
+  });
+
+  it("does not count a reservation whose replica died (its lease lapsed)", async () => {
+    const { b, store } = replicas({ limits: { maxFiles: 1 } });
+    store.reservations.set("dead", { runId: "run-1", bytes: 13, expiresAt: new Date(NOW.getTime() - 1) });
+    await expect(b.handle(request("dl/app/1.0.0"))).resolves.toMatchObject({ status: 200 });
+    expect(store.reservations.has("dead")).toBe(false);
+  });
+
+  it("answers a metadata request after a fallen-back plan on a replica that did not run the plan", async () => {
+    // Without a fallback, "dep" (reached only through app's metadata) is refused; once a plan of the run fell
+    // back, any replica walks the graph for it instead of refusing.
+    const control = replicas();
+    await expect(control.b.handle(request("dep"))).resolves.toMatchObject({ status: 403 });
+
+    const { b, store } = replicas();
+    await store.addPlanFallback("run-1", "fake");
+    await expect(b.handle(request("dep"))).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("starts at most one plan at a time per run, and the plan limit holds across replicas", async () => {
+    const { store } = replicas();
+    const lease = new Date(NOW.getTime() + 60_000);
+    expect(await store.startPlan("run-1", { max: 2, leaseUntil: lease, now: NOW })).toBe("started");
+    expect(await store.startPlan("run-1", { max: 2, leaseUntil: lease, now: NOW })).toBe("busy");
+    await store.endPlan("run-1");
+    expect(await store.startPlan("run-1", { max: 2, leaseUntil: lease, now: NOW })).toBe("started");
+    await store.endPlan("run-1");
+    expect(await store.startPlan("run-1", { max: 2, leaseUntil: lease, now: NOW })).toBe("limit");
   });
 });
 
@@ -958,6 +1035,68 @@ describe("RegistryService served-byte tally and per-adapter hosts", () => {
     expect("body" in response && response.body).toContain("wardby_upstream_host_not_allowed");
     expect(urls).toEqual([]);
     expect(store.fetches).toMatchObject([{ outcome: "refused", reason: "wardby_upstream_host_not_allowed" }]);
+  });
+});
+
+describe("RegistryService per-name upstream hosts", () => {
+  /** `app` may be downloaded only from private.test, every other name only from upstream.test. */
+  const bound: RegistryAdapter = {
+    ...fakeAdapter,
+    upstreamHosts: ["upstream.test", "private.test"],
+    hostsFor: (name) => (name === "app" ? ["private.test"] : ["upstream.test"]),
+  };
+  async function download(urlOf: (name: string) => string) {
+    const urls: string[] = [];
+    const store = new MemoryRegistryStore();
+    store.contexts.set(capabilityHash("rrg_token"), {
+      runId: "run-1",
+      deadlineAt: new Date(NOW.getTime() + DAY),
+      allowlist: { fake: ["app"] },
+      policy: {},
+      repository: "owner/repo",
+      cacheImage: null,
+      dependencyCache: false,
+      packageAudit: null,
+    });
+    const registry = new RegistryService({
+      adapters: new Map([
+        [
+          "fake",
+          {
+            ...bound,
+            resolveDownload: (route, m) => {
+              const file = m.versions.get(route.version)?.files[0];
+              return file ? { ...file, upstreamUrl: urlOf(m.name) } : null;
+            },
+          },
+        ],
+      ]),
+      store,
+      audit: { audit: async () => NO_ADVISORIES },
+      upstream: async (url) => {
+        urls.push(url);
+        return new Response(tarball);
+      },
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1_000_000, maxTotalBytes: 2_000_000, maxFiles: 10, idleTimeoutMs: 1_000 },
+      now: () => NOW,
+    });
+    return { response: await registry.handle(request("dl/app/1.0.0")), urls, store };
+  }
+
+  it("refuses a download hosted on another allowed host than its own name's, without fetching it", async () => {
+    // A document for the private name that points at the public host (or the reverse).
+    const { response, urls, store } = await download(() => "https://upstream.test/app/1.0.0.tgz");
+    expect(response).toMatchObject({ status: 502 });
+    expect("body" in response && response.body).toContain("wardby_upstream_host_not_allowed");
+    expect(urls).toEqual([]);
+    expect(store.fetches).toMatchObject([{ outcome: "refused", reason: "wardby_upstream_host_not_allowed" }]);
+  });
+
+  it("serves a download hosted on its own name's host", async () => {
+    const { response, urls } = await download(() => "https://private.test/app/1.0.0.tgz");
+    expect(response).toMatchObject({ status: 200 });
+    expect(urls).toEqual(["https://private.test/app/1.0.0.tgz"]);
   });
 });
 

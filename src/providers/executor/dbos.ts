@@ -51,7 +51,15 @@ import {
   shouldGiveUpAdoption,
   versionMismatchReason,
 } from "./dbos-status.js";
-import type { Executor, ExecutionRecoveryResult, PersistedExecutionHandle } from "./types.js";
+import {
+  ExecutorClosingError,
+  type Executor,
+  type ExecutionRecoveryResult,
+  type PersistedExecutionHandle,
+} from "./types.js";
+
+/** How long close() lets running workflows finish before it shuts DBOS down anyway. */
+const SHUTDOWN_TIMEOUT_MS = 5_000;
 
 export const DBOS_BACKEND = "dbos";
 
@@ -290,6 +298,13 @@ const runWorkflow = DBOS.registerWorkflow(
 
 export class DbosExecutor implements Executor {
   private launched = false;
+  /**
+   * Set when close() begins and cleared by an explicit launch(). While set, start/stop/recover
+   * refuse instead of relaunching DBOS: a scheduler or reconciler pass already in flight at
+   * shutdown would otherwise launch it again in a dying process, and the workflow would stay
+   * owned by that dead executor id until another process adopted it.
+   */
+  private closing = false;
   /** Non-optional once constructed — see the constructor's DBOS_EXECUTOR_ID guard. */
   private readonly id: string;
   /**
@@ -305,6 +320,8 @@ export class DbosExecutor implements Executor {
     private readonly config: DbosConfig,
     private readonly db: Db = defaultDb,
     private readonly heartbeatIntervalMs: number = HEARTBEAT_INTERVAL_MS,
+    /** How long close() lets running workflows finish before it shuts DBOS down anyway; tests shorten it. */
+    private readonly shutdownTimeoutMs: number = SHUTDOWN_TIMEOUT_MS,
   ) {
     if (!config.systemDatabaseUrl) {
       throw new Error("EXECUTOR=dbos requires DBOS_SYSTEM_DATABASE_URL or DATABASE_URL.");
@@ -323,6 +340,7 @@ export class DbosExecutor implements Executor {
 
   async launch(): Promise<void> {
     if (this.launched) return;
+    this.closing = false;
     // DBOS is a process-wide singleton: the executor id is fixed by whoever
     // launched it first, and setConfig below is skipped for everyone after.
     // Fail loudly rather than run with an id that disagrees with reality —
@@ -359,10 +377,11 @@ export class DbosExecutor implements Executor {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
     if (!this.launched) return;
     this.launched = false;
     try {
-      await DBOS.shutdown({ workflowCompletionTimeoutMS: 5_000 });
+      await DBOS.shutdown({ workflowCompletionTimeoutMS: this.shutdownTimeoutMs });
     } finally {
       // Only now: shutdown first lets the queue runner finish the dispatch it is in, so a workflow
       // the queue claimed just before (a takeover's fork, an adoption) still starts. Without its
@@ -373,13 +392,19 @@ export class DbosExecutor implements Executor {
     }
   }
 
+  /** Launches on first use, but never once close() has begun. */
+  private async ensureLaunched(): Promise<void> {
+    if (this.closing) throw new ExecutorClosingError();
+    if (!this.launched) await this.launch();
+  }
+
   /** Where a run this executor marks failed files its self-defect (no-op without a configured issue tracker). */
   private get selfDefects(): SelfDefectSink {
     return { db: this.db, issueTrackers: this.providers.issueTrackers };
   }
 
   async start(runId: string): Promise<void> {
-    if (!this.launched) await this.launch();
+    await this.ensureLaunched();
     await this.db.run.updateMany({
       where: { id: runId, executionBackend: null },
       data: { executionBackend: DBOS_BACKEND },
@@ -426,7 +451,7 @@ export class DbosExecutor implements Executor {
     // Cancellation goes through DBOS, so this process has to be launched
     // even when it never started this run (the reconciler/MCP can stop a run
     // another instance is executing).
-    if (!this.launched) await this.launch();
+    await this.ensureLaunched();
     dbosLog.info({ runId, reason }, "cancelling durable run");
     // The terminal write comes first and is conditional (the first writer wins), so the run is
     // cancelled with the caller's reason even when its workflow runs in another process (where the
@@ -475,7 +500,7 @@ export class DbosExecutor implements Executor {
     if (handle.backend !== DBOS_BACKEND) {
       return { state: "lost", reason: `DbosExecutor cannot recover backend "${handle.backend}".` };
     }
-    if (!this.launched) await this.launch();
+    await this.ensureLaunched();
     const status = await DBOS.getWorkflowStatus(handle.id);
     const row = await this.db.run.findUnique({ where: { id: handle.runId }, select: { status: true } });
     const runIsTerminal = !!row && !["pending", "running"].includes(row.status);

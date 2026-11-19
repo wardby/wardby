@@ -25,6 +25,7 @@
  * run's row is final, outside any run, and a failure to file only logs — it
  * never fails a run, so it can never trigger another filing.
  */
+import { errorName } from "./run-follow-ups.js";
 import type { PrismaClient } from "#prisma";
 import { agentFooter } from "../providers/issue-tracker/jira.js";
 import {
@@ -117,7 +118,7 @@ export async function fileSelfDefect(
 ): Promise<FileIssueResult | null> {
   if (!SELF_DEFECT_STATUSES.has(run.status) || !trackers) return null;
   const filing = attempt(db, trackers, run, opts).catch((err: unknown) => {
-    log.warn({ err, runId: run.id, agentId: run.agentId }, "could not file the run's self-defect");
+    log.warn({ error: errorName(err), runId: run.id, agentId: run.agentId }, "could not file the run's self-defect");
     return null;
   });
   const waitMs = opts.waitMs ?? SELF_DEFECT_WAIT_MS;
@@ -153,7 +154,7 @@ export async function fileSelfDefectForRun(
       select: { id: true, agentId: true, status: true, error: true, finishedAt: true },
     });
   } catch (err) {
-    log.warn({ err, runId }, "could not read the run to file its self-defect");
+    log.warn({ error: errorName(err), runId }, "could not read the run to file its self-defect");
     return null;
   }
   if (!row) return null;

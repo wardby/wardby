@@ -228,6 +228,22 @@ export interface VersionFact {
   dependencies: readonly DeclaredDependency[];
 }
 
+/** A private registry that serves only the names in `scopes` (npm scopes
+ *  such as `@acme`); every other name comes from the public registry. A
+ *  lockfile entry for a scoped name must record `baseUrl` as its source,
+ *  and any other name must not. Plain data: it is shipped to a worker thread. */
+export interface PrivateRegistry {
+  /** The private registry's npm base URL, with a trailing slash. */
+  baseUrl: string;
+  scopes: readonly string[];
+}
+
+export interface LockfileParseOptions {
+  maxEntries: number;
+  proxyRegistryUrl: string;
+  privateRegistry?: PrivateRegistry;
+}
+
 /** An ecosystem's lockfile verification hooks (`POST /-/plan`): parsing and
  *  registry reads only. Every decision (integrity, edges, reachability,
  *  release age, advisories) is the registry core's. */
@@ -244,7 +260,11 @@ export interface LockfilePlanSupport {
    *  `wardby_lockfile_too_large`). `proxyRegistryUrl` is the proxy's own
    *  route for this ecosystem, which a lockfile written through it records
    *  as the download source. */
-  parse(body: string, options: { maxEntries: number; proxyRegistryUrl: string }): ParsedLockfile;
+  parse(body: string, options: LockfileParseOptions): ParsedLockfile;
+  /** Set when some names come from a private registry (see
+   *  `PrivateRegistry`); passed to `parse` so parsers stay stateless and
+   *  can run in a worker thread. */
+  readonly privateRegistry?: PrivateRegistry;
   /** The registry's own record of one version, with or without its publish
    *  time (`publishedAt` null: read with fetchPublishTimes); null when the
    *  registry has no such version. */
@@ -297,6 +317,17 @@ export interface RegistryAdapter {
   readonly osvEcosystem: string;
   /** Upstream hosts this adapter may reach; added to the pinned-fetch allowlist. */
   readonly upstreamHosts: readonly string[];
+  /** Per-name upstream hosts, when they differ by package (npm with a
+   *  private scope: a scoped name's downloads must come from the private
+   *  host, every other name's from the public one). The core checks a
+   *  download URL against this instead of `upstreamHosts` when present. */
+  hostsFor?(name: string): readonly string[];
+  /** Whether `name` is served from a private registry. The OSV audit does
+   *  not fail an install for such a name when OSV gives no answer. */
+  isPrivateName?(name: string): boolean;
+  /** Allowlist roots every agent has in addition to its own entries (a
+   *  wildcard with an empty prefix allows every name). The operator opts in. */
+  implicitRoots?: readonly AllowlistEntry[];
   /** Extra folder names skipped at collection, e.g. "vendor" for Composer. */
   readonly collectExclude: readonly string[];
   /** Whether fetchMetadata's VersionInfo.dependencies is complete (npm's
@@ -318,6 +349,9 @@ export interface RegistryAdapter {
   /** Lockfile verification (`POST /registry/<id>/-/plan`); omitted when the
    *  ecosystem has none. */
   readonly lockfilePlan?: LockfilePlanSupport;
+  /** The index address a lockfile's `registry =` entry carries for this ecosystem's upstream (no trailing slash), which
+   *  `POST /registry/<id>/-/origins` answers beside each file's real address. Omitted when the ecosystem has no such route. */
+  readonly lockfileIndexUrl?: string;
 
   // --- Allowlist syntax -------------------------------------------------
   /** Parse one allowlist entry in this ecosystem's syntax. Throws an

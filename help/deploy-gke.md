@@ -87,3 +87,6 @@ the user to the full guide below for every step.
 Follow the complete, ordered guide at
 [`docs/getting-started-gke.md`](../docs/getting-started-gke.md). It includes
 the precise IAM, DNS, bootstrap, upgrades, and teardown steps.
+
+To manage the Kubernetes workloads with Helm instead of the overlay, see
+[Install Wardby with Helm](install-helm.md).

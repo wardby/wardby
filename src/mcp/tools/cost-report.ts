@@ -2,6 +2,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { agentAccessResolver, readableAgentsWhere } from "../auth/access.js";
 import { costReport, CostReportInputError, parseCostReportQuery, type CostVisibility } from "../../core/cost-report.js";
+import { isOwnerAll } from "../auth/resource-server.js";
 import { textResult } from "./text-result.js";
 
 /**
@@ -44,7 +45,7 @@ export function registerCostReportTools(mcp: WardbyMcpServer): void {
         throw err;
       }
       let visibility: CostVisibility | null = null;
-      if (!ctx.operator) {
+      if (!ctx.operator && !isOwnerAll(ctx)) {
         const resolve = await agentAccessResolver(ctx);
         const agents = await ctx.db.agent.findMany({
           where: await readableAgentsWhere(ctx),

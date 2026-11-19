@@ -18,8 +18,9 @@
  *
  * Kept free of imports from npm.ts, which imports this module.
  */
-import { parseProxyPath, publicNpmTarballUrl } from "./npm-lockfile.js";
+import { npmTarballUrl, parseProxyPath } from "./npm-lockfile.js";
 import { registryDependencyEdges } from "./npm-plan.js";
+import { isPrivateNpmName } from "./private-registry.js";
 import {
   buildResolve,
   entryOf,
@@ -32,7 +33,14 @@ import {
   yamlEntryLines,
   type Target,
 } from "./lockfile-shared.js";
-import { RegistryError, type DeclaredDependency, type LockfileEntry, type ParsedLockfile } from "./types.js";
+import {
+  RegistryError,
+  type DeclaredDependency,
+  type LockfileEntry,
+  type LockfileParseOptions,
+  type ParsedLockfile,
+  type PrivateRegistry,
+} from "./types.js";
 
 /** Two-space-indented keys a pnpm lockfile may have per entry (a package
  *  and its snapshot, plus slack for importers), for the cheap pre-check. */
@@ -85,7 +93,13 @@ function importerReferences(importer: Record<string, unknown>): Map<string, stri
 
 /** The entry for one installed instance: local (null), or registry or
  *  refused by its resolution. */
-function classify(path: string, name: string, version: string, resolution: unknown, proxyRegistryUrl: string): Target {
+function classify(
+  path: string,
+  name: string,
+  version: string,
+  resolution: unknown,
+  options: LockfileParseOptions,
+): Target {
   if (version.startsWith("link:") || version.startsWith("file:")) return null;
   const fields = mapOf(resolution);
   const type = stringOf(fields.type);
@@ -93,14 +107,11 @@ function classify(path: string, name: string, version: string, resolution: unkno
   const tarball = stringOf(fields.tarball);
   if (tarball?.startsWith("file:")) return null;
   const integrity = stringOf(fields.integrity) ?? null;
-  const elsewhere = type !== undefined || (tarball !== undefined && !fromRegistry(tarball, proxyRegistryUrl));
+  const elsewhere = type !== undefined || (tarball !== undefined && !fromRegistry(name, tarball, options));
   return entryOf(path, name, version, integrity, elsewhere ? "elsewhere" : "registry");
 }
 
-export function parsePnpmLockfile(
-  body: string,
-  options: { maxEntries: number; proxyRegistryUrl: string },
-): ParsedLockfile {
+export function parsePnpmLockfile(body: string, options: LockfileParseOptions): ParsedLockfile {
   const lines = yamlEntryLines(body);
   if (lines > (options.maxEntries + 1) * KEY_LINES_PER_ENTRY) throw tooLarge(lines, options.maxEntries);
   const document = parseLockfileYaml(body);
@@ -130,10 +141,10 @@ export function parsePnpmLockfile(
     if (major === 9) {
       const base = withoutPeers(path);
       const { name, range: version } = splitDescriptor(base);
-      target = classify(path, name, version, mapOf(packages[base]).resolution, options.proxyRegistryUrl);
+      target = classify(path, name, version, mapOf(packages[base]).resolution, options);
     } else if (path.startsWith("/")) {
       const { name, range: version } = splitDescriptor(withoutPeers(path.slice(1)));
-      target = classify(path, name, version, instance.resolution, options.proxyRegistryUrl);
+      target = classify(path, name, version, instance.resolution, options);
     } else {
       // A v6 key without a leading slash is a package from outside the
       // registry (a git host, a URL, a local path); pnpm records its
@@ -143,7 +154,7 @@ export function parsePnpmLockfile(
         stringOf(instance.name) ?? path,
         stringOf(instance.version) ?? "",
         { type: "elsewhere", ...mapOf(instance.resolution) },
-        options.proxyRegistryUrl,
+        options,
       );
     }
     if (target) entries.push(target);
@@ -191,7 +202,7 @@ const RESOLUTION = /^(\s+resolution:\s*\{)([^}\n]*)(\}\s*)$/gm;
  * a package from the public registry), and one without an integrity is
  * rewritten to the public registry URL. Only matched values change.
  */
-export function normalizePnpmLockfile(content: string, registryUrl: string): string {
+export function normalizePnpmLockfile(content: string, registryUrl: string, privateRegistry?: PrivateRegistry): string {
   const base = registryUrl.endsWith("/") ? registryUrl : `${registryUrl}/`;
   return content.replace(RESOLUTION, (match, open: string, inner: string, close: string) => {
     const parts = inner.split(",").map((part) => part.trim());
@@ -203,8 +214,10 @@ export function normalizePnpmLockfile(content: string, registryUrl: string): str
       .replace(/^(['"])(.*)\1$/, "$2");
     const target = url.startsWith(base) ? parseProxyPath(url.slice(base.length)) : null;
     if (!target) return match;
-    if (parts.some((part) => part.startsWith("integrity:"))) parts.splice(tarballAt, 1);
-    else parts[tarballAt] = `tarball: ${publicNpmTarballUrl(target.name, target.version)}`;
+    // A private registry's download URL is never the conventional public one, so pnpm records it.
+    if (isPrivateNpmName(target.name, privateRegistry) || !parts.some((part) => part.startsWith("integrity:")))
+      parts[tarballAt] = `tarball: ${npmTarballUrl(target.name, target.version, privateRegistry)}`;
+    else parts.splice(tarballAt, 1);
     return `${open}${parts.join(", ")}${close}`;
   });
 }

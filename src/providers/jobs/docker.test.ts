@@ -926,7 +926,7 @@ describe("DockerJobLauncher", () => {
       phase: "provisioning",
     };
     const stateFile = `${createHash("sha256").update(created.spec.runId).digest("hex")}.json`;
-    await mkdir(join(created.root, "ambiguous-state"), { recursive: true });
+    await mkdir(join(created.root, "ambiguous-state"), { recursive: true, mode: 0o700 });
     await writeFile(join(created.root, "ambiguous-state", stateFile), `${JSON.stringify(record)}\n`, { mode: 0o600 });
     const recovered = new DockerJobLauncher({
       stateRoot: join(created.root, "ambiguous-state"),
@@ -947,7 +947,7 @@ describe("DockerJobLauncher", () => {
     const root = await mkdtemp(join(tmpdir(), "wardby-docker-job-"));
     temporaryRoots.push(root);
     const stateRoot = join(root, "state");
-    await mkdir(stateRoot, { recursive: true });
+    await mkdir(stateRoot, { recursive: true, mode: 0o700 });
     const runId = "docker-stale-network";
     const job = spec(runId);
     const plan = buildDockerIsolationPlan(job, "trusted-proxy");

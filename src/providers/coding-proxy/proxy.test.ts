@@ -17,6 +17,7 @@ import { deriveRegistryToken } from "../../coding/registry/token.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import { shippedCatalog } from "../llm/catalog.js";
 import { entryOf } from "../llm/catalog-types.js";
+import { WardbyMetrics } from "../../observability/metrics.js";
 import type { LlmEffort } from "../llm/types.js";
 import type { ProxyAuditEvent, ProxyModelTerms, ProxyProtocol } from "./types.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
@@ -96,6 +97,8 @@ async function harness(
     protocol?: ProxyProtocol;
     allowedModels?: string[];
     terms?: ProxyModelTerms;
+    leaseMs?: number;
+    ownerId?: string;
     mcpTools?: McpToolPin[];
   } = {},
 ): Promise<Harness> {
@@ -115,6 +118,8 @@ async function harness(
     pricing,
     pricingVersion: pricing ? "test-v1" : undefined,
     audit: (event) => events.push(event),
+    leaseMs: overrides.leaseMs,
+    ownerId: overrides.ownerId,
   });
   const session = await proxy.createSession({
     runId: `run-${Math.random()}`,
@@ -450,7 +455,7 @@ describe("CodingProxy", () => {
     const pending = execute(h, "cancel-in-flight");
     await vi.waitFor(() => expect(h.fetch).toHaveBeenCalledTimes(1));
     await h.proxy.cancelSession(h.session.id);
-    await expect(pending).rejects.toMatchObject({ status: 502, code: "upstream_aborted" });
+    await expect(pending).rejects.toMatchObject({ status: 502 });
     expect((await h.ledger.getRequest(reservedRequestId(h.events)))?.status).toBe("uncertain");
   });
 
@@ -2385,6 +2390,716 @@ describe("cache-aware holds", () => {
     });
     await execute(h, "t0", new TestSink(), turnBody(0));
     expect(h.events.find((e) => e.type === "request.reserved")).toMatchObject({ reservationBasis: "full" });
+  });
+});
+
+describe("request leases", () => {
+  const LEASE_MS = 30_000;
+  const at = (ms: number) => new Date(NOW.getTime() + ms);
+
+  /** An upstream whose stream stays open until finish() or until the request is aborted. */
+  function openUpstream() {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const upstream: typeof globalThis.fetch = async (_url, init) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            controller = c;
+            init?.signal?.addEventListener("abort", () => c.error(new Error("aborted")));
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    return {
+      upstream,
+      finish: (sse: string) => {
+        controller.enqueue(Buffer.from(sse));
+        controller.close();
+      },
+    };
+  }
+
+  /** A second proxy process on the same ledger and session, as another replica. */
+  function replica(h: Harness, clock: () => Date, options: { leaseMs?: number } = {}) {
+    const events: ProxyAuditEvent[] = [];
+    const proxy = new CodingProxy({
+      ledger: h.ledger,
+      credentials: { resolve: async () => "UPSTREAM_SECRET" },
+      fetch: vi.fn(async () => new Response(completedSse(USAGE), { headers: { "content-type": "text/event-stream" } })),
+      now: clock,
+      pricing: () => PRICE,
+      pricingVersion: "test-v1",
+      audit: (event) => events.push(event),
+      leaseMs: options.leaseMs ?? LEASE_MS,
+    });
+    return { proxy, events };
+  }
+
+  /** Starts a streaming request on `h` that stays open, and waits until its row exists. */
+  async function startOpenRequest(h: Harness, key = "open") {
+    const pending = execute(h, key, new TestSink(), requestBody(true)).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.events.some((e) => e.type === "request.reserved")).toBe(true));
+    await vi.waitFor(() => expect(h.fetch).toHaveBeenCalled());
+    return { pending, id: reservedRequestId(h.events) };
+  }
+
+  it("leases a reserved request to its process and keeps it alive while the process renews it", async () => {
+    let now = NOW;
+    const open = openUpstream();
+    const h = await harness({ now: () => now, leaseMs: LEASE_MS, ownerId: "owner-a", fetch: open.upstream });
+    const { pending, id } = await startOpenRequest(h);
+    expect(await h.ledger.getRequest(id)).toMatchObject({
+      status: "reserved",
+      ownerId: "owner-a",
+      leaseUntil: at(LEASE_MS),
+      maxOutputTokens: 10,
+    });
+
+    now = at(20_000);
+    await h.proxy.renewOwnLeases();
+    expect((await h.ledger.getRequest(id))?.leaseUntil).toEqual(at(20_000 + LEASE_MS));
+
+    // Past the first lease but inside the renewed one: another replica leaves it alone.
+    now = at(40_000);
+    const other = replica(h, () => now);
+    expect(await other.proxy.sweepExpired()).toMatchObject({ settled: 0 });
+    expect((await h.ledger.getRequest(id))?.status).toBe("reserved");
+
+    await h.proxy.cancelSession(h.session.id);
+    await pending;
+  });
+
+  it("settles a request whose process died at an estimate, and gives its hold back to the budget", async () => {
+    let now = NOW;
+    const raw = requestBody(true);
+    const hold = estimateReservationUsd(
+      Buffer.byteLength(JSON.stringify({ ...JSON.parse(raw), store: false, background: false })),
+      10,
+      PRICE,
+    );
+    const open = openUpstream();
+    const h = await harness({
+      now: () => now,
+      leaseMs: LEASE_MS,
+      budgetUsd: hold * 1.5,
+      fetch: open.upstream,
+    });
+    const { pending, id } = await startOpenRequest(h);
+
+    // While it is held, the same run's next request does not fit.
+    const other = replica(h, () => now);
+    await expect(
+      other.proxy.execute(
+        { bearer: h.session.capability, protocol: "openai-responses", rawBody: raw, requestKey: "next" },
+        new TestSink(),
+      ),
+    ).rejects.toMatchObject({ status: 429, code: "wardby_budget_exhausted" });
+
+    // Its process dies: nothing renews the lease. Once it is out, another replica settles the row.
+    now = at(LEASE_MS + 1);
+    expect(await other.proxy.sweepExpired()).toEqual({ settled: 1, withoutEstimate: 0, failures: [] });
+    const settled = await h.ledger.getRequest(id);
+    expect(settled).toMatchObject({
+      status: "uncertain",
+      costEstimated: true,
+      leaseUntil: null,
+      ownerId: expect.any(String),
+    });
+    expect(settled?.actualCostUsd).toBeGreaterThan(0);
+    expect(settled?.actualCostUsd).toBeLessThan(hold);
+    expect(other.events.filter((event) => event.type === "request.uncertain")).toEqual([
+      expect.objectContaining({
+        type: "request.uncertain",
+        runId: h.session.runId,
+        requestId: id,
+        reason: "lease_expired",
+        estimatedCostUsd: settled?.actualCostUsd,
+      }),
+    ]);
+
+    // The hold is gone and only the estimate counts, so the next request goes through.
+    await other.proxy.execute(
+      { bearer: h.session.capability, protocol: "openai-responses", rawBody: raw, requestKey: "next" },
+      new TestSink(),
+    );
+    // A second sweep finds nothing: the row is settled.
+    expect(await other.proxy.sweepExpired()).toMatchObject({ settled: 0 });
+
+    await h.proxy.cancelSession(h.session.id);
+    await pending;
+  });
+
+  it("corrects a swept request to its real cost when its slow owner does finish", async () => {
+    let now = NOW;
+    const open = openUpstream();
+    const h = await harness({ now: () => now, leaseMs: LEASE_MS, fetch: open.upstream });
+    const { pending, id } = await startOpenRequest(h);
+
+    now = at(LEASE_MS + 1);
+    const other = replica(h, () => now);
+    await other.proxy.sweepExpired();
+    expect((await h.ledger.getRequest(id))?.status).toBe("uncertain");
+
+    open.finish(completedSse(USAGE));
+    await pending;
+    expect(await h.ledger.getRequest(id)).toMatchObject({
+      status: "completed",
+      costEstimated: false,
+      leaseUntil: null,
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+  });
+
+  it("never sweeps a reserved request that has no lease", async () => {
+    let now = NOW;
+    const h = await harness({ now: () => now });
+    await h.ledger.reserve({
+      id: "old-pod",
+      sessionId: h.session.id,
+      requestKey: "old-pod",
+      requestFingerprint: "old-pod",
+      model: "test-model",
+      reservationUsd: 0.01,
+      pricing: { ...PRICE, version: "test-v1" },
+      now,
+    });
+    now = at(24 * 60 * 60_000);
+    const other = replica(h, () => now);
+    expect(await other.proxy.sweepExpired()).toEqual({ settled: 0, withoutEstimate: 0, failures: [] });
+    expect((await h.ledger.getRequest("old-pod"))?.status).toBe("reserved");
+  });
+
+  it("aborts its upstream call on the next heartbeat once another replica swept its request", async () => {
+    let now = NOW;
+    const open = openUpstream();
+    const h = await harness({ now: () => now, leaseMs: LEASE_MS, ownerId: "owner-a", fetch: open.upstream });
+    const { pending, id } = await startOpenRequest(h);
+
+    // The owner stalls past its lease and another replica settles the request.
+    now = at(LEASE_MS + 1);
+    const other = replica(h, () => now);
+    expect(await other.proxy.sweepExpired()).toMatchObject({ settled: 1 });
+    const swept = await h.ledger.getRequest(id);
+    expect(swept?.status).toBe("uncertain");
+
+    // The owner wakes up: its heartbeat finds the lease gone and stops the relay.
+    await h.proxy.renewOwnLeases();
+    expect(await pending).toMatchObject({ status: 502 });
+    expect(await h.ledger.getRequest(id)).toEqual(swept);
+  });
+
+  it("does not keep renewing a request it lost", async () => {
+    let now = NOW;
+    const open = openUpstream();
+    const h = await harness({ now: () => now, leaseMs: LEASE_MS, ownerId: "owner-a", fetch: open.upstream });
+    const { pending } = await startOpenRequest(h);
+    now = at(LEASE_MS + 1);
+    await replica(h, () => now).proxy.sweepExpired();
+
+    const renew = vi.spyOn(h.ledger, "renewLeases");
+    await h.proxy.renewOwnLeases();
+    await pending;
+    await h.proxy.renewOwnLeases();
+    expect(renew).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts a request whose session another process cancelled", async () => {
+    const open = openUpstream();
+    const h = await harness({ leaseMs: LEASE_MS, ownerId: "owner-a", fetch: open.upstream });
+    const { pending, id } = await startOpenRequest(h);
+
+    // Cancelled through the ledger, as a different process would: this one is not told directly.
+    await h.ledger.cancelSession(h.session.id);
+    await h.proxy.renewOwnLeases();
+    expect(await pending).toMatchObject({ status: 502 });
+    expect((await h.ledger.getRequest(id))?.status).toBe("uncertain");
+  });
+
+  it("leaves a request it still owns running when it renews", async () => {
+    const open = openUpstream();
+    const h = await harness({ leaseMs: LEASE_MS, ownerId: "owner-a", fetch: open.upstream });
+    const { pending, id } = await startOpenRequest(h);
+    await h.proxy.renewOwnLeases();
+    expect((await h.ledger.getRequest(id))?.status).toBe("reserved");
+    open.finish(completedSse(USAGE));
+    expect(await pending).not.toMatchObject({ status: 502 });
+  });
+
+  it("does not lease a request when the proxy has no lease length", async () => {
+    const open = openUpstream();
+    const h = await harness({ fetch: open.upstream });
+    const { pending, id } = await startOpenRequest(h);
+    expect((await h.ledger.getRequest(id))?.leaseUntil).toBeNull();
+    const renew = vi.spyOn(h.ledger, "renewLeases");
+    await h.proxy.renewOwnLeases();
+    expect(renew).not.toHaveBeenCalled();
+    await h.proxy.cancelSession(h.session.id);
+    await pending;
+  });
+
+  it("stops renewing a request once it settles, however it settles", async () => {
+    const h = await harness({ leaseMs: LEASE_MS });
+    const renew = vi.spyOn(h.ledger, "renewLeases");
+    await execute(h, "completes");
+    await expect(execute(h, "rejected", new TestSink(), requestBody())).resolves.toBeDefined();
+    const unavailable = await harness({
+      leaseMs: LEASE_MS,
+      credentials: {
+        resolve: async () => {
+          throw new Error("no credential");
+        },
+      },
+    });
+    await expect(execute(unavailable, "no-credential")).rejects.toMatchObject({ status: 503 });
+    const renewUnavailable = vi.spyOn(unavailable.ledger, "renewLeases");
+    await h.proxy.renewOwnLeases();
+    await unavailable.proxy.renewOwnLeases();
+    expect(renew).not.toHaveBeenCalled();
+    expect(renewUnavailable).not.toHaveBeenCalled();
+    expect(await unavailable.ledger.getRequest(reservedRequestId(unavailable.events))).toMatchObject({
+      status: "released",
+      leaseUntil: null,
+    });
+  });
+
+  it("settles without an estimate, keeping the hold, when none can be made", async () => {
+    let now = NOW;
+    const open = openUpstream();
+    const h = await harness({ now: () => now, leaseMs: LEASE_MS, fetch: open.upstream });
+    const { pending, id } = await startOpenRequest(h);
+    now = at(LEASE_MS + 1);
+    const other = replica(h, () => now);
+    h.ledger.settlementHints = async () => {
+      throw new Error("ledger unavailable");
+    };
+    expect(await other.proxy.sweepExpired()).toEqual({ settled: 1, withoutEstimate: 1, failures: [] });
+    const settled = await h.ledger.getRequest(id);
+    expect(settled).toMatchObject({ status: "uncertain", leaseUntil: null });
+    expect(settled?.costEstimated).toBeFalsy();
+    expect(other.events[0]).not.toHaveProperty("estimatedCostUsd");
+    await h.proxy.cancelSession(h.session.id);
+    await pending;
+  });
+
+  it("keeps sweeping the other expired requests when one cannot be settled", async () => {
+    let now = NOW;
+    const h = await harness({ now: () => now, leaseMs: LEASE_MS });
+    for (const id of ["first", "second"]) {
+      await h.ledger.reserve({
+        id,
+        sessionId: h.session.id,
+        requestKey: id,
+        requestFingerprint: id,
+        model: "test-model",
+        reservationUsd: 0.01,
+        pricing: { ...PRICE, version: "test-v1" },
+        now,
+        ownerId: "dead",
+        leaseMs: LEASE_MS,
+        requestBytes: 3_000,
+        maxOutputTokens: 10,
+      });
+      now = at(1_000);
+    }
+    now = at(LEASE_MS + 5_000);
+    const settle = h.ledger.settleExpired.bind(h.ledger);
+    h.ledger.settleExpired = async (id, estimate) => {
+      if (id === "first") throw new Error("database unavailable");
+      return settle(id, estimate);
+    };
+    const result = await h.proxy.sweepExpired();
+    expect(result).toMatchObject({ settled: 1, withoutEstimate: 0 });
+    expect(result.failures).toHaveLength(1);
+    expect((await h.ledger.getRequest("first"))?.status).toBe("reserved");
+    expect((await h.ledger.getRequest("second"))?.status).toBe("uncertain");
+  });
+
+  it("carries no secret value in a sweep's audit, result or metrics", async () => {
+    let now = NOW;
+    const open = openUpstream();
+    const h = await harness({ now: () => now, leaseMs: LEASE_MS, fetch: open.upstream });
+    const { pending } = await startOpenRequest(h);
+    now = at(LEASE_MS + 1);
+    const other = replica(h, () => now);
+    const metrics = new WardbyMetrics();
+    const result = await other.proxy.sweepExpired();
+    for (const event of other.events) metrics.observeProxyAudit(event);
+    const exposition = await metrics.registry.metrics();
+    for (const output of [JSON.stringify(other.events), JSON.stringify(result), exposition]) {
+      expect(output).not.toContain("UPSTREAM_SECRET");
+      expect(output).not.toContain(h.session.capability);
+    }
+    expect(exposition).toContain('wardby_proxy_leases_swept_total{estimate="yes"} 1');
+    await h.proxy.cancelSession(h.session.id);
+    await pending;
+  });
+});
+
+describe("a retry after the first try's proxy died", () => {
+  const LEASE_MS = 30_000;
+  const at = (ms: number) => new Date(NOW.getTime() + ms);
+  /** A session deadline past every clock these tests move to, so the session never expires under them. */
+  const LATE = at(2 * 24 * 60 * 60_000);
+  /** Every replica started on a harness, so `stop` can abort the requests each left in flight. */
+  const replicas = new Map<Harness, CodingProxy[]>();
+
+  const start = (overrides: Parameters<typeof harness>[0] = {}) => harness({ deadlineAt: LATE, ...overrides });
+
+  /** Cancels the session on the harness's proxy and on every replica, so no request is left hanging. */
+  async function stop(h: Harness) {
+    for (const proxy of [h.proxy, ...(replicas.get(h) ?? [])]) await proxy.cancelSession(h.session.id);
+    replicas.delete(h);
+  }
+
+  /** An upstream whose stream stays open until the request is aborted: a request whose process then "dies". */
+  const hangingUpstream: typeof globalThis.fetch = async (_url, init) =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          init?.signal?.addEventListener("abort", () => c.error(new Error("aborted")));
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+
+  /** Another proxy process on the same ledger and session, with its own clock-independent upstream. */
+  function replica(
+    h: Harness,
+    clock: () => Date,
+    options: { fetch?: typeof globalThis.fetch; leaseMs?: number; maxAttempts?: number } = {},
+  ) {
+    const events: ProxyAuditEvent[] = [];
+    const upstream = vi.fn(
+      options.fetch ??
+        (async () => new Response(completedSse(USAGE), { headers: { "content-type": "text/event-stream" } })),
+    );
+    const proxy = new CodingProxy({
+      ledger: h.ledger,
+      credentials: { resolve: async () => "UPSTREAM_SECRET" },
+      fetch: upstream,
+      now: clock,
+      pricing: () => PRICE,
+      pricingVersion: "test-v1",
+      audit: (event) => events.push(event),
+      leaseMs: options.leaseMs ?? LEASE_MS,
+      ...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
+    });
+    replicas.set(h, [...(replicas.get(h) ?? []), proxy]);
+    const retry = (key: string, rawBody = requestBody(true)) =>
+      proxy.execute(
+        { bearer: h.session.capability, protocol: "openai-responses", rawBody, requestKey: key },
+        new TestSink(),
+      );
+    return { proxy, events, upstream, retry };
+  }
+
+  /** Starts a streaming request that stays open (its process is then abandoned), and waits for its row. */
+  async function orphan(h: Harness, key = "orphan") {
+    const pending = execute(h, key, new TestSink(), requestBody(true)).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.fetch).toHaveBeenCalled());
+    return { pending, id: reservedRequestId(h.events) };
+  }
+
+  it("takes over an orphaned request as a new attempt and sends it upstream once", async () => {
+    let now = NOW;
+    const h = await start({ now: () => now, leaseMs: LEASE_MS, ownerId: "dead", fetch: hangingUpstream });
+    const { pending, id } = await orphan(h);
+
+    now = at(LEASE_MS + 1);
+    const other = replica(h, () => now);
+    await other.retry("orphan");
+
+    expect(other.upstream).toHaveBeenCalledTimes(1);
+    const old = await h.ledger.getRequest(id);
+    expect(old).toMatchObject({ status: "uncertain", costEstimated: true, leaseUntil: null, attempt: 1 });
+    expect(old?.orphanedAt).toBeInstanceOf(Date);
+    const created = other.events.find((e) => e.type === "request.reserved")!.requestId!;
+    expect(await h.ledger.getRequest(created)).toMatchObject({
+      status: "completed",
+      attempt: 2,
+      requestKey: "orphan",
+    });
+    expect(other.events.map((e) => e.type)).toEqual([
+      "request.uncertain",
+      "request.taken_over",
+      "request.reserved",
+      "response.completed",
+    ]);
+    expect(other.events[0]).toMatchObject({
+      requestId: id,
+      reason: "lease_expired",
+      estimatedCostUsd: old?.actualCostUsd,
+    });
+    expect(other.events[1]).toMatchObject({
+      runId: h.session.runId,
+      requestId: created,
+      previousRequestId: id,
+      attempt: 2,
+    });
+
+    await stop(h);
+    await pending;
+  });
+
+  it("takes over a request the sweep already settled", async () => {
+    let now = NOW;
+    const h = await start({ now: () => now, leaseMs: LEASE_MS, fetch: hangingUpstream });
+    const { pending, id } = await orphan(h);
+
+    now = at(LEASE_MS + 1);
+    const other = replica(h, () => now);
+    expect(await other.proxy.sweepExpired()).toMatchObject({ settled: 1 });
+    other.events.length = 0;
+    await other.retry("orphan");
+
+    expect(other.upstream).toHaveBeenCalledTimes(1);
+    expect(other.events.map((e) => e.type)).toEqual(["request.taken_over", "request.reserved", "response.completed"]);
+    expect(other.events[0]).toMatchObject({ previousRequestId: id, attempt: 2 });
+    expect((await h.ledger.getRequest(id))?.status).toBe("uncertain");
+
+    await stop(h);
+    await pending;
+  });
+
+  it("answers a retry inside the lease with a retryable 503 and a Retry-After past the lease, without a second upstream call", async () => {
+    let now = NOW;
+    const h = await start({ now: () => now, leaseMs: LEASE_MS, fetch: hangingUpstream });
+    const { pending, id } = await orphan(h);
+
+    now = at(10_000);
+    const other = replica(h, () => now);
+    await expect(other.retry("orphan")).rejects.toMatchObject({
+      status: 503,
+      code: "wardby_request_in_progress",
+      // 20 s of lease left, plus a second so the retry lands after expiry.
+      retryAfterSeconds: 21,
+    });
+    expect(other.upstream).not.toHaveBeenCalled();
+    expect(other.events.at(-1)).toMatchObject({
+      type: "request.rejected",
+      requestId: id,
+      reason: "request_in_progress",
+    });
+    expect((await h.ledger.getRequest(id))?.status).toBe("reserved");
+
+    // Once the lease has run out the same retry goes through.
+    now = at(LEASE_MS + 1);
+    await other.retry("orphan");
+    expect(other.upstream).toHaveBeenCalledTimes(1);
+
+    await stop(h);
+    await pending;
+  });
+
+  it("lets concurrent retries create one new attempt and send one upstream call", async () => {
+    let now = NOW;
+    const h = await start({ now: () => now, leaseMs: LEASE_MS, fetch: hangingUpstream });
+    const { pending } = await orphan(h);
+
+    now = at(LEASE_MS + 1);
+    const first = replica(h, () => now);
+    const second = replica(h, () => now);
+    const results = await Promise.allSettled([first.retry("orphan"), second.retry("orphan")]);
+
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const refused = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    // Whichever lost sees the new attempt in progress, or already completed: never a second upstream call.
+    expect([409, 503]).toContain(refused.reason.status);
+    expect(first.upstream.mock.calls.length + second.upstream.mock.calls.length).toBe(1);
+
+    await stop(h);
+    await pending;
+  });
+
+  it("refuses a retry beyond the attempt cap with a status the clients do not retry", async () => {
+    let now = NOW;
+    const h = await start({ now: () => now, leaseMs: LEASE_MS, fetch: hangingUpstream });
+    const { pending } = await orphan(h);
+
+    // Attempt 2 takes over attempt 1, and its own process dies too.
+    now = at(LEASE_MS + 1);
+    const second = replica(h, () => now, { fetch: hangingUpstream, maxAttempts: 2 });
+    const secondTry = second.retry("orphan").catch((error: unknown) => error);
+    await vi.waitFor(() => expect(second.upstream).toHaveBeenCalled());
+
+    now = at(2 * LEASE_MS + 2);
+    const third = replica(h, () => now, { maxAttempts: 2 });
+    await expect(third.retry("orphan")).rejects.toMatchObject({
+      status: 422,
+      code: "wardby_request_attempts_exhausted",
+    });
+    expect(third.upstream).not.toHaveBeenCalled();
+    expect(third.events.at(-1)).toMatchObject({ type: "request.rejected", reason: "attempts_exhausted", attempt: 2 });
+
+    await stop(h);
+    await Promise.all([pending, secondTry]);
+  });
+
+  it("settles the first attempt at an estimate and gives the new attempt its own full hold", async () => {
+    let now = NOW;
+    const raw = requestBody(true);
+    const hold = estimateReservationUsd(
+      Buffer.byteLength(JSON.stringify({ ...JSON.parse(raw), store: false, background: false })),
+      10,
+      PRICE,
+    );
+    const h = await start({ now: () => now, leaseMs: LEASE_MS, budgetUsd: hold * 3, fetch: hangingUpstream });
+    const { pending, id } = await orphan(h);
+
+    now = at(LEASE_MS + 1);
+    const other = replica(h, () => now, { fetch: hangingUpstream });
+    const retried = other.retry("orphan").catch((error: unknown) => error);
+    await vi.waitFor(() => expect(other.upstream).toHaveBeenCalled());
+
+    const old = await h.ledger.getRequest(id);
+    const created = await h.ledger.getRequest(other.events.find((e) => e.type === "request.reserved")!.requestId!);
+    expect(old).toMatchObject({ status: "uncertain", costEstimated: true });
+    expect(old?.actualCostUsd).toBeGreaterThan(0);
+    expect(old?.actualCostUsd).toBeLessThan(hold);
+    expect(created).toMatchObject({ status: "reserved", attempt: 2, reservationUsd: hold });
+
+    await stop(h);
+    await Promise.all([pending, retried]);
+  });
+
+  it("fails closed when no estimate can be made: settles the old attempt held in full and refuses the retry", async () => {
+    let now = NOW;
+    const h = await start({ now: () => now, leaseMs: LEASE_MS, fetch: hangingUpstream });
+    const { pending, id } = await orphan(h);
+
+    now = at(LEASE_MS + 1);
+    const other = replica(h, () => now);
+    h.ledger.settlementHints = async () => {
+      throw new Error("ledger unavailable");
+    };
+    await expect(other.retry("orphan")).rejects.toMatchObject({ status: 409, code: "duplicate_uncertain" });
+    expect(other.upstream).not.toHaveBeenCalled();
+    const old = await h.ledger.getRequest(id);
+    expect(old).toMatchObject({ status: "uncertain", leaseUntil: null, attempt: 1 });
+    expect(old?.costEstimated).toBeFalsy();
+    expect(other.events.map((e) => e.type)).toEqual(["request.uncertain", "request.rejected"]);
+
+    await stop(h);
+    await pending;
+  });
+
+  it("never takes over a request with no lease", async () => {
+    let now = NOW;
+    // The first proxy has no lease length: its row has no lease, as a row from before leases.
+    const h = await start({ now: () => now, fetch: hangingUpstream });
+    const { pending, id } = await orphan(h);
+
+    now = at(24 * 60 * 60_000);
+    const other = replica(h, () => now);
+    await expect(other.retry("orphan")).rejects.toMatchObject({ status: 409, code: "duplicate_reserved" });
+    expect(other.upstream).not.toHaveBeenCalled();
+    expect(await h.ledger.getRequest(id)).toMatchObject({ status: "reserved", leaseUntil: null });
+
+    await stop(h);
+    await pending;
+  });
+
+  it("keeps its answers for completed, live-uncertain and different-body requests", async () => {
+    let now = NOW;
+    const raw = requestBody(true);
+    const h = await start({ now: () => now, leaseMs: LEASE_MS, fetch: hangingUpstream });
+    const { pending } = await orphan(h);
+    const other = replica(h, () => now);
+
+    // A different body under the same key, even with the lease out: a conflict, not a takeover.
+    now = at(LEASE_MS + 1);
+    await expect(other.retry("orphan", requestBody(false))).rejects.toMatchObject({
+      status: 409,
+      code: "idempotency_conflict",
+    });
+    expect(other.upstream).not.toHaveBeenCalled();
+
+    // A completed request is never sent again.
+    const done = replica(h, () => now);
+    await done.retry("done", raw);
+    await expect(done.retry("done", raw)).rejects.toMatchObject({ status: 409, code: "duplicate_completed" });
+    expect(done.upstream).toHaveBeenCalledTimes(1);
+
+    // A request a live proxy settled uncertain (a broken stream) is not an orphan, however old.
+    const broken = replica(h, () => now, {
+      fetch: async () =>
+        new Response('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"x"}\n\n'),
+    });
+    await expect(broken.retry("broken", raw)).rejects.toMatchObject({ status: 502 });
+    now = at(24 * 60 * 60_000);
+    await expect(broken.retry("broken", raw)).rejects.toMatchObject({ status: 409, code: "duplicate_uncertain" });
+    expect(broken.upstream).toHaveBeenCalledTimes(1);
+
+    await stop(h);
+    await pending;
+  });
+
+  it("takes over for the Anthropic protocol through the same path", async () => {
+    let now = NOW;
+    const body = JSON.parse(await fixture("anthropic-sdk-request.json"));
+    body.stream = false;
+    body.model = "claude-sonnet-5";
+    const rawBody = JSON.stringify(body);
+    const h = await start({
+      now: () => now,
+      leaseMs: LEASE_MS,
+      protocol: "anthropic-messages",
+      fetch: hangingUpstream,
+    });
+    const pending = execute(h, "orphan", new TestSink(), rawBody).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.fetch).toHaveBeenCalled());
+    const id = reservedRequestId(h.events);
+
+    now = at(LEASE_MS + 1);
+    const response = JSON.parse(await fixture("anthropic-message-response.json"));
+    const other = replica(h, () => now, { fetch: async () => Response.json(response) });
+    await other.proxy.execute(
+      {
+        bearer: h.session.capability,
+        protocol: "anthropic-messages",
+        rawBody,
+        requestKey: "orphan",
+        anthropicBeta: CLAUDE_CODE_ANTHROPIC_BETAS.join(","),
+      },
+      new TestSink(),
+    );
+    expect(other.upstream).toHaveBeenCalledTimes(1);
+    expect(other.events.find((e) => e.type === "request.taken_over")).toMatchObject({ previousRequestId: id });
+
+    await stop(h);
+    await pending;
+  });
+
+  it("carries no secret value in a takeover's audit, errors or metrics", async () => {
+    let now = NOW;
+    const h = await start({ now: () => now, leaseMs: LEASE_MS, fetch: hangingUpstream });
+    const { pending } = await orphan(h);
+    const other = replica(h, () => now);
+
+    now = at(10_000);
+    const inProgress = await other.retry("orphan").catch((error: unknown) => error);
+    now = at(LEASE_MS + 1);
+    await other.retry("orphan");
+    const exhausted = replica(h, () => now, { maxAttempts: 1 });
+    const refused = await exhausted.retry("orphan").catch((error: unknown) => error);
+
+    const metrics = new WardbyMetrics();
+    const events = [...other.events, ...exhausted.events];
+    for (const event of events) metrics.observeProxyAudit(event);
+    const exposition = await metrics.registry.metrics();
+    const outputs = [
+      JSON.stringify(events),
+      exposition,
+      JSON.stringify({ message: (inProgress as Error).message, ...(inProgress as object) }),
+      JSON.stringify({ message: (refused as Error).message, ...(refused as object) }),
+    ];
+    for (const output of outputs) {
+      expect(output).not.toContain("UPSTREAM_SECRET");
+      expect(output).not.toContain(h.session.capability);
+    }
+
+    await stop(h);
+    await pending;
   });
 });
 

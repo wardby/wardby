@@ -8,6 +8,14 @@ import { capabilityHash } from "./capability-hash.js";
 import { CLAUDE_MCP_TOOL_PREFIX } from "../../coding/mcp-token.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
 import {
+  renewHeldLeases,
+  sweepExpiredLeases,
+  type LeaseLedger,
+  type LeaseLossReason,
+  type SweepResult,
+} from "../../core/request-lease.js";
+import { logger } from "../../core/logger.js";
+import {
   AnthropicSseUsageTracker,
   actualCostUsd,
   fingerprintRequest,
@@ -33,6 +41,7 @@ import { CLAUDE_RESULT_TOOL } from "../../core/run-steps/summarize.js";
 import type { RunStepBatch, RunStepSubmitter } from "../../core/run-steps/types.js";
 import type {
   CredentialResolver,
+  ExpiredRequest,
   ProxyAuditSink,
   ProxyLedger,
   ProxyModelTerms,
@@ -41,6 +50,8 @@ import type {
   ProxyRequest,
   ProxySession,
   ProxyUsage,
+  ReserveProxyRequestInput,
+  ReserveProxyRequestResult,
 } from "./types.js";
 
 export const PROXY_MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -83,6 +94,8 @@ export class CodingProxyError extends Error {
   constructor(
     public readonly status: number,
     public readonly code: string,
+    /** Sent as Retry-After: when a client that retries this status should try again. */
+    public readonly retryAfterSeconds?: number,
   ) {
     super(code);
   }
@@ -154,6 +167,15 @@ export interface CodingProxyOptions {
    */
   onModelRequest?: (runId: string) => Promise<void>;
   /**
+   * How long a reserved request stays leased to this process, renewed by renewOwnLeases (a request it stops owning is aborted). Unset, a
+   * request is reserved with no lease: nothing can tell it from an orphan, so nothing sweeps it.
+   */
+  leaseMs?: number;
+  /** This process's id on the requests it leases. Defaults to a random UUID. */
+  ownerId?: string;
+  /** Tries one request key may have: a retry after the first try's proxy died takes over as a new try. Defaults to 3. */
+  maxAttempts?: number;
+  /**
    * Where coding runs' steps go (RunStepForwarder, to the control plane's run-steps listener);
    * absent, no step is extracted. Steps are read from frames after they are relayed and handed over
    * unmasked (the control plane redacts them by exact value before writing). Extraction never fails,
@@ -167,6 +189,12 @@ export interface CodingProxyOptions {
   /** Tests only: replaces the stream step extractor. */
   createStepExtractor?: (protocol: ProxyProtocol, options?: StepCaptureOptions) => StreamStepExtractor;
 }
+
+/** Tries per request key by default, matching the workers' own retry setting (3 retries after the first try). */
+const DEFAULT_MAX_ATTEMPTS = 3;
+
+/** Added to the lease's remaining time in Retry-After, so the retry lands after expiry rather than on it. */
+const RETRY_AFTER_MARGIN_SECONDS = 1;
 
 interface ParsedRequest {
   body: Record<string, unknown>;
@@ -1100,7 +1128,15 @@ export class CodingProxy {
   private readonly getPricing: (model: string, protocol: ProxyProtocol) => ModelPricing;
   private readonly priceVersion: string;
   private readonly activeRequests = new Map<string, Set<AbortController>>();
+  /** The upstream call of each request being relayed, so a request this process lost can be aborted by id. */
+  private readonly requestControllers = new Map<string, AbortController>();
   private readonly onModelRequest?: (runId: string) => Promise<void>;
+  /** This process's id on the requests it reserves. */
+  readonly ownerId: string;
+  private readonly leaseMs?: number;
+  private readonly maxAttempts: number;
+  /** The requests this process holds a lease on and keeps renewing; one leaves the set the moment its relay ends. */
+  private readonly openRequests = new Set<string>();
   private readonly steps?: RunStepSubmitter;
   private readonly createStepExtractor?: (protocol: ProxyProtocol, options?: StepCaptureOptions) => StreamStepExtractor;
   private readonly runStepsCeiling: RunStepsLevel;
@@ -1109,6 +1145,9 @@ export class CodingProxy {
 
   constructor(options: CodingProxyOptions) {
     this.ledger = options.ledger;
+    this.ownerId = options.ownerId ?? randomUUID();
+    this.leaseMs = options.leaseMs;
+    this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.onModelRequest = options.onModelRequest;
     this.steps = options.steps;
     this.createStepExtractor = options.createStepExtractor;
@@ -1287,7 +1326,7 @@ export class CodingProxy {
         ? { holdCachedTokens: hold.cachedTokens, holdUncachedTokens: hold.uncachedTokens }
         : {}),
     };
-    const reservation = await this.ledger.reserve({
+    const reserveInput: ReserveProxyRequestInput = {
       id: randomUUID(),
       sessionId: session.id,
       requestKey,
@@ -1298,9 +1337,16 @@ export class CodingProxy {
       ceilingUsd: hold.ceilingUsd,
       reservationBasis: hold.basis,
       conversationKey: conversation,
+      maxOutputTokens: parsed.maxOutputTokens,
+      ...(this.leaseMs !== undefined ? { ownerId: this.ownerId, leaseMs: this.leaseMs } : {}),
+      maxAttempts: this.maxAttempts,
       pricing: snapshot,
       now: this.now(),
-    });
+    };
+    let reservation = await this.ledger.reserve(reserveInput);
+    if (reservation.outcome === "orphaned") {
+      reservation = await this.takeOver(session, reservation.orphan, reserveInput);
+    }
     if (reservation.outcome === "inactive") {
       // The session has ended (cancelled, expired or closed): another replica may have ended it.
       this.seenResults.forget(session.id);
@@ -1325,7 +1371,35 @@ export class CodingProxy {
     if (reservation.outcome === "duplicate") {
       this.handleDuplicate(session, reservation.request, parsed.fingerprint);
     }
+    if (reservation.outcome === "in_progress") {
+      this.refuseInProgress(session, reservation.request, reservation.retryAfterMs);
+    }
+    if (reservation.outcome === "orphaned") {
+      // Another retry took the row over between the two reserves, and its own lease has already run out.
+      this.refuseInProgress(session, reservation.orphan.request, 0);
+    }
+    if (reservation.outcome === "attempts_exhausted") {
+      this.audit({
+        type: "request.rejected",
+        runId: session.runId,
+        requestId: reservation.request.id,
+        reason: "attempts_exhausted",
+        attempt: reservation.request.attempt,
+      });
+      // A status the workers' clients do not retry: the request has already been tried the most it may be.
+      throw new CodingProxyError(422, "wardby_request_attempts_exhausted");
+    }
     const request = reservation.request;
+    if (reservation.tookOver) {
+      this.audit({
+        type: "request.taken_over",
+        runId: session.runId,
+        requestId: request.id,
+        previousRequestId: reservation.tookOver.requestId,
+        attempt: request.attempt,
+        model: request.model,
+      });
+    }
     this.audit({
       type: "request.reserved",
       runId: session.runId,
@@ -1333,6 +1407,8 @@ export class CodingProxy {
       model: request.model,
       ...holdAudit,
     });
+    // Only after the audit above: a request that never gets this far is not renewed, so its lease runs out.
+    if (this.leaseMs !== undefined) this.openRequests.add(request.id);
     // Run steps: the results this (validated) request carries for the previous turn, once per call id.
     const capture = stepCapture(session, this.runStepsCeiling);
     if (capture !== "none") {
@@ -1350,6 +1426,8 @@ export class CodingProxy {
       key = await this.credentials.resolve(session.credentialRef);
       if (!key) throw new Error();
     } catch {
+      // Out of the set first: if the release below fails, the lease runs out and the row is swept.
+      this.openRequests.delete(request.id);
       await this.ledger.release(request.id, 503);
       this.audit({
         type: "request.released",
@@ -1363,6 +1441,7 @@ export class CodingProxy {
 
     const remainingMs = session.deadlineAt.getTime() - this.now().getTime();
     if (remainingMs <= 0) {
+      this.openRequests.delete(request.id);
       this.seenResults.forget(session.id);
       await this.ledger.release(request.id, 403);
       throw new CodingProxyError(403, "session_expired");
@@ -1371,6 +1450,7 @@ export class CodingProxy {
     const deadlineTimer = setTimeout(() => controller.abort(), remainingMs);
     deadlineTimer.unref();
     this.trackActive(session.id, controller);
+    this.requestControllers.set(request.id, controller);
     const progress: RelayProgress = {
       maxOutputTokens: parsed.maxOutputTokens,
       stream: parsed.stream,
@@ -1379,6 +1459,8 @@ export class CodingProxy {
       relayedOutputBytes: 0,
     };
     const cleanupActive = () => {
+      this.openRequests.delete(request.id);
+      this.requestControllers.delete(request.id);
       clearTimeout(deadlineTimer);
       const active = this.activeRequests.get(session.id);
       active?.delete(controller);
@@ -1479,6 +1561,56 @@ export class CodingProxy {
     };
   }
 
+  /**
+   * Extends the lease of every request this process is relaying. The runtime calls it each
+   * heartbeat. A request the ledger no longer lets it renew (swept, taken over, or its session
+   * cancelled) is aborted, so this process stops relaying and billing for it.
+   */
+  async renewOwnLeases(): Promise<void> {
+    const leaseMs = this.leaseMs;
+    if (leaseMs === undefined) return;
+    await renewHeldLeases({
+      ledger: { renew: (ownerId, ids) => this.ledger.renewLeases(ownerId, ids, leaseMs) },
+      ownerId: this.ownerId,
+      held: () => [...this.openRequests],
+      onLost: (id, reason) => this.abandonRequest(id, reason),
+    });
+  }
+
+  private abandonRequest(requestId: string, reason: LeaseLossReason): void {
+    // Out of the set so it is not renewed again; the abort ends the relay and its cleanup does the rest.
+    this.openRequests.delete(requestId);
+    this.requestControllers.get(requestId)?.abort();
+    logger
+      .child({ module: "coding-proxy-lease" })
+      .warn({ event: "proxy.lease_lost", requestId, reason }, "coding proxy: request no longer owned, aborting it");
+  }
+
+  /**
+   * Settles reserved requests whose lease ran out (their proxy process died) as uncertain, at an
+   * estimate, so their holds stop counting against the run's budget. Safe to run on every replica
+   * at once: the ledger settles a row for one caller only, and only while its lease is still out.
+   */
+  sweepExpired(batch?: number): Promise<SweepResult> {
+    const ledger: Pick<LeaseLedger<ExpiredRequest>, "expired" | "settleExpired"> = {
+      expired: (limit) => this.ledger.expiredLeases(limit),
+      settleExpired: async (item) => {
+        const estimate = await this.estimateExpired(item);
+        if (!(await this.ledger.settleExpired(item.request.id, estimate))) return "lostRace";
+        this.audit({
+          type: "request.uncertain",
+          runId: item.runId,
+          requestId: item.request.id,
+          model: item.request.model,
+          reason: "lease_expired",
+          ...(estimate ? { estimatedCostUsd: estimate.costUsd } : {}),
+        });
+        return estimate ? "settled" : "settledWithoutEstimate";
+      },
+    };
+    return sweepExpiredLeases(ledger, batch);
+  }
+
   private async authenticate(bearer: string): Promise<ProxySession> {
     if (!bearer || bearer.length > 100) throw new CodingProxyError(401, "invalid_capability");
     const session = await this.ledger.findSessionByCapabilityHash(capabilityHash(bearer));
@@ -1490,6 +1622,61 @@ export class CodingProxy {
     const active = this.activeRequests.get(sessionId) ?? new Set<AbortController>();
     active.add(controller);
     this.activeRequests.set(sessionId, active);
+  }
+
+  /**
+   * A retry found its key's newest try reserved with an expired lease: its proxy is presumed dead. The
+   * old try is settled at an estimate and the next one reserved in one ledger transaction. With no
+   * estimate it fails closed: the old try is settled holding its full hold (as the sweep would) and the
+   * retry is refused, because nothing could say what the first try cost.
+   */
+  private async takeOver(
+    session: ProxySession,
+    orphan: ExpiredRequest,
+    input: ReserveProxyRequestInput,
+  ): Promise<ReserveProxyRequestResult> {
+    const old = orphan.request;
+    const estimate = await this.estimateExpired(orphan);
+    if (!estimate) {
+      if (!(await this.ledger.settleExpired(old.id))) this.refuseInProgress(session, old, 0);
+      this.audit({
+        type: "request.uncertain",
+        runId: session.runId,
+        requestId: old.id,
+        model: old.model,
+        reason: "lease_expired",
+      });
+      this.audit({ type: "request.rejected", runId: session.runId, requestId: old.id, reason: "duplicate_uncertain" });
+      throw new CodingProxyError(409, "duplicate_uncertain");
+    }
+    const result = await this.ledger.reserve({ ...input, takeover: { requestId: old.id, estimate } });
+    // The old try was settled in that transaction unless the ledger found it already renewed or settled.
+    if (result.outcome === "reserved" && result.tookOver) {
+      this.audit({
+        type: "request.uncertain",
+        runId: session.runId,
+        requestId: old.id,
+        model: old.model,
+        reason: "lease_expired",
+        estimatedCostUsd: estimate.costUsd,
+      });
+    }
+    return result;
+  }
+
+  /** The key's earlier try may still be running: send the client away until its lease has run out. */
+  private refuseInProgress(session: ProxySession, request: ProxyRequest, retryAfterMs: number): never {
+    this.audit({
+      type: "request.rejected",
+      runId: session.runId,
+      requestId: request.id,
+      reason: "request_in_progress",
+    });
+    throw new CodingProxyError(
+      503,
+      "wardby_request_in_progress",
+      Math.max(1, Math.ceil(retryAfterMs / 1000)) + RETRY_AFTER_MARGIN_SECONDS,
+    );
   }
 
   private handleDuplicate(session: ProxySession, request: ProxyRequest, fingerprint: string): never {
@@ -1727,6 +1914,45 @@ export class CodingProxy {
           bodyBytes: progress.bodyBytes,
           reservationUsd: request.reservationUsd,
           maxOutputTokens: progress.maxOutputTokens,
+          ceilingUsd: request.ceilingUsd ?? request.reservationUsd,
+        },
+        request.pricing,
+      );
+      return Number.isFinite(estimate.costUsd) ? estimate : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The best known cost of a request whose process died (interrupted.ts), from what its row kept.
+   * What lived only in that process (usage already read, output already relayed) is gone, so the
+   * estimate comes from the conversation's previous reply, the body size, or the model's median
+   * reply. Undefined when none can be made: the request then keeps its full hold. Never throws.
+   */
+  private async estimateExpired({ request, createdAt }: ExpiredRequest): Promise<InterruptedEstimate | undefined> {
+    try {
+      const hints = await this.ledger.settlementHints(request.sessionId, request.model);
+      const latest = request.conversationKey
+        ? await this.ledger.previousReply(request.sessionId, request.conversationKey).catch(() => null)
+        : null;
+      // A reply that began after this request cannot be the prompt it was built on.
+      const previous = latest && latest.startedAt.getTime() <= createdAt.getTime() ? latest : null;
+      const previousPrompt = previousInput({
+        model: request.model,
+        bodyBytes: request.requestBytes,
+        previous,
+        pricing: request.pricing,
+        now: createdAt,
+      });
+      const estimate = estimateInterrupted(
+        {
+          relayedOutputBytes: 0,
+          ...hints,
+          ...(previousPrompt ? { previous: previousPrompt } : {}),
+          ...(request.requestBytes !== undefined ? { bodyBytes: request.requestBytes } : {}),
+          reservationUsd: request.reservationUsd,
+          maxOutputTokens: request.maxOutputTokens ?? 0,
           ceilingUsd: request.ceilingUsd ?? request.reservationUsd,
         },
         request.pricing,

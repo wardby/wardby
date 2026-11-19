@@ -437,14 +437,21 @@ request.
 
 What happens:
 
-- **Pull request.** The pull request title starts with the issue key
-  (`[PROJ-123] ...`) and its body says `Resolves Jira issue [PROJ-123](url)`.
-  The issue key comes from the run that was triggered by the issue, never from
-  text the coding agent wrote.
+- **Pull request.** The pull request title ends with the issue key
+  (`feat(webhooks): add retry (PROJ-123)`, see
+  [Pull request titles and commit messages](coding-agent-setup.md#pull-request-titles-and-commit-messages))
+  and its body says `Resolves Jira issue [PROJ-123](url)`. The issue key comes
+  from the run that was triggered by the issue, never from text the coding
+  agent wrote.
+- **Branch.** The branch is named from the issue key (`wardby/PROJ-123`, then
+  `-2` for a repeat run when the earlier one pushed), so Jira's GitHub
+  integration links it to the issue. A later run for the same issue adds a
+  commit to the open pull request instead of opening another; see
+  [Branch names](coding-agent-setup.md#branch-names).
 - **Remote link.** Wardby adds a web link to the pull request on the issue.
   This works on every site. Jira's development panel shows the pull request
   only when the Jira and GitHub integration is installed on your site; the
-  title key is what lets it match. Adding the link needs the service account's
+  key in the title is what lets it match. Adding the link needs the service account's
   Link issues permission.
 - **Status moves.** When the Jira-triggered run finishes and reports a newly
   opened pull request, the issue moves to `onPullRequestOpened` (a follow-up

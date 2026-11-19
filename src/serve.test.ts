@@ -7,6 +7,7 @@ import type { McpProviders } from "./mcp/context.js";
 import { FakeChatProvider } from "./providers/chat/fake.js";
 import type { Power } from "./core/power.js";
 import { startServe } from "./serve.js";
+import { codingRunObserver } from "./coding/observability.js";
 
 // `startNotifications` is mocked (least-invasive seam) so this file can
 // assert serve.ts wires `providers.chat` through to it, and calls its
@@ -77,6 +78,8 @@ const ENV_KEYS = [
   "WARDBY_JIRA_API_TOKEN",
   "WARDBY_JIRA_API_TOKEN_EXPIRES_AT",
   "WARDBY_JIRA_WEBHOOK_SECRET",
+  "METRICS_BIND",
+  "METRICS_ALLOW_NON_LOOPBACK",
 ] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 beforeEach(() => {
@@ -132,13 +135,21 @@ describe("startServe transport guard", () => {
     process.env.CODING_MAX_CONCURRENT = "four";
     await expect(startServe({ providers })).rejects.toThrow(/CODING_MAX_CONCURRENT/);
   });
+
+  it("fails fast on a malformed METRICS_BIND, before MCP starts listening", async () => {
+    process.env.MCP_TRANSPORT = "http";
+    delete process.env.CODING_MAX_CONCURRENT;
+    process.env.METRICS_BIND = "0.0.0.0:9464";
+    delete process.env.METRICS_ALLOW_NON_LOOPBACK;
+    await expect(startServe({ providers })).rejects.toThrow(/METRICS_ALLOW_NON_LOOPBACK/);
+  });
 });
 
 describe.skipIf(!process.env.DATABASE_URL)("startServe (database)", () => {
   const db = createPrismaClient();
   const scope = "serve-test-" + randomUUID();
   afterAll(async () => {
-    await db.schedulerLease.deleteMany({ where: { scope: { in: [scope, scope + "-chat"] } } });
+    await db.schedulerLease.deleteMany({ where: { scope: { in: [scope, scope + "-chat", scope + "-metrics"] } } });
     await db.$disconnect();
   });
 
@@ -177,6 +188,37 @@ describe.skipIf(!process.env.DATABASE_URL)("startServe (database)", () => {
 
     // Shutdown: the port is released.
     await expect(fetch(origin + "/mcp", { method: "POST" })).rejects.toThrow();
+  });
+
+  it("serves the coding run lifecycle on METRICS_BIND and releases the port on close()", async () => {
+    const port = await freePort();
+    const metricsPort = await freePort();
+    const origin = `http://127.0.0.1:${port}`;
+    Object.assign(process.env, {
+      MCP_TRANSPORT: "http",
+      MCP_HTTP_BIND: `127.0.0.1:${port}`,
+      MCP_CANONICAL_URI: origin,
+      AUTH_PROVIDER: "self-hosted",
+      AUTH_AUDIENCE: origin,
+      AUTH_SIGNING_KEY: "a1".repeat(32),
+      AUTH_CREDENTIAL_HASH_KEY: "b2".repeat(32),
+      SECRET_APP_KEY: "c3".repeat(32),
+      METRICS_BIND: `127.0.0.1:${metricsPort}`,
+    });
+    const metricsUrl = `http://127.0.0.1:${metricsPort}/metrics`;
+
+    const handle = await startServe({ providers, scope: scope + "-metrics" });
+    try {
+      // The executor reports through the shared lifecycle observer.
+      codingRunObserver.emit({ stage: "terminal", runId: "run-metrics", outcome: "budget_exhausted" });
+      const body = await (await fetch(metricsUrl)).text();
+      expect(body).toContain('wardby_coding_runs_terminal_total{outcome="budget_exhausted"} 1');
+      expect(body).not.toContain("run-metrics");
+    } finally {
+      await handle.close();
+    }
+
+    await expect(fetch(metricsUrl)).rejects.toThrow();
   });
 
   it("passes providers.chat to startNotifications and stops it on close()", async () => {

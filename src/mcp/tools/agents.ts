@@ -74,7 +74,7 @@ import {
 } from "../../core/grants.js";
 import { projectTool, TOOL_GRANTS_INCLUDE } from "./tools.js";
 import { withZod3ToolWarnings } from "../../core/zod3-window.js";
-import { requireAnyScope, requireScope } from "../auth/resource-server.js";
+import { isOwnerAll, requireAnyScope, requireScope } from "../auth/resource-server.js";
 import { logger } from "../../core/logger.js";
 import { removeRetainedRounds } from "./retained-rounds.js";
 import {
@@ -801,7 +801,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       validateWorkspaceDiskMb(args.codingProfile?.workspaceDiskMb);
       if (args.codingProfile) await requireCatalogServiceNames(ctx.db, args.codingProfile.services);
       if (args.budgetGroupId) {
-        await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id);
+        await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id, isOwnerAll(ctx));
       }
       const { codingProfile, repositoryAdminOverride, nativeExecutionMode, ...agentFieldsData } = args;
       const agentData = {
@@ -983,7 +983,10 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       // Strict: a repository is a binding, so only the agent's owner sets
       // one (or an admin's explicit approval, below). Not a write-grantee,
       // not the stdio operator.
-      const isOwner = before.ownerId !== null && before.ownerId === ctx.principal.id;
+      // An owner-all caller (owner:all + wardby_owner) acts as the owner of every agent, so no
+      // owner-only field or binding is refused to it; its repository is approved as an admin's.
+      const ownerAll = isOwnerAll(ctx);
+      const isOwner = ownerAll || (before.ownerId !== null && before.ownerId === ctx.principal.id);
       // An admin may approve a repository (repositoryAdminOverride) on an agent
       // they don't own, but change nothing else on it.
       const adminEdit = args.repositoryAdminOverride === true && !isOwner;
@@ -1044,7 +1047,9 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               provider: codeProviderOf(plannedRepository),
               repository: plannedRepository,
               kind: "coding",
-              adminOverride: args.repositoryAdminOverride === true,
+              adminOverride:
+                args.repositoryAdminOverride === true ||
+                (ownerAll && !(before.ownerId !== null && before.ownerId === ctx.principal.id)),
             })
           : null;
       if (args.repositoryAdminOverride === true && !authorization) {
@@ -1077,7 +1082,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             throw new McpError(409, `Agent "${args.id}" changed while it was being updated; try again.`);
           }
           if (args.budgetGroupId) {
-            await requireReadableBudgetGroup(tx, args.budgetGroupId, ctx.principal.id);
+            await requireReadableBudgetGroup(tx, args.budgetGroupId, ctx.principal.id, isOwnerAll(ctx));
           }
 
           const nextKind = args.kind ?? existing.kind;
@@ -1294,7 +1299,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       additionalProperties: false,
     },
     handler: async (args: { summary?: boolean; all?: boolean }, ctx) => {
-      if (args.all === true && !ctx.operator) requireScope(ctx, ctx.canonicalUri, "admin:view");
+      if (args.all === true && !ctx.operator && !isOwnerAll(ctx)) requireScope(ctx, ctx.canonicalUri, "admin:view");
       const [where, accessOf] = await Promise.all([
         args.all === true ? Promise.resolve({}) : readableAgentsWhere(ctx),
         agentAccessResolver(ctx),
@@ -1361,7 +1366,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         tools: await Promise.all(
           agent.tools.map(async (attachment) => ({
             ...attachment,
-            tool: await withZod3ToolWarnings(projectTool(attachment.tool, ctx.principal.id)),
+            tool: await withZod3ToolWarnings(projectTool(attachment.tool, ctx.principal.id, isOwnerAll(ctx))),
           })),
         ),
       });

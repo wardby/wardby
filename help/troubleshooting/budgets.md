@@ -53,6 +53,13 @@ A coding run's per-request holds price the cached part of the input at the
 cache-read rate after the first reply of a conversation; see the help article
 `errors/budget-exhausted`.
 
+## Holds left by a stopped proxy
+
+A coding request holds budget until it settles. If the coding proxy stops in the
+middle of one, its hold is settled at an estimate once the proxy's lease on it
+runs out, so it does not keep refusing the run's later requests. See
+`troubleshooting/stopped-proxy-holds`.
+
 ## Allowing a small overrun
 
 If coding runs stop just short of finishing, set `allowedOverrunPercent` (0 to

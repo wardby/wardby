@@ -13,6 +13,7 @@ import {
   callGitCheck,
   callPlanPlace,
   callPrepareDependencies,
+  callRestorePypiLockfiles,
   callResultBundle,
   openPlanSession,
 } from "./tool-socket.js";
@@ -55,6 +56,7 @@ try {
     signal: controller.signal,
     createQuery: createClaudeSdkQuery,
     prepareDependencies: () => callPrepareDependencies({ signal: controller.signal, deadlineAt: task.deadlineAt }),
+    restorePypiLockfiles: () => callRestorePypiLockfiles({ signal: controller.signal }),
     // A run with git history (#536): the tool runner has the workspace and git; this container has neither.
     gitCheck: () => callGitCheck({ signal: controller.signal }),
     placePlanFile: (file) => callPlanPlace(file, { signal: controller.signal }),

@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: wardby admin viewer API
-  version: 0.10.1
+  version: 0.10.2
   description: "Read-only admin API behind the wardby viewer: graph, run detail, infrastructure info, your documents and a live event stream. Response objects may gain new fields in later releases; clients should ignore unknown fields. See docs/viewer-api.md for the prose contract."
 servers:
   - url: https://{host}
@@ -17,7 +17,7 @@ paths:
       description: |-
         Agents, runs, coding-run services and outcomes for a time window, as a graph.
 
-        Requires a bearer token with the `admin:view` scope, held by a caller with the admin role.
+        Requires a bearer token with the `admin:view` scope, held by a caller with the admin or viewer role.
       security:
         - bearer: []
       parameters:
@@ -76,7 +76,7 @@ paths:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
         "403":
-          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).
+          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin or viewer role (no `WWW-Authenticate` header).
           content:
             application/json:
               schema:
@@ -124,7 +124,7 @@ paths:
       description: |-
         Full detail for one run, including final text and its newest steps.
 
-        Requires a bearer token with the `admin:view` scope, held by a caller with the admin role.
+        Requires a bearer token with the `admin:view` scope, held by a caller with the admin or viewer role.
       security:
         - bearer: []
       parameters:
@@ -158,7 +158,7 @@ paths:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
         "403":
-          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).
+          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin or viewer role (no `WWW-Authenticate` header).
           content:
             application/json:
               schema:
@@ -219,7 +219,7 @@ paths:
       description: |-
         Where and how this wardby deployment runs its workloads.
 
-        Requires a bearer token with the `admin:view` scope, held by a caller with the admin role.
+        Requires a bearer token with the `admin:view` scope, held by a caller with the admin or viewer role.
       security:
         - bearer: []
       responses:
@@ -246,7 +246,7 @@ paths:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
         "403":
-          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).
+          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin or viewer role (no `WWW-Authenticate` header).
           content:
             application/json:
               schema:
@@ -294,7 +294,7 @@ paths:
       description: |-
         The documents and designs the authenticated caller owns or was granted read access to, newest first. Metadata only (titles, ids, agent, repository, path, timestamps); never content or comments. The role-based access an admin has to every document is not applied here. `pagePath` is the page that opens one, relative to the server's origin.
 
-        Requires a bearer token with the `admin:view` scope, held by a caller with the admin role.
+        Requires a bearer token with the `admin:view` scope, held by a caller with the admin or viewer role.
       security:
         - bearer: []
       parameters:
@@ -356,7 +356,7 @@ paths:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
         "403":
-          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).
+          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin or viewer role (no `WWW-Authenticate` header).
           content:
             application/json:
               schema:
@@ -414,7 +414,7 @@ paths:
 
         There is no replay. Open the event stream first, then load `/admin/api/graph` and apply events on top of it. Refetch the graph on every `resync` and after every reconnect rather than trying to resume.
 
-        Requires a bearer token with the `admin:view` scope, held by a caller with the admin role.
+        Requires a bearer token with the `admin:view` scope, held by a caller with the admin or viewer role.
       security:
         - bearer: []
       responses:
@@ -443,7 +443,7 @@ paths:
             WWW-Authenticate:
               $ref: "#/components/headers/WWWAuthenticate"
         "403":
-          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).
+          description: Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin or viewer role (no `WWW-Authenticate` header).
           content:
             application/json:
               schema:

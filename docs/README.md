@@ -4,6 +4,8 @@
   containerized PostgreSQL and a budgeted sample agent.
 - [Getting started on GKE](getting-started-gke.md) covers the supported Google
   Cloud deployment from project setup through verification and teardown.
+- [Install with Helm](install-helm.md) installs and upgrades the Kubernetes
+  workloads from the published chart on infrastructure you provide.
 - [Bring your own identity provider](getting-started-identity-provider.md)
   configures an existing OAuth/OIDC provider to protect remote MCP access.
 - [Runtime architecture](architecture-runtime.md) explains the control-plane,
@@ -46,6 +48,9 @@
   account and webhook, and links agents to projects.
 - [Send workflow updates to Slack](slack-notifications.md) (0.6.0+) links a Slack
   channel to a Jira project or an agent to follow cards from pickup to merge.
+- [Availability](availability.md) covers single-instance workloads, pod and
+  node failures, recovery times, PodDisruptionBudgets, and running two
+  control-plane copies.
 - [Run hooks](run-hooks.md) (0.9.8+; posting through the server's Slack bot with a system tool, 0.9.12+) ties your own sandbox tool to an agent's
   events, such as `run_completed`, to send results to Slack, email or any API.
 - [Documents](documents.md) (0.10.0+) covers Markdown documents with anchored

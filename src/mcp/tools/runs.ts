@@ -1,7 +1,7 @@
 import { RunStatus, RunTrigger, type NativeExecutionMode, type Prisma } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import { agentAccessResolver, readableAgentsWhere, requireAgentAccess } from "../auth/access.js";
-import { requireScope } from "../auth/resource-server.js";
+import { isOwnerAll, requireScope } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
 import { loadGraphRuns, type IssueSites } from "../../viewer/graph.js";
 import { loadJiraConfig } from "../../config/providers.js";
@@ -352,7 +352,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       const filters = runFilters(args);
       if (args.all === true) {
         if (args.agentId !== undefined) throw new McpError(400, "all lists every agent's runs; leave out agentId");
-        if (!ctx.operator) requireScope(ctx, ctx.canonicalUri, "admin:view");
+        if (!ctx.operator && !isOwnerAll(ctx)) requireScope(ctx, ctx.canonicalUri, "admin:view");
       }
       if (args.agentId === undefined) {
         const runs = await listRunsAcrossAgents(ctx, filters, {

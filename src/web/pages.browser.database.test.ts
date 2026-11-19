@@ -529,7 +529,14 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     // J and K move between threads, switching boards. An opened thread focuses its reply box, where
     // J and K are typed: focus moves to the popover's close button (not a text field) before each key.
     const head = page.locator(".cpop .quote");
-    const leaveReplyBox = () => page.locator(".cpop [data-act=close]").focus();
+    const leaveReplyBox = async () => {
+      // Wait for the reply box to take focus first: on a slow machine it can do so after the close
+      // button is focused, and the next J is then typed into the box.
+      await expect
+        .poll(() => page.locator(".cpop textarea").evaluate((el) => el.ownerDocument.activeElement === el))
+        .toBe(true);
+      await page.locator(".cpop [data-act=close]").focus();
+    };
     await page.keyboard.press("j");
     await expect.poll(() => head.textContent()).toContain("#1 on");
     await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Menu");

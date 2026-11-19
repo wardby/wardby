@@ -546,6 +546,17 @@ describe("secret in value help", () => {
   });
 });
 
+describe("JFrog Artifactory help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["artifactory", "jfrog", "private packages", "REGISTRY_JFROG_URL"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("jfrog-artifactory");
+    }
+  });
+});
+
 describe("host provider errors help", () => {
   it("is the first result for every registration code", async () => {
     const { buildHelpCatalog } = await import("./catalog.js");

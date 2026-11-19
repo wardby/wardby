@@ -1,0 +1,46 @@
+{{- if .Values.headroom.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-headroom
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: wardby-headroom
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.headroom.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-headroom
+  template:
+    metadata:
+      {{- with include "wardby.podAnnotations" (list $ .Values.headroom) | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: wardby-headroom
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      priorityClassName: wardby-headroom
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.headroom.terminationGracePeriodSeconds }}
+      {{- with include "wardby.podScheduling" (list $ .Values.headroom) | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      {{- with .Values.headroom.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.headroom.podSecurityContext | nindent 8 }}
+      containers:
+        - name: pause
+          image: {{ .Values.headroom.image }}
+          resources:
+            {{- toYaml .Values.headroom.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+{{- end }}

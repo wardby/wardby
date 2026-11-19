@@ -179,7 +179,37 @@ export interface RegistryStore {
    *  the session is unsealed, does not already hold it, and holds fewer
    *  than `max`; otherwise does nothing. */
   recordDependencyCacheLockHash(runId: string, lockHash: string, max: number): Promise<void>;
+  /** Ecosystems where a lockfile plan of the run failed or refused an entry. Shared by every proxy replica. */
+  planFallback(runId: string): Promise<string[]>;
+  /** Adds an ecosystem to the run's plan fallback (a no-op when already there). Never cleared for the run. */
+  addPlanFallback(runId: string, ecosystem: string): Promise<void>;
+  /** Starts a lockfile plan for the run, atomically: "busy" while another plan's lease (held by any replica) is
+   *  live, "limit" once the run has started `max` plans, otherwise counts the plan, takes the lease and
+   *  returns "started". */
+  startPlan(runId: string, input: { max: number; leaseUntil: Date; now: Date }): Promise<PlanStart>;
+  /** Ends the run's plan lease (call once a started plan has finished, however it ended). */
+  endPlan(runId: string): Promise<void>;
+  /** Reserves a file slot (and the declared size, when known) for a download that is about to stream, atomically
+   *  against the files already served and every live reservation of the run, from any replica. Returns the
+   *  reservation's id, or null when the run is at `maxFiles`. A reservation whose lease passed (its replica
+   *  died) is swept and counts for nothing. */
+  reserveDownload(
+    runId: string,
+    input: { sizeBytes: number | null; maxFiles: number; leaseUntil: Date; now: Date },
+  ): Promise<string | null>;
+  /** Extends a reservation's lease and, for a download of unknown size, records the bytes streamed so far.
+   *  Returns the bytes served plus every live reservation's bytes (this one's included). */
+  syncDownload(
+    runId: string,
+    reservationId: string,
+    input: { streamedBytes: number | null; leaseUntil: Date; now: Date },
+  ): Promise<number>;
+  /** Drops a reservation (a no-op when it is already gone). */
+  releaseDownload(reservationId: string): Promise<void>;
 }
+
+/** What `startPlan` decided. */
+export type PlanStart = "started" | "busy" | "limit";
 
 /** In-memory adapter for tests. `contexts` is settable directly so tests can
  *  seed a run without going through a full proxy session. */
@@ -198,6 +228,11 @@ export class MemoryRegistryStore implements RegistryStore {
   readonly planRefusals = new Map<string, PlanRefusedVersion>();
   /** runId -> dependency cache session state (shareable with the cache's memory store). */
   readonly cacheSessions = new Map<string, DependencyCacheSessionState>();
+  /** runId -> the run's shared plan state (the columns of its CodingProxySession). */
+  readonly planStates = new Map<string, { fallback: Set<string>; plans: number; leaseUntil: Date | null }>();
+  /** reservation id -> a download streaming now. */
+  readonly reservations = new Map<string, { runId: string; bytes: number; expiresAt: Date }>();
+  private reservationCounter = 0;
 
   async findRunByRegistryTokenHash(hash: string, now: Date): Promise<RegistryRunContext | null> {
     const context = this.contexts.get(hash);
@@ -353,5 +388,78 @@ export class MemoryRegistryStore implements RegistryStore {
     }
     if (session.sealedAt || session.lockHashes.includes(lockHash) || session.lockHashes.length >= max) return;
     session.lockHashes.push(lockHash);
+  }
+
+  private planState(runId: string) {
+    let state = this.planStates.get(runId);
+    if (!state) {
+      state = { fallback: new Set(), plans: 0, leaseUntil: null };
+      this.planStates.set(runId, state);
+    }
+    return state;
+  }
+
+  async planFallback(runId: string): Promise<string[]> {
+    return [...this.planState(runId).fallback];
+  }
+
+  async addPlanFallback(runId: string, ecosystem: string): Promise<void> {
+    this.planState(runId).fallback.add(ecosystem);
+  }
+
+  async startPlan(runId: string, input: { max: number; leaseUntil: Date; now: Date }): Promise<PlanStart> {
+    const state = this.planState(runId);
+    if (state.leaseUntil && state.leaseUntil > input.now) return "busy";
+    if (state.plans >= input.max) return "limit";
+    state.plans += 1;
+    state.leaseUntil = input.leaseUntil;
+    return "started";
+  }
+
+  async endPlan(runId: string): Promise<void> {
+    this.planState(runId).leaseUntil = null;
+  }
+
+  private liveReservations(runId: string, now: Date): { files: number; bytes: number } {
+    let files = 0;
+    let bytes = 0;
+    for (const [id, reservation] of this.reservations) {
+      if (reservation.runId !== runId) continue;
+      if (reservation.expiresAt <= now) this.reservations.delete(id);
+      else {
+        files += 1;
+        bytes += reservation.bytes;
+      }
+    }
+    return { files, bytes };
+  }
+
+  async reserveDownload(
+    runId: string,
+    input: { sizeBytes: number | null; maxFiles: number; leaseUntil: Date; now: Date },
+  ): Promise<string | null> {
+    const served = await this.usage(runId);
+    if (served.files + this.liveReservations(runId, input.now).files >= input.maxFiles) return null;
+    this.reservationCounter += 1;
+    const id = `reservation-${this.reservationCounter}`;
+    this.reservations.set(id, { runId, bytes: input.sizeBytes ?? 0, expiresAt: input.leaseUntil });
+    return id;
+  }
+
+  async syncDownload(
+    runId: string,
+    reservationId: string,
+    input: { streamedBytes: number | null; leaseUntil: Date; now: Date },
+  ): Promise<number> {
+    const reservation = this.reservations.get(reservationId);
+    if (reservation) {
+      reservation.expiresAt = input.leaseUntil;
+      if (input.streamedBytes !== null) reservation.bytes = input.streamedBytes;
+    }
+    return (await this.usage(runId)).bytes + this.liveReservations(runId, input.now).bytes;
+  }
+
+  async releaseDownload(reservationId: string): Promise<void> {
+    this.reservations.delete(reservationId);
   }
 }

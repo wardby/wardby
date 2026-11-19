@@ -104,11 +104,28 @@ export class CodingMetrics implements CodingRunObserver {
 }
 
 export class PinoCodingRunObserver implements CodingRunObserver {
+  private readonly sinks = new Set<CodingRunObserver>();
+
   constructor(private readonly metrics = new CodingMetrics()) {}
 
   emit(event: CodingLifecycleEvent): void {
     this.metrics.emit(event);
     logger.info({ event: `coding.${event.stage}`, ...event }, "coding run lifecycle");
+    for (const sink of this.sinks) {
+      try {
+        sink.emit(event);
+      } catch {
+        // One failing sink must not stop the others or the lifecycle log.
+      }
+    }
+  }
+
+  /** Also sends every event to `sink` (e.g. the Prometheus registry). Returns a function that detaches it. */
+  addSink(sink: CodingRunObserver): () => void {
+    this.sinks.add(sink);
+    return () => {
+      this.sinks.delete(sink);
+    };
   }
 
   snapshot(): CodingMetricsSnapshot {

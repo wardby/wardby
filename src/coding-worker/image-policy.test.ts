@@ -60,6 +60,30 @@ describe("coding worker image policy", () => {
     }
   });
 
+  it("the node-python images pin uv and poetry and bake the CPython builds uv can select offline", async () => {
+    const codex = await readFile(new URL("./Dockerfile.node-python", import.meta.url), "utf8");
+    const claude = await readFile(new URL("../claude-tool-runner/Dockerfile", import.meta.url), "utf8");
+    for (const dockerfile of [codex, claude]) {
+      expect(dockerfile).toMatch(/\buv==\d+\.\d+\.\d+/);
+      expect(dockerfile).toMatch(/\bpoetry==\d+\.\d+\.\d+/);
+      expect(dockerfile).toContain("uv python install --no-bin 3.12 3.13 3.14");
+      expect(dockerfile).toContain("UV_PYTHON_INSTALL_DIR=/opt/uv-python");
+      expect(dockerfile).toContain("UV_PYTHON_DOWNLOADS=never");
+    }
+    // `python` is the managed CPython the image is built for (PYTHON_DEFAULT_VERSION), not Debian's python3,
+    // so the toolchainVersion an agent asks for is the interpreter it gets.
+    for (const dockerfile of [codex, claude]) {
+      expect(dockerfile).toContain("ARG PYTHON_DEFAULT_VERSION=3.12");
+      expect(dockerfile).not.toContain("ln -s /usr/bin/python3 /usr/bin/python");
+      expect(dockerfile).toContain('ln -s "$python_home/bin/python3" /usr/bin/python');
+      expect(dockerfile).toContain("sys.version_info[:2])) == '${PYTHON_DEFAULT_VERSION}'");
+      expect(dockerfile).toContain("python -m pytest -q -p no:cacheprovider /tmp/test_ok.py");
+    }
+    // The two images carry the same pins, package for package.
+    const pins = (text: string) => text.match(/\b(?:uv|poetry|pytest|ruff)==[\d.]+/g)?.sort();
+    expect(pins(claude)).toEqual(pins(codex));
+  });
+
   it("Dockerfile.driver copies every module the driver's entry point imports", async () => {
     const dockerfile = await readFile(new URL("./Dockerfile.driver", import.meta.url), "utf8");
     const closure = relativeImportClosure(["coding-worker/main.ts"]);

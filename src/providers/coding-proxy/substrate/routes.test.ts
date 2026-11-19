@@ -1928,10 +1928,15 @@ describe("substrate routes", () => {
       expect((await fetch(`${base}/repos/extra-beta/seed`, tool())).status).toBe(200);
       expect((await fetch(`${base}/repos/extra-beta/workspace`, tool(upload("tar")))).status).toBe(404);
       await settle();
-      expect(routeLines().slice(5)).toEqual([
-        expect.objectContaining({ route: "repos.seed", status: 200, repository: "extra-beta" }),
-        expect.objectContaining({ route: "repos.workspace", status: 404, repository: "extra-beta" }),
-      ]);
+      // A line is written when its response finishes, so the two can land in either order.
+      const named = routeLines().slice(5);
+      expect(named).toHaveLength(2);
+      expect(named).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ route: "repos.seed", status: 200, repository: "extra-beta" }),
+          expect.objectContaining({ route: "repos.workspace", status: 404, repository: "extra-beta" }),
+        ]),
+      );
     });
 
     it("single shape: the agent actor is the holder", async () => {

@@ -348,6 +348,7 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
       expect(missing).toHaveLength(proxyGrantChecks(GRANTS).length);
       expect(missing).toContainEqual({ grant: "INSERT ON RegistryPlanRefusal" });
       expect(missing).toContainEqual({ grant: "DELETE ON DependencySnapshot" });
+      expect(missing).toContainEqual({ grant: "DELETE ON DependencyUploadClaim" });
       expect(missing).toContainEqual({ grant: "SELECT (dependencyCache) ON CodingRun" });
     } finally {
       await client.$disconnect();
@@ -478,13 +479,15 @@ describe.skipIf(!process.env.DATABASE_URL)("database-grants.sql (PostgreSQL)", (
         .replace(/\bRegistryVersionFact\b/g, `RegistryVersionFact${missing}`)
         .replace(/\bRegistryApprovedVersion\b/g, `RegistryApprovedVersion${missing}`)
         .replace(/\bRegistryPlanRefusal\b/g, `RegistryPlanRefusal${missing}`)
+        .replace(/\bRegistryReservation\b/g, `RegistryReservation${missing}`)
         .replace(/\bDependencySnapshot\b/g, `DependencySnapshot${missing}`)
+        .replace(/\bDependencyUploadClaim\b/g, `DependencyUploadClaim${missing}`)
         .replace(/\bSubstrateRelayChannel\b/g, `SubstrateRelayChannel${missing}`)
         .replace(/\bSubstrateRelayEvent\b/g, `SubstrateRelayEvent${missing}`)
         .replace(/\bSubstrateRun\b/g, `SubstrateRun${missing}`)
         .replace(/\b_prisma_migrations\b/g, `_prisma_migrations${missing}`);
       expect(sql).not.toMatch(
-        /"(CodingProxySession|CodingProxyRequest|Run|RunModelUsage|CodingRun|RegistryAllowance|RegistryFetch|RegistryAuditRecord|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|DependencySnapshot|SubstrateRelayChannel|SubstrateRelayEvent|SubstrateRun|_prisma_migrations)"/,
+        /"(CodingProxySession|CodingProxyRequest|Run|RunModelUsage|CodingRun|RegistryAllowance|RegistryFetch|RegistryAuditRecord|RegistryVersionFact|RegistryApprovedVersion|RegistryPlanRefusal|RegistryReservation|DependencySnapshot|DependencyUploadClaim|SubstrateRelayChannel|SubstrateRelayEvent|SubstrateRun|_prisma_migrations)"/,
       );
       for (const st of statements(sql)) await admin.$executeRawUnsafe(st);
       const [{ tables, columns }] = await admin.$queryRawUnsafe(

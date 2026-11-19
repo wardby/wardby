@@ -58,11 +58,21 @@ export interface McpRequestContext {
    */
   roles?: readonly string[];
   /**
+   * The principal ids the caller acts for: its own, then each team's backing
+   * principal (a Personal team's is the caller's own, so it is listed once).
+   * An owner check is `ownerId in actsFor`. Resolved per request with `roles`
+   * (core/teams/standing.ts). Absent = just `principal.id`.
+   */
+  actsFor?: readonly string[];
+  /** Ids of the teams the caller belongs to, Personal team included. Absent = none known. */
+  teamIds?: readonly string[];
+  /**
    * The stdio local operator (set only by index.ts localOperatorContext):
    * owner of every resource for access checks, unfiltered listings. Depends
    * on the transport, never on the principal, so an HTTP caller whose
    * subject equals LOCAL_PRINCIPAL never gets it (A10). It never bypasses
-   * the binding rules (auth/access.ts requireBindingOwner).
+   * the binding rules (auth/access.ts requireBindingOwner), unlike an
+   * owner-all caller.
    */
   operator?: boolean;
   /**

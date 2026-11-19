@@ -36,6 +36,22 @@ const POSTGRES = resolvedFromDefinition(
 );
 
 describe("claudeToolSetup", () => {
+  it("never carries the JFrog credential, even when it is in the launcher's environment", () => {
+    const raw = claudeToolSetup(spec, CAPABILITY, {
+      env: {
+        REGISTRY_JFROG_URL: "https://example.jfrog.io/acme",
+        REGISTRY_JFROG_NPM_REPO: "npm-local",
+        REGISTRY_JFROG_NPM_SCOPES: "@acme",
+        REGISTRY_UPSTREAM_USERNAME: "env:JFROG_USER",
+        REGISTRY_UPSTREAM_PASSWORD: "env:JFROG_PASS",
+        JFROG_USER: "svc-user-value",
+        JFROG_PASS: "svc-pass-value",
+      },
+    });
+    for (const secret of ["svc-user-value", "svc-pass-value", "JFROG_PASS", "REGISTRY_UPSTREAM"])
+      expect(raw).not.toContain(secret);
+  });
+
   it("names its environment variable", () => {
     expect(CLAUDE_TOOL_SETUP_ENV).toBe("WARDBY_TOOL_SETUP");
   });

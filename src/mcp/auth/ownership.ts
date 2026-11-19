@@ -12,6 +12,11 @@
  */
 import type { PrismaClient, Tool } from "#prisma";
 import { McpError } from "../errors.js";
+import type { McpRequestContext } from "../context.js";
+import { isOwnerAll } from "./resource-server.js";
+
+/** The caller bypasses per-owner checks: an owner-all caller (owner:all scope + wardby_owner role). */
+type OwnerAllCtx = Pick<McpRequestContext, "scopes" | "roles">;
 
 export function canRead(ownerId: string | null, principalId: string): boolean {
   return ownerId === null || ownerId === principalId;
@@ -21,13 +26,28 @@ export function isOwner(ownerId: string | null, principalId: string): boolean {
   return ownerId === principalId;
 }
 
+/** canRead, plus owner-all callers read every owner's rows. */
+export function canReadFor(ctx: OwnerAllCtx & { principal: { id: string } }, ownerId: string | null): boolean {
+  return isOwnerAll(ctx) || canRead(ownerId, ctx.principal.id);
+}
+
+/** canMutate, plus owner-all callers mutate every owner's rows. */
+export function canMutateFor(ctx: OwnerAllCtx & { principal: { id: string } }, ownerId: string | null): boolean {
+  return isOwnerAll(ctx) || canMutate(ownerId, ctx.principal.id);
+}
+
 /** Same rule as canRead: a null owner is a mutation target for anyone, same as it's a read target for anyone. */
 export function canMutate(ownerId: string | null, principalId: string): boolean {
   return ownerId === null || ownerId === principalId;
 }
 
-export function assertCanMutate(ownerId: string | null, principalId: string, notFoundMessage: string): void {
-  if (!canMutate(ownerId, principalId)) throw new McpError(403, notFoundMessage);
+export function assertCanMutate(
+  ownerId: string | null,
+  principalId: string,
+  notFoundMessage: string,
+  ownerAll = false,
+): void {
+  if (!ownerAll && !canMutate(ownerId, principalId)) throw new McpError(403, notFoundMessage);
 }
 
 /** Prisma where-clause fragment: rows owned by the caller, plus public (null-owner) rows. */
@@ -35,10 +55,15 @@ export function visibleToPrincipal(principalId: string) {
   return { OR: [{ ownerId: principalId }, { ownerId: null }] };
 }
 
-export async function requireOwnedBudgetGroup(db: PrismaClient, id: string, principalId: string) {
+/** visibleToPrincipal for a request: an owner-all caller sees every row. */
+export function visibleTo(ctx: OwnerAllCtx & { principal: { id: string } }) {
+  return isOwnerAll(ctx) ? {} : visibleToPrincipal(ctx.principal.id);
+}
+
+export async function requireOwnedBudgetGroup(db: PrismaClient, id: string, principalId: string, ownerAll = false) {
   const group = await db.budgetGroup.findUnique({ where: { id } });
   if (!group) throw new McpError(404, `Budget group "${id}" not found.`);
-  assertCanMutate(group.ownerId, principalId, `Budget group "${id}" is not owned by the caller.`);
+  assertCanMutate(group.ownerId, principalId, `Budget group "${id}" is not owned by the caller.`, ownerAll);
   return group;
 }
 
@@ -46,37 +71,53 @@ export async function requireReadableBudgetGroup(
   db: Pick<PrismaClient, "budgetGroup">,
   id: string,
   principalId: string,
+  ownerAll = false,
 ) {
   const group = await db.budgetGroup.findUnique({ where: { id } });
-  if (!group || !canRead(group.ownerId, principalId)) {
+  if (!group || !(ownerAll || canRead(group.ownerId, principalId))) {
     throw new McpError(404, `Budget group "${id}" not found.`);
   }
   return group;
 }
 
-export async function requireOwnedSecret(db: PrismaClient, id: string, principalId: string): Promise<void> {
+export async function requireOwnedSecret(
+  db: PrismaClient,
+  id: string,
+  principalId: string,
+  ownerAll = false,
+): Promise<void> {
   const secret = await db.secret.findUnique({ where: { id } });
   if (!secret) throw new McpError(403, `Secret "${id}" is not owned by the caller.`);
-  assertCanMutate(secret.ownerId, principalId, `Secret "${id}" is not owned by the caller.`);
+  assertCanMutate(secret.ownerId, principalId, `Secret "${id}" is not owned by the caller.`, ownerAll);
 }
 
-export async function requireOwnedWebhook(db: PrismaClient, id: string, principalId: string): Promise<void> {
+export async function requireOwnedWebhook(
+  db: PrismaClient,
+  id: string,
+  principalId: string,
+  ownerAll = false,
+): Promise<void> {
   const webhook = await db.webhook.findUnique({ where: { id } });
   if (!webhook) throw new McpError(403, `Webhook "${id}" is not owned by the caller.`);
-  assertCanMutate(webhook.ownerId, principalId, `Webhook "${id}" is not owned by the caller.`);
+  assertCanMutate(webhook.ownerId, principalId, `Webhook "${id}" is not owned by the caller.`, ownerAll);
 }
 
-export async function requireOwnedDatastore(db: PrismaClient, id: string, principalId: string) {
+export async function requireOwnedDatastore(db: PrismaClient, id: string, principalId: string, ownerAll = false) {
   const datastore = await db.datastore.findUnique({ where: { id } });
   if (!datastore) throw new McpError(403, `Datastore "${id}" is not owned by the caller.`);
-  assertCanMutate(datastore.ownerId, principalId, `Datastore "${id}" is not owned by the caller.`);
+  assertCanMutate(datastore.ownerId, principalId, `Datastore "${id}" is not owned by the caller.`, ownerAll);
   return datastore;
 }
 
-export async function requireOwnedTool(db: Pick<PrismaClient, "tool">, id: string, principalId: string): Promise<Tool> {
+export async function requireOwnedTool(
+  db: Pick<PrismaClient, "tool">,
+  id: string,
+  principalId: string,
+  ownerAll = false,
+): Promise<Tool> {
   const tool = await db.tool.findUnique({ where: { id } });
   if (!tool) throw new McpError(404, `Tool "${id}" not found.`);
-  assertCanMutate(tool.ownerId, principalId, `Tool "${id}" is not owned by the caller.`);
+  assertCanMutate(tool.ownerId, principalId, `Tool "${id}" is not owned by the caller.`, ownerAll);
   return tool;
 }
 
@@ -84,21 +125,23 @@ export async function requireOwnedTool(db: Pick<PrismaClient, "tool">, id: strin
  * Owner-only, with no null-is-public passthrough: for changing or removing
  * a tool's code (update_tool/delete_tool), where requireOwnedTool's rule
  * would let anyone rewrite a public tool. A public tool is readable but
- * immutable over MCP (403) -- only an operator can change one, via the CLI.
+ * immutable over MCP (403) -- only an operator can change one, via the CLI
+ * (or an owner-all caller, who passes `ownerAll`).
  * A tool the caller can't read is 404, the same as a missing one.
  */
 export async function requireStrictlyOwnedTool(
   db: Pick<PrismaClient, "tool">,
   id: string,
   principalId: string,
+  ownerAll = false,
 ): Promise<Tool> {
-  return assertStrictlyOwnedTool(await db.tool.findUnique({ where: { id } }), id, principalId);
+  return assertStrictlyOwnedTool(await db.tool.findUnique({ where: { id } }), id, principalId, ownerAll);
 }
 
 /** requireStrictlyOwnedTool's rule for a row already read (e.g. inside core/tool-admin.ts's transaction). */
-export function assertStrictlyOwnedTool(tool: Tool | null, id: string, principalId: string): Tool {
-  if (!tool || !canRead(tool.ownerId, principalId)) throw new McpError(404, `Tool "${id}" not found.`);
-  if (!isOwner(tool.ownerId, principalId)) {
+export function assertStrictlyOwnedTool(tool: Tool | null, id: string, principalId: string, ownerAll = false): Tool {
+  if (!tool || !(ownerAll || canRead(tool.ownerId, principalId))) throw new McpError(404, `Tool "${id}" not found.`);
+  if (!ownerAll && !isOwner(tool.ownerId, principalId)) {
     throw new McpError(403, `Tool "${id}" is public; public tools can't be changed or deleted over MCP.`);
   }
   return tool;
@@ -109,11 +152,11 @@ export function assertStrictlyOwnedTool(tool: Tool | null, id: string, principal
  * agent's owner — a public agent's runs are still private to whoever
  * triggered them. No canRead/null=public path exists here on purpose.
  */
-export async function requireOwnedTask(db: PrismaClient, taskId: string, principalId: string) {
+export async function requireOwnedTask(db: PrismaClient, taskId: string, principalId: string, ownerAll = false) {
   const task = await db.task.findUnique({ where: { id: taskId } });
   // 404, not 403: confirming a taskId exists at all to a non-owner is
   // itself a small information leak — same reasoning as agent reads.
-  if (!task || !isOwner(task.principalId, principalId)) {
+  if (!task || !(ownerAll || isOwner(task.principalId, principalId))) {
     throw new McpError(404, `Task "${taskId}" not found.`);
   }
   return task;

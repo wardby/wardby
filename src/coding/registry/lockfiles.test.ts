@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { configuredRegistryAdapters } from "./adapters.js";
 import { normalizeRegistryLockfiles } from "./lockfiles.js";
 
 const PROXY_BASE = "http://wardby-proxy:8787";
@@ -108,6 +109,25 @@ describe("normalizeRegistryLockfiles", () => {
       expect(content).not.toContain("wardby-proxy");
       expect(content).not.toContain("rrg_");
     }
+  });
+
+  it("rewrites a configured private scope back to the JFrog registry, and leaves the public default without one", async () => {
+    const adapters = configuredRegistryAdapters({
+      REGISTRY_JFROG_URL: "https://example.jfrog.io/acme",
+      REGISTRY_JFROG_NPM_REPO: "npm-local",
+      REGISTRY_JFROG_NPM_SCOPES: "@scope",
+    });
+    const workspace = await mkdtemp(join(tmpdir(), "wardby-lockfiles-"));
+    await write(workspace, "package-lock.json", lock(PROXIED));
+    await normalizeRegistryLockfiles({ workspace, proxyBaseUrl: PROXY_BASE, adapters });
+    expect(await readFile(join(workspace, "package-lock.json"), "utf8")).toBe(
+      lock('"resolved": "https://example.jfrog.io/acme/api/npm/npm-local/@scope/pkg/-/pkg-3.5.1.tgz"'),
+    );
+
+    const unconfigured = await mkdtemp(join(tmpdir(), "wardby-lockfiles-"));
+    await write(unconfigured, "package-lock.json", lock(PROXIED));
+    await normalizeRegistryLockfiles({ workspace: unconfigured, proxyBaseUrl: PROXY_BASE });
+    expect(await readFile(join(unconfigured, "package-lock.json"), "utf8")).toBe(lock(PUBLIC));
   });
 });
 

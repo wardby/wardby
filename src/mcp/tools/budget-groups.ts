@@ -1,7 +1,8 @@
 /** BudgetGroup CRUD with scope checks in server.ts and ownership checks here. */
 import { z } from "zod";
 import { computeGroupSpend } from "../../core/budget-groups.js";
-import { canRead, requireOwnedBudgetGroup, visibleToPrincipal } from "../auth/ownership.js";
+import { canReadFor, requireOwnedBudgetGroup, visibleTo } from "../auth/ownership.js";
+import { isOwnerAll } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -90,7 +91,7 @@ export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
       const result = UpdateBudgetGroupSchema.safeParse(rawArgs);
       if (!result.success) throw invalidArguments("update_budget_group arguments", result.error);
       const { id, ...updates } = result.data;
-      await requireOwnedBudgetGroup(ctx.db, id, ctx.principal.id);
+      await requireOwnedBudgetGroup(ctx.db, id, ctx.principal.id, isOwnerAll(ctx));
       const group = await ctx.db.budgetGroup.update({ where: { id }, data: updates });
       return textResult(group);
     },
@@ -101,7 +102,7 @@ export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
     scope: "agents:read",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args: Record<string, never>, ctx) => {
-      const groups = await ctx.db.budgetGroup.findMany({ where: visibleToPrincipal(ctx.principal.id) });
+      const groups = await ctx.db.budgetGroup.findMany({ where: visibleTo(ctx) });
       return textResult(groups);
     },
   });
@@ -120,7 +121,7 @@ export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
         where: { id: args.id },
         include: { agents: { select: { id: true, name: true, budgetUsd: true } } },
       });
-      if (!group || !canRead(group.ownerId, ctx.principal.id)) {
+      if (!group || !canReadFor(ctx, group.ownerId)) {
         throw new McpError(404, `Budget group "${args.id}" not found.`);
       }
       const spend = await computeGroupSpend(ctx.db, group, group.agents, new Date());
@@ -138,7 +139,7 @@ export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
       additionalProperties: false,
     },
     handler: async (args: { id: string }, ctx) => {
-      await requireOwnedBudgetGroup(ctx.db, args.id, ctx.principal.id);
+      await requireOwnedBudgetGroup(ctx.db, args.id, ctx.principal.id, isOwnerAll(ctx));
       // Agent.budgetGroupId -> BudgetGroup is ON DELETE SET NULL: member
       // agents are ungrouped automatically, never blocked or cascaded.
       await ctx.db.budgetGroup.delete({ where: { id: args.id } });

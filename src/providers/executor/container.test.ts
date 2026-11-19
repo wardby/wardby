@@ -74,6 +74,7 @@ import {
   type CapacityRequeueOutcome,
   DESCRIPTION_REFRESH_TIMEOUT_MS,
   RunCapabilityVault,
+  TRANSCRIPT_MAX_ATTEMPTS,
   type LinkedIssueRef,
   type LinkedIssueSource,
   type StoredDescriptionBaseline,
@@ -87,8 +88,11 @@ import {
   type ExtraPublishRecord,
   type RunRepositorySnapshot,
   type ProvisioningClaim,
+  type WorkspaceBase,
   storedTests,
 } from "./container.js";
+import { CODING_FOLLOW_UP_KINDS } from "./container-follow-ups.js";
+import { ExecutorClosingError } from "./types.js";
 import {
   RunTranscriptRecorder,
   transcriptBlobKey,
@@ -106,6 +110,10 @@ import { LocalBlobStore } from "../storage/local.js";
  * diagnostic id by design, so this log line is the only place the real reason
  * exists — which makes it worth asserting on.
  */
+function followUpContext(attempt: number) {
+  return { runId: "run-1", kind: "test", payload: {}, attempt, signal: new AbortController().signal };
+}
+
 const logged = vi.hoisted(() => [] as { level: string; payload: Record<string, unknown>; message: string }[]);
 vi.mock("../../core/logger.js", () => {
   const make = (): Record<string, unknown> => {
@@ -150,6 +158,7 @@ const IMAGE = `registry.example/worker@sha256:${"a".repeat(64)}`;
 const CLAUDE_IMAGE = `registry.example/claude-worker@sha256:${"b".repeat(64)}`;
 const CLAUDE_TOOL_IMAGE = `registry.example/claude-tools@sha256:${"c".repeat(64)}`;
 const roots: string[] = [];
+const executors: ContainerExecutor[] = [];
 const LOCAL_REPOSITORY = "local:/srv/repos/example";
 
 function snapshot(overrides: Partial<ContainerRunSnapshot> = {}): ContainerRunSnapshot {
@@ -233,6 +242,11 @@ class FakeStore implements ContainerExecutionStore {
   terminations: unknown[] = [];
   /** Every handle written, in order, so tests can see whether one was stored before launching. */
   persistedHandles: JobHandle[] = [];
+  /** The queued chores this process did itself and marked done (completeFollowUp). */
+  completedFollowUps: string[] = [];
+  async completeFollowUp(_runId: string, kind: string): Promise<void> {
+    this.completedFollowUps.push(kind);
+  }
   heartbeats = 0;
   /** Answers relatedPullRequests when set; left undefined, the store has no such method behavior. */
   related?: RelatedPullRequestEntry[] | Error;
@@ -291,8 +305,13 @@ class FakeStore implements ContainerExecutionStore {
     return "claimed";
   }
 
-  async persistHandle(_runId: string, claimId: string, handle: JobHandle): Promise<void> {
+  /** The workspace base written with each handle (undefined when the caller passed none). */
+  persistedBases: Array<WorkspaceBase | undefined> = [];
+  async persistHandle(_runId: string, claimId: string, handle: JobHandle, base?: WorkspaceBase): Promise<void> {
     if (this.run.status !== "pending" && this.run.status !== "running") throw new Error("not_active");
+    this.persistedBases.push(structuredClone(base));
+    // Mirrors the real store: the base lands in the same write as the handle.
+    if (base && !this.run.jobHandle) Object.assign(this.run, structuredClone(base));
     // Mirrors the real store: re-persisting the same handle is a no-op, even once the claim is gone.
     if (this.run.jobHandle) {
       if (JSON.stringify(this.run.jobHandle) !== JSON.stringify(handle)) throw new Error("conflict");
@@ -586,9 +605,26 @@ class FakeVcs implements VcsProvider {
     await mkdir(this.workspace.workspacePath, { recursive: true });
     return this.workspace;
   }
+  /** What recoverWorkspace was asked to rebuild a missing checkout from (VcsPrepareInput.rebuild). */
+  rebuilds: Array<NonNullable<VcsPrepareInput["rebuild"]>> = [];
+  /** Makes a requested rebuild fail, the way a base that can no longer be reproduced does. */
+  rebuildError?: Error;
   async recoverWorkspace(input: VcsPrepareInput): Promise<PreparedWorkspace | null> {
     if (input.slot) return this.slots.get(input.slot.name) ?? null;
-    return this.workspace?.runId === input.runId ? this.workspace : null;
+    if (this.workspace?.runId === input.runId) return this.workspace;
+    // Like the real provider: a missing checkout is rebuilt only when the caller recorded what to rebuild from.
+    if (!input.rebuild) return null;
+    if (this.rebuildError) throw this.rebuildError;
+    this.rebuilds.push(structuredClone(input.rebuild));
+    this.workspace = {
+      ...this.makeWorkspace(input),
+      baseCommit: input.rebuild.baseCommit,
+      ...(input.rebuild.targetMerge
+        ? { targetMerge: { ...structuredClone(input.rebuild.targetMerge), conflictedPaths: [] } }
+        : {}),
+    };
+    await mkdir(this.workspace.workspacePath, { recursive: true });
+    return this.workspace;
   }
   /** Runs at the start of prepareReadOnlyCopy (a test may slow it down or make it fail). */
   onPrepareCopy?: (input: ReadOnlyCopyInput) => Promise<void>;
@@ -717,7 +753,7 @@ class FakeVcs implements VcsProvider {
     });
     this.events.push(`notifyFinished:${outcome}`);
   }
-  private makeWorkspace(input: VcsPrepareInput): PreparedWorkspace {
+  private makeWorkspace({ rebuild: _rebuild, ...input }: VcsPrepareInput): PreparedWorkspace {
     return {
       id: `vcs-${input.runId}`,
       ...input,
@@ -805,11 +841,14 @@ async function harness(
       : {}),
     limits: { cpus: 1, memoryMb: 1024, pids: 64, diskMb: 512 },
     maxDiskMb: 8192,
-    sleep: async () => {},
+    // Yields to the event loop: an adopted run's observer loop (recover()) never ends on its own, and
+    // a sleep that only resolves microtasks would starve everything else, timers included.
+    sleep: () => new Promise<void>((resolve) => setImmediate(resolve)),
     observer,
     repoAccess: gateWith().gate,
     ...extra,
   });
+  executors.push(executor);
   return { executor, store, jobs, vcs, sessions, capabilities, events, observer, root };
 }
 
@@ -843,6 +882,8 @@ function writeOnceRecorder(writesNow: () => number) {
 }
 
 afterEach(async () => {
+  // Ends the observer loops recover() starts, before their checkouts are removed.
+  await Promise.all(executors.splice(0).map((executor) => executor.close()));
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -1337,11 +1378,189 @@ describe("ContainerExecutor", () => {
         await vi.advanceTimersByTimeAsync(61_000);
         await running;
         expect(created.store.run.status).toBe("succeeded");
-        expect(created.jobs.removals).toBe(1);
+        // The capture window ended with the pod kept and its chore left for the scheduler leader.
+        expect(created.jobs.removals).toBe(0);
+        expect(created.store.completedFollowUps).not.toContain(CODING_FOLLOW_UP_KINDS.releaseJob);
         expect(calls).toHaveLength(1);
+        // After the last attempt the leader gives up on the capture and removes the job.
+        await created.executor.followUpHandlers()[CODING_FOLLOW_UP_KINDS.releaseJob]({
+          ...followUpContext(TRANSCRIPT_MAX_ATTEMPTS),
+          signal: AbortSignal.abort(),
+        });
+        expect(created.jobs.removals).toBe(1);
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe("follow-up handlers", () => {
+    const RELEASE = CODING_FOLLOW_UP_KINDS.releaseJob;
+    const HOST_NOTIFY = CODING_FOLLOW_UP_KINDS.hostNotify;
+    const TERMINAL_HOOK = CODING_FOLLOW_UP_KINDS.terminalHook;
+    const CLAUDE = {
+      model: "claude-sonnet-5",
+      workerImage: CLAUDE_IMAGE,
+      sessionResume: true,
+      provider: "claude-code",
+    } as const;
+    const claude = { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE };
+
+    async function withRecorder(
+      record: (input: RecordTranscriptInput) => Promise<RecordResult>,
+      setup: (created: Awaited<ReturnType<typeof harness>>) => void = () => {},
+    ) {
+      const calls: RecordTranscriptInput[] = [];
+      const created = await harness({ ...CLAUDE }, IMAGE, undefined, claude, {
+        transcripts: {
+          record: async (input) => {
+            created.events.push("record");
+            calls.push(input);
+            return record(input);
+          },
+        },
+      });
+      setup(created);
+      await created.executor.start("run-1");
+      return { created, calls };
+    }
+
+    it("marks each chore done after this process did it, in the order capture, remove, comment, hook", async () => {
+      const { created } = await withRecorder(
+        async () => "stored",
+        (c) => {
+          c.jobs.readTranscript = async () => "file";
+        },
+      );
+      expect(created.store.completedFollowUps).toEqual([RELEASE, HOST_NOTIFY, TERMINAL_HOOK]);
+      expect(created.events.indexOf("record")).toBeLessThan(created.events.indexOf("remove"));
+    });
+
+    it("captures the transcript before it removes the job, from a process that never ran the job", async () => {
+      const { created } = await withRecorder(
+        async () => "stored",
+        (c) => {
+          c.jobs.readTranscript = async () => "file";
+        },
+      );
+      created.events.length = 0;
+
+      await created.executor.followUpHandlers()[RELEASE](followUpContext(1));
+
+      expect(created.events).toEqual(["record", "remove"]);
+    });
+
+    it("treats a removed job as not capturable: no retry, nothing read, and the chore ends", async () => {
+      const { created, calls } = await withRecorder(
+        async () => "not_captured",
+        (c) => {
+          c.jobs.readTranscript = async () => "file";
+        },
+      );
+      created.jobs.status = async () => {
+        throw new Error("job_removed");
+      };
+      const before = calls.length;
+
+      await created.executor.followUpHandlers()[RELEASE](followUpContext(1));
+
+      expect(calls).toHaveLength(before + 1);
+      expect(await calls[before].read(10)).toBeUndefined();
+      expect(created.jobs.removals).toBe(2);
+    });
+
+    it("retries a pod that could not be read, keeping the pod, until the last attempt gives up and removes it", async () => {
+      const { created } = await withRecorder(
+        async (input) => {
+          await input.read(10).catch(() => undefined);
+          return "not_captured";
+        },
+        (c) => {
+          c.jobs.readTranscript = async () => {
+            throw new Error("exec failed: token ghp_fake_secret_value");
+          };
+        },
+      );
+      // This process's own attempt left the pod and the row for the leader.
+      expect(created.jobs.removals).toBe(0);
+      expect(created.store.completedFollowUps).not.toContain(RELEASE);
+      const handler = created.executor.followUpHandlers()[RELEASE];
+
+      await expect(handler(followUpContext(1))).rejects.toMatchObject({ name: "TranscriptUnreadable", message: "" });
+      expect(created.jobs.removals).toBe(0);
+
+      await handler(followUpContext(TRANSCRIPT_MAX_ATTEMPTS));
+      expect(created.jobs.removals).toBe(1);
+      // Neither the thrown error nor any log line carries the launcher's error text.
+      expect(JSON.stringify(logged)).not.toContain("ghp_fake_secret_value");
+    });
+
+    it("does not capture for a run without session resume, and still removes the job", async () => {
+      const created = await harness({ ...CLAUDE, sessionResume: false }, IMAGE, undefined, claude, {
+        transcripts: { record: async () => "stored" },
+      });
+      await created.executor.start("run-1");
+      created.jobs.removals = 0;
+
+      await created.executor.followUpHandlers()[RELEASE](followUpContext(1));
+
+      expect(created.jobs.removals).toBe(1);
+      expect(created.events.filter((event) => event === "record")).toEqual([]);
+    });
+
+    it("posts a continuation's final status from the stored run, and nothing for a run that is not one", async () => {
+      const continuation = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+      await continuation.executor.start("run-1");
+      const posted = continuation.vcs.notifyFinishedCalls.length;
+
+      await continuation.executor.followUpHandlers()[HOST_NOTIFY](followUpContext(1));
+
+      expect(continuation.vcs.notifyFinishedCalls).toHaveLength(posted + 1);
+      expect(continuation.vcs.notifyFinishedCalls.at(-1)).toMatchObject({
+        outcome: "succeeded",
+        agentName: "knock-knock-implement",
+      });
+      // What only the finishing process knew is not in the stored run.
+      expect(continuation.vcs.notifyFinishedCalls.at(-1)!.summary).toBeUndefined();
+
+      const plain = await harness({});
+      await plain.executor.start("run-1");
+      const before = plain.vcs.notifyFinishedCalls.length;
+      await plain.executor.followUpHandlers()[HOST_NOTIFY](followUpContext(1));
+      expect(plain.vcs.notifyFinishedCalls).toHaveLength(before);
+    });
+
+    it("runs the terminal hook from the leader, and lets its failure through so the chore is retried", async () => {
+      const seen: string[] = [];
+      let fail = false;
+      const created = await harness({}, IMAGE, undefined, undefined, {
+        onCodingRunTerminal: async (runId) => {
+          seen.push(runId);
+          if (fail) throw new Error("host down");
+        },
+      });
+      await created.executor.start("run-1");
+      expect(seen).toEqual(["run-1"]);
+      const handler = created.executor.followUpHandlers()[TERMINAL_HOOK];
+
+      await handler(followUpContext(1));
+      expect(seen).toEqual(["run-1", "run-1"]);
+
+      fail = true;
+      await expect(handler(followUpContext(2))).rejects.toThrow("host down");
+    });
+
+    it("leaves a failed chore's row for the drain: the failure is logged by name only", async () => {
+      const created = await harness({}, IMAGE, undefined, undefined, {
+        onCodingRunTerminal: async () => {
+          throw new Error("host down token ghp_fake_secret_value");
+        },
+      });
+      await created.executor.start("run-1");
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.store.completedFollowUps).not.toContain(TERMINAL_HOOK);
+      expect(JSON.stringify(logged)).not.toContain("ghp_fake_secret_value");
     });
   });
 
@@ -2408,6 +2627,22 @@ describe("ContainerExecutor", () => {
       activeJobs: 0,
       budgetReservedUsd: 2,
       budgetActualUsd: 0.01,
+    });
+  });
+
+  it("reports the cost the run was finally charged, not the cost when its snapshot was loaded", async () => {
+    const created = await harness({ status: "running", jobHandle: { backend: "fake", id: "job-1" }, costUsd: 0.2 });
+    const terminate = created.store.terminate.bind(created.store);
+    created.store.terminate = async (...args) => {
+      // A reply settles while the run is stopped: the proxy adds its cost to the run.
+      created.store.run.costUsd = 0.25;
+      return terminate(...args);
+    };
+    await created.executor.stop("run-1", "requested");
+
+    expect(created.observer.events.find((event) => event.stage === "terminal")).toMatchObject({
+      outcome: "cancelled",
+      budgetActualUsd: 0.25,
     });
   });
 
@@ -4842,7 +5077,309 @@ describe("ContainerExecutor", () => {
     created.jobs.statusValue = { state: "running" };
     await expect(created.executor.recover({ runId: "run-1", ...handle })).resolves.toEqual({ state: "active" });
     expect(created.jobs.launches).toBe(0);
-    expect(created.store.heartbeats).toBe(1);
+    // recover() beats once; the observer loop it starts beats on each poll after.
+    expect(created.store.heartbeats).toBeGreaterThanOrEqual(1);
+    await created.executor.close();
+  });
+
+  describe("a run another process launched, adopted through recover()", () => {
+    const handle = { backend: "fake", id: "job-1" };
+    const FAST_POLL = { pollMinMs: 1, pollMaxMs: 2 };
+    const limited = {
+      jobHandle: handle,
+      proxySessionId: "session-1",
+      budgetUsd: 1,
+      budgetBaseUsd: 1,
+      budgetLimitUsd: 1.5,
+    };
+
+    it("is topped up while it runs, as its launcher would have", async () => {
+      const created = await harness(limited, IMAGE, undefined, undefined, FAST_POLL);
+      const asked: string[] = [];
+      created.store.topUpBudget = async (runId: string) => {
+        asked.push(runId);
+        return { outcome: "not_needed", near: true };
+      };
+      created.jobs.statusValue = { state: "running" };
+      await expect(created.executor.recover({ runId: "run-1", ...handle })).resolves.toEqual({ state: "active" });
+      await vi.waitFor(() => expect(asked.length).toBeGreaterThanOrEqual(2));
+      expect(asked.every((runId) => runId === "run-1")).toBe(true);
+      await created.executor.close();
+    });
+
+    it("stops asking once its top-up is refused", async () => {
+      const created = await harness(limited, IMAGE, undefined, undefined, FAST_POLL);
+      const answers: TopUpOutcome[] = ["granted", "unavailable"];
+      let asked = 0;
+      created.store.topUpBudget = async () => {
+        asked += 1;
+        return { outcome: answers.shift() ?? "not_needed" };
+      };
+      let polls = 0;
+      created.jobs.status = async () => {
+        polls += 1;
+        return { state: "running" };
+      };
+      await created.executor.recover({ runId: "run-1", ...handle });
+      await vi.waitFor(() => expect(polls).toBeGreaterThanOrEqual(6));
+      expect(asked).toBe(2);
+      await created.executor.close();
+    });
+
+    it("never asks for a top-up for a run without a limit", async () => {
+      const created = await harness(
+        { jobHandle: handle, proxySessionId: "session-1", budgetUsd: 1, budgetBaseUsd: 1 },
+        IMAGE,
+        undefined,
+        undefined,
+        FAST_POLL,
+      );
+      let asked = 0;
+      created.store.topUpBudget = async () => {
+        asked += 1;
+        return { outcome: "granted" };
+      };
+      let polls = 0;
+      created.jobs.status = async () => {
+        polls += 1;
+        return { state: "running" };
+      };
+      await created.executor.recover({ runId: "run-1", ...handle });
+      await vi.waitFor(() => expect(polls).toBeGreaterThanOrEqual(4));
+      expect(asked).toBe(0);
+      await created.executor.close();
+    });
+
+    it("is observed by one loop however often the reconciler recovers it, and reports no running stage", async () => {
+      const created = await harness(limited, IMAGE, undefined, undefined, FAST_POLL);
+      let statusCalls = 0;
+      created.jobs.status = async () => {
+        statusCalls += 1;
+        return { state: "running" };
+      };
+      await created.executor.recover({ runId: "run-1", ...handle });
+      await created.executor.recover({ runId: "run-1", ...handle });
+      await created.executor.recover({ runId: "run-1", ...handle });
+      // Each recover() asks the job's status once itself; only the first starts a loop.
+      await vi.waitFor(() => expect(statusCalls).toBeGreaterThan(3));
+      await created.executor.close();
+      expect(created.observer.events.some((event) => event.stage === "running")).toBe(false);
+    });
+
+    it("is left for the next adopter, untouched, when this process closes", async () => {
+      const created = await harness(limited, IMAGE, undefined, undefined, FAST_POLL);
+      created.jobs.statusValue = { state: "running" };
+      await created.executor.recover({ runId: "run-1", ...handle });
+      await created.executor.close();
+      expect(created.jobs.removals).toBe(0);
+    });
+
+    it("is finished by the adopting process when its job ends", async () => {
+      const created = await harness(limited, IMAGE, undefined, undefined, FAST_POLL);
+      let polls = 0;
+      created.jobs.status = async () => (++polls < 3 ? { state: "running" } : { state: "failed" });
+      await created.executor.recover({ runId: "run-1", ...handle });
+      await vi.waitFor(() => expect(created.store.terminations).toHaveLength(1));
+      expect(polls).toBe(3);
+      await created.executor.close();
+    });
+  });
+
+  describe("a run finished by a control-plane process that has no copy of its checkout", () => {
+    const handle = { backend: "fake", id: "job-1" };
+    const BASE = "c".repeat(40);
+    const TARGET = "d".repeat(40);
+    /** The run was launched by another process (it has a handle and a recorded base), but this one has no checkout. */
+    /** The operator-facing reasons logged for failed runs (the persisted error is only a diagnostic id). */
+    const failureReasons = () =>
+      logged
+        .filter((line) => line.level === "warn" && "reason" in line.payload)
+        .map((line) => String(line.payload.reason));
+    const adopted = (overrides: Partial<ContainerRunSnapshot> = {}) =>
+      harness({ jobHandle: handle, proxySessionId: "session-1", baseSha: BASE, ...overrides });
+
+    it("rebuilds the checkout at the recorded base and pushes the changes", async () => {
+      const created = await adopted();
+      created.jobs.statusValue = { state: "succeeded" };
+      await expect(created.executor.recover({ runId: "run-1", ...handle })).resolves.toEqual({ state: "terminal" });
+
+      expect(created.store.run.status).toBe("succeeded");
+      expect(created.vcs.rebuilds).toEqual([{ baseCommit: BASE }]);
+      expect(created.vcs.finalized).toBe(1);
+      expect(created.store.run.result).toMatchObject({ outcome: "pull_request_opened", pullRequestNumber: 42 });
+      expect(created.vcs.cleaned).toBe(1);
+    });
+
+    it("rebuilds a continuation's target merge from the recorded inputs", async () => {
+      const created = await adopted({
+        rootCodingRunId: "root-run",
+        headRef: "wardby/run-root-run",
+        targetMergeRef: "main",
+        targetMergeSha: TARGET,
+      });
+      created.jobs.statusValue = { state: "succeeded" };
+      await created.executor.recover({ runId: "run-1", ...handle });
+
+      expect(created.vcs.rebuilds).toEqual([{ baseCommit: BASE, targetMerge: { ref: "main", targetCommit: TARGET } }]);
+      expect(created.store.run.result).toMatchObject({ outcome: "pull_request_updated" });
+      // The pushed head is the merge, and the PR's status comment says so.
+      expect(created.vcs.notifyFinishedCalls[0]?.mergeSentence).toEqual(expect.stringContaining("main"));
+    });
+
+    it("rebuilds the checkout of a run stopped at its budget, so its partial changes are kept", async () => {
+      const created = await adopted();
+      created.jobs.statusValue = { state: "succeeded" };
+      created.jobs.result.resultArtifact = JSON.stringify({
+        schemaVersion: 1,
+        runId: "run-1",
+        outcome: "budget_exhausted",
+        summary: "Half done.",
+        tests: [],
+      });
+      await created.executor.recover({ runId: "run-1", ...handle });
+
+      expect(created.store.run.status).toBe("budget_exhausted");
+      expect(created.vcs.rebuilds).toEqual([{ baseCommit: BASE }]);
+      expect(created.vcs.finalized).toBe(1);
+      expect(created.store.run.result).toMatchObject({ outcome: "pull_request_opened" });
+    });
+
+    it("fails with coding_workspace_lost, pushing nothing, when no base was recorded", async () => {
+      const created = await adopted({ baseSha: null });
+      created.jobs.statusValue = { state: "succeeded" };
+      await created.executor.recover({ runId: "run-1", ...handle });
+
+      expect(created.vcs.rebuilds).toEqual([]);
+      expect(created.vcs.finalized).toBe(0);
+      expect(created.store.run.status).toBe("failed");
+      expect(failureReasons()).toContain("coding_workspace_lost");
+    });
+
+    it("never pushes when the rebuild cannot reproduce the recorded base", async () => {
+      const created = await adopted();
+      created.jobs.statusValue = { state: "succeeded" };
+      created.vcs.rebuildError = new Error("vcs_rebuild_base_unavailable");
+      await created.executor.recover({ runId: "run-1", ...handle });
+
+      expect(created.vcs.finalized).toBe(0);
+      expect(created.store.run.status).toBe("failed");
+      expect(failureReasons()).toContain("vcs_rebuild_base_unavailable");
+      expect(failureReasons()).not.toContain("coding_workspace_lost");
+    });
+
+    it("never rebuilds a checkout just to clean up a run that is already over", async () => {
+      const created = await adopted({ status: "cancelled" });
+      await created.executor.recover({ runId: "run-1", ...handle });
+      expect(created.vcs.rebuilds).toEqual([]);
+    });
+
+    it("records the base commit and any target merge with the job handle, when the run launches", async () => {
+      const created = await harness({ rootCodingRunId: "root-run", headRef: "wardby/run-root-run" });
+      created.vcs.targetMerge = { ref: "main", targetCommit: TARGET, conflictedPaths: [] };
+      await created.executor.start("run-1");
+
+      expect(created.store.persistedBases).toEqual([
+        { baseSha: "a".repeat(40), targetMergeRef: "main", targetMergeSha: TARGET },
+      ]);
+    });
+
+    it("records only the base commit when nothing was merged", async () => {
+      const created = await harness();
+      await created.executor.start("run-1");
+      expect(created.store.persistedBases).toEqual([{ baseSha: "a".repeat(40) }]);
+    });
+  });
+
+  describe("close", () => {
+    /** A poll loop that really yields to timers: the harness default sleep never does. */
+    const SLOW_SLEEP = { sleep: () => new Promise<void>((resolve) => setTimeout(resolve, 1)) };
+    const runningRun = async () => {
+      const created = await harness({}, IMAGE, undefined, undefined, SLOW_SLEEP);
+      created.jobs.statusValue = { state: "running" };
+      const started = created.executor.start("run-1");
+      await vi.waitFor(() => expect(created.store.heartbeats).toBeGreaterThan(1));
+      return { created, started };
+    };
+
+    it("ends a launched run's poll loop and leaves its job, session and workspace alone", async () => {
+      const { created, started } = await runningRun();
+      await created.executor.close();
+      await started;
+      expect(created.store.run.status).toBe("running");
+      expect(created.store.terminations).toEqual([]);
+      expect(created.jobs.stops).toBe(0);
+      expect(created.jobs.removals).toBe(0);
+      expect(created.sessions.cancels).toBe(0);
+      expect(created.vcs.cleaned).toBe(0);
+    });
+
+    it("does not fail a healthy run when the database errors under the loop during teardown", async () => {
+      const { created, started } = await runningRun();
+      const closed = created.executor.close();
+      created.store.heartbeat = async () => {
+        throw new Error("Can't reach database server");
+      };
+      await closed;
+      await started;
+      expect(created.store.run.status).toBe("running");
+      expect(created.store.terminations).toEqual([]);
+      expect(created.jobs.stops).toBe(0);
+      expect(created.jobs.removals).toBe(0);
+    });
+
+    it("still fails a run on a database error when the executor is not closing", async () => {
+      const created = await harness({}, IMAGE, undefined, undefined, SLOW_SLEEP);
+      created.jobs.statusValue = { state: "running" };
+      created.store.heartbeat = async () => {
+        throw new Error("Can't reach database server");
+      };
+      await created.executor.start("run-1");
+      expect(created.jobs.removals).toBe(1);
+    });
+
+    it("lets another executor adopt the run it left behind through recover()", async () => {
+      const { created, started } = await runningRun();
+      await created.executor.close();
+      await started;
+      const adopter = await harness(
+        { jobHandle: created.jobs.handle, proxySessionId: "session-1" },
+        IMAGE,
+        undefined,
+        undefined,
+        SLOW_SLEEP,
+      );
+      adopter.jobs.statusValue = { state: "running" };
+      await expect(adopter.executor.recover({ runId: "run-1", ...created.jobs.handle })).resolves.toEqual({
+        state: "active",
+      });
+    });
+
+    it("refuses to start or recover a run once closing, and launches nothing", async () => {
+      const created = await harness();
+      await created.executor.close();
+      await expect(created.executor.start("run-1")).rejects.toBeInstanceOf(ExecutorClosingError);
+      await expect(created.executor.recover({ runId: "run-1", backend: "fake", id: "job-1" })).rejects.toBeInstanceOf(
+        ExecutorClosingError,
+      );
+      expect(created.jobs.launches).toBe(0);
+    });
+
+    it("resolves at once with no runs, and when called twice", async () => {
+      const created = await harness();
+      await created.executor.close();
+      await created.executor.close();
+    });
+
+    it("wakes the default poll sleep instead of waiting out its delay", async () => {
+      const created = await harness({}, IMAGE, undefined, undefined, { sleep: undefined, pollMinMs: 60_000 });
+      created.jobs.statusValue = { state: "running" };
+      const started = created.executor.start("run-1");
+      await vi.waitFor(() => expect(created.store.heartbeats).toBe(1));
+      const begun = Date.now();
+      await created.executor.close();
+      await started;
+      expect(Date.now() - begun).toBeLessThan(5_000);
+    });
   });
 
   it("stops spend, the job, and the trusted workspace idempotently", async () => {

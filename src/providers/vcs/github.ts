@@ -2,6 +2,7 @@ import { testOutcomeLabel, type TestOutcome } from "../../coding/test-outcomes.j
 import { createPrivateKey } from "node:crypto";
 import { importPKCS8, SignJWT } from "jose";
 import { isGitHubLogin } from "../../config/github-allowed-accounts.js";
+import { commitIssueKey, conventionalSubject } from "../../coding/commit-subject.js";
 import { testSimulatorBase } from "../../config/test-simulators.js";
 import { codeProviderOf, normalizeHostedRepository, pullRequestWebUrl } from "../../coding/code-host.js";
 import { ACCEPTED_ADVISORY_ID } from "../../coding/registry/allowlist.js";
@@ -16,6 +17,7 @@ import { refusalMeaning } from "../../coding/registry/refusal-hints.js";
 import {
   COMMIT_SHA,
   DEPENDENCY_CACHE_PATH,
+  isWardbyHeadRef,
   normalizeGitHubRepository,
   normalizeGitRef,
   truncateText,
@@ -104,6 +106,8 @@ export interface PullRequestInput {
   summary?: string;
   tests?: readonly PullRequestTestResult[];
   tag?: string;
+  /** The model's conventional-commit subject parts; the title is built from them (coding/commit-subject.ts). */
+  commit?: { type?: string; scope?: string; title?: string };
   /** Deduplicated by the caller isn't required — pullRequestBody dedupes itself (ecosystem+name+version / +reason). */
   packages?: readonly PackageReport[];
   packageRefusals?: readonly PackageRefusal[];
@@ -328,10 +332,13 @@ function validIssueKey(input: PullRequestInput): string | undefined {
   return typeof key === "string" && PR_ISSUE_KEY.test(key) ? key : undefined;
 }
 
+/** `type(scope): title (KEY)`, the same subject the run's commit carries; see coding/commit-subject.ts. */
 export function pullRequestTitle(input: PullRequestInput): string {
-  const base = input.tag ? `[${input.tag}] Wardby run ${input.runId}` : `Wardby run ${input.runId}`;
-  const key = validIssueKey(input);
-  return key ? `[${key}] ${base}` : base;
+  return conventionalSubject({
+    runId: input.runId,
+    ...input.commit,
+    issueKey: commitIssueKey(validIssueKey(input), input.tag),
+  });
 }
 
 /**
@@ -1142,7 +1149,7 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
     const repository = normalizeGitHubRepository(input.repository);
     const baseRef = normalizeGitRef(input.baseRef);
     const headRef = normalizeGitRef(input.headRef);
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.runId) || headRef !== `wardby/run-${input.runId}`) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.runId) || !isWardbyHeadRef(headRef)) {
       throw new Error("github_pull_request_input_invalid");
     }
     if (input.tag !== undefined && !SAFE_PULL_REQUEST_TAG.test(input.tag)) {
@@ -1341,9 +1348,9 @@ export class GitHubAppClient implements GitHubRepositoryAccess {
       !SAFE_RUN_ID.test(input.runId) ||
       !SAFE_RUN_ID.test(input.rootRunId) ||
       !SAFE_RUN_ID.test(input.baseline.agentTextRunId) ||
-      (input.headSha !== undefined && !COMMIT_SHA.test(input.headSha)) ||
-      // Only wardby's own pull request: its branch is the root run's.
-      headRef !== `wardby/run-${input.rootRunId}`
+      (input.headSha !== undefined && !/^[0-9a-f]{40}$/.test(input.headSha)) ||
+      // Only wardby's own pull request branch (the root run's, stored at dispatch).
+      !isWardbyHeadRef(headRef)
     ) {
       throw new Error("github_pull_request_description_input_invalid");
     }

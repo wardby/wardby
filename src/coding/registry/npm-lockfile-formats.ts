@@ -8,9 +8,15 @@
  * Kept free of imports from npm.ts, which imports this module.
  */
 import { normalizeNpmLockfile } from "./npm-lockfile.js";
-import { npmLockfilePlan, parseNpmLockfile } from "./npm-plan.js";
+import { createNpmLockfilePlan, parseNpmLockfile } from "./npm-plan.js";
 import { isPnpmLockfile, normalizePnpmLockfile, parsePnpmLockfile } from "./pnpm-lockfile.js";
-import { RegistryError, type LockfilePlanSupport, type ParsedLockfile } from "./types.js";
+import {
+  RegistryError,
+  type LockfileParseOptions,
+  type LockfilePlanSupport,
+  type ParsedLockfile,
+  type PrivateRegistry,
+} from "./types.js";
 import {
   isYarnBerryLockfile,
   isYarnClassicLockfile,
@@ -19,10 +25,7 @@ import {
 } from "./yarn-lockfile.js";
 
 /** Parses whichever supported lockfile `body` is. */
-export function parseNpmClientLockfile(
-  body: string,
-  options: { maxEntries: number; proxyRegistryUrl: string },
-): ParsedLockfile {
+export function parseNpmClientLockfile(body: string, options: LockfileParseOptions): ParsedLockfile {
   if (body.trimStart().startsWith("{")) return parseNpmLockfile(body, options);
   if (isYarnClassicLockfile(body) || isYarnBerryLockfile(body)) return parseYarnLockfile(body, options);
   if (isPnpmLockfile(body)) return parsePnpmLockfile(body, options);
@@ -33,19 +36,29 @@ export function parseNpmClientLockfile(
   );
 }
 
-export const npmClientLockfilePlan: LockfilePlanSupport = {
-  ...npmLockfilePlan,
-  parse: parseNpmClientLockfile,
-  // npm's JSON parses in milliseconds on the event loop; pnpm's and yarn's
-  // formats go to a worker thread (registry/lockfile-parse.ts).
-  parsesOffThread: (body) => !body.trimStart().startsWith("{"),
-};
+export function createNpmClientLockfilePlan(privateRegistry?: PrivateRegistry): LockfilePlanSupport {
+  return {
+    ...createNpmLockfilePlan(privateRegistry),
+    parse: parseNpmClientLockfile,
+    // npm's JSON parses in milliseconds on the event loop; pnpm's and yarn's
+    // formats go to a worker thread (registry/lockfile-parse.ts).
+    parsesOffThread: (body) => !body.trimStart().startsWith("{"),
+  };
+}
 
-export const npmClientLockfiles = {
-  names: ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"],
-  normalize(content: string, registryUrl: string, name: string): string {
-    if (name === "pnpm-lock.yaml") return normalizePnpmLockfile(content, registryUrl);
-    if (name === "yarn.lock") return normalizeYarnLockfile(content, registryUrl);
-    return normalizeNpmLockfile(content, registryUrl);
-  },
-} as const;
+export const npmClientLockfilePlan: LockfilePlanSupport = createNpmClientLockfilePlan();
+
+const LOCKFILE_NAMES = ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"] as const;
+
+export function createNpmClientLockfiles(privateRegistry?: PrivateRegistry) {
+  return {
+    names: LOCKFILE_NAMES,
+    normalize(content: string, registryUrl: string, name: string): string {
+      if (name === "pnpm-lock.yaml") return normalizePnpmLockfile(content, registryUrl, privateRegistry);
+      if (name === "yarn.lock") return normalizeYarnLockfile(content, registryUrl, privateRegistry);
+      return normalizeNpmLockfile(content, registryUrl, privateRegistry);
+    },
+  };
+}
+
+export const npmClientLockfiles = createNpmClientLockfiles();

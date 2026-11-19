@@ -1,0 +1,154 @@
+{{- $cp := .Values.controlPlane }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: wardby-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: wardby-control-plane
+    {{- include "wardby.labels" . | nindent 4 }}
+  {{- if .Values.gateway.enabled }}
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wardby-control-plane
+  ports:
+    - name: mcp
+      port: {{ $cp.port }}
+      targetPort: {{ $cp.port }}
+    {{- if $cp.metrics.enabled }}
+    - name: metrics
+      port: {{ $cp.metrics.port }}
+      targetPort: {{ $cp.metrics.port }}
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: wardby-control-plane
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $cp.replicas }}
+  minReadySeconds: {{ $cp.minReadySeconds }}
+  strategy:
+    {{- toYaml $cp.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  template:
+    metadata:
+      {{- with include "wardby.podAnnotations" (list $ $cp) | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: wardby-control-plane
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccounts.controlPlane.name }}
+      # The launcher creates run pods through the Kubernetes API.
+      automountServiceAccountToken: true
+      priorityClassName: wardby-control-plane
+      terminationGracePeriodSeconds: {{ $cp.terminationGracePeriodSeconds }}
+      {{- with include "wardby.podScheduling" (list $ $cp) | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with include "wardby.cloudSqlProxy" . | trim }}
+      initContainers:
+        {{- . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: control-plane
+          image: {{ include "wardby.image" (list $ "runtime") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "dist/cli.js", "serve"]
+          {{- with include "wardby.envFrom" (list $ $cp) | trim }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          env:
+            {{- include "wardby.env" (list $ $cp "controlPlane" (include "wardby.controlPlane.env" . | fromYaml)) | nindent 12 }}
+          ports:
+            - name: mcp
+              containerPort: {{ $cp.port }}
+            {{- if $cp.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ $cp.metrics.port }}
+            {{- end }}
+          # The server refuses any Host but the canonical one, and a 200 from the
+          # discovery document means it is serving, not merely holding a socket.
+          readinessProbe:
+            httpGet:
+              port: {{ $cp.port }}
+              path: /.well-known/oauth-protected-resource
+              httpHeaders:
+                - name: Host
+                  value: {{ .Values.hostname | quote }}
+            {{- toYaml $cp.readinessProbe | nindent 12 }}
+          # Keep serving while the load balancer drains the endpoint.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $cp.preStopSleepSeconds }}
+          resources:
+            {{- toYaml $cp.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "wardby.tmpVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "wardby.tmpVolume" $cp | nindent 8 }}
+---
+# Egress only: nothing in the namespace may reach the control plane. The load
+# balancer's ingress hole is in gateway.yaml. The one exception is the metrics
+# scrapers, admitted on the metrics port when metrics are on.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+    - Ingress
+    - Egress
+  {{- if $cp.metrics.enabled }}
+  {{- with $cp.metrics.ingressFrom }}
+  ingress:
+    # The metrics scrapers.
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - port: {{ $cp.metrics.port }}
+          protocol: TCP
+  {{- end }}
+  {{- end }}
+  egress:
+    {{- include "wardby.dnsEgress" . | nindent 4 }}
+    {{- include "wardby.databaseEgress" . | nindent 4 }}
+    {{- with $cp.kubernetesApi.cidr }}
+    # The API server's private endpoint sits in a range the public rule excepts.
+    - ports:
+        - port: {{ $cp.kubernetesApi.port }}
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: {{ . }}
+    {{- end }}
+    {{- include "wardby.publicHttpsEgress" . | nindent 4 }}
+{{- with include "wardby.podDisruptionBudget" (list $ $cp "wardby-control-plane") | trim }}
+---
+{{ . }}
+{{- end }}

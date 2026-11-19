@@ -50,6 +50,9 @@ type LinkArgs = {
   checkName?: string;
   reviewFixMaxRounds?: number;
   waitForCi?: boolean;
+  reviewDrafts?: boolean;
+  reviewOnPush?: boolean;
+  reviewOnOpen?: boolean;
   markReadyWhenPassing?: boolean;
   baseRef?: string;
   name?: string;
@@ -141,8 +144,17 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       "read link; a wardby admin may instead approve it with adminOverride. checkName is only allowed (and required) with the " +
       "pull_request trigger, and is unique per repository. waitForCi (only with the pull_request trigger) holds this agent's " +
       "review on a pushed head until that head's own CI finishes, instead of racing it; APPROVE is refused while CI on the " +
-      "head is failing or still running. Re-linking an already-linked repository replaces its access, triggers, checkName, " +
-      "reviewFixMaxRounds, waitForCi, markReadyWhenPassing, and baseRef (an omitted field is cleared, not kept) and re-checks access " +
+      "head is failing or still running. reviewDrafts (only with the pull_request trigger, default false) sets whether this agent " +
+      "reviews draft pull requests: false skips a draft until it is marked ready for review (a draft a wardby coding run opened " +
+      "is always reviewed); ask the user which they want before linking a pull_request reviewer. reviewOnPush (only with the " +
+      "pull_request trigger, default false) sets whether every push of new commits to an open pull request starts a review: false " +
+      "reviews a pull request when it is opened, reopened or marked ready for review, and a later push starts none (a review " +
+      "comment or a check re-run still does; a pull request a wardby coding run opened is always reviewed on push); true reviews " +
+      "every push. reviewOnOpen (only with the pull_request trigger, default false) sets whether a pull request is reviewed " +
+      "automatically when it is opened, reopened or marked ready for review: false reviews only on request (a review comment " +
+      "or a check re-run; a pull request a wardby coding run opened is always reviewed), true reviews on open. Re-linking an " +
+      "already-linked repository replaces its access, triggers, checkName, " +
+      "reviewFixMaxRounds, waitForCi, reviewDrafts, reviewOnPush, reviewOnOpen, markReadyWhenPassing, and baseRef (an omitted field is cleared, not kept) and re-checks access " +
       "— always send the full desired state. A local repository (local:/abs/path, inside the server's trusted roots) takes " +
       "no triggers or checkName: it supports manual reviews only (trigger_agent with review). " +
       "On a coding agent, adds a repository its runs may work in, with no triggers: a GitHub repository or a local one. " +
@@ -173,6 +185,26 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
           description:
             "Only with the pull_request trigger: hold this agent's review on a pushed head until that head's own CI " +
             "finishes, instead of racing it (default false).",
+        },
+        reviewDrafts: {
+          type: "boolean",
+          description:
+            "Only with the pull_request trigger: review draft pull requests too (true), or skip a draft until it is " +
+            "marked ready for review (false, the default). A draft a wardby coding run opened is always reviewed.",
+        },
+        reviewOnPush: {
+          type: "boolean",
+          description:
+            "Only with the pull_request trigger: review every push of new commits to an open pull request (true), " +
+            "or only when it is opened, reopened or marked ready for review (false, the default). A review comment or a check re-run " +
+            "always reviews. A pull request a wardby coding run opened is always reviewed on push.",
+        },
+        reviewOnOpen: {
+          type: "boolean",
+          description:
+            "Only with the pull_request trigger: review a pull request when it is opened, reopened or marked ready for " +
+            "review (true), or only when asked by a review comment or a check re-run (false, the default). A pull request " +
+            "a wardby coding run opened is always reviewed. Omitting it on a re-link resets it to false.",
         },
         markReadyWhenPassing: {
           type: "boolean",
@@ -257,11 +289,14 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
           args.checkName !== undefined ||
           args.reviewFixMaxRounds !== undefined ||
           args.waitForCi !== undefined ||
+          args.reviewDrafts !== undefined ||
+          args.reviewOnPush !== undefined ||
+          args.reviewOnOpen !== undefined ||
           args.markReadyWhenPassing !== undefined
         ) {
           throw new McpError(
             400,
-            "A coding agent's repository link takes no triggers, checkName, reviewFixMaxRounds, waitForCi or markReadyWhenPassing.",
+            "A coding agent's repository link takes no triggers, checkName, reviewFixMaxRounds, waitForCi, reviewDrafts, reviewOnPush, reviewOnOpen or markReadyWhenPassing.",
           );
         }
         if (args.access === "write" && agent.codingProfile?.repository === repository) {
@@ -359,6 +394,18 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       if (waitForCi && !triggers.includes("pull_request")) {
         throw new McpError(400, "waitForCi needs the pull_request trigger.");
       }
+      const reviewDrafts = args.reviewDrafts ?? false;
+      if (reviewDrafts && !triggers.includes("pull_request")) {
+        throw new McpError(400, "reviewDrafts needs the pull_request trigger.");
+      }
+      const reviewOnPush = args.reviewOnPush ?? false;
+      if (reviewOnPush && !triggers.includes("pull_request")) {
+        throw new McpError(400, "reviewOnPush needs the pull_request trigger.");
+      }
+      const reviewOnOpen = args.reviewOnOpen ?? false;
+      if (reviewOnOpen && !triggers.includes("pull_request")) {
+        throw new McpError(400, "reviewOnOpen needs the pull_request trigger.");
+      }
       const markReadyWhenPassing = args.markReadyWhenPassing ?? false;
       if (markReadyWhenPassing && args.access !== "write") {
         throw new McpError(400, "markReadyWhenPassing needs write access.");
@@ -427,6 +474,9 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
               checkName,
               reviewFixMaxRounds,
               waitForCi,
+              reviewDrafts,
+              reviewOnPush,
+              reviewOnOpen,
               markReadyWhenPassing,
               baseRef,
               ref,

@@ -622,6 +622,10 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       });
       const save = () => page.locator(".save").textContent();
       await expect.poll(() => save()).toBe("Read only: approved · unsaved changes");
+      // Let the autosave timer armed by the typing run out while the design is locked, as the test above
+      // does: a timer still pending at the reopen could save the old edits over the version the page is
+      // about to be told about, and the page would show a conflict instead of "Unsaved changes".
+      await page.waitForTimeout(2500);
       expect(puts).toEqual([]);
       const typed = await h1.textContent();
       expect(typed).toContain("!");

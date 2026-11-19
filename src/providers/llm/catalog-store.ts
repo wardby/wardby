@@ -11,6 +11,7 @@
  * installed (unit tests, offline CLI commands) currentModelCatalog() is the
  * shipped catalog.
  */
+import { startInterval, type IntervalHandle } from "../../core/interval.js";
 import { logger } from "../../core/logger.js";
 import { buildCatalog, rowFromRecord, shippedCatalog, type ModelCatalog } from "./catalog.js";
 import { SHIPPED_CATALOG, SHIPPED_CATALOG_VERSION } from "./catalog-shipped.js";
@@ -38,7 +39,7 @@ export function refreshIntervalMs(env: NodeJS.ProcessEnv = process.env): number 
 
 export class CatalogStore {
   private catalog: ModelCatalog = shippedCatalog();
-  private timer: NodeJS.Timeout | undefined;
+  private poller: IntervalHandle | undefined;
   private readonly intervalMs: number;
   private readonly log: CatalogLog;
   /** Monotonic id handed out per load attempt (poll or refreshNow), taken before the
@@ -51,9 +52,6 @@ export class CatalogStore {
   /** True once `close()` has run; a load already in flight at that point must not
    *  assign into `catalog` or log on failure when it eventually settles. */
   private closed = false;
-  /** True while a poll-triggered load is in flight, so a slow load doesn't overlap
-   *  with the next interval tick. */
-  private polling = false;
 
   constructor(
     private readonly db: CatalogDb,
@@ -64,10 +62,8 @@ export class CatalogStore {
   }
 
   async start(): Promise<void> {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-    }
+    void this.poller?.stop();
+    this.poller = undefined;
     this.closed = false;
     try {
       await this.applyLoad();
@@ -77,24 +73,23 @@ export class CatalogStore {
         { cause: err },
       );
     }
-    this.timer = setInterval(() => {
-      if (this.polling) return;
-      this.polling = true;
-      this.applyLoad().then(
-        () => {
-          this.polling = false;
-        },
-        (err: unknown) => {
-          this.polling = false;
+    this.poller = startInterval({
+      name: "model-catalog-refresh",
+      everyMs: this.intervalMs,
+      // A query hung past this is abandoned, so one stuck read cannot stop refreshes until restart.
+      timeoutMs: this.intervalMs * 2,
+      tick: async () => {
+        try {
+          await this.applyLoad();
+        } catch (err) {
           if (this.closed) return;
           this.log.warn(
             { event: "models.catalog.refresh_failed", err: err instanceof Error ? err.message : String(err) },
             "model catalog refresh failed; keeping the last good catalog",
           );
-        },
-      );
-    }, this.intervalMs);
-    this.timer.unref?.();
+        }
+      },
+    });
   }
 
   current(): ModelCatalog {
@@ -107,8 +102,9 @@ export class CatalogStore {
 
   close(): void {
     this.closed = true;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
+    // `closed` already keeps a load in flight from assigning or logging, so close() need not wait for it.
+    void this.poller?.stop();
+    this.poller = undefined;
   }
 
   /** Runs one load, then applies it only if it is still the newest load to have

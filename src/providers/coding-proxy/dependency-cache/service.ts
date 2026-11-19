@@ -21,13 +21,19 @@
  *   and only for its derived key. Each upload writes its own blob object
  *   (a unique key), so no upload can replace a committed snapshot's bytes;
  *   an upload that does not end in its own row deletes its own object.
+ * - An upload first takes a claim row (the store's claimUpload), before any
+ *   byte reaches the blob store. The claim's unique indexes are the
+ *   cross-replica guard: one upload per snapshot and one per run and project.
+ *   The claim is released when the upload ends. A proxy that dies mid-upload
+ *   leaves its claim behind, and the eviction pass deletes that claim's blob
+ *   once it is older than the upload window (sweepStaleUploads).
  * - The sha256 is computed while the upload streams and stored in Postgres;
  *   downloads carry it so the worker verifies before extracting.
  * - The worker sends the archive's SHA-256; an upload whose bytes differ is
  *   refused `digest_mismatch` and its object deleted.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { pipeline, Transform, type Readable } from "node:stream";
 import { logger } from "../../../core/logger.js";
 import { BlobStoreError, type BlobStore } from "../../storage/types.js";
@@ -172,8 +178,9 @@ export interface DependencyCacheServiceOptions {
 export class DependencyCacheService {
   readonly uploadMs: number;
   private readonly now: () => Date;
-  /** `runId\0projectPath` and key ids of uploads streaming right now (per replica). */
-  private readonly uploading = new Set<string>();
+  /** Names this process on the claims it takes. */
+  private readonly ownerId = randomUUID();
+  /** Uploads streaming through this replica right now. */
   private activeUploads = 0;
 
   constructor(private readonly options: DependencyCacheServiceOptions) {
@@ -396,9 +403,6 @@ export class DependencyCacheService {
       throw new CacheRefusal(413, "too_large");
     const verifiedArchive = verifiedArchiveHeaders(request.headers);
     const expectedSha256 = archiveDigestHeader(request.headers);
-    const projectSlot = `${context.runId}\0${key.projectPath}`;
-    if (this.uploading.has(projectSlot) || this.uploading.has(key.keyId))
-      throw new CacheRefusal(409, "upload_in_progress");
     if (await this.options.store.hasUploaded(context.runId, key.ecosystem, key.projectPath))
       throw new CacheRefusal(409, "already_uploaded");
     if (await this.options.store.findByIdentity(key)) {
@@ -407,19 +411,28 @@ export class DependencyCacheService {
     }
     if (this.activeUploads >= (this.options.maxConcurrentUploads ?? DEFAULT_MAX_CONCURRENT_UPLOADS))
       throw new CacheRefusal(503, "busy");
-    // Re-checked after the awaits above: the slot is taken synchronously.
-    if (this.uploading.has(projectSlot) || this.uploading.has(key.keyId))
-      throw new CacheRefusal(409, "upload_in_progress");
-    this.uploading.add(projectSlot);
-    this.uploading.add(key.keyId);
+    // Counted before the claim's await, so concurrent requests cannot all pass the check above.
     this.activeUploads += 1;
-    releaseBodyTimer();
+    const blobKey = newBlobKey(key);
+    let claimed = false;
     try {
-      await this.storeUpload(context, deadline, key, request, response, verifiedArchive, expectedSha256);
+      const claim = await this.options.store.claimUpload({
+        ecosystem: key.ecosystem,
+        repository: key.repository,
+        projectPath: key.projectPath,
+        lockHash: key.lockHash,
+        workerImage: key.workerImage,
+        blobKey,
+        runId: context.runId,
+        ownerId: this.ownerId,
+      });
+      if (claim === "in_progress") throw new CacheRefusal(409, "upload_in_progress");
+      claimed = true;
+      releaseBodyTimer();
+      await this.storeUpload(context, deadline, key, blobKey, request, response, verifiedArchive, expectedSha256);
     } finally {
-      this.uploading.delete(projectSlot);
-      this.uploading.delete(key.keyId);
       this.activeUploads -= 1;
+      if (claimed) await this.releaseClaim(blobKey);
     }
   }
 
@@ -427,12 +440,12 @@ export class DependencyCacheService {
     context: RegistryRunContext,
     deadline: number,
     key: SnapshotKey,
+    blobKey: string,
     request: IncomingMessage,
     response: ServerResponse,
     verifiedArchive: VerifiedArchive | null,
     expectedSha256: string | null,
   ): Promise<void> {
-    const blobKey = newBlobKey(key);
     let expired = false;
     const timer = setTimeout(
       () => {
@@ -501,6 +514,18 @@ export class DependencyCacheService {
       "dependency cache snapshot stored",
     );
     send(response, 201, { stored: true, sha256: stored.sha256, sizeBytes: stored.sizeBytes });
+  }
+
+  /**
+   * Ends an upload's claim. A failure is only logged: the claim then ages out and the sweep removes it
+   * (and its blob, unless a snapshot row names it).
+   */
+  private async releaseClaim(blobKey: string): Promise<void> {
+    try {
+      await this.options.store.releaseUpload(blobKey);
+    } catch (error) {
+      cacheLog.warn({ event: "dependency_cache.release_failed", err: error }, "dependency cache: claim not released");
+    }
   }
 
   /** Removes an upload's own blob object (unique to the upload, so no row refers to it). */

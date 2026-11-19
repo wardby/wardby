@@ -5,13 +5,12 @@ import {
   normalizeLocalRepository,
   resolveLocalRepository,
 } from "../../coding/local-repo.js";
-import { COMMIT_SHA } from "../../coding/protocol.js";
+import { COMMIT_SHA, isWardbyHeadRef } from "../../coding/protocol.js";
 import { SHA, isSafeRefName, isSafeRepoPath, localGit, localGitBytes } from "../../coding/local-git.js";
 import type { RepositoryFileInput } from "./github.js";
 import type { GitRemote, PublishInput, PublishResult } from "./remote.js";
 
 /** The only refs a local remote ever writes into the user's repository. */
-const LOCAL_PUSH_REF = /^wardby\/run-[A-Za-z0-9_-]+$/;
 
 export interface LocalRemoteOptions {
   /** Trusted roots (realpaths), re-read on every call so a change takes effect without a restart. */
@@ -22,7 +21,7 @@ export interface LocalRemoteOptions {
  * A git repository on the control plane's own disk (`local:/abs/path`).
  *
  * The source repository is touched only by `ls-remote`, the clone's
- * upload-pack, and a push to `refs/heads/wardby/run-*`: the clone goes through
+ * upload-pack, and a push to `refs/heads/wardby/*`: the clone goes through
  * a `file://` URL (so `--depth 1` is honored and nothing is hard-linked), never
  * reads the source's working tree, and every hardening check in GitVcsProvider
  * still applies. `protocol.file.allow=always` is set only on this remote's
@@ -146,6 +145,6 @@ export class LocalRemote implements GitRemote {
   }
 
   assertPushRef(headRef: string): void {
-    if (!LOCAL_PUSH_REF.test(headRef)) throw new Error("vcs_head_ref_invalid");
+    if (!isWardbyHeadRef(headRef)) throw new Error("vcs_head_ref_invalid");
   }
 }

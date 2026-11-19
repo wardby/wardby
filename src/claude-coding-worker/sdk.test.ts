@@ -72,7 +72,7 @@ describe("Claude SDK configuration", () => {
     expect(tools.timeout).toBeLessThanOrEqual(2_147_483_647);
   });
 
-  it("never lets the agent call the worker's own dependency-cache and git tools, in any mode", () => {
+  it("never lets the agent call the worker's own dependency-cache, git, plan and lockfile-restore tools, in any mode", () => {
     for (const options of [
       buildClaudeSdkOptions(config()),
       buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context", skills: true }),
@@ -84,8 +84,10 @@ describe("Claude SDK configuration", () => {
         "mcp__wardby_tools__wardby_plan_place",
         "mcp__wardby_tools__wardby_plan_list",
         "mcp__wardby_tools__wardby_plan_read",
+        "mcp__wardby_tools__wardby_restore_pypi_lockfiles",
       ]);
       expect(options.allowedTools).not.toContain("mcp__wardby_tools__wardby_prepare_dependencies");
+      expect(options.allowedTools).not.toContain("mcp__wardby_tools__wardby_restore_pypi_lockfiles");
       expect(options.allowedTools).not.toContain("mcp__wardby_tools");
     }
   });

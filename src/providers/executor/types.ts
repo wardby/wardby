@@ -7,6 +7,18 @@
  * backed by durable workflow steps with no scheduler or CLI change — the
  * scheduler only ever calls `start(runId)` and never sees the mechanism.
  */
+/**
+ * Thrown by an executor asked to start, stop or recover a run after `close()` began. The run is
+ * healthy and simply not this process's to drive any more: callers leave it as it is, and another
+ * process picks it up (the reconciler's recover(), or the next scheduler tick).
+ */
+export class ExecutorClosingError extends Error {
+  constructor(message = "The executor is closing and no longer accepts runs.") {
+    super(message);
+    this.name = "ExecutorClosingError";
+  }
+}
+
 export interface PersistedExecutionHandle {
   runId: string;
   backend: string;
@@ -52,8 +64,17 @@ export interface Executor {
    * before starting the scheduler or MCP server.
    */
   launch?: () => Promise<void>;
-  /** Optional graceful shutdown counterpart to `launch`. */
+  /**
+   * Optional graceful shutdown counterpart to `launch`. After it begins, start/stop/recover throw
+   * `ExecutorClosingError` rather than starting work in a process that is going away.
+   */
   close?: () => Promise<void>;
+  /**
+   * Optional. The chores this executor queues in the transaction that ends a run (`enqueueRunFollowUp`),
+   * by kind. The scheduler leader merges them into its drain (`runFollowUpHandlersFor`), so a pod that
+   * dies after the status write cannot lose them. An executor that queues none omits it.
+   */
+  followUpHandlers?: () => RunFollowUpHandlers;
   /**
    * Fire-and-forget start-up warm-up, called only from a long-running server process's own
    * start-up (`wardby serve`, the MCP server, `wardby scheduler`) — never from a one-shot CLI
@@ -129,6 +150,7 @@ export interface Executor {
    */
   defersCodingResolution?: boolean;
 }
+import type { RunFollowUpHandlers } from "../../core/run-follow-ups.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import type { ResolvedCodingService } from "../../coding/services/catalog.js";
 import type { UnstartableService } from "../jobs/types.js";

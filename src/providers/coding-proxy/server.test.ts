@@ -4,14 +4,16 @@ import type { AddressInfo } from "node:net";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { createMcpRoute } from "./mcp-route.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
-import { CodingProxy, type CreatedCodingProxySession } from "./proxy.js";
+import { CodingProxy, CodingProxyError, type CreatedCodingProxySession } from "./proxy.js";
 import type { RegistryAdapter } from "../../coding/registry/types.js";
 import { capabilityHash } from "./proxy.js";
 import { npmAdapter } from "../../coding/registry/npm.js";
+import { pypiAdapter } from "../../coding/registry/pypi.js";
 import { RegistryError } from "../../coding/registry/types.js";
 import {
   errorResponse,
   RegistryService,
+  type RegistryOriginsRequest,
   type RegistryPlanRequest,
   type RegistryRefusalsRequest,
   type RegistryRequest,
@@ -492,6 +494,65 @@ describe("coding proxy registry routing", () => {
     await server.close();
   });
 
+  it("routes POST /registry/<ecosystem>/-/origins to the registry's origins, which reads the body within 1 MiB", async () => {
+    const asked: { ecosystem: string; token: string; body: string }[] = [];
+    const registry = {
+      handle: async (): Promise<RegistryResponse> => ({ status: 200, contentType: "text", body: "" }),
+      origins: async (request: RegistryOriginsRequest): Promise<RegistryResponse> => {
+        try {
+          asked.push({ ecosystem: request.ecosystem, token: request.token, body: await request.readBody() });
+        } catch (error) {
+          return errorResponse(error as RegistryError);
+        }
+        return { status: 200, contentType: "application/json", body: '{"index":"i","files":[]}' };
+      },
+    };
+    const server = await startCodingProxyServer(fakeProxy(), { host: "127.0.0.1", port: 0, registry });
+    const url = `http://127.0.0.1:${server.port}/registry/pypi/-/origins`;
+    const ok = await fetch(url, { method: "POST", headers: { authorization: "Bearer rrg_o" }, body: '{"files":[]}' });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("cache-control")).toBe("no-store");
+    expect(await ok.json()).toEqual({ index: "i", files: [] });
+    expect(asked).toEqual([{ ecosystem: "pypi", token: "rrg_o", body: '{"files":[]}' }]);
+
+    const large = await fetch(url, { method: "POST", body: "x".repeat(1024 * 1024 + 1) });
+    expect(large.status).toBe(413);
+    expect(await large.json()).toEqual({ error: expect.stringContaining("wardby_request_too_large") });
+    expect(asked).toHaveLength(1);
+    // Only POST asks; a GET of the same path is an ordinary registry request.
+    expect((await fetch(url)).status).toBe(200);
+    await server.close();
+  });
+
+  it("rejects an unauthenticated origins request before reading its body", async () => {
+    const registry = new RegistryService({
+      adapters: new Map([["pypi", pypiAdapter]]),
+      store: new MemoryRegistryStore(),
+      audit: { audit: async () => ({ withheld: () => [], waived: () => [], reported: () => [] }) },
+      upstream: async () => new Response("", { status: 500 }),
+      proxyBase: "http://wardby-proxy:8787/registry/",
+      limits: { maxFileBytes: 1, maxTotalBytes: 1, maxFiles: 1, idleTimeoutMs: 1_000 },
+    });
+    const server = await startCodingProxyServer(fakeProxy(), { host: "127.0.0.1", port: 0, registry });
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        pulled += 1;
+        if (pulled === 1) controller.enqueue(new TextEncoder().encode("{"));
+        else await new Promise(() => {});
+      },
+    });
+    const response = await fetch(`http://127.0.0.1:${server.port}/registry/pypi/-/origins`, {
+      method: "POST",
+      headers: { authorization: "Bearer rrg_nope" },
+      body,
+      duplex: "half",
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: expect.stringContaining("invalid_capability") });
+    await server.close();
+  });
+
   it("rejects an unauthenticated plan before reading its body", async () => {
     const registry = new RegistryService({
       adapters: new Map([["npm", npmAdapter]]),
@@ -537,6 +598,30 @@ describe("coding proxy registry routing", () => {
     });
     const response = await fetch(`http://127.0.0.1:${server.port}/registry/npm/react`);
     expect(response.status).toBe(403);
+    await server.close();
+  });
+
+  it("sends a refusal's Retry-After header, and none when the refusal has no retry time", async () => {
+    const proxy = fakeProxy();
+    const execute = vi.spyOn(proxy, "execute");
+    const server = await startCodingProxyServer(proxy, { host: "127.0.0.1", port: 0 });
+    const post = () =>
+      fetch(`http://127.0.0.1:${server.port}/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer any" },
+        body: "{}",
+      });
+    execute.mockRejectedValueOnce(new CodingProxyError(503, "wardby_request_in_progress", 21));
+    const inProgress = await post();
+    expect(inProgress.status).toBe(503);
+    expect(inProgress.headers.get("retry-after")).toBe("21");
+    expect(await inProgress.json()).toEqual({
+      error: { type: "wardby_request_in_progress", message: "wardby_request_in_progress" },
+    });
+    execute.mockRejectedValueOnce(new CodingProxyError(409, "duplicate_completed"));
+    const duplicate = await post();
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.headers.get("retry-after")).toBeNull();
     await server.close();
   });
 

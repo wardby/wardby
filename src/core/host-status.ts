@@ -39,6 +39,7 @@ import { continuedForAnotherIssue, githubIssueKey, recordIssuePullRequests } fro
 import { logger } from "./logger.js";
 import { providerClassOfCategory, providerSentence, type ProviderFailureClass } from "./provider-wording.js";
 import { defuseMentions, splitReply } from "./reply-parts.js";
+import { spendLine, withSpend } from "./run-spend.js";
 import { splitTaskOverride } from "./untrusted-content.js";
 
 const log = logger.child({ module: "host-status" });
@@ -82,6 +83,7 @@ export type HostStatusDb = Pick<
   | "registryAuditRecord"
   | "issuePullRequest"
   | "codingRun"
+  | "$queryRaw"
 >;
 
 export type FinishedRun = Pick<Run, "id" | "status" | "finalText">;
@@ -663,7 +665,7 @@ export async function completeHostStatus(
     const fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
       ? null
       : fullReplyOf(run, pullRequests, failedChildren);
-    const body = outcomeBody(run, status.repository, pullRequests, failedChildren, {
+    const outcome = outcomeBody(run, status.repository, pullRequests, failedChildren, {
       budgetSentence,
       fromIssue: failedChildren.some((c) => c.status === "budget_exhausted")
         ? await runCameFromGitHubIssue(db, status, run.id)
@@ -674,6 +676,8 @@ export async function completeHostStatus(
       fullReplyFollows: true,
       statusInThread: status.commentKind === "inline",
     });
+    // The agent spend goes above the run line, which stays last, as on a Jira issue comment.
+    const body = withSpend(outcome, await spendLine(db, run.id));
     let commentId = status.commentId;
     if (commentId) {
       await host.editComment(status.repository, {

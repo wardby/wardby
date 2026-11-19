@@ -423,10 +423,21 @@ describe("KubernetesJobLauncher", () => {
         return 1;
       };
       expect(await h.launcher.readTranscript(handle, 1024)).toBeUndefined();
+      // The exec fails because the pod is gone (a stopped run): nothing is left to collect.
       h.api.onExec = async () => {
         throw new Error("pod gone");
       };
+      await h.lose(handle);
       expect(await h.launcher.readTranscript(handle, 1024)).toBeUndefined();
+    });
+
+    it("throws, rather than returning undefined, when the exec fails on a pod that is still there", async () => {
+      const h = await harness();
+      const handle = await h.launcher.launch(h.spec);
+      h.api.onExec = async () => {
+        throw new Error("connection reset");
+      };
+      await expect(h.launcher.readTranscript(handle, 1024)).rejects.toThrow("transcript_unreadable");
     });
 
     it("rejects a transcript larger than maxBytes", async () => {

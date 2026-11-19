@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 import { PLAN_FOLDER_PATH, type CodingTaskInput } from "../coding/protocol.js";
@@ -365,6 +365,118 @@ describe("runCodingWorker", () => {
     expect(await readFile(join(workspace, "web", "package-lock.json"), "utf8")).toBe(
       `{\n  "resolved": "https://registry.npmjs.org/@react-aria/live-announcer/-/live-announcer-3.5.1.tgz"\n}\n`,
     );
+  });
+
+  describe("uv.lock", () => {
+    afterEach(() => vi.unstubAllGlobals());
+    const registered = "https://pypi.org/simple";
+    const lock = (index: string): string =>
+      `version = 1\n\n[[package]]\nname = "idna"\nversion = "3.7"\nsource = { registry = "${index}" }\n`;
+
+    /** The registry the fake proxy's origins route names (a private index), and the package it knows beyond the lock. */
+    const REAL_INDEX = "https://registry.example.test/api/pypi/pypi/simple";
+    const proxied = "http://proxy:8080/registry/pypi";
+    const upgraded = [
+      "",
+      "[[package]]",
+      'name = "six"',
+      'version = "1.17.0"',
+      `source = { registry = "${proxied}/simple" }`,
+      `wheels = [{ url = "${proxied}/files/six/six-1.17.0-py3-none-any.whl", hash = "sha256:aa" }]`,
+      "",
+    ].join("\n");
+    const sixAddress = "https://registry.example.test/api/pypi/pypi/six/1.17.0/six-1.17.0-py3-none-any.whl";
+    const asked: { authorization: string | null; files: unknown[] }[] = [];
+
+    /** Stands in for the proxy's origins route: knows `known` (`<name>/<file>` -> address) and refuses the rest. */
+    function stubOrigins(known: Record<string, string>) {
+      asked.length = 0;
+      vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
+        const files = (JSON.parse(init?.body as string) as { files: { name: string; filename: string }[] }).files;
+        asked.push({ authorization: new Headers(init?.headers).get("authorization"), files });
+        return Response.json({
+          index: REAL_INDEX,
+          files: files.map((file) => {
+            const url = known[`${file.name}/${file.filename}`];
+            return url ? { ...file, url } : { ...file, error: "wardby_origin_not_allowed" };
+          }),
+        });
+      });
+    }
+
+    async function run(
+      outcome: "changes_ready" | "no_changes",
+      agentAppends = "",
+      agent?: (workspace: string) => Promise<void>,
+    ) {
+      const workspace = await tempWorkspace();
+      await writeFile(join(workspace, "uv.lock"), lock(registered));
+      const output = JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome, summary: "Done.", tests: [] });
+      let atStart = "";
+      await runCodingWorker({
+        input,
+        workspace,
+        proxyBaseUrl: "http://proxy:8080",
+        capability: "cap",
+        signal: new AbortController().signal,
+        createClient: () => {
+          return {
+            startThread: () => ({
+              async runStreamed() {
+                atStart = await readFile(join(workspace, "uv.lock"), "utf8");
+                if (agentAppends) await appendFile(join(workspace, "uv.lock"), agentAppends);
+                await agent?.(workspace);
+                return { events: events([{ type: "item.completed", item: { type: "agent_message", text: output } }]) };
+              },
+            }),
+          };
+        },
+      });
+      return { atStart, final: await readFile(join(workspace, "uv.lock"), "utf8") };
+    }
+
+    it("points the lock at the proxy before the agent starts and restores it for a changes_ready run", async () => {
+      const { atStart, final } = await run("changes_ready");
+      expect(atStart).toBe(lock("http://proxy:8080/registry/pypi/simple"));
+      expect(final).toBe(lock(registered));
+    });
+
+    it("gives an upgraded package, and the registry, the real address the proxy answers, with the agent's own rm -rf .cache", async () => {
+      stubOrigins({ "six/six-1.17.0-py3-none-any.whl": sixAddress });
+      const { final } = await run("changes_ready", upgraded, (workspace) =>
+        rm(join(workspace, ".cache"), { recursive: true, force: true }),
+      );
+      expect(final).toContain(`name = "six"\nversion = "1.17.0"\nsource = { registry = "${REAL_INDEX}" }`);
+      expect(final).toContain(sixAddress);
+      expect(final).not.toContain("proxy:8080");
+      expect(final).not.toContain("pythonhosted");
+      // Asked with the run's registry token, once.
+      expect(asked).toEqual([
+        {
+          authorization: `Bearer ${deriveRegistryToken("cap")}`,
+          files: [{ name: "six", filename: "six-1.17.0-py3-none-any.whl" }],
+        },
+      ]);
+    });
+
+    it("refuses to collect a uv.lock the proxy cannot give a real address for", async () => {
+      stubOrigins({});
+      await expect(run("changes_ready", upgraded)).rejects.toThrow("coding_pypi_lockfile_unresolved");
+    });
+
+    it("refuses to collect it too when the proxy cannot be reached, with a code that names no secret", async () => {
+      vi.stubGlobal("fetch", async () => {
+        throw new Error(`connect failed: ${deriveRegistryToken("cap")}`);
+      });
+      const failure = await run("changes_ready", upgraded).catch((error: Error) => error);
+      expect((failure as Error).message).toBe("coding_pypi_lockfile_unresolved");
+      expect(safeWorkerErrorCode(failure)).toBe("coding_pypi_lockfile_unresolved");
+    });
+
+    it("leaves a workspace that is not collected as the agent left it", async () => {
+      const { final } = await run("no_changes");
+      expect(final).toBe(lock("http://proxy:8080/registry/pypi/simple"));
+    });
   });
 
   it("rejects a structured result bound to another run", async () => {

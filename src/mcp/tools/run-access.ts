@@ -1,6 +1,7 @@
 import type { PrismaClient, Run } from "#prisma";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
+import { isOwnerAll } from "../auth/resource-server.js";
 import { effectiveAccess, type GrantDb } from "../../core/grants.js";
 
 /** Who is asking to read a run: a principal, and whether it is the stdio local operator. */
@@ -49,6 +50,12 @@ export async function findReadableRun(ctx: McpRequestContext, runId: string): Pr
   const run = await ctx.db.run.findUnique({ where: { id: runId } });
   const notFound = new McpError(404, `Run "${runId}" not found.`);
   if (!run) throw notFound;
-  if (!(await canReadRun(ctx.db, run, { principalId: ctx.principal.id, operator: ctx.operator }))) throw notFound;
+  if (
+    !(await canReadRun(ctx.db, run, {
+      principalId: ctx.principal.id,
+      operator: ctx.operator === true || isOwnerAll(ctx),
+    }))
+  )
+    throw notFound;
   return run;
 }
