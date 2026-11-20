@@ -42,6 +42,36 @@ async function failure(promise: Promise<unknown>): Promise<McpError> {
   throw new Error("expected a rejection");
 }
 
+describe("owner-all callers", () => {
+  const db = fakeDb([
+    { id: "a1", ownerId: "owner" },
+    { id: "orphan", ownerId: null },
+  ]);
+  const ownerAll = (principalId = "boss") =>
+    ctx(db, principalId, { scopes: new Set(["owner:all"]), roles: ["wardby_owner"] });
+
+  it("is owner of another owner's agent and of an owner-less one", async () => {
+    expect((await requireAgentAccess(ownerAll(), "a1", "owner")).access).toBe("owner");
+    expect((await requireAgentAccess(ownerAll(), "orphan", "owner")).access).toBe("owner");
+  });
+
+  it("is not owner with the role but no scope, or the scope but no role", async () => {
+    const noScope = ctx(db, "boss", { roles: ["wardby_owner"] });
+    const noRole = ctx(db, "boss", { scopes: new Set(["owner:all"]), roles: ["admin"] });
+    expect((await failure(requireAgentAccess(noScope, "a1", "read"))).httpStatus).toBe(404);
+    expect((await failure(requireAgentAccess(noRole, "a1", "read"))).httpStatus).toBe(404);
+  });
+
+  it("lists every agent", async () => {
+    expect(await readableAgentsWhere(ownerAll())).toEqual({});
+  });
+
+  it("passes the binding rules, on an owned and an owner-less agent", () => {
+    expect(() => requireBindingOwner(ownerAll(), { id: "a1", ownerId: "owner" })).not.toThrow();
+    expect(() => requireBindingOwner(ownerAll(), { id: "a2", ownerId: null })).not.toThrow();
+  });
+});
+
 describe("requireAgentAccess", () => {
   const db = fakeDb(
     [

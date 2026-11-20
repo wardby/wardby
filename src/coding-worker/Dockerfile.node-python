@@ -1,4 +1,7 @@
-FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:0f4ddfd3a4cb04e13accc0769055b33c134a40ce358d1130f8813767040f8ada AS runtime
+FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:b1ca4f3db5957eb6b2f740dcb3b9c4493d63ed5638bc0b3507ba4b94a2f7c71b AS runtime
+# The managed CPython (3.12, 3.13 or 3.14) that `python` runs: the node-python image registered for a
+# toolchainVersion is built with that version (CODING_WORKER_IMAGE_NODE_PYTHON_<version>).
+ARG PYTHON_DEFAULT_VERSION=3.12
 # python3-venv (ensurepip plus the bundled pip wheel) stays installed: in
 # registry mode (docs/coding-packages.md) the agent installs packages with
 # `python -m venv --system-site-packages .venv && .venv/bin/python -m pip
@@ -6,15 +9,39 @@ FROM ghcr.io/wardby/wardby/wardby-coding-worker-driver@sha256:0f4ddfd3a4cb04e13a
 # PIP_* environment the driver sets. The system pip is still removed:
 # Debian's system Python refuses `pip install` outside a venv (PEP 668), and
 # the root filesystem is read-only at run time anyway.
+#
+# uv and poetry run a project's own checks. uv also picks the interpreter: a run cannot download one
+# (it reaches only the registry proxy), so uv's managed CPython builds are installed here, at build
+# time, into /opt/uv-python, and uv is told to look there and never download. uv reaches the proxy
+# through the UV_* settings the worker gets (src/coding/registry/pypi.ts); poetry has no such
+# setting, so it installs only from a project's own configuration.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
-    && python3 -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 uv==0.13.4 \
+    && python3 -m pip install --no-cache-dir --break-system-packages \
+        pytest==8.3.4 ruff==0.16.7 uv==0.13.4 poetry==2.5.1 \
     && apt-get purge -y --auto-remove python3-pip \
     && rm -rf /var/lib/apt/lists/* \
+    && UV_NO_CACHE=1 UV_PYTHON_INSTALL_DIR=/opt/uv-python uv python install --no-bin 3.12 3.13 3.14 \
+    # Each managed CPython ships its own pip, and pip vendors certifi: the pip these builds carry
+    # (26.2.1) bundles a certifi with compromised root CAs (GHSA-6q48-6c7w-9gw2), fixed in 26.2.2.
+    && for python in /opt/uv-python/cpython-*/bin/python3; do \
+        "$python" -m pip install --no-cache-dir --break-system-packages --upgrade pip==26.2.2; \
+    done \
     # Most Python projects (and their own docs) say `python`, not `python3`.
     # Without this alias a task that runs `python -m pytest` reports a failed
     # command even when the suite is green -- observed in a live smoke run.
-    && ln -s /usr/bin/python3 /usr/bin/python
+    # It is the managed CPython this image is built for (PYTHON_DEFAULT_VERSION), so the agent's
+    # toolchainVersion is the interpreter it gets; the system python3 stays Debian's. pytest and ruff
+    # go into that interpreter too, so `python -m pytest` and a --system-site-packages venv find them.
+    && python_home="$(echo /opt/uv-python/cpython-${PYTHON_DEFAULT_VERSION}-linux-*)" \
+    && test -x "$python_home/bin/python3" \
+    && ln -s "$python_home/bin/python3" /usr/bin/python \
+    && python -m pip install --no-cache-dir --break-system-packages pytest==8.3.4 ruff==0.16.7 \
+    # Login shells too (the driver's /etc/profile.d shims are there for the same reason).
+    && printf '%s\n' \
+        'export UV_PYTHON_INSTALL_DIR=/opt/uv-python' \
+        'export UV_PYTHON_DOWNLOADS=never' \
+        > /etc/profile.d/wardby-uv.sh
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \
@@ -28,7 +55,12 @@ RUN test ! -e /usr/bin/docker \
     && python3 -m pytest --version \
     && python3 -m ruff --version \
     && python --version \
+    && python -c "import sys; assert '.'.join(map(str, sys.version_info[:2])) == '${PYTHON_DEFAULT_VERSION}'" \
     && python -m pytest --version \
+    # pytest must run a real test on this interpreter, not only print its version.
+    && printf 'def test_ok():\n    assert 1 + 1 == 2\n' > /tmp/test_ok.py \
+    && python -m pytest -q -p no:cacheprovider /tmp/test_ok.py \
+    && rm /tmp/test_ok.py \
     && uv --version \
     # The driver's uv shim (/opt/wardby/bin/uv) runs this real uv.
     && test "$(bash -lc 'command -v uv')" = /opt/wardby/bin/uv \
@@ -38,8 +70,20 @@ RUN test ! -e /usr/bin/docker \
     && python -m venv --system-site-packages /tmp/venv-check \
     && /tmp/venv-check/bin/python -m pip --version \
     && /tmp/venv-check/bin/python -m pytest --version \
-    && rm -rf /tmp/venv-check
+    && rm -rf /tmp/venv-check \
+    && uv --version \
+    && poetry --version \
+    # uv must pick each baked interpreter offline.
+    && UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never uv venv --python 3.12 /tmp/uv-check \
+    && /tmp/uv-check/bin/python -c "import sys; assert sys.version_info[:2] == (3, 12)" \
+    && UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never uv venv --python 3.13 /tmp/uv-check13 \
+    && UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never uv venv --python 3.14 /tmp/uv-check14 \
+    && rm -rf /tmp/uv-check /tmp/uv-check13 /tmp/uv-check14 \
+    # Every managed interpreter carries the patched pip.
+    && for python in /opt/uv-python/cpython-*/bin/python3; do \
+        "$python" -m pip --version | grep -q '^pip 26.2.2 ' || exit 1; \
+    done
 USER 10001:10001
-ENV NODE_ENV=production HOME=/home/wardby
+ENV NODE_ENV=production HOME=/home/wardby UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never
 WORKDIR /workspace
 ENTRYPOINT ["node", "/opt/wardby/coding-worker/main.js"]

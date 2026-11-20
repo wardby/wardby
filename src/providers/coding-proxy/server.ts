@@ -7,7 +7,12 @@ import { logger } from "../../core/logger.js";
 import type { ProxyAuditEvent } from "./types.js";
 import { CodingProxyError, PROXY_MAX_BODY_BYTES, type CodingProxy, type ProxyResponseSink } from "./proxy.js";
 import { RegistryError } from "../../coding/registry/types.js";
-import { MAX_PLAN_BODY_BYTES, type RegistryResponse, type RegistryService } from "./registry/service.js";
+import {
+  MAX_ORIGINS_BODY_BYTES,
+  MAX_PLAN_BODY_BYTES,
+  type RegistryResponse,
+  type RegistryService,
+} from "./registry/service.js";
 import type { DependencyCacheService } from "./dependency-cache/service.js";
 import type { ProxyProtocol } from "./types.js";
 import { MCP_ROUTE_PATH } from "./mcp-route.js";
@@ -30,7 +35,7 @@ export interface CodingProxyServerConfig {
   port: number;
   /** Exact `Host` values accepted (DNS-rebinding guard); absent means no check. */
   expectedHosts?: string[];
-  registry?: Pick<RegistryService, "handle"> & Partial<Pick<RegistryService, "plan" | "refusals">>;
+  registry?: Pick<RegistryService, "handle"> & Partial<Pick<RegistryService, "plan" | "refusals" | "origins">>;
   /** The dependency cache (`/cache/...`); absent when the deployment has it off. */
   dependencyCache?: Pick<DependencyCacheService, "handle" | "uploadMs">;
   /** Time to receive a whole request (default HTTP_LIMITS.requestMs); a cache upload gets its upload window instead. */
@@ -52,9 +57,13 @@ export interface CodingProxyServerHandle {
   close(): Promise<void>;
 }
 
-function sendError(response: ServerResponse, status: number, code: string): void {
+function sendError(response: ServerResponse, status: number, code: string, retryAfterSeconds?: number): void {
   response
-    .writeHead(status, { "content-type": "application/json", "cache-control": "no-store" })
+    .writeHead(status, {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      ...(retryAfterSeconds !== undefined ? { "retry-after": String(retryAfterSeconds) } : {}),
+    })
     .end(JSON.stringify({ error: { type: code, message: code } }));
 }
 
@@ -86,17 +95,40 @@ function sendRegistry(response: ServerResponse, result: RegistryResponse & { bod
     .end(result.body);
 }
 
-/** Reads a lockfile body within MAX_PLAN_BODY_BYTES, decoding each chunk
- *  as it arrives (no buffered copy of the raw bytes), and joins the text
- *  once. A RegistryError says why it could not be read. */
-function readPlanBody(request: IncomingMessage, signal: AbortSignal): Promise<string> {
-  const tooLarge = () => new RegistryError(413, "wardby_lockfile_too_large", "the lockfile is larger than 20 MiB");
+/** Time a client has to send the origins route's small request. */
+const ORIGINS_UPLOAD_MS = 30_000;
+
+interface BodyLimits {
+  maxBytes: number;
+  /** What the body is, for the 400 messages. */
+  noun: string;
+  tooLarge(): RegistryError;
+}
+const PLAN_BODY: BodyLimits = {
+  maxBytes: MAX_PLAN_BODY_BYTES,
+  noun: "lockfile",
+  tooLarge: () => new RegistryError(413, "wardby_lockfile_too_large", "the lockfile is larger than 20 MiB"),
+};
+const ORIGINS_BODY: BodyLimits = {
+  maxBytes: MAX_ORIGINS_BODY_BYTES,
+  noun: "request",
+  tooLarge: () => new RegistryError(413, "wardby_request_too_large", "the request is larger than 1 MiB"),
+};
+
+/** Reads a plan's lockfile (or the origins route's request) within its size
+ *  limit, decoding each chunk as it arrives (no buffered copy of the raw
+ *  bytes), and joins the text once. A RegistryError says why it could not be
+ *  read. */
+function readPlanBody(request: IncomingMessage, signal: AbortSignal, limits: BodyLimits = PLAN_BODY): Promise<string> {
+  const tooLarge = () => limits.tooLarge();
   const length = request.headers["content-length"];
-  if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > MAX_PLAN_BODY_BYTES))
+  if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > limits.maxBytes))
     return Promise.reject(tooLarge());
   const encoding = request.headers["content-encoding"];
   if (encoding && encoding !== "identity")
-    return Promise.reject(new RegistryError(400, "wardby_bad_request", "the lockfile must not be content-encoded"));
+    return Promise.reject(
+      new RegistryError(400, "wardby_bad_request", `the ${limits.noun} must not be content-encoded`),
+    );
   return new Promise((resolve, reject) => {
     const decoder = new StringDecoder("utf8");
     const parts: string[] = [];
@@ -114,10 +146,10 @@ function readPlanBody(request: IncomingMessage, signal: AbortSignal): Promise<st
       request.pause();
       reject(error);
     };
-    const failed = () => fail(new RegistryError(400, "wardby_bad_request", "the lockfile could not be read"));
+    const failed = () => fail(new RegistryError(400, "wardby_bad_request", `the ${limits.noun} could not be read`));
     const data = (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_PLAN_BODY_BYTES) fail(tooLarge());
+      if (size > limits.maxBytes) fail(tooLarge());
       else parts.push(decoder.write(chunk));
     };
     const end = () => {
@@ -265,6 +297,36 @@ export async function startCodingProxyServer(
           }
           return;
         }
+        const origins = request.url.match(/^\/registry\/([a-z0-9-]+)\/-\/origins(?:\?.*)?$/);
+        if (origins && request.method === "POST" && config.registry.origins) {
+          // The real upstream address of each file a lockfile names. The token is authenticated before the (small)
+          // body is read, within its own size and time bounds.
+          const controller = new AbortController();
+          response.on("close", () => {
+            if (!response.writableFinished) controller.abort();
+          });
+          let bodyRead = false;
+          const result = await config.registry.origins({
+            ecosystem: origins[1],
+            token: registryToken(request.headers.authorization),
+            readBody: () => {
+              bodyRead = true;
+              return readPlanBody(
+                request,
+                AbortSignal.any([controller.signal, AbortSignal.timeout(ORIGINS_UPLOAD_MS)]),
+                ORIGINS_BODY,
+              );
+            },
+            signal: controller.signal,
+          });
+          if (!bodyRead) response.setHeader("connection", "close");
+          if ("body" in result) sendRegistry(response, result);
+          else {
+            void result.stream.cancel().catch(() => undefined);
+            sendError(response, 500, "internal_error");
+          }
+          return;
+        }
         if (request.method !== "GET" && request.method !== "HEAD") {
           sendError(response, 405, "method_not_allowed");
           return;
@@ -388,7 +450,12 @@ export async function startCodingProxyServer(
           { event: "request.rejected", code: error instanceof CodingProxyError ? error.code : error.message },
           "coding proxy request rejected",
         );
-        sendError(response, error.status, error instanceof CodingProxyError ? error.code : error.message);
+        sendError(
+          response,
+          error.status,
+          error instanceof CodingProxyError ? error.code : error.message,
+          error instanceof CodingProxyError ? error.retryAfterSeconds : undefined,
+        );
         return;
       }
       // The client (an untrusted worker) still gets only "internal_error";

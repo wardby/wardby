@@ -25,18 +25,21 @@ Find the id with `list_runs` (filter with `"status": "pending"` or
 The run ends as `cancelled`, with `Stopped by <your id> with stop_run: <reason>`
 in its `stopRequestReason` (and, for a native run, in its `error`).
 
-| The run is                                 | `stop_run`                                                                                                                                                                                                     |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pending, or a coding run queued for a slot | Ends it now. It never starts.                                                                                                                                                                                  |
-| A running native run in the control plane  | Ends it now; the run stops at its next step. A model turn already under way finishes first; a tool call already under way is aborted within a few seconds.                                                     |
-| A running native run in the sandbox        | Ends it now and ends its gateway session, so the worker's next call is refused and it exits. A worker still running after a short grace (5 seconds) is killed and removed; a warm pool worker is never reused. |
-| A running coding run                       | Ends it, cancels its model proxy session, and stops and removes its worker. It opens or updates no pull request afterwards.                                                                                    |
-| Already finished (any other status)        | Changes nothing and returns its status. Calling `stop_run` again is safe.                                                                                                                                      |
+| The run is                                 | `stop_run`                                                                                                                                                                                                                 |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pending, or a coding run queued for a slot | Ends it now. It never starts.                                                                                                                                                                                              |
+| A running native run in the control plane  | Ends it now; the run stops at its next step. A model turn already under way finishes first; a tool call already under way is aborted within a few seconds.                                                                 |
+| A running native run in the sandbox        | Ends it now and ends its gateway session, so the worker's next call is refused and it exits. A worker still running after a short grace (5 seconds) is killed and removed; a warm pool worker is never reused.             |
+| A running coding run                       | Ends it, cancels its model proxy session, and stops and removes its worker. A model request still streaming is aborted within one proxy heartbeat (10 seconds by default). It opens or updates no pull request afterwards. |
+| Already finished (any other status)        | Changes nothing and returns its status. Calling `stop_run` again is safe.                                                                                                                                                  |
 
 Sub-agent runs the stopped run delegated, and that are still pending or running,
 are stopped too (their ids are in `stoppedChildRunIds`).
 
-Spend already recorded stays counted against the budget. A stopped run is not a
+Spend already recorded stays counted against the budget. A model request that
+was cut off by the stop is settled at an estimate from what had been received,
+never above its worst case (see
+[Availability](../docs/availability.md#a-model-request-whose-proxy-stops-mid-stream)). A stopped run is not a
 failure: Slack notifications say it was cancelled, and no defect is filed.
 
 If the result still shows `pending` or `running`, the stop has been recorded

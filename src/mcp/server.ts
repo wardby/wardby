@@ -35,7 +35,7 @@ import { hkdfSync, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Agent, PrismaClient, Principal } from "#prisma";
 import type { McpRequestContext, McpProviders } from "./context.js";
-import { requireScope } from "./auth/resource-server.js";
+import { effectiveScopes, parseOwnerAllRoleOnly, requireScope } from "./auth/resource-server.js";
 import { McpError, mapPrismaError } from "./errors.js";
 import { TASKS_EXTENSION_ID, clientSupportsTasks } from "./capabilities.js";
 import { readableAgentsWhere } from "./auth/access.js";
@@ -152,6 +152,8 @@ export interface WardbyMcpServer {
 interface AuthInfoExtra {
   principal?: Principal;
   roles?: McpRequestContext["roles"];
+  actsFor?: McpRequestContext["actsFor"];
+  teamIds?: McpRequestContext["teamIds"];
 }
 
 const REQUEST_STATE_KEY_BYTES = 32;
@@ -207,6 +209,7 @@ function agentPromptText(agent: Pick<Agent, "name" | "model" | "systemPrompt">):
 }
 
 export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
+  const ownerAllRoleOnly = parseOwnerAllRoleOnly(opts.env ?? process.env);
   const specs: ToolSpec<never>[] = [];
   const requestHandlers: {
     method: string;
@@ -245,8 +248,11 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
     if (extra?.principal) {
       return {
         principal: extra.principal,
-        scopes: new Set(authInfo!.scopes),
+        // AUTH_OWNER_ALL_ROLE_ONLY: the role alone stands in for the owner:all scope.
+        scopes: effectiveScopes(authInfo!.scopes, extra.roles, ownerAllRoleOnly),
         roles: extra.roles ?? [],
+        actsFor: extra.actsFor,
+        teamIds: extra.teamIds,
         canonicalUri: opts.config.canonicalUri,
         providers: opts.providers,
         db: opts.db,

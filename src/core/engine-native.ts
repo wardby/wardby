@@ -289,10 +289,18 @@ export class NativeEngine implements Engine {
     turn: number,
     toolCalls: TurnResult["toolCalls"],
   ): Promise<string[]> {
-    const runCall = (index: number): Promise<string> =>
-      step(`turn:${turn}:tool:${index}`, () =>
-        ctx.runSandboxTool(toolCalls[index].name, toolCalls[index].argsJson, toolCalls[index].id),
-      );
+    const runCall = async (index: number): Promise<string> => {
+      const call = toolCalls[index];
+      const recorded = await step(`turn:${turn}:tool:${index}`, async () => {
+        const result = await ctx.runSandboxTool(call.name, call.argsJson, call.id);
+        const state = ctx.toolState?.capture(call.name);
+        return state === undefined ? result : { result, state };
+      });
+      // A step recorded without state (before toolState, or by a tool that has none) is the bare result.
+      if (typeof recorded === "string") return recorded;
+      ctx.toolState?.restore(recorded.state);
+      return recorded.result;
+    };
     const concurrent = ctx.runsConcurrently;
     const results: string[] = new Array<string>(toolCalls.length);
 

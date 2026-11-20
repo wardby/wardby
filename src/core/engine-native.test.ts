@@ -15,6 +15,8 @@ import {
 import { NativeEngine } from "./engine-native.js";
 import type { EngineTurnEvent } from "../providers/engine/types.js";
 import { runStepsHook } from "./run-steps/native.js";
+import { REVIEW_READ_TOOLS, ReviewReadLedger } from "./review-reads.js";
+import type { PullRequestView } from "../providers/review-host/types.js";
 import type { RunStepBatch } from "./run-steps/types.js";
 
 /** Records each step's JSON result; on a later run replays it without calling fn. */
@@ -519,6 +521,108 @@ describe("NativeEngine", () => {
     expect(replayed).toEqual(first);
     expect(replayLlm.calls).toHaveLength(0);
     expect(replayTool).not.toHaveBeenCalled();
+  });
+
+  describe("tool state across a replay (a run resumed on another pod)", () => {
+    const HEAD = "a".repeat(40);
+    const page = (files: { filename: string; patchStatus: "complete" | "later_page" }[]) =>
+      ({
+        headSha: HEAD,
+        nextPatchCursor: null,
+        files: files.map((file) => ({ ...file, status: "modified", additions: 1, deletions: 0, patch: "x" })),
+      }) as unknown as PullRequestView;
+    const price = (usage: { inputTokens: number; outputTokens: number }) => usage.inputTokens + usage.outputTokens;
+    const count = (messages: { content: string }[]) => messages.reduce((sum, m) => sum + m.content.length, 0);
+    const toolStateFor = (reads: ReviewReadLedger): NonNullable<EngineRunContext["toolState"]> => ({
+      capture: (toolName) => (REVIEW_READ_TOOLS.has(toolName) ? reads.toJSON() : undefined),
+      restore: (state) => reads.merge(ReviewReadLedger.fromJSON(state)),
+    });
+    const twoTurns = (toolName: string): LlmStreamEvent[][] => [
+      [
+        { type: "tool_call", id: "c1", name: toolName, argsJson: "{}" },
+        { type: "done", stopReason: "tool_calls", usage: { inputTokens: 9, outputTokens: 2, costUsd: 11 } },
+      ],
+      [
+        { type: "text", delta: "done" },
+        { type: "done", stopReason: "stop", usage: { inputTokens: 20, outputTokens: 6, costUsd: 26 } },
+      ],
+    ];
+
+    it("restores the review read ledger to what it was at the last completed step", async () => {
+      const record = new Map<string, unknown>();
+      const before = new ReviewReadLedger();
+      const readTool = vi.fn(async () => {
+        before.recordPage(
+          "o/r",
+          1,
+          page([
+            { filename: "src/a.ts", patchStatus: "complete" },
+            { filename: "src/b.ts", patchStatus: "later_page" },
+          ]),
+          false,
+        );
+        return '{"ok":true}';
+      });
+      await new NativeEngine().run(
+        makeContext({
+          llm: scriptedLlm(twoTurns("repo_pr_read"), price, count),
+          runSandboxTool: readTool,
+          toolState: toolStateFor(before),
+          step: recordingStepRunner(record, []),
+        }),
+      );
+      expect(before.unreadCode("o/r", 1, HEAD)).toEqual(["src/b.ts"]);
+
+      // Another pod resumes the run: the read is replayed from its record and never runs again.
+      const after = new ReviewReadLedger();
+      const replayTool = vi.fn(async () => '{"ok":true}');
+      await new NativeEngine().run(
+        makeContext({
+          llm: scriptedLlm(twoTurns("repo_pr_read"), price, count),
+          runSandboxTool: replayTool,
+          toolState: toolStateFor(after),
+          step: recordingStepRunner(record, []),
+        }),
+      );
+      expect(replayTool).not.toHaveBeenCalled();
+      expect(after.toJSON()).toEqual(before.toJSON());
+      expect(after.unreadCode("o/r", 1, HEAD)).toEqual(["src/b.ts"]);
+    });
+
+    it("records a tool with no state as its bare result, as every step did before", async () => {
+      const record = new Map<string, unknown>();
+      const capture = vi.fn(() => undefined);
+      await new NativeEngine().run(
+        makeContext({
+          llm: scriptedLlm(twoTurns("getWeather"), price, count),
+          toolState: { capture, restore: vi.fn() },
+          step: recordingStepRunner(record, []),
+        }),
+      );
+      expect(record.get("turn:1:tool:0")).toBe('{"ok":true}');
+    });
+
+    it("replays a step recorded before tool state existed without restoring anything", async () => {
+      const record = new Map<string, unknown>();
+      await new NativeEngine().run(
+        makeContext({
+          llm: scriptedLlm(twoTurns("repo_pr_read"), price, count),
+          step: recordingStepRunner(record, []),
+        }),
+      );
+      expect(record.get("turn:1:tool:0")).toBe('{"ok":true}');
+
+      const restore = vi.fn();
+      const replayed = await new NativeEngine().run(
+        makeContext({
+          llm: scriptedLlm(twoTurns("repo_pr_read"), price, count),
+          toolState: { capture: () => ({ v: 1 }), restore },
+          step: recordingStepRunner(record, []),
+        }),
+      );
+      expect(replayed.status).toBe("succeeded");
+      expect(restore).not.toHaveBeenCalled();
+    });
   });
 
   it("names wind-down steps distinctly so a replay after budget exhaustion lines up", async () => {

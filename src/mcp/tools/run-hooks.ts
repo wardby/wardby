@@ -21,7 +21,7 @@ import { validateParams } from "../../sandbox/zod-params.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import { assertAgentAccess } from "../auth/access.js";
 import { requireOwnedTool } from "../auth/ownership.js";
-import { requireScope } from "../auth/resource-server.js";
+import { isOwnerAll, requireScope } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -228,7 +228,7 @@ export function registerRunHookTools(mcp: WardbyMcpServer): void {
             `Agent "${agent.id}" is writable by everyone, so hook capabilities cannot be granted on it; revoke or lower the everyone grant first.`,
           );
         }
-        const tool = await requireOwnedTool(tx, args.toolId, ctx.principal.id);
+        const tool = await requireOwnedTool(tx, args.toolId, ctx.principal.id, isOwnerAll(ctx));
         await assertToolAcceptsConfig(tool, agent, parsed);
         const hook = await tx.runHook.create({
           data: {

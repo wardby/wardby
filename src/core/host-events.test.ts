@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
 import type { RepoAccessDecision, RepoAccessGate } from "./repo-access.js";
@@ -94,7 +95,15 @@ function gate(
 }
 
 function deps(
-  links: Array<{ agentId: string; triggers: string[]; checkName: string | null; waitForCi?: boolean }>,
+  links: Array<{
+    agentId: string;
+    triggers: string[];
+    checkName: string | null;
+    waitForCi?: boolean;
+    reviewDrafts?: boolean;
+    reviewOnPush?: boolean;
+    reviewOnOpen?: boolean;
+  }>,
   h = host(),
   repoAccess = gate(),
   reviewed: { runId: string } | null = null,
@@ -114,6 +123,8 @@ function deps(
       agentRepository: {
         findMany: vi.fn(async () =>
           links.map((l) => ({
+            // A stored row always has the flag; the pre-existing links were backfilled on.
+            reviewOnOpen: true,
             ...l,
             provider: "github",
             repository: REPO,
@@ -141,7 +152,8 @@ function deps(
         findMany: vi.fn(async () => []),
         createMany: vi.fn(async () => ({ count: 0 })),
         deleteMany: vi.fn(async () => ({ count: 1 })),
-        updateMany: vi.fn(async () => ({ count: 0 })),
+        // Claims a row (a flip to "ci" is the same call).
+        updateMany: vi.fn(async () => ({ count: 1 })),
       },
       run: {
         findUnique: vi.fn(async () => ({ id: "run", status: "running", finalText: null })),
@@ -254,6 +266,260 @@ describe("routeHostEvent", () => {
     const d = deps([{ agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" }]);
     await expect(routeHostEvent({ ...pr, isFork: true }, d)).resolves.toEqual({ runIds: [], followUps: [] });
     expect(d.hosts.github.startCheck).not.toHaveBeenCalled();
+  });
+
+  describe("draft pull requests", () => {
+    const draft: HostEvent = { ...pr, isDraft: true };
+    const link = { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" };
+
+    it("skips a draft by default: no check, no run", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([link]);
+      await expect(routeHostEvent(draft, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(d.hosts.github.startCheck).not.toHaveBeenCalled();
+    });
+
+    it("skips a draft for a link with reviewDrafts off, but reviews it for one with reviewDrafts on", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([
+        { ...link, reviewDrafts: false },
+        { agentId: "a2", triggers: ["pull_request"], checkName: "security", reviewDrafts: true },
+      ]);
+      const result = await routeHostEvent(draft, d);
+      expect(result.runIds).toEqual(["run-a2"]);
+      expect(d.hosts.github.startCheck).toHaveBeenCalledTimes(1);
+      expect(d.hosts.github.startCheck).toHaveBeenCalledWith(REPO, { headSha: SHA, name: "security" });
+    });
+
+    it("reviews the pull request once it is marked ready for review (isDraft false)", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([link]);
+      const result = await routeHostEvent({ ...pr, isDraft: false }, d);
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+
+    it("always reviews a draft a wardby coding run opened, whatever reviewDrafts says", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const h = host();
+      h.pullRequestOrigin = vi.fn(async () => ({
+        headSha: SHA,
+        isFork: false,
+        state: "open",
+        labels: [],
+        draft: true,
+        markerRunId: "run_open",
+      }));
+      const d = deps([{ ...link, reviewDrafts: false }], h);
+      const result = await routeHostEvent(draft, d);
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+
+    it("reviews a draft whose origin cannot be read, as usual", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const h = host();
+      h.pullRequestOrigin = vi.fn(async () => {
+        throw new Error("boom");
+      });
+      const d = deps([link], h);
+      const result = await routeHostEvent(draft, d);
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+
+    it("never skips an explicit request: a check re-run reviews a draft", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([link]);
+      const result = await routeHostEvent(
+        {
+          kind: "check_rerun",
+          provider: "github",
+          repository: REPO,
+          prNumber: 7,
+          headSha: SHA,
+          checkName: "wardby review",
+        },
+        d,
+      );
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+  });
+
+  describe("pushes of new commits", () => {
+    const push: HostEvent = { ...pr, isPush: true };
+    const link = { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review" };
+
+    it("reviews a push for a link with reviewOnPush on", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([{ ...link, reviewOnPush: true }]);
+      const result = await routeHostEvent(push, d);
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+
+    it("skips a push by default and for a link with reviewOnPush off: no check, no run", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([{ ...link, reviewOnPush: false }]);
+      await expect(routeHostEvent(push, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(d.hosts.github.startCheck).not.toHaveBeenCalled();
+    });
+
+    it("skips a push only for the links with reviewOnPush off", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([
+        { ...link, reviewOnPush: false },
+        { agentId: "a2", triggers: ["pull_request"], checkName: "security", reviewOnPush: true },
+      ]);
+      const result = await routeHostEvent(push, d);
+      expect(result.runIds).toEqual(["run-a2"]);
+      expect(d.hosts.github.startCheck).toHaveBeenCalledTimes(1);
+    });
+
+    it("still reviews the pull request when it is opened or marked ready, whatever reviewOnPush says", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([{ ...link, reviewOnPush: false }]);
+      const result = await routeHostEvent({ ...pr, isPush: false }, d);
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+
+    it("always reviews a push to a pull request a wardby coding run opened", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const h = host();
+      h.pullRequestOrigin = vi.fn(async () => ({
+        headSha: SHA,
+        isFork: false,
+        state: "open",
+        labels: [],
+        draft: false,
+        markerRunId: "run_open",
+      }));
+      const d = deps([{ ...link, reviewOnPush: false }], h);
+      const result = await routeHostEvent(push, d);
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+
+    it("reviews a push whose origin cannot be read, as usual", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const h = host();
+      h.pullRequestOrigin = vi.fn(async () => {
+        throw new Error("boom");
+      });
+      const d = deps([{ ...link, reviewOnPush: false }], h);
+      const result = await routeHostEvent(push, d);
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+
+    it("never skips an explicit request: a check re-run reviews with reviewOnPush off", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([{ ...link, reviewOnPush: false }]);
+      const result = await routeHostEvent(
+        {
+          kind: "check_rerun",
+          provider: "github",
+          repository: REPO,
+          prNumber: 7,
+          headSha: SHA,
+          checkName: "wardby review",
+        },
+        d,
+      );
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+  });
+
+  describe("pull requests opened, reopened or marked ready", () => {
+    const link = { agentId: "a1", triggers: ["pull_request"], checkName: "wardby review", reviewOnOpen: false };
+
+    it("starts no run and posts no check for a link with reviewOnOpen off", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([link]);
+      // opened, reopened and ready_for_review are all pr_updated events that are not a push.
+      for (const event of [pr, { ...pr, isPush: false }, { ...pr, isDraft: false }]) {
+        await expect(routeHostEvent(event, d)).resolves.toEqual({ runIds: [], followUps: [] });
+      }
+      expect(dispatchRun).not.toHaveBeenCalled();
+      expect(d.hosts.github.startCheck).not.toHaveBeenCalled();
+    });
+
+    it("reviews for a link with reviewOnOpen on, and skips only the links with it off", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([link, { agentId: "a2", triggers: ["pull_request"], checkName: "security", reviewOnOpen: true }]);
+      const result = await routeHostEvent(pr, d);
+      expect(result.runIds).toEqual(["run-a2"]);
+      expect(d.hosts.github.startCheck).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not decide a push: reviewOnPush alone does", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([{ ...link, reviewOnPush: true }]);
+      const result = await routeHostEvent({ ...pr, isPush: true }, d);
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+
+    it("always reviews a pull request a wardby coding run opened", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const h = host();
+      h.pullRequestOrigin = vi.fn(async () => ({
+        headSha: SHA,
+        isFork: false,
+        state: "open",
+        labels: [],
+        draft: false,
+        markerRunId: "run_open",
+      }));
+      const result = await routeHostEvent(pr, deps([link], h));
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+
+    it("reviews when the origin cannot be read, as usual", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const h = host();
+      h.pullRequestOrigin = vi.fn(async () => {
+        throw new Error("boom");
+      });
+      const result = await routeHostEvent(pr, deps([link], h));
+      expect(result.runIds).toEqual(["run-a1"]);
+    });
+
+    it("never skips an explicit request: '@wardby review' and a check re-run review with it off", async () => {
+      vi.mocked(dispatchRun).mockClear();
+      const d = deps([link]);
+      const mention = await routeHostEvent(
+        {
+          kind: "mention",
+          provider: "github",
+          repository: REPO,
+          number: 7,
+          isPullRequest: true,
+          comment: { kind: "conversation", id: "4" },
+          body: "@wardby review",
+          author: "chfields",
+          authorId: "1001",
+        },
+        d,
+      );
+      expect(mention.runIds).toEqual(["run-a1"]);
+      const rerun = await routeHostEvent(
+        {
+          kind: "check_rerun",
+          provider: "github",
+          repository: REPO,
+          prNumber: 7,
+          headSha: SHA,
+          checkName: "wardby review",
+        },
+        d,
+      );
+      expect(rerun.runIds).toEqual(["run-a1"]);
+    });
+
+    it("backfills every existing link to on in the migration", () => {
+      const sql = readFileSync(
+        new URL("../../prisma/migrations/20261201000001_add_review_on_open/migration.sql", import.meta.url),
+        "utf8",
+      );
+      expect(sql).toMatch(/ADD COLUMN "reviewOnOpen" BOOLEAN NOT NULL DEFAULT false/);
+      expect(sql).toMatch(/UPDATE "AgentRepository" SET "reviewOnOpen" = true;/);
+    });
   });
 
   it("re-runs only the agent that owns the rerequested check", async () => {
@@ -2113,6 +2379,7 @@ describe("review after CI (waitForCi)", () => {
     findMany: ReturnType<typeof vi.fn>;
     createMany: ReturnType<typeof vi.fn>;
     deleteMany: ReturnType<typeof vi.fn>;
+    updateMany: ReturnType<typeof vi.fn>;
   };
   function setup(
     opts: {
@@ -2225,7 +2492,7 @@ describe("review after CI (waitForCi)", () => {
         },
         select: { id: true, agentId: true, checkName: true },
       });
-      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
+      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ["d1"] } } });
       expect(dispatchRun).toHaveBeenCalledTimes(1);
     });
 
@@ -2266,7 +2533,7 @@ describe("review after CI (waitForCi)", () => {
         where: { provider: "github", repository: REPO, prNumber: 7, headSha: SHA, reason: "ci" },
         select: { id: true, agentId: true, checkName: true },
       });
-      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
+      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ["d1"] } } });
       expect(d.reviewLookup).toHaveBeenCalled();
     });
 
@@ -2302,7 +2569,7 @@ describe("review after CI (waitForCi)", () => {
 
     it("starts nothing when a concurrent delivery already claimed the row", async () => {
       const { d, store } = setup({ ci: "passing", rows: [deferred()] });
-      store.deleteMany.mockResolvedValueOnce({ count: 0 });
+      store.updateMany.mockResolvedValueOnce({ count: 0 });
       await expect(routeHostEvent(ciEvent, d)).resolves.toEqual({ runIds: [], followUps: [expect.any(Function)] });
       expect(dispatchRun).not.toHaveBeenCalled();
     });
@@ -2343,7 +2610,7 @@ describe("review after CI (waitForCi)", () => {
         orderBy: { createdAt: "asc" },
         take: DEFERRED_REVIEW_BATCH,
       });
-      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
+      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ["d1"] } } });
       expect(DEFERRED_REVIEW_MAX_WAIT_MS).toBe(15 * 60_000);
       expect(DEFERRED_REVIEW_BATCH).toBe(50);
     });
@@ -2388,7 +2655,7 @@ describe("review after CI (waitForCi)", () => {
 
     it("starts nothing for a row another instance already claimed", async () => {
       const { d, store } = setup({ rows: [deferred()] });
-      store.deleteMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 0 });
+      store.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 0 });
       await expect(startDeferredReviews(d, NOW)).resolves.toEqual([]);
       expect(dispatchRun).not.toHaveBeenCalled();
     });
@@ -2401,12 +2668,23 @@ describe("review after CI (waitForCi)", () => {
       await expect(startDeferredReviews(d, NOW)).resolves.toEqual([]);
     });
 
+    it("claims a row that is unclaimed or whose claim timed out, and deletes it only after starting", async () => {
+      const { d, store } = setup({ rows: [deferred()] });
+      await expect(startDeferredReviews(d, NOW)).resolves.toEqual(["run-a1"]);
+      const claim = store.updateMany.mock.calls[0][0] as { where: { id: string; OR: unknown[] } };
+      expect(claim.where.id).toBe("d1");
+      expect(claim.where.OR).toEqual([{ claimedAt: null }, { claimedAt: { lt: expect.any(Date) } }]);
+      expect(Math.max(...vi.mocked(dispatchRun).mock.invocationCallOrder)).toBeLessThan(
+        store.deleteMany.mock.invocationCallOrder.at(-1) as number,
+      );
+    });
+
     it("logs and returns nothing when a claimed review cannot be started", async () => {
       const { d, store } = setup({ rows: [deferred()] });
       d.reviewLookup.mockRejectedValueOnce(new Error("db down"));
       await expect(startDeferredReviews(d, NOW)).resolves.toEqual([]);
-      // The row was claimed before the failure: at most once, never retried.
-      expect(store.deleteMany).toHaveBeenCalledWith({ where: { id: "d1" } });
+      // The row stays claimed (not deleted): a later pass retries it once the claim times out.
+      expect(store.deleteMany).not.toHaveBeenCalledWith({ where: { id: { in: ["d1"] } } });
       expect(dispatchRun).not.toHaveBeenCalled();
     });
 
@@ -2506,7 +2784,11 @@ describe("delegated pull requests wait for the request (#259)", () => {
     expect(db.deferredReview.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { leadRunId: "lead", reason: "request" } }),
     );
-    expect(db.deferredReview.deleteMany).toHaveBeenCalledWith({ where: { id: "d2" } });
+    expect(db.deferredReview.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: "d2" }) }),
+    );
+    // Deleted only after its review was started.
+    expect(db.deferredReview.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ["d2"] } } });
   });
 
   it("startDeferredForRequest never throws", async () => {

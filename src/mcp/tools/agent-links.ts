@@ -8,7 +8,7 @@
 import { buildAgentFlows, type AgentLinkFacts, type SubAgentFact } from "../../core/agent-flows.js";
 import { stripControlSequences } from "../../core/run-steps/control-chars.js";
 import { agentAccessResolver, readableAgentsWhere } from "../auth/access.js";
-import { requireScope } from "../auth/resource-server.js";
+import { isOwnerAll, requireScope } from "../auth/resource-server.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
@@ -37,7 +37,7 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
       "all: true covers every agent in the deployment (admins only, admin:view).",
     inputSchema: { type: "object", properties: { all: { type: "boolean" } }, additionalProperties: false },
     handler: async (args: { all?: boolean }, ctx) => {
-      if (args.all === true && !ctx.operator) requireScope(ctx, ctx.canonicalUri, "admin:view");
+      if (args.all === true && !ctx.operator && !isOwnerAll(ctx)) requireScope(ctx, ctx.canonicalUri, "admin:view");
       const [where, accessOf] = await Promise.all([
         args.all === true ? Promise.resolve({}) : readableAgentsWhere(ctx),
         agentAccessResolver(ctx),

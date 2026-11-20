@@ -24,6 +24,9 @@ pub fn run() {
             let current = appearance::load(handle);
             app.set_menu(appearance::build_menu(handle, current)?)?;
             appearance::apply(handle, current);
+            if let Err(e) = commands::seed_server_from_env(handle) {
+                eprintln!("wardby-viewer: ignoring WARDBY_VIEWER_SERVER_URL: {e}");
+            }
             Ok(())
         })
         .on_menu_event(|app, event| {

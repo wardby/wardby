@@ -1,0 +1,102 @@
+{{- if .Values.migration.enabled }}
+{{- $w := .Values.migration }}
+{{- $sa := .Values.serviceAccounts.migration }}
+# The schema migration runs as a pre-install/pre-upgrade hook, so a release
+# never rolls the workloads against an un-migrated schema. A failed migration
+# fails the release.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $sa.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+    {{- with $sa.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+automountServiceAccountToken: false
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-migrate
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    {{- include "wardby.dnsEgress" . | nindent 4 }}
+    {{- include "wardby.databaseEgress" . | nindent 4 }}
+    {{- include "wardby.publicHttpsEgress" . | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wardby-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: wardby-migrate
+    {{- include "wardby.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $w.backoffLimit }}
+  activeDeadlineSeconds: {{ $w.activeDeadlineSeconds }}
+  template:
+    metadata:
+      {{- with include "wardby.podAnnotations" (list $ $w) | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: wardby-migrate
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ $sa.name }}
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      {{- with include "wardby.podScheduling" (list $ $w) | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with include "wardby.cloudSqlProxy" . | trim }}
+      initContainers:
+        {{- . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "wardby.image" (list $ "migration") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sh", "-c", "npm run prisma:migrate && npm run dbos:migrate"]
+          {{- with include "wardby.envFrom" (list $ $w) | trim }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          env:
+            {{- include "wardby.env" (list $ $w "migration" dict) | nindent 12 }}
+          resources:
+            {{- toYaml $w.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "wardby.tmpVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "wardby.tmpVolume" $w | nindent 8 }}
+{{- end }}

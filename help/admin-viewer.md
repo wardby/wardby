@@ -1,7 +1,7 @@
 ---
 id: admin-viewer
 title: Watch live runs with the admin viewer API
-summary: Read-only, deployment-wide live view of runs, sub-agent trees, triggers, outcomes and coding-run services for admins (admin:view).
+summary: Read-only, deployment-wide live view of runs, sub-agent trees, triggers, outcomes and coding-run services for admins and viewers (admin:view).
 audience: operator
 tags: [viewer, admin, runs, desktop, infrastructure, kubernetes, download, openapi, api contract, sign-in, request]
 appliesTo: ">=0.4.0"
@@ -14,8 +14,8 @@ viewers. It shows every owner's runs across the deployment: sub-agent trees,
 what triggered each run, its outcomes (pull requests, comments, checks), and
 coding-run services, with a live event stream.
 
-It requires the Wardby `admin` role and the `admin:view` scope, which only the
-`admin` role grants. In delegating mode, define `admin:view` in your identity
+It requires the `admin:view` scope and a Wardby role that grants it: `admin`,
+or the read-only `viewer` role, which grants `admin:view` and nothing else. In delegating mode, define `admin:view` in your identity
 provider and map it like `agents:admin`. See
 [Configure identity and privileged access](identity-and-access.md).
 

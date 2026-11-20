@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { collectExclusions } from "../coding/collect-exclude.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
 import { capabilityHash } from "../providers/coding-proxy/capability-hash.js";
@@ -653,6 +653,8 @@ describe("Codex bridge, end to end without Substrate", () => {
     it("runs by default: a bridge started without imageCheck checks its image", async () => {
       await stage(codexWorkerSetup(spec, FAKE_CAP, { collectResultBundle: false }));
       let launched = false;
+      // The default check reads the process uid and refuses root as `user`; CI agents run as root.
+      const getuid = vi.spyOn(process, "getuid").mockReturnValue(10001);
       const started = runCodex({
         proxyUrl,
         env: { PATH: process.env.PATH },
@@ -672,7 +674,9 @@ describe("Codex bridge, end to end without Substrate", () => {
           return { exited: Promise.resolve(0) };
         },
       });
-      const error = (await started.catch((e: unknown) => e)) as ImageIncompleteError;
+      const error = (await started
+        .catch((e: unknown) => e)
+        .finally(() => getuid.mockRestore())) as ImageIncompleteError;
       expect(error).toBeInstanceOf(ImageIncompleteError);
       expect(error.item).toBe("runner");
       await error.close();

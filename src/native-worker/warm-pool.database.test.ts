@@ -259,9 +259,11 @@ describe.skipIf(!process.env.DATABASE_URL)("PooledWorkerLauncher (database)", ()
     pools.push(shrunk);
     await shrunk.start();
     expect(launcher.warm.size).toBe(0);
-    // The old replica, still running at size 2, refills after the new one's start-up pass.
+    // The old replica, still running at size 2, refills after the new one's start-up pass. Count
+    // its launches: the new one retires them every 20ms, so the pool's size here is a race.
+    const starts = vi.spyOn(launcher, "startWarm");
     await warmed(other);
-    expect(launcher.warm.size).toBe(2);
+    expect(starts).toHaveBeenCalledTimes(2);
     // A worker is removed before its row is deleted: wait for both, not just the workers.
     await vi.waitFor(
       async () => {

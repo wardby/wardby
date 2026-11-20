@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "./db.js";
-import { tryAcquireLease } from "./lease.js";
+import { releaseLease, tryAcquireLease } from "./lease.js";
 
 // The lease's whole point is atomic conditional-write semantics under
 // concurrency (Postgres's ON CONFLICT ... WHERE) — not faithfully fakeable,
@@ -68,5 +68,46 @@ describe.skipIf(!databaseUrl)("tryAcquireLease (database)", () => {
 
     const lease = await db.schedulerLease.findUnique({ where: { scope } });
     expect(lease?.holder).toBe("holder-b");
+  });
+
+  it("hands the lease over at once when its holder releases it", async () => {
+    const scope = newScope();
+    await tryAcquireLease(db, scope, "holder-a", 30_000);
+    expect(await tryAcquireLease(db, scope, "holder-b", 30_000)).toBe(false);
+
+    expect(await releaseLease(db, scope, "holder-a")).toBe(true);
+
+    expect(await tryAcquireLease(db, scope, "holder-b", 30_000)).toBe(true);
+    const lease = await db.schedulerLease.findUnique({ where: { scope } });
+    expect(lease?.holder).toBe("holder-b");
+  });
+
+  it("releases only a lease the caller still holds", async () => {
+    const scope = newScope();
+    await tryAcquireLease(db, scope, "holder-a", -1_000);
+    await tryAcquireLease(db, scope, "holder-b", 30_000);
+
+    expect(await releaseLease(db, scope, "holder-a")).toBe(false);
+
+    const lease = await db.schedulerLease.findUnique({ where: { scope } });
+    expect(lease?.holder).toBe("holder-b");
+  });
+
+  it("releasing a lease that was never taken is a no-op", async () => {
+    expect(await releaseLease(db, newScope(), "holder-a")).toBe(false);
+  });
+
+  it("stamps expiresAt from the database clock, whatever the process clock says", async () => {
+    const scope = newScope();
+    vi.useFakeTimers({ now: new Date("2001-01-01T00:00:00Z"), toFake: ["Date"] });
+    try {
+      await tryAcquireLease(db, scope, "holder-a", 30_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    const lease = await db.schedulerLease.findUnique({ where: { scope } });
+    const untilExpiry = lease!.expiresAt.getTime() - Date.now();
+    expect(untilExpiry).toBeGreaterThan(20_000);
+    expect(untilExpiry).toBeLessThanOrEqual(30_000);
   });
 });

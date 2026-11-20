@@ -178,6 +178,7 @@ function fakeDb(
         codingRuns.push(data);
         return data;
       },
+      findMany: async () => [],
     },
     webhook: {},
     $queryRaw: async () => [],
@@ -691,7 +692,7 @@ describe("trigger_agent", () => {
           const result = await call(native.client, { repositories: ["base"] });
           expect(result.isError).toBe(true);
           expect(JSON.stringify(result)).toContain(
-            "Task, baseRef, repository and repositories overrides are only valid for coding agents.",
+            "Task, baseRef, branch, repository and repositories overrides are only valid for coding agents.",
           );
           await native.client.close();
         });
@@ -708,6 +709,30 @@ describe("trigger_agent", () => {
       expect(refused.isError).toBe(true);
       expect((await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } })).isError).toBeFalsy();
       await client.close();
+    });
+
+    it("names the pull request branch from the branch argument, and only for the owner unless opted in", async () => {
+      const { db, client } = await as("owner", coding(false), []);
+      const named = await client.callTool({
+        name: "trigger_agent",
+        arguments: { agentId: "a1", branch: "Fix Invoice Rounding" },
+      });
+      expect(named.isError).toBeFalsy();
+      const unnamed = await client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });
+      expect(unnamed.isError).toBeFalsy();
+      const heads = (db as unknown as { codingRuns: { headRef: string }[] }).codingRuns.map((r) => r.headRef);
+      expect(heads[0]).toBe("wardby/fix-invoice-rounding");
+      expect(heads[1]).toMatch(/^wardby\/run-/);
+      await client.close();
+
+      const closed = await as("g", coding(false), [grant("execute")]);
+      const refused = await closed.client.callTool({
+        name: "trigger_agent",
+        arguments: { agentId: "a1", branch: "mine" },
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused)).toMatch(/allowWebhookTaskOverride/);
+      await closed.client.close();
     });
 
     it("a non-owner may pass a coding task or baseRef only when the owner opted in (allowWebhookTaskOverride)", async () => {

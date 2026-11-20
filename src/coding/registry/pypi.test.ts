@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { zipSync, strToU8 } from "fflate";
 import { describe, expect, it } from "vitest";
-import { pypiAdapter, requiredDists, requiresDist } from "./pypi.js";
+import { createPypiAdapter, pypiAdapter, requiredDists, requiresDist } from "./pypi.js";
 
 const json = async () => JSON.parse(await readFile(new URL("./fixtures/pypi-flask.json", import.meta.url), "utf8"));
 const metadataText = () => readFile(new URL("./fixtures/flask.METADATA", import.meta.url), "utf8");
@@ -258,6 +258,37 @@ describe("pypiAdapter protocol", () => {
     );
   });
 
+  it("resolves relative file URLs against the JFrog index, including the metadata URL", async () => {
+    const adapter = createPypiAdapter({
+      url: "https://example.jfrog.io/acme",
+      host: "example.jfrog.io",
+      pypi: { repo: "pypi", trustAll: false },
+    });
+    const filename = "pluggy-0.3.0-py2.py3-none-any.whl";
+    const index = {
+      name: "pluggy",
+      files: [
+        {
+          filename,
+          url: `../../packages/packages/7a/09/abc/${filename}`,
+          hashes: { sha256: "a".repeat(64) },
+          "core-metadata": true,
+        },
+      ],
+    };
+    const meta = await adapter.fetchMetadata(
+      "pluggy",
+      async () =>
+        new Response(JSON.stringify(index), { headers: { "content-type": "application/vnd.pypi.simple.v1+json" } }),
+    );
+    const file = meta.versions.get("0.3.0")!.files[0];
+    expect(file.upstreamUrl).toBe(
+      `https://example.jfrog.io/acme/api/pypi/pypi/packages/packages/7a/09/abc/${filename}`,
+    );
+    const route = { kind: "file-metadata", name: "pluggy", filename } as const;
+    expect(adapter.resolveFileMetadata!(route, meta)?.upstreamUrl).toBe(`${file.upstreamUrl}.metadata`);
+  });
+
   it("keeps only wheels and sdists, with the fields it renders, in the cached index", async () => {
     const meta = await pypiAdapter.fetchMetadata("flask", async () => Response.json(await json()));
     const raw = meta.raw as { files: Record<string, unknown>[] };
@@ -304,5 +335,8 @@ describe("pypiAdapter protocol", () => {
       UV_CACHE_DIR: "/workspace/.cache/pypi/uv",
       UV_PYTHON_DOWNLOADS: "never",
     });
+    expect(config.env.UV_DEFAULT_INDEX).toBe(config.env.PIP_INDEX_URL);
+    expect(config.env.POETRY_CACHE_DIR).toBe("/workspace/.cache/pypi/poetry");
+    expect(config.env.POETRY_VIRTUALENVS_IN_PROJECT).toBe("true");
   });
 });

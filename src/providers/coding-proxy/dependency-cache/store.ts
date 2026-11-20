@@ -45,6 +45,19 @@ export interface SnapshotRow extends SnapshotIdentity {
   createdByRunId: string | null;
 }
 
+/** An upload in flight: written before its first byte is stored, deleted when the upload ends. */
+export interface UploadClaim extends SnapshotIdentity {
+  blobKey: string;
+  runId: string;
+  /** The proxy process that took the claim. */
+  ownerId: string;
+}
+
+export interface StoredUploadClaim extends UploadClaim {
+  id: string;
+  createdAt: Date;
+}
+
 /** What eviction needs of every snapshot. */
 export type EvictionRow = Pick<SnapshotRow, "id" | "repository" | "blobKey" | "sizeBytes" | "createdAt" | "lastUsedAt">;
 
@@ -73,6 +86,17 @@ export interface DependencyCacheStore {
   /** Deletes the row only while it still points at `blobKey` (a re-upload may have replaced it); true when deleted. */
   deleteIfBlob(id: string, blobKey: string): Promise<boolean>;
   listForEviction(): Promise<EvictionRow[]>;
+  /**
+   * Takes the cross-replica "uploading" claim: "in_progress" when another claim already holds this snapshot
+   * identity or this run's project (or blob key).
+   */
+  claimUpload(claim: UploadClaim): Promise<"claimed" | "in_progress">;
+  /** Deletes the claim for `blobKey` (a no-op when it is already gone). */
+  releaseUpload(blobKey: string): Promise<void>;
+  /** Claims created at or before `cutoff`: uploads whose proxy died, since an upload ends within the upload window. */
+  listStaleUploads(cutoff: Date): Promise<StoredUploadClaim[]>;
+  /** Whether a snapshot row names `blobKey`. */
+  hasSnapshotBlob(blobKey: string): Promise<boolean>;
   /** Runs `work` while holding the cluster-wide eviction lock; returns false (without running it) when another holder has it. */
   withEvictionLock(work: () => Promise<void>): Promise<boolean>;
 }
@@ -86,6 +110,7 @@ const sameScope = (row: SnapshotScope, scope: SnapshotScope) =>
 /** In-memory adapter for tests. `sessions` may be shared with a MemoryRegistryStore's `cacheSessions`. */
 export class MemoryDependencyCacheStore implements DependencyCacheStore {
   readonly rows: SnapshotRow[] = [];
+  readonly claims: StoredUploadClaim[] = [];
   private evicting = false;
 
   /** Runs whose agent has the cache off (sealForModelRequest leaves them alone). */
@@ -165,6 +190,31 @@ export class MemoryDependencyCacheStore implements DependencyCacheStore {
       createdAt,
       lastUsedAt,
     }));
+  }
+
+  async claimUpload(claim: UploadClaim): Promise<"claimed" | "in_progress"> {
+    const taken = this.claims.some(
+      (held) =>
+        held.blobKey === claim.blobKey ||
+        (sameScope(held, claim) && held.lockHash === claim.lockHash) ||
+        (held.runId === claim.runId && held.ecosystem === claim.ecosystem && held.projectPath === claim.projectPath),
+    );
+    if (taken) return "in_progress";
+    this.claims.push({ ...claim, id: `c${randomUUID().replaceAll("-", "")}`, createdAt: new Date() });
+    return "claimed";
+  }
+
+  async releaseUpload(blobKey: string): Promise<void> {
+    const index = this.claims.findIndex((claim) => claim.blobKey === blobKey);
+    if (index >= 0) this.claims.splice(index, 1);
+  }
+
+  async listStaleUploads(cutoff: Date): Promise<StoredUploadClaim[]> {
+    return this.claims.filter((claim) => claim.createdAt.getTime() <= cutoff.getTime());
+  }
+
+  async hasSnapshotBlob(blobKey: string): Promise<boolean> {
+    return this.rows.some((row) => row.blobKey === blobKey);
   }
 
   async withEvictionLock(work: () => Promise<void>): Promise<boolean> {

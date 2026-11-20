@@ -26,7 +26,7 @@ models. Seven sensitive permissions have an additional role requirement:
 - `agents:admin` requires the Wardby `admin` role.
 - `packages:approve` requires the `admin` or `package-approver` role.
 - `services:manage` requires the `admin` or `service-manager` role.
-- `admin:view` requires the `admin` role. It opens the read-only, deployment-wide
+- `admin:view` requires the `admin` or `viewer` role. It opens the read-only, deployment-wide
   admin viewer API; see [Watch live runs with the admin viewer API](admin-viewer.md).
 - `models:admin` requires the `admin` or `model-manager` role. It adds,
   overrides, disables, and resets model catalog entries; see
@@ -34,6 +34,19 @@ models. Seven sensitive permissions have an additional role requirement:
 - `hosts:admin` requires the `admin` or `host-manager` role. It registers host
   providers, approves their tools and, with `secrets:write`, replaces their secrets; see
   [Host providers](../docs/host-providers.md).
+- `teams:manage` requires the `admin` or `team-manager` role. It creates,
+  renames and deletes teams and edits their members. Assigning a team's roles
+  is admin only; see `teams`.
+- `owner:all` requires the `wardby_owner` role, which also includes every
+  `admin` permission. A caller holding both the scope and the role acts as the
+  owner of every owner's agents, runs, tools, budget groups, MCP servers,
+  documents, webhooks, grants, datastores and secret metadata, including
+  owner-only fields, bindings (it attaches its own secrets and datastores to any
+  agent) and run tasks. It holds every privileged scope without separate
+  consent. Secret values are never returned. Assign it to people, not broad
+  teams; see `teams`. If the identity provider cannot issue `owner:all`, an
+  operator can set `AUTH_OWNER_ALL_ROLE_ONLY=true` so the role alone is enough;
+  every client holding that person's token then acts as owner of everything.
 - `documents:read` and `documents:write` need no role; access is per document
   (`grant_access` with `resourceType: "document"`). Search help for "documents".
 - `power:manage` requires the `admin` role. It reads low-power state and

@@ -18,6 +18,18 @@ observability:up`), dev/local only. See `docs/observability.md`.
 - **`gke/`** — the supported Google Cloud path: GKE Autopilot, private-IP Cloud
   SQL, Artifact Registry, and the `gke-autopilot` Kubernetes overlay. Start with
   the [full GKE guide](../docs/getting-started-gke.md).
+- **`helm/wardby/`** — the Helm chart for the Kubernetes workloads (control
+  plane, coding proxy, native gateway, migration, network policies, RBAC). It
+  is published to `oci://ghcr.io/wardby/wardby`:
+
+  ```sh
+  helm install wardby oci://ghcr.io/wardby/wardby --version <x.y.z> \
+    --namespace wardby-coding --create-namespace -f my-values.yaml
+  ```
+
+  It runs on a cluster, database and images you provide. See
+  [Install with Helm](../docs/install-helm.md).
+
 - **`gcp/`** — **deprecated** Cloud Run reference. It remains temporarily for
   existing operators but should not be used for a new installation.
 

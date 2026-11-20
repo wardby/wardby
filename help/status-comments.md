@@ -11,7 +11,8 @@ appliesTo: >=0.2.1
 
 Mentioning the GitHub App starts a run and posts a working status comment.
 The comment is updated when the run finishes, with pull request links, an
-answer, or a failure. This includes a run that a deploy moved to a new
+answer, or a failure, and an `Agent spend: $...` line with what the run cost,
+sub-runs included, as on Jira issue comments. This includes a run that a deploy moved to a new
 control-plane process. Jira requests also report their outcome in a status
 comment.
 

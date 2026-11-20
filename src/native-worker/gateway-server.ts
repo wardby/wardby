@@ -34,7 +34,7 @@ import {
   type SandboxSessionSnapshot,
 } from "../core/runner.js";
 import type { CodingMcpDeps } from "../core/coding-mcp.js";
-import { ReviewReadLedger } from "../core/review-reads.js";
+import { REVIEW_READ_TOOLS, ReviewReadLedger } from "../core/review-reads.js";
 import { DELEGATE_TOOL_PREFIX } from "../core/tool-names.js";
 import { relayedOutputTokens } from "../providers/coding-proxy/interrupted.js";
 import { RoutingLlmProvider } from "../providers/llm/routing.js";
@@ -475,9 +475,6 @@ async function streamedOutputTokens(llm: LlmProvider, model: string, streamed: s
     .countTokens(model, [{ role: "assistant", content: streamed }])
     .catch(() => relayedOutputTokens(Buffer.byteLength(streamed)));
 }
-
-/** The review tools that record reads (repo_publish_review checks them). */
-const REVIEW_READ_TOOLS = new Set(["repo_pr_read", "repo_read_file"]);
 
 async function builtin(
   ctx: RebuiltRun,

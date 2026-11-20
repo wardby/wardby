@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "./db.js";
-import { spendLine } from "./issue-status.js";
+import { spendLine } from "./run-spend.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("spendLine (database)", () => {
   const db = createPrismaClient();

@@ -188,7 +188,7 @@ function Dashboard({
           <>
             {viewer.forbidden && (
               <p role="alert" className="error">
-                This account needs the admin role (admin:view) to use the viewer.
+                This account needs the admin or viewer role (admin:view) to use the viewer.
               </p>
             )}
             {viewer.error && !viewer.forbidden && (

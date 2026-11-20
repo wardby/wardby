@@ -23,6 +23,7 @@ import {
   PLAN_READ_TOOL,
   PLAN_ROOT,
   PREPARE_DEPENDENCIES_TOOL,
+  RESTORE_PYPI_LOCKFILES_TOOL,
   RESULT_BUNDLE_TOOL,
   startToolRunner,
   TOOL_RUNNER_READY_MESSAGE,
@@ -468,6 +469,34 @@ test("a worker that hangs up stops the prepare (its signal aborts)", async () =>
   });
 });
 
+// ---------------------------------------------------------------- uv.lock / poetry.lock
+
+const PIP_INDEX_URL = "http://wardby:rgt_secret@wardby-proxy:8787/registry/pypi/simple/";
+
+async function withPypiRunner(loadPypiLockfiles, body, env = { PIP_INDEX_URL }) {
+  const directory = await mkdtemp(join(tmpdir(), "wardby-claude-pypi-"));
+  const workspace = join(directory, "workspace");
+  const socketPath = join(directory, "runner.sock");
+  await import("node:fs/promises").then(({ mkdir }) => mkdir(workspace));
+  const setup = parseToolSetup(JSON.stringify({ schemaVersion: 1, env, files: [] }), workspace);
+  const server = await startToolRunner(socketPath, setup, { workspacePath: workspace, loadPypiLockfiles });
+  const clients = [];
+  try {
+    await body({
+      workspace,
+      connect: async () => {
+        const client = await connect(socketPath);
+        clients.push(client);
+        return client;
+      },
+    });
+  } finally {
+    for (const client of clients) client.socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 // ---------------------------------------------------------------- git history (#536)
 
 function git(cwd, ...args) {
@@ -532,6 +561,173 @@ async function withGitRunner(options, body) {
     await rm(directory, { recursive: true, force: true });
   }
 }
+
+function fakePypiModule() {
+  const calls = { prepare: [], restore: [] };
+  return {
+    calls,
+    prepareWorkspacePypiLockfiles: async (options) => {
+      calls.prepare.push(options);
+      return { env: { POETRY_HTTP_BASIC_CORP_USERNAME: "wardby" }, prepared: ["uv.lock"], warnings: [] };
+    },
+    restoreWorkspacePypiLockfiles: async (options) => {
+      calls.restore.push(options);
+      return { restored: ["uv.lock"], warnings: [] };
+    },
+  };
+}
+
+test("offers the restore tool only on a run with a PyPI registry", async () => {
+  await withPypiRunner(
+    async () => fakePypiModule(),
+    async ({ connect }) => {
+      const listed = await (await connect()).request("tools/list");
+      assert.deepEqual(listed.result.tools.map((tool) => tool.name).sort(), [
+        "run_command",
+        RESTORE_PYPI_LOCKFILES_TOOL,
+      ]);
+    },
+  );
+  await withPypiRunner(
+    async () => fakePypiModule(),
+    async ({ connect }) => {
+      const listed = await (await connect()).request("tools/list");
+      assert.deepEqual(
+        listed.result.tools.map((tool) => tool.name),
+        ["run_command"],
+      );
+    },
+    { npm_config_registry: "http://wardby-proxy:8787/registry/npm/" },
+  );
+});
+
+test("prepares the lockfiles once, before the first command, with the proxy route and the registry token", async () => {
+  const module = fakePypiModule();
+  await withPypiRunner(
+    async () => module,
+    async ({ connect, workspace }) => {
+      const client = await connect();
+      await callTool(client, "run_command", { command: "echo $POETRY_HTTP_BASIC_CORP_USERNAME > env.txt" });
+      await callTool(client, "run_command", { command: "true" });
+      assert.equal(module.calls.prepare.length, 1);
+      const [call] = module.calls.prepare;
+      assert.equal(call.workspace, workspace);
+      assert.equal(call.registryUrl, "http://wardby-proxy:8787/registry/pypi/");
+      assert.equal(call.token, "rgt_secret");
+      // What the session returns reaches the commands, and the token is not in the URL it was given.
+      assert.equal((await readFile(join(workspace, "env.txt"), "utf8")).trim(), "wardby");
+    },
+  );
+});
+
+async function captureStderr(body) {
+  const lines = [];
+  const write = process.stderr.write;
+  process.stderr.write = (chunk, ...rest) => {
+    lines.push(String(chunk));
+    const callback = rest.find((argument) => typeof argument === "function");
+    if (callback) callback();
+    return true;
+  };
+  try {
+    await body();
+  } finally {
+    process.stderr.write = write;
+  }
+  return lines
+    .join("")
+    .split("\n")
+    .filter((line) => line.includes("pypi_lockfiles"))
+    .map((line) => JSON.parse(line));
+}
+
+test("logs what the session warns about, and a session that throws, without stopping a command", async () => {
+  const module = fakePypiModule();
+  module.prepareWorkspacePypiLockfiles = async () => ({
+    env: {},
+    prepared: [],
+    warnings: ["pyproject.toml: poetry lock through the proxy failed; left as found"],
+  });
+  const warned = await captureStderr(() =>
+    withPypiRunner(
+      async () => module,
+      async ({ connect }) => {
+        const ran = await callTool(await connect(), "run_command", { command: "true" });
+        assert.equal(ran.result.isError, false);
+      },
+    ),
+  );
+  assert.deepEqual(warned, [
+    { warning: "pypi_lockfiles", message: "pyproject.toml: poetry lock through the proxy failed; left as found" },
+  ]);
+  const thrown = await captureStderr(() =>
+    withPypiRunner(
+      async () => {
+        throw new Error("module not found, token rgt_secret");
+      },
+      async ({ connect }) => {
+        const ran = await callTool(await connect(), "run_command", { command: "true" });
+        assert.equal(ran.result.isError, false);
+      },
+    ),
+  );
+  assert.deepEqual(thrown, [
+    { warning: "pypi_lockfiles", message: "preparing the workspace failed; files left as found" },
+  ]);
+});
+
+test("restores through the session, and never prepares when no command ran", async () => {
+  const module = fakePypiModule();
+  await withPypiRunner(
+    async () => module,
+    async ({ connect, workspace }) => {
+      const client = await connect();
+      assert.deepEqual(toolJson(await callTool(client, RESTORE_PYPI_LOCKFILES_TOOL)), {
+        restored: ["uv.lock"],
+        warnings: [],
+      });
+      assert.deepEqual(module.calls.prepare, []);
+      assert.equal(module.calls.restore[0].workspace, workspace);
+      assert.equal(module.calls.restore[0].registryUrl, "http://wardby-proxy:8787/registry/pypi/");
+      // The run's registry token, which the restore sends to the proxy to ask each file's real address.
+      assert.equal(module.calls.restore[0].token, "rgt_secret");
+    },
+  );
+});
+
+test("passes the session's unresolved lockfiles through, so the worker can fail the run", async () => {
+  const module = fakePypiModule();
+  module.restoreWorkspacePypiLockfiles = async () => ({
+    restored: ["uv.lock"],
+    warnings: ["uv.lock: 1 entries still name the proxy (wardby_origin_not_allowed x1)"],
+    unresolved: ["uv.lock"],
+  });
+  await withPypiRunner(
+    async () => module,
+    async ({ connect }) => {
+      const restored = toolJson(await callTool(await connect(), RESTORE_PYPI_LOCKFILES_TOOL));
+      assert.deepEqual(restored.unresolved, ["uv.lock"]);
+      assert.equal(JSON.stringify(restored).includes("rgt_secret"), false);
+    },
+  );
+});
+
+test("a session that fails to load or throws never stops a command, and restore reports a warning", async () => {
+  await withPypiRunner(
+    async () => {
+      throw new Error("module not found");
+    },
+    async ({ connect, workspace }) => {
+      const client = await connect();
+      const ran = await callTool(client, "run_command", { command: "echo ok > ok.txt" });
+      assert.equal(ran.result.isError, false);
+      assert.equal((await readFile(join(workspace, "ok.txt"), "utf8")).trim(), "ok");
+      const restored = toolJson(await callTool(client, RESTORE_PYPI_LOCKFILES_TOOL));
+      assert.deepEqual(restored.restored, []);
+      assert.equal(restored.warnings.length, 1);
+    },
+  );
+});
 
 test("the git check answers ok with git, and git_unavailable without it", async () => {
   await withGitRunner({}, async ({ connect }) => {

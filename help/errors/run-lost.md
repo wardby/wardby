@@ -21,6 +21,11 @@ A native run that is waiting in a `delegate_to_*` call on a coding sub-agent, or
 - `Could not continue across versions: the run's steps changed in the new version.` The run was waiting on a sub-agent, but the new code no longer matches the steps the run had recorded.
 - `Durable workflow could not be re-driven after 3 adoption attempts…` Wardby tried three times to resume the run and gave up.
 - `Orphaned: no heartbeat/progress since before <time>.` Nothing was executing the run and it stopped reporting progress, for example because its process was killed.
+- `Never started: still pending with nothing running it after 3 restarts.` The run was created but the process that was to start it died, and starting it again three times did not take.
+
+## A run that never started is restarted, not lost
+
+A native run that stays `pending` with no execution backend (the process that created it died before starting it) has run no step, so the reconciler starts it again instead of marking it lost. This covers a scheduled run, so it runs once, not zero times. The same holds for a start, stop or review the scheduler leader had claimed when it died: the claim is cleared only after the work was done, so the next leader does it. Only a run that still does not start after three restarts ends `lost`, with the `Never started` reason above.
 
 ## Sub-agents of a lost run
 

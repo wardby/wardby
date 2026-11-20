@@ -342,10 +342,10 @@ The image is recorded in `.wardby/.env`. To use your own build of it, set the
 variable for your provider to an immutable digest (`repo@sha256:...`) or a local
 image id before running quickstart:
 
-| Provider    | Variable                                           |
-| ----------- | -------------------------------------------------- |
-| Codex       | `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`             |
-| Claude Code | `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` |
+| Provider    | Variable (one per Python version: `_3_12`, `_3_13`, `_3_14`) |
+| ----------- | ------------------------------------------------------------ |
+| Codex       | `CODING_WORKER_IMAGE_NODE_PYTHON_3_12`                       |
+| Claude Code | `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`           |
 
 If your wardby version ships no Python workspace image, quickstart prints
 "Python project detected, but this version has no Python workspace image" and

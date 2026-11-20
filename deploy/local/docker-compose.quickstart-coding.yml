@@ -14,6 +14,18 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       NODE_ENV: production
+      # Private registry (JFrog Artifactory): empty means public npm and PyPI. The
+      # credential variables hold env:NAME references; the proxy resolves them from the
+      # ARTIFACTORY_* values below. They stay in this container only.
+      REGISTRY_JFROG_URL: ${REGISTRY_JFROG_URL:-}
+      REGISTRY_JFROG_NPM_REPO: ${REGISTRY_JFROG_NPM_REPO:-}
+      REGISTRY_JFROG_NPM_SCOPES: ${REGISTRY_JFROG_NPM_SCOPES:-}
+      REGISTRY_JFROG_PYPI_REPO: ${REGISTRY_JFROG_PYPI_REPO:-}
+      REGISTRY_JFROG_PYPI_TRUST_ALL: ${REGISTRY_JFROG_PYPI_TRUST_ALL:-}
+      REGISTRY_UPSTREAM_USERNAME: ${REGISTRY_UPSTREAM_USERNAME:-}
+      REGISTRY_UPSTREAM_PASSWORD: ${REGISTRY_UPSTREAM_PASSWORD:-}
+      ARTIFACTORY_USER: ${ARTIFACTORY_USER:-}
+      ARTIFACTORY_TOKEN: ${ARTIFACTORY_TOKEN:-}
       # Optional: base URL of a native gateway (`wardby native-gateway`, see
       # docker-compose.native-sandbox.yml) that serves MCP tool calls for coding
       # agents, e.g. http://wardby-native-gateway:8790 on a shared network. Unset

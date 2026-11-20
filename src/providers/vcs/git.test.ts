@@ -378,6 +378,39 @@ describe("GitVcsProvider", () => {
     expect(github.pullRequestCalls[0]?.acceptReadyForReview).toBeUndefined();
   });
 
+  it("writes a conventional commit message with the key and a Wardby-Run line", async () => {
+    const { provider, github, git, input } = await harness();
+    const prepared = await provider.prepareWorkspace(input);
+    await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+
+    await provider.finalizeChanges(prepared, {
+      commit: { type: "feat", scope: "webhooks", title: "add retry to Jira webhook delivery" },
+      issue: { key: "PROJ-123" },
+    });
+
+    const commit = git.calls.find((call) => call.args.includes("commit"))!;
+    expect(commit.args[commit.args.indexOf("-m") + 1]).toBe(
+      "feat(webhooks): add retry to Jira webhook delivery (PROJ-123)\n\nWardby-Run: run-1",
+    );
+    // The same parts reach the pull request, which builds its title from them.
+    expect(github.pullRequestCalls[0]?.commit).toEqual({
+      type: "feat",
+      scope: "webhooks",
+      title: "add retry to Jira webhook delivery",
+    });
+  });
+
+  it("falls back to a conventional chore subject when the agent gave no commit fields", async () => {
+    const { provider, git, input } = await harness();
+    const prepared = await provider.prepareWorkspace(input);
+    await writeFile(resolve(prepared.workspacePath, "src-index.ts"), "changed\n");
+
+    await provider.finalizeChanges(prepared);
+
+    const commit = git.calls.find((call) => call.args.includes("commit"))!;
+    expect(commit.args[commit.args.indexOf("-m") + 1]).toBe("chore: Wardby run run-1\n\nWardby-Run: run-1");
+  });
+
   it("passes the agent's summary, tests, and tag through to the pull request", async () => {
     const { provider, github, input } = await harness();
     const prepared = await provider.prepareWorkspace(input);
@@ -768,11 +801,11 @@ describe("GitVcsProvider", () => {
       expect(github.tokenCalls).toBe(1);
     });
 
-    it("rejects a continuation whose headRef doesn't match the claimed root run", async () => {
+    it("rejects a continuation whose headRef is outside the wardby/ namespace", async () => {
       const { provider } = await harness();
-      await expect(
-        provider.prepareWorkspace(continuationInput({ continuation: { rootRunId: "some-other-run" } })),
-      ).rejects.toThrow("vcs_head_ref_invalid");
+      await expect(provider.prepareWorkspace(continuationInput({ headRef: "feature/x" }))).rejects.toThrow(
+        "vcs_head_ref_invalid",
+      );
     });
 
     it("rejects a malformed continuation root run id", async () => {
@@ -1886,8 +1919,6 @@ describe("GitVcsProvider per-repository workspaces (real git)", { timeout: 30_00
   it("creates another run's branch when branchRunId names it, and carries branchRunId through recovery", async () => {
     const { main, provider, make, input } = await setup();
     const borrowed = { ...input, runId: "run-2", headRef: "wardby/run-root-1", branchRunId: "root-1" };
-    const { branchRunId: _unused, ...withoutBranchRunId } = borrowed;
-    await expect(provider.prepareWorkspace(withoutBranchRunId)).rejects.toThrow("vcs_head_ref_invalid");
     const prepared = await provider.prepareWorkspace(borrowed);
     expect(prepared).toMatchObject({
       branchRunId: "root-1",

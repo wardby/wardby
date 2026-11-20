@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "../../core/db.js";
-import { DeferredExecutor, drainDeferredRuns } from "./deferred.js";
+import { DEFERRED_START_CLAIM_TIMEOUT_MS, DeferredExecutor, drainDeferredRuns } from "./deferred.js";
 import type { Executor } from "./types.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("DeferredExecutor and drainDeferredRuns (database)", () => {
@@ -57,7 +57,85 @@ describe.skipIf(!process.env.DATABASE_URL)("DeferredExecutor and drainDeferredRu
     // Two drains racing (two replicas): one start.
     await Promise.all([drainDeferredRuns({ db, executor }), drainDeferredRuns({ db, executor })]);
     expect(calls.filter((c) => c === `start:${run.id}`)).toHaveLength(1);
-    expect((await db.run.findUniqueOrThrow({ where: { id: run.id } })).startDeferredAt).toBeNull();
+    // Cleared once the start was attempted, not when it was claimed.
+    await vi.waitFor(async () =>
+      expect(await db.run.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({
+        startDeferredAt: null,
+        startClaimedAt: null,
+      }),
+    );
+  });
+
+  it("starts a run whose claiming leader died before acting, once the claim times out", async () => {
+    const run = await pendingRun();
+    await new DeferredExecutor(db).start(run.id);
+    const t0 = new Date();
+
+    // The first leader claims the start and dies: its start never returns.
+    const dying: Executor = { start: vi.fn(() => new Promise<void>(() => {})), stop: async () => {} };
+    await drainDeferredRuns({ db, executor: dying, now: () => t0 });
+    await vi.waitFor(() => expect(dying.start).toHaveBeenCalledWith(run.id));
+    expect(await db.run.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({
+      startClaimedAt: expect.any(Date),
+      startDeferredAt: expect.any(Date),
+    });
+
+    // While the claim is fresh the next leader leaves it alone (no second start)...
+    const next = server();
+    await drainDeferredRuns({ db, executor: next.executor, now: () => new Date(t0.getTime() + 1_000) });
+    expect(next.calls).not.toContain(`start:${run.id}`);
+
+    // ...and takes it over once it is older than the timeout: started exactly once.
+    const later = new Date(t0.getTime() + DEFERRED_START_CLAIM_TIMEOUT_MS + 1_000);
+    await drainDeferredRuns({ db, executor: next.executor, now: () => later });
+    await Promise.all([drainDeferredRuns({ db, executor: next.executor, now: () => later })]);
+    await vi.waitFor(async () =>
+      expect(await db.run.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({
+        startDeferredAt: null,
+        startClaimedAt: null,
+      }),
+    );
+    expect(next.calls.filter((c) => c === `start:${run.id}`)).toHaveLength(1);
+  });
+
+  it("keeps a stop requested when the leader dies before carrying it out, and the next leader stops the run", async () => {
+    const running = await db.run.create({ data: { agentId, status: "running", executionManaged: true } });
+    await new DeferredExecutor(db).stop(running.id, "parent ended");
+
+    // The first leader dies inside executor.stop: the request must survive.
+    const dying: Executor = {
+      start: async () => {},
+      stop: async () => {
+        throw new Error("leader died");
+      },
+    };
+    await drainDeferredRuns({ db, executor: dying });
+    expect(await db.run.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
+      stopRequestedAt: expect.any(Date),
+      stopRequestReason: "parent ended",
+    });
+
+    const { executor, calls } = server();
+    await drainDeferredRuns({ db, executor });
+    expect(calls).toContain(`stop:${running.id}:parent ended`);
+    expect((await db.run.findUniqueOrThrow({ where: { id: running.id } })).stopRequestedAt).toBeNull();
+  });
+
+  it("does not clear a newer stop request that replaced the one it carried out", async () => {
+    const running = await db.run.create({ data: { agentId, status: "running", executionManaged: true } });
+    await new DeferredExecutor(db).stop(running.id, "first");
+    const replacing: Executor = {
+      start: async () => {},
+      stop: async (id) => {
+        // A newer request lands while this stop is in flight.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await db.run.update({ where: { id }, data: { stopRequestedAt: new Date(), stopRequestReason: "second" } });
+      },
+    };
+    await drainDeferredRuns({ db, executor: replacing });
+    expect(await db.run.findUniqueOrThrow({ where: { id: running.id } })).toMatchObject({
+      stopRequestReason: "second",
+    });
   });
 
   it("cancels a never-started run directly, and requests a stop for a running one", async () => {

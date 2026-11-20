@@ -149,18 +149,27 @@ EOF
 
 echo "==> 5/${TOTAL_STEPS} build and push the worker, node-python worker, runtime, and Claude images"
 docker build -f src/coding-worker/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev" .
-docker build -f src/coding-worker/Dockerfile.node-python -t "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev" .
+docker build -f src/coding-worker/Dockerfile.node-python --build-arg PYTHON_DEFAULT_VERSION=3.12 -t "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev" .
+# `python` in a node-python image is the version it is built for, so each toolchainVersion has its own image.
+docker build -f src/coding-worker/Dockerfile.node-python --build-arg PYTHON_DEFAULT_VERSION=3.13 -t "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python-3-13:dev" .
+docker build -f src/coding-worker/Dockerfile.node-python --build-arg PYTHON_DEFAULT_VERSION=3.14 -t "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python-3-14:dev" .
 docker build -f deploy/Dockerfile --target runtime -t "localhost:${REGISTRY_PORT}/wardby-runtime:dev" .
 docker build -f src/claude-coding-worker/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev" .
 docker build -f src/claude-tool-runner/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev" .
-docker build -f src/claude-tool-runner/Dockerfile --target node-python -t "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev" .
+docker build -f src/claude-tool-runner/Dockerfile --target node-python --build-arg PYTHON_DEFAULT_VERSION=3.12 -t "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev" .
+docker build -f src/claude-tool-runner/Dockerfile --target node-python --build-arg PYTHON_DEFAULT_VERSION=3.13 -t "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python-3-13:dev" .
+docker build -f src/claude-tool-runner/Dockerfile --target node-python --build-arg PYTHON_DEFAULT_VERSION=3.14 -t "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python-3-14:dev" .
 docker build -f src/native-worker/Dockerfile -t "localhost:${REGISTRY_PORT}/wardby-native-worker:dev" .
 docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev"
+docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python-3-13:dev"
+docker push "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python-3-14:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-runtime:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev"
+docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python-3-13:dev"
+docker push "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python-3-14:dev"
 docker push "localhost:${REGISTRY_PORT}/wardby-native-worker:dev"
 # The digest in this registry: an image also tagged for another registry has a
 # digest for each, in no promised order.
@@ -175,24 +184,28 @@ registry_digest() {
 }
 WORKER_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-coding-worker:dev")"
 WORKER_NODE_PYTHON_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python:dev")"
+WORKER_NODE_PYTHON_313_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python-3-13:dev")"
+WORKER_NODE_PYTHON_314_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-coding-worker-node-python-3-14:dev")"
 RUNTIME_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-runtime:dev")"
 NATIVE_WORKER_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-native-worker:dev")"
 CLAUDE_WORKER_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-claude-coding-worker:dev")"
 CLAUDE_TOOL_RUNNER_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner:dev")"
 CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python:dev")"
+CLAUDE_TOOL_RUNNER_NODE_PYTHON_313_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python-3-13:dev")"
+CLAUDE_TOOL_RUNNER_NODE_PYTHON_314_DIGEST="$(registry_digest "localhost:${REGISTRY_PORT}/wardby-claude-tool-runner-node-python-3-14:dev")"
 
 echo "==> 6/${TOTAL_STEPS} verify the worker images have tar, head, and test"
 # Both worker images (plain node, and the node-python toolchain agents on CODING_WORKER_IMAGE_NODE_PYTHON_3_12
 # use) need this: the run pod's keeper seeds and collects the workspace through them. The Claude worker
 # image's keeper needs the same.
-for image_digest in "$WORKER_DIGEST" "$WORKER_NODE_PYTHON_DIGEST" "$CLAUDE_WORKER_DIGEST"; do
+for image_digest in "$WORKER_DIGEST" "$WORKER_NODE_PYTHON_DIGEST" "$WORKER_NODE_PYTHON_313_DIGEST" "$WORKER_NODE_PYTHON_314_DIGEST" "$CLAUDE_WORKER_DIGEST"; do
   if ! docker run --rm --entrypoint sh "$image_digest" -c 'command -v tar && command -v head && command -v test' >/dev/null; then
     echo "up.sh: worker image $image_digest is missing tar, head, or test; Task 5's seeding and collection depend on them." >&2
     exit 1
   fi
 done
 # Claude's tool runners answer the pod's startup probe with `test -S`.
-for image_digest in "$CLAUDE_TOOL_RUNNER_DIGEST" "$CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST"; do
+for image_digest in "$CLAUDE_TOOL_RUNNER_DIGEST" "$CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST" "$CLAUDE_TOOL_RUNNER_NODE_PYTHON_313_DIGEST" "$CLAUDE_TOOL_RUNNER_NODE_PYTHON_314_DIGEST"; do
   if ! docker run --rm --entrypoint sh "$image_digest" -c 'command -v test' >/dev/null; then
     echo "up.sh: the Claude tool runner image $image_digest is missing test." >&2
     exit 1
@@ -318,9 +331,13 @@ CODING_WORKER_IMAGE=${WORKER_DIGEST}
 NATIVE_SANDBOX_LAUNCHER=kubernetes
 NATIVE_SANDBOX_WORKER_IMAGE=${NATIVE_WORKER_DIGEST}
 CODING_WORKER_IMAGE_NODE_PYTHON_3_12=${WORKER_NODE_PYTHON_DIGEST}
+CODING_WORKER_IMAGE_NODE_PYTHON_3_13=${WORKER_NODE_PYTHON_313_DIGEST}
+CODING_WORKER_IMAGE_NODE_PYTHON_3_14=${WORKER_NODE_PYTHON_314_DIGEST}
 CODING_CLAUDE_WORKER_IMAGE=${CLAUDE_WORKER_DIGEST}
 CODING_CLAUDE_TOOL_RUNNER_IMAGE=${CLAUDE_TOOL_RUNNER_DIGEST}
 CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12=${CLAUDE_TOOL_RUNNER_NODE_PYTHON_DIGEST}
+CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_13=${CLAUDE_TOOL_RUNNER_NODE_PYTHON_313_DIGEST}
+CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_14=${CLAUDE_TOOL_RUNNER_NODE_PYTHON_314_DIGEST}
 
 # The keeper's NetworkPolicy-enforcement probe routinely takes longer than the
 # launcher's 10 s per-probe default under kind's default node resources (250m CPU / 128Mi); 60 s

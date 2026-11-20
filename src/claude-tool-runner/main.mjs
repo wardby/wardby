@@ -27,6 +27,13 @@ export const TOOL_RUNNER_READY_MESSAGE = "wardby_tool_runner_ready";
  * command has run it only answers `already_started`.
  */
 export const PREPARE_DEPENDENCIES_TOOL = "wardby_prepare_dependencies";
+/**
+ * The worker's call once the agent has finished a changes_ready run: points every uv.lock that names the proxy
+ * back at real registry addresses (asked of the proxy) and puts the original Poetry files back (see pypiGate).
+ * Answers `{ restored, warnings, unresolved }`; a non-empty `unresolved` fails the run. Never
+ * the agent's either (sdk.ts disallows it).
+ */
+export const RESTORE_PYPI_LOCKFILES_TOOL = "wardby_restore_pypi_lockfiles";
 
 /**
  * The worker's calls on a run with git history (#536, claude-coding-worker/driver.ts): a git check
@@ -66,6 +73,40 @@ const loadDefaultResultBundle = () => import("../coding-worker/result-bundle.mjs
  *  /opt/wardby/coding-worker/, the same path relative to this file as in the repository. */
 const loadDefaultDependencyCache = () => import("../coding-worker/dependency-cache.mjs");
 
+/** The uv.lock / poetry.lock session (src/coding/registry/pypi-lockfiles/session.ts, compiled): only the
+ *  node-python image copies it to /opt/wardby/coding/registry/, so any other image fails to load it and skips. */
+const loadDefaultPypiLockfiles = () => import("../coding/registry/pypi-lockfiles/session.js");
+
+/**
+ * The proxy's PyPI route and the run's registry token, read from the pip index the launcher already
+ * put in the setup (pypi.ts workerConfig: `http://wardby:<token>@<proxy>/registry/pypi/simple/`).
+ * Null without it: the run has no registry, so there is nothing to point a lockfile at.
+ */
+function pypiRegistry(setup) {
+  const raw = setup.env.PIP_INDEX_URL;
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const token = decodeURIComponent(url.password);
+    if (!token || !url.pathname.endsWith("/simple/")) return null;
+    url.username = "";
+    url.password = "";
+    url.pathname = url.pathname.slice(0, -"simple/".length);
+    return { registryUrl: url.toString(), token };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One JSON line on stderr per warning, as for `tool_setup_invalid`: a prepare that left the lockfiles as
+ * found (a failed `poetry lock`, say) is otherwise invisible to the person reading the run. The session's
+ * warnings name files and reasons, never credentials.
+ */
+function logPypiWarnings(warnings) {
+  for (const message of warnings) process.stderr.write(`${JSON.stringify({ warning: "pypi_lockfiles", message })}\n`);
+}
+
 /**
  * Process-wide, across every socket connection: the dependency cache runs at most once, only
  * before the first command, and the first command never starts while it is still running. Before
@@ -75,11 +116,37 @@ const loadDefaultDependencyCache = () => import("../coding-worker/dependency-cac
  * An adopted warm round (`setup.workspaceReused`) answers `reused_workspace` and never prepares:
  * its workspace already holds the previous round's tree, and the proxy refuses it the cache anyway.
  */
-function dependencyGate(setup, workspacePath, loadDependencyCache) {
+function dependencyGate(initialSetup, workspacePath, loadDependencyCache, loadPypiLockfiles) {
+  let setup = initialSetup;
   let preparing;
   let sealing;
+  let pypi;
   let commandStarted = false;
   const env = () => commandEnvironment(setup, workspacePath);
+  /**
+   * Once, before the first command (or the dependency cache, whichever comes first): points the
+   * workspace's uv.lock and poetry.lock files at the proxy, since the sandbox reaches nothing else, and
+   * adds Poetry's source credentials to every later command. Best effort: any failure leaves the files as found.
+   */
+  const preparePypi = () =>
+    (pypi ??= (async () => {
+      const registry = pypiRegistry(initialSetup);
+      if (!registry) return;
+      try {
+        await prepareCommandWorkspace(initialSetup, workspacePath);
+        const module = await loadPypiLockfiles();
+        const result = await module.prepareWorkspacePypiLockfiles({
+          workspace: workspacePath,
+          ...registry,
+          env: commandEnvironment(initialSetup, workspacePath),
+        });
+        setup = { ...initialSetup, env: { ...initialSetup.env, ...result.env } };
+        logPypiWarnings(result.warnings ?? []);
+      } catch {
+        // The files stay as the repository had them.
+        logPypiWarnings(["preparing the workspace failed; files left as found"]);
+      }
+    })());
   const seal = () =>
     (sealing ??= (async () => {
       try {
@@ -101,6 +168,7 @@ function dependencyGate(setup, workspacePath, loadDependencyCache) {
       if (preparing) return preparing;
       if (commandStarted) return Promise.resolve({ projects: [], reason: "already_started" });
       preparing = (async () => {
+        await preparePypi();
         if (setup.workspaceReused) return { projects: [], reason: "reused_workspace" };
         if (deadlineAt !== undefined && !Number.isFinite(Date.parse(deadlineAt)))
           return { projects: [], reason: "invalid_deadline" };
@@ -135,8 +203,33 @@ function dependencyGate(setup, workspacePath, loadDependencyCache) {
       })();
       return preparing;
     },
+    setup: () => setup,
+    /**
+     * After the agent: real registry addresses back in every uv.lock that names the proxy (asked of the proxy with
+     * the run's token, so no snapshot is needed), and the original Poetry files. Never prepares.
+     */
+    async restorePypi() {
+      const registry = pypiRegistry(initialSetup);
+      if (!registry) return { restored: [], warnings: [], unresolved: [] };
+      try {
+        await pypi;
+        const module = await loadPypiLockfiles();
+        return await module.restoreWorkspacePypiLockfiles({
+          workspace: workspacePath,
+          registryUrl: registry.registryUrl,
+          token: registry.token,
+        });
+      } catch {
+        return {
+          restored: [],
+          warnings: ["pypi lockfiles: restoring the workspace failed; files left as found"],
+          unresolved: [],
+        };
+      }
+    },
     async beforeCommand() {
       commandStarted = true;
+      await preparePypi();
       if (!setup.dependencyCache) return;
       if (preparing) await preparing;
       await seal();
@@ -199,13 +292,24 @@ function toolServer(setup, gate, workspacePath, git, plan) {
     },
     async ({ command, timeout_ms }) => {
       await gate.beforeCommand();
-      const result = await runCommand(command, timeout_ms ?? limits.defaultMs, workspacePath, setup);
+      const result = await runCommand(command, timeout_ms ?? limits.defaultMs, workspacePath, gate.setup());
       return {
         content: [{ type: "text", text: `exit_code=${result.code}\n${result.output}` }],
         isError: result.code !== 0,
       };
     },
   );
+  // Only a run with a PyPI registry has lockfiles to put back.
+  if (pypiRegistry(setup)) {
+    server.registerTool(
+      RESTORE_PYPI_LOCKFILES_TOOL,
+      {
+        description: "Wardby internal: put the original index URLs back in uv and poetry lockfiles.",
+        inputSchema: {},
+      },
+      async () => ({ content: [{ type: "text", text: JSON.stringify(await gate.restorePypi()) }] }),
+    );
+  }
   if (setup.dependencyCache) {
     server.registerTool(
       PREPARE_DEPENDENCIES_TOOL,
@@ -336,6 +440,7 @@ export async function startToolRunner(
     reposRoot = REPOS_ROOT,
     gitBinary = "git",
     loadDependencyCache = loadDefaultDependencyCache,
+    loadPypiLockfiles = loadDefaultPypiLockfiles,
     loadResultBundle = loadDefaultResultBundle,
     planRoot = PLAN_ROOT,
     loadPlanFolder = loadDefaultPlanFolder,
@@ -344,7 +449,7 @@ export async function startToolRunner(
   if (!isAbsolute(socketPath)) throw new Error("tool_socket_path_invalid");
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
   await rm(socketPath, { force: true });
-  const gate = dependencyGate(setup, workspacePath, loadDependencyCache);
+  const gate = dependencyGate(setup, workspacePath, loadDependencyCache, loadPypiLockfiles);
   const git = gitTools({ workspacePath, reposRoot, gitBinary, loadResultBundle });
   const plan = { root: planRoot, load: loadPlanFolder };
   const server = createServer((socket) => {

@@ -30,7 +30,7 @@ import { REVIEW_HOST_TOOL_NAMES } from "../../core/review-host-tools.js";
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { reservedToolNameReason } from "../../core/tool-names.js";
 import { agentAccessResolver, assertAgentAccess, requireAgentAccess, requireBindable } from "../auth/access.js";
-import { requireScope } from "../auth/resource-server.js";
+import { isOwnerAll, requireScope } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -106,7 +106,7 @@ async function requireOwnedServer(
   db: Pick<PrismaClient, "mcpServer"> = ctx.db,
 ): Promise<ServerRecord> {
   const server = await db.mcpServer.findUnique({ where: { id } });
-  if (!server || server.ownerId !== ctx.principal.id) throw serverNotFound(id);
+  if (!server || !(isOwnerAll(ctx) || server.ownerId === ctx.principal.id)) throw serverNotFound(id);
   return server;
 }
 
@@ -122,7 +122,7 @@ async function requireServerAccess(
 ): Promise<ServerRecord> {
   const server = await db.mcpServer.findUnique({ where: { id } });
   if (!server) throw serverNotFound(id);
-  const access = await effectiveAccess(db, "mcp_server", server, ctx.principal.id);
+  const access = await effectiveAccess(db, "mcp_server", server, ctx.principal.id, { operator: isOwnerAll(ctx) });
   if (access === "none") throw serverNotFound(id);
   if (!atLeast("mcp_server", access, min)) {
     throw new McpError(403, `MCP server "${server.name}": attaching it needs use access (you have ${access}).`);
@@ -354,7 +354,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
       gate(ctx, "other");
       const sharedIds = await grantedIds(ctx.db, "mcp_server", ctx.principal.id, "read");
       const rows = await ctx.db.mcpServer.findMany({
-        where: { OR: [{ ownerId: ctx.principal.id }, { id: { in: sharedIds } }] },
+        where: isOwnerAll(ctx) ? {} : { OR: [{ ownerId: ctx.principal.id }, { id: { in: sharedIds } }] },
         orderBy: [{ name: "asc" }, { id: "asc" }],
       });
       return textResult({

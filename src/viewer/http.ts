@@ -1,7 +1,7 @@
 /**
  * Viewer HTTP routes: GET /admin/api/graph, /admin/api/runs/:id, /admin/api/infra, /admin/api/documents and the
  * /admin/api/events SSE stream. Read-only and deployment-wide, so every route
- * authenticates and then requires the privileged `admin:view` scope (admin role
+ * authenticates and then requires the privileged `admin:view` scope (admin or viewer role
  * only) BEFORE touching the database or the event bus. McpErrors propagate to
  * the server's catch (401/403 + WWW-Authenticate).
  */

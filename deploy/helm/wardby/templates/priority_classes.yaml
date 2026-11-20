@@ -1,0 +1,30 @@
+{{- if .Values.priorityClasses.create }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: wardby-control-plane
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+description: wardby control plane and coding proxy.
+value: {{ int .Values.priorityClasses.controlPlane }}
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: wardby-coding-run
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+description: wardby coding-run pods; wait for capacity, never preempt.
+preemptionPolicy: Never
+value: {{ int .Values.priorityClasses.codingRun }}
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: wardby-headroom
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+description: wardby headroom placeholder; the first pod evicted when a node is short.
+preemptionPolicy: Never
+value: {{ int .Values.priorityClasses.headroom }}
+{{- end }}

@@ -1,0 +1,178 @@
+{{- $w := .Values.codingProxy }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: wardby-coding-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: wardby-coding-proxy
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wardby-coding-proxy
+  ports:
+    - name: proxy
+      port: 8787
+      targetPort: 8787
+    - name: deny
+      port: 8788
+      targetPort: 8788
+    {{- if $w.metrics.enabled }}
+    - name: metrics
+      port: {{ $w.metrics.port }}
+      targetPort: {{ $w.metrics.port }}
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wardby-coding-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: wardby-coding-proxy
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $w.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  template:
+    metadata:
+      {{- with include "wardby.podAnnotations" (list $ $w) | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: wardby-coding-proxy
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccounts.codingProxy.name }}
+      automountServiceAccountToken: false
+      priorityClassName: wardby-control-plane
+      terminationGracePeriodSeconds: {{ $w.terminationGracePeriodSeconds }}
+      {{- with include "wardby.podScheduling" (list $ $w) | trim }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with include "wardby.cloudSqlProxy" . | trim }}
+      initContainers:
+        {{- . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: proxy
+          image: {{ include "wardby.image" (list $ "runtime") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "dist/coding-proxy/main.js"]
+          {{- with include "wardby.envFrom" (list $ $w) | trim }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          env:
+            {{- include "wardby.env" (list $ $w "codingProxy" (include "wardby.codingProxy.env" . | fromYaml)) | nindent 12 }}
+          ports:
+            - name: proxy
+              containerPort: 8787
+            - name: deny
+              containerPort: 8788
+            {{- if $w.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ $w.metrics.port }}
+            {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: 8787
+            {{- toYaml $w.readinessProbe | nindent 12 }}
+          # On SIGTERM the proxy stops listening and finishes the requests in flight; keep it
+          # serving while the Service stops routing to it.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $w.preStopSleepSeconds }}
+          resources:
+            {{- toYaml $w.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            {{- include "wardby.tmpVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "wardby.tmpVolume" $w | nindent 8 }}
+---
+# Admits coding-run pods on the proxy port and on the deny port, the enforcement witness,
+# and the metrics scrapers when metrics are on.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              wardby.io/component: coding-run
+      ports:
+        - port: 8787
+          protocol: TCP
+        - port: 8788
+          protocol: TCP
+    {{- if $w.metrics.enabled }}
+    {{- with $w.metrics.ingressFrom }}
+    # The metrics scrapers.
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - port: {{ $w.metrics.port }}
+          protocol: TCP
+    {{- end }}
+    {{- end }}
+  egress:
+    {{- include "wardby.kubeDnsEgress" . | nindent 4 }}
+    {{- include "wardby.publicHttpsEgress" . | nindent 4 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+    - Egress
+  egress:
+    {{- include "wardby.dnsEgress" . | nindent 4 }}
+{{- with include "wardby.databaseEgress" . | trim }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-coding-proxy-database
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-coding-proxy
+  policyTypes:
+    - Egress
+  egress:
+    {{- . | nindent 4 }}
+{{- end }}
+{{- with include "wardby.podDisruptionBudget" (list $ $w "wardby-coding-proxy") | trim }}
+---
+{{ . }}
+{{- end }}

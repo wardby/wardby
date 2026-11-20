@@ -157,6 +157,8 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
       { systemDatabaseUrl: process.env.DATABASE_URL, schemaName: "dbos_test", executorId: id },
       runnerDb,
       /* heartbeatIntervalMs */ 50,
+      // close() waits this long for a running workflow; many tests hold one open on purpose, so 5 s a close adds up.
+      /* shutdownTimeoutMs */ 500,
     );
   }
 
@@ -238,7 +240,8 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     expect(after.executionBackend).toBe(DBOS_BACKEND);
     expect(after.turns).toBe(2);
     expect(llm.calls).toHaveLength(2);
-  });
+    // The first launch of the file pays DBOS's cold start, which can pass 5s on a loaded CI agent.
+  }, 30_000);
 
   it("is idempotent: a second start for the same run attaches to the existing workflow", async () => {
     const llm = scriptedLlm([finalAnswer("once")]);
@@ -251,7 +254,7 @@ describe.skipIf(!process.env.DATABASE_URL)("DbosExecutor (database)", () => {
     const after = await db.run.findUniqueOrThrow({ where: { id: run.id } });
     expect(after.status).toBe("succeeded");
     expect(llm.calls).toHaveLength(1);
-  });
+  }, 30_000);
 
   it("stop cancels a running workflow and the run lands cancelled with the operator's reason, rather than hanging", async () => {
     let release!: () => void;

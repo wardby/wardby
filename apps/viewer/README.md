@@ -77,9 +77,18 @@ from the list (after a confirmation). Signing out deletes the Keychain entry
 and forgets the access token; the grant is not revoked at the server. Removing
 a server also signs out of it.
 
-The signed-in user needs the Wardby `admin` role, because the viewer API
-requires the `admin:view` scope and only that role grants it. See
+The signed-in user needs the Wardby `admin` or `viewer` role, because the
+viewer API requires the `admin:view` scope and only those roles grant it. Use
+`viewer` for people who should watch runs without the rest of `admin`. See
 [Configure identity and privileged access](../../help/identity-and-access.md).
+
+### Start with a server already added
+
+Set `WARDBY_VIEWER_SERVER_URL` (and optionally `WARDBY_VIEWER_SERVER_NAME`) in
+the environment the app starts in, and it adds or updates that server in its
+saved list at launch, using the same rules as adding it by hand. Only the
+address is read this way; credentials are never taken from the environment, so
+you still sign in in the browser.
 
 ### Self-hosted sign-in
 

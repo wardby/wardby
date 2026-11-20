@@ -70,4 +70,7 @@ If a company-managed Jira site still uses the legacy Epic Link field, set
 grouped under their epic. On GKE, `deploy/gke/up.sh` applies the database
 grant coding runs need to record their per-model usage when you upgrade.
 
+To chart spend per agent over time on a log platform, use the control plane's
+`run.finished` log line; see [Monitor Wardby](observability.md).
+
 For the full guide, follow [`docs/jira-agents.md`](../docs/jira-agents.md).

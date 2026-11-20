@@ -138,6 +138,13 @@ describe("buildHelpCatalog", () => {
     await expect(buildHelpCatalog(root, "latest")).rejects.toThrow('Invalid help release version "latest"');
   });
 
+  it("finds the wardby_owner role and the owner:all scope in the checked-in corpus", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["wardby_owner", "owner:all"]) {
+      expect(searchHelp(catalog, query).map((r) => r.page.id)).toContain("identity-and-access");
+    }
+  });
+
   it("builds the checked-in corpus with a page for coding services and each of their errors", async () => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
     const ids = new Set(catalog.pages.map((entry) => entry.id));

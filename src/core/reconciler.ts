@@ -20,7 +20,10 @@
  *    committing the `Run` and the executor ever starting it — or the
  *    executor's `start()` call itself failed before persisting anything).
  *    Queued coding runs (`CodingRun.queuedAt` set) are excluded; the coding
- *    queue owns their timeout.
+ *    queue owns their timeout. A native run in that state has not started:
+ *    no execution backend holds it, so no step ran. It is restarted through
+ *    the executor (a start on a started run attaches), at most
+ *    MAX_START_RESTARTS times, and only then marked `lost`.
  *
  * The conditional `updateMany` (`WHERE ... AND status IN (...) AND ...`) is
  * what makes two concurrent reconcilers safe: whichever transaction's
@@ -53,24 +56,27 @@ import type { Prisma, PrismaClient } from "#prisma";
 import type { Executor } from "../providers/executor/types.js";
 import type { ReviewHostProvider, ReviewHostRegistry } from "../providers/review-host/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
-import { HEARTBEAT_TIMEOUT_MS, RECONCILE_INTERVAL_MS } from "./timing.js";
+import { startInterval } from "./interval.js";
+import { HEARTBEAT_TIMEOUT_MS, LOOP_TICK_TIMEOUT_MS, RECONCILE_INTERVAL_MS } from "./timing.js";
 import { prisma as defaultDb } from "./db.js";
 import { logger } from "./logger.js";
-import { stopChildrenOfLostRun } from "./lost-run-children.js";
 import { closeOpenHostCheck } from "./review-host-checks.js";
 import { completeHostStatus, type HostStatusDb } from "./host-status.js";
 import { closeOrphanedIssueStatuses } from "./issue-status.js";
-import { fileSelfDefect } from "./self-defects.js";
-import { emitRunFinishedEvents } from "./workflow-run-events.js";
+import { enqueueLostRunFollowUps } from "./run-follow-up-handlers.js";
 import { syncOpenPullRequestStates } from "./pull-request-state-sync.js";
 import { sweepMergeOrderChecks } from "./merge-order-check.js";
 import { startDeferredReviews, type ReviewStartDeps } from "./host-events.js";
+import { markRunFailedFromExecutorError } from "./dispatch.js";
 import { sweepUnansweredDocumentRuns, type DocumentSweepDeps } from "./documents/agent-loop.js";
 import { sweepExpiredDocumentRows } from "./documents/sweep.js";
 
 const reconcilerLog = logger.child({ module: "reconciler" });
-/** A pass waits this long per self-defect, then moves on; the filing finishes (or logs) in the background. */
-const SELF_DEFECT_WAIT = { waitMs: 2_000 };
+/**
+ * How many times a pending run with no execution backend is restarted (nothing had run it)
+ * before the reconciler gives up and marks it `lost`.
+ */
+export const MAX_START_RESTARTS = 3;
 
 export type ReconcilerDb = Pick<
   PrismaClient,
@@ -81,6 +87,7 @@ export type ReconcilerDb = Pick<
   | "runBudgetEvent"
   | "runHostStatus"
   | "runIssueStatus"
+  | "runFollowUp"
   | "agentIssueProject"
   | "issuePullRequest"
   | "codingRun"
@@ -177,6 +184,25 @@ export async function closeOrphanedHostStatuses(
   for (const { run } of orphans) await completeHostStatus(db, run, hosts, { postIfMissing: true });
 }
 
+/**
+ * Marks a run lost and queues its chores (stop its children, file its self-defect, emit its finished
+ * events) in the same transaction, so a pod that dies right after the write cannot lose them: the
+ * scheduler leader drains them (run-follow-ups.ts). Returns 1 when this call made the row lost, else 0.
+ */
+async function markLost(
+  db: ReconcilerDb,
+  runId: string,
+  where: Prisma.RunWhereInput,
+  reason: string,
+  now: Date,
+): Promise<number> {
+  return db.$transaction(async (tx) => {
+    const result = await tx.run.updateMany({ where, data: { status: "lost", error: reason, finishedAt: now } });
+    if (result.count > 0) await enqueueLostRunFollowUps(tx, runId);
+    return result.count;
+  });
+}
+
 /** Runs one reconciliation pass. Returns the number of runs marked `lost`. */
 export async function reconcileOnce(
   db: ReconcilerDb,
@@ -242,6 +268,30 @@ export async function reconcileOnce(
       reason = recovered.reason ?? "Managed coding job was lost after stop and collection attempts.";
     } else if (run.agent.kind === "coding") {
       reason = "Managed coding job became stale before its launcher handle was persisted; it was not relaunched.";
+    } else if (run.status === "pending" && !run.executionBackend && executor) {
+      // Never started: no backend holds it and no step ran, so start it rather than lose it.
+      // The claim is a compare-and-set on the attempt count, so one instance restarts it per
+      // attempt and the count bounds the restarts.
+      const claimed = await db.run.updateMany({
+        where: { id: run.id, ...stale, executionBackend: null, startAttempts: run.startAttempts },
+        data: { startAttempts: { increment: 1 }, startDeferredAt: null, startClaimedAt: null },
+      });
+      if (claimed.count === 0) continue;
+      if (run.startAttempts < MAX_START_RESTARTS) {
+        reconcilerLog.warn({ runId: run.id, attempt: run.startAttempts + 1 }, "restarting a run that never started");
+        // Not awaited: an in-process executor's start runs the whole run.
+        void executor
+          .start(run.id)
+          .catch((err: unknown) =>
+            markRunFailedFromExecutorError(db, run.id, err, { db, issueTrackers }).catch((err2: unknown) =>
+              reconcilerLog.error({ err: err2, runId: run.id }, "failed to persist executor start failure"),
+            ),
+          );
+        continue;
+      }
+      reason = `Never started: still pending with nothing running it after ${MAX_START_RESTARTS} restarts.`;
+      lost += await markLost(db, run.id, { id: run.id, executionManaged: true, status: "pending" }, reason, now);
+      continue;
     } else if (run.executionBackend && executor?.recover) {
       // Claim before asking. For a `running` row this is a real CAS: the
       // winner's UPDATE refreshes heartbeatAt, which takes the row out of
@@ -273,52 +323,18 @@ export async function reconcileOnce(
       }
       if (recovered.state === "active" || recovered.state === "terminal") continue;
       reason = recovered.reason ?? "Durable backend reported the run lost.";
-      const result = await db.run.updateMany({
-        where: { id: run.id, executionManaged: true, status: { in: ["pending", "running"] } },
-        data: { status: "lost", error: reason, finishedAt: now },
-      });
-      lost += result.count;
-      if (result.count > 0) {
-        await stopChildrenOfLostRun(db, executor, run.id);
-        await fileSelfDefect(
-          db,
-          issueTrackers,
-          { ...run, status: "lost", error: reason, finishedAt: now },
-          SELF_DEFECT_WAIT,
-        );
-        await emitRunFinishedEvents(db, {
-          id: run.id,
-          agentId: run.agentId,
-          status: "lost",
-          error: reason,
-          parentRunId: run.parentRunId,
-        });
-      }
+      lost += await markLost(
+        db,
+        run.id,
+        { id: run.id, executionManaged: true, status: { in: ["pending", "running"] } },
+        reason,
+        now,
+      );
       continue;
     }
 
-    const result = await db.run.updateMany({
-      where: { id: run.id, ...stale },
-      data: { status: "lost", error: reason, finishedAt: now },
-    });
-    lost += result.count;
-    // Only after this pass made the row lost (not when another instance won the race); bounded, never throws.
-    if (result.count > 0) {
-      await stopChildrenOfLostRun(db, executor, run.id);
-      await fileSelfDefect(
-        db,
-        issueTrackers,
-        { ...run, status: "lost", error: reason, finishedAt: now },
-        SELF_DEFECT_WAIT,
-      );
-      await emitRunFinishedEvents(db, {
-        id: run.id,
-        agentId: run.agentId,
-        status: "lost",
-        error: reason,
-        parentRunId: run.parentRunId,
-      });
-    }
+    // Only the pass that made the row lost queues its chores (not when another instance won the race).
+    lost += await markLost(db, run.id, { id: run.id, ...stale }, reason, now);
   }
   await closeOrphanedHostChecks(db, reviewHosts, now);
   await closeOrphanedHostStatuses(db, reviewHosts, now);
@@ -357,7 +373,8 @@ export interface ReconcilerOptions {
 }
 
 export interface ReconcilerHandle {
-  stop(): void;
+  /** Resolves once a pass already in flight has finished or timed out; no pass starts after. */
+  stop(): Promise<void>;
 }
 
 export function startReconciler(options: ReconcilerOptions = {}): ReconcilerHandle {
@@ -365,24 +382,23 @@ export function startReconciler(options: ReconcilerOptions = {}): ReconcilerHand
   const intervalMs = options.intervalMs ?? RECONCILE_INTERVAL_MS;
   const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
 
-  const timer = setInterval(() => {
-    reconcileOnce(
-      db,
-      new Date(),
-      heartbeatTimeoutMs,
-      options.executor,
-      options.reviewHosts,
-      options.issueTrackers,
-      options.deferredReviews,
-      options.documentRuns,
-    ).catch((err) => {
-      reconcilerLog.error({ err }, "reconcile pass failed");
-    });
-  }, intervalMs);
-
-  return {
-    stop() {
-      clearInterval(timer);
+  const loop = startInterval({
+    name: "reconciler",
+    everyMs: intervalMs,
+    timeoutMs: LOOP_TICK_TIMEOUT_MS,
+    tick: async () => {
+      await reconcileOnce(
+        db,
+        new Date(),
+        heartbeatTimeoutMs,
+        options.executor,
+        options.reviewHosts,
+        options.issueTrackers,
+        options.deferredReviews,
+        options.documentRuns,
+      );
     },
-  };
+  });
+
+  return { stop: () => loop.stop() };
 }

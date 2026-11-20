@@ -1450,7 +1450,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   async readTranscript(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
-    return this.readOutputFile(handle, TRANSCRIPT_PATH, maxBytes, "transcript_too_large");
+    return this.readOutputFile(handle, TRANSCRIPT_PATH, maxBytes, "transcript_too_large", true);
   }
 
   async readPlanFiles(handle: JobHandle, maxBytes: number): Promise<string | undefined> {
@@ -1462,6 +1462,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     path: string,
     maxBytes: number,
     tooLarge: string,
+    /** Throw (rather than return undefined) when the exec failed on a pod that is still there: the transcript chore retries. */
+    retryable = false,
   ): Promise<string | undefined> {
     const names = this.namesFor(handle);
     const found = names && (await this.readRecord(names));
@@ -1478,10 +1480,14 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
       );
       if (!collector.writableEnded) collector.end();
       await finished(collector);
-    } catch {
-      // The pod is gone (a stopped run) or unreachable: there is nothing to collect.
+    } catch (error) {
       collector.destroy();
-      return undefined;
+      // A pod that is gone (a stopped or removed run) has nothing to collect. An exec that failed on a pod
+      // that is still there (or a pod lookup that failed) is worth another try: it throws, so a caller that
+      // retries (the coding run's release-job chore) does not remove the pod first. A readPod error propagates.
+      if (found.record.phase === "removed" || !(await this.api.readPod(this.namespace, names.pod))) return undefined;
+      if (!retryable) return undefined;
+      throw errorWithCode("transcript_unreadable", error);
     }
     if (exitCode !== 0) return undefined;
     if (collector.exceeded) throw new Error(tooLarge);

@@ -13,7 +13,12 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
-import { RegistryError, type LockfileEntry, type ParsedLockfile } from "../../../coding/registry/types.js";
+import {
+  RegistryError,
+  type LockfileEntry,
+  type LockfileParseOptions,
+  type ParsedLockfile,
+} from "../../../coding/registry/types.js";
 import type { ParseRequest, ParseResponse, ShippedLockfile } from "./lockfile-parse-worker.js";
 
 /** Time one off-thread lockfile parse may take. Real lockfiles at the
@@ -67,7 +72,7 @@ function rebuild(shipped: ShippedLockfile): ParsedLockfile {
 export async function parseLockfileOffThread(
   ecosystem: string,
   body: string,
-  options: { maxEntries: number; proxyRegistryUrl: string },
+  options: LockfileParseOptions,
   limits: {
     timeoutMs?: number;
     signal?: AbortSignal;

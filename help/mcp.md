@@ -26,6 +26,10 @@ find bundled self-hosted guidance with fuzzy matching and `get_help_article`
 to read a complete article by id. These tools use the same release-bundled,
 offline catalog as `wardby help`; they expose no instance data or credentials.
 
+Call `get_version` (also `agents:read`) to see which Wardby version the server
+is running. It returns `{ "version": "<semver>" }`, the same value as
+`wardby --version`.
+
 See [`docs/getting-started-identity-provider.md`](../docs/getting-started-identity-provider.md)
 for the supported self-hosted and delegated identity-provider setup.
 

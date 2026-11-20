@@ -41,6 +41,8 @@ COPY --from=build /build/dist/coding-worker/task-note.js ./coding-worker/task-no
 COPY --from=build /build/dist/coding-worker/mcp-config.js ./coding-worker/mcp-config.js
 COPY --from=build /build/dist/coding-worker/plan-output.js ./coding-worker/plan-output.js
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
+# The driver imports the conventional-commit subject builder, which imports protocol.js.
+COPY --from=build /build/dist/coding/commit-subject.js ./coding/commit-subject.js
 # Session-resume transcript capture (claude-coding-worker/transcript.js); neither imports anything.
 COPY --from=build /build/dist/coding/transcript/claude-code.js ./coding/transcript/claude-code.js
 COPY --from=build /build/dist/coding/transcript/format.js ./coding/transcript/format.js

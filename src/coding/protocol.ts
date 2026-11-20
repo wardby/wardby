@@ -269,6 +269,19 @@ function isGitHubRepository(value: string): boolean {
   }
 }
 
+/**
+ * The shape of every branch a coding run pushes: `wardby/` plus one safe
+ * component (`wardby/run-<runId>`, `wardby/<ISSUE-KEY>`, `wardby/<name>`, each
+ * optionally `-N` for a repeat). Which branch a run gets is decided and
+ * stored by the control plane at dispatch (core/coding-branch.ts); the worker
+ * and the VCS layer only check this shape.
+ */
+export const WARDBY_HEAD_REF = /^wardby\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+export function isWardbyHeadRef(value: string): boolean {
+  return WARDBY_HEAD_REF.test(value);
+}
+
 export function normalizeGitRef(value: string): string {
   let ref = value.trim();
   if (ref.startsWith("refs/heads/")) ref = ref.slice("refs/heads/".length);
@@ -458,6 +471,70 @@ export function normalizeCodingTag(value: unknown): string | null | undefined {
     .slice(0, MAX_TAG_BYTES)
     .replace(/[^a-z0-9]+$/, "");
   return SAFE_TAG.test(slug) ? slug : null;
+}
+
+// ------------------------------------------------------------ conventional-commit subject
+
+// The model-written parts of the pull request title and the run's commit. They live here, not in
+// the subject builder, because this module is shipped to workers as a single file (the agent
+// output schema below validates them).
+
+export const COMMIT_TYPES = [
+  "feat",
+  "fix",
+  "docs",
+  "style",
+  "refactor",
+  "perf",
+  "test",
+  "build",
+  "ci",
+  "chore",
+] as const;
+export type CommitType = (typeof COMMIT_TYPES)[number];
+
+export const MAX_COMMIT_SCOPE_LENGTH = 32;
+/** Room for a title however long the model made it: the subject is cut back to MAX_COMMIT_SUBJECT_LENGTH. */
+export const MAX_COMMIT_TITLE_INPUT = 200;
+
+const SAFE_SCOPE = /^[a-z0-9][a-z0-9._/-]*$/;
+/** What a model writes for "no scope" when the field is typed as text: the word, not an omitted value. */
+const EMPTY_SCOPE_WORDS: ReadonlySet<string> = new Set(["null", "none", "undefined", "n/a", "na"]);
+
+/** A listed type, case-insensitively; anything else (including a non-string) is undefined. */
+export function normalizeCommitType(value: unknown): CommitType | undefined {
+  if (typeof value !== "string") return undefined;
+  const lowered = value.trim().toLowerCase();
+  return (COMMIT_TYPES as readonly string[]).includes(lowered) ? (lowered as CommitType) : undefined;
+}
+
+/** A lowercase slug of at most MAX_COMMIT_SCOPE_LENGTH characters, or undefined when nothing usable is left. */
+export function normalizeCommitScope(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, "-")
+    .replace(/^[^a-z0-9]+/, "")
+    .slice(0, MAX_COMMIT_SCOPE_LENGTH)
+    .replace(/[^a-z0-9]+$/, "");
+  return SAFE_SCOPE.test(slug) && !EMPTY_SCOPE_WORDS.has(slug) ? slug : undefined;
+}
+
+/**
+ * One plain line: whitespace and control characters collapse to single spaces, a leading
+ * `type:` or `type(scope):` the model repeated is dropped, and a trailing period goes.
+ * Undefined when nothing is left.
+ */
+export function normalizeCommitTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const title = value
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(new RegExp(`^(?:${COMMIT_TYPES.join("|")})(?:\\([^)]*\\))?!?:\\s*`, "i"), "")
+    .replace(/[.\s]+$/, "")
+    .slice(0, MAX_COMMIT_TITLE_INPUT);
+  return title.length > 0 ? title : undefined;
 }
 
 /**
@@ -770,12 +847,11 @@ export const CodingTaskInputSchema = z
     if (new Set(repositoryNames).size !== repositoryNames.length) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["repositories"], message: "must name each repository once" });
     }
-    const expectedHeadRunId = value.continuationOf?.runId ?? value.runId;
-    if (value.headRef !== `wardby/run-${expectedHeadRunId}`) {
+    if (!isWardbyHeadRef(value.headRef)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["headRef"],
-        message: "must match wardby/run-<runId> (or wardby/run-<continuationOf.runId>)",
+        message: "must be a wardby/<name> branch",
       });
     }
     if (value.diskMb !== undefined && value.dependencyCache !== true) {
@@ -827,6 +903,11 @@ const agentOutputFields = {
   // Model-written, so normalized rather than rejected; see normalizeCodingTag.
   tag: optionalTag,
   pullRequests: nullable(z.array(PullRequestNoteSchema).max(MAX_RUN_REPOSITORIES_IN_INPUT)),
+  // The conventional-commit subject (see the section above). Model-written too, so each is normalized
+  // to a usable value or dropped (null and absent alike), never rejected.
+  commitType: z.preprocess(normalizeCommitType, z.enum(COMMIT_TYPES).optional()),
+  commitScope: z.preprocess(normalizeCommitScope, z.string().optional()),
+  commitTitle: z.preprocess(normalizeCommitTitle, z.string().optional()),
 };
 
 function redactAgentOutput<
@@ -834,6 +915,8 @@ function redactAgentOutput<
     summary: string;
     tests: { command: string }[];
     tag?: string;
+    commitScope?: string;
+    commitTitle?: string;
     pullRequests?: { title?: string; description: string }[];
   },
 >(value: T): T {
@@ -851,6 +934,8 @@ function redactAgentOutput<
     summary: redactTokenShapedValues(value.summary),
     tests: value.tests.map((test) => ({ ...test, command: redactTokenShapedValues(test.command) })),
     ...(value.tag !== undefined ? { tag: redactTokenShapedValues(value.tag) } : {}),
+    ...(value.commitScope !== undefined ? { commitScope: redactTokenShapedValues(value.commitScope) } : {}),
+    ...(value.commitTitle !== undefined ? { commitTitle: redactTokenShapedValues(value.commitTitle) } : {}),
   };
 }
 

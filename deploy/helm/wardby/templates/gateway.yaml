@@ -1,0 +1,182 @@
+{{- if .Values.gateway.enabled }}
+{{- $g := .Values.gateway }}
+{{- $host := required "hostname is required when gateway.enabled" .Values.hostname }}
+{{- $port := .Values.controlPlane.port }}
+# Publishes the MCP endpoint and the OAuth discovery/registration endpoints the
+# control plane serves; anyone who can reach the hostname can reach /register.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: wardby-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+  {{- with $g.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  gatewayClassName: {{ $g.className }}
+  {{- with $g.addresses }}
+  addresses:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: {{ $g.httpsPort }}
+      hostname: {{ $host }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+      {{- with $g.tlsSecretName }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            group: ""
+            name: {{ . }}
+      {{- end }}
+    {{- if $g.httpRedirect.enabled }}
+    # Only redirects to https.
+    - name: http
+      protocol: HTTP
+      port: {{ $g.httpRedirect.port }}
+      hostname: {{ $host }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- end }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: wardby-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+  {{- with $g.routeAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    - name: wardby-control-plane
+      sectionName: https
+  hostnames:
+    - {{ $host }}
+  rules:
+    - backendRefs:
+        - name: wardby-control-plane
+          port: {{ $port }}
+{{- if $g.httpRedirect.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: wardby-control-plane-redirect
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: wardby-control-plane
+      sectionName: http
+  hostnames:
+    - {{ $host }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: {{ $g.httpRedirect.statusCode }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane-lb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- range $g.loadBalancerCidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - port: {{ $port }}
+          protocol: TCP
+{{- if $g.certManager.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ required "gateway.tlsSecretName is required with certManager" $g.tlsSecretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $g.tlsSecretName }}
+  dnsNames:
+    - {{ $host }}
+  issuerRef:
+    {{- toYaml (required "gateway.certManager.issuerRef is required" $g.certManager.issuerRef) | nindent 4 }}
+  {{- with $g.certManager.extraSpec }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}
+{{- if $g.gke.enabled }}
+---
+# GKE's default health check (GET / with the pod IP as Host) fails against this
+# server, which only answers its canonical Host.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: wardby-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: {{ $port }}
+        host: {{ $host }}
+        requestPath: /.well-known/oauth-protected-resource
+  targetRef:
+    group: ""
+    kind: Service
+    name: wardby-control-plane
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: wardby-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  default:
+    {{- with $g.gke.securityPolicy }}
+    securityPolicy: {{ . }}
+    {{- end }}
+    timeoutSec: {{ $g.gke.timeoutSec }}
+    {{- with $g.gke.logging }}
+    logging:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  targetRef:
+    group: ""
+    kind: Service
+    name: wardby-control-plane
+{{- end }}
+{{- end }}

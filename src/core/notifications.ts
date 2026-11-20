@@ -24,9 +24,9 @@ export async function startNotifications(opts: {
   db: PrismaClient;
   chat: ChatProviderRegistry;
   holder?: string;
-}): Promise<{ stop(): void }> {
+}): Promise<{ stop(): Promise<void> }> {
   installWorkflowEventRecorder(opts.db, opts.chat);
-  if (Object.keys(opts.chat).length === 0) return { stop() {} };
+  if (Object.keys(opts.chat).length === 0) return { stop: async () => {} };
   // Identity checks run in the background: Slack being slow or unreachable
   // must never delay process startup. The dispatcher starts immediately
   // regardless; a failed check just logs (dispatch itself re-checks auth

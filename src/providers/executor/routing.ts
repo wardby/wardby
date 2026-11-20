@@ -1,3 +1,4 @@
+import type { RunFollowUpHandlers } from "../../core/run-follow-ups.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import type { ResolvedCodingService } from "../../coding/services/catalog.js";
 import type { UnstartableService } from "../jobs/types.js";
@@ -98,6 +99,13 @@ export class RoutingExecutor implements Executor {
   /** Lifecycle fans out to every distinct executor; each hook is optional on the seam. */
   async launch(): Promise<void> {
     for (const executor of this.distinct()) await executor.launch?.();
+  }
+
+  /** Every distinct executor's chores; kinds do not overlap. */
+  followUpHandlers(): RunFollowUpHandlers {
+    const handlers: RunFollowUpHandlers = {};
+    for (const executor of this.distinct()) Object.assign(handlers, executor.followUpHandlers?.());
+    return handlers;
   }
 
   /** Fans out like `launch`. */

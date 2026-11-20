@@ -30,7 +30,7 @@ import type { WardbyMcpServer } from "../server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import { requireOwnedSecret } from "../auth/ownership.js";
-import { requireScope } from "../auth/resource-server.js";
+import { isOwnerAll, requireScope } from "../auth/resource-server.js";
 import { requireAgentAccess, requireBindable, requireBindingOwner } from "../auth/access.js";
 import {
   clearUnbrokerOutcome,
@@ -528,7 +528,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     scope: "secrets:write",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
-      const secrets = await listSecrets(ctx.principal.id, ctx.db);
+      const secrets = await listSecrets(ctx.principal.id, ctx.db, { all: isOwnerAll(ctx) });
       return textResult(secrets);
     },
   });
@@ -594,7 +594,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
     scope: "secrets:write",
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
     handler: async (args: { id: string }, ctx) => {
-      await requireOwnedSecret(ctx.db, args.id, ctx.principal.id);
+      await requireOwnedSecret(ctx.db, args.id, ctx.principal.id, isOwnerAll(ctx));
       const { providers } = await hostProvidersUsingSecret(ctx.db, args.id);
       if (providers.length > 0) {
         throw new McpError(
@@ -602,8 +602,10 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
           `This secret is used by host provider ${providers.map((p) => `"${p}"`).join(", ")}; re-register it or delete_host_provider first.`,
         );
       }
-      const secret = await ctx.db.secret.findUnique({ where: { id: args.id }, select: { name: true } });
-      const servers = secret ? await mcpServersUsingSecret(ctx.db, ctx.principal.id, secret.name) : [];
+      const secret = await ctx.db.secret.findUnique({ where: { id: args.id }, select: { name: true, ownerId: true } });
+      // The secret's own owner (an owner-all caller may delete another owner's secret).
+      const secretOwnerId = secret?.ownerId ?? ctx.principal.id;
+      const servers = secret ? await mcpServersUsingSecret(ctx.db, secretOwnerId, secret.name) : [];
       if (servers.length > 0) {
         throw new McpError(
           409,
@@ -611,7 +613,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         );
       }
       // Warm rounds: found before the delete, removed after it (a kept session holds the value).
-      const reached = secret ? await agentsReachedBySecret(ctx, ctx.principal.id, secret.name) : [];
+      const reached = secret ? await agentsReachedBySecret(ctx, secretOwnerId, secret.name) : [];
       await deleteSecret(args.id, ctx.db, {
         cipher: ctx.providers.secrets,
         options: ctx.providers.sandboxFetchOptions,

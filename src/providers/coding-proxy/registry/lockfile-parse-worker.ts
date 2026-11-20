@@ -7,13 +7,14 @@
  */
 import { parentPort } from "node:worker_threads";
 import { REGISTRY_ADAPTERS } from "../../../coding/registry/adapters.js";
-import { RegistryError, type ParsedLockfile } from "../../../coding/registry/types.js";
+import { RegistryError, type ParsedLockfile, type PrivateRegistry } from "../../../coding/registry/types.js";
 
 export interface ParseRequest {
   ecosystem: string;
   body: string;
   maxEntries: number;
   proxyRegistryUrl: string;
+  privateRegistry?: PrivateRegistry;
 }
 
 /** A ParsedLockfile without its functions: `edges[i]` lists, for
@@ -44,6 +45,7 @@ export function parseAndShip(request: ParseRequest): ShippedLockfile {
   const parsed = support.parse(request.body, {
     maxEntries: request.maxEntries,
     proxyRegistryUrl: request.proxyRegistryUrl,
+    ...(request.privateRegistry ? { privateRegistry: request.privateRegistry } : {}),
   });
   if (!parsed.dependencyKeys) throw new Error("this lockfile format cannot be parsed off the event loop");
   const index = new Map(parsed.entries.map((entry, at) => [entry, at]));

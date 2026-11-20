@@ -51,6 +51,10 @@ export function parseAllowlist(
       entries.map((entry) => adapter.parseAllowlistEntry(entry)),
     );
   }
+  // Roots the operator grants every agent, even one with no entry for the ecosystem.
+  for (const [ecosystem, adapter] of adapters) {
+    if (adapter.implicitRoots) parsed.set(ecosystem, [...(parsed.get(ecosystem) ?? []), ...adapter.implicitRoots]);
+  }
   return parsed;
 }
 

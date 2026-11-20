@@ -318,4 +318,88 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
       await db.registryVersionFact.deleteMany({ where: { name } });
     }
   });
+  describe("per-run state shared by two proxy replicas", () => {
+    // Two stores over one database stand in for two proxy pods: neither holds anything the other cannot see.
+    const replicas = () => ({ a: new PrismaRegistryStore(db), b: new PrismaRegistryStore(db) });
+    const times = () => {
+      const now = new Date();
+      return { now, lease: new Date(now.getTime() + 60_000) };
+    };
+
+    it("shares the plan fallback", async () => {
+      const { runId, agentId } = await seedRun({ registryTokenHash: `h-${randomUUID()}`, allowlist: {} });
+      runIds.push(runId);
+      agentIds.push(agentId);
+      const { a, b } = replicas();
+      expect(await b.planFallback(runId)).toEqual([]);
+      await a.addPlanFallback(runId, "npm");
+      await a.addPlanFallback(runId, "npm");
+      await b.addPlanFallback(runId, "pypi");
+      expect((await a.planFallback(runId)).sort()).toEqual(["npm", "pypi"]);
+    });
+
+    it("runs one plan at a time and at most the limit, across replicas, and lets a lapsed lease go", async () => {
+      const { runId, agentId } = await seedRun({ registryTokenHash: `h-${randomUUID()}`, allowlist: {} });
+      runIds.push(runId);
+      agentIds.push(agentId);
+      const { a, b } = replicas();
+      const { now, lease } = times();
+      const started = await Promise.all([
+        a.startPlan(runId, { max: 5, leaseUntil: lease, now }),
+        b.startPlan(runId, { max: 5, leaseUntil: lease, now }),
+      ]);
+      expect(started.sort()).toEqual(["busy", "started"]);
+      // The replica that held the lease died: once the lease lapses the other may plan.
+      expect(await b.startPlan(runId, { max: 5, leaseUntil: lease, now: lease })).toBe("started");
+      await b.endPlan(runId);
+      expect(await a.startPlan(runId, { max: 3, leaseUntil: lease, now })).toBe("started");
+      await a.endPlan(runId);
+      // Three plans have now been started in total.
+      expect(await b.startPlan(runId, { max: 3, leaseUntil: lease, now })).toBe("limit");
+    });
+
+    it("admits at most maxFiles concurrent downloads across replicas", async () => {
+      const { runId, agentId } = await seedRun({ registryTokenHash: `h-${randomUUID()}`, allowlist: {} });
+      runIds.push(runId);
+      agentIds.push(agentId);
+      const { a, b } = replicas();
+      const { now, lease } = times();
+      const ids = await Promise.all(
+        [a, b, a, b, a, b].map((store) =>
+          store.reserveDownload(runId, { sizeBytes: 5, maxFiles: 3, leaseUntil: lease, now }),
+        ),
+      );
+      expect(ids.filter((id) => id !== null)).toHaveLength(3);
+      // A served row counts like a reservation, and releasing one frees its slot.
+      const held = ids.find((id) => id !== null)!;
+      await a.releaseDownload(held);
+      await a.recordFetch({ runId, ecosystem: "npm", name: "react", sizeBytes: 5, outcome: "served" });
+      expect(await b.reserveDownload(runId, { sizeBytes: 5, maxFiles: 3, leaseUntil: lease, now })).toBeNull();
+    });
+
+    it("sums served and reserved bytes, and sweeps a reservation whose lease lapsed", async () => {
+      const { runId, agentId } = await seedRun({ registryTokenHash: `h-${randomUUID()}`, allowlist: {} });
+      runIds.push(runId);
+      agentIds.push(agentId);
+      const { a, b } = replicas();
+      const { now, lease } = times();
+      await a.recordFetch({ runId, ecosystem: "npm", name: "react", sizeBytes: 10, outcome: "served" });
+      const first = await a.reserveDownload(runId, { sizeBytes: 5, maxFiles: 10, leaseUntil: lease, now });
+      const second = await b.reserveDownload(runId, { sizeBytes: null, maxFiles: 10, leaseUntil: lease, now });
+      expect(await b.syncDownload(runId, second!, { streamedBytes: 7, leaseUntil: lease, now })).toBe(22);
+      await a.releaseDownload(first!);
+      expect(await a.syncDownload(runId, second!, { streamedBytes: 7, leaseUntil: lease, now })).toBe(17);
+
+      // A reservation already past its lease (its replica died) counts for nothing and is swept.
+      const dead = await a.reserveDownload(runId, {
+        sizeBytes: 100,
+        maxFiles: 10,
+        leaseUntil: new Date(now.getTime() - 1_000),
+        now: new Date(now.getTime() - 2_000),
+      });
+      expect(await b.syncDownload(runId, second!, { streamedBytes: 7, leaseUntil: lease, now })).toBe(17);
+      await b.reserveDownload(runId, { sizeBytes: 1, maxFiles: 10, leaseUntil: lease, now });
+      expect(await db.registryReservation.findUnique({ where: { id: dead! } })).toBeNull();
+    });
+  });
 });

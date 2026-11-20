@@ -37,6 +37,14 @@ const MAX_TEXT_PIECES = 64;
 // What a server without get_run_steps (or get_run_text) answers (the MCP SDK's "Tool <name> not found").
 const UNKNOWN_TOOL = /\btool\b[^\n]*\bnot found\b|unknown tool|no such tool/i;
 // The timer ticks this often; each tick refreshes only when one is due.
+// The engine draws Markdown of at most this many characters; longer text is drawn as plain text.
+const MARKDOWN_MAX = 10_000;
+/** text in pieces of at most size characters, so each fits the engine's limit for one text node. */
+const chunks = (text: string, size: number): string[] => {
+  const out: string[] = [];
+  for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
+  return out.length > 0 ? out : [""];
+};
 const TICK_MS = 5000;
 // The first Claude Code release whose pane accepts every prop the pane draws (Text size, weight, mono and
 // tabular; spacing tokens; Text children in a Button). An older engine refuses the whole tree and draws
@@ -2877,7 +2885,7 @@ export const register: Register = (on, options) => {
      */
     const pill = (label: string, tone: Tone, mark?: string) =>
       isDesktop ? (
-        <Text backgroundColor={TONES[tone].bg} color={TONES[tone].fg} weight="medium" size="caption">
+        <Text backgroundColor={TONES[tone].bg} color={TONES[tone].fg}>
           {` ${label || mark || ""} `}
         </Text>
       ) : (
@@ -3825,14 +3833,7 @@ export const register: Register = (on, options) => {
       // Keys are for the terminal, where the keyboard is the way in; the desktop takes clicks.
       const hk = (key: string) => (D ? {} : { hotkey: key });
       // Section headings: plain, semibold, sentence case.
-      const heading = (text: string) =>
-        D ? (
-          <Text weight="semibold" size="footnote">
-            {text}
-          </Text>
-        ) : (
-          <Text bold>{text}</Text>
-        );
+      const heading = (text: string) => (D ? <Text bold>{text}</Text> : <Text bold>{text}</Text>);
       /**
        * Copies one of get_run's long fields. When the server sent only its first page, the rest is read
        * first (get_run_text), so Copy gives the whole text; an older server's first page is copied as is.
@@ -3884,16 +3885,21 @@ export const register: Register = (on, options) => {
         const cut = isFull ? { text, more: 0 } : collapse(text, inner);
         return (
           <Box key={key} flexDirection="column">
-            {asMarkdown && Markdown ? (
+            {asMarkdown && Markdown && cut.text.length <= MARKDOWN_MAX ? (
               <Markdown key={`${key}-text`} text={cut.text} {...(dim ? { dimColor: true } : {})} />
             ) : (
-              <Text wrap="wrap" {...(dim ? { dimColor: true } : {})}>
-                {cut.text}
-              </Text>
+              // The engine draws at most MARKDOWN_MAX characters in one text node: a longer text is drawn in pieces.
+              <Box key={`${key}-text`} flexDirection="column">
+                {chunks(cut.text, MARKDOWN_MAX).map((piece, i) => (
+                  <Text key={`${key}-piece-${i}`} wrap="wrap" {...(dim ? { dimColor: true } : {})}>
+                    {piece}
+                  </Text>
+                ))}
+              </Box>
             )}
             {cut.more > 0 && (
               <Box key={`${key}-more`}>
-                <Text color={TONES.blue.fg} size="caption">
+                <Text color={TONES.blue.fg}>
                   … {cut.more} more {cut.more === 1 ? "line" : "lines"}
                   {D ? "" : " (m)"}
                 </Text>
@@ -3984,11 +3990,11 @@ export const register: Register = (on, options) => {
                 <Box key={`step-mark-${step.seq}`} width={4} flexShrink={0} justifyContent="center">
                   {result &&
                     (result.failed ? (
-                      <Text mono size="caption" weight="semibold" color={WARDBY.red} backgroundColor={FAIL_TINT}>
+                      <Text bold color={WARDBY.red} backgroundColor={FAIL_TINT}>
                         {result.mark}
                       </Text>
                     ) : (
-                      <Text weight="semibold" color={markColor(false, result.mark)}>
+                      <Text bold color={markColor(false, result.mark)}>
                         {result.mark}
                       </Text>
                     ))}
@@ -4013,15 +4019,11 @@ export const register: Register = (on, options) => {
                   <Box flexGrow={1} flexShrink={1} minWidth={0} gap={1} alignItems="center">
                     {!SHELL_TOOLS.has(step.tool ?? "") && (
                       <Box flexShrink={0}>
-                        <Text size="caption" dimColor>
-                          {step.tool ?? "tool"}
-                        </Text>
+                        <Text dimColor>{step.tool ?? "tool"}</Text>
                       </Box>
                     )}
                     <Box flexGrow={1} flexShrink={1} minWidth={0}>
-                      <Text mono size="footnote" wrap="truncate-end">
-                        {step.summary}
-                      </Text>
+                      <Text wrap="truncate-end">{step.summary}</Text>
                     </Box>
                   </Box>
                 ) : (
@@ -4039,7 +4041,7 @@ export const register: Register = (on, options) => {
                       {said.text}
                     </Text>
                     {said.hidden > 0 && (
-                      <Text dimColor size="caption">
+                      <Text dimColor>
                         … {said.hidden} more {said.hidden === 1 ? "line" : "lines"}
                       </Text>
                     )}
@@ -4079,7 +4081,7 @@ export const register: Register = (on, options) => {
                   const failed =
                     parts?.exit != null ? parts.exit !== "0" : step.status !== null && step.status !== "ok";
                   const status = (
-                    <Text size="caption" {...(failed ? { color: D ? WARDBY.red : FAILED_COLOR } : { dimColor: true })}>
+                    <Text {...(failed ? { color: D ? WARDBY.red : FAILED_COLOR } : { dimColor: true })}>
                       {exitText}
                     </Text>
                   );
@@ -4093,11 +4095,7 @@ export const register: Register = (on, options) => {
                       {(D || parts) && (
                         <Box key={`step-head-${step.seq}`} gap={1} alignItems="center">
                           <Box flexGrow={1} flexShrink={1} minWidth={0}>
-                            {parts && (
-                              <Text mono={D} size="footnote" wrap="wrap">
-                                {`$ ${parts.command}`}
-                              </Text>
-                            )}
+                            {parts && <Text wrap="wrap">{`$ ${parts.command}`}</Text>}
                           </Box>
                           {status}
                           {D && (
@@ -4116,7 +4114,7 @@ export const register: Register = (on, options) => {
                         </Text>
                       )}
                       {text !== "" && (
-                        <Text dimColor wrap="wrap" mono={D}>
+                        <Text dimColor wrap="wrap">
                           {text}
                         </Text>
                       )}
@@ -4234,16 +4232,14 @@ export const register: Register = (on, options) => {
                   void update($, openStep, () => null);
                 }}
               />
-              <Text size="heading" weight="semibold" bold={!D} wrap="wrap">
+              <Text bold={!D} wrap="wrap">
                 {open.agentName}
               </Text>
               {pill(open.status.replaceAll("_", " "), statusTone(open.status), statusMark(open.status))}
               <Box flexGrow={1} />
-              <Text dimColor mono size="caption">
-                {shortId(open.id)}
-              </Text>
+              <Text dimColor>{shortId(open.id)}</Text>
             </Box>
-            <Text dimColor size="caption" wrap="wrap">
+            <Text dimColor wrap="wrap">
               {meta}
             </Text>
             {open.budgetUsd ? (
@@ -4260,17 +4256,11 @@ export const register: Register = (on, options) => {
               )
             ) : null}
             <Box>
-              <Text
-                size="caption"
-                tabular
-                {...(budgetShare(open) >= 0.8 ? { color: budgetColor(open) } : { dimColor: true })}
-              >
+              <Text {...(budgetShare(open) >= 0.8 ? { color: budgetColor(open) } : { dimColor: true })}>
                 {budgetText}
               </Text>
               <Box flexGrow={1} />
-              <Text dimColor size="caption" tabular>
-                turn {open.turns}
-              </Text>
+              <Text dimColor>turn {open.turns}</Text>
             </Box>
           </Box>
           {shown &&
@@ -4281,7 +4271,7 @@ export const register: Register = (on, options) => {
               "error",
               <>
                 <Box key="error-head" alignItems="center">
-                  <Text color={FAILED_COLOR} weight="semibold" bold>
+                  <Text color={FAILED_COLOR} bold>
                     {shown.failureCategory ? shown.failureCategory.replaceAll("_", " ") : "Failed"}
                   </Text>
                   <Box flexGrow={1} />
@@ -4292,7 +4282,7 @@ export const register: Register = (on, options) => {
                 {shown.error && <Text wrap="wrap">{shown.error}</Text>}
                 {shown.error && shown.more.error && (
                   <Box key="error-more">
-                    <Text color={TONES.blue.fg} size="caption">
+                    <Text color={TONES.blue.fg}>
                       … {shown.more.error.total - shown.more.error.next} more characters{D ? "" : " (m)"}
                     </Text>
                   </Box>
@@ -4410,8 +4400,7 @@ export const register: Register = (on, options) => {
                   const name = (
                     <Text>
                       <Text dimColor>{indent}</Text>
-                      {mark} {isThis ? <Text weight="semibold">{row.agentName}</Text> : row.agentName}{" "}
-                      <Text dimColor>{role}</Text>
+                      {mark} {isThis ? <Text bold>{row.agentName}</Text> : row.agentName} <Text dimColor>{role}</Text>
                     </Text>
                   );
                   return (
@@ -4426,18 +4415,24 @@ export const register: Register = (on, options) => {
                             {name}
                           </Text>
                         ) : (
-                          <Button
-                            key={`tree-${row.id}`}
-                            onPress={() => {
-                              void update($, selected, () => row.id);
-                              void pane.loadDetail(row.id);
-                            }}
-                          >
-                            {name}
-                          </Button>
+                          <Box>
+                            <Text dimColor>{indent}</Text>
+                            {mark}
+                            <Text> </Text>
+                            <Button
+                              key={`tree-${row.id}`}
+                              plain
+                              label={row.agentName}
+                              onPress={() => {
+                                void update($, selected, () => row.id);
+                                void pane.loadDetail(row.id);
+                              }}
+                            />
+                            <Text dimColor> {role}</Text>
+                          </Box>
                         )}
                       </Box>
-                      <Text dimColor size="caption" tabular>
+                      <Text dimColor>
                         {" "}
                         {usd(row.costUsd)} · {took(row, now)}
                       </Text>
@@ -4536,7 +4531,7 @@ export const register: Register = (on, options) => {
                         <Text>Imported. Run this in a terminal to continue the session:</Text>
                       )}
                       {state?.command && (
-                        <Text mono wrap="truncate-end">
+                        <Text wrap="truncate-end">
                           {state.command.length > 160 ? `${state.command.slice(0, 160)}…` : state.command}
                         </Text>
                       )}
@@ -4666,9 +4661,7 @@ export const register: Register = (on, options) => {
           // Two button bars: the view, and which runs to show. The choice in force is the primary button.
           <Box gap={2} flexWrap="wrap" alignItems="center">
             <Box gap={1} alignItems="center">
-              <Text dimColor size="caption">
-                View
-              </Text>
+              <Text dimColor>View</Text>
               {(["ledger", "strips"] as const).map((v) => (
                 <Button
                   key={`view-${v}`}
@@ -4679,9 +4672,7 @@ export const register: Register = (on, options) => {
               ))}
             </Box>
             <Box gap={1} alignItems="center">
-              <Text dimColor size="caption">
-                Show
-              </Text>
+              <Text dimColor>Show</Text>
               {STATUS_FILTERS.map((choice) => (
                 <Button
                   key={`status-${choice.value}`}
@@ -4698,10 +4689,10 @@ export const register: Register = (on, options) => {
               <Button
                 key={`status-${choice.value}`}
                 hotkey={choice.hotkey}
+                label={f.status === choice.value ? `[${choice.label}]` : choice.label}
+                {...(f.status === choice.value ? {} : { dimColor: true })}
                 onPress={() => void update($, filter, (old): Filter => ({ ...old, status: choice.value }))}
-              >
-                {f.status === choice.value ? <Text bold>[{choice.label}]</Text> : <Text dimColor>{choice.label}</Text>}
-              </Button>
+              />
             ))}
           </Box>
         )}
@@ -4744,21 +4735,16 @@ export const register: Register = (on, options) => {
                             <Svg source={cardBarSvg(groupBarHex(group))} alt={`${groupTone(group)} group`} height={3} />
                           </Box>
                         )}
-                        <Box flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
+                        <Box flexDirection="column" paddingX={1} paddingTop={1} paddingBottom={1}>
                           <Box>
                             {group.url ? (
                               <Link href={group.url} label={group.label} />
                             ) : (
-                              <Text weight="semibold">{group.label}</Text>
+                              <Text bold>{group.label}</Text>
                             )}
-                            <Text dimColor size="caption">
-                              {" "}
-                              {groupState(group)}
-                            </Text>
+                            <Text dimColor> {groupState(group)}</Text>
                             <Box flexGrow={1} />
-                            <Text weight="semibold" tabular>
-                              {usd(total)}
-                            </Text>
+                            <Text bold>{usd(total)}</Text>
                           </Box>
                           {/* A column per step: its drawing and, under it, its name as a link, so they line up. */}
                           <Box marginTop={1}>
@@ -4814,8 +4800,8 @@ export const register: Register = (on, options) => {
                           {step && (
                             <Box flexDirection="column" marginTop={1}>
                               <Box>
-                                <Text weight="semibold">{stepName(step.row, step.event)}</Text>
-                                <Text dimColor size="caption">
+                                <Text bold>{stepName(step.row, step.event)}</Text>
+                                <Text dimColor>
                                   {"  "}
                                   {ACTIVE.has(step.row.status)
                                     ? `running ${took(step.row, now)}`
@@ -4851,12 +4837,10 @@ export const register: Register = (on, options) => {
                   })}
                   {other ? (
                     <Box flexDirection="column" marginTop={1}>
-                      <Text dimColor size="caption">
-                        Other runs
-                      </Text>
+                      <Text dimColor>Other runs</Text>
                       {other.rows.map(({ row }) => (
                         <Box key={`other-${row.id}`}>
-                          <Text color={statusColor(row.status)} weight="semibold">
+                          <Text bold color={statusColor(row.status)}>
                             {statusMark(row.status)}{" "}
                           </Text>
                           <Markdown
@@ -4869,9 +4853,7 @@ export const register: Register = (on, options) => {
                             }}
                           />
                           <Box flexGrow={1} />
-                          <Text dimColor size="caption" tabular>
-                            {took(row, now)}
-                          </Text>
+                          <Text dimColor>{took(row, now)}</Text>
                         </Box>
                       ))}
                     </Box>
@@ -4919,23 +4901,19 @@ export const register: Register = (on, options) => {
                           }}
                         />
                       </Box>
-                      <Text
-                        tabular
-                        size="caption"
-                        {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}
-                      >
+                      <Text {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}>
                         {costOf(row)}
                       </Text>
                     </Box>
                     {showsLastLine(row) && (
                       <Box key={`last-${row.id}`} marginLeft={indent}>
-                        <Text dimColor size="caption" wrap="truncate-end">
+                        <Text dimColor wrap="truncate-end">
                           ↳ {row.lastLine}
                         </Text>
                       </Box>
                     )}
                     <Box marginLeft={indent}>
-                      <Text dimColor size="caption" wrap="truncate-end">
+                      <Text dimColor wrap="truncate-end">
                         {metaOf(row, now)}
                       </Text>
                     </Box>
@@ -4959,7 +4937,7 @@ export const register: Register = (on, options) => {
                     <Box key={`group-${group.key}-bar`} paddingX={1}>
                       <Svg source={cardBarSvg(groupBarHex(group))} alt={`${groupTone(group)} group`} height={3} />
                     </Box>
-                    <Box flexDirection="column" paddingX={1} paddingTop="sm" paddingBottom="sm">
+                    <Box flexDirection="column" paddingX={1} paddingTop={1} paddingBottom={1}>
                       {children as never}
                     </Box>
                   </Box>
@@ -4992,9 +4970,7 @@ export const register: Register = (on, options) => {
                       />
                     </Box>
                     <Box width={8} justifyContent="flex-end">
-                      <Text weight="semibold" tabular>
-                        {usd(total)}
-                      </Text>
+                      <Text bold>{usd(total)}</Text>
                     </Box>
                   </Box>
                   {isOpen && group.rows.map((entry) => runLine(entry))}
@@ -5028,25 +5004,24 @@ export const register: Register = (on, options) => {
                   <Box key={row.id} flexDirection="column">
                     {/* The status pill and the agent, "$x of $y" at the right. */}
                     <Box>
+                      {hotkey ? <Text dimColor>{hotkey} </Text> : null}
+                      {depth > 0 ? (
+                        <Text dimColor>{event ? `${"   ".repeat(depth)}${event} → ` : branch(depth)}</Text>
+                      ) : null}
+                      {pill(row.status.replaceAll("_", " "), statusTone(row.status), statusMark(row.status))}
+                      <Text> </Text>
                       <Button
                         key={`run-${row.id}`}
+                        plain
+                        label={row.agentName}
                         {...(hotkey ? { hotkey } : {})}
                         onPress={() => {
                           void update($, selected, () => row.id);
                           void pane.loadDetail(row.id);
                         }}
-                      >
-                        {hotkey ? <Text dimColor>{hotkey} </Text> : ""}
-                        {depth > 0 ? (
-                          <Text dimColor>{event ? `${"   ".repeat(depth)}${event} → ` : branch(depth)}</Text>
-                        ) : (
-                          ""
-                        )}
-                        {pill(row.status.replaceAll("_", " "), statusTone(row.status), statusMark(row.status))}{" "}
-                        <Text bold>{row.agentName}</Text>
-                      </Button>
+                      />
                       <Box flexGrow={1} />
-                      <Text tabular {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}>
+                      <Text {...(budgetShare(row) >= 0.8 ? { color: budgetColor(row) } : { dimColor: true })}>
                         {" "}
                         {costOf(row)}
                       </Text>

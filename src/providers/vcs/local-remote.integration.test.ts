@@ -342,15 +342,18 @@ describe("LocalRemote (real git, no Docker)", { timeout: 20_000 }, () => {
 describe("LocalRemote push guard", { timeout: 20_000 }, () => {
   const remote = new LocalRemote({ roots: () => [] });
 
-  it("accepts only wardby/run-* refs", () => {
-    expect(() => remote.assertPushRef("wardby/run-abc_1-2")).not.toThrow();
+  it("accepts only single-component wardby/* refs", () => {
+    for (const ref of ["wardby/run-abc_1-2", "wardby/DEVXP-123", "wardby/DEVXP-123-2", "wardby/fix-invoice"]) {
+      expect(() => remote.assertPushRef(ref)).not.toThrow();
+    }
     for (const ref of [
       "main",
-      "wardby/run-",
-      "wardby/run-a/b",
-      "refs/heads/wardby/run-a",
-      "wardby/run-a..b",
-      "x/wardby/run-a",
+      "wardby/",
+      "wardby/a/b",
+      "refs/heads/wardby/a",
+      "wardby/a..b",
+      "wardby/-a",
+      "x/wardby/a",
     ]) {
       expect(() => remote.assertPushRef(ref)).toThrow("vcs_head_ref_invalid");
     }

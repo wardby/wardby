@@ -10,7 +10,7 @@ appliesTo: ">=0.5.3"
 # Build a custom worker image for another language
 
 Wardby's own worker images have Node (`toolchain: node`) or Node and Python
-3.12 (`toolchain: node-python`). For any other language, build your own image
+(`toolchain: node-python`, with pytest, ruff, uv, poetry and CPython 3.12 to 3.14). For any other language, build your own image
 on top of Wardby's driver base image and set the coding agent's
 `codingProfile.workerImageRef` to it. The long-form guide is
 [`docs/coding-worker-byo-images.md`](../docs/coding-worker-byo-images.md).

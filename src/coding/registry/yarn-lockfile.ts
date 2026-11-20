@@ -21,7 +21,7 @@
  *
  * Kept free of imports from npm.ts, which imports this module.
  */
-import { parseProxyPath, publicNpmTarballUrl } from "./npm-lockfile.js";
+import { npmTarballUrl, parseProxyPath } from "./npm-lockfile.js";
 import { registryDependencyEdges } from "./npm-plan.js";
 import {
   YARN_CLASSIC_REGISTRY,
@@ -38,7 +38,14 @@ import {
   yamlEntryLines,
   type Target,
 } from "./lockfile-shared.js";
-import { RegistryError, type DeclaredDependency, type LockfileEntry, type ParsedLockfile } from "./types.js";
+import {
+  RegistryError,
+  type DeclaredDependency,
+  type LockfileEntry,
+  type LockfileParseOptions,
+  type ParsedLockfile,
+  type PrivateRegistry,
+} from "./types.js";
 
 /** A lockfile's line limit for the classic parser, far above any real one
  *  for the entry bound, so a pathological body is refused early. */
@@ -142,10 +149,7 @@ function readClassic(body: string, maxEntries: number): ClassicEntry[] {
   return entries;
 }
 
-export function parseYarnClassicLockfile(
-  body: string,
-  options: { maxEntries: number; proxyRegistryUrl: string },
-): ParsedLockfile {
+export function parseYarnClassicLockfile(body: string, options: LockfileParseOptions): ParsedLockfile {
   const entries: LockfileEntry[] = [];
   const byPath = new Map<string, { dependencies: ReadonlyMap<string, string> }>();
   const byDescriptor = new Map<string, Target>();
@@ -166,7 +170,7 @@ export function parseYarnClassicLockfile(
         name,
         raw.fields.get("version") ?? "",
         raw.fields.get("integrity") ?? null,
-        resolved !== undefined && fromRegistry(resolved, options.proxyRegistryUrl) ? "registry" : "elsewhere",
+        resolved !== undefined && fromRegistry(name, resolved, options) ? "registry" : "elsewhere",
       );
       entries.push(target);
     }
@@ -271,7 +275,7 @@ function berryDeclared(dependencies: Record<string, unknown>): DeclaredDependenc
 
 export function parseYarnBerryLockfile(
   document: Record<string, unknown>,
-  options: { maxEntries: number; proxyRegistryUrl: string },
+  options: LockfileParseOptions,
 ): ParsedLockfile {
   const metadataVersion = Number(stringOf(mapOf(document.__metadata).version));
   if (!Number.isInteger(metadataVersion) || metadataVersion < 4)
@@ -302,7 +306,7 @@ export function parseYarnBerryLockfile(
     const npm = npmResolution(resolution);
     let target: Target = null;
     if (npm) {
-      const elsewhere = npm.archiveUrl !== undefined && !fromRegistry(npm.archiveUrl, options.proxyRegistryUrl);
+      const elsewhere = npm.archiveUrl !== undefined && !fromRegistry(npm.name, npm.archiveUrl, options);
       // Berry's checksum is not npm's integrity: none is claimed.
       target = entryOf(path, npm.name, npm.version, null, elsewhere ? "elsewhere" : "registry");
       entries.push(target);
@@ -328,10 +332,7 @@ export function parseYarnBerryLockfile(
 
 /** A `yarn.lock` of either generation: classic when it carries the
  *  `# yarn lockfile v1` marker, Berry when it has a `__metadata` section. */
-export function parseYarnLockfile(
-  body: string,
-  options: { maxEntries: number; proxyRegistryUrl: string },
-): ParsedLockfile {
+export function parseYarnLockfile(body: string, options: LockfileParseOptions): ParsedLockfile {
   if (isYarnClassicLockfile(body)) return parseYarnClassicLockfile(body, options);
   const lines = yamlEntryLines(body);
   if (lines > options.maxEntries * MAX_LINES_PER_ENTRY) throw tooLarge(lines, options.maxEntries);
@@ -373,7 +374,7 @@ function decode(value: string): string | null {
  * proxy is dropped (Berry records one only for a download URL other than
  * the registry's conventional one). Only matched values change.
  */
-export function normalizeYarnLockfile(content: string, registryUrl: string): string {
+export function normalizeYarnLockfile(content: string, registryUrl: string, privateRegistry?: PrivateRegistry): string {
   const base = registryUrl.endsWith("/") ? registryUrl : `${registryUrl}/`;
   if (isYarnClassicLockfile(content)) {
     return content.replace(CLASSIC_RESOLVED, (match, open: string, value: string, close: string) => {
@@ -382,7 +383,7 @@ export function normalizeYarnLockfile(content: string, registryUrl: string): str
       const target = url.startsWith(base) ? parseProxyPath(url.slice(base.length)) : null;
       if (!target) return match;
       const fragment = hash < 0 ? "" : value.slice(hash);
-      const publicUrl = publicNpmTarballUrl(target.name, target.version).replace(
+      const publicUrl = npmTarballUrl(target.name, target.version, privateRegistry).replace(
         "https://registry.npmjs.org/",
         YARN_CLASSIC_REGISTRY,
       );

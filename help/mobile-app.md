@@ -9,9 +9,9 @@ appliesTo: ">=0.6.0"
 
 # Use the wardby mobile app
 
-The mobile app is a read-only live view of runs for admins, built on the admin
-viewer API (see `admin-viewer`). Sign-in needs the `admin` role and the
-`admin:view` scope.
+The mobile app is a read-only live view of runs for admins and viewers, built on the admin
+viewer API (see `admin-viewer`). Sign-in needs the `admin` or `viewer` role
+and the `admin:view` scope.
 
 ## Enable it with self-hosted auth
 

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { MAX_ACCEPTED_ADVISORIES, matchRoot, resolvePolicy } from "./allowlist.js";
+import { MAX_ACCEPTED_ADVISORIES, matchRoot, parseAllowlist, resolvePolicy } from "./allowlist.js";
+import { createPypiAdapter, pypiAdapter } from "./pypi.js";
+import type { JfrogRegistryConfig } from "./jfrog.js";
 
 describe("matchRoot", () => {
   const entries = [
@@ -11,6 +13,36 @@ describe("matchRoot", () => {
     expect(matchRoot(entries, "@heroui/react")).toEqual(entries[1]);
     expect(matchRoot(entries, "@heroui")).toBeUndefined();
     expect(matchRoot(entries, "react-dom")).toBeUndefined();
+  });
+});
+
+describe("parseAllowlist with implicit roots", () => {
+  const jfrog: JfrogRegistryConfig = {
+    url: "https://example.jfrog.io/acme",
+    host: "example.jfrog.io",
+    pypi: { repo: "pypi", trustAll: true },
+  };
+
+  it("lets a trust-all PyPI adapter match any name, even with no PyPI entry", () => {
+    const adapters = new Map([["pypi", createPypiAdapter(jfrog)]]);
+    const entries = parseAllowlist({}, adapters).get("pypi") ?? [];
+    expect(matchRoot(entries, "typer")).toBeDefined();
+    expect(matchRoot(entries, "a")).toBeDefined();
+    expect(matchRoot(entries, "")).toBeUndefined();
+  });
+
+  it("keeps the agent's own entries alongside the implicit root", () => {
+    const adapters = new Map([["pypi", createPypiAdapter(jfrog)]]);
+    const entries = parseAllowlist({ pypi: ["flask>=3"] }, adapters).get("pypi") ?? [];
+    expect(matchRoot(entries, "flask")?.range).toBe(">=3");
+    expect(matchRoot(entries, "click")).toBeDefined();
+  });
+
+  it("adds nothing without the setting", () => {
+    const adapters = new Map([["pypi", pypiAdapter]]);
+    expect(parseAllowlist({}, adapters).get("pypi")).toBeUndefined();
+    const plain = createPypiAdapter({ ...jfrog, pypi: { repo: "pypi", trustAll: false } });
+    expect(parseAllowlist({}, new Map([["pypi", plain]])).get("pypi")).toBeUndefined();
   });
 });
 

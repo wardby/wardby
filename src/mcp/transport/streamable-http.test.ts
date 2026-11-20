@@ -70,6 +70,8 @@ function fakeDb() {
         createdAt: new Date(),
       }),
     },
+    // Callers here belong to no team; standing resolution reads memberships.
+    teamMember: { findMany: async () => [] },
   } as unknown as import("#prisma").PrismaClient;
 }
 

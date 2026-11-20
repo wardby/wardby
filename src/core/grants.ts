@@ -95,7 +95,7 @@ function granteeKeys(principalId: string | null): string[] {
 /**
  * max(owner, principal grant, everyone grant). `principalId` null (e.g. a
  * legacy webhook with no recorded creator) gets everyone grants only.
- * `operator` is the stdio local operator (McpRequestContext.operator),
+ * `operator` is the stdio local operator (McpRequestContext.operator) or an owner-all caller (isOwnerAll),
  * owner of everything for access checks — never for binding rules.
  */
 export async function effectiveAccess<T extends ResourceType>(

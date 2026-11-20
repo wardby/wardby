@@ -3,6 +3,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { requireAgentAccess } from "../auth/access.js";
 import { textResult } from "./text-result.js";
+import { isOwnerAll } from "../auth/resource-server.js";
 
 export function registerWebhookTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
@@ -26,7 +27,7 @@ export function registerWebhookTools(mcp: WardbyMcpServer): void {
     description: "Lists webhooks you created, and every webhook on an agent you own.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
-      const webhooks = await listWebhooks(ctx.principal.id, ctx.db, { all: ctx.operator === true });
+      const webhooks = await listWebhooks(ctx.principal.id, ctx.db, { all: ctx.operator === true || isOwnerAll(ctx) });
       return textResult(webhooks);
     },
   });
@@ -41,7 +42,10 @@ export function registerWebhookTools(mcp: WardbyMcpServer): void {
       const principalId = ctx.principal.id;
       const allowed =
         webhook !== null &&
-        (ctx.operator === true || webhook.ownerId === principalId || webhook.agent.ownerId === principalId);
+        (ctx.operator === true ||
+          isOwnerAll(ctx) ||
+          webhook.ownerId === principalId ||
+          webhook.agent.ownerId === principalId);
       if (!allowed) throw new McpError(403, `Webhook "${args.id}" is not owned by the caller.`);
       await deleteWebhook(args.id, ctx.db);
       return textResult({ deleted: args.id });

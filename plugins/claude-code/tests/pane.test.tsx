@@ -680,7 +680,7 @@ test("sub-agent runs nest under their lead, and the detail shows the run tree", 
     .map((el) => el.key)
     .filter((key): key is string => typeof key === "string" && key.startsWith("run-"));
   expect(order).toEqual(["run-solo", "run-lead", "run-kid1", "run-kid2"]);
-  expect((await ui.find({ key: "run-kid1" }))?.text).toContain("└ ");
+  expect((await ui.find({ key: "kid1" }))?.text).toContain("└ ");
 
   await ui.press({ key: "run-kid2" });
   await clock.settle();
@@ -761,8 +761,8 @@ test("runs linked by a pull request sit under it newest first, with the event th
     .filter((key): key is string => typeof key === "string" && key.startsWith("run-"));
   // Newest first: the lone audit run, then the chain newest first, the builder still under its lead.
   expect(order).toEqual(["run-solo", "run-fix1", "run-bld1", "run-rev1", "run-open1"]);
-  expect((await ui.find({ key: "run-rev1" }))?.text).toContain("review → ");
-  expect((await ui.find({ key: "run-fix1" }))?.text).toContain("mention → ");
+  expect((await ui.find({ key: "rev1" }))?.text).toContain("review → ");
+  expect((await ui.find({ key: "fix1" }))?.text).toContain("mention → ");
   expect(await ui.find({ type: "Text", text: /check completed/ })).toBeDefined();
 
   await ui.press({ key: "run-rev1" });
@@ -2478,8 +2478,12 @@ test("Show full text reads the rest of a long request, final answer and error, p
     { field: "finalText", offset: 8000 },
     { field: "error", offset: 8000 },
   ]);
-  expect((await ui.find({ key: "request-text" }))?.props.text).toBe(full.request);
-  expect((await ui.find({ key: "final-text" }))?.props.text).toBe(full.finalText);
+  // The engine draws at most 10,000 characters in one text node, so a longer text is drawn in pieces.
+  const drawn = async (key: string) => JSON.stringify(await ui.find({ key }));
+  const lastLine = (text: string) => text.split("\n").at(-1) as string;
+  expect(await drawn("request-text")).toContain(lastLine(full.request));
+  expect(await drawn("request-text")).toContain("request line 00000");
+  expect(await drawn("final-text")).toContain(lastLine(full.finalText));
   expect(JSON.stringify(await ui.find({ type: "Text", text: /^error line 00000/ }))).toContain("error line 00179");
   expect(await ui.find({ key: "error-more" })).toBeUndefined();
   // Collapsing and expanding again reads nothing more.

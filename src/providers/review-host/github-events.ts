@@ -171,7 +171,16 @@ export function normalizeGitHubEvent(
     if (!prNumber || typeof headSha !== "string" || !SAFE_SHA.test(headSha)) return null;
     const headRepo = obj(head?.repo)?.full_name;
     const isFork = typeof headRepo !== "string" || headRepo.toLowerCase() !== repository;
-    return { kind: "pr_updated", provider: "github", repository, prNumber, headSha, isFork };
+    return {
+      kind: "pr_updated",
+      provider: "github",
+      repository,
+      prNumber,
+      headSha,
+      isFork,
+      isDraft: pr?.draft === true,
+      isPush: p.action === "synchronize",
+    };
   }
 
   if (eventName === "check_suite") {

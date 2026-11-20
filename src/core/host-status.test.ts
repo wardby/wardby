@@ -54,6 +54,10 @@ function db(opts: { row?: StatusRow | null; children?: unknown[]; run?: unknown;
       update: vi.fn(async () => undefined),
       updateMany: vi.fn(async () => ({ count: opts.claimed ?? 1 })),
     },
+    // spendLine reads three queries; a test that wants a cost line queues them itself.
+    $queryRaw: vi.fn(async (): Promise<unknown[]> => {
+      throw new Error("no spend rows in this test");
+    }),
     run: {
       findMany: vi.fn(async () => opts.children ?? []),
       findUnique: vi.fn(async () => opts.run ?? null),
@@ -498,6 +502,30 @@ describe("completeHostStatus", () => {
       where: { runId: "r1", completedAt: null },
       data: { commentId: "501", completedAt: expect.any(Date) },
     });
+  });
+
+  it("reports what the run cost above the run line, which stays last", async () => {
+    const h = host();
+    const d = db({ row: row() });
+    d.$queryRaw
+      .mockResolvedValueOnce([{ usd: "0.4321" }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ model: "claude-sonnet-4-6", usd: "0.4321" }]);
+    await completeHostStatus(d as never, finished, { github: h });
+    const body = h.editComment.mock.calls[0][1].body as string;
+    expect(body).toContain("Agent spend: $0.43 this run · claude-sonnet-4-6 $0.43");
+    expect(body.endsWith("<sub>wardby run `r1`</sub>")).toBe(true);
+    expect(body.indexOf("Agent spend")).toBeLessThan(body.indexOf("<sub>wardby run"));
+  });
+
+  it("still posts the outcome when the cost cannot be read", async () => {
+    const h = host();
+    const d = db({ row: row() });
+    d.$queryRaw.mockRejectedValue(new Error("db down"));
+    await completeHostStatus(d as never, finished, { github: h });
+    const body = h.editComment.mock.calls[0][1].body as string;
+    expect(body).not.toContain("Agent spend");
+    expect(body.endsWith("<sub>wardby run `r1`</sub>")).toBe(true);
   });
 
   it("marks a failed sub-run as a failure", async () => {

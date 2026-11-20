@@ -334,7 +334,7 @@ describe("GitHubAppClient", () => {
       }),
     ).resolves.toEqual({ number: 8, url: "https://github.com/openai/example/pull/8" });
     expect(createBody).toEqual({
-      title: "Wardby run run-1",
+      title: "chore: Wardby run run-1",
       head: "wardby/run-run-1",
       base: "main",
       body: "<!-- wardby:run-1 -->",
@@ -370,7 +370,7 @@ describe("GitHubAppClient", () => {
       ],
     });
 
-    expect(createBody?.title).toBe("Wardby run run-1");
+    expect(createBody?.title).toBe("chore: Wardby run run-1");
     const body = createBody?.body as string;
     expect(body.startsWith("<!-- wardby:run-1 -->\n")).toBe(true);
     expect(body).toContain("Added a hello.py script and confirmed it runs.");
@@ -449,7 +449,7 @@ describe("GitHubAppClient", () => {
     expect(body).not.toContain("**Refused:**");
   });
 
-  it("prefixes the PR title with a caller-provided tag, leaving it unchanged when absent", async () => {
+  it("suffixes the PR title with a tag that is an issue key, and builds it from the model's commit fields", async () => {
     let createBody: Record<string, unknown> | undefined;
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       const url = String(input);
@@ -471,8 +471,9 @@ describe("GitHubAppClient", () => {
       baseRef: "main",
       headRef: "wardby/run-run-1",
       tag: "JIRA-123",
+      commit: { type: "feat", scope: "webhooks", title: "add retry to Jira webhook delivery" },
     });
-    expect(createBody?.title).toBe("[JIRA-123] Wardby run run-1");
+    expect(createBody?.title).toBe("feat(webhooks): add retry to Jira webhook delivery (JIRA-123)");
   });
 
   it("normalizes the URL returned by a successful draft PR creation", async () => {
@@ -1349,14 +1350,23 @@ describe("pull request issue reference", () => {
     expect(PR_GITHUB_ISSUE_KEY.source).toBe(GITHUB_ISSUE_KEY.source);
     expect(PR_GITHUB_ISSUE_KEY.flags).toBe(GITHUB_ISSUE_KEY.flags);
     const github = { key: "acme/app#7", url: "https://github.com/acme/app/issues/7", trackerName: "GitHub" };
-    expect(pullRequestTitle({ ...base, issue: github })).toBe("Wardby run run-1");
+    expect(pullRequestTitle({ ...base, issue: github })).toBe("chore: Wardby run run-1");
     expect(pullRequestBody({ ...base, issue: github })).not.toContain("acme/app#7");
   });
 
-  it("prefixes the title with the key, keeping the model tag after it", () => {
-    expect(pullRequestTitle({ ...base, issue })).toBe("[PROJ-123] Wardby run run-1");
-    expect(pullRequestTitle({ ...base, tag: "fix-login", issue })).toBe("[PROJ-123] [fix-login] Wardby run run-1");
-    expect(pullRequestTitle({ ...base, tag: "fix-login" })).toBe("[fix-login] Wardby run run-1");
+  it("suffixes the title with the key; a tag that is only a label stays out of it", () => {
+    const commit = { type: "fix", scope: "auth", title: "reject expired viewer tokens" };
+    expect(pullRequestTitle({ ...base, commit, issue })).toBe("fix(auth): reject expired viewer tokens (PROJ-123)");
+    expect(pullRequestTitle({ ...base, commit, tag: "fix-login", issue })).toBe(
+      "fix(auth): reject expired viewer tokens (PROJ-123)",
+    );
+    expect(pullRequestTitle({ ...base, commit, tag: "fix-login" })).toBe("fix(auth): reject expired viewer tokens");
+    expect(pullRequestTitle({ ...base, commit, tag: "GH-42" })).toBe("fix(auth): reject expired viewer tokens (GH-42)");
+  });
+
+  it("falls back to a conventional chore title when the model gave no commit fields", () => {
+    expect(pullRequestTitle({ ...base, issue })).toBe("chore: Wardby run run-1 (PROJ-123)");
+    expect(pullRequestTitle({ ...base, commit: { type: "feature", title: "add it" } })).toBe("chore: add it");
   });
 
   it("puts the issue link first, right after the hidden run marker", () => {
@@ -1373,7 +1383,7 @@ describe("pull request issue reference", () => {
     const body = pullRequestBody({ ...base, summary: "Did it.", issueNumber: 12 });
     expect(body.split("\n\n").slice(0, 3)).toEqual(["<!-- wardby:run-1 -->", "From issue #12", "Did it."]);
     expect(hasClosingKeyword(body)).toBe(false);
-    expect(pullRequestTitle({ ...base, issueNumber: 12 })).toBe("Wardby run run-1");
+    expect(pullRequestTitle({ ...base, issueNumber: 12 })).toBe("chore: Wardby run run-1");
     // A tracker issue's line wins; a bad number renders nothing.
     expect(pullRequestBody({ ...base, summary: "Did it.", issue, issueNumber: 12 })).not.toContain("issue #12");
     for (const issueNumber of [0, -1, 1.5, Number.NaN]) {
@@ -1414,12 +1424,12 @@ describe("pull request issue reference", () => {
 
   it("drops a malformed key from both title and body", () => {
     for (const key of ["proj-1", "PROJ-0", "PROJ-1\n# x", "[PROJ-1]", "PROJ", "a b-1"]) {
-      expect(pullRequestTitle({ ...base, issue: { key, url: issue.url } })).toBe("Wardby run run-1");
+      expect(pullRequestTitle({ ...base, issue: { key, url: issue.url } })).toBe("chore: Wardby run run-1");
       expect(pullRequestBody({ ...base, issue: { key, url: issue.url } })).not.toContain("Resolves");
     }
   });
 
-  it("keeps the title prefix but omits the link when the url is missing or not https", () => {
+  it("keeps the title key but omits the link when the url is missing or not https", () => {
     for (const url of [
       undefined,
       "http://example.atlassian.net/browse/PROJ-123",
@@ -1427,7 +1437,7 @@ describe("pull request issue reference", () => {
       "https://x/a b",
     ]) {
       const input = { ...base, issue: { key: "PROJ-123", url } };
-      expect(pullRequestTitle(input)).toBe("[PROJ-123] Wardby run run-1");
+      expect(pullRequestTitle(input)).toBe("chore: Wardby run run-1 (PROJ-123)");
       expect(pullRequestBody(input)).not.toContain("Resolves");
     }
   });

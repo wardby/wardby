@@ -11,10 +11,14 @@
  * Kept free of imports from npm.ts, which imports this module.
  */
 import semver from "semver";
+import { PUBLIC_NPM_REGISTRY, npmUpstreamFor } from "./private-registry.js";
+import type { PrivateRegistry } from "./types.js";
 
-const PUBLIC_REGISTRY = "https://registry.npmjs.org/";
+const PUBLIC_REGISTRY = PUBLIC_NPM_REGISTRY;
 /** Same shape as the adapter's allowlist name check (scoped names are lower case). */
 export const PACKAGE_NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/[a-z0-9-~][a-z0-9-._~]*|[A-Za-z0-9-~][A-Za-z0-9-._~]*)$/;
+/** An npm scope, `@acme`. */
+export const PACKAGE_SCOPE = /^@[a-z0-9-~][a-z0-9-._~]*$/;
 /** A `"resolved": "<value>"` pair whose value has no JSON escapes. */
 const RESOLVED = /("resolved"\s*:\s*")([^"\\]*)(")/g;
 
@@ -62,11 +66,17 @@ export function publicNpmTarballUrl(name: string, version: string): string {
   return `${PUBLIC_REGISTRY}${name}/-/${unscoped(name)}-${version}.tgz`;
 }
 
-export function normalizeNpmLockfile(content: string, registryUrl: string): string {
+/** The download URL a lockfile records for `name`: the private registry's
+ *  for a name in its scopes, the public registry's for every other. */
+export function npmTarballUrl(name: string, version: string, privateRegistry?: PrivateRegistry): string {
+  return `${npmUpstreamFor(name, privateRegistry)}${name}/-/${unscoped(name)}-${version}.tgz`;
+}
+
+export function normalizeNpmLockfile(content: string, registryUrl: string, privateRegistry?: PrivateRegistry): string {
   const base = registryUrl.endsWith("/") ? registryUrl : `${registryUrl}/`;
   return content.replace(RESOLVED, (match, open: string, url: string, close: string) => {
     if (!url.startsWith(base)) return match;
     const target = parseProxyPath(url.slice(base.length));
-    return target ? `${open}${publicNpmTarballUrl(target.name, target.version)}${close}` : match;
+    return target ? `${open}${npmTarballUrl(target.name, target.version, privateRegistry)}${close}` : match;
   });
 }

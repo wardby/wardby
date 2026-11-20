@@ -7,6 +7,7 @@ import type {
   ApprovedDownload,
   ApprovedVersion,
   PlanRefusedVersion,
+  PlanStart,
   RegistryAuditInsert,
   RegistryFetchRecord,
   RegistryRunContext,
@@ -304,6 +305,85 @@ export class PrismaRegistryStore implements RegistryStore {
         AND "dependencyCacheSealedAt" IS NULL
         AND NOT (${lockHash} = ANY("dependencyCacheLockHashes"))
         AND cardinality("dependencyCacheLockHashes") < ${max}`;
+  }
+
+  async planFallback(runId: string): Promise<string[]> {
+    const session = await this.db.codingProxySession.findUnique({
+      where: { runId },
+      select: { registryPlanFallback: true },
+    });
+    return session?.registryPlanFallback ?? [];
+  }
+
+  async addPlanFallback(runId: string, ecosystem: string): Promise<void> {
+    await this.db.$executeRaw`
+      UPDATE "CodingProxySession"
+      SET "registryPlanFallback" = array_append(COALESCE("registryPlanFallback", ARRAY[]::TEXT[]), ${ecosystem})
+      WHERE "runId" = ${runId}
+        AND NOT (${ecosystem} = ANY(COALESCE("registryPlanFallback", ARRAY[]::TEXT[])))`;
+  }
+
+  async startPlan(runId: string, input: { max: number; leaseUntil: Date; now: Date }): Promise<PlanStart> {
+    // One UPDATE with its conditions in the WHERE, so two replicas can never both start a plan the run's
+    // lease or limit forbids.
+    const { count: started } = await this.db.codingProxySession.updateMany({
+      where: {
+        runId,
+        registryPlans: { lt: input.max },
+        OR: [{ registryPlanLeaseUntil: null }, { registryPlanLeaseUntil: { lte: input.now } }],
+      },
+      data: { registryPlans: { increment: 1 }, registryPlanLeaseUntil: input.leaseUntil },
+    });
+    if (started > 0) return "started";
+    const session = await this.db.codingProxySession.findUnique({
+      where: { runId },
+      select: { registryPlanLeaseUntil: true },
+    });
+    return session?.registryPlanLeaseUntil && session.registryPlanLeaseUntil > input.now ? "busy" : "limit";
+  }
+
+  async endPlan(runId: string): Promise<void> {
+    await this.db.codingProxySession.updateMany({ where: { runId }, data: { registryPlanLeaseUntil: null } });
+  }
+
+  async reserveDownload(
+    runId: string,
+    input: { sizeBytes: number | null; maxFiles: number; leaseUntil: Date; now: Date },
+  ): Promise<string | null> {
+    return this.db.$transaction(async (tx) => {
+      // The session row is the run's lock: reservations of one run are admitted one at a time, across replicas.
+      await tx.$queryRaw`SELECT 1 FROM "CodingProxySession" WHERE "runId" = ${runId} FOR UPDATE`;
+      await tx.registryReservation.deleteMany({ where: { runId, expiresAt: { lte: input.now } } });
+      const served = await tx.registryFetch.count({ where: { runId, outcome: "served" } });
+      const held = await tx.registryReservation.count({ where: { runId } });
+      if (served + held >= input.maxFiles) return null;
+      const row = await tx.registryReservation.create({
+        data: { runId, bytes: input.sizeBytes ?? 0, expiresAt: input.leaseUntil },
+        select: { id: true },
+      });
+      return row.id;
+    });
+  }
+
+  async syncDownload(
+    runId: string,
+    reservationId: string,
+    input: { streamedBytes: number | null; leaseUntil: Date; now: Date },
+  ): Promise<number> {
+    await this.db.registryReservation.updateMany({
+      where: { id: reservationId },
+      data: { expiresAt: input.leaseUntil, ...(input.streamedBytes !== null ? { bytes: input.streamedBytes } : {}) },
+    });
+    const served = await this.usage(runId);
+    const held = await this.db.registryReservation.aggregate({
+      where: { runId, expiresAt: { gt: input.now } },
+      _sum: { bytes: true },
+    });
+    return served.bytes + (held._sum.bytes ?? 0);
+  }
+
+  async releaseDownload(reservationId: string): Promise<void> {
+    await this.db.registryReservation.deleteMany({ where: { id: reservationId } });
   }
 }
 

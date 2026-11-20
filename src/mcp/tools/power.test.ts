@@ -103,7 +103,7 @@ describe("power tools", () => {
       const client = await connect(who, power);
       const r = await client.callTool({ name, arguments: args });
       expect(r.isError).toBe(true);
-      expect(text(r)).toMatch(/requires a role that grants it \(admin\)/);
+      expect(text(r)).toMatch(/requires a role that grants it \(admin or wardby_owner\)/);
       expect(power.sleepNow).not.toHaveBeenCalled();
       expect(power.status).not.toHaveBeenCalled();
       await client.close();

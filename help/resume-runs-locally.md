@@ -51,6 +51,9 @@ blob store nothing is stored, and `update_agent` warns you.
 - Stored gzip-compressed under the `run-transcripts/` prefix. When the run's
   context was compacted, only what a resume loads is kept: the last
   compaction's summary, the messages it kept, and everything after it.
+- Captured after the run ends and before its job is removed. A pod that cannot be
+  read is retried up to five times before the run records `not_captured`; if the
+  job is already gone the run records `not_captured` at once.
 - At most `RUN_TRANSCRIPT_MAX_BYTES` per run, measured before compression
   (default 10 MiB, at most 64 MiB). Each run records a status (`stored`,
   `too_large`, `not_captured` or `failed`) with a reason code.

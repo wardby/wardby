@@ -346,6 +346,19 @@ export function imageVariable(value: string | undefined): string | undefined {
   return value?.trim() || undefined;
 }
 
+/** Python versions a node-python image can be selected for. Each one needs its own `<prefix>_<major>_<minor>` variable. */
+export const NODE_PYTHON_VERSIONS = ["3.12", "3.13", "3.14"] as const;
+
+/** The configured node-python images keyed by `toolchainVersion`, or undefined when none is set. */
+function nodePythonImages(env: NodeJS.ProcessEnv, prefix: string): Record<string, string> | undefined {
+  const images: Record<string, string> = {};
+  for (const version of NODE_PYTHON_VERSIONS) {
+    const image = imageVariable(env[`${prefix}_${version.replace(".", "_")}`]);
+    if (image) images[version] = image;
+  }
+  return Object.keys(images).length > 0 ? images : undefined;
+}
+
 function commandTimeoutVariable(env: NodeJS.ProcessEnv, name: string): number | undefined {
   const raw = env[name]?.trim();
   if (raw === undefined || raw === "") return undefined;
@@ -389,11 +402,11 @@ export function loadClaudeCommandTimeouts(env: NodeJS.ProcessEnv = process.env):
 
 export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env): ContainerExecutorConfig {
   const additionalWorkerImages: Record<string, Record<string, string>> = {};
-  const nodePythonWorker = imageVariable(env.CODING_WORKER_IMAGE_NODE_PYTHON_3_12);
-  if (nodePythonWorker) additionalWorkerImages["node-python"] = { "3.12": nodePythonWorker };
+  const nodePythonWorkers = nodePythonImages(env, "CODING_WORKER_IMAGE_NODE_PYTHON");
+  if (nodePythonWorkers) additionalWorkerImages["node-python"] = nodePythonWorkers;
   const claudeToolRunnerImages: Record<string, Record<string, string>> = {};
-  const nodePythonToolRunner = imageVariable(env.CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12);
-  if (nodePythonToolRunner) claudeToolRunnerImages["node-python"] = { "3.12": nodePythonToolRunner };
+  const nodePythonToolRunners = nodePythonImages(env, "CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON");
+  if (nodePythonToolRunners) claudeToolRunnerImages["node-python"] = nodePythonToolRunners;
   const diskMb = optionalPositiveInteger(env.CODING_DISK_MB, "CODING_DISK_MB") ?? 2048;
   // Defaults to the effective diskMb: raising the ceiling an agents:write caller can request is an
   // explicit operator choice, so upgrading with an unchanged environment changes nothing.

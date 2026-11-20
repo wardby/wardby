@@ -9,7 +9,7 @@ deployment.
 It is **deployment-wide**. Unlike the MCP tools, which show a caller their own
 and public agents, the viewer shows **every owner's** runs. For that reason it
 requires the privileged `admin:view` scope, and that scope is granted only by
-the `admin` role.
+the `admin` role or the read-only `viewer` role.
 
 ## Access
 
@@ -20,14 +20,15 @@ same `admin:view` scope and `admin` role, and are refused otherwise. Their
 `trigger` and `outcomes` here; `serviceReadiness` is `services` without `reason`.
 
 A caller needs an access token for the Wardby MCP resource that carries the
-`admin:view` scope, and the Wardby `admin` role. Send it as
+`admin:view` scope, and the Wardby `admin` or `viewer` role. Send it as
 `Authorization: Bearer <token>`.
 
-- **Self-hosted sign-in:** the `admin` role grants `admin:view`. A client
+- **Self-hosted sign-in:** the `admin` and `viewer` roles grant `admin:view`. A client
   requests the scope during sign-in like any other.
 - **External identity provider (delegating mode):** define the `admin:view`
   scope in the provider and map it the same way as `agents:admin`, and map the
-  provider's admin group to the Wardby `admin` role. When you upgrade an
+  provider's admin group to the Wardby `admin` role, or a read-only group to
+  the `viewer` role. When you upgrade an
   existing deployment, define the scope before deploying: clients that request
   every advertised scope otherwise fail with `invalid_scope`. See
   [getting-started-identity-provider.md](getting-started-identity-provider.md).
@@ -55,13 +56,13 @@ mode. See the help article `mobile-app`.
 
 All five endpoints accept only `GET`.
 
-| Status | Meaning                                                           |
-| ------ | ----------------------------------------------------------------- |
-| `401`  | No valid access token.                                            |
-| `403`  | The token lacks `admin:view`, or the caller lacks the admin role. |
-| `400`  | `invalid_since` or `invalid_limit` (graph and documents only).    |
-| `404`  | Unknown run id (run detail only).                                 |
-| `405`  | A method other than `GET`.                                        |
+| Status | Meaning                                                                     |
+| ------ | --------------------------------------------------------------------------- |
+| `401`  | No valid access token.                                                      |
+| `403`  | The token lacks `admin:view`, or the caller lacks the admin or viewer role. |
+| `400`  | `invalid_since` or `invalid_limit` (graph and documents only).              |
+| `404`  | Unknown run id (run detail only).                                           |
+| `405`  | A method other than `GET`.                                                  |
 
 ### `GET /admin/api/graph`
 
@@ -235,7 +236,7 @@ operator's own kubeconfig; the README lists the Kubernetes Role it needs.
 
 `docs/viewer-api.openapi.yml` (OpenAPI 3.1) is the machine-readable contract
 for all five endpoints: bearer authentication (`admin:view` scope and the
-`admin` role), query parameters, error responses and their codes, and the
+`admin` or `viewer` role), query parameters, error responses and their codes, and the
 component schemas for every response and event. It ships in the npm package, so
 `npm pack @wardby/cli@<version>` fetches it without installing anything.
 

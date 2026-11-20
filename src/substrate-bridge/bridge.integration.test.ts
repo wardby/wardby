@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseToolSetup } from "../claude-tool-runner/command.mjs";
 import { claudeToolSetup } from "../providers/jobs/claude-tool-setup.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
@@ -455,6 +455,8 @@ describe("substrate bridges, end to end without Substrate", () => {
     it("runs by default: a bridge started without imageCheck checks its image", async () => {
       const { workspace } = await stage();
       let launched = false;
+      // The default check reads the process uid and refuses root as `user`; CI agents run as root.
+      const getuid = vi.spyOn(process, "getuid").mockReturnValue(10001);
       const error = (await startTool(workspace, "", {
         imageCheck: undefined,
         runnerEntry: join(dir, "missing.mjs"),
@@ -462,7 +464,9 @@ describe("substrate bridges, end to end without Substrate", () => {
           launched = true;
           return { ready: Promise.resolve(), exited: new Promise<number>(() => undefined) };
         },
-      }).catch((e: unknown) => e)) as ImageIncompleteError;
+      })
+        .catch((e: unknown) => e)
+        .finally(() => getuid.mockRestore())) as ImageIncompleteError;
       expect(error).toBeInstanceOf(ImageIncompleteError);
       expect(error.item).toBe("runner");
       expect(JSON.parse((await blobs.get(BLOB.imageIncomplete(TOKEN))).toString())).toEqual({ item: "runner" });

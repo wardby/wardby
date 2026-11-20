@@ -59,7 +59,11 @@ const registryLog = logger.child({ module: "coding-registry" });
  *  this, a proxy database role missing its grants (permission denied) was
  *  indistinguishable from an upstream outage: an unlogged 502 to npm or pip.
  *  Expected refusals (4xx) stay unlogged here: they are recorded per run. */
-function logRegistryFailure(route: "handle" | "plan" | "refusals", ecosystem: string, error: unknown): void {
+function logRegistryFailure(
+  route: "handle" | "plan" | "refusals" | "origins",
+  ecosystem: string,
+  error: unknown,
+): void {
   if (error instanceof RegistryError) {
     if (error.status >= 500) {
       registryLog.warn(
@@ -76,7 +80,20 @@ function logRegistryFailure(route: "handle" | "plan" | "refusals", ecosystem: st
     }
     return;
   }
-  registryLog.error({ event: "registry.failed", route, ecosystem, err: error }, "coding registry request failed");
+  registryLog.error(
+    { event: "registry.failed", route, ecosystem, err: error, cause: describeCause(error) },
+    "coding registry request failed",
+  );
+}
+
+/** What an error wrapped (`proxy_egress_blocked` hides its reason in `cause`,
+ *  which a stack trace does not print). Name, code and message only: never a
+ *  URL or header, which may carry a credential or a signed query. */
+function describeCause(error: unknown): { name: string; code?: unknown; message: string } | undefined {
+  const cause = error instanceof Error ? error.cause : undefined;
+  if (!(cause instanceof Error)) return undefined;
+  const code = (cause as { code?: unknown }).code;
+  return { name: cause.name, ...(code !== undefined ? { code } : {}), message: cause.message };
 }
 
 const DAY_MS = 86_400_000;
@@ -135,12 +152,35 @@ const MAX_VERSION_DOCUMENT_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_PLAN_CONCURRENCY = 2;
 /** Lockfile plans one run may make (REGISTRY_PLAN_MAX_PER_RUN). */
 export const DEFAULT_PLAN_MAX_PER_RUN = 20;
+/** How long past its own time bounds a run's plan lease lasts, so a replica that dies mid-plan does not
+ *  block the run's later plans for long. */
+const PLAN_LEASE_MARGIN_MS = 60_000;
+/** Parse bound assumed for the plan lease when `planParseTimeoutMs` is unset (lockfile-parse.ts's default). */
+const ASSUMED_PLAN_PARSE_TIMEOUT_MS = 15_000;
+/** How long past the idle timeout a download's reservation lasts without being extended, so a replica that
+ *  dies mid-download stops counting against the run's limits soon after. */
+const RESERVATION_LEASE_MARGIN_MS = 60_000;
+/** A streaming download re-reads the run's byte total (and extends its lease) at most this often... */
+const TOTAL_SYNC_INTERVAL_MS = 1_000;
+/** ...or once this many unreserved bytes have streamed since the last read, whichever comes first. */
+const TOTAL_SYNC_BYTES = 1024 * 1024;
 /** The `filename` of a refused RegistryFetch row a lockfile plan recorded
  *  (the route it came from), which is how get_run tells plan refusals from
  *  download refusals. */
 export const PLAN_FETCH_FILENAME = PLAN_REFUSAL_FILENAME;
 /** Largest lockfile a plan reads (the HTTP layer enforces it: 413). */
 export const MAX_PLAN_BODY_BYTES = 20 * 1024 * 1024;
+/** Largest request the origins route reads (the HTTP layer enforces it: 413). */
+export const MAX_ORIGINS_BODY_BYTES = 1024 * 1024;
+/** Files and distinct projects one origins request may ask about; a client sends a long lockfile in several requests. */
+export const MAX_ORIGIN_FILES = 1000;
+export const MAX_ORIGIN_PROJECTS = 200;
+const MAX_ORIGIN_NAME_CHARS = MAX_RECORDED_NAME;
+const MAX_ORIGIN_FILENAME_CHARS = 512;
+/** Longest file address the origins route returns, so its answer stays bounded whatever an index lists. */
+const MAX_ORIGIN_URL_CHARS = 1024;
+/** Projects whose index is read at once by one origins request. */
+const ORIGINS_CONCURRENCY = 4;
 
 /** Why a graph node could not be expanded: its OSV audit or its upstream
  *  metadata was unavailable. */
@@ -342,38 +382,23 @@ export interface RegistryLimits {
 }
 export const DEFAULT_MAX_REFUSAL_RECORDS = 500;
 
-/** Per-run in-process tallies, seeded from the store on first use and
- *  dropped once the run's registry token has expired. Like `inFlight`,
- *  they hold per replica (the proxy runs as one). */
+/** Per-run in-process state, dropped once the run's registry token has
+ *  expired. Only caches and de-duplication live here: what limits a run
+ *  (served files and bytes, in-flight downloads, the plan count and lease,
+ *  the plan fallback) is in the store, shared by every proxy replica. */
 interface RunTally {
   deadline: number;
   /** Drops this tally (and its graph walks) when the run's deadline passes. */
   timer?: NodeJS.Timeout;
   refused?: number;
-  /** Served files and bytes, kept live as downloads complete, so a download
-   *  that started before another finished still counts it (a one-off
-   *  `usage()` snapshot would not). */
-  served?: { files: number; bytes: number };
   /** On-demand dependency-graph walks, keyed by ecosystem. */
   graphs?: Map<string, GraphWalk>;
-  /** A lockfile plan is running for the run: one at a time per run, so a
-   *  worker cannot queue many (each holds its parsed lockfile). */
-  planning?: boolean;
-  /** Lockfile plans the run has started. */
-  plans?: number;
   /** Downloads answered from a plan refusal already recorded, so a
    *  retried download records its refusal once. */
   planAnswered?: Set<string>;
   /** Plan refusals already recorded (`ecosystem\0name@version\0code`), so
    *  a lockfile planned again records each refusal once. */
   planRefusals?: Set<string>;
-  /** Ecosystems where a lockfile plan of this run failed (any error
-   *  answer) or refused an entry. There, the lockfile's packages may have
-   *  no allowance (npm re-reads their metadata, or inflates an old
-   *  lockfile, in no top-down order), so a metadata miss walks the graph
-   *  like a download does. Never cleared for the run. Per proxy process,
-   *  like the graph walks. */
-  planFallback?: Set<string>;
 }
 export type RegistryResponse =
   | { status: number; contentType: string; body: string }
@@ -410,6 +435,67 @@ export interface RegistryPlanRequest {
   signal: AbortSignal;
   /** As RegistryRequest.host: a guard-validated `Host`, or absent. */
   host?: string;
+}
+
+export interface RegistryOriginsRequest {
+  ecosystem: string;
+  token: string;
+  /** Reads the request body (at most MAX_ORIGINS_BODY_BYTES). Called once the token is authenticated. Throws a
+   *  RegistryError (413 or 400) for a body it cannot read. */
+  readBody(): Promise<string>;
+  signal: AbortSignal;
+}
+
+/** Per-item error codes of the origins route (documented in help/errors/coding-pypi-lockfile-unresolved.md). */
+type OriginError =
+  | "wardby_origin_name_invalid"
+  | "wardby_origin_not_allowed"
+  | "wardby_origin_file_unknown"
+  | "wardby_origin_url_unsafe"
+  | "wardby_origin_unavailable";
+type OriginAnswer = { url: string } | { error: OriginError };
+
+/** The address to hand back for a file, or null when it must not leave the proxy: not https, carrying credentials, or a
+ *  query (where a signed token would sit). A fragment (a hash) is dropped. */
+function publishableOrigin(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "") return null;
+  url.hash = "";
+  const text = url.toString();
+  return text.length <= MAX_ORIGIN_URL_CHARS ? text : null;
+}
+
+function parseOriginsRequest(raw: string): { name: string; filename: string }[] {
+  const bad = (message: string) => new RegistryError(400, "wardby_bad_request", message);
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw bad("the request must be JSON");
+  }
+  const files = (value as { files?: unknown } | null)?.files;
+  if (!Array.isArray(files)) throw bad('the request needs a "files" list');
+  if (files.length > MAX_ORIGIN_FILES) throw bad(`at most ${MAX_ORIGIN_FILES} files per request`);
+  return files.map((item: unknown) => {
+    const { name, filename } = (item ?? {}) as { name?: unknown; filename?: unknown };
+    if (typeof name !== "string" || name === "" || name.length > MAX_ORIGIN_NAME_CHARS)
+      throw bad("each file needs a project name");
+    if (
+      typeof filename !== "string" ||
+      filename === "" ||
+      filename.length > MAX_ORIGIN_FILENAME_CHARS ||
+      filename === ".." ||
+      /[/\\]/.test(filename) ||
+      [...filename].some((char) => char.charCodeAt(0) < 0x20)
+    )
+      throw bad("each file needs a file name");
+    return { name, filename };
+  });
 }
 
 function contentTypeOf(route: DownloadRoute | FileMetadataRoute): string {
@@ -531,15 +617,6 @@ export class RegistryService {
   private readonly metadataCacheEntries: number;
   private readonly metadataCacheBytes: number;
   private readonly metadataUpstream: UpstreamFetch;
-  /** Per-run in-flight download usage: files and bytes reserved by downloads
-   *  that are streaming right now but not yet recorded to the store. Without
-   *  this, `usage()` (which only counts already-served rows) is read once
-   *  per request, so concurrent downloads for the same run (e.g. npm's
-   *  parallel installs) count toward neither the file nor the byte limit
-   *  until each finishes, letting them overshoot both. This reservation is
-   *  in-process only — it holds per replica of the registry proxy, not
-   *  across replicas. */
-  private readonly inFlight = new Map<string, { files: number; bytes: number }>();
   private readonly tallies = new Map<string, RunTally>();
   /** Expanded packages of the graph walks (`runId\0ecosystem\0name`),
    *  least recently used first, so a package reached again under a new
@@ -665,6 +742,115 @@ export class RegistryService {
     }
   }
 
+  /**
+   * `POST /registry/<ecosystem>/-/origins`: the real upstream address of each (project, file) the run may be served,
+   * and the index address a lockfile's `registry =` entry carries, so a lockfile written through the proxy can be
+   * pointed back at the registry the proxy itself reads. Authenticated with the run's registry token. It answers only
+   * what the same token could be served by a metadata request (an allowlisted or approved project, a file the filtered
+   * index lists), per item: `{ name, filename, url }` or `{ name, filename, error }`. Never carries a credential: an
+   * address with userinfo or a query is withheld, and no answer or log names a token. Nothing is stored.
+   */
+  async origins(request: RegistryOriginsRequest): Promise<RegistryResponse> {
+    try {
+      return await this.resolveOrigins(request);
+    } catch (error) {
+      logRegistryFailure("origins", request.ecosystem, error);
+      if (error instanceof RegistryError) return errorResponse(error);
+      return errorResponse(new RegistryError(502, "wardby_upstream_error", "the file addresses could not be resolved"));
+    }
+  }
+
+  private async resolveOrigins(request: RegistryOriginsRequest): Promise<RegistryResponse> {
+    const adapter = this.options.adapters.get(request.ecosystem);
+    if (!adapter) throw new RegistryError(404, "wardby_registry_unknown", `no registry named "${request.ecosystem}"`);
+    const context = await this.options.store.findRunByRegistryTokenHash(capabilityHash(request.token), this.now());
+    if (!context) throw new RegistryError(401, "invalid_capability", "the registry token is not valid for a live run");
+    const index = adapter.lockfileIndexUrl;
+    if (!index)
+      throw new RegistryError(
+        404,
+        "wardby_origins_unsupported",
+        `the ${adapter.id} registry has no file addresses to give`,
+      );
+    const items = parseOriginsRequest(await request.readBody());
+    // Each project once, under its canonical name (a malformed name is that item's error, not the request's).
+    const filenamesByProject = new Map<string, Set<string>>();
+    const projectOf: (string | null)[] = items.map((item) => {
+      try {
+        const route = adapter.route("GET", `simple/${encodeURIComponent(item.name)}/`, new Headers());
+        if (route?.kind !== "metadata") return null;
+        const name = adapter.normalizeName(route.name);
+        let filenames = filenamesByProject.get(name);
+        if (!filenames) filenamesByProject.set(name, (filenames = new Set()));
+        filenames.add(item.filename);
+        return name;
+      } catch {
+        return null;
+      }
+    });
+    if (filenamesByProject.size > MAX_ORIGIN_PROJECTS)
+      throw new RegistryError(400, "wardby_bad_request", `at most ${MAX_ORIGIN_PROJECTS} projects per request`);
+    const answers = new Map<string, Map<string, OriginAnswer>>();
+    const projects = [...filenamesByProject];
+    for (let start = 0; start < projects.length; start += ORIGINS_CONCURRENCY) {
+      if (request.signal.aborted) throw new RegistryError(499, "wardby_request_aborted", "the request was cancelled");
+      await Promise.all(
+        projects.slice(start, start + ORIGINS_CONCURRENCY).map(async ([name, filenames]) => {
+          answers.set(name, await this.originsOfProject(adapter, context, name, [...filenames]));
+        }),
+      );
+    }
+    const files = items.map((item, position) => {
+      const name = projectOf[position];
+      const answer: OriginAnswer =
+        name === null
+          ? { error: "wardby_origin_name_invalid" }
+          : (answers.get(name)?.get(item.filename) ?? { error: "wardby_origin_unavailable" });
+      return { name: item.name, filename: item.filename, ...answer };
+    });
+    return { status: 200, contentType: "application/json", body: JSON.stringify({ index, files }) };
+  }
+
+  /** One project's files: authorized exactly as its metadata request is, then looked up in the index as that request
+   *  would list it (release age, advisories and the root's range applied). */
+  private async originsOfProject(
+    adapter: RegistryAdapter,
+    context: RegistryRunContext,
+    name: string,
+    filenames: string[],
+  ): Promise<Map<string, OriginAnswer>> {
+    const answers = new Map<string, OriginAnswer>();
+    const failAll = (error: OriginError) => {
+      for (const filename of filenames) answers.set(filename, { error });
+      return answers;
+    };
+    let meta: PackageMetadata;
+    let keptFiles: Set<string>;
+    try {
+      const { root } = await this.authorize(adapter, context, name, "metadata");
+      meta = await this.metadata(adapter, name, false);
+      ({ keptFiles } = await this.keptVersions(adapter, context, meta, root));
+    } catch (error) {
+      if (error instanceof RegistryError) {
+        if (error.status === 403) return failAll("wardby_origin_not_allowed");
+        if (error.code === "wardby_package_not_found") return failAll("wardby_origin_file_unknown");
+      } else logRegistryFailure("origins", adapter.id, error);
+      return failAll("wardby_origin_unavailable");
+    }
+    const listed = new Map<string, FileRef>();
+    for (const info of meta.versions.values()) for (const file of info.files) listed.set(file.filename, file);
+    for (const filename of filenames) {
+      const file = listed.get(filename);
+      if (!file || !keptFiles.has(filename)) {
+        answers.set(filename, { error: "wardby_origin_file_unknown" });
+        continue;
+      }
+      const url = this.hostAllowed(adapter, file.upstreamUrl, name) ? publishableOrigin(file.upstreamUrl) : null;
+      answers.set(filename, url === null ? { error: "wardby_origin_url_unsafe" } : { url });
+    }
+    return answers;
+  }
+
   private async planLockfile(request: RegistryPlanRequest): Promise<RegistryResponse> {
     const adapter = this.options.adapters.get(request.ecosystem);
     if (!adapter) throw new RegistryError(404, "wardby_registry_unknown", `no registry named "${request.ecosystem}"`);
@@ -674,11 +860,12 @@ export class RegistryService {
     const auditVersions = this.options.audit.auditVersions?.bind(this.options.audit);
     if (!support || !auditVersions)
       throw new RegistryError(404, "wardby_plan_unsupported", `the ${adapter.id} registry does not verify lockfiles`);
-    const tally = this.tally(context);
     try {
-      return await this.runPlan(request, adapter, support, auditVersions, context, tally);
+      return await this.runPlan(request, adapter, support, auditVersions, context);
     } catch (error) {
-      (tally.planFallback ??= new Set()).add(adapter.id);
+      // A failed plan leaves the lockfile's packages without allowances: metadata misses walk for the rest
+      // of the run, on every replica. The plan's own error is the one to show, so a failed write is dropped.
+      await this.options.store.addPlanFallback(context.runId, adapter.id).catch(() => undefined);
       throw error;
     }
   }
@@ -689,23 +876,32 @@ export class RegistryService {
     support: LockfilePlanSupport,
     auditVersions: OsvAudit["auditVersions"],
     context: RegistryRunContext,
-    tally: RunTally,
   ): Promise<RegistryResponse> {
-    if (tally.planning)
+    const maxPlans = this.options.planMaxPerRun ?? DEFAULT_PLAN_MAX_PER_RUN;
+    // One plan at a time per run, so a worker cannot queue many (each holds its parsed lockfile), and
+    // `maxPlans` in total: both decided in the store, so they hold across every proxy replica.
+    const leaseMs =
+      (this.options.planTimeoutMs ?? DEFAULT_PLAN_TIMEOUT_MS) +
+      (this.options.planParseTimeoutMs ?? ASSUMED_PLAN_PARSE_TIMEOUT_MS) +
+      PLAN_LEASE_MARGIN_MS;
+    const now = this.now();
+    const start = await this.options.store.startPlan(context.runId, {
+      max: maxPlans,
+      leaseUntil: new Date(now.getTime() + leaseMs),
+      now,
+    });
+    if (start === "busy")
       throw new RegistryError(
         429,
         "wardby_plan_in_progress",
         "a lockfile plan is already running for this run; wait for it to finish",
       );
-    const maxPlans = this.options.planMaxPerRun ?? DEFAULT_PLAN_MAX_PER_RUN;
-    if ((tally.plans ?? 0) >= maxPlans)
+    if (start === "limit")
       throw new RegistryError(
         429,
         "wardby_plan_limit",
         `this run has made its ${maxPlans} lockfile plans (REGISTRY_PLAN_MAX_PER_RUN)`,
       );
-    tally.planning = true;
-    tally.plans = (tally.plans ?? 0) + 1;
     try {
       // The body is read only while a slot is held: a queued plan holds no
       // lockfile text, and at most `planConcurrency` bodies exist at once.
@@ -717,6 +913,7 @@ export class RegistryService {
         const parseOptions = {
           maxEntries: this.options.planMaxEntries ?? DEFAULT_PLAN_MAX_ENTRIES,
           proxyRegistryUrl: `${this.proxyBase(request.host)}${adapter.id}/`,
+          ...(support.privateRegistry ? { privateRegistry: support.privateRegistry } : {}),
         };
         // A YAML or yarn lockfile is read in a worker thread with a time
         // bound (lockfile-parse.ts); npm's JSON stays on the event loop.
@@ -729,7 +926,8 @@ export class RegistryService {
         return this.verifyPlan(request, adapter, support, lockfile, auditVersions, context, lockHash);
       });
     } finally {
-      tally.planning = false;
+      // A failed release is swept when the lease lapses.
+      await this.options.store.endPlan(context.runId).catch(() => undefined);
     }
   }
 
@@ -764,7 +962,7 @@ export class RegistryService {
         audit: (versions, auditSignal) => auditVersions(adapter, versions, auditSignal),
         accepted: new Set(acceptedAdvisories),
         auditMode: context.packageAudit,
-        hostAllowed: (url) => this.hostAllowed(adapter, url),
+        hostAllowed: (url, name) => this.hostAllowed(adapter, url, name),
         signal,
       });
     } catch (error) {
@@ -800,7 +998,7 @@ export class RegistryService {
     if (support.approves !== "names") await store.approveVersions(context.runId, adapter.id, result.approved);
     // A plan that refused anything leaves some lockfile packages without an
     // allowance: metadata misses walk for the rest of the run.
-    if (result.refused.length > 0) (this.tally(context).planFallback ??= new Set()).add(adapter.id);
+    if (result.refused.length > 0) await store.addPlanFallback(context.runId, adapter.id);
     // Only verdicts about the registry's name@version itself answer later
     // downloads; a lockfile-dependent one (unreachable, an integrity or
     // source the lockfile claims) must not block the same version reached
@@ -902,7 +1100,7 @@ export class RegistryService {
           allowed: true,
           publishedAt: null,
         };
-        if (!this.hostAllowed(adapter, file.upstreamUrl)) {
+        if (!this.hostAllowed(adapter, file.upstreamUrl, name)) {
           await this.refuse(context, adapter, name, "wardby_upstream_host_not_allowed", file);
           throw new RegistryError(
             502,
@@ -1051,7 +1249,7 @@ export class RegistryService {
     }
     // Each adapter may reach only its own upstream hosts, not every host
     // the pinned fetch allows for the registry as a whole.
-    if (!this.hostAllowed(adapter, file.upstreamUrl)) {
+    if (!this.hostAllowed(adapter, file.upstreamUrl, name)) {
       await this.refuse(context, adapter, name, "wardby_upstream_host_not_allowed", file);
       throw new RegistryError(
         502,
@@ -1102,24 +1300,27 @@ export class RegistryService {
     await store.addAuditedAllowances(context.runId, adapter.id, dependencies, audit.via ?? name);
   }
 
-  private hostAllowed(adapter: RegistryAdapter, url: string): boolean {
+  /** Whether `url` is on a host `name` may be downloaded from: the host of
+   *  that name's own upstream when the adapter has one per name (a private
+   *  scope must never be fetched from the public host, nor the reverse, so
+   *  a document from one cannot point at the other), else any of the
+   *  adapter's hosts. */
+  private hostAllowed(adapter: RegistryAdapter, url: string, name: string): boolean {
     try {
       const parsed = new URL(url);
-      return parsed.protocol === "https:" && adapter.upstreamHosts.includes(parsed.hostname.toLowerCase());
+      const hosts = adapter.hostsFor ? adapter.hostsFor(name) : adapter.upstreamHosts;
+      return parsed.protocol === "https:" && hosts.includes(parsed.hostname.toLowerCase());
     } catch {
       return false;
     }
   }
 
-  /** Served usage for the run, seeded once from the store and then kept
-   *  current in-process as downloads complete. */
-  private async servedUsage(context: RegistryRunContext): Promise<{ files: number; bytes: number }> {
-    const tally = this.tally(context);
-    if (!tally.served) {
-      const recorded = await this.options.store.usage(context.runId);
-      tally.served ??= { files: recorded.files, bytes: recorded.bytes };
-    }
-    return tally.served;
+  /** Whether a lockfile plan of the run failed or refused an entry for this ecosystem. There, the
+   *  lockfile's packages may have no allowance (npm re-reads their metadata, or inflates an old lockfile,
+   *  in no top-down order), so a metadata miss walks the graph like a download does. Never cleared for
+   *  the run; read from the store, so every proxy replica agrees. */
+  private async planFellBack(context: RegistryRunContext, adapter: RegistryAdapter): Promise<boolean> {
+    return (await this.options.store.planFallback(context.runId)).includes(adapter.id);
   }
 
   private async authorize(
@@ -1146,8 +1347,8 @@ export class RegistryService {
       // served (through every other check) and recorded. A download with
       // no metadata first, or a metadata miss once a lockfile plan of the
       // run fell back, cannot say how the package reached the run.
-      const fellBack = this.tally(context).planFallback?.has(adapter.id) ?? false;
-      return { root: undefined, audit: { relation: kind === "download" || fellBack ? "unknown" : "top-level" } };
+      const fellBack = kind === "download" || (await this.planFellBack(context, adapter));
+      return { root: undefined, audit: { relation: fellBack ? "unknown" : "top-level" } };
     }
     // A package manager resolves top-down: it reads a parent's metadata,
     // which records the parent's declared dependencies as allowances,
@@ -1155,7 +1356,7 @@ export class RegistryService {
     // neither a root nor an allowance is therefore refused at once, unless
     // a lockfile plan of this run failed or refused an entry (then the
     // lockfile's packages may lack allowances, and the miss walks).
-    if (kind !== "download" && !this.tally(context).planFallback?.has(adapter.id)) {
+    if (kind !== "download" && !(await this.planFellBack(context, adapter))) {
       await this.refuse(context, adapter, name, PACKAGE_NOT_ALLOWED);
       throw new RegistryError(403, PACKAGE_NOT_ALLOWED, notAllowedMessage(name, adapter.id, entries.length > 0));
     }
@@ -1705,42 +1906,6 @@ export class RegistryService {
     });
   }
 
-  private inFlightUsage(runId: string): { files: number; bytes: number } {
-    return this.inFlight.get(runId) ?? { files: 0, bytes: 0 };
-  }
-
-  /** Reserve one file slot for a download that is about to start, and its
-   *  declared size when known. An unknown size (`null`) reserves no bytes
-   *  up front; those are added incrementally as they stream, via
-   *  `trackStreamedBytes`. */
-  private reserveDownload(runId: string, sizeBytes: number | null): void {
-    const slot = this.inFlight.get(runId) ?? { files: 0, bytes: 0 };
-    slot.files += 1;
-    if (sizeBytes !== null) slot.bytes += sizeBytes;
-    this.inFlight.set(runId, slot);
-  }
-
-  /** Only called for downloads whose declared size was unknown at
-   *  reservation time; adds each chunk's bytes to the in-flight total as it
-   *  arrives, so the shared budget check sees them immediately. */
-  private trackStreamedBytes(runId: string, delta: number): void {
-    const slot = this.inFlight.get(runId);
-    if (slot) slot.bytes += delta;
-  }
-
-  /** Release a download's reservation on every exit path (served, failed,
-   *  cancelled, or refused before it ever reserved streaming). Undoes
-   *  exactly what was reserved: the declared size when known, or the bytes
-   *  actually streamed when it was not. */
-  private releaseDownload(runId: string, sizeBytes: number | null, streamedBytes: number): void {
-    const slot = this.inFlight.get(runId);
-    if (!slot) return;
-    slot.files = Math.max(0, slot.files - 1);
-    slot.bytes = Math.max(0, slot.bytes - (sizeBytes ?? streamedBytes));
-    if (slot.files === 0 && slot.bytes === 0) this.inFlight.delete(runId);
-    else this.inFlight.set(runId, slot);
-  }
-
   /** The extras the run allows for `name`: those its allowlist entries name
    *  plus those a served parent's dependency line asked of it. They decide
    *  which of the package's extra-gated dependencies its files allow. */
@@ -1807,39 +1972,47 @@ export class RegistryService {
   ): Promise<RegistryResponse> {
     const { limits, store } = this.options;
     const runId = context.runId;
-    const served = await this.servedUsage(context);
-    const flight = this.inFlightUsage(runId);
-    if (served.files + flight.files >= limits.maxFiles) {
+    // Reserve this download's slot in the store first, atomically against the
+    // files already served and every download of the run streaming now, on
+    // this replica or another: a concurrent download for the same run (e.g.
+    // npm installing several dependencies in parallel) sees it at once
+    // rather than racing past the same snapshot. Released on every exit
+    // path below, and swept by its lease if this replica dies first.
+    const reservationLease = () => new Date(this.now().getTime() + limits.idleTimeoutMs + RESERVATION_LEASE_MARGIN_MS);
+    const reservationId = await store.reserveDownload(runId, {
+      sizeBytes: file.sizeBytes,
+      maxFiles: limits.maxFiles,
+      leaseUntil: reservationLease(),
+      now: this.now(),
+    });
+    if (reservationId === null) {
       await this.refuse(context, adapter, name, "wardby_package_limit", file);
       throw new RegistryError(429, "wardby_package_limit", "this run has reached its package file limit");
     }
+    let bytes = 0;
+    let released = false;
+    // Never rejects: a reservation that cannot be dropped is swept when its lease lapses.
+    const release = async () => {
+      if (released) return;
+      released = true;
+      await store.releaseDownload(reservationId).catch(() => undefined);
+    };
+
     if (file.sizeBytes !== null && file.sizeBytes > limits.maxFileBytes) {
+      await release();
       await this.refuse(context, adapter, name, "wardby_package_too_large", file);
       throw new RegistryError(413, "wardby_package_too_large", `"${file.filename}" exceeds the per-file size limit`);
     }
-
-    // Reserve this download's slot before any further await, so a
-    // concurrent download for the same run (e.g. npm installing several
-    // dependencies in parallel) sees it immediately rather than racing past
-    // the same `usage()` snapshot. Released on every exit path below.
-    this.reserveDownload(runId, file.sizeBytes);
-    let bytes = 0;
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      this.releaseDownload(runId, file.sizeBytes, bytes);
-    };
 
     let upstream: Response;
     try {
       upstream = await this.options.upstream(file.upstreamUrl, { signal });
     } catch (error) {
-      release();
+      await release();
       throw error;
     }
     if (!upstream.ok || !upstream.body) {
-      release();
+      await release();
       throw new RegistryError(502, "wardby_upstream_error", `the registry returned ${upstream.status}`);
     }
 
@@ -1868,7 +2041,7 @@ export class RegistryService {
       if (settled) return;
       settled = true;
       clearIdle();
-      release();
+      await release();
       await reader.cancel().catch(() => undefined);
       try {
         await this.refuse(context, adapter, name, reason, file);
@@ -1889,8 +2062,33 @@ export class RegistryService {
       if (settled) return;
       settled = true;
       clearIdle();
-      release();
+      void release();
       controller.error(new RegistryError(499, "client_disconnected", "the client disconnected"));
+    };
+
+    // The run's bytes served plus every live reservation, from the store, so
+    // other replicas' downloads count. Read on a download's first chunk and
+    // then at most every TOTAL_SYNC_INTERVAL_MS (or TOTAL_SYNC_BYTES of
+    // unreserved streaming) to keep a chunk off the database; in between,
+    // the bytes this download streamed since the last read (those of a
+    // download of unknown size, which reserved none) are added locally.
+    // Reading also extends the reservation's lease and records those bytes.
+    let syncedAt = Number.NEGATIVE_INFINITY;
+    let syncedTotal = 0;
+    let syncedBytes = 0;
+    const totalExceeded = async (): Promise<boolean> => {
+      const unreserved = file.sizeBytes === null;
+      if (Date.now() - syncedAt >= TOTAL_SYNC_INTERVAL_MS || (unreserved && bytes - syncedBytes >= TOTAL_SYNC_BYTES)) {
+        const streamed = bytes;
+        syncedTotal = await store.syncDownload(runId, reservationId, {
+          streamedBytes: unreserved ? streamed : null,
+          leaseUntil: reservationLease(),
+          now: this.now(),
+        });
+        syncedAt = Date.now();
+        syncedBytes = streamed;
+      }
+      return syncedTotal + (unreserved ? bytes - syncedBytes : 0) > limits.maxTotalBytes;
     };
 
     const stream = new ReadableStream<Uint8Array>({
@@ -1914,15 +2112,16 @@ export class RegistryService {
           if (hash && hash.digest("hex") !== file.integrity!.hex) return fail(controller, "wardby_integrity_mismatch");
           settled = true;
           // Persist the served record (and the dependency allowances it
-          // grows) BEFORE releasing the in-flight reservation. Releasing
-          // first would open a window, between the release and the row
-          // actually landing in the store, where neither `inFlight` nor
-          // store.usage() counts this file — a concurrent request could be
+          // grows) BEFORE releasing the reservation. Releasing first would
+          // open a window, between the release and the row actually landing
+          // in the store, where neither the reservation nor the served rows
+          // count this file — a concurrent request, on any replica, could be
           // admitted past maxFiles/maxTotalBytes in that window, reopening
-          // the race the reservation exists to close. `release()` still
-          // runs unconditionally (finally), so a failed record never leaks
-          // the reservation; it errors the controller instead of closing it,
-          // the same way every other failure path here does.
+          // the race the reservation exists to close. Until the release the
+          // file counts twice, which only ever refuses early. `release()`
+          // still runs unconditionally (finally), so a failed record never
+          // leaks the reservation; it errors the controller instead of
+          // closing it, the same way every other failure path here does.
           try {
             await store.recordFetch({
               runId: context.runId,
@@ -1935,10 +2134,6 @@ export class RegistryService {
               outcome: "served",
               ...(servedReason ? { reason: servedReason } : {}),
             });
-            // Counted before release() drops the reservation, so no window
-            // exists where neither the tally nor inFlight holds this file.
-            served.files += 1;
-            served.bytes += bytes;
             if (adapter.dependenciesFromFile && buffered.length > 0) {
               const body = Buffer.concat(buffered);
               const extras = await this.allowedExtras(adapter, context, name);
@@ -1974,16 +2169,17 @@ export class RegistryService {
                   ),
             );
           } finally {
-            release();
+            await release();
           }
           return;
         }
         const { value } = outcome;
         bytes += value.byteLength;
-        if (file.sizeBytes === null) this.trackStreamedBytes(runId, value.byteLength);
         if (bytes > limits.maxFileBytes) return fail(controller, "wardby_package_too_large");
-        if (served.bytes + this.inFlightUsage(runId).bytes > limits.maxTotalBytes)
-          return fail(controller, "wardby_package_limit");
+        const overTotal = await totalExceeded().catch(() => false);
+        // The idle timer cannot be running here, but the client may have gone while the total was read.
+        if (settled) return;
+        if (overTotal) return fail(controller, "wardby_package_limit");
         hash?.update(value);
         if (adapter.dependenciesFromFile && bytes <= DEPENDENCY_BUFFER_LIMIT) buffered.push(value);
         controller.enqueue(value);
@@ -1991,7 +2187,7 @@ export class RegistryService {
       cancel: async () => {
         settled = true;
         clearIdle();
-        release();
+        await release();
         await reader.cancel().catch(() => undefined);
       },
     });

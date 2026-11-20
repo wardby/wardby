@@ -36,6 +36,7 @@ async function main(): Promise<void> {
       logProxyAudit(event);
     },
     onRequest: (event) => metrics.observeProxyRequest(event),
+    onLeaseError: (stage) => metrics.observeProxyLeaseError(stage),
   });
   let metricsServer: MetricsServerHandle | undefined;
   try {

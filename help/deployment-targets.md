@@ -30,6 +30,9 @@ remaining controls and verification before accepting production work.
   GCP-native secret and network controls. Operators still need to choose
   availability, test recovery, and configure alerts and retention. See
   [Deploy on GKE](deploy-gke.md).
+- **Helm chart:** installs and upgrades the Kubernetes workloads on a cluster,
+  database and images you already have. See
+  [Install Wardby with Helm](install-helm.md).
 
 An experimental Agent Substrate backend for coding agents
 (`JOB_LAUNCHER=substrate`) is described in the `job-launcher-substrate` help

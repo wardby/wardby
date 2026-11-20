@@ -5,6 +5,9 @@ import {
   ROLE_PERMISSIONS,
   SCOPES_SUPPORTED,
   authenticate,
+  effectiveScopes,
+  isOwnerAll,
+  parseOwnerAllRoleOnly,
   permissionsOf,
   requireAnyScope,
   requireScope,
@@ -68,26 +71,31 @@ describe("supported scopes", () => {
       for (const scope of scopes) expect(SCOPES_SUPPORTED, `${name} needs ${scope}`).toContain(scope);
   });
 
-  it("treats exactly admin:view, agents:admin, packages:approve, services:manage, models:admin, power:manage and hosts:admin as privileged", () => {
+  it("treats exactly admin:view, agents:admin, packages:approve, services:manage, models:admin, power:manage, hosts:admin and teams:manage as privileged", () => {
     expect([...PRIVILEGED_SCOPES].sort()).toEqual([
       "admin:view",
       "agents:admin",
       "hosts:admin",
       "models:admin",
+      "owner:all",
       "packages:approve",
       "power:manage",
       "services:manage",
+      "teams:manage",
     ]);
     for (const scope of PRIVILEGED_SCOPES) expect(SCOPES_SUPPORTED).toContain(scope);
   });
 
-  it("built-in roles: admin grants every permission, package-approver, service-manager and model-manager one each", () => {
+  it("built-in roles: admin grants every permission, package-approver, service-manager, model-manager, host-manager, team-manager and viewer one each", () => {
     expect([...ROLE_NAMES].sort()).toEqual([
       "admin",
       "host-manager",
       "model-manager",
       "package-approver",
       "service-manager",
+      "team-manager",
+      "viewer",
+      "wardby_owner",
     ]);
     expect([...ROLE_PERMISSIONS.admin].sort()).toEqual([
       "admin:view",
@@ -97,14 +105,19 @@ describe("supported scopes", () => {
       "packages:approve",
       "power:manage",
       "services:manage",
+      "teams:manage",
     ]);
+    expect([...ROLE_PERMISSIONS.wardby_owner].sort()).toEqual([...ROLE_PERMISSIONS.admin, "owner:all"].sort());
+    expect(ROLE_PERMISSIONS["team-manager"]).toEqual(["teams:manage"]);
     expect(ROLE_PERMISSIONS["package-approver"]).toEqual(["packages:approve"]);
     expect(ROLE_PERMISSIONS["service-manager"]).toEqual(["services:manage"]);
     expect(ROLE_PERMISSIONS["model-manager"]).toEqual(["models:admin"]);
+    expect(ROLE_PERMISSIONS.viewer).toEqual(["admin:view"]);
     for (const perms of Object.values(ROLE_PERMISSIONS)) for (const p of perms) expect(PRIVILEGED_SCOPES).toContain(p);
     expect([...permissionsOf(["bogus", "package-approver"])]).toEqual(["packages:approve"]);
     expect([...permissionsOf(["service-manager"])]).toEqual(["services:manage"]);
     expect([...permissionsOf(["model-manager"])]).toEqual(["models:admin"]);
+    expect([...permissionsOf(["viewer"])]).toEqual(["admin:view"]);
     expect(permissionsOf(null).size).toBe(0);
   });
 });
@@ -117,7 +130,7 @@ describe("privileged operations need the scope AND a role granting it", () => {
       const err = denial(() => requireScope(ctx(["agents:admin"], roles), URI, "agents:admin"));
       expect(err).toBeInstanceOf(McpError);
       expect(err?.httpStatus).toBe(403);
-      expect(err?.message).toMatch(/requires a role that grants it \(admin\)/);
+      expect(err?.message).toMatch(/requires a role that grants it \(admin or wardby_owner\)/);
       // Re-authorizing for more scopes can't help, so no scope challenge.
       expect(err?.wwwAuthenticate ?? "").not.toContain("scope=");
     }
@@ -144,7 +157,7 @@ describe("privileged operations need the scope AND a role granting it", () => {
     expect(missingScope?.wwwAuthenticate).toContain('scope="packages:approve"');
     const owner = denial(() => requireScope(ctx(["agents:admin"], approver), URI, "agents:admin"));
     expect(owner?.httpStatus).toBe(403);
-    expect(owner?.message).toMatch(/agents:admin requires a role that grants it \(admin\)/);
+    expect(owner?.message).toMatch(/agents:admin requires a role that grants it \(admin or wardby_owner\)/);
   });
 
   it("a member can do none of them", () => {
@@ -191,9 +204,10 @@ describe("privileged operations need the scope AND a role granting it", () => {
     ).toMatch(/requires a role that grants it/);
   });
 
-  it("admin:view is honoured only for the admin role", () => {
+  it("admin:view is honoured only for the admin and viewer roles", () => {
     const base = { scopes: ["admin:view"] };
     expect(() => requireScope(ctx([...base.scopes], ["admin"]), URI, "admin:view")).not.toThrow();
+    expect(() => requireScope(ctx([...base.scopes], ["viewer"]), URI, "admin:view")).not.toThrow();
     expect(() => requireScope(ctx([...base.scopes], []), URI, "admin:view")).toThrow(/Forbidden/);
     expect(() => requireScope(ctx([...base.scopes], ["service-manager"]), URI, "admin:view")).toThrow(/Forbidden/);
   });
@@ -215,16 +229,69 @@ describe("privileged operations need the scope AND a role granting it", () => {
   });
 });
 
+describe("wardby_owner and owner:all", () => {
+  it("grants every admin permission plus owner:all, and covers every privileged scope", () => {
+    const perms = permissionsOf(["wardby_owner"]);
+    for (const p of ROLE_PERMISSIONS.admin) expect(perms.has(p)).toBe(true);
+    expect(perms.has("owner:all")).toBe(true);
+    for (const p of PRIVILEGED_SCOPES) expect(perms.has(p), p).toBe(true);
+    // admin does not carry owner:all.
+    expect(permissionsOf(["admin"]).has("owner:all")).toBe(false);
+  });
+
+  it("isOwnerAll needs both the scope and the role", () => {
+    expect(isOwnerAll(ctx(["owner:all"], ["wardby_owner"]))).toBe(true);
+    expect(isOwnerAll(ctx([], ["wardby_owner"]))).toBe(false);
+    expect(isOwnerAll(ctx(["owner:all"], ["admin"]))).toBe(false);
+    expect(isOwnerAll(ctx(["owner:all"]))).toBe(false);
+  });
+
+  it("requireScope owner:all names wardby_owner in the role error", () => {
+    const err = denial(() => requireScope(ctx(["owner:all"], ["admin"]), URI, "owner:all"));
+    expect(err?.httpStatus).toBe(403);
+    expect(err?.message).toContain("wardby_owner");
+    expect(denial(() => requireScope(ctx(["owner:all"], ["wardby_owner"]), URI, "owner:all"))).toBeUndefined();
+  });
+});
+
+describe("AUTH_OWNER_ALL_ROLE_ONLY", () => {
+  it("is off when unset, empty or false, on for true, and a startup error for anything else", () => {
+    expect(parseOwnerAllRoleOnly({})).toBe(false);
+    expect(parseOwnerAllRoleOnly({ AUTH_OWNER_ALL_ROLE_ONLY: "" })).toBe(false);
+    expect(parseOwnerAllRoleOnly({ AUTH_OWNER_ALL_ROLE_ONLY: " false " })).toBe(false);
+    expect(parseOwnerAllRoleOnly({ AUTH_OWNER_ALL_ROLE_ONLY: "true" })).toBe(true);
+    expect(() => parseOwnerAllRoleOnly({ AUTH_OWNER_ALL_ROLE_ONLY: "yes" })).toThrow(/must be "true" or "false"/);
+  });
+
+  it("adds owner:all to a token only when the flag is on and a role grants it", () => {
+    const token = ["agents:read"];
+    expect(effectiveScopes(token, ["wardby_owner"], true).has("owner:all")).toBe(true);
+    expect(effectiveScopes(token, ["wardby_owner"], false).has("owner:all")).toBe(false);
+    expect(effectiveScopes(token, ["admin"], true).has("owner:all")).toBe(false);
+    expect(effectiveScopes(token, [], true).has("owner:all")).toBe(false);
+    expect([...effectiveScopes(token, ["wardby_owner"], true)].sort()).toEqual(["agents:read", "owner:all"]);
+  });
+
+  it("makes a role-only caller owner-all, and never an unprivileged one", () => {
+    const roleOnly = (roles: string[]) => ({ ...ctx([], roles), scopes: effectiveScopes([], roles, true) });
+    expect(isOwnerAll(roleOnly(["wardby_owner"]))).toBe(true);
+    expect(isOwnerAll(roleOnly(["admin"]))).toBe(false);
+  });
+});
+
 describe("power:manage", () => {
   it("is supported, privileged, granted by admin and by no other built-in role", () => {
     expect(SCOPES_SUPPORTED).toContain("power:manage");
     expect(PRIVILEGED_SCOPES).toContain("power:manage");
-    expect(ROLE_NAMES.filter((role) => ROLE_PERMISSIONS[role].includes("power:manage"))).toEqual(["admin"]);
+    expect(ROLE_NAMES.filter((role) => ROLE_PERMISSIONS[role].includes("power:manage"))).toEqual([
+      "admin",
+      "wardby_owner",
+    ]);
     const tools = requiredScopes();
     expect(tools.get("power_sleep")).toEqual(["power:manage"]);
     expect(tools.get("power_status")).toEqual(["power:manage"]);
     expect(() => requireScope(ctx(["power:manage"], ["admin"]), URI, "power:manage")).not.toThrow();
-    for (const roles of [[], ["model-manager"], ["service-manager"], ["package-approver"]])
+    for (const roles of [[], ["model-manager"], ["service-manager"], ["package-approver"], ["viewer"]])
       expect(denial(() => requireScope(ctx(["power:manage"], roles), URI, "power:manage"))?.httpStatus).toBe(403);
   });
 });
@@ -238,6 +305,8 @@ describe("role plumbing", () => {
         createdAt: new Date(),
       })),
     },
+    // Callers here belong to no team; standing resolution reads memberships.
+    teamMember: { findMany: vi.fn(async () => []) },
   } as unknown as import("#prisma").PrismaClient;
   const provider = (v: VerifiedToken) => ({ verifyBearer: async () => v }) as unknown as AuthProvider;
 

@@ -125,6 +125,12 @@ export const DEFERRED_REVIEW_MAX_WAIT_MS = 15 * 60_000;
 export const DEFERRED_REVIEW_MAX_AGE_MS = 24 * 60 * 60_000;
 /** Upper bound on deferred reviews the sweep starts per pass, so a backlog drains over several passes. */
 export const DEFERRED_REVIEW_BATCH = 50;
+/**
+ * How long a claim on a deferred review holds before another pass may take it over. The row is
+ * deleted only after its review start was attempted, so a claim older than this was left by a
+ * process that died: the next pass starts the review (`alreadyReviewed` keeps it to one run).
+ */
+export const DEFERRED_REVIEW_CLAIM_TIMEOUT_MS = 5 * 60_000;
 
 export interface RouteResult {
   runIds: string[];
@@ -955,6 +961,92 @@ type LinkRow = Awaited<ReturnType<HostEventDb["agentRepository"]["findMany"]>>[n
 };
 
 /**
+ * Drops the links that do not review drafts (reviewDrafts off) when the pull request is a
+ * draft; marking it ready for review starts their review (ready_for_review is a pr_updated
+ * event with isDraft false). A draft a Wardby coding run opened is always reviewed, since the
+ * mark-ready flow waits on its reviewers' approval, and so is one whose origin cannot be read.
+ * Explicit requests (a check re-run, a review comment) never come here.
+ */
+async function withoutSkippedDrafts(
+  event: Extract<HostEvent, { kind: "pr_updated" }>,
+  links: LinkRow[],
+  readOrigin: (() => Promise<PullRequestOrigin>) | undefined,
+): Promise<LinkRow[]> {
+  if (event.isDraft !== true || links.every((l) => l.reviewDrafts)) return links;
+  try {
+    if (readOrigin && (await readOrigin()).markerRunId) return links;
+  } catch (err) {
+    log.warn(
+      { err, repository: event.repository, prNumber: event.prNumber },
+      "could not read the draft's origin; reviewing as usual",
+    );
+    return links;
+  }
+  log.info(
+    { repository: event.repository, prNumber: event.prNumber, headSha: event.headSha },
+    "review skipped: the pull request is a draft",
+  );
+  return links.filter((l) => l.reviewDrafts);
+}
+
+/**
+ * Drops the links that do not review every push (reviewOnPush off) when the event is a push of new commits to an open
+ * pull request: they review it when it is opened, reopened or marked ready, and a later push
+ * starts no review. A pull request a Wardby coding run opened is always reviewed on push (the
+ * review_fix rounds and mark-ready flow wait on a review of each new head), and so is one whose
+ * origin cannot be read. Explicit requests (a check re-run, a review comment) never come here.
+ */
+async function withoutSkippedPushes(
+  event: Extract<HostEvent, { kind: "pr_updated" }>,
+  links: LinkRow[],
+  readOrigin: (() => Promise<PullRequestOrigin>) | undefined,
+): Promise<LinkRow[]> {
+  if (event.isPush !== true || links.every((l) => l.reviewOnPush)) return links;
+  try {
+    if (readOrigin && (await readOrigin()).markerRunId) return links;
+  } catch (err) {
+    log.warn(
+      { err, repository: event.repository, prNumber: event.prNumber },
+      "could not read the pull request's origin; reviewing the push as usual",
+    );
+    return links;
+  }
+  log.info(
+    { repository: event.repository, prNumber: event.prNumber, headSha: event.headSha },
+    "review skipped: new commits were pushed and the link reviews on open and ready only",
+  );
+  return links.filter((l) => l.reviewOnPush);
+}
+
+/**
+ * Drops the links that do not review on open (reviewOnOpen off) when the event is a pull request being opened,
+ * reopened or marked ready for review (a pr_updated that is not a push): they review only when asked, by a review
+ * comment or a check re-run, which never come here. A pull request a Wardby coding run opened is always reviewed
+ * (the review_fix rounds and mark-ready flow wait on a review), and so is one whose origin cannot be read.
+ */
+async function withoutSkippedOpens(
+  event: Extract<HostEvent, { kind: "pr_updated" }>,
+  links: LinkRow[],
+  readOrigin: (() => Promise<PullRequestOrigin>) | undefined,
+): Promise<LinkRow[]> {
+  if (event.isPush === true || links.every((l) => l.reviewOnOpen)) return links;
+  try {
+    if (readOrigin && (await readOrigin()).markerRunId) return links;
+  } catch (err) {
+    log.warn(
+      { err, repository: event.repository, prNumber: event.prNumber },
+      "could not read the pull request's origin; reviewing it as usual",
+    );
+    return links;
+  }
+  log.info(
+    { repository: event.repository, prNumber: event.prNumber, headSha: event.headSha },
+    "review skipped: the pull request was opened or made ready and the link reviews only on request",
+  );
+  return links.filter((l) => l.reviewOnOpen);
+}
+
+/**
  * Keeps only the links the gate still authorizes: the agent must have an
  * owner, and the owner's current access (or a recorded admin/grandfathered
  * approval) must cover the link. Denials are logged, never surfaced.
@@ -1116,8 +1208,10 @@ async function waitForPushingRun(
 /**
  * Starts deferred reviews for one PR head. The head must still be that sha,
  * open, and not a fork; otherwise every row is dropped (a newer push records
- * its own). Each row is claimed by deleting it, so a concurrent ci_completed
- * delivery or sweep starts each review only once. On `ci` and `request`, only
+ * its own). Each row is claimed with a timestamp (`claimedAt`), so a concurrent
+ * ci_completed delivery or sweep starts each review only once, and deleted after
+ * the start was attempted, so a process that dies in between leaves the review
+ * to the next pass once the claim times out. On `ci` and `request`, only
  * reviewers still authorized are claimed (the rest wait for the sweep); on `sweep` (the
  * last attempt) every row is claimed and unauthorized or unlinked reviewers
  * are dropped.
@@ -1147,30 +1241,44 @@ async function startDeferred(
   );
   const allowedIds = new Set(allowed.map((l) => l.agentId));
   const targets: ReviewTarget[] = [];
+  const claimedIds: string[] = [];
+  const claimCutoff = new Date(Date.now() - DEFERRED_REVIEW_CLAIM_TIMEOUT_MS);
   for (const row of rows) {
     if (mode !== "sweep" && !allowedIds.has(row.agentId)) continue;
-    const claimed = await deps.db.deferredReview.deleteMany({ where: { id: row.id } });
-    if (claimed.count !== 1) continue;
-    if (allowedIds.has(row.agentId)) targets.push({ agentId: row.agentId, checkName: row.checkName });
-    else
+    if (!allowedIds.has(row.agentId)) {
+      // Nothing to start: dropping the row is the whole job.
+      await deps.db.deferredReview.deleteMany({ where: { id: row.id } });
       log.info(
         { ...where, agentId: row.agentId },
         "deferred review dropped: the reviewer is no longer linked or authorized",
       );
+      continue;
+    }
+    // Claimed with a timestamp, not by deleting: the row goes only after the start was attempted.
+    const claimed = await deps.db.deferredReview.updateMany({
+      where: { id: row.id, OR: [{ claimedAt: null }, { claimedAt: { lt: claimCutoff } }] },
+      data: { claimedAt: new Date() },
+    });
+    if (claimed.count !== 1) continue;
+    claimedIds.push(row.id);
+    targets.push({ agentId: row.agentId, checkName: row.checkName });
   }
   if (targets.length === 0) return [];
   log.info({ ...where, agentIds: targets.map((t) => t.agentId), reason }, "starting the deferred review");
   try {
+    let runIds: string[] = [];
     if (decision.kind === "skip") {
       await postSkippedReviewChecks(deps, host, key.repository, key.prNumber, key.headSha, targets);
-      return [];
+    } else {
+      runIds = await startReviews(deps, host, key.repository, key.prNumber, key.headSha, targets, true);
     }
-    return await startReviews(deps, host, key.repository, key.prNumber, key.headSha, targets, true);
+    await deps.db.deferredReview.deleteMany({ where: { id: { in: claimedIds } } });
+    return runIds;
   } catch (err) {
-    // The rows are already claimed (at most once): make the lost start visible.
+    // The rows stay claimed: a later pass takes them over once the claim times out.
     log.warn(
       { err, ...where, agentIds: targets.map((t) => t.agentId) },
-      "claimed deferred reviews could not be started",
+      "claimed deferred reviews could not be started; they are retried after the claim times out",
     );
     return [];
   }
@@ -1698,7 +1806,12 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
             ]
           : [];
       if (reviewerLinks.length === 0) return { runIds: [], followUps };
-      const allowed = await authorizedLinks(deps, event, reviewerLinks);
+      const authorized = await authorizedLinks(deps, event, reviewerLinks);
+      const allowed = await withoutSkippedOpens(
+        event,
+        await withoutSkippedPushes(event, await withoutSkippedDrafts(event, authorized, readOrigin), readOrigin),
+        readOrigin,
+      );
       if (allowed.length === 0) return { runIds: [], followUps };
       // A PR a delegated coding run opened is reviewed once the whole request
       // finished, so its sibling PRs exist and the related section is current (#259).
@@ -1780,8 +1893,9 @@ export async function routeHostEvent(event: HostEvent, deps: RouteHostEventDeps)
       // tools and secrets, so its author needs real push access to the
       // repository (author_association, checked upstream, is only a
       // pre-filter). Checked by the author's immutable id. Checked before
-      // anything is said back: someone without write access gets no reply at
-      // all, so a mention can never be used to probe what is linked here.
+      // anything is said back: someone without write access learns nothing
+      // about what is linked here (at most, the refusal below that says a
+      // mention needs write access), so a mention cannot be used to probe it.
       const author = await deps.repoAccess.authorizeHostUser({
         provider: event.provider,
         repository: event.repository,

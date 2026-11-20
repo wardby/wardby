@@ -8,6 +8,7 @@
   <p><strong>Bring your providers. Keep your infrastructure. Govern agents in one place.</strong></p>
   <p>
     <a href="#get-started">Get started</a> ·
+    <a href="#using-wardby">Using Wardby</a> ·
     <a href="#why-wardby">Why Wardby</a> ·
     <a href="#where-wardby-fits">Where it fits</a> ·
     <a href="#a-full-cycle-agent-from-one-conversation">Full-cycle example</a> ·
@@ -66,23 +67,6 @@ Quickstart keeps credentials and local state under `.wardby/` in the current
 project. Read the [local getting-started guide](https://github.com/wardby/wardby/blob/main/docs/getting-started.md)
 for unattended setup, lifecycle commands, MCP configuration, and cleanup.
 
-### Develop Wardby from source
-
-Clone the repository only when you want to contribute to Wardby, inspect its
-deployment assets, or build images yourself:
-
-```sh
-git clone https://github.com/wardby/wardby.git
-cd wardby
-npm ci
-npm run build
-npm test
-```
-
-Continue with [CONTRIBUTING.md](https://github.com/wardby/wardby/blob/main/CONTRIBUTING.md)
-for the development database, migrations, required checks, and contribution
-expectations.
-
 ### Deploy for a team
 
 - Follow the [GKE guide](https://github.com/wardby/wardby/blob/main/docs/getting-started-gke.md)
@@ -92,6 +76,67 @@ expectations.
   production infrastructure and controls yourself.
 - Follow [Bring your own identity provider](https://github.com/wardby/wardby/blob/main/docs/getting-started-identity-provider.md)
   to protect remote MCP with your existing OAuth/OIDC provider.
+
+## Using Wardby
+
+You work with Wardby through your MCP client (Claude, Codex or any other):
+describe what you want, and the client calls Wardby's tools. The same
+operations are available to any client that speaks MCP. Ask for things in plain
+language; the tool names below are what happens underneath.
+
+**Create an agent.** Give it a name, a system prompt, a model and a per-run
+budget (`create_agent`). Change any of them later with `update_agent`.
+
+**Run it.** Trigger a run on demand (`trigger_agent`), or put it on a schedule
+(`set_schedule`) or a webhook (`create_webhook`). Check what happened with
+`list_runs` and `get_run`.
+
+**Give it what it needs.** Attach sandboxed tools (`create_tool`,
+`attach_tool`), secrets (`create_secret`, `attach_secret`), datastores
+(`create_datastore`, `attach_datastore`), a repository for coding work
+(`link_repository`) and sub-agents (`attach_subagent`). An agent can only use
+what you attach to it.
+
+**Keep spend bounded.** Every agent has a hard per-run budget. Put related
+agents in a shared daily, weekly or monthly budget group
+(`create_budget_group`), and review spend with `cost_report`.
+
+**See your agents.** `list_agents` shows every agent you can reach. Each row has
+an `access` field with your level on it: `owner`, `write`, `execute` or `read`.
+
+### Share an agent
+
+Agents are private until their owner shares them with `grant_access`. Grant one
+person, or everyone signed in to your Wardby, one of these levels:
+
+| Level     | What the person can do                                                      |
+| --------- | --------------------------------------------------------------------------- |
+| `read`    | See the agent's configuration. Secret values are never shown.               |
+| `execute` | Everything in `read`, plus trigger runs and see the runs they triggered.    |
+| `write`   | Everything in `execute`, plus change the prompt, model, schedule and tools. |
+
+Remove a grant with `revoke_access`, and see who has access with `list_access`.
+
+A **public agent** is one granted to `everyone`. Use `read` or `execute` for an
+agent the whole team can see or run. Use `write` for an agent anyone can also
+edit: Wardby allows that only while the agent holds none of its owner's secrets,
+datastores, repositories, sub-agents or tool capabilities, so that editing an
+agent can never be used to reach your credentials.
+
+Runs of a shared agent use the owner's attached resources and the agent's
+shared memory. Deleting an agent, managing its grants and changing its bindings
+stay with the owner. Read
+[Share an agent](https://github.com/wardby/wardby/blob/main/help/sharing-agents.md)
+and the [security deployment guide](https://github.com/wardby/wardby/blob/main/docs/security-deployment.md)
+for the full rules.
+
+### Where to go next
+
+- [Creating agents](https://github.com/wardby/wardby/blob/main/help/creating-agents.md)
+- [Agent recipes](https://github.com/wardby/wardby/blob/main/docs/agent-recipes.md)
+- [Models and pricing](https://github.com/wardby/wardby/blob/main/docs/models.md)
+- Ask your MCP client to `search_help` for any topic: the same short articles
+  are built into Wardby.
 
 ## Why Wardby
 
@@ -276,9 +321,11 @@ deployment guides above for the complete process boundary.
 
 ## Bring your own observability
 
-The coding proxy can expose standard Prometheus metrics at `/metrics` when
-`METRICS_BIND` is configured. Collection is pull-based: keep the endpoint on a
-private network and give only your chosen collector access to it.
+The coding proxy and the control plane can each expose standard Prometheus
+metrics at `/metrics` when `METRICS_BIND` is configured: the proxy's traffic
+and cost, and the control plane's coding-run lifecycle. Collection is
+pull-based: keep each endpoint on a private network and give only your chosen
+collector access to it.
 
 | Destination                      | Integration path                                                                                                                                                                                                                                   |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -287,17 +334,9 @@ private network and give only your chosen collector access to it.
 | **Google Cloud Monitoring**      | Configure the [Google Cloud Ops Agent Prometheus receiver](https://cloud.google.com/stackdriver/docs/managed-prometheus/setup-opsagent), or a Managed Service for Prometheus collector, to scrape the private endpoint.                            |
 | **Other monitoring platforms**   | Use any collector or hosted service that accepts the Prometheus exposition format.                                                                                                                                                                 |
 
-Run the local proof without making a paid model request:
-
-```sh
-npm run observability:up
-npm run observability:smoke
-npm run observability:down
-```
-
 The included cloud deployments do not yet provision AWS or GCP collectors.
-Current metrics primarily cover the coding proxy; application/MCP metrics,
-production alerts, and SLOs remain operator responsibilities. See the
+MCP request metrics are not yet exported; production alerts and SLOs remain
+operator responsibilities. See the
 [observability guide](https://github.com/wardby/wardby/blob/main/docs/observability.md) for boundaries and retention.
 
 ## Security boundaries
@@ -426,7 +465,6 @@ docs/           Architecture, security, setup, and operator guidance
 Apache License 2.0. See [LICENSE](https://github.com/wardby/wardby/blob/main/LICENSE) for the license terms and
 [NOTICE](https://github.com/wardby/wardby/blob/main/NOTICE) for attribution.
 
-See [CONTRIBUTING.md](https://github.com/wardby/wardby/blob/main/CONTRIBUTING.md) to contribute and [SECURITY.md](https://github.com/wardby/wardby/blob/main/SECURITY.md)
-to report a vulnerability privately.
+To work on Wardby itself, see [README_DEVELOPMENT.md](https://github.com/wardby/wardby/blob/main/README_DEVELOPMENT.md) and [CONTRIBUTING.md](https://github.com/wardby/wardby/blob/main/CONTRIBUTING.md). To report a vulnerability privately, see [SECURITY.md](https://github.com/wardby/wardby/blob/main/SECURITY.md).
 
 Built as an independent reimplementation. See [CLEANROOM.md](https://github.com/wardby/wardby/blob/main/CLEANROOM.md).

@@ -55,6 +55,7 @@ import { McpError } from "../errors.js";
 import { createTaskResult, getTask, cancelTask } from "../tasks/manager.js";
 import { requireOwnedTask } from "../auth/ownership.js";
 import { agentAccess, assertAgentAccess } from "../auth/access.js";
+import { isOwnerAll } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import type { PrismaClient } from "#prisma";
 import { textResult } from "./text-result.js";
@@ -67,6 +68,7 @@ const TriggerAgentSchema = z
     agentId: z.string().trim().min(1).max(128),
     task: CodingTaskOverrideSchema.optional(),
     baseRef: CodingBaseRefSchema.optional(),
+    branch: z.string().trim().min(1).max(100).optional(),
     repository: z.string().min(1).max(300).optional(),
     repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
     continuePriorRun: z.string().trim().min(1).max(128).optional(),
@@ -151,11 +153,12 @@ function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
 function assertOverrideAllowed(
   principalId: string,
   agent: { id: string } & CodingOverrideAgent,
-  args: { task?: string; baseRef?: string; repository?: string; repositories?: string[] },
+  args: { task?: string; baseRef?: string; branch?: string; repository?: string; repositories?: string[] },
 ): void {
   if (
     args.task === undefined &&
     args.baseRef === undefined &&
+    args.branch === undefined &&
     args.repository === undefined &&
     args.repositories === undefined
   ) {
@@ -164,7 +167,7 @@ function assertOverrideAllowed(
   if (!codingOverrideAllowed(principalId, agent)) {
     throw new McpError(
       403,
-      `Agent "${agent.id}": only its owner can pass a task, baseRef, repository or repositories, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
+      `Agent "${agent.id}": only its owner can pass a task, baseRef, branch, repository or repositories, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
     );
   }
 }
@@ -180,7 +183,7 @@ async function requireTriggerable<A extends TriggerableAgent>(
   ctx: McpRequestContext,
   row: A | null,
   id: string,
-  args: { task?: string; baseRef?: string; repository?: string; repositories?: string[] },
+  args: { task?: string; baseRef?: string; branch?: string; repository?: string; repositories?: string[] },
   db: Pick<PrismaClient, "resourceGrant"> = ctx.db,
 ): Promise<A> {
   const { agent } = await assertAgentAccess(ctx, row, id, "execute", db);
@@ -201,7 +204,7 @@ async function checkContinuePriorRun(
   priorRunId: string,
   args: { baseRef?: string; repository?: string },
 ): Promise<void> {
-  if (agent.ownerId === null || agent.ownerId !== ctx.principal.id) {
+  if (!isOwnerAll(ctx) && (agent.ownerId === null || agent.ownerId !== ctx.principal.id)) {
     throw new McpError(403, `Agent "${agent.id}": ${CONTINUATION_SAME_OWNER_MESSAGE}`);
   }
   if (agent.kind !== "coding") {
@@ -252,6 +255,12 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         agentId: { type: "string" },
         task: { type: "string" },
         baseRef: { type: "string" },
+        branch: {
+          type: "string",
+          description:
+            "Coding agents only: a name for the pull request branch (wardby/<name>; cleaned to lowercase letters, digits and hyphens, at most 40 characters). " +
+            "Default: the linked issue's key (wardby/PROJ-123), else wardby/run-<run id>. A name already used in the repository gets -2, -3, ...",
+        },
         repository: {
           type: "string",
           description:
@@ -320,12 +329,13 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         agent.kind !== "coding" &&
         (args.task !== undefined ||
           args.baseRef !== undefined ||
+          args.branch !== undefined ||
           args.repository !== undefined ||
           args.repositories !== undefined)
       ) {
         throw new McpError(
           400,
-          "Task, baseRef, repository and repositories overrides are only valid for coding agents.",
+          "Task, baseRef, branch, repository and repositories overrides are only valid for coding agents.",
         );
       }
 
@@ -405,6 +415,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           trigger: "manual",
           codingTask: args.task,
           codingBaseRef: args.baseRef,
+          codingBranch: args.branch,
           codingRepository: args.repository,
           codingRepositories: args.repositories,
           continuesCodingRunId: args.continuePriorRun,
@@ -457,13 +468,13 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
   // wire capture would show it; `client.request()`'s return value won't.
   mcp.registerRequestHandler("tasks/get", "agents:read", async (params, ctx) => {
     const { taskId } = params as { taskId: string };
-    await requireOwnedTask(ctx.db, taskId, ctx.principal.id);
+    await requireOwnedTask(ctx.db, taskId, ctx.principal.id, isOwnerAll(ctx));
     return getTask(taskId, ctx.db);
   });
 
   mcp.registerRequestHandler("tasks/cancel", "runs:trigger", async (params, ctx) => {
     const { taskId } = params as { taskId: string };
-    await requireOwnedTask(ctx.db, taskId, ctx.principal.id);
+    await requireOwnedTask(ctx.db, taskId, ctx.principal.id, isOwnerAll(ctx));
     await cancelTask(taskId, ctx.db, async (runId) => {
       await ctx.providers.executor.stop(runId, "cancelled by caller");
     });
@@ -472,7 +483,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
 
   mcp.registerRequestHandler("tasks/update", "runs:trigger", async (params, ctx) => {
     const { taskId } = params as { taskId: string };
-    await requireOwnedTask(ctx.db, taskId, ctx.principal.id);
+    await requireOwnedTask(ctx.db, taskId, ctx.principal.id, isOwnerAll(ctx));
     const result = await getTask(taskId, ctx.db);
     throw new McpError(400, `Task "${taskId}" is not awaiting input (status: ${result.status}).`);
   });

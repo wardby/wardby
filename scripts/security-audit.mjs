@@ -8,7 +8,8 @@ import { spawnSync } from "node:child_process";
 // migration image (docs/security-deployment.md):
 // - deepmerge-ts 8.0.2 (GHSA-ggr8-5vv4-36mx, via @prisma/config), 2026-09-24;
 // - mysql2 3.24.4 (GHSA-3f6p-5ww8-9rcr, GHSA-rgwj-5xj2-c3m3; Prisma Studio's
-//   MySQL executor only), 2026-09-25.
+//   MySQL executor only), 2026-09-25;
+// - effect 3.22.5 (GHSA-7589-6fvf-x4pw, via @prisma/config), 2026-11-19.
 // No allowlist entry backs them up on purpose: if a lockfile change ever
 // dropped an override, the advisory would reappear here and fail the job.
 const acceptedException = null;

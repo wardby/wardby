@@ -15,7 +15,7 @@ import { GITHUB_ACCOUNT_NOT_ALLOWED } from "../../config/github-allowed-accounts
 import { requiredLevel, type AuthorizedVia, type RepoAccessKind } from "../../core/repo-access.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
-import { requireScope } from "./resource-server.js";
+import { isOwnerAll, requireScope } from "./resource-server.js";
 
 export interface RepositoryAuthorization {
   authorizedVia: AuthorizedVia;
@@ -76,7 +76,7 @@ export async function authorizeRepositoryForSet(
   }
   if (input.adminOverride) {
     // Role-gated: the scope alone never suffices (resource-server.ts).
-    requireScope(ctx, ctx.canonicalUri, "agents:admin");
+    if (!isOwnerAll(ctx)) requireScope(ctx, ctx.canonicalUri, "agents:admin");
     return stamp("admin");
   }
   const gate = ctx.providers.repoAccess;

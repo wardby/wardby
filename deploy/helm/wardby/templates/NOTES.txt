@@ -1,0 +1,11 @@
+wardby {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+MCP endpoint: {{ include "wardby.canonicalUri" . }}
+{{- if not .Values.gateway.enabled }}
+
+The control plane is cluster-internal (gateway.enabled=false). Reach it with:
+  kubectl -n {{ .Release.Namespace }} exec deploy/wardby-control-plane -- node dist/cli.js mcp
+{{- end }}
+
+Check the rollout:
+  kubectl -n {{ .Release.Namespace }} get pods

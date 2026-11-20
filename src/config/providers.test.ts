@@ -158,6 +158,24 @@ describe("loadContainerExecutorConfig", () => {
     expect(loadContainerExecutorConfig({}).claudeToolRunnerImages).toEqual({});
   });
 
+  it("maps each configured node-python version to its own image for Codex and Claude Code", () => {
+    const worker312 = `worker-python@sha256:${"1".repeat(64)}`;
+    const worker314 = `worker-python@sha256:${"2".repeat(64)}`;
+    const tools313 = `claude-tools-python@sha256:${"3".repeat(64)}`;
+    const tools314 = `claude-tools-python@sha256:${"4".repeat(64)}`;
+    expect(
+      loadContainerExecutorConfig({
+        CODING_WORKER_IMAGE_NODE_PYTHON_3_12: worker312,
+        CODING_WORKER_IMAGE_NODE_PYTHON_3_14: worker314,
+        CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_13: tools313,
+        CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_14: ` ${tools314} `,
+      }),
+    ).toMatchObject({
+      additionalWorkerImages: { "node-python": { "3.12": worker312, "3.14": worker314 } },
+      claudeToolRunnerImages: { "node-python": { "3.13": tools313, "3.14": tools314 } },
+    });
+  });
+
   it.each(["0", "-1", "nope"])("rejects invalid container CPU limits (%s)", (value) => {
     expect(() => loadContainerExecutorConfig({ CODING_CPUS: value })).toThrow("CODING_CPUS must be a positive");
   });

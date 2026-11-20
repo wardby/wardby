@@ -9,6 +9,7 @@
  * value in the CLI's own environment.
  */
 import { serviceEnvironment } from "../../coding-worker/driver.js";
+import { configuredRegistryAdapters } from "../../coding/registry/adapters.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT } from "./docker-isolation.js";
@@ -55,6 +56,8 @@ export interface ClaudeToolSetupOptions {
   proxyBaseUrl?: string;
   /** The Substrate launcher's adopt path. Ignored unless the spec has dependencyCache. */
   workspaceReused?: boolean;
+  /** Where the registry settings are read from (default process.env). */
+  env?: NodeJS.ProcessEnv;
 }
 
 export function claudeToolSetup(spec: JobSpec, capability: string, options: ClaudeToolSetupOptions = {}): string {
@@ -63,6 +66,8 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
     proxyBaseUrl: options.proxyBaseUrl ?? `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
     token: deriveRegistryToken(capability),
     cacheRoot: `${TOOL_WORKSPACE}/.cache`,
+    // Only the non-secret JFrog settings are read; the upstream credential is the proxy's alone.
+    adapters: configuredRegistryAdapters(options.env ?? process.env),
   });
   const setup: ClaudeToolSetup = {
     schemaVersion: 1,

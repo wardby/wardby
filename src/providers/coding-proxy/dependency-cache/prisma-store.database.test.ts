@@ -23,6 +23,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
   const repositories: string[] = [];
 
   afterAll(async () => {
+    await db.dependencyUploadClaim.deleteMany({ where: { repository: { in: repositories } } });
     await db.dependencySnapshot.deleteMany({ where: { repository: { in: repositories } } });
     await db.codingRun.deleteMany({ where: { runId: { in: runIds } } });
     await db.run.deleteMany({ where: { id: { in: runIds } } });
@@ -132,6 +133,73 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaDependencyCacheStore (database
     const { runId: off } = await seedRun(randomUUID(), false);
     await cache.sealForModelRequest(off, first);
     expect((await cache.session(off))?.sealedAt).toBeNull();
+  });
+
+  it("lets one upload claim a snapshot or a run's project at a time, and frees it on release", async () => {
+    const cache = new PrismaDependencyCacheStore(db);
+    const { runId, repository } = await seedRun();
+    const { runId: otherRunId } = await seedRun();
+    const claim = (run: string, lock: string, blobKey = `claim-${randomUUID()}`) => ({
+      ecosystem: "npm",
+      repository,
+      projectPath: ".",
+      lockHash: hex(lock),
+      workerImage: "worker:1",
+      blobKey,
+      runId: run,
+      ownerId: "proxy-1",
+    });
+    const first = claim(runId, "lock");
+    // Concurrent claims of one snapshot identity: exactly one wins, whichever run asks.
+    const outcomes = await Promise.all([
+      cache.claimUpload(first),
+      cache.claimUpload(claim(otherRunId, "lock")),
+      cache.claimUpload(claim(otherRunId, "lock")),
+    ]);
+    expect(outcomes.filter((outcome) => outcome === "claimed")).toHaveLength(1);
+    // The same run and project cannot hold a second claim, even for another lockfile.
+    const winner = outcomes.indexOf("claimed") === 0 ? runId : otherRunId;
+    expect(await cache.claimUpload(claim(winner, "other-lock"))).toBe("in_progress");
+    await db.dependencyUploadClaim.deleteMany({ where: { repository } });
+    expect(await cache.claimUpload(first)).toBe("claimed");
+    expect(await cache.claimUpload(first)).toBe("in_progress");
+    await cache.releaseUpload(first.blobKey);
+    await cache.releaseUpload(first.blobKey); // a second release is a no-op
+    expect(await cache.claimUpload(claim(runId, "lock"))).toBe("claimed");
+  });
+
+  it("lists only claims at or before the cutoff, and tells a committed blob from an orphan", async () => {
+    const cache = new PrismaDependencyCacheStore(db);
+    const { runId, repository } = await seedRun();
+    const old = {
+      ecosystem: "npm",
+      repository,
+      projectPath: ".",
+      lockHash: hex("old"),
+      workerImage: "worker:1",
+      blobKey: `claim-old-${randomUUID()}`,
+      runId,
+      ownerId: "proxy-1",
+    };
+    await cache.claimUpload(old);
+    await cache.claimUpload({
+      ...old,
+      lockHash: hex("fresh"),
+      projectPath: "web",
+      blobKey: `claim-fresh-${randomUUID()}`,
+    });
+    const stored = await db.dependencyUploadClaim.findUniqueOrThrow({ where: { blobKey: old.blobKey } });
+    await db.dependencyUploadClaim.update({
+      where: { blobKey: old.blobKey },
+      data: { createdAt: new Date(Date.now() - 3_600_000) },
+    });
+    const stale = await cache.listStaleUploads(new Date(Date.now() - 1_800_000));
+    expect(stale.filter((held) => held.repository === repository).map((held) => held.id)).toEqual([stored.id]);
+
+    expect(await cache.hasSnapshotBlob(old.blobKey)).toBe(false);
+    const committed = snapshot(repository, runId, "committed");
+    await cache.insert(committed);
+    expect(await cache.hasSnapshotBlob(committed.blobKey)).toBe(true);
   });
 
   it("says a run's workspace is reused only past round 1 of its SubstrateRun row", async () => {

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: wardby
+description: Budget-guarded LLM agents on a schedule, with sandboxed coding runs on Kubernetes.
+type: application
+version: 0.1.0
+appVersion: "0.10.2"
+home: https://github.com/wardby/wardby
+sources:
+  - https://github.com/wardby/wardby
+keywords:
+  - llm
+  - agents
+  - mcp
+annotations:
+  artifacthub.io/license: Apache-2.0

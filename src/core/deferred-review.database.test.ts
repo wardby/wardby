@@ -78,6 +78,7 @@ describe.skipIf(!process.env.DATABASE_URL)("deferred reviews (database)", () => 
         triggers: ["pull_request"],
         checkName: "wardby review",
         waitForCi: true,
+        reviewOnOpen: true,
         authorizedVia: "host_permission",
       },
     });
@@ -226,6 +227,7 @@ describe.skipIf(!process.env.DATABASE_URL)("request deferrals (database)", () =>
           triggers: ["pull_request"],
           checkName: agentId === waiter ? "wardby review" : "security",
           waitForCi: agentId === waiter,
+          reviewOnOpen: true,
           authorizedVia: "host_permission",
         },
       });

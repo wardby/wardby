@@ -1,9 +1,11 @@
 import type { Prisma, PrismaClient } from "#prisma";
+import type { LeaseRenewal } from "../../core/request-lease.js";
 import { RUN_STEPS_LEVELS, type RunStepsLevel } from "../../core/run-steps/config.js";
 import { logger } from "../../core/logger.js";
 import { normalizeProxyModelTerms } from "./types.js";
 import type {
   CreateProxySessionInput,
+  ExpiredRequest,
   PreviousReply,
   PricingSnapshot,
   ProxyLedger,
@@ -82,6 +84,11 @@ interface RequestRow {
   ceilingUsd: unknown;
   reservationBasis: string | null;
   conversationKey: string | null;
+  maxOutputTokens: number | null;
+  ownerId: string | null;
+  leaseUntil: Date | null;
+  attempt: number;
+  orphanedAt: Date | null;
 }
 
 function isRunStepsLevel(value: unknown): value is RunStepsLevel {
@@ -178,6 +185,11 @@ function requestFromRow(row: RequestRow): ProxyRequest {
       ? { reservationBasis: row.reservationBasis }
       : {}),
     ...(row.conversationKey !== null ? { conversationKey: row.conversationKey } : {}),
+    ...(row.maxOutputTokens !== null ? { maxOutputTokens: row.maxOutputTokens } : {}),
+    ...(row.ownerId !== null ? { ownerId: row.ownerId } : {}),
+    leaseUntil: row.leaseUntil,
+    attempt: row.attempt,
+    orphanedAt: row.orphanedAt,
   };
 }
 
@@ -187,7 +199,8 @@ async function requestById(db: PrismaProxyLedgerTx | PrismaProxyLedgerDb, id: st
            "reservationUsd", "actualCostUsd", "pricingVersion", "pricingSnapshot",
            "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens",
            "reasoningTokens", "upstreamStatus", "costEstimated",
-           "requestBytes", "ceilingUsd", "reservationBasis", "conversationKey"
+           "requestBytes", "ceilingUsd", "reservationBasis", "conversationKey",
+           "maxOutputTokens", "ownerId", "leaseUntil", "attempt", "orphanedAt"
     FROM "CodingProxyRequest" WHERE "id" = ${id}
   `;
   return rows[0] ? requestFromRow(rows[0]) : null;
@@ -249,16 +262,67 @@ export class PrismaProxyLedger implements ProxyLedger {
       if (!row || row.status !== "active") return { outcome: "inactive", reason: "cancelled" } as const;
       if (input.now.getTime() >= row.deadlineAt.getTime()) return { outcome: "inactive", reason: "expired" } as const;
 
-      const duplicate = await tx.$queryRaw<RequestRow[]>`
+      // The key's newest attempt. The lease comparison is made here, on the database's clock.
+      const newest = await tx.$queryRaw<
+        (RequestRow & { createdAt: Date; leaseExpired: boolean | null; leaseRemainingMs: unknown })[]
+      >`
           SELECT "id", "sessionId", "requestKey", "requestFingerprint", "model", "status",
                  "reservationUsd", "actualCostUsd", "pricingVersion", "pricingSnapshot",
                  "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens",
                  "reasoningTokens", "upstreamStatus", "costEstimated",
-                 "requestBytes", "ceilingUsd", "reservationBasis", "conversationKey"
+                 "requestBytes", "ceilingUsd", "reservationBasis", "conversationKey",
+                 "maxOutputTokens", "ownerId", "leaseUntil", "attempt", "orphanedAt", "createdAt",
+                 "leaseUntil" < CURRENT_TIMESTAMP AS "leaseExpired",
+                 GREATEST(0, EXTRACT(EPOCH FROM ("leaseUntil" - CURRENT_TIMESTAMP)) * 1000) AS "leaseRemainingMs"
           FROM "CodingProxyRequest"
           WHERE "sessionId" = ${input.sessionId} AND "requestKey" = ${input.requestKey}
+          ORDER BY "attempt" DESC LIMIT 1
         `;
-      if (duplicate[0]) return { outcome: "duplicate", request: requestFromRow(duplicate[0]) } as const;
+      let attempt = 1;
+      let tookOver: { requestId: string } | undefined;
+      const prior = newest[0];
+      if (prior) {
+        const request = requestFromRow(prior);
+        const retryable = input.maxAttempts !== undefined && request.requestFingerprint === input.requestFingerprint;
+        // A row with no lease (written before leases) cannot be told from a live one, and an uncertain
+        // row a live proxy settled (a broken stream) is not an orphan: neither is ever taken over.
+        const reservedLeased = request.status === "reserved" && prior.leaseUntil !== null;
+        const settledOrphan = request.status === "uncertain" && prior.orphanedAt !== null;
+        if (!retryable || !(reservedLeased || settledOrphan)) return { outcome: "duplicate", request } as const;
+        if (reservedLeased && prior.leaseExpired !== true) {
+          return { outcome: "in_progress", request, retryAfterMs: Number(prior.leaseRemainingMs ?? 0) } as const;
+        }
+        if (request.attempt >= input.maxAttempts!) return { outcome: "attempts_exhausted", request } as const;
+        if (reservedLeased) {
+          if (input.takeover?.requestId !== request.id) {
+            return { outcome: "orphaned", orphan: { request, runId: row.runId, createdAt: prior.createdAt } } as const;
+          }
+          // The session lock is held, so no reserve or complete can interleave; the guard covers the
+          // owner renewing, or a release, which take no session lock.
+          const { estimate } = input.takeover;
+          const settled = await tx.$executeRaw`
+              UPDATE "CodingProxyRequest"
+              SET "status" = 'uncertain',
+                  "actualCostUsd" = ${estimate.costUsd},
+                  "inputTokens" = ${estimate.usage.inputTokens}, "outputTokens" = ${estimate.usage.outputTokens},
+                  "cachedInputTokens" = ${estimate.usage.cachedInputTokens},
+                  "cacheWriteTokens" = ${estimate.usage.cacheWriteTokens},
+                  "reasoningTokens" = 0,
+                  "costEstimated" = true, "leaseUntil" = NULL, "orphanedAt" = CURRENT_TIMESTAMP,
+                  "updatedAt" = CURRENT_TIMESTAMP
+              WHERE "id" = ${request.id} AND "status" = 'reserved' AND "leaseUntil" < CURRENT_TIMESTAMP
+            `;
+          if (settled === 0) {
+            const current = (await requestById(tx, request.id)) ?? request;
+            return current.status === "reserved"
+              ? ({ outcome: "in_progress", request: current, retryAfterMs: 0 } as const)
+              : ({ outcome: "duplicate", request: current } as const);
+          }
+          await this.recomputeRunTotals(tx, request.sessionId, request.model);
+        }
+        attempt = request.attempt + 1;
+        tookOver = { requestId: request.id };
+      }
 
       const totals = await tx.$queryRaw<
         { spent: unknown; heldReserved: unknown; heldUncertain: unknown; done: unknown }[]
@@ -304,6 +368,8 @@ export class PrismaProxyLedger implements ProxyLedger {
           `;
         return { outcome: "budget_exhausted", details } as const;
       }
+      // A lease needs an owner to renew it: without one the row is written unleased, so never swept.
+      const leaseMs = input.ownerId !== undefined ? (input.leaseMs ?? null) : null;
       const pricing = JSON.stringify({
         encoding: input.pricing.encoding,
         inputPerMTok: input.pricing.inputPerMTok,
@@ -315,16 +381,20 @@ export class PrismaProxyLedger implements ProxyLedger {
           INSERT INTO "CodingProxyRequest"
             ("id", "sessionId", "requestKey", "requestFingerprint", "model", "status",
              "reservationUsd", "pricingVersion", "pricingSnapshot", "requestBytes", "ceilingUsd",
-             "reservationBasis", "conversationKey", "createdAt", "updatedAt")
+             "reservationBasis", "conversationKey", "maxOutputTokens", "ownerId", "leaseUntil", "attempt",
+             "createdAt", "updatedAt")
           VALUES
             (${input.id}, ${input.sessionId}, ${input.requestKey}, ${input.requestFingerprint}, ${input.model},
              'reserved', ${input.reservationUsd}, ${input.pricing.version}, ${pricing}::jsonb,
              ${input.requestBytes ?? null}, ${input.ceilingUsd ?? null}, ${input.reservationBasis ?? null},
-             ${input.conversationKey ?? null}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             ${input.conversationKey ?? null}, ${input.maxOutputTokens ?? null}, ${input.ownerId ?? null},
+             CASE WHEN ${leaseMs}::double precision IS NULL THEN NULL
+                  ELSE CURRENT_TIMESTAMP + ${leaseMs}::double precision * interval '1 millisecond' END,
+             ${attempt}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         `;
       const request = await requestById(tx, input.id);
       if (!request) throw new Error("proxy_reservation_not_persisted");
-      return { outcome: "reserved", request } as const;
+      return { outcome: "reserved", request, ...(tookOver ? { tookOver } : {}) } as const;
     });
   }
 
@@ -345,7 +415,8 @@ export class PrismaProxyLedger implements ProxyLedger {
                  "reservationUsd", "actualCostUsd", "pricingVersion", "pricingSnapshot",
                  "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteTokens",
                  "reasoningTokens", "upstreamStatus", "costEstimated",
-                 "requestBytes", "ceilingUsd", "reservationBasis", "conversationKey"
+                 "requestBytes", "ceilingUsd", "reservationBasis", "conversationKey",
+                 "maxOutputTokens", "ownerId", "leaseUntil", "attempt", "orphanedAt"
           FROM "CodingProxyRequest" WHERE "id" = ${requestId} FOR UPDATE
         `;
       const prior = locked[0] ? requestFromRow(locked[0]) : null;
@@ -366,7 +437,7 @@ export class PrismaProxyLedger implements ProxyLedger {
               "inputTokens" = ${usage.inputTokens}, "outputTokens" = ${usage.outputTokens},
               "cachedInputTokens" = ${usage.cachedInputTokens}, "cacheWriteTokens" = ${usage.cacheWriteTokens},
               "reasoningTokens" = ${usage.reasoningTokens}, "upstreamStatus" = ${upstreamStatus},
-              "costEstimated" = false,
+              "costEstimated" = false, "leaseUntil" = NULL,
               "completedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
           WHERE "id" = ${requestId} AND "status" IN ('reserved', 'uncertain')
         `;
@@ -436,7 +507,8 @@ export class PrismaProxyLedger implements ProxyLedger {
   async release(requestId: string, upstreamStatus: number): Promise<void> {
     await this.db.$executeRaw`
       UPDATE "CodingProxyRequest"
-      SET "status" = 'released', "upstreamStatus" = ${upstreamStatus}, "updatedAt" = CURRENT_TIMESTAMP
+      SET "status" = 'released', "upstreamStatus" = ${upstreamStatus}, "leaseUntil" = NULL,
+          "updatedAt" = CURRENT_TIMESTAMP
       WHERE "id" = ${requestId} AND "status" = 'reserved'
     `;
   }
@@ -460,10 +532,66 @@ export class PrismaProxyLedger implements ProxyLedger {
               "cachedInputTokens" = ${estimate?.usage.cachedInputTokens ?? null},
               "cacheWriteTokens" = ${estimate?.usage.cacheWriteTokens ?? null},
               "reasoningTokens" = ${estimate ? 0 : null},
-              "costEstimated" = ${estimate !== undefined}, "updatedAt" = CURRENT_TIMESTAMP
+              "costEstimated" = ${estimate !== undefined}, "leaseUntil" = NULL, "updatedAt" = CURRENT_TIMESTAMP
           WHERE "id" = ${requestId} AND "status" = 'reserved'
         `;
       if (estimate && updated > 0) await this.recomputeRunTotals(tx, initial.sessionId, initial.model);
+    });
+  }
+
+  async renewLeases(ownerId: string, requestIds: string[], leaseMs: number): Promise<LeaseRenewal> {
+    if (requestIds.length === 0) return { renewed: [], cancelled: [] };
+    const rows = await this.db.$queryRaw<{ id: string; cancelled: boolean }[]>`
+      UPDATE "CodingProxyRequest" q
+      SET "leaseUntil" = CURRENT_TIMESTAMP + ${leaseMs}::double precision * interval '1 millisecond'
+      FROM "CodingProxySession" s
+      WHERE s."id" = q."sessionId" AND q."ownerId" = ${ownerId} AND q."status" = 'reserved'
+        AND q."leaseUntil" IS NOT NULL AND q."id" = ANY(${requestIds}::text[])
+      RETURNING q."id", (s."status" = 'cancelled') AS "cancelled"
+    `;
+    return { renewed: rows.map((row) => row.id), cancelled: rows.filter((row) => row.cancelled).map((row) => row.id) };
+  }
+
+  async expiredLeases(limit: number): Promise<ExpiredRequest[]> {
+    const rows = await this.db.$queryRaw<(RequestRow & { runId: string; createdAt: Date })[]>`
+      SELECT q."id", q."sessionId", q."requestKey", q."requestFingerprint", q."model", q."status",
+             q."reservationUsd", q."actualCostUsd", q."pricingVersion", q."pricingSnapshot",
+             q."inputTokens", q."outputTokens", q."cachedInputTokens", q."cacheWriteTokens",
+             q."reasoningTokens", q."upstreamStatus", q."costEstimated",
+             q."requestBytes", q."ceilingUsd", q."reservationBasis", q."conversationKey",
+             q."maxOutputTokens", q."ownerId", q."leaseUntil", q."attempt", q."orphanedAt", q."createdAt", s."runId"
+      FROM "CodingProxyRequest" q
+      JOIN "CodingProxySession" s ON s."id" = q."sessionId"
+      WHERE q."status" = 'reserved' AND q."leaseUntil" < CURRENT_TIMESTAMP
+      ORDER BY q."leaseUntil"
+      LIMIT ${limit}
+    `;
+    return rows.map((row) => ({ request: requestFromRow(row), runId: row.runId, createdAt: row.createdAt }));
+  }
+
+  async settleExpired(requestId: string, estimate?: { usage: ProxyUsage; costUsd: number }): Promise<boolean> {
+    return this.transaction(async (tx) => {
+      const initial = await requestById(tx, requestId);
+      if (!initial) return false;
+      // The session lock orders this against reserve and complete, as markUncertain does.
+      await tx.$queryRaw<{ id: string }[]>`
+          SELECT "id" FROM "CodingProxySession" WHERE "id" = ${initial.sessionId} FOR UPDATE
+        `;
+      const updated = await tx.$executeRaw`
+          UPDATE "CodingProxyRequest"
+          SET "status" = 'uncertain',
+              "actualCostUsd" = ${estimate?.costUsd ?? null},
+              "inputTokens" = ${estimate?.usage.inputTokens ?? null}, "outputTokens" = ${estimate?.usage.outputTokens ?? null},
+              "cachedInputTokens" = ${estimate?.usage.cachedInputTokens ?? null},
+              "cacheWriteTokens" = ${estimate?.usage.cacheWriteTokens ?? null},
+              "reasoningTokens" = ${estimate ? 0 : null},
+              "costEstimated" = ${estimate !== undefined}, "leaseUntil" = NULL, "orphanedAt" = CURRENT_TIMESTAMP,
+              "updatedAt" = CURRENT_TIMESTAMP
+          WHERE "id" = ${requestId} AND "status" = 'reserved' AND "leaseUntil" < CURRENT_TIMESTAMP
+        `;
+      if (updated === 0) return false;
+      if (estimate) await this.recomputeRunTotals(tx, initial.sessionId, initial.model);
+      return true;
     });
   }
 

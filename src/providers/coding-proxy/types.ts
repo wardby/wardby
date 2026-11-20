@@ -2,6 +2,7 @@ import { parseStoredEntry, type CatalogEntry } from "../llm/catalog-types.js";
 import type { RunStepsLevel } from "../../core/run-steps/config.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import type { ProxyRefusalDetails } from "../../core/budget-events.js";
+import type { LeaseRenewal } from "../../core/request-lease.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
 
 export type ProxySessionStatus = "active" | "cancelled";
@@ -85,6 +86,16 @@ export interface ProxyRequest {
   ceilingUsd?: number;
   reservationBasis?: ReservationBasis;
   conversationKey?: string | null;
+  /** The request's output cap, kept so an orphaned request can be estimated. */
+  maxOutputTokens?: number;
+  /** The proxy process that reserved the request; kept after it settles. */
+  ownerId?: string;
+  /** While reserved, when the owner's lease runs out; null once settled, and on rows from before leases. */
+  leaseUntil?: Date | null;
+  /** Which try of this requestKey the row is: 1, then one more per takeover of an orphaned row. */
+  attempt: number;
+  /** When the row was settled because its owner's lease ran out; unset for any other row. */
+  orphanedAt?: Date | null;
 }
 
 export type ReservationBasis = "cached" | "full";
@@ -133,14 +144,41 @@ export interface ReserveProxyRequestInput {
   ceilingUsd?: number;
   reservationBasis?: ReservationBasis;
   conversationKey?: string | null;
+  maxOutputTokens?: number;
+  /** The reserving proxy process. With leaseMs, the row is leased to it; without, it has no lease and is never swept. */
+  ownerId?: string;
+  /** How long the lease lasts from now, on the ledger's clock. */
+  leaseMs?: number;
+  /** Tries one requestKey may have. Without it a duplicate of a reserved row is never taken over. */
+  maxAttempts?: number;
+  /**
+   * Take over this orphaned request (the one an earlier reserve returned as `orphaned`): in the same
+   * transaction, settle it at the estimate and reserve the next attempt. The estimate is the proxy's;
+   * the ledger only applies it while the row is still the key's newest, reserved and lease-expired.
+   */
+  takeover?: { requestId: string; estimate: { usage: ProxyUsage; costUsd: number } };
+}
+
+/** A reserved request whose lease has run out: its owner is presumed dead. */
+export interface ExpiredRequest {
+  request: ProxyRequest;
+  runId: string;
+  /** When the request was reserved, for the clock of its estimate. */
+  createdAt: Date;
 }
 
 /** What the proxy knows about a refusal: the numbers only; names and the binding limit are the control plane's. */
 export type ProxyRefusalRecord = Omit<ProxyRefusalDetails, "agentBudgetUsd" | "groupName" | "leadAgentName">;
 
 export type ReserveProxyRequestResult =
-  | { outcome: "reserved"; request: ProxyRequest }
+  | { outcome: "reserved"; request: ProxyRequest; tookOver?: { requestId: string } }
   | { outcome: "duplicate"; request: ProxyRequest }
+  /** The key's newest row is reserved and its owner's lease is still running: nothing may be sent upstream yet. */
+  | { outcome: "in_progress"; request: ProxyRequest; retryAfterMs: number }
+  /** The key's newest row is reserved and its lease ran out: the owner is presumed dead. Retry with `takeover`. */
+  | { outcome: "orphaned"; orphan: ExpiredRequest }
+  /** The key has used all its attempts. */
+  | { outcome: "attempts_exhausted"; request: ProxyRequest }
   | { outcome: "budget_exhausted"; details: Omit<ProxyRefusalRecord, "source"> }
   | { outcome: "inactive"; reason: "cancelled" | "expired" };
 
@@ -168,6 +206,22 @@ export interface ProxyLedger {
   settlementHints(sessionId: string, model: string): Promise<{ medianOutputTokens?: number }>;
   /** The latest completed or uncertain request of a conversation, or null when it has none. */
   previousReply(sessionId: string, conversationKey: string): Promise<PreviousReply | null>;
+  /**
+   * Extends the lease of these reserved requests to leaseMs from now. Only rows owned by ownerId
+   * move: a row another process leased, or one already settled, is left alone and is not in the
+   * result's `renewed`, which is how its owner learns it lost it. `cancelled` lists renewed rows
+   * whose session was cancelled.
+   */
+  renewLeases(ownerId: string, requestIds: string[], leaseMs: number): Promise<LeaseRenewal>;
+  /** Up to `limit` reserved requests whose lease has run out, oldest lease first. Rows with no lease are never listed. */
+  expiredLeases(limit: number): Promise<ExpiredRequest[]>;
+  /**
+   * Settles a request whose lease has run out as uncertain, at the estimate (it then counts at it,
+   * not at its hold) or, without one, holding its full hold. Applies only while the row is still
+   * reserved and its lease still expired, so an owner that renewed or settled it in the meantime
+   * wins. True when this call settled it.
+   */
+  settleExpired(requestId: string, estimate?: { usage: ProxyUsage; costUsd: number }): Promise<boolean>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether a request of this session was ever refused for budget. */
   budgetExhausted(sessionId: string): Promise<boolean>;
@@ -188,6 +242,7 @@ export interface ProxyAuditEvent {
     | "request.rejected"
     | "request.released"
     | "request.uncertain"
+    | "request.taken_over"
     | "response.completed";
   runId: string;
   requestId?: string;
@@ -212,6 +267,9 @@ export interface ProxyAuditEvent {
   heldUncertainUsd?: number;
   turn?: number;
   costUsd?: number;
+  /** For request.taken_over: the orphaned request this one replaces, and which try this is. */
+  previousRequestId?: string;
+  attempt?: number;
   /** For request.uncertain: the estimated cost it was settled at, when one could be made. */
   estimatedCostUsd?: number;
   inputTokens?: number;

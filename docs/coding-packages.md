@@ -21,8 +21,8 @@ Claude Code's tool-runner container, the same container that mounts the
 workspace and runs every other shell command — the agent container never runs
 one. The toolchain picks the tool-runner image: `node` uses
 `CODING_CLAUDE_TOOL_RUNNER_IMAGE`, and `node-python` with toolchain version
-`3.12` uses `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` (Python with
-pytest and ruff, the same packages as the Codex `node-python` worker). As with
+`3.12`, `3.13` or `3.14` uses `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12`, `_3_13` or `_3_14` respectively (Python with
+pytest, ruff, uv and poetry, the same packages as the Codex `node-python` worker). As with
 Codex, pip installs go into a virtual environment
 (`python -m venv --system-site-packages .venv`), and pip there reaches only the
 registry. The lockfile check
@@ -357,9 +357,10 @@ bounded by `REGISTRY_PLAN_MAX_ENTRIES` entries (`413
 wardby_lockfile_too_large`, as is a lockfile over 20 MiB) and
 `REGISTRY_PLAN_TIMEOUT_MS` (`503 wardby_plan_incomplete`; what was verified is
 kept, so a retry resumes). The proxy checks the registry token and waits for
-one of two plan slots before it reads the lockfile at all, so an
-unauthenticated or queued plan holds none of it; a run may run one plan at a
-time and make `REGISTRY_PLAN_MAX_PER_RUN` in all (`429 wardby_plan_limit`).
+one of two plan slots (per proxy pod) before it reads the lockfile at all, so
+an unauthenticated or queued plan holds none of it; a run may run one plan at a
+time and make `REGISTRY_PLAN_MAX_PER_RUN` in all (`429 wardby_plan_limit`),
+counted in the database across every proxy pod.
 It only reads the registry for entries it reaches, so a lockfile full of
 unrelated packages costs nothing upstream. As a rough guide, a web-app
 lockfile of about 200 entries verifies in seconds the first time and in under a
@@ -370,6 +371,50 @@ back to the dependency-graph walk below (after a plan with any refusal, this
 applies to metadata requests as well as downloads). That can make a failing install take
 minutes and use much more proxy memory; fix the refusals (wait out the release
 age or adjust the agent's policy) rather than retrying.
+
+### uv and poetry
+
+The `node-python` images ship `uv` and `poetry` next to pytest and ruff, plus
+CPython 3.12, 3.13 and 3.14 as uv's managed interpreters (in `/opt/uv-python`,
+which uv is pointed at); `python` is the version the image is built for. A run cannot download an interpreter, because it reaches
+only the registry, so `uv python install` has nothing to fetch: pick one of the
+shipped versions.
+
+```sh
+uv venv --python 3.13        # or: uv python pin 3.13
+uv pip install -r requirements.txt
+uv pip install -e '.[test]'
+```
+
+The worker points uv at the proxy with the run's registry token (`UV_DEFAULT_INDEX`;
+uv reads none of pip's `PIP_*` settings), keeps its cache under the workspace's
+`.cache`, and turns interpreter downloads off. As with pip, installs draw on the
+agent's PyPI allowlist and the registry serves wheels only.
+
+- Lock files are not verified before an install the way npm's are (see
+  [Lockfile installs](#lockfile-installs-verified-then-approved-exactly)). A
+  `uv.lock` or `poetry.lock` that records download URLs outside the registry
+  has those requests refused, like any request that bypasses the proxy.
+- `uv sync` and `uv run` read the project's `uv.lock` and `pyproject.toml`, so a
+  project whose lock or `[[tool.uv.index]]` names a private index (for example
+  an Artifactory with `authenticate = "always"`) goes straight to that index and
+  not through the proxy. `uv pip install` reads the same `[[tool.uv.index]]`
+  when it runs inside the project. To install the locked versions through the
+  proxy, export them (`uv export --frozen --no-hashes --no-emit-project`), then
+  run `uv pip install --no-config -r <file>` from a directory outside the
+  repository, with `--python` pointing at the project's environment.
+- A locked version with a blocking advisory is withheld by the proxy, so the
+  install fails with an unsatisfiable-requirement error from uv, not a refusal
+  naming the advisory. The version is absent from the index the worker sees.
+  Accept the advisory in the agent's `packagePolicy.acceptedAdvisories` (see
+  [Accepting advisories](#accepting-advisories)) or move the lock to a fixed
+  release.
+- Poetry has no setting for its package index, so the worker cannot point it at
+  the registry: a project's own `pyproject.toml` sources decide where it
+  installs from. Poetry is there to run a project whose dependencies are already
+  installed (for example in a [custom image](coding-worker-byo-images.md)). Its
+  cache goes under `.cache` and its virtual environment in the project's
+  `.venv`, neither of which is collected.
 
 ### pnpm and yarn
 
@@ -503,7 +548,9 @@ example, when it upgrades a lockfileVersion 1 lockfile or re-reads the
 lockfile's packages on `npm install <new-package>`). For the rest of that run
 and ecosystem, a metadata request for an unknown name goes through the
 dependency-graph walk below, exactly as a download does, even if a later plan
-succeeds. The proxy keeps this per run in memory, like the walk itself.
+succeeds. This is recorded on the run's proxy session in the database, so every
+proxy pod answers the same way, including one that did not run the plan and one
+that started after it; the walk's own progress stays in the pod's memory.
 
 As a consequence, a **new top-level package must be allowlisted** (or already
 be in the lockfile the run's plan approved), even if some allowlisted
@@ -972,8 +1019,8 @@ the cache doesn't fail the run: its projects report `tool_unavailable`. See
      that `docker compose down -v` removes. This requires wardby 0.7.0 or
      later (earlier runtime images can't write to the volume).
 2. **Database grants.** Where the coding proxy has its own restricted database
-   role (GKE), it needs access to `DependencySnapshot`, a few `CodingRun`
-   columns, and SELECT on `SubstrateRun`, which the cache reads on every
+   role (GKE), it needs access to `DependencySnapshot`, `DependencyUploadClaim`, a few
+   `CodingRun` columns, and SELECT on `SubstrateRun`, which the cache reads on every
    launcher (without it, every cache request fails). `deploy/gke/up.sh`
    applies them before the rollout; see
    [Upgrading an existing deployment](getting-started-gke.md#upgrading-an-existing-deployment).
@@ -1005,6 +1052,19 @@ deletes objects older than `dependency_cache_max_age_days + 7` days, which
 removes objects that were never recorded; keep that Terraform variable equal
 to `WARDBY_DEPENDENCY_CACHE_MAX_AGE_DAYS` by hand. The kind harness and
 Docker quickstart stores are local and have no such rule.
+
+Before it stores the first byte, an upload records a claim in the database,
+and removes the claim when the upload ends. Only one claim per snapshot, and
+one per run and project, can exist at a time across all proxy replicas, so two
+replicas never upload the same snapshot at once: the second request is refused
+`409 upload_in_progress`, and that run simply goes without storing a snapshot.
+If a proxy stops in the middle of an upload, its claim stays behind. The next
+hourly pass that finds a claim older than
+`WARDBY_DEPENDENCY_CACHE_UPLOAD_SECONDS` plus 5 minutes deletes the stored
+object (unless a snapshot already uses it) and then the claim. The object is
+reclaimed without waiting for the bucket's age rule. The claims live in the
+`DependencyUploadClaim` table, which the coding proxy's database role needs
+read, insert and delete access to (see [Enable it](#enable-it)).
 
 Other bounds:
 
@@ -1219,12 +1279,14 @@ requirements.txt` (pip has no hook, and in the worker it only exists
   project from the file URLs the lock records, never from its index, so for
   the command the shim also points the lock's PyPI URLs at the registry
   (without credentials; uv sends the index's), and afterwards puts the file
-  back: exactly as it was when uv left it alone, otherwise with PyPI's URLs
-  (a file the lock already had keeps its URL; a new one gets PyPI's
-  redirecting `files.pythonhosted.org/packages/<tag>/<letter>/<name>/<file>`
-  path). Before the workspace is collected, any registry URL left in a
-  `uv.lock` is rewritten the same way, so a committed lock never names the
-  registry.
+  back: exactly as it was when uv left it alone. A lock that already named
+  the registry (the worker's own rewrite before the agent starts, or a lock
+  the command created) is left as uv wrote it, and so are the URLs of any
+  package the command added or upgraded. Before the workspace is collected,
+  every registry URL left in a `uv.lock` is replaced with the real address
+  the registry gives for that file, so a committed lock never names the
+  registry (see [Writing a uv.lock back to its real
+  registry](#writing-a-uvlock-back-to-its-real-registry)).
 - **`pip install .`, `uv sync`, `uv run` and other project installs** build
   the project, which installs its build backend (`[build-system] requires`:
   `hatchling`, `setuptools`, `poetry-core`, …) and whatever the backend asks
@@ -1263,6 +1325,44 @@ file claims, like an npm one, with these differences:
   run; its downloads still go through every usual check (wheels only, each
   file's own release age, the index's sha256, advisories). A pin refused as
   too new or with no wheel is named in the plan's output with its reason.
+
+#### Writing a uv.lock back to its real registry
+
+Inside a run, an existing `uv.lock` names the registry proxy (the worker
+rewrites it before the agent starts, and uv writes the proxy's URLs for any
+package it adds or upgrades). Before the changes are collected, each of those
+URLs is replaced with the address the proxy itself reads the file from, so the
+lock in the pull request installs outside the sandbox. That address is the
+public `files.pythonhosted.org` URL, or the Artifactory file URL when a
+[JFrog PyPI repository](#private-packages-from-jfrog-artifactory) replaces
+the public index, and the `registry =` value is `https://pypi.org/simple` or
+the Artifactory simple index. Nothing is guessed: the worker asks the proxy,
+which already holds each file's address from the index it served, so private
+packages and versions that were not in the committed lock are covered, and the
+copy of the original lock kept in the workspace is not needed.
+
+The worker asks with `POST /registry/pypi/-/origins` and the run's registry
+token. The body is `{ "files": [{ "name": "<project>", "filename": "<file>" }] }`
+(at most 1000 files and 200 projects, 1 MiB); the answer is `{ "index": "<registry
+value>", "files": [...] }` with, for each file, either `"url"` or an `"error"`
+code:
+
+| Code                         | Meaning                                                                                                                                                                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wardby_origin_name_invalid` | The project name is not a valid Python project name.                                                                                                                                              |
+| `wardby_origin_not_allowed`  | The run was never allowed this project: it is neither on the allowlist nor an allowance (a dependency of a package served).                                                                       |
+| `wardby_origin_file_unknown` | The project's index has no such file for this run: a typo, a version outside the allowlisted range, newer than the age limit or withheld by an advisory, or a project the registry does not have. |
+| `wardby_origin_url_unsafe`   | The index lists the file at an address the proxy will not hand out: not HTTPS, outside its upstream host, or carrying credentials or a query.                                                     |
+| `wardby_origin_unavailable`  | The registry or the advisory audit could not be reached. Retry.                                                                                                                                   |
+
+The route answers only for what the same token could be served by a metadata
+request, nothing is stored, and no answer, error or log carries a credential.
+If any entry cannot be given a real address, the run fails with
+[`coding_pypi_lockfile_unresolved`](../help/errors/coding-pypi-lockfile-unresolved.md)
+instead of collecting a lock that cannot install: an entry the proxy cannot
+answer for is taken from the copy of the original lock, when the workspace
+still has it and the entry is unchanged. Poetry files are restored from that
+copy as before.
 
 **Why an install was refused.** npm prints the registry's refusal body, so
 the agent sees the code and the hint. pip doesn't (a refused package shows
@@ -1346,31 +1446,160 @@ other refusal the run got past. If nothing of that name was served,
   The one exception is the [dependency cache](#dependency-cache)'s
   `npm rebuild`, which Wardby runs itself before the agent starts.
 
+## Private packages from JFrog Artifactory
+
+By default the proxy reads public npm and PyPI. An operator can point it at a
+JFrog Artifactory instead, so runs can install private packages. The
+credential stays in the proxy process: the worker and tool runner never hold
+it and still reach only the proxy. With none of the settings below, behaviour
+is unchanged.
+
+**Scope.** Claude Code runs. Codex runs install through the proxy as usual,
+and a `uv.lock` is written back to the Artifactory addresses for both
+(see [Writing a uv.lock back to its real
+registry](#writing-a-uvlock-back-to-its-real-registry)). The Codex driver
+still rewrites npm lockfile download URLs back to public registry URLs when it
+collects the workspace, so an npm lockfile entry for a private scope would be
+rewritten wrongly. Use Claude Code for repositories with private npm packages
+until that is lifted.
+
+**npm is scope-routed.** Names in the configured scopes (for example
+`@your-org`) resolve only from the Artifactory npm repository, with the
+credential. Every other name resolves from public npm, with no credential. A
+name in a configured scope never falls back to public npm, and a name outside
+them is never fetched from Artifactory. A download URL must be on the host of
+its own package's upstream: a public document cannot point the proxy at the
+Artifactory host, or the reverse.
+
+**PyPI replaces the public index.** An Artifactory PyPI repository serves
+public packages too, so when one is configured it replaces public PyPI and
+`pypi.org` and `files.pythonhosted.org` are no longer reachable. The index
+must answer the JSON Simple API (PEP 691); an index that answers only HTML is
+refused with a message saying so.
+
+| Setting                         | Set on                  | Meaning                                                                                           |
+| ------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `REGISTRY_JFROG_URL`            | proxy and launcher host | Base URL with its context path, e.g. `https://your-org.jfrog.io/your-context`. HTTPS.             |
+| `REGISTRY_JFROG_NPM_REPO`       | proxy and launcher host | npm repository key, e.g. `npm-local`. Unset: all npm comes from public npm.                       |
+| `REGISTRY_JFROG_NPM_SCOPES`     | proxy and launcher host | Comma-separated scopes served by that repository, e.g. `@your-org`. Required with a repo.         |
+| `REGISTRY_JFROG_PYPI_REPO`      | proxy                   | PyPI repository key, e.g. `pypi`. Unset: public PyPI.                                             |
+| `REGISTRY_JFROG_PYPI_TRUST_ALL` | proxy                   | `true` allows every package the PyPI repository serves, with no allowlist entry. Default `false`. |
+| `REGISTRY_UPSTREAM_USERNAME`    | proxy only              | `env:NAME` reference to the username, e.g. `env:ARTIFACTORY_USER`.                                |
+| `REGISTRY_UPSTREAM_PASSWORD`    | proxy only              | `env:NAME` reference to the password or token. Sent as Basic auth.                                |
+
+**Trusting the whole PyPI repository.** By default every PyPI package, from
+Artifactory or not, needs an allowlist entry. With
+`REGISTRY_JFROG_PYPI_TRUST_ALL=true`, every agent on that proxy may install
+any package the repository serves, so repositories need no PyPI allowlist.
+Only do this when the repository is curated, for example a virtual repository
+with an approval or curation layer in front of its public remote: if it
+proxies public PyPI unfiltered, this allows all of PyPI. The release-age rule,
+the OSV audit (malware is still refused), the wheels-only rule and the host
+binding still apply to every package. An agent's own PyPI entries still work
+and still narrow nothing: they are additional, not exclusive. The setting is
+proxy-wide; there is no per-agent form.
+
+The derived upstreams are `<url>/api/npm/<repo>/` and
+`<url>/api/pypi/<repo>/simple/`. The proxy refuses to start on an invalid
+combination: a URL that is not HTTPS or embeds credentials or a query, a
+repository key that is a path or URL, an npm repository without scopes, a
+repository without a URL, a repository without credentials (there is no
+anonymous mode), or credentials with no repository. The credential is sent
+only to the Artifactory host, never to public registries or OSV. A redirect is
+followed in one case only: a GET to the Artifactory host that answers with a
+redirect, which Artifactory does when it serves downloads from cloud storage
+through signed URLs. The proxy follows that one redirect to an HTTPS URL on any
+public host, without the credential, and refuses a redirect from that second
+hop. Private, loopback and metadata addresses stay blocked, and the connection
+is pinned to the address the proxy checked. The downloaded file is still
+verified against the `sha256` in the index. Use a dedicated read-only identity limited to the
+repositories listed, and rotate it with a proxy restart.
+
+**Passing the settings to a local proxy.** `REGISTRY_UPSTREAM_USERNAME` and
+`REGISTRY_UPSTREAM_PASSWORD` hold `env:NAME` references, so the variables they
+name (for example `ARTIFACTORY_USER` and `ARTIFACTORY_TOKEN`) must be set in
+the proxy's own environment too. The Docker Compose files in `deploy/local/`
+pass all of these through to the `coding-proxy` container from the environment
+Compose runs in, empty meaning public registries. Export them in the shell:
+Compose does not read `.env.local`. The proxy container itself never reads `.env.local`. Restart
+the proxy after changing them. Your own
+deployment must pass them to the proxy process and nowhere else: never to the
+worker, the tool runner or the main server.
+
+**Policy is unchanged for Artifactory packages.** The per-agent allowlist
+(use a scope wildcard such as `@your-org/*`), the minimum release age and the
+OSV audit all still apply. One difference: when OSV gives no answer, an
+install of a name in a configured scope does not fail, while a public name
+keeps the `REGISTRY_AUDIT_FAIL_OPEN` behaviour. Private package names are
+still sent to `api.osv.dev`, and a version with no publish time in the
+Artifactory metadata is refused by the release-age rule like any other.
+
+**Lockfiles.** A lockfile may record the Artifactory URL for names in the
+configured scopes and public npm URLs for every other name; the reverse is
+`unsupported`. When the collected lockfiles are normalized, each package is
+rewritten to its own upstream, so a run does not change `resolved` URLs.
+
+**Known limitations.**
+
+- A repository's own `.npmrc` that maps a scope to the Artifactory URL
+  (`@your-org:registry=…`) takes precedence over the proxy setting inside the
+  tool runner, so installs of that scope do not reach the proxy and fail.
+  There is no workaround in this release; the worker setup does not yet pin
+  configured scopes to the proxy.
+- Not verified against Artifactory: yarn classic and yarn Berry install-time
+  URL rewriting, corepack, npm's `replace-registry-host` for lockfiles that
+  record Artifactory URLs, pnpm `tarball:` URLs, and root `preinstall`
+  scripts. Prefer lockfiles that record only public URLs plus the private
+  scope's.
+- Artifactory "redirect download" (a 302 to signed cloud-storage URL) works:
+  the proxy follows that one redirect without the credential. Any other
+  redirect is refused, including one from the storage URL, and a redirect to a
+  plain-HTTP URL, one with embedded credentials, or one with no `Location`
+  fails the download. The index is not hash-checked, so an Artifactory that
+  redirects index requests to an unexpected host makes the proxy fetch from it:
+  keep the repository under your control.
+- Dependencies are installed into the run's workspace and are visible to the
+  agent while it works, private package source included.
+
 ## Operator limits
 
 These per-run limits protect the proxy process and are configured with
-environment variables (defaults shown); they're enforced by the single proxy
-process handling the run, counting files and bytes currently in flight as well
-as what's already been recorded, so parallel downloads (for example npm's
-default concurrent connections) can't add up to more than the limit before any
-one of them finishes:
+environment variables (defaults shown); they're enforced against the database,
+so they hold in total however many proxy pods serve the run. They count files
+and bytes currently in flight as well as what's already been recorded, so
+parallel downloads (for example npm's default concurrent connections) can't add
+up to more than the limit before any one of them finishes. A download holds its
+place while it streams and gives it up when it completes or fails; if its pod
+dies first, the place is freed once the download's lease
+(`REGISTRY_IDLE_TIMEOUT_MS` plus a minute) lapses:
 
-| Setting                        | Default | Meaning                                                        |
-| ------------------------------ | ------- | -------------------------------------------------------------- |
-| `REGISTRY_MAX_FILE_MB`         | 200     | Largest single downloaded file.                                |
-| `REGISTRY_MAX_TOTAL_MB`        | 2048    | Total bytes downloaded in one run.                             |
-| `REGISTRY_MAX_FILES`           | 5000    | Total files served in one run.                                 |
-| `REGISTRY_IDLE_TIMEOUT_MS`     | 120000  | Idle time allowed on one download.                             |
-| `REGISTRY_AUDIT_FAIL_OPEN`     | `false` | Allow-and-report instead of refusing when OSV is unreachable.  |
-| `REGISTRY_METADATA_TIMEOUT_MS` | 30000   | Time allowed for one metadata or OSV request, body included.   |
-| `REGISTRY_MAX_METADATA_MB`     | 64      | Largest metadata or OSV response the proxy reads.              |
-| `REGISTRY_MAX_GRAPH_PACKAGES`  | 3000    | Package names the graph walk may expand per run and ecosystem. |
-| `REGISTRY_GRAPH_TIMEOUT_MS`    | 180000  | Time one download's graph walk may take.                       |
-| `REGISTRY_DB_POOL_MAX`         | 3       | Database connections for the registry's own pool.              |
-| `CODING_PROXY_DB_POOL_MAX`     | 5       | Database connections for the budget ledger (model requests).   |
-| `REGISTRY_PLAN_MAX_ENTRIES`    | 5000    | Entries a lockfile plan (`POST /-/plan`) may have.             |
-| `REGISTRY_PLAN_TIMEOUT_MS`     | 120000  | Time allowed for one lockfile plan.                            |
-| `REGISTRY_PLAN_MAX_PER_RUN`    | 20      | Lockfile plans one run may make.                               |
+| Setting                          | Default | Meaning                                                        |
+| -------------------------------- | ------- | -------------------------------------------------------------- |
+| `REGISTRY_MAX_FILE_MB`           | 200     | Largest single downloaded file.                                |
+| `REGISTRY_MAX_TOTAL_MB`          | 2048    | Total bytes downloaded in one run.                             |
+| `REGISTRY_MAX_FILES`             | 5000    | Total files served in one run.                                 |
+| `REGISTRY_IDLE_TIMEOUT_MS`       | 120000  | Idle time allowed on one download.                             |
+| `REGISTRY_AUDIT_FAIL_OPEN`       | `false` | Allow-and-report instead of refusing when OSV is unreachable.  |
+| `REGISTRY_METADATA_TIMEOUT_MS`   | 30000   | Time allowed for one metadata or OSV request, body included.   |
+| `REGISTRY_MAX_METADATA_MB`       | 64      | Largest metadata or OSV response the proxy reads.              |
+| `REGISTRY_MAX_GRAPH_PACKAGES`    | 3000    | Package names the graph walk may expand per run and ecosystem. |
+| `REGISTRY_GRAPH_TIMEOUT_MS`      | 180000  | Time one download's graph walk may take.                       |
+| `REGISTRY_DB_POOL_MAX`           | 3       | Database connections for the registry's own pool.              |
+| `CODING_PROXY_DB_POOL_MAX`       | 5       | Database connections for the budget ledger (model requests).   |
+| `CODING_PROXY_LEASE_SECONDS`     | 30      | How long a model request's lease lasts between renewals.       |
+| `CODING_PROXY_HEARTBEAT_SECONDS` | 10      | How often a proxy renews the leases of its requests.           |
+| `CODING_PROXY_SWEEP_SECONDS`     | 15      | How often a proxy settles requests whose lease ran out.        |
+| `REGISTRY_PLAN_MAX_ENTRIES`      | 5000    | Entries a lockfile plan (`POST /-/plan`) may have.             |
+| `REGISTRY_PLAN_TIMEOUT_MS`       | 120000  | Time allowed for one lockfile plan.                            |
+| `REGISTRY_PLAN_MAX_PER_RUN`      | 20      | Lockfile plans one run may make.                               |
+
+The three `CODING_PROXY_*_SECONDS` settings keep a stopped proxy's model
+requests from holding budget forever; the lease must be more than twice the
+heartbeat, or the proxy refuses to start. The heartbeat also delivers a stop: a
+request of a cancelled run is aborted at the next one. A worker's retry of a request whose
+proxy stopped takes over as a new attempt once the lease has run out; see
+[Availability](availability.md#a-model-request-whose-proxy-stops-mid-stream)
+and [A retry after the proxy stopped](availability.md#a-retry-after-the-proxy-stopped).
 
 A large allowlist can reach the package bound: the walk follows every kept
 version in each range plus optional and peer dependencies, so a graph is
@@ -1524,6 +1753,8 @@ same codes for the run (see
 | `wardby_registry_integrity_missing`  | —      | A plan refusal: npm publishes no integrity for this version, so a download of it couldn't be checked.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `wardby_plan_in_progress`            | 429    | A lockfile plan is already running for this run (one at a time). Wait for it; the install still runs, but downloads and, for the rest of the run, metadata requests fall back to the walk.                                                                                                                                                                                                                                                                                                                                                  |
 | `wardby_plan_incomplete`             | 503    | The plan didn't finish within `REGISTRY_PLAN_TIMEOUT_MS` (or the client went away), or a `pnpm-lock.yaml` or `yarn.lock` wasn't read within 15 seconds (see [pnpm and yarn](#pnpm-and-yarn); a retry of that lockfile won't help). What was verified is kept, so a retry resumes; the install still runs, but downloads and, for the rest of the run, metadata requests fall back to the walk.                                                                                                                                              |
+| `wardby_request_too_large`           | 413    | The body sent to `POST /-/origins` is over 1 MiB. Send fewer files per request.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `wardby_origins_unsupported`         | 404    | The ecosystem has no file addresses to give (`POST /-/origins` is a PyPI route).                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `wardby_bad_request`                 | 400    | The request path is malformed (bad percent-encoding, or not a valid package name). A client or agent bug, not a package choice.                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `wardby_upstream_error`              | 502    | The upstream registry answered with an error, or the download failed partway. Retry. Also returned, as "could not be checked against this agent's approved dependency graph… try again", when the registry failed while resolving a lockfile install's dependency graph.                                                                                                                                                                                                                                                                    |
 | `wardby_upstream_unavailable`        | 504    | The upstream registry didn't answer a metadata request within `REGISTRY_METADATA_TIMEOUT_MS`. Retry.                                                                                                                                                                                                                                                                                                                                                                                                                                        |

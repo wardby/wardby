@@ -14,9 +14,12 @@
 // reaches only the proxy. So for those project commands the lock's PyPI index
 // and file URLs point at the proxy (without credentials: uv sends the index's),
 // and afterwards the file is put back: as it was when uv left it alone, else
-// with the proxy URLs mapped back to PyPI (a file the original named to its
-// original URL, any other to PyPI's redirecting path). A uv.lock the command
-// created is written with PyPI's URLs too.
+// with the URLs this shim routed mapped back to PyPI (a file the original named
+// to its original URL, any other to PyPI's redirecting path). A lock that
+// already named the proxy before the command (the run's own rewrite), or one
+// the command created, is left as uv wrote it: the proxy's real upstream may be
+// a private registry, so those URLs are pointed at it, by asking the proxy,
+// when the run's changes are collected (pypi-lockfiles/session.ts).
 //
 // Security does not depend on this file: the proxy verifies every lockfile
 // claim and every download itself. Every failure here is reported and then
@@ -26,7 +29,7 @@ import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 
 import { delimiter, join } from "node:path";
 import { planPythonLockfile } from "./pypi-plan.mjs";
 import { registryAccess } from "./registry-refusals.mjs";
-import { planTargets, proxyUrls, routeLock, unrouteLock } from "./uv-lock.mjs";
+import { lockAfterCommand, planTargets, proxyUrls, routeLock } from "./uv-lock.mjs";
 
 /** Set for the real uv and everything it runs, so a nested uv (inside `uv run`) changes nothing. */
 const ACTIVE = "WARDBY_UV_SHIM_ACTIVE";
@@ -74,17 +77,10 @@ function write(path, text, what) {
 
 /** Routes the lock at `path` for the command; returns how to put it back (always defined). */
 function routeForCommand(target, proxy) {
-  if (typeof target !== "string") {
-    // No lock yet: one the command creates is written with PyPI's URLs.
-    const path = target.missing;
-    return () => {
-      const created = read(path);
-      if (created !== undefined) {
-        const restored = unrouteLock(created, proxy);
-        if (restored !== created) write(path, restored, "restore");
-      }
-    };
-  }
+  // No lock yet: one the command creates names the proxy, and is left so. The proxy's real upstream may be a private
+  // registry, so mapping those URLs to PyPI's here could write addresses that exist nowhere; they are pointed at the
+  // real upstream when the run's changes are collected, by asking the proxy.
+  if (typeof target !== "string") return () => {};
   const original = read(target);
   if (original === undefined) return () => {};
   const routed = routeLock(original, proxy);
@@ -92,12 +88,8 @@ function routeForCommand(target, proxy) {
   return () => {
     const after = read(target);
     if (after === undefined) return;
-    if (after === routed.text) {
-      if (after !== original) write(target, original, "restore");
-      return;
-    }
-    const restored = unrouteLock(after, proxy, routed.originals);
-    if (restored !== after) write(target, restored, "restore");
+    const restored = lockAfterCommand(original, routed, after, proxy);
+    if (restored !== undefined && restored !== after) write(target, restored, "restore");
   };
 }
 

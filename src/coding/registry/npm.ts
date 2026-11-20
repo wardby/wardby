@@ -7,8 +7,15 @@
  * install-time scripts disabled.
  */
 import semver from "semver";
-import { npmClientLockfilePlan, npmClientLockfiles } from "./npm-lockfile-formats.js";
+import { jfrogNpmRegistry, type JfrogRegistryConfig } from "./jfrog.js";
+import {
+  createNpmClientLockfilePlan,
+  createNpmClientLockfiles,
+  npmClientLockfilePlan,
+  npmClientLockfiles,
+} from "./npm-lockfile-formats.js";
 import { registryDependencyEdges } from "./npm-plan.js";
+import { PUBLIC_NPM_REGISTRY, isPrivateNpmName, npmUpstreamFor } from "./private-registry.js";
 import {
   AllowlistEntryError,
   RegistryError,
@@ -29,7 +36,7 @@ import {
  *  `jsonstream`), so names are never case-folded anywhere. */
 const NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/[a-z0-9-~][a-z0-9-._~]*|[A-Za-z0-9-~][A-Za-z0-9-._~]*)$/;
 const SCOPE_WILDCARD = /^(@[a-z0-9-~][a-z0-9-._~]*)\/\*$/;
-const UPSTREAM = "https://registry.npmjs.org/";
+const PUBLIC_HOST = new URL(PUBLIC_NPM_REGISTRY).hostname;
 
 interface Packument {
   name: string;
@@ -191,171 +198,187 @@ function trimPackument(name: string, doc: Packument, render: boolean): PackageMe
   return { name, versions, raw: renderData, approxBytes };
 }
 
-export const npmAdapter: RegistryAdapter = {
-  id: "npm",
-  osvEcosystem: "npm",
-  upstreamHosts: ["registry.npmjs.org"],
-  collectExclude: ["node_modules"],
-  dependenciesInMetadata: true,
-  lockfiles: npmClientLockfiles,
-  lockfilePlan: npmClientLockfilePlan,
+/** The npm adapter. With `jfrog` configured, names in its npm scopes are
+ *  read from (and downloaded from) the JFrog npm repo and every other name
+ *  from public npm; each name's downloads must come from its own host. */
+export function createNpmAdapter(jfrog?: JfrogRegistryConfig): RegistryAdapter {
+  const privateRegistry = jfrogNpmRegistry(jfrog);
+  return {
+    id: "npm",
+    osvEcosystem: "npm",
+    upstreamHosts: privateRegistry && jfrog ? [PUBLIC_HOST, jfrog.host] : [PUBLIC_HOST],
+    ...(privateRegistry && jfrog
+      ? {
+          hostsFor: (name: string) => [isPrivateNpmName(name, privateRegistry) ? jfrog.host : PUBLIC_HOST],
+          isPrivateName: (name: string) => isPrivateNpmName(name, privateRegistry),
+        }
+      : {}),
+    collectExclude: ["node_modules"],
+    dependenciesInMetadata: true,
+    lockfiles: privateRegistry ? createNpmClientLockfiles(privateRegistry) : npmClientLockfiles,
+    lockfilePlan: privateRegistry ? createNpmClientLockfilePlan(privateRegistry) : npmClientLockfilePlan,
 
-  parseAllowlistEntry(raw: string): AllowlistEntry {
-    const value = raw.trim();
-    // Scopes are always lower case on npm, so folding one cannot select a
-    // different package; package names are kept exactly as written.
-    const scope = value.toLowerCase().match(SCOPE_WILDCARD);
-    if (scope) return { name: `${scope[1]}/`, wildcard: true };
-    const at = value.indexOf("@", 1);
-    const name = validName(at > 0 ? value.slice(0, at) : value);
-    if (at < 0) return { name, wildcard: false };
-    const range = value.slice(at + 1);
-    if (!semver.validRange(range)) throw new AllowlistEntryError(`"${range}" is not a valid npm version range`);
-    return { name, wildcard: false, range };
-  },
+    parseAllowlistEntry(raw: string): AllowlistEntry {
+      const value = raw.trim();
+      // Scopes are always lower case on npm, so folding one cannot select a
+      // different package; package names are kept exactly as written.
+      const scope = value.toLowerCase().match(SCOPE_WILDCARD);
+      if (scope) return { name: `${scope[1]}/`, wildcard: true };
+      const at = value.indexOf("@", 1);
+      const name = validName(at > 0 ? value.slice(0, at) : value);
+      if (at < 0) return { name, wildcard: false };
+      const range = value.slice(at + 1);
+      if (!semver.validRange(range)) throw new AllowlistEntryError(`"${range}" is not a valid npm version range`);
+      return { name, wildcard: false, range };
+    },
 
-  normalizeName: (name) => name,
+    normalizeName: (name) => name,
 
-  satisfies: (version, range) => semver.satisfies(version, range),
+    satisfies: (version, range) => semver.satisfies(version, range),
 
-  compareVersions(a, b) {
-    if (!semver.valid(a) || !semver.valid(b)) throw new Error(`not a semver version: "${a}" / "${b}"`);
-    return semver.compare(a, b);
-  },
+    compareVersions(a, b) {
+      if (!semver.valid(a) || !semver.valid(b)) throw new Error(`not a semver version: "${a}" / "${b}"`);
+      return semver.compare(a, b);
+    },
 
-  route(method, subpath): RegistryRoute | null {
-    if (method !== "GET" && method !== "HEAD") return null;
-    const tarball = subpath.match(/^-\/tarball\/([^/]+)\/([^/]+)$/);
-    // The standard upstream tarball path, `<name>/-/<unscoped>-<version>.tgz`,
-    // which a lockfile's `resolved` URLs point at once npm rewrites their
-    // host to the configured registry (replace-registry-host). The name is
-    // one segment (`react`, `@scope%2fpkg`) or a literal scope plus name
-    // (`@scope/pkg`); the filename is one raw segment.
-    const standard = subpath.match(/^((?:@[^/]+\/)?[^/]+)\/-\/([^/]+)$/);
-    // One version's document, `<name>/<version>` (corepack reads these to
-    // download a pinned pnpm or yarn), for an exact version only.
-    const versionDocument = subpath.match(/^((?:@[^/]+\/)?[^/]+)\/([^/]+)$/);
-    try {
-      if (tarball) {
-        const name = decodeURIComponent(tarball[1]);
-        const version = decodeURIComponent(tarball[2]);
-        if (!NAME.test(name) || !semver.valid(version)) return null;
-        return { kind: "download", name, version, filename: `${version}.tgz` };
+    route(method, subpath): RegistryRoute | null {
+      if (method !== "GET" && method !== "HEAD") return null;
+      const tarball = subpath.match(/^-\/tarball\/([^/]+)\/([^/]+)$/);
+      // The standard upstream tarball path, `<name>/-/<unscoped>-<version>.tgz`,
+      // which a lockfile's `resolved` URLs point at once npm rewrites their
+      // host to the configured registry (replace-registry-host). The name is
+      // one segment (`react`, `@scope%2fpkg`) or a literal scope plus name
+      // (`@scope/pkg`); the filename is one raw segment.
+      const standard = subpath.match(/^((?:@[^/]+\/)?[^/]+)\/-\/([^/]+)$/);
+      // One version's document, `<name>/<version>` (corepack reads these to
+      // download a pinned pnpm or yarn), for an exact version only.
+      const versionDocument = subpath.match(/^((?:@[^/]+\/)?[^/]+)\/([^/]+)$/);
+      try {
+        if (tarball) {
+          const name = decodeURIComponent(tarball[1]);
+          const version = decodeURIComponent(tarball[2]);
+          if (!NAME.test(name) || !semver.valid(version)) return null;
+          return { kind: "download", name, version, filename: `${version}.tgz` };
+        }
+        if (standard) return standardTarball(decodeURIComponent(standard[1]), decodeURIComponent(standard[2]));
+        if (versionDocument) {
+          // `@scope/pkg` matches too (as name `@scope`, version `pkg`), and
+          // falls through: no package name is a scope alone.
+          const name = decodeURIComponent(versionDocument[1]);
+          const version = decodeURIComponent(versionDocument[2]);
+          if (NAME.test(name) && semver.valid(version) === version) return { kind: "metadata", name, version };
+        }
+        const name = decodeURIComponent(subpath);
+        return NAME.test(name) ? { kind: "metadata", name } : null;
+      } catch {
+        throw new RegistryError(400, "wardby_bad_request", "malformed percent-encoding in the registry path");
       }
-      if (standard) return standardTarball(decodeURIComponent(standard[1]), decodeURIComponent(standard[2]));
-      if (versionDocument) {
-        // `@scope/pkg` matches too (as name `@scope`, version `pkg`), and
-        // falls through: no package name is a scope alone.
-        const name = decodeURIComponent(versionDocument[1]);
-        const version = decodeURIComponent(versionDocument[2]);
-        if (NAME.test(name) && semver.valid(version) === version) return { kind: "metadata", name, version };
+    },
+
+    async fetchMetadata(name, upstream, options = {}): Promise<PackageMetadata> {
+      const response = await upstream(`${npmUpstreamFor(name, privateRegistry)}${name.replaceAll("/", "%2f")}`, {
+        accept: "application/json",
+      });
+      if (response.status === 404)
+        throw new RegistryError(404, "wardby_package_not_found", `npm has no package "${name}"`);
+      if (!response.ok) throw new RegistryError(502, "wardby_upstream_error", `npm returned ${response.status}`);
+      // The full packument is only ever a local of `trimPackument`: nothing
+      // returned from here references it, so it is garbage as soon as the
+      // trimmed form is built (a large one is tens of MB parsed).
+      return trimPackument(name, (await response.json()) as Packument, options.render === true);
+    },
+
+    renderMetadata(meta, keep, keptFiles, proxyBase) {
+      const raw = meta.raw as NpmRenderData | undefined;
+      if (!raw) throw new Error(`npm metadata for "${meta.name}" was fetched without render data`);
+      const versions: Record<string, unknown> = {};
+      const time: Record<string, string> = {};
+      for (const version of keep) {
+        const manifest = raw.manifests.get(version);
+        if (manifest === undefined || !keptFiles.has(`${version}.tgz`)) continue;
+        const info = JSON.parse(manifest) as Packument["versions"][string];
+        versions[version] = {
+          ...info,
+          dist: { ...info.dist, tarball: proxyTarballUrl(proxyBase, meta.name, version) },
+        };
+        const published = raw.times.get(version);
+        if (published !== undefined) time[version] = published;
       }
-      const name = decodeURIComponent(subpath);
-      return NAME.test(name) ? { kind: "metadata", name } : null;
-    } catch {
-      throw new RegistryError(400, "wardby_bad_request", "malformed percent-encoding in the registry path");
-    }
-  },
-
-  async fetchMetadata(name, upstream, options = {}): Promise<PackageMetadata> {
-    const response = await upstream(`${UPSTREAM}${name.replaceAll("/", "%2f")}`, { accept: "application/json" });
-    if (response.status === 404)
-      throw new RegistryError(404, "wardby_package_not_found", `npm has no package "${name}"`);
-    if (!response.ok) throw new RegistryError(502, "wardby_upstream_error", `npm returned ${response.status}`);
-    // The full packument is only ever a local of `trimPackument`: nothing
-    // returned from here references it, so it is garbage as soon as the
-    // trimmed form is built (a large one is tens of MB parsed).
-    return trimPackument(name, (await response.json()) as Packument, options.render === true);
-  },
-
-  renderMetadata(meta, keep, keptFiles, proxyBase) {
-    const raw = meta.raw as NpmRenderData | undefined;
-    if (!raw) throw new Error(`npm metadata for "${meta.name}" was fetched without render data`);
-    const versions: Record<string, unknown> = {};
-    const time: Record<string, string> = {};
-    for (const version of keep) {
-      const manifest = raw.manifests.get(version);
-      if (manifest === undefined || !keptFiles.has(`${version}.tgz`)) continue;
-      const info = JSON.parse(manifest) as Packument["versions"][string];
-      versions[version] = {
-        ...info,
-        dist: { ...info.dist, tarball: proxyTarballUrl(proxyBase, meta.name, version) },
+      const kept = Object.keys(versions);
+      const tags = Object.fromEntries(Object.entries(raw.distTags).filter(([, version]) => kept.includes(version)));
+      if (!tags.latest && kept.length > 0) tags.latest = semver.maxSatisfying(kept, "*") ?? kept[kept.length - 1];
+      return {
+        contentType: "application/json",
+        body: JSON.stringify({ name: raw.name, "dist-tags": tags, time, versions }),
       };
-      const published = raw.times.get(version);
-      if (published !== undefined) time[version] = published;
-    }
-    const kept = Object.keys(versions);
-    const tags = Object.fromEntries(Object.entries(raw.distTags).filter(([, version]) => kept.includes(version)));
-    if (!tags.latest && kept.length > 0) tags.latest = semver.maxSatisfying(kept, "*") ?? kept[kept.length - 1];
-    return {
-      contentType: "application/json",
-      body: JSON.stringify({ name: raw.name, "dist-tags": tags, time, versions }),
-    };
-  },
+    },
 
-  renderVersion(meta, version, keptFiles, proxyBase) {
-    const raw = meta.raw as NpmRenderData | undefined;
-    if (!raw) throw new Error(`npm metadata for "${meta.name}" was fetched without render data`);
-    const manifest = raw.manifests.get(version);
-    if (manifest === undefined || !keptFiles.has(`${version}.tgz`)) return null;
-    const info = JSON.parse(manifest) as Packument["versions"][string];
-    return {
-      contentType: "application/json",
-      body: JSON.stringify({
-        ...info,
-        dist: { ...info.dist, tarball: proxyTarballUrl(proxyBase, meta.name, version) },
-      }),
-    };
-  },
+    renderVersion(meta, version, keptFiles, proxyBase) {
+      const raw = meta.raw as NpmRenderData | undefined;
+      if (!raw) throw new Error(`npm metadata for "${meta.name}" was fetched without render data`);
+      const manifest = raw.manifests.get(version);
+      if (manifest === undefined || !keptFiles.has(`${version}.tgz`)) return null;
+      const info = JSON.parse(manifest) as Packument["versions"][string];
+      return {
+        contentType: "application/json",
+        body: JSON.stringify({
+          ...info,
+          dist: { ...info.dist, tarball: proxyTarballUrl(proxyBase, meta.name, version) },
+        }),
+      };
+    },
 
-  resolveDownload(route: DownloadRoute, meta) {
-    return meta.versions.get(route.version)?.files.find((file) => file.filename === route.filename) ?? null;
-  },
+    resolveDownload(route: DownloadRoute, meta) {
+      return meta.versions.get(route.version)?.files.find((file) => file.filename === route.filename) ?? null;
+    },
 
-  workerConfig({ registryUrl, token, cacheDir }) {
-    const npmrc = `${cacheDir}/npmrc`;
-    // yarn Berry and corepack append paths to a registry without a trailing slash.
-    const registryServer = registryUrl.replace(/\/+$/, "");
-    const proxy = new URL(registryUrl);
-    return {
-      env: {
-        // npm, and pnpm (which reads the same npm_config_* settings and
-        // npmrc). Only settings npm knows: npm warns about any other on
-        // every command, so pnpm's store and cache and yarn classic's cache
-        // folder are set by the shim for that tool alone (npm-shim.mjs),
-        // under npm_config_cache.
-        npm_config_registry: registryUrl,
-        npm_config_userconfig: npmrc,
-        npm_config_ignore_scripts: "true",
-        npm_config_cache: cacheDir,
-        npm_config_audit: "false",
-        npm_config_fund: "false",
-        npm_config_update_notifier: "false",
-        // yarn classic (1.x): the registry and token from the npm settings
-        // above, and its own switch for install scripts. Nothing here is a
-        // YARN_ setting yarn Berry would reject as unknown.
-        YARN_IGNORE_SCRIPTS: "true",
-        // yarn Berry (2+) ignores npm's settings. Its global folder holds its
-        // shared cache; the per-project cacheFolder is left alone, so a
-        // repository that commits its cache (zero-install) keeps it.
-        YARN_NPM_REGISTRY_SERVER: registryServer,
-        YARN_NPM_AUTH_TOKEN: token,
-        YARN_NPM_ALWAYS_AUTH: "true",
-        ...(proxy.protocol === "http:" ? { YARN_UNSAFE_HTTP_WHITELIST: proxy.hostname } : {}),
-        YARN_ENABLE_TELEMETRY: "0",
-        YARN_ENABLE_SCRIPTS: "false",
-        YARN_GLOBAL_FOLDER: `${cacheDir}/yarn-berry`,
-        // corepack, which downloads the pnpm or yarn release a project pins.
-        COREPACK_NPM_REGISTRY: registryServer,
-        COREPACK_NPM_TOKEN: token,
-        COREPACK_HOME: `${cacheDir}/corepack`,
-        COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
-        COREPACK_ENABLE_AUTO_PIN: "0",
-        COREPACK_DEFAULT_TO_LATEST: "0",
-        // The only registry the package-manager shim (npm-shim.mjs) sends a lockfile to.
-        WARDBY_NPM_PLAN_REGISTRY: registryUrl,
-      },
-      files: [{ path: npmrc, content: `${registryUrl.replace(/^https?:/, "")}:_authToken=${token}\n`, mode: 0o600 }],
-    };
-  },
-};
+    workerConfig({ registryUrl, token, cacheDir }) {
+      const npmrc = `${cacheDir}/npmrc`;
+      // yarn Berry and corepack append paths to a registry without a trailing slash.
+      const registryServer = registryUrl.replace(/\/+$/, "");
+      const proxy = new URL(registryUrl);
+      return {
+        env: {
+          // npm, and pnpm (which reads the same npm_config_* settings and
+          // npmrc). Only settings npm knows: npm warns about any other on
+          // every command, so pnpm's store and cache and yarn classic's cache
+          // folder are set by the shim for that tool alone (npm-shim.mjs),
+          // under npm_config_cache.
+          npm_config_registry: registryUrl,
+          npm_config_userconfig: npmrc,
+          npm_config_ignore_scripts: "true",
+          npm_config_cache: cacheDir,
+          npm_config_audit: "false",
+          npm_config_fund: "false",
+          npm_config_update_notifier: "false",
+          // yarn classic (1.x): the registry and token from the npm settings
+          // above, and its own switch for install scripts. Nothing here is a
+          // YARN_ setting yarn Berry would reject as unknown.
+          YARN_IGNORE_SCRIPTS: "true",
+          // yarn Berry (2+) ignores npm's settings. Its global folder holds its
+          // shared cache; the per-project cacheFolder is left alone, so a
+          // repository that commits its cache (zero-install) keeps it.
+          YARN_NPM_REGISTRY_SERVER: registryServer,
+          YARN_NPM_AUTH_TOKEN: token,
+          YARN_NPM_ALWAYS_AUTH: "true",
+          ...(proxy.protocol === "http:" ? { YARN_UNSAFE_HTTP_WHITELIST: proxy.hostname } : {}),
+          YARN_ENABLE_TELEMETRY: "0",
+          YARN_ENABLE_SCRIPTS: "false",
+          YARN_GLOBAL_FOLDER: `${cacheDir}/yarn-berry`,
+          // corepack, which downloads the pnpm or yarn release a project pins.
+          COREPACK_NPM_REGISTRY: registryServer,
+          COREPACK_NPM_TOKEN: token,
+          COREPACK_HOME: `${cacheDir}/corepack`,
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+          COREPACK_ENABLE_AUTO_PIN: "0",
+          COREPACK_DEFAULT_TO_LATEST: "0",
+          // The only registry the package-manager shim (npm-shim.mjs) sends a lockfile to.
+          WARDBY_NPM_PLAN_REGISTRY: registryUrl,
+        },
+        files: [{ path: npmrc, content: `${registryUrl.replace(/^https?:/, "")}:_authToken=${token}\n`, mode: 0o600 }],
+      };
+    },
+  };
+}
+
+export const npmAdapter: RegistryAdapter = createNpmAdapter();

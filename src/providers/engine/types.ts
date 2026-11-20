@@ -142,6 +142,18 @@ export interface EngineRunContext {
   onTurn?: (event: EngineTurnEvent) => void;
   /** See StepRunner. Optional; the in-process executor leaves it unset. */
   step?: StepRunner;
+  /**
+   * Per-attempt state a tool call changes in memory, which a replay would otherwise lose: a tool
+   * step that `capture`s a snapshot records it with the tool's result, and a replay of that step
+   * (a run resumed on another pod) hands it to `restore` instead of running the tool. `capture`
+   * returns undefined for a tool that has no state; its step records the bare result string, as
+   * every step recorded before this existed did, and a replay accepts either. A snapshot is plain
+   * JSON and `restore` must be safe to repeat (a union with what is already there).
+   */
+  toolState?: {
+    capture(toolName: string): unknown;
+    restore(state: unknown): void;
+  };
 }
 
 /** What EngineRunContext.onTurn receives: a turn's output, then (if it called tools) their results in call order. */

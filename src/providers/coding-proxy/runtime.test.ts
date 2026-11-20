@@ -82,6 +82,61 @@ describe("configured coding proxy runtime", () => {
     );
   });
 
+  it("leases the proxy's requests, and refuses to start when the lease is too short for the heartbeat", async () => {
+    const handle: CodingProxyServerHandle = { port: CODING_PROXY_PORT, close: async () => {} };
+    const startServer = vi.fn(async () => handle);
+    const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
+    const before = constructed.length;
+
+    await startConfiguredCodingProxy({
+      db: {} as PrismaClient,
+      env: { OPENAI_API_KEY: "test-secret", CODING_PROXY_LEASE_SECONDS: "60" },
+      startServer,
+      startDenyPort,
+    }).then((started) => started.close());
+    expect(constructed[before]).toMatchObject({ leaseMs: 60_000 });
+
+    startServer.mockClear();
+    await expect(
+      startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: { OPENAI_API_KEY: "test-secret", CODING_PROXY_LEASE_SECONDS: "20", CODING_PROXY_HEARTBEAT_SECONDS: "10" },
+        startServer,
+        startDenyPort,
+      }),
+    ).rejects.toThrow("CODING_PROXY_LEASE_SECONDS must be greater than twice CODING_PROXY_HEARTBEAT_SECONDS.");
+    expect(startServer).not.toHaveBeenCalled();
+  });
+
+  it("runs the lease sweep until the server has drained, then stops it", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const order: string[] = [];
+      const handle: CodingProxyServerHandle = {
+        port: CODING_PROXY_PORT,
+        close: async () => void order.push("server closed"),
+      };
+      // The database stub has no query methods, so every sweep fails and is reported.
+      const onLeaseError = vi.fn((stage: string) => void order.push(`${stage} failed`));
+      const started = await startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: { OPENAI_API_KEY: "test-secret", CODING_PROXY_SWEEP_SECONDS: "15" },
+        startServer: vi.fn(async () => handle),
+        startDenyPort: vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} })),
+        onLeaseError,
+      });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(order).toEqual(["sweep failed"]);
+
+      await started.close();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(order).toEqual(["sweep failed", "server closed"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("starts the deny-port listener alongside the proxy and closes both", async () => {
     const closed: string[] = [];
     const handle: CodingProxyServerHandle = {
@@ -528,6 +583,195 @@ describe("configured coding proxy runtime: load-test mock upstream", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("createRegistryUpstream with an upstream credential", () => {
+  const credentials = { host: "example.jfrog.io", authorization: "Basic c3ZjOnB3" };
+  const capture = () => {
+    const seen: { url: string; headers: Headers }[] = [];
+    const pinned = vi.fn(async (url: string, init?: RequestInit) => {
+      seen.push({ url, headers: new Headers(init?.headers) });
+      return new Response("{}");
+    }) as unknown as typeof globalThis.fetch;
+    return { seen, upstream: createRegistryUpstream(pinned, credentials) };
+  };
+
+  it("sends the credential to the JFrog host only, never to public registries or OSV", async () => {
+    const { seen, upstream } = capture();
+    await upstream("https://example.jfrog.io/acme/api/npm/npm-local/@acme%2fui");
+    await upstream("https://registry.npmjs.org/left-pad");
+    await upstream("https://pypi.org/simple/requests/");
+    await upstream("https://api.osv.dev/v1/query", { method: "POST", body: "{}" });
+    await upstream("https://example.jfrog.io.evil.test/x");
+    expect(seen.map((call) => call.headers.get("authorization"))).toEqual(["Basic c3ZjOnB3", null, null, null, null]);
+  });
+
+  it("sends no authorization header without a credential", async () => {
+    const seen: Headers[] = [];
+    const pinned = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers));
+      return new Response("{}");
+    }) as unknown as typeof globalThis.fetch;
+    await createRegistryUpstream(pinned)("https://example.jfrog.io/x");
+    expect(seen[0].has("authorization")).toBe(false);
+  });
+});
+
+describe("createRegistryUpstream redirect following", () => {
+  const credentials = { host: "example.jfrog.io", authorization: "Basic c3ZjOnB3" };
+  const file = "https://example.jfrog.io/acme/api/pypi/pypi/packages/packages/ab/cd/x-1.0-py3-none-any.whl";
+  const redirect = (location: string | null, status = 302) =>
+    new Response(null, { status, headers: location ? { location } : {} });
+
+  const setup = (first: Response, second: Response = new Response("wheel")) => {
+    const calls: { fetcher: "pinned" | "redirect"; url: string; init?: RequestInit }[] = [];
+    const pinned = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ fetcher: "pinned", url, init });
+      return first;
+    }) as unknown as typeof globalThis.fetch;
+    const redirectFetch = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ fetcher: "redirect", url, init });
+      return second;
+    }) as unknown as typeof globalThis.fetch;
+    return { calls, upstream: createRegistryUpstream(pinned, credentials, redirectFetch) };
+  };
+
+  it("follows one redirect from JFrog to the target, without the credential", async () => {
+    const { calls, upstream } = setup(redirect("https://storage.googleapis.com/bucket/x.whl?X-Goog-Signature=abc"));
+    const response = await upstream(file, { accept: "application/octet-stream" });
+    expect(await response.text()).toBe("wheel");
+    expect(calls.map((call) => call.fetcher)).toEqual(["pinned", "redirect"]);
+    expect(new Headers(calls[0].init?.headers).get("authorization")).toBe("Basic c3ZjOnB3");
+    expect(calls[0].init?.redirect).toBe("manual");
+    expect(calls[1].url).toBe("https://storage.googleapis.com/bucket/x.whl?X-Goog-Signature=abc");
+    expect(new Headers(calls[1].init?.headers).has("authorization")).toBe(false);
+    expect(new Headers(calls[1].init?.headers).get("accept")).toBe("application/octet-stream");
+    expect(calls[1].init?.redirect).toBe("error");
+  });
+
+  it("resolves a relative Location against the JFrog URL", async () => {
+    const { calls, upstream } = setup(redirect("/other/path/x.whl"));
+    await upstream(file);
+    expect(calls[1].url).toBe("https://example.jfrog.io/other/path/x.whl");
+  });
+
+  it.each([
+    ["a plain-http target", "http://storage.googleapis.com/x.whl"],
+    ["a target with embedded credentials", "https://user:pw@storage.googleapis.com/x.whl"],
+    ["no Location header", null],
+  ])("refuses a redirect with %s", async (_label, location) => {
+    const { calls, upstream } = setup(redirect(location));
+    await expect(upstream(file)).rejects.toThrow("proxy_egress_blocked");
+    expect(calls.map((call) => call.fetcher)).toEqual(["pinned"]);
+  });
+
+  it("does not follow redirects for other hosts, for non-GET requests, or without a redirect fetch", async () => {
+    const other = setup(redirect("https://storage.googleapis.com/x"));
+    await other.upstream("https://registry.npmjs.org/left-pad");
+    expect(other.calls[0].init?.redirect).toBe("error");
+
+    const post = setup(redirect("https://storage.googleapis.com/x"));
+    await post.upstream(file, { method: "POST", body: "{}" });
+    expect(post.calls[0].init?.redirect).toBe("error");
+
+    const seen: RequestInit[] = [];
+    const pinned = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen.push(init ?? {});
+      return new Response("{}");
+    }) as unknown as typeof globalThis.fetch;
+    await createRegistryUpstream(pinned, credentials)(file);
+    expect(seen[0].redirect).toBe("error");
+  });
+
+  it("returns a non-redirect response from JFrog untouched", async () => {
+    const { calls, upstream } = setup(new Response("index"));
+    expect(await (await upstream(file)).text()).toBe("index");
+    expect(calls.map((call) => call.fetcher)).toEqual(["pinned"]);
+  });
+});
+
+describe("configured coding proxy runtime with a JFrog registry", () => {
+  const jfrogEnv = {
+    OPENAI_API_KEY: "test-secret",
+    REGISTRY_JFROG_URL: "https://example.jfrog.io/acme",
+    REGISTRY_JFROG_NPM_REPO: "npm-local",
+    REGISTRY_JFROG_NPM_SCOPES: "@acme",
+    REGISTRY_JFROG_PYPI_REPO: "pypi",
+    REGISTRY_UPSTREAM_USERNAME: "env:JFROG_USER",
+    REGISTRY_UPSTREAM_PASSWORD: "env:JFROG_PASS",
+    JFROG_USER: "svc",
+    JFROG_PASS: "s3cret",
+  };
+  const start = (
+    env: Record<string, string>,
+    createPinnedFetch: (options: { allowedHosts: string[] }) => typeof globalThis.fetch = () =>
+      vi.fn(async () => new Response("{}")),
+  ) => {
+    const startServer = vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} }));
+    const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
+    return {
+      startServer,
+      createPinnedFetch,
+      started: startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env,
+        startServer,
+        startDenyPort,
+        createPinnedFetch,
+      }),
+    };
+  };
+
+  it("allows the JFrog host alongside public npm and OSV, and no longer allows the public PyPI hosts", async () => {
+    const built: { allowedHosts: string[]; anyPublicHost?: boolean }[] = [];
+    const createPinnedFetch = vi.fn((options: { allowedHosts: string[]; anyPublicHost?: boolean }) => {
+      built.push(options);
+      return vi.fn(async () => new Response("{}"));
+    });
+    await start(jfrogEnv, createPinnedFetch).started;
+    const strict = built.filter((options) => !options.anyPublicHost);
+    expect(strict).toHaveLength(1);
+    const allowedHosts = strict[0].allowedHosts;
+    expect(allowedHosts).toEqual(expect.arrayContaining(["api.osv.dev", "registry.npmjs.org", "example.jfrog.io"]));
+    expect(allowedHosts).not.toContain("pypi.org");
+    expect(allowedHosts).not.toContain("files.pythonhosted.org");
+  });
+
+  it("builds a second, redirect-only fetch for JFrog downloads, never with OSV or the credential's hosts widened", async () => {
+    const built: { allowedHosts: string[]; anyPublicHost?: boolean }[] = [];
+    const createPinnedFetch = vi.fn((options: { allowedHosts: string[]; anyPublicHost?: boolean }) => {
+      built.push(options);
+      return vi.fn(async () => new Response("{}"));
+    });
+    await start(jfrogEnv, createPinnedFetch).started;
+    const open = built.filter((options) => options.anyPublicHost);
+    expect(open).toHaveLength(1);
+    expect(open[0].allowedHosts).not.toContain("api.osv.dev");
+  });
+
+  it("builds no redirect fetch without a JFrog registry", async () => {
+    const built: { anyPublicHost?: boolean }[] = [];
+    const createPinnedFetch = vi.fn((options: { allowedHosts: string[]; anyPublicHost?: boolean }) => {
+      built.push(options);
+      return vi.fn(async () => new Response("{}"));
+    });
+    await start({ OPENAI_API_KEY: "test-secret" }, createPinnedFetch).started;
+    expect(built.some((options) => options.anyPublicHost)).toBe(false);
+  });
+
+  it.each([
+    ["an invalid setting", { ...jfrogEnv, REGISTRY_JFROG_URL: "http://example.jfrog.io/acme" }],
+    ["a missing credential", { ...jfrogEnv, REGISTRY_UPSTREAM_PASSWORD: undefined }],
+    ["a credential reference to an unset variable", { ...jfrogEnv, JFROG_PASS: undefined }],
+    [
+      "a credential with no repo configured",
+      { OPENAI_API_KEY: "x", REGISTRY_UPSTREAM_USERNAME: "env:A", REGISTRY_UPSTREAM_PASSWORD: "env:B" },
+    ],
+  ])("fails before listening on %s", async (_label, env) => {
+    const { started, startServer } = start(env as Record<string, string>);
+    await expect(started).rejects.toThrow(/registry_jfrog_config_invalid/);
+    expect(startServer).not.toHaveBeenCalled();
   });
 });
 

@@ -14,9 +14,13 @@ without a GitHub App; see [Local repositories](coding-agent-setup.md#local-repos
 
 Once an agent is linked to a repository with the `pull_request` trigger:
 
-- Every push to a pull request (open, new commits, reopen, ready-for-review)
-  starts an **in-progress check** named after the link's `checkName` (e.g.
-  "wardby review").
+- A pull request that is opened, reopened or marked ready for review starts an
+  **in-progress check** named after the link's `checkName` (e.g. "wardby
+  review"), unless the link has `reviewOnOpen: false`, in which case a review
+  starts only when requested. A push of new commits starts one only on a link with
+  `reviewOnPush: true`; by default it does not, and a review is requested with a
+  `@<app-slug> review` comment or a re-run of the check. See
+  [Linking an agent to a repository](#linking-an-agent-to-a-repository).
 - The agent reads the diff, then publishes its review in one call: **inline
   comments** on the changed lines (a `suggestion` code block in a comment
   becomes a one-click "Commit suggestion" on GitHub), and **one summary
@@ -102,6 +106,9 @@ comment with the outcome:
 - that the run, or one of its coding sub-runs, **ran out of budget**, or
   could not start for lack of it, with the run's budget amount (and the
   budget group, when the group's remaining allowance is what limited it);
+- an `Agent spend: $…` line above the run id with what the run cost, its
+  sub-runs included (the same line a Jira issue comment carries; it is left out
+  if the cost cannot be read);
 - the run's final status for any other unsuccessful end (`failed`,
   `cancelled`, ...). Error text is never posted; look the run up by its id.
 
@@ -137,6 +144,24 @@ No run starts. That applies to anyone with `triage` access, and to anyone with
 `OWNER`, `MEMBER` or `COLLABORATOR`. GitHub reports `read` for every account
 on a public repository, so a stranger there (association `NONE`,
 `CONTRIBUTOR` or unknown) is refused silently and learns nothing about the App.
+
+When someone with write access mentions the App and nothing starts, the App
+replies on the issue or pull request (in the review thread, if the mention was
+in one) instead of leaving the mention unanswered. It says which of these
+applies, with no 👀 reaction:
+
+- **No agent answers mentions on the repository** — no agent is linked with
+  the `mention` trigger. Link one (see [Linking an
+  agent](#linking-an-agent-to-a-repository)).
+- **No reviewer is linked** — `@<app-slug> review` was used, but no agent is
+  linked with the `pull_request` trigger and a `checkName`.
+- **The linked agent can no longer use the repository** — the agent owner's
+  GitHub account lost access, or its authorization lapsed. The owner
+  re-authorizes or re-links the agent.
+- **The pull request is closed or comes from a fork** — wardby reviews only
+  open pull requests from branches of the repository.
+
+The reply never names the App, so it cannot be read as a mention of itself.
 
 A mention inside Markdown code is not a request. Text in an inline code span
 (`` `@<app-slug>` ``), a fenced code block, or an indented code block is
@@ -816,8 +841,8 @@ linking stays disabled there.
 First link your GitHub account (`link_host_account`, above). Then use the
 `link_repository` tool (agents:write) on a native agent you own. Calling it
 again for an already-linked repository replaces that link's `access`,
-`triggers`, `checkName`, `reviewFixMaxRounds`, `waitForCi`, and
-`markReadyWhenPassing` — omitted fields are cleared, not kept — and checks
+`triggers`, `checkName`, `reviewFixMaxRounds`, `waitForCi`, `reviewDrafts`,
+`reviewOnPush`, `reviewOnOpen`, and `markReadyWhenPassing` — omitted fields are cleared, not kept — and checks
 your access again, so always send the full desired state. Two common shapes:
 
 **A reviewer**, which starts a check on every PR push:
@@ -840,6 +865,44 @@ opened](#reviewing-a-pull-request-a-delegated-run-opened) below.
 Add `"waitForCi": true` to a `pull_request` link to hold the reviewer's
 review of a pushed head until that head's own CI finishes, instead of racing
 it — see [Review after CI (`waitForCi`)](#review-after-ci-waitforci) below.
+
+A `pull_request` reviewer skips draft pull requests by default: a draft's
+`opened`, `synchronize` and `reopened` events start nothing, and the review
+starts when the pull request is marked ready for review. Add
+`"reviewDrafts": true` to review drafts too (boolean, default `false`, only on
+a `pull_request` link — 400 without that trigger). A draft that a Wardby coding
+run opened is always reviewed, whatever this says, because marking it ready
+waits for its reviewers' approval. An explicit request — a re-run of the
+review check, or a review command in a comment — reviews a draft either way.
+Re-linking replaces this field like the others: send it again to keep `true`.
+
+A `pull_request` reviewer reviews a pull request when it is opened, reopened or
+marked ready for review. A later push of new commits starts no review and no
+check, until someone asks for one (a `@<app-slug> review` comment or a re-run of
+the review check, both reviewing the current head). Add `"reviewOnPush": true`
+to review every push instead (boolean, default `false`, only on a
+`pull_request` link — 400 without that trigger). A pull request a Wardby coding
+run opened is always reviewed on push, whatever this says, because automatic
+review-fix rounds and marking it ready wait on a review of each new head. With
+a required review check, a pushed head has no check until the review is
+requested, so it blocks merging until then. Re-linking replaces this field like
+the others: send it again to keep `true`.
+
+A `pull_request` reviewer starts a review on its own when a pull request is
+opened, reopened or marked ready for review only if the link has
+`"reviewOnOpen": true`. It is a boolean, only on a `pull_request` link (400
+without that trigger, and on a coding agent's link), and **defaults to `false`
+for a new link**: link a repository without it and nothing is reviewed until
+someone asks, with a `@<app-slug> review` comment (the commenter needs write
+access) or a re-run of the review check. A pull request a Wardby coding run
+opened is always reviewed, on open and on push, whatever this says, because
+automatic review-fix rounds and marking it ready wait on a review. A push is
+decided by `reviewOnPush` alone. Links created before this setting existed
+review on open, as they always did. Re-linking replaces this field like the
+others: **omitting it resets it to `false`**, so send `"reviewOnOpen": true`
+again to keep automatic reviews. With a required review check, a pull request
+that nobody has asked a review for has no check and cannot merge, so do not
+require the check on a repository linked this way.
 
 **A responder**, which only answers `@<app-slug>` mentions that are not a
 review command:
@@ -1093,7 +1156,12 @@ request merge.
 The `unread_files` refusal applies in both execution modes. In `sandbox` mode
 (see [Native agent sandbox](native-sandbox.md)) the gateway saves what the run
 has read on its session after each `repo_pr_read` and `repo_read_file` call, so
-`repo_publish_review` checks the same reads as in `control-plane` mode.
+`repo_publish_review` checks the same reads as in `control-plane` mode. In
+`control-plane` mode the reads are saved with each `repo_pr_read` and
+`repo_read_file` step the run records, so a run another control-plane copy
+takes over after a crash keeps what it had read up to its last completed step
+and is gated on it as before. A run recorded by an earlier release starts its
+resumed attempt with no reads recorded, as that release never saved them.
 Reviewer prompts written before 0.7.0 still work, because the refusal tells
 the agent what to do; update them with the paging step from the shipped
 reviewer prompt.

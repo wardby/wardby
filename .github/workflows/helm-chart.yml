@@ -1,0 +1,80 @@
+name: Helm chart
+
+# Lints and tests deploy/helm/wardby on every change to it, and on a release
+# packages it at the release version and pushes it to
+# oci://ghcr.io/<owner>/wardby with the workflow's own GITHUB_TOKEN.
+on:
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - deploy/helm/**
+      - .github/workflows/helm-chart.yml
+
+permissions:
+  contents: read
+
+env:
+  CHART: deploy/helm/wardby
+  UNITTEST_VERSION: v0.6.2
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install helm-unittest
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "$UNITTEST_VERSION" --verify=false
+      - name: Lint
+        run: helm lint "$CHART" -f "$CHART/ci/default-values.yaml"
+      - name: Unit tests
+        run: helm unittest "$CHART"
+      - name: Render
+        run: helm template wardby "$CHART" -f "$CHART/ci/default-values.yaml" > /dev/null
+
+  publish:
+    needs: test
+    # Only the upstream project publishes the canonical chart; forks run the tests only.
+    if: github.event_name == 'release' && github.repository_owner == 'wardby'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Version
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${TAG#v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Release tag '$TAG' is not vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: helm package "$CHART" --version "$VERSION" --app-version "$VERSION" --destination dist-chart
+      - name: Push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+          helm push "dist-chart/wardby-$VERSION.tgz" "oci://ghcr.io/${OWNER,,}"
+          helm registry logout ghcr.io
+      - name: Check the chart is anonymously pullable
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          # Fails when the package is not public (Package settings > Change visibility).
+          helm pull "oci://ghcr.io/${OWNER,,}/wardby" --version "$VERSION" --destination "$RUNNER_TEMP"

@@ -7,20 +7,27 @@
  * per coding run and applies the result before the agent starts.
  */
 import { REGISTRY_ADAPTERS } from "./adapters.js";
+import type { EcosystemId, RegistryAdapter } from "./types.js";
 
 /** The URL the worker's package manager is pointed at for one ecosystem. */
 export function registryUrlFor(proxyBaseUrl: string, ecosystem: string): string {
   return `${proxyBaseUrl.replace(/\/$/, "")}/registry/${ecosystem}/`;
 }
 
-export function registryWorkerSetup(input: { proxyBaseUrl: string; token: string; cacheRoot: string }): {
+export function registryWorkerSetup(input: {
+  proxyBaseUrl: string;
+  token: string;
+  cacheRoot: string;
+  /** Default: the public registries' adapters. */
+  adapters?: ReadonlyMap<EcosystemId, RegistryAdapter>;
+}): {
   env: Record<string, string>;
   files: { path: string; content: string; mode: number }[];
 } {
   const token = input.token;
   const env: Record<string, string> = {};
   const files: { path: string; content: string; mode: number }[] = [];
-  for (const adapter of REGISTRY_ADAPTERS.values()) {
+  for (const adapter of (input.adapters ?? REGISTRY_ADAPTERS).values()) {
     const config = adapter.workerConfig({
       registryUrl: registryUrlFor(input.proxyBaseUrl, adapter.id),
       token,

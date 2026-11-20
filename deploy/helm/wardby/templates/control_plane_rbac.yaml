@@ -1,0 +1,95 @@
+# What the control plane's launcher needs to run coding and sandbox pods in this namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wardby-coding-launcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "delete", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "update"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    resourceNames: ["wardby-coding-proxy"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    resourceNames: ["wardby-coding"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wardby-control-plane-launcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wardby-coding-launcher
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccounts.controlPlane.name }}
+    namespace: {{ .Release.Namespace }}
+---
+# The launcher's preflight reads its own namespace, which only a cluster-scoped role can grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wardby-coding-launcher-namespace
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: [{{ .Release.Namespace | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wardby-control-plane-namespace
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: wardby-coding-launcher-namespace
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccounts.controlPlane.name }}
+    namespace: {{ .Release.Namespace }}
+---
+# The same read, unbound: for granting to an operator or test identity that runs the preflight.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wardby-coding-namespace-reader
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: [{{ .Release.Namespace | quote }}]
+    verbs: ["get"]

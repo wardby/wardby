@@ -159,6 +159,17 @@ describe("viewer api auth", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(SNAPSHOT);
   });
+
+  it("serves the graph snapshot to a viewer, the read-only role", async () => {
+    vi.mocked(loadGraph).mockResolvedValue(SNAPSHOT as never);
+    const { base } = await start({
+      scopes: new Set(["admin:view"]),
+      roles: ["viewer"],
+    } as unknown as McpRequestContext);
+    const res = await fetch(`${base}/admin/api/graph`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(SNAPSHOT);
+  });
 });
 
 describe("viewer api infra", () => {

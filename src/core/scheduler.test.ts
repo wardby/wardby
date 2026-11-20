@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createPrismaClient } from "./db.js";
-import type { Executor } from "../providers/executor/types.js";
-import { findDueCandidates, claimDueRun, markRunFailedFromExecutorError, type SchedulerDb } from "./scheduler.js";
+import { ExecutorClosingError, type Executor } from "../providers/executor/types.js";
+import {
+  findDueCandidates,
+  claimDueRun,
+  markRunFailedFromExecutorError,
+  startScheduler,
+  type SchedulerDb,
+} from "./scheduler.js";
 import { setPlanChainHook } from "./plans/chain-hook.js";
 import type { SelfDefectSink } from "./self-defects.js";
 
@@ -153,6 +159,16 @@ describe("markRunFailedFromExecutorError", () => {
     expect(runs[0].status).toBe("failed");
     expect(runs[0].error).toBe("boom");
     expect(runs[0].finishedAt).not.toBeNull();
+  });
+
+  it("leaves a run alone when the executor refused it because it is closing", async () => {
+    const runs: FakeRun[] = [{ id: "r1", status: "pending", error: null, finishedAt: null }];
+    const db = fakeRunDb(runs);
+
+    await markRunFailedFromExecutorError(db, "r1", new ExecutorClosingError());
+
+    expect(runs[0].status).toBe("pending");
+    expect(runs[0].error).toBeNull();
   });
 
   it("does not clobber a run that already reached a terminal state through another path", async () => {
@@ -475,5 +491,60 @@ describe.skipIf(!databaseUrl)("claimDueRun (database)", () => {
     expect(run?.codingRun?.task).toBe(
       "Standing instructions for this coding agent:\nsys\n\nRequest:\nUpdate dependencies",
     );
+  });
+});
+
+describe("startScheduler stop", () => {
+  /** A db whose lease statements are recorded; the lease is granted to whoever asks. */
+  function leaseDb() {
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const db = {
+      agent: { findMany: async () => [] },
+      $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const sql = strings.join("?");
+        statements.push({ sql, values });
+        return [{ holder: String(values[1] ?? values[0]) }];
+      },
+    } as unknown as SchedulerDb;
+    return { db, statements };
+  }
+
+  it("releases the leader lease, after its loops have stopped, so another copy takes over at once", async () => {
+    const { db, statements } = leaseDb();
+    const logs: string[] = [];
+    const scheduler = startScheduler({
+      executor,
+      db,
+      scope: "scope-1",
+      instanceId: "me",
+      onLog: (message) => logs.push(message),
+    });
+    await vi.waitFor(() => expect(scheduler.isLeader()).toBe(true));
+
+    await scheduler.stop();
+
+    const release = statements.at(-1)!;
+    expect(release.sql).toContain('DELETE FROM "SchedulerLease"');
+    expect(release.values).toEqual(["scope-1", "me"]);
+    expect(scheduler.isLeader()).toBe(false);
+    expect(logs).toContain('released leadership for scope "scope-1"');
+    const acquires = statements.filter((statement) => statement.sql.includes("INSERT")).length;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(statements.filter((statement) => statement.sql.includes("INSERT")).length).toBe(acquires);
+  });
+
+  it("still stops when the release fails: the lease then expires on its own", async () => {
+    const { db } = leaseDb();
+    const failing = {
+      ...db,
+      $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        if (strings.join("?").includes("DELETE")) throw new Error("connection lost");
+        return [{ holder: String(values[1]) }];
+      },
+    } as unknown as SchedulerDb;
+    const scheduler = startScheduler({ executor, db: failing, instanceId: "me", onLog: () => {} });
+    await vi.waitFor(() => expect(scheduler.isLeader()).toBe(true));
+
+    await expect(scheduler.stop()).resolves.toBeUndefined();
   });
 });

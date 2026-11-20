@@ -19,6 +19,9 @@ project checks, and optionally open a draft pull request.
 | Native agent | Review, triage, analysis, reporting, workflow coordination, and API-backed tasks     | Wardby's managed native run loop with only its attached tools, secrets, datastores, and sub-agents | A structured result, report, decision, or bounded follow-up action |
 | Coding agent | Repository changes, tests, dependency updates, implementation work, and PR revisions | An isolated Codex or Claude Code worker with a trusted proxy and Git finalization                  | No changes, a bounded result, or one controlled draft pull request |
 
+How a coding run names its pull request and commits is in
+[Pull request titles and commit messages](help://pull-request-titles).
+
 ## Start with a native agent
 
 Native agents are the default when a task does not need a full repository

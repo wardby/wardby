@@ -1,5 +1,7 @@
+import type { LeaseRenewal } from "../../core/request-lease.js";
 import {
   normalizeProxyModelTerms,
+  type ExpiredRequest,
   type PreviousReply,
   type CreateProxySessionInput,
   type ProxyLedger,
@@ -31,6 +33,8 @@ function cloneRequest(request: ProxyRequest): ProxyRequest {
     ...request,
     pricing: { ...request.pricing },
     usage: request.usage ? { ...request.usage } : undefined,
+    ...(request.leaseUntil ? { leaseUntil: new Date(request.leaseUntil) } : {}),
+    ...(request.orphanedAt ? { orphanedAt: new Date(request.orphanedAt) } : {}),
   };
 }
 
@@ -44,6 +48,11 @@ export class MemoryProxyLedger implements ProxyLedger {
   private readonly startedAt = new Map<string, Date>();
 
   constructor(private readonly options: { now?: () => Date } = {}) {}
+
+  /** The ledger's own clock, which leases run on (the database's, for the Prisma ledger). */
+  private clock(): Date {
+    return this.options.now?.() ?? new Date();
+  }
 
   async createSession(input: CreateProxySessionInput): Promise<void> {
     if ([...this.sessions.values()].some((session) => session.runId === input.runId)) {
@@ -85,8 +94,48 @@ export class MemoryProxyLedger implements ProxyLedger {
     if (!session || session.status === "cancelled") return { outcome: "inactive", reason: "cancelled" };
     if (input.now.getTime() >= session.deadlineAt.getTime()) return { outcome: "inactive", reason: "expired" };
     const lookupKey = `${input.sessionId}\0${input.requestKey}`;
+    // The newest attempt of the key. Leases are compared on the ledger's clock, as the database ledger does.
     const existingId = this.requestBySessionKey.get(lookupKey);
-    if (existingId) return { outcome: "duplicate", request: cloneRequest(this.requests.get(existingId)!) };
+    const prior = existingId ? this.requests.get(existingId)! : undefined;
+    let attempt = 1;
+    let tookOver: { requestId: string } | undefined;
+    if (prior) {
+      const retryable = input.maxAttempts !== undefined && prior.requestFingerprint === input.requestFingerprint;
+      // A row with no lease cannot be told from a live one, and an uncertain row a live proxy settled
+      // (a broken stream) is not an orphan: neither is ever taken over.
+      const reservedLeased = prior.status === "reserved" && Boolean(prior.leaseUntil);
+      const settledOrphan = prior.status === "uncertain" && Boolean(prior.orphanedAt);
+      if (!retryable || !(reservedLeased || settledOrphan))
+        return { outcome: "duplicate", request: cloneRequest(prior) };
+      if (reservedLeased) {
+        const remainingMs = prior.leaseUntil!.getTime() - this.clock().getTime();
+        if (remainingMs >= 0) {
+          return { outcome: "in_progress", request: cloneRequest(prior), retryAfterMs: remainingMs };
+        }
+      }
+      if (prior.attempt >= input.maxAttempts!) return { outcome: "attempts_exhausted", request: cloneRequest(prior) };
+      if (reservedLeased) {
+        if (input.takeover?.requestId !== prior.id) {
+          return {
+            outcome: "orphaned",
+            orphan: {
+              request: cloneRequest(prior),
+              runId: session.runId,
+              createdAt: new Date(this.startedAt.get(prior.id) ?? 0),
+            },
+          };
+        }
+        const { estimate } = input.takeover;
+        prior.status = "uncertain";
+        prior.leaseUntil = null;
+        prior.orphanedAt = this.clock();
+        prior.actualCostUsd = estimate.costUsd;
+        prior.usage = { ...estimate.usage };
+        prior.costEstimated = true;
+      }
+      attempt = prior.attempt + 1;
+      tookOver = { requestId: prior.id };
+    }
 
     let spent = 0;
     let heldReserved = 0;
@@ -122,11 +171,20 @@ export class MemoryProxyLedger implements ProxyLedger {
       return { outcome: "budget_exhausted", details };
     }
 
-    const request: ProxyRequest = { ...input, pricing: { ...input.pricing }, status: "reserved" };
+    const { leaseMs, maxAttempts: _maxAttempts, takeover: _takeover, ...rest } = input;
+    const request: ProxyRequest = {
+      ...rest,
+      pricing: { ...input.pricing },
+      status: "reserved",
+      attempt,
+      // A lease needs an owner to renew it: without one the row is unleased, so never swept.
+      leaseUntil:
+        input.ownerId !== undefined && leaseMs !== undefined ? new Date(this.clock().getTime() + leaseMs) : null,
+    };
     this.requests.set(request.id, request);
     this.requestBySessionKey.set(lookupKey, request.id);
     this.startedAt.set(request.id, new Date(input.now));
-    return { outcome: "reserved", request: cloneRequest(request) };
+    return { outcome: "reserved", request: cloneRequest(request), ...(tookOver ? { tookOver } : {}) };
   }
 
   async complete(
@@ -148,6 +206,7 @@ export class MemoryProxyLedger implements ProxyLedger {
     request.usage = { ...usage };
     request.upstreamStatus = upstreamStatus;
     request.costEstimated = false;
+    request.leaseUntil = null;
     return cloneRequest(request);
   }
 
@@ -156,6 +215,7 @@ export class MemoryProxyLedger implements ProxyLedger {
     if (request.status === "completed" || request.status === "uncertain") return;
     request.status = "released";
     request.upstreamStatus = upstreamStatus;
+    request.leaseUntil = null;
   }
 
   async markUncertain(
@@ -167,11 +227,55 @@ export class MemoryProxyLedger implements ProxyLedger {
     if (request.status !== "reserved") return;
     request.status = "uncertain";
     request.upstreamStatus = upstreamStatus;
+    request.leaseUntil = null;
     if (estimate) {
       request.actualCostUsd = estimate.costUsd;
       request.usage = { ...estimate.usage };
       request.costEstimated = true;
     }
+  }
+
+  async renewLeases(ownerId: string, requestIds: string[], leaseMs: number): Promise<LeaseRenewal> {
+    const leaseUntil = new Date(this.clock().getTime() + leaseMs);
+    const renewed: string[] = [];
+    const cancelled: string[] = [];
+    for (const id of requestIds) {
+      const request = this.requests.get(id);
+      if (request?.ownerId === ownerId && request.status === "reserved" && request.leaseUntil) {
+        request.leaseUntil = new Date(leaseUntil);
+        renewed.push(id);
+        if (this.sessions.get(request.sessionId)?.status === "cancelled") cancelled.push(id);
+      }
+    }
+    return { renewed, cancelled };
+  }
+
+  async expiredLeases(limit: number): Promise<ExpiredRequest[]> {
+    const now = this.clock().getTime();
+    return [...this.requests.values()]
+      .filter((request) => request.status === "reserved" && request.leaseUntil && request.leaseUntil.getTime() < now)
+      .sort((a, b) => a.leaseUntil!.getTime() - b.leaseUntil!.getTime())
+      .slice(0, limit)
+      .map((request) => ({
+        request: cloneRequest(request),
+        runId: this.sessions.get(request.sessionId)!.runId,
+        createdAt: new Date(this.startedAt.get(request.id) ?? 0),
+      }));
+  }
+
+  async settleExpired(requestId: string, estimate?: { usage: ProxyUsage; costUsd: number }): Promise<boolean> {
+    const request = this.requests.get(requestId);
+    if (!request || request.status !== "reserved") return false;
+    if (!request.leaseUntil || request.leaseUntil.getTime() >= this.clock().getTime()) return false;
+    request.status = "uncertain";
+    request.leaseUntil = null;
+    request.orphanedAt = this.clock();
+    if (estimate) {
+      request.actualCostUsd = estimate.costUsd;
+      request.usage = { ...estimate.usage };
+      request.costEstimated = true;
+    }
+    return true;
   }
 
   async settlementHints(sessionId: string, model: string): Promise<{ medianOutputTokens?: number }> {

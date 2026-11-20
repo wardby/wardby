@@ -412,6 +412,7 @@ model Run {
   modelUsage           RunModelUsage[]
   serviceStatuses      CodingRunServiceStatus[]
   budgetEvents         RunBudgetEvent[]
+  followUps            RunFollowUp[]
   /// A manual review of a local branch: this run is the review run dispatched for it.
   localPullRequest     LocalPullRequest?
   /// A sandbox-mode native run's gateway session (native sandbox phase 3).
@@ -426,6 +427,13 @@ model Run {
   /// run through the server's executor and clears this.
   stopRequestedAt      DateTime?
   stopRequestReason    String?
+  /// When the scheduler leader last claimed this run's deferred start (startDeferredAt). The
+  /// marker is cleared only after the start was attempted, so a leader that died in between
+  /// leaves it for the next one, which re-claims it once this is older than the claim timeout.
+  startClaimedAt       DateTime?
+  /// Times the reconciler restarted this run because it stayed pending with no execution
+  /// backend (nothing ran it); bounded so a start that keeps failing ends the run `lost`.
+  startAttempts        Int                      @default(0)
   /// Run steps (RunStep) not recorded because the run already had MAX_RUN_STEPS (2,000).
   stepsDropped         Int                      @default(0)
   /// The run steps level this run records, fixed at dispatch: min(WARDBY_RUN_STEPS, Agent.runSteps
@@ -632,6 +640,11 @@ model CodingRun {
   resultBranch          String?
   /// The commit the run started from (the base ref's tip when the workspace was prepared).
   baseSha               String?
+  /// Set with the job handle when a continuation's workspace merged its pull request's target branch:
+  /// the branch and the commit merged. With baseSha, this is what another control-plane process
+  /// rebuilds the checkout from if the launching one is gone. Null = nothing was merged.
+  targetMergeRef        String?
+  targetMergeSha        String?
   /// Step in the request's merge order set by the delegating agent (1 = first); null = no order.
   mergeOrder            Int?
   /// Fixed at dispatch: this run's repository came from an AgentRepository link, not the
@@ -1065,6 +1078,15 @@ model CodingProxySession {
   runStepsLevel             RunStepsLevel?
   /// MCP tools/call count for this run (capped by WARDBY_MCP_MAX_CALLS_PER_RUN).
   mcpCallCount              Int                      @default(0)
+  /// Package registry: ecosystems where a lockfile plan of this run failed or refused an entry, so a
+  /// metadata miss walks the graph instead of being refused. Shared by every proxy replica.
+  registryPlanFallback      String[]                 @default([])
+  /// Package registry: lockfile plans this run has started (capped by REGISTRY_PLAN_MAX_PER_RUN).
+  registryPlans             Int                      @default(0)
+  /// Package registry: set while a lockfile plan of this run is running (one at a time); a lease, so a
+  /// replica that dies mid-plan does not block the run's later plans for longer than it lasts.
+  registryPlanLeaseUntil    DateTime?
+  registryReservations      RegistryReservation[]
 
   @@index([deadlineAt])
 }
@@ -1093,6 +1115,20 @@ model CodingProxyRequest {
   reservationBasis   String?
   /// sha256 of what identifies the conversation (first message, or OpenAI prompt_cache_key).
   conversationKey    String?
+  /// The request's output cap, kept so a sweeper can estimate the cost of a request its owner never settled.
+  maxOutputTokens    Int?
+  /// Random id of the proxy process that reserved the row; kept after the row settles.
+  ownerId            String?
+  /// While the row is reserved, when its owner's lease runs out (database clock). The owner renews it;
+  /// a sweeper settles a reserved row whose lease has passed. NULL once settled, and on rows written
+  /// before leases existed, which are never swept.
+  leaseUntil         DateTime?
+  /// Which try of this requestKey the row is: 1 for the first, then one more each time a retry
+  /// takes over an orphaned (lease expired) row. A duplicate lookup reads the highest.
+  attempt            Int                      @default(1)
+  /// Set when the row was settled because its owner's lease ran out (the proxy died), never when a
+  /// live proxy's stream broke. Only such a row, the newest attempt of its key, may be taken over by a retry.
+  orphanedAt         DateTime?
   pricingVersion     String
   pricingSnapshot    Json
   inputTokens        Int?
@@ -1105,9 +1141,10 @@ model CodingProxyRequest {
   updatedAt          DateTime                 @updatedAt
   completedAt        DateTime?
 
-  @@unique([sessionId, requestKey])
+  @@unique([sessionId, requestKey, attempt])
   @@index([sessionId, status])
   @@index([sessionId, conversationKey])
+  @@index([status, leaseUntil])
 }
 
 /// Package audit mode (docs/coding-packages.md#package-audit-mode).
@@ -1175,6 +1212,20 @@ model RegistryFetch {
   run       CodingRun            @relation(fields: [runId], references: [runId], onDelete: Cascade)
 
   @@index([runId, createdAt])
+}
+
+/// A package download streaming right now, counted against its run's file and byte limits by every
+/// proxy replica until it completes, fails or its lease runs out (the replica serving it died).
+model RegistryReservation {
+  id        String             @id @default(cuid())
+  runId     String
+  /// Declared size when the registry gave one; otherwise the bytes streamed so far.
+  bytes     Int
+  expiresAt DateTime
+  createdAt DateTime           @default(now())
+  session   CodingProxySession @relation(fields: [runId], references: [runId], onDelete: Cascade)
+
+  @@index([runId])
 }
 
 /// Immutable facts about one published package version, read from the
@@ -1270,6 +1321,29 @@ model DependencySnapshot {
   @@index([createdByRunId, projectPath])
 }
 
+/// An upload in flight, written before the first byte goes to the blob store and
+/// deleted once the upload ends (committed or not). The unique indexes are the
+/// cross-replica "uploading" guard: one claim per snapshot identity and one per
+/// run and project. A claim that outlives the upload window belongs to a proxy
+/// that died; the eviction pass deletes its blob and the claim.
+model DependencyUploadClaim {
+  id          String   @id @default(cuid())
+  ecosystem   String
+  repository  String
+  projectPath String   @default(".")
+  lockHash    String
+  workerImage String
+  blobKey     String   @unique
+  runId       String
+  /// The proxy process that took the claim (a per-process id).
+  ownerId     String
+  createdAt   DateTime @default(now())
+
+  @@unique([ecosystem, repository, projectPath, lockHash, workerImage])
+  @@unique([runId, ecosystem, projectPath])
+  @@index([createdAt])
+}
+
 /// Phase 2: single-row-per-scope lease so exactly one scheduler process
 /// ticks at a time. `holder` is a process instance id (crypto.randomUUID()).
 model SchedulerLease {
@@ -1303,6 +1377,9 @@ model Principal {
   hostIdentityLinkRequests HostIdentityLinkRequest[]
   oauthLinkRequests        OAuthLinkRequest[]
   grants                   ResourceGrant[]
+  /// Set when this principal is a team's backing principal (subject "team:<id>").
+  team                     Team?
+  teamMemberships          TeamMember[]
 }
 
 /// Explicit sharing of one resource with one grantee (docs/private/
@@ -1507,7 +1584,7 @@ model AuthUser {
   displayName String?
   status      String                   @default("enabled")
   /// wardby roles (src/mcp/auth/resource-server.ts ROLE_PERMISSIONS: admin,
-  /// package-approver, service-manager, model-manager, host-manager), set with `wardby auth user grant`. Empty = member.
+  /// package-approver, service-manager, model-manager, host-manager, wardby_owner), set with `wardby auth user grant`. Empty = member.
   /// A privileged operation needs its scope on the token AND a role here
   /// that grants it; unknown values grant nothing.
   roles       String[]                 @default([])
@@ -1648,6 +1725,22 @@ model AgentRepository {
   /// instead of racing it. Default off: existing links review immediately,
   /// exactly as today.
   waitForCi            Boolean  @default(false)
+  /// Only with the "pull_request" trigger: whether this agent reviews draft pull
+  /// requests. Default off: a draft is skipped until it is marked ready for
+  /// review, except one Wardby's own coding run opened (those are always reviewed).
+  reviewDrafts         Boolean  @default(false)
+  /// Only with the "pull_request" trigger: whether this agent reviews every push of
+  /// new commits to an open pull request. Default off: the pull request is reviewed
+  /// when it is opened, reopened or marked ready for review, and a later push starts no
+  /// review (a review comment or a check re-run still does), except on a pull request
+  /// Wardby's own coding run opened (those are always reviewed on push).
+  reviewOnPush         Boolean  @default(false)
+  /// Only with the "pull_request" trigger: whether this agent starts a review on its
+  /// own when a pull request is opened, reopened or marked ready for review. Off: it
+  /// reviews only when asked (a review comment or a check re-run), except on a pull
+  /// request Wardby's own coding run opened (those are always reviewed). New links
+  /// default off; the migration set every existing link on, so they keep reviewing.
+  reviewOnOpen         Boolean  @default(false)
   /// Only on a write (builder) link: Wardby marks the draft pull requests this
   /// agent opened in the repository ready for review, once, after every Wardby
   /// review check passed, CI is green and the merge order check (if any) is
@@ -1770,6 +1863,10 @@ model DeferredReview {
   reason     String   @default("ci")
   /// The run-tree root a "request" row waits for.
   leadRunId  String?
+  /// When a process claimed this row to start the review. The row is deleted only after the
+  /// start was attempted, so a process that died in between leaves it to be re-claimed once
+  /// this is older than the claim timeout.
+  claimedAt  DateTime?
 
   @@unique([provider, repository, prNumber, headSha, agentId])
   @@index([provider, repository, headSha])
@@ -2336,6 +2433,30 @@ model NotificationDelivery {
   @@index([provider, channelId, threadKey, createdAt])
 }
 
+/// A chore to do after a run reaches a terminal status. It is written in the same transaction as the
+/// status, so a crash between the two cannot lose it; the scheduler leader drains the due rows and
+/// runs the handler registered for `kind`. Handlers must be idempotent: a row can run more than once.
+/// Payloads hold ids, never content or secret values.
+model RunFollowUp {
+  id            String    @id @default(cuid())
+  runId         String
+  run           Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  /// Names the handler that does the chore.
+  kind          String
+  payload       Json      @default("{}")
+  /// Claims so far. A claim also pushes nextAttemptAt out, so a second replica cannot take the row.
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now())
+  /// The name of the last error, never its message (a message can carry a secret).
+  lastError     String?
+  doneAt        DateTime?
+  createdAt     DateTime  @default(now())
+
+  /// One chore of each kind per run, so enqueueing twice is a no-op.
+  @@unique([runId, kind])
+  @@index([doneAt, nextAttemptAt])
+}
+
 /// The parent message of a work item's (or PR's) thread in one channel.
 model NotificationThread {
   id        String   @id @default(cuid())
@@ -2423,6 +2544,52 @@ model HostProviderTrustedAccount {
   hostProvider HostProvider @relation(fields: [provider], references: [name], onDelete: Cascade)
 
   @@id([provider, accountId])
+}
+
+/// A named set of equal members that owns resources, receives grants and carries
+/// wardby roles (docs/private/adr/0001, 0003). Owns and is granted through its
+/// backing principal (subject "team:<id>", never a token subject), so every
+/// existing owner and grant rule works for a team unchanged.
+model Team {
+  id          String       @id @default(cuid())
+  name        String       @unique
+  principalId String       @unique
+  principal   Principal    @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  /// wardby roles the team's members hold (same names as AuthUser.roles); unknown values grant nothing.
+  roles       String[]     @default([])
+  /// A user's Personal team (docs/private/adr/0004): its backing principal IS the
+  /// user's own principal, so no ownerId is ever rewritten. No roles, one member,
+  /// never renamed, deleted or linked. Tell personal from shared by this flag, not
+  /// by the "team:" subject prefix.
+  personal    Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  members     TeamMember[]
+}
+
+model TeamMember {
+  teamId      String
+  team        Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  principalId String
+  principal   Principal @relation(fields: [principalId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+
+  @@id([teamId, principalId])
+  @@index([principalId])
+}
+
+/// Append-only record of team changes. No FK to Team so entries survive a delete.
+/// `detail` never carries secret values.
+model TeamAudit {
+  id        String   @id @default(cuid())
+  at        DateTime @default(now())
+  /// Principal that made the change (plain text, no FK, like ResourceGrant.grantedById).
+  actorId   String?
+  action    String
+  teamId    String?
+  detail    Json?
+
+  @@index([teamId, at])
 }
 
 model Document {

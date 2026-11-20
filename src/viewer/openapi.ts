@@ -29,7 +29,8 @@ export interface ViewerRoute {
   responses: Readonly<Record<string, Json>>;
 }
 
-const AUTH_NOTE = "Requires a bearer token with the `admin:view` scope, held by a caller with the admin role.";
+const AUTH_NOTE =
+  "Requires a bearer token with the `admin:view` scope, held by a caller with the admin or viewer role.";
 const ref = (name: string): Json => ({ $ref: `#/components/schemas/${name}` });
 const errorBody = (codes: string, description: string): Json => {
   const list = codes.split(", ");
@@ -192,7 +193,7 @@ function operation(route: ViewerRoute): Json {
       "403": {
         ...errorBody(
           "invalid_token",
-          "Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin role (no `WWW-Authenticate` header).",
+          "Token lacks the `admin:view` scope (the `WWW-Authenticate` header is present), or the caller lacks the admin or viewer role (no `WWW-Authenticate` header).",
         ),
         headers: wwwAuthenticate,
       },

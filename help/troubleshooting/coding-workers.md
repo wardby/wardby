@@ -3,7 +3,7 @@ id: troubleshooting/coding-workers
 title: Troubleshoot coding workers
 summary: Investigate coding-worker setup, isolation preflight, and safe failure handling.
 audience: operator
-tags: [coding-agents, get_run, request, requestUnavailable, quota, coding_queue_timeout, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex, memory, CODING_MEMORY_MB, CODING_CPUS, out-of-memory, command-timeout, timeout_ms, exit-code-124, CODING_BASH_DEFAULT_TIMEOUT_MS, CODING_BASH_MAX_TIMEOUT_MS]
+tags: [coding-agents, get_run, request, requestUnavailable, quota, coding_queue_timeout, docker, kubernetes, isolation, services, debug-trace, debugTraceMinutes, debugTraceMaxMb, maxOutputTokens, output-tokens, claude-code, codex, memory, CODING_MEMORY_MB, CODING_CPUS, out-of-memory, command-timeout, timeout_ms, exit-code-124, CODING_BASH_DEFAULT_TIMEOUT_MS, CODING_BASH_MAX_TIMEOUT_MS, package-registry, coding-proxy, wardby_package_limit, wardby_plan_in_progress, wardby_package_not_allowed, proxy-restart]
 appliesTo: >=0.2.1
 ---
 
@@ -104,6 +104,17 @@ commands run in a tool-runner container limited to at most 512 MiB and 0.25 CPU.
 3. For a Claude Code agent with heavy checks, run it on Codex instead, since raising
    the pod's memory doesn't raise the tool runner's limit.
 
+## Runs that fail when the coding proxy stops mid-request
+
+A coding proxy that stops while a model request is in flight (a node loss, an
+out-of-memory kill, or a shutdown that outlasts its grace period) cuts the
+agent turn that was streaming through it, and the worker retries it. The request's budget hold is settled
+at an estimate once its lease runs out, so it does not refuse the run's later
+requests, and the worker's retry of the same request takes over as a new
+attempt once the lease has run out (until then it is answered `503
+wardby_request_in_progress` with a `Retry-After`). See
+`troubleshooting/stopped-proxy-holds`.
+
 ## Claude Code commands that stop with exit code 124
 
 A Claude Code command that returns exit code 124 ran out of time. Each command
@@ -165,6 +176,36 @@ to the named quota and grant the launcher `get` on it. See
 
 A lead agent with `parallelDelegations` starts several coding runs together;
 expect some of them to queue when the lead fans out wider than the free slots.
+
+## Runs whose changes were not pushed after a restart
+
+A deploy or node loss can replace the control-plane copy that launched a coding
+run. The copy that finishes it rebuilds the git checkout from what the launching
+copy recorded, so the changes are pushed as usual. Two failures remain:
+
+- [`vcs_rebuild_base_unavailable`](../errors/vcs-rebuild-base-unavailable.md):
+  the recorded base commit could not be fetched again; nothing was pushed.
+- [`coding_workspace_lost`](../errors/coding-workspace-lost.md): the run was
+  launched before the base was recorded, so there is nothing to rebuild from.
+
+## Package installs and the coding proxy restarting
+
+The package registry's per-run state (files and bytes served, downloads in
+flight, lockfile plans, and the plan fallback) is kept in PostgreSQL, so an
+install carries on when the coding proxy restarts partway through it, and every
+proxy pod enforces the per-run limits once in total. See
+[Installing packages in coding runs](../../docs/coding-packages.md) and
+[Availability](../../docs/availability.md#why-the-coding-proxy-runs-one-copy).
+
+Two things can look like a stuck run for about a minute after a proxy pod dies,
+and clear on their own:
+
+- A download that was streaming still counts against the run's file and byte
+  limits until its lease lapses (`REGISTRY_IDLE_TIMEOUT_MS` plus a minute). A
+  run at its limit may see `429 wardby_package_limit` until then.
+- A lockfile plan that was running still holds the run's one plan slot until its
+  lease lapses (the plan's time bounds plus a minute). A new plan in that window
+  gets `429 wardby_plan_in_progress`; the worker retries it.
 
 ## Service refusals and failures
 

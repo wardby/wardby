@@ -22,6 +22,8 @@ import { drainCodingQueue } from "./core/coding-queue.js";
 import { prisma } from "./core/db.js";
 import { logger } from "./core/logger.js";
 import { DISABLED_POWER } from "./core/power.js";
+import { runFollowUpHandlersFor } from "./core/run-follow-up-handlers.js";
+import { drainRunFollowUps, type RunFollowUpObserver } from "./core/run-follow-ups.js";
 import { startNotifications } from "./core/notifications.js";
 import { startRunHookDispatcher } from "./core/run-hooks/dispatcher.js";
 import { startReconciler } from "./core/reconciler.js";
@@ -34,8 +36,38 @@ import { RunStepSweeper } from "./core/run-steps/sweep.js";
 import { parseRunStepsListen, startRunStepIngress } from "./core/run-steps/ingress.js";
 import type { McpProviders } from "./mcp/context.js";
 import { buildMcpProviders, startMcp } from "./mcp/index.js";
+import { codingRunObserver } from "./coding/observability.js";
+import { loadMetricsConfig } from "./observability/config.js";
+import { WardbyMetrics } from "./observability/metrics.js";
+import { startMetricsServer, type MetricsServerConfig } from "./observability/metrics-server.js";
 
 const serveLog = logger.child({ module: "serve" });
+
+/**
+ * The coding executor runs in this process, so its run lifecycle (launches,
+ * terminal outcomes, cleanup, budget, duration) is only visible here. Attach a
+ * Prometheus registry to the lifecycle observer and serve it privately.
+ */
+async function startCodingMetrics(
+  bind: MetricsServerConfig,
+): Promise<{ close(): Promise<void>; followUps: RunFollowUpObserver }> {
+  const metrics = new WardbyMetrics();
+  const detach = codingRunObserver.addSink(metrics);
+  try {
+    const server = await startMetricsServer(metrics.registry, bind);
+    serveLog.info({ event: "metrics.started", port: server.port }, "private metrics server started");
+    return {
+      followUps: metrics,
+      close: async () => {
+        detach();
+        await server.close();
+      },
+    };
+  } catch (error) {
+    detach();
+    throw error;
+  }
+}
 
 export interface ServeOptions {
   /** Scheduler lease scope; defaults to "default" like `wardby scheduler --scope`. */
@@ -63,6 +95,8 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
   // Parsed before anything starts, so a malformed CODING_MAX_CONCURRENT or
   // CODING_QUEUE_TIMEOUT_SEC fails fast instead of after HTTP is listening.
   const concurrency = loadCodingConcurrencyConfig();
+  // Same fail-fast for a malformed METRICS_BIND.
+  const metricsConfig = loadMetricsConfig();
   // Run steps from the coding proxy (POST /internal/run-steps); parsed early so a bad value stops start-up.
   const runStepsListen = parseRunStepsListen(process.env.WARDBY_RUN_STEPS_LISTEN);
   const providers = options.providers ?? buildMcpProviders().providers;
@@ -75,7 +109,15 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
       (err) => serveLog.warn({ err }, "low_power_access_check_failed"),
     );
   }
-  const mcp = await startMcp({ providers, schedulerAttached: true });
+  // Attached before MCP starts the executor, so runs it recovers at startup are counted.
+  const codingMetrics = metricsConfig.bind ? await startCodingMetrics(metricsConfig.bind) : undefined;
+  let mcp: Awaited<ReturnType<typeof startMcp>>;
+  try {
+    mcp = await startMcp({ providers, schedulerAttached: true });
+  } catch (error) {
+    await codingMetrics?.close();
+    throw error;
+  }
   // Its own port (not the MCP listener's): only the coding proxy reaches it.
   let runStepIngress: Server | undefined;
   if (runStepsListen && providers.runSteps) {
@@ -83,6 +125,7 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
       runStepIngress = await startRunStepIngress(runStepsListen, { db: prisma, sink: providers.runSteps });
     } catch (err) {
       await mcp.close();
+      await codingMetrics?.close();
       throw err;
     }
     serveLog.info({ host: runStepsListen.host, port: runStepsListen.port }, "run steps listener started");
@@ -140,6 +183,16 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
         beforeStart: (runId) => resolveDeferredCodingRun({ db: prisma, executor: providers.executor, runId }),
         onStartFailed: (runId, err) => markRunFailedFromExecutorError(prisma, runId, err, selfDefects),
       });
+      // Chores a run's status write queued, so a crash between the two cannot lose them.
+      await drainRunFollowUps({
+        db: prisma,
+        handlers: runFollowUpHandlersFor({
+          db: prisma,
+          executor: providers.executor,
+          issueTrackers: providers.issueTrackers,
+        }),
+        observer: codingMetrics?.followUps,
+      });
       // Scale idle coding-proxy/native-gateway Deployments to zero (no-op unless WARDBY_LOW_POWER=1).
       await power.sleepIfIdle().catch((err) => serveLog.warn({ err }, "power_sleep_failed"));
       await runStepSweeper.maybeSweep();
@@ -151,14 +204,16 @@ export async function startServe(options: ServeOptions = {}): Promise<ServeHandl
     close: async () => {
       // Order matters under a SIGTERM grace period: stop creating new runs,
       // stop reaping, then let startMcp close HTTP and drain the executor.
-      scheduler.stop();
-      reconciler.stop();
-      notifications.stop();
+      // Metrics close last so the drain's final cleanup events are still served.
+      // All three stop taking new passes at once; then wait for a pass already in flight, so
+      // nothing starts a run or writes to the database once the drain below has begun.
+      await Promise.all([scheduler.stop(), reconciler.stop(), notifications.stop()]);
       runHooks.stop();
       // Before mcp.close(), which flushes the run-steps writer: no batch arrives after the flush.
       const ingress = runStepIngress;
       if (ingress) await new Promise<void>((resolve) => ingress.close(() => resolve()));
       await mcp.close();
+      await codingMetrics?.close();
     },
   };
 }

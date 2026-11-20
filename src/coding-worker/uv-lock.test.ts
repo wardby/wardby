@@ -6,7 +6,7 @@ import { pypiAdapter } from "../coding/registry/pypi.js";
 import { normalizeUvLock } from "../coding/registry/pypi-plan.js";
 import { planPythonLockfile } from "./pypi-plan.mjs";
 import { registryAccess } from "./registry-refusals.mjs";
-import { planTargets, proxyUrls, routeLock, unrouteLock } from "./uv-lock.mjs";
+import { lockAfterCommand, planTargets, proxyUrls, routeLock, unrouteLock } from "./uv-lock.mjs";
 
 const TOKEN = "rrg_FAKE_registry_token_for_tests";
 const env = pypiAdapter.workerConfig({
@@ -107,6 +107,42 @@ wheels = [
     expect(normalizeUvLock(rewritten, "http://wardby-proxy:8787/registry/pypi/")).toContain(
       "https://files.pythonhosted.org/packages/py2.py3/s/six/six-1.17.0-py2.py3-none-any.whl",
     );
+  });
+});
+
+describe("what the shim leaves in a lock after a command", () => {
+  const proxied = routeLock(LOCK, proxy).text;
+  const upgraded = `${proxied}
+[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "http://wardby-proxy:8787/registry/pypi/simple/" }
+wheels = [
+    { url = "http://wardby-proxy:8787/registry/pypi/files/six/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:47" },
+]
+`;
+
+  it("puts a lock uv left alone back exactly as it was", () => {
+    const routed = routeLock(LOCK, proxy);
+    expect(lockAfterCommand(LOCK, routed, routed.text, proxy)).toBe(LOCK);
+  });
+
+  it("maps back to PyPI only what this shim routed from PyPI's own URLs", () => {
+    const routed = routeLock(LOCK, proxy);
+    const restored = lockAfterCommand(LOCK, routed, `${routed.text}\n# uv wrote this\n`, proxy)!;
+    expect(restored).toContain(
+      "https://files.pythonhosted.org/packages/3e/30/e900/annotated_doc-0.0.5-py3-none-any.whl",
+    );
+    expect(restored).not.toContain("wardby-proxy");
+  });
+
+  it("leaves a lock that already named the proxy as uv wrote it, so no public address is invented for a private package", () => {
+    // The run's own rewrite pointed the lock at the proxy before any command; the real upstream may be a
+    // private registry whose files PyPI does not have.
+    const routed = routeLock(proxied, proxy);
+    expect(routed.text).toBe(proxied);
+    expect(lockAfterCommand(proxied, routed, upgraded, proxy)).toBeUndefined();
+    expect(lockAfterCommand(proxied, routed, proxied, proxy)).toBe(proxied);
   });
 });
 

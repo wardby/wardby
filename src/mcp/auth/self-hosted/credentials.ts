@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Prisma, PrismaClient } from "#prisma";
+import { newUserPrincipalData } from "../../../core/teams/personal.js";
 import { cleanDisplayName, upsertProfile } from "../../../core/documents/profiles.js";
 import { requireSubject } from "../../../providers/auth/subject.js";
 import { ROLE_NAMES, isRoleName } from "../resource-server.js";
@@ -63,7 +64,11 @@ export class IdentityService {
     requireSubject(subject);
     const granted = validateRoles(roles);
     return this.db.$transaction(async (tx) => {
-      const principal = await tx.principal.upsert({ where: { subject }, create: { subject }, update: {} });
+      const principal = await tx.principal.upsert({
+        where: { subject },
+        create: newUserPrincipalData(subject),
+        update: {},
+      });
       const displayName = name === undefined ? null : requireDisplayName(name);
       const user = await tx.authUser.create({ data: { principalId: principal.id, roles: granted, displayName } });
       if (displayName) await upsertProfile(tx, principal.id, { displayName, source: "operator" });

@@ -14,3 +14,9 @@ export declare function proxyUrls(env?: Record<string, string | undefined>): Pro
 export declare function publicFileUrl(name: string, filename: string): string | undefined;
 export declare function routeLock(text: string, proxy: ProxyUrls): { text: string; originals: Map<string, string> };
 export declare function unrouteLock(text: string, proxy: ProxyUrls, originals?: Map<string, string>): string;
+export declare function lockAfterCommand(
+  original: string,
+  routed: { text: string; originals: Map<string, string> },
+  after: string,
+  proxy: ProxyUrls,
+): string | undefined;

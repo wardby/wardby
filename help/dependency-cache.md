@@ -87,8 +87,8 @@ for folders restored from a snapshot.
    `WARDBY_DEPENDENCY_CACHE=true bash deploy/kind-coding/up.sh` (not durable).
    Docker quickstart: add `WARDBY_DEPENDENCY_CACHE=true` to `.wardby/.env`
    (requires wardby 0.7.0 or later).
-2. GKE: nothing extra. `up.sh` grants the proxy the `DependencySnapshot`
-   table before the rollout.
+2. GKE: nothing extra. `up.sh` grants the proxy the `DependencySnapshot` and
+   `DependencyUploadClaim` tables before the rollout.
 3. Per agent, once the worker images are current: `update_agent` with
    `codingProfile.dependencyCache: true`. This needs `packages:approve` or
    `agents:admin`.
@@ -112,6 +112,17 @@ Tuning, on the proxy: `WARDBY_DEPENDENCY_CACHE_MAX_SNAPSHOT_MB` (1024),
 from creation, so snapshots are rebuilt periodically) and `_UPLOAD_SECONDS`
 (900). On GKE and AWS keep the Terraform `dependency_cache_max_age_days` equal
 to `_MAX_AGE_DAYS`; the bucket also deletes objects older than that plus 7 days.
+
+## Interrupted uploads
+
+An upload records a claim before it stores anything, so two proxy replicas
+never upload the same snapshot at once: the second is refused
+`upload_in_progress` and that run just doesn't store a snapshot. If a proxy
+stops mid-upload, the hourly cleanup pass deletes the half-written object once
+its claim is older than `_UPLOAD_SECONDS` plus 5 minutes. Nothing for you to
+do; if objects pile up in the bucket anyway, check that the proxy's database
+role can delete from `DependencyUploadClaim` and that the proxy log has no
+`dependency_cache.reclaim_failed` lines.
 
 ## Troubleshooting
 

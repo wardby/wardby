@@ -56,7 +56,7 @@ describe("startNotifications", () => {
 
     const handle = await startNotifications({ db, chat: {} });
     expect(handle.stop).toBeTypeOf("function");
-    handle.stop();
+    await handle.stop();
 
     await emitWorkflowEvent({
       dedupeKey: "test:1",
@@ -86,7 +86,7 @@ describe("startNotifications", () => {
     await Promise.resolve();
     expect(authTestSpy).toHaveResolved();
 
-    handle.stop();
+    await handle.stop();
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -106,7 +106,7 @@ describe("startNotifications", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    handle.stop();
+    await handle.stop();
     expect(vi.getTimerCount()).toBe(0);
   });
 });

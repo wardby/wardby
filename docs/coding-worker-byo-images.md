@@ -155,7 +155,7 @@ agent's commands.
 
 1. **Find your release's tool runner image.** It is the value of
    `CODING_CLAUDE_TOOL_RUNNER_IMAGE` on your server. To start from Node and
-   Python, use `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` instead. A
+   Python, use `CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12` (or `_3_13`, `_3_14`) instead. A
    release value looks like
    `ghcr.io/wardby/wardby/wardby-claude-tool-runner@sha256:<digest>`. If the
    value is a local image ID (`sha256:...` only), give it a name first, because

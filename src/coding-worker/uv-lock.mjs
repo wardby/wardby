@@ -148,3 +148,20 @@ export function unrouteLock(text, proxy, originals = new Map()) {
     return url ? `"${url}"` : match;
   });
 }
+
+/**
+ * What a uv.lock should hold once a project command has finished, or `undefined` for "leave it as uv wrote it".
+ * `original` is the lock before the command, `routed` what routeLock made of it, `after` what the file holds now.
+ *
+ * - Untouched by uv: exactly `original`.
+ * - Already naming the proxy before the command (the run's own rewrite, which a private registry's lock needs):
+ *   leave uv's result alone. Mapping the proxy's URLs to PyPI's here would write public addresses for packages
+ *   that exist only on the proxy's real upstream; they are pointed at that upstream when the run's changes are
+ *   collected, by asking the proxy.
+ * - Routed by this shim from PyPI's own URLs: map back to PyPI's, as before.
+ */
+export function lockAfterCommand(original, routed, after, proxy) {
+  if (after === routed.text) return original;
+  if (routed.text === original) return undefined;
+  return unrouteLock(after, proxy, routed.originals);
+}

@@ -1,0 +1,12 @@
+import { readFileSync } from "node:fs";
+
+/** The installed Wardby version, read from package.json (same relative path from src/core and dist/core). */
+export function packageVersion(): string {
+  const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
+    version?: unknown;
+  };
+  if (typeof packageJson.version !== "string" || packageJson.version.length === 0) {
+    throw new Error("invalid_package_version");
+  }
+  return packageJson.version;
+}

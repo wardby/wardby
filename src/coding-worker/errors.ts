@@ -25,6 +25,8 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   "coding_output_missing",
   "coding_output_invalid",
   "coding_output_run_mismatch",
+  // A changes_ready run left a uv.lock naming proxy-only URLs (a dependency added or upgraded in the run): not collected.
+  "coding_pypi_lockfile_unresolved",
   // Claude Code: its command tool (the relay to the tool runner's socket) never connected.
   "worker_tool_runner_unreachable",
   // A run with git history (#536) on an image (or tool runner) without git.

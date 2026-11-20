@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createPrismaClient } from "../../core/db.js";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PrismaProxyLedger } from "./prisma-ledger.js";
 import { PrismaContainerExecutionStore } from "../executor/container.js";
 import { CodingProxy, type ProxyResponseSink } from "./proxy.js";
@@ -769,6 +769,572 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       expect(await ledger.previousReply(pSession, "other")).toBeNull();
     });
   });
+  describe("request leases", () => {
+    const lAgent = `lease-agent-${suffix}`;
+    const lRun = `lease-run-${suffix}`;
+    const lSession = `lease-session-${suffix}`;
+    const model = "lease-model";
+    const LEASE_MS = 30_000;
+    const ledger = new PrismaProxyLedger(db);
+    const usage = { inputTokens: 100, outputTokens: 10, cachedInputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
+    const reserveResult = (key: string, extra: Partial<Parameters<typeof ledger.reserve>[0]>) =>
+      ledger.reserve({
+        id: `lease-${key}-${suffix}`,
+        sessionId: lSession,
+        requestKey: key,
+        requestFingerprint: `fingerprint-${key}`,
+        model,
+        reservationUsd: 0.0001,
+        maxOutputTokens: 100,
+        pricing: { version: "test", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 },
+        now: new Date(),
+        ...extra,
+      });
+    const reserveLeased = async (
+      key: string,
+      extra: Partial<Parameters<typeof ledger.reserve>[0]> = { ownerId: `owner-${suffix}`, leaseMs: LEASE_MS },
+    ) => {
+      const result = await reserveResult(key, extra);
+      if (result.outcome !== "reserved") throw new Error(`unexpected ${result.outcome}`);
+      return result.request.id;
+    };
+    /** Moves a row's lease into the past, as if its owner had stopped renewing it. */
+    const expire = (id: string, interval = "1 minute") =>
+      db.$executeRaw`UPDATE "CodingProxyRequest" SET "leaseUntil" = CURRENT_TIMESTAMP - ${interval}::interval WHERE "id" = ${id}`;
+    const expiredHere = async () =>
+      (await ledger.expiredLeases(1000)).filter((item) => item.request.sessionId === lSession);
+
+    afterAll(async () => {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${lSession}`;
+      await db.runModelUsage.deleteMany({ where: { runId: lRun } });
+      await db.codingRun.deleteMany({ where: { runId: lRun } });
+      await db.run.deleteMany({ where: { id: lRun } });
+      await db.agent.deleteMany({ where: { id: lAgent } });
+    });
+
+    it("leases a request to its owner from the database clock, and leaves an unowned one unleased", async () => {
+      await db.agent.create({ data: { id: lAgent, name: lAgent, systemPrompt: "x", model, budgetUsd: 1 } });
+      await db.run.create({ data: { id: lRun, agentId: lAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: lRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${lRun}`,
+          provider: "codex",
+          model,
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 0.001,
+        },
+      });
+      await ledger.createSession({
+        id: lSession,
+        runId: lRun,
+        capabilityHash: `lease-hash-${suffix}`,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: [model],
+        deadlineAt: new Date(Date.now() + 600_000),
+        budgetUsd: 0.001,
+        registryTokenHash: `lease-registry-hash-${suffix}`,
+      });
+
+      const before = Date.now();
+      const leased = await reserveLeased("leased");
+      const request = await ledger.getRequest(leased);
+      expect(request).toMatchObject({ status: "reserved", ownerId: `owner-${suffix}`, maxOutputTokens: 100 });
+      // The database's clock, so allow for a skew between it and this process.
+      expect(Math.abs(request!.leaseUntil!.getTime() - (before + LEASE_MS))).toBeLessThan(5_000);
+
+      const unowned = await reserveLeased("unowned", { leaseMs: LEASE_MS });
+      const unleased = await reserveLeased("unleased", {});
+      for (const id of [unowned, unleased]) expect((await ledger.getRequest(id))?.leaseUntil).toBeNull();
+      await ledger.release(unowned, 500);
+      await ledger.release(unleased, 500);
+      await ledger.release(leased, 500);
+    });
+
+    it("renews only the owner's own reserved requests", async () => {
+      const mine = await reserveLeased("renew-mine");
+      const theirs = await reserveLeased("renew-theirs", { ownerId: `other-${suffix}`, leaseMs: LEASE_MS });
+      const settled = await reserveLeased("renew-settled");
+      await ledger.complete(settled, usage, 0.00001, 200);
+      await Promise.all([mine, theirs].map((id) => expire(id)));
+
+      const renewal = await ledger.renewLeases(
+        `owner-${suffix}`,
+        [mine, theirs, settled, `missing-${suffix}`],
+        LEASE_MS,
+      );
+      expect(renewal).toEqual({ renewed: [mine], cancelled: [] });
+
+      expect((await ledger.getRequest(mine))!.leaseUntil!.getTime()).toBeGreaterThan(Date.now());
+      expect((await ledger.getRequest(theirs))!.leaseUntil!.getTime()).toBeLessThan(Date.now());
+      expect((await ledger.getRequest(settled))?.leaseUntil).toBeNull();
+      await ledger.renewLeases(`owner-${suffix}`, [], LEASE_MS);
+      await ledger.release(mine, 500);
+      await ledger.release(theirs, 500);
+      expect(await ledger.renewLeases(`owner-${suffix}`, [], LEASE_MS)).toEqual({ renewed: [], cancelled: [] });
+    });
+
+    it("tells an owner whose request another process swept that it no longer holds it", async () => {
+      const ownerA = `owner-a-${suffix}`;
+      const ownerB = `owner-b-${suffix}`;
+      const a = await reserveLeased("fence-a", { ownerId: ownerA, leaseMs: LEASE_MS });
+      const b = await reserveLeased("fence-b", { ownerId: ownerB, leaseMs: LEASE_MS });
+
+      // A stalls past its lease; B's process sweeps the request. B's own request is untouched.
+      await expire(a);
+      expect(await ledger.settleExpired(a)).toBe(true);
+
+      // A is alive and heartbeats: it is told it holds nothing. B is told it still holds its own.
+      expect(await ledger.renewLeases(ownerA, [a], LEASE_MS)).toEqual({ renewed: [], cancelled: [] });
+      expect(await ledger.renewLeases(ownerB, [a, b], LEASE_MS)).toEqual({ renewed: [b], cancelled: [] });
+      expect(await ledger.getRequest(a)).toMatchObject({ status: "uncertain", leaseUntil: null });
+      await ledger.release(b, 500);
+      // Settled without an estimate it keeps its full hold, which the session's small budget cannot spare.
+      await db.$executeRaw`DELETE FROM "CodingProxyRequest" WHERE "id" = ${a}`;
+    });
+
+    it("lets an owner whose lease ran out but was not yet swept renew it and keep the request", async () => {
+      const ownerA = `owner-a-${suffix}`;
+      const a = await reserveLeased("fence-late", { ownerId: ownerA, leaseMs: LEASE_MS });
+      await expire(a);
+      expect(await ledger.renewLeases(ownerA, [a], LEASE_MS)).toEqual({ renewed: [a], cancelled: [] });
+      expect(await ledger.settleExpired(a)).toBe(false);
+      await ledger.release(a, 500);
+    });
+
+    it("lists the renewed requests whose session was cancelled", async () => {
+      const mine = await reserveLeased("fence-cancel");
+      await ledger.cancelSession(lSession);
+      try {
+        expect(await ledger.renewLeases(`owner-${suffix}`, [mine], LEASE_MS)).toEqual({
+          renewed: [mine],
+          cancelled: [mine],
+        });
+      } finally {
+        // The other tests share this session.
+        await db.$executeRaw`UPDATE "CodingProxySession" SET "status" = 'active' WHERE "id" = ${lSession}`;
+      }
+      await ledger.release(mine, 500);
+    });
+
+    it("lists only reserved requests whose lease has passed, with their run, oldest lease first", async () => {
+      const live = await reserveLeased("list-live");
+      const noLease = await reserveLeased("list-no-lease", {});
+      const dead = await reserveLeased("list-dead");
+      const older = await reserveLeased("list-older");
+      const done = await reserveLeased("list-done");
+      await ledger.complete(done, usage, 0.00001, 200);
+      await expire(dead);
+      await expire(older, "2 minutes");
+      await expire(done);
+      await expire(noLease);
+      await db.$executeRaw`UPDATE "CodingProxyRequest" SET "leaseUntil" = NULL WHERE "id" = ${noLease}`;
+
+      const expired = await expiredHere();
+      expect(expired.map((item) => item.request.id)).toEqual([older, dead]);
+      expect(expired[0]).toMatchObject({ runId: lRun, request: { status: "reserved", maxOutputTokens: 100 } });
+      expect(Math.abs(expired[0].createdAt.getTime() - Date.now())).toBeLessThan(60_000);
+      expect((await ledger.expiredLeases(1)).length).toBe(1);
+      for (const id of [live, noLease, dead, older]) await ledger.release(id, 500);
+    });
+
+    it("settles an expired request at an estimate, into the run's totals and out of the budget's holds", async () => {
+      // The session budget is 0.001. A hold of 0.0009 fits beside nothing else held.
+      const dead = await reserveLeased("swept", {
+        ownerId: `owner-${suffix}`,
+        leaseMs: LEASE_MS,
+        reservationUsd: 0.0009,
+      });
+      await expire(dead);
+      expect((await reserveResult("blocked", { reservationUsd: 0.0005 })).outcome).toBe("budget_exhausted");
+
+      const estimate = { usage: { ...usage, outputTokens: 3 }, costUsd: 0.00002 };
+      expect(await ledger.settleExpired(dead, estimate)).toBe(true);
+
+      expect(await ledger.getRequest(dead)).toMatchObject({
+        status: "uncertain",
+        costEstimated: true,
+        actualCostUsd: 0.00002,
+        leaseUntil: null,
+        ownerId: `owner-${suffix}`,
+        usage: estimate.usage,
+      });
+      const run = await db.run.findUniqueOrThrow({ where: { id: lRun } });
+      expect(Number(run.costUsd)).toBeGreaterThan(0);
+      expect(run.turns).toBeGreaterThanOrEqual(1);
+      // The hold is gone, so the request that did not fit before now does.
+      const next = await reserveResult("after-sweep", { reservationUsd: 0.0005 });
+      expect(next.outcome).toBe("reserved");
+      if (next.outcome === "reserved") await ledger.release(next.request.id, 500);
+    });
+
+    it("settles an expired request once, and only while it is still reserved and expired", async () => {
+      const renewed = await reserveLeased("guard-renewed");
+      await expire(renewed);
+      await ledger.renewLeases(`owner-${suffix}`, [renewed], LEASE_MS);
+      expect(await ledger.settleExpired(renewed, { usage, costUsd: 0.00001 })).toBe(false);
+      expect((await ledger.getRequest(renewed))?.status).toBe("reserved");
+
+      const finished = await reserveLeased("guard-finished");
+      await expire(finished);
+      await ledger.complete(finished, usage, 0.00001, 200);
+      expect(await ledger.settleExpired(finished, { usage, costUsd: 0.00009 })).toBe(false);
+      expect(await ledger.getRequest(finished)).toMatchObject({ status: "completed", actualCostUsd: 0.00001 });
+
+      const unleased = await reserveLeased("guard-unleased", {});
+      expect(await ledger.settleExpired(unleased)).toBe(false);
+      expect(await ledger.settleExpired(`missing-${suffix}`)).toBe(false);
+
+      const raced = await reserveLeased("guard-raced");
+      await expire(raced);
+      const results = await Promise.all([
+        ledger.settleExpired(raced, { usage, costUsd: 0.00001 }),
+        new PrismaProxyLedger(db).settleExpired(raced, { usage, costUsd: 0.00001 }),
+      ]);
+      expect(results.filter(Boolean)).toHaveLength(1);
+      await ledger.release(renewed, 500);
+      await ledger.release(unleased, 500);
+    });
+
+    it("settles an expired request without an estimate by keeping its hold", async () => {
+      const dead = await reserveLeased("no-estimate");
+      await expire(dead);
+      expect(await ledger.settleExpired(dead)).toBe(true);
+      const request = await ledger.getRequest(dead);
+      expect(request).toMatchObject({ status: "uncertain", costEstimated: false, leaseUntil: null });
+      expect(request?.actualCostUsd).toBeUndefined();
+    });
+
+    it("lets a swept request finish at its real cost", async () => {
+      const dead = await reserveLeased("late-finish");
+      await expire(dead);
+      await ledger.settleExpired(dead, { usage, costUsd: 0.00002 });
+      const done = await ledger.complete(dead, { ...usage, outputTokens: 40 }, 0.00007, 200);
+      expect(done).toMatchObject({
+        status: "completed",
+        costEstimated: false,
+        actualCostUsd: 0.00007,
+        leaseUntil: null,
+      });
+    });
+
+    it("clears the lease, and keeps the owner, when a request settles any other way", async () => {
+      const completed = await reserveLeased("clean-completed");
+      const released = await reserveLeased("clean-released");
+      const uncertain = await reserveLeased("clean-uncertain");
+      await ledger.complete(completed, usage, 0.00001, 200);
+      await ledger.release(released, 500);
+      await ledger.markUncertain(uncertain, 502);
+      for (const id of [completed, released, uncertain]) {
+        expect(await ledger.getRequest(id)).toMatchObject({ leaseUntil: null, ownerId: `owner-${suffix}` });
+      }
+    });
+  });
+
+  describe("stopping a run from another process", () => {
+    const sAgent = `stop-agent-${suffix}`;
+    const sRun = `stop-run-${suffix}`;
+    const entry = entryOf(shippedCatalog().require("gpt-5.6-luna"));
+
+    afterAll(async () => {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "runId" = ${sRun}`;
+      await db.runModelUsage.deleteMany({ where: { runId: sRun } });
+      await db.codingRun.deleteMany({ where: { runId: sRun } });
+      await db.run.deleteMany({ where: { id: sRun } });
+      await db.agent.deleteMany({ where: { id: sAgent } });
+    });
+
+    it("aborts the stream held by one proxy when another proxy cancels the session, at the next heartbeat", async () => {
+      await db.agent.create({
+        data: { id: sAgent, name: sAgent, systemPrompt: "x", model: entry.modelId, budgetUsd: 1 },
+      });
+      await db.run.create({ data: { id: sRun, agentId: sAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: sRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${sRun}`,
+          provider: "codex",
+          model: entry.modelId,
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      // The relay's upstream stays open until the proxy aborts it.
+      let upstreamAborted = false;
+      const holdOpen: typeof globalThis.fetch = async (_url, init) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              init?.signal?.addEventListener("abort", () => {
+                upstreamAborted = true;
+                controller.error(new Error("aborted"));
+              });
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      const instance = (ownerId: string) =>
+        new CodingProxy({
+          ledger: new PrismaProxyLedger(db),
+          credentials: { resolve: async () => "secret" },
+          fetch: holdOpen,
+          leaseMs: 30_000,
+          ownerId,
+        });
+      const relay = instance(`relay-${suffix}`);
+      // The control plane's own instance: same database, no stream, so it cannot abort anything itself.
+      const controlPlane = instance(`control-plane-${suffix}`);
+      const session = await relay.createSession({
+        runId: sRun,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: [entry.modelId],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        terms: { version: "v1", entry },
+      });
+      const sink: ProxyResponseSink = { start() {}, write() {}, end() {}, destroy() {} };
+      const pending = relay
+        .execute(
+          {
+            bearer: session.capability,
+            protocol: "openai-responses",
+            rawBody: JSON.stringify({ model: entry.modelId, input: "hi", max_output_tokens: 10, stream: true }),
+            requestKey: "held-open",
+          },
+          sink,
+        )
+        .catch((error: unknown) => error);
+      const requestRow = async () => {
+        const rows = await db.$queryRaw<Array<{ id: string; status: string }>>`
+          SELECT "id", "status" FROM "CodingProxyRequest" WHERE "sessionId" = ${session.id}
+        `;
+        return rows[0];
+      };
+      await vi.waitFor(async () => expect((await requestRow())?.status).toBe("reserved"), { timeout: 5_000 });
+
+      // A heartbeat before the stop leaves a live request alone.
+      await relay.renewOwnLeases();
+      expect(upstreamAborted).toBe(false);
+
+      // The stop lands through the other instance; the relay is not told directly.
+      await controlPlane.cancelSession(session.id);
+      expect(upstreamAborted).toBe(false);
+
+      await relay.renewOwnLeases();
+      expect(await pending).toMatchObject({ status: 502 });
+      expect(upstreamAborted).toBe(true);
+      const row = await requestRow();
+      expect(row).toMatchObject({ status: "uncertain" });
+      expect(await new PrismaProxyLedger(db).getRequest(row.id)).toMatchObject({
+        status: "uncertain",
+        leaseUntil: null,
+      });
+    });
+  });
+
+  describe("request attempts", () => {
+    const aAgent = `attempt-agent-${suffix}`;
+    const aRun = `attempt-run-${suffix}`;
+    const aSession = `attempt-session-${suffix}`;
+    const model = "attempt-model";
+    const LEASE_MS = 30_000;
+    const ledger = new PrismaProxyLedger(db);
+    const usage = { inputTokens: 100, outputTokens: 10, cachedInputTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
+    const estimate = { usage, costUsd: 0.00002 };
+    let counter = 0;
+    /** One try of request key `key` (a fixed body): `id` names the row, `extra` its lease, cap or takeover. */
+    const tryKey = (key: string, extra: Partial<Parameters<typeof ledger.reserve>[0]> = {}) =>
+      ledger.reserve({
+        id: `attempt-${key}-${++counter}-${suffix}`,
+        sessionId: aSession,
+        requestKey: key,
+        requestFingerprint: `fingerprint-${key}`,
+        model,
+        reservationUsd: 0.0001,
+        maxOutputTokens: 100,
+        pricing: { version: "test", encoding: "o200k_base" as const, inputPerMTok: 1, outputPerMTok: 1 },
+        now: new Date(),
+        ownerId: `owner-${suffix}`,
+        leaseMs: LEASE_MS,
+        maxAttempts: 3,
+        ...extra,
+      });
+    const reserved = async (key: string, extra: Partial<Parameters<typeof ledger.reserve>[0]> = {}) => {
+      const result = await tryKey(key, extra);
+      if (result.outcome !== "reserved") throw new Error(`unexpected ${result.outcome}`);
+      return result;
+    };
+    const expire = (id: string) =>
+      db.$executeRaw`UPDATE "CodingProxyRequest" SET "leaseUntil" = CURRENT_TIMESTAMP - interval '1 minute' WHERE "id" = ${id}`;
+    const attemptsOf = (key: string) =>
+      db.$queryRaw<{ id: string; attempt: number; status: string }[]>`
+        SELECT "id", "attempt", "status" FROM "CodingProxyRequest"
+        WHERE "sessionId" = ${aSession} AND "requestKey" = ${key} ORDER BY "attempt"`;
+
+    beforeAll(async () => {
+      await db.agent.create({ data: { id: aAgent, name: aAgent, systemPrompt: "x", model, budgetUsd: 1 } });
+      await db.run.create({ data: { id: aRun, agentId: aAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: aRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${aRun}`,
+          provider: "codex",
+          model,
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 0.001,
+        },
+      });
+      await ledger.createSession({
+        id: aSession,
+        runId: aRun,
+        capabilityHash: `attempt-hash-${suffix}`,
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: [model],
+        deadlineAt: new Date(Date.now() + 600_000),
+        budgetUsd: 0.01,
+        registryTokenHash: `attempt-registry-hash-${suffix}`,
+      });
+    });
+
+    afterAll(async () => {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${aSession}`;
+      await db.runModelUsage.deleteMany({ where: { runId: aRun } });
+      await db.codingRun.deleteMany({ where: { runId: aRun } });
+      await db.run.deleteMany({ where: { id: aRun } });
+      await db.agent.deleteMany({ where: { id: aAgent } });
+    });
+
+    it("answers a retry inside the lease as in progress, with the lease's remaining time", async () => {
+      const first = await reserved("in-lease");
+      const retry = await tryKey("in-lease");
+      expect(retry).toMatchObject({ outcome: "in_progress", request: { id: first.request.id } });
+      const remaining = (retry as { retryAfterMs: number }).retryAfterMs;
+      expect(remaining).toBeGreaterThan(LEASE_MS - 10_000);
+      expect(remaining).toBeLessThanOrEqual(LEASE_MS);
+    });
+
+    it("takes an orphan over in one transaction: settles it at the estimate and reserves attempt 2", async () => {
+      const first = await reserved("takeover");
+      await expire(first.request.id);
+      const orphaned = await tryKey("takeover");
+      expect(orphaned).toMatchObject({
+        outcome: "orphaned",
+        orphan: { runId: aRun, request: { id: first.request.id } },
+      });
+      expect((await ledger.getRequest(first.request.id))?.status).toBe("reserved");
+
+      const second = await reserved("takeover", { takeover: { requestId: first.request.id, estimate } });
+      expect(second).toMatchObject({ request: { attempt: 2 }, tookOver: { requestId: first.request.id } });
+      expect(await ledger.getRequest(first.request.id)).toMatchObject({
+        status: "uncertain",
+        costEstimated: true,
+        actualCostUsd: 0.00002,
+        leaseUntil: null,
+        attempt: 1,
+      });
+      expect((await ledger.getRequest(first.request.id))?.orphanedAt).toBeInstanceOf(Date);
+      expect((await attemptsOf("takeover")).map((row) => [row.attempt, row.status])).toEqual([
+        [1, "uncertain"],
+        [2, "reserved"],
+      ]);
+    });
+
+    it("takes a request the sweep settled over, and a late finish of the old owner still corrects its row", async () => {
+      const first = await reserved("swept");
+      await expire(first.request.id);
+      expect(await ledger.settleExpired(first.request.id, estimate)).toBe(true);
+      const second = await reserved("swept");
+      expect(second).toMatchObject({ request: { attempt: 2 }, tookOver: { requestId: first.request.id } });
+      expect(await ledger.complete(first.request.id, usage, 0.00007, 200)).toMatchObject({
+        status: "completed",
+        actualCostUsd: 0.00007,
+        attempt: 1,
+      });
+    });
+
+    it("lets two concurrent takeovers of one orphan create exactly one new attempt", async () => {
+      const first = await reserved("race");
+      await expire(first.request.id);
+      const results = await Promise.all([
+        tryKey("race", { takeover: { requestId: first.request.id, estimate } }),
+        tryKey("race", { takeover: { requestId: first.request.id, estimate } }),
+      ]);
+      expect(results.map((result) => result.outcome).sort()).toEqual(["in_progress", "reserved"]);
+      expect((await attemptsOf("race")).map((row) => row.attempt)).toEqual([1, 2]);
+    });
+
+    it("refuses once a key has used its attempts, reading the newest attempt", async () => {
+      const first = await reserved("cap", { maxAttempts: 2 });
+      await expire(first.request.id);
+      const second = await reserved("cap", {
+        maxAttempts: 2,
+        takeover: { requestId: first.request.id, estimate },
+      });
+      await expire(second.request.id);
+      expect(await tryKey("cap", { maxAttempts: 2 })).toMatchObject({
+        outcome: "attempts_exhausted",
+        request: { id: second.request.id, attempt: 2 },
+      });
+      expect((await attemptsOf("cap")).map((row) => row.attempt)).toEqual([1, 2]);
+    });
+
+    it("keeps answering duplicate for completed, live-uncertain, released, unleased and different-body requests", async () => {
+      const completed = await reserved("dup-completed");
+      await ledger.complete(completed.request.id, usage, 0.00001, 200);
+      const uncertain = await reserved("dup-uncertain");
+      await ledger.markUncertain(uncertain.request.id, 502, estimate);
+      const released = await reserved("dup-released");
+      await ledger.release(released.request.id, 500);
+      const unleased = await reserved("dup-unleased", { ownerId: undefined, leaseMs: undefined });
+      const other = await reserved("dup-body");
+      // The unleased row is left as it is: expiring it would give it a lease.
+      await Promise.all([uncertain, other].map((row) => expire(row.request.id)));
+
+      for (const [key, row] of [
+        ["dup-completed", completed],
+        ["dup-uncertain", uncertain],
+        ["dup-released", released],
+        ["dup-unleased", unleased],
+      ] as const) {
+        expect(await tryKey(key)).toMatchObject({ outcome: "duplicate", request: { id: row.request.id } });
+      }
+      expect(await tryKey("dup-body", { requestFingerprint: "another body" })).toMatchObject({
+        outcome: "duplicate",
+        request: { id: other.request.id },
+      });
+    });
+
+    it("counts the first attempt's estimate and the new attempt's hold against the budget", async () => {
+      // A hold as large as the whole budget never fits, so the refusal's numbers show what counted.
+      const first = await reserved("budget");
+      await expire(first.request.id);
+      await reserved("budget", { takeover: { requestId: first.request.id, estimate } });
+      const refused = await tryKey("budget-other", { reservationUsd: 0.01 });
+      expect(refused).toMatchObject({ outcome: "budget_exhausted" });
+      const details = (refused as { details: { spentUsd: number; heldReservedUsd: number } }).details;
+      expect(details.spentUsd).toBeGreaterThanOrEqual(0.00002);
+      expect(details.heldReservedUsd).toBeGreaterThanOrEqual(0.0001);
+    });
+  });
+
   describe("MCP sessions", () => {
     const mAgent = `mcp-agent-${suffix}`;
     const mRun = `mcp-run-${suffix}`;

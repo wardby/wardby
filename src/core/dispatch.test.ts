@@ -165,9 +165,25 @@ function fakeDb(
         if (!row) throw new Error(`fakeDb: no coding run "${where.runId}"`);
         return { gitHistoryDepth: null, gitHistoryFull: false, ...row };
       },
+      // chooseHeadRef / findContinuable: the repository's roots whose branch starts with a name, newest first;
       // newestDefaultPullRequest: a root's continuations (newest first; insertion order here).
       findMany: async ({ where }: any) =>
-        codingRuns.filter((row) => row.rootCodingRunId === where.rootCodingRunId).reverse(),
+        where.headRef?.startsWith !== undefined
+          ? codingRuns
+              .filter(
+                (row) =>
+                  row.repository === where.repository &&
+                  String(row.headRef).startsWith(where.headRef.startsWith) &&
+                  (where.rootCodingRunId === undefined || (row.rootCodingRunId ?? null) === where.rootCodingRunId),
+              )
+              .map((row) => ({
+                runId: row.runId,
+                headRef: row.headRef,
+                result: row.result ?? null,
+                run: { status: runs.find((r) => r.id === row.runId)?.status ?? "running" },
+              }))
+              .reverse()
+          : codingRuns.filter((row) => row.rootCodingRunId === where.rootCodingRunId).reverse(),
       // effectiveMergeOrder: newest non-null mergeOrder among a root and its continuations.
       findFirst: async ({ where }: any) => {
         const [{ runId: rootId }] = where.OR;
@@ -179,6 +195,7 @@ function fakeDb(
         return matches[0] ? { mergeOrder: matches[0].mergeOrder } : null;
       },
     },
+    issuePullRequest: { findFirst: async () => null },
     // No extra repositories unless a test seeds them (a continuation copies its root's: none here).
     codingRunRepository: { findMany: async () => [], createMany: async () => ({ count: 0 }) },
     task: {
@@ -1430,6 +1447,49 @@ describe("dispatchRun", () => {
         usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
       },
     };
+
+    it("names the branch from the issue key, a requested name, or the run id", async () => {
+      const agent = codingAgent();
+      const named = fakeDb(agent);
+      await dispatchRun({ db: named.db, executor, agentId: agent.id, attribution: intent("OPS-6") });
+      expect(named.codingRuns[0].headRef).toBe("wardby/OPS-6");
+
+      const requested = fakeDb(agent);
+      await dispatchRun({
+        db: requested.db,
+        executor,
+        agentId: agent.id,
+        attribution: intent("OPS-6"),
+        codingBranch: "wardby/Readme Update",
+      });
+      expect(requested.codingRuns[0].headRef).toBe("wardby/readme-update");
+
+      const plain = fakeDb(agent);
+      const result = await dispatchRun({ db: plain.db, executor, agentId: agent.id });
+      expect(plain.codingRuns[0].headRef).toBe(`wardby/run-${result?.run.id}`);
+    });
+
+    it("numbers a second run on the same issue while the first still holds its branch", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent);
+      await dispatchRun({ db: state.db, executor, agentId: agent.id, attribution: intent("OPS-6") });
+      await dispatchRun({ db: state.db, executor, agentId: agent.id, attribution: intent("OPS-6") });
+      expect(state.codingRuns.map((row) => row.headRef)).toEqual(["wardby/OPS-6", "wardby/OPS-6-2"]);
+    });
+
+    it("refuses a requested branch name together with a continuation", async () => {
+      const agent = codingAgent();
+      const state = fakeDb(agent);
+      await expect(
+        dispatchRun({
+          db: state.db,
+          executor,
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+          codingBranch: "readme",
+        }),
+      ).rejects.toThrow(/codingBranch/);
+    });
 
     it("a run with an intent is attributed to it, with the parent frozen", async () => {
       const agent = codingAgent();

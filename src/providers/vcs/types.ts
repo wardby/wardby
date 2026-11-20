@@ -59,6 +59,23 @@ export interface VcsPrepareInput {
   gitHistory?: GitHistorySetting;
   /** The default repository's remote links (#536), fetched into its history. Needs gitHistory; never on a slot. */
   remotes?: readonly RemoteLinkInput[];
+  /**
+   * Set only by a caller that is finishing a run and can use a rebuilt checkout: when
+   * recoverWorkspace finds no local checkout (another control-plane process prepared it),
+   * it clones again and pins the result to these recorded inputs instead of returning null.
+   * Never set for cleanup, which has no use for a checkout that is gone.
+   */
+  rebuild?: WorkspaceRebuild;
+}
+
+/**
+ * What prepareWorkspace recorded about a run's checkout, enough to rebuild it exactly:
+ * the commit the clone started from and, for a continuation that merged its pull
+ * request's target branch, the branch and the commit that was merged.
+ */
+export interface WorkspaceRebuild {
+  baseCommit: string;
+  targetMerge?: { ref: string; targetCommit: string };
 }
 
 /** One repository's files at one commit, for a run to read: no git metadata, never collected. */
@@ -149,6 +166,8 @@ export interface FinalizeChangesDetails {
   summary?: string;
   tests?: readonly { command: string; outcome: TestOutcome }[];
   tag?: string;
+  /** The model's conventional-commit subject parts (coding/commit-subject.ts): this run's commit and, on the first run, the PR title. */
+  commit?: { type?: string; scope?: string; title?: string };
   /** Packages the registry proxy served/refused during this run (RegistryFetch), for the PR body. */
   packages?: readonly {
     ecosystem: string;

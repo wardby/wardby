@@ -3,7 +3,7 @@ id: code-review-agents
 title: Run GitHub code-review agents
 summary: Link a read-only review agent to a repository for pull-request checks and trusted mention workflows.
 audience: operator
-tags: [github, code-review, skipped-review, budget-stopped-draft, continue-draft, follow-up, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing, repo_issue_read, issues, mentions, code-spans, contributor, acceptance-criteria, jira, large-pull-request, truncated, patchCursor, unread_files]
+tags: [github, code-review, draft, reviewDrafts, reviewOnPush, review-on-push, reviewOnOpen, review-on-open, review-on-request, mention-only, no-automatic-review, manual-review, skip-push-review, skipped-review, budget-stopped-draft, continue-draft, follow-up, pull-requests, webhooks, ci, checks, waitForCi, markReadyWhenPassing, repo_issue_read, issues, mentions, code-spans, contributor, acceptance-criteria, jira, large-pull-request, truncated, patchCursor, unread_files]
 appliesTo: >=0.2.1
 ---
 
@@ -44,7 +44,11 @@ repository permission. Someone with `triage` access, or with `read` access on a 
 or as an owner, member or collaborator, gets a 😕 reaction and a reply saying
 a mention needs write access; anyone else, including a stranger on a public
 repository, is ignored silently. A private organization member, whom GitHub labels
-`CONTRIBUTOR` or `NONE`, is still checked and can start runs. A mention inside
+`CONTRIBUTOR` or `NONE`, is still checked and can start runs. When someone with
+write access mentions the App and nothing starts (no agent linked for mentions
+or reviews, the linked agent's owner lost access to the repository, or the pull
+request is closed or from a fork), the App replies with the reason instead of
+staying silent. A mention inside
 Markdown code (an inline code span or a code block) is not a request, so
 quoting `` `@<app-slug>` `` in an issue or comment starts nothing. Repository links
 require the agent owner's linked GitHub access, or an explicitly recorded
@@ -79,6 +83,44 @@ itself reports once it runs. A large diff is read in pages (see [Large pull
 requests](#large-pull-requests)). From Wardby 0.7.0, a push to a draft is also held
 while the coding run that pushed it is still running, and, when a lead
 delegated that run (a follow-up request, say), until that lead finishes.
+
+## Draft pull requests
+
+A `pull_request` reviewer skips a draft pull request by default. The draft's
+pushes start no review and no check; marking it ready for review starts one.
+To review drafts too, link the repository with `reviewDrafts: true` (it is a
+`pull_request`-link setting, default `false`; re-linking without it turns it
+back off). Two cases are reviewed whatever the setting says: a draft a Wardby
+coding run opened (marking it ready waits on its reviewers), and an explicit
+request, such as re-running the review check or a review command in a comment.
+When asked to link a reviewer, ask whether drafts should be reviewed.
+
+## Review only on request after the first review
+
+A `pull_request` reviewer reviews a pull request when it is opened, reopened
+or marked ready for review, and a later push starts no review and no check.
+Comment `@<app-slug> review`, or re-run the review check, to review the current
+head. To review every push instead, link the repository with
+`reviewOnPush: true` (a `pull_request`-link setting, default `false`;
+re-linking without it turns it back off). A pull request a Wardby coding run opened is always
+reviewed on push, whatever the setting says. If the review check is required
+by branch protection, a pushed head has no check until you ask for one, so the
+pull request cannot merge until then. Combine it with `reviewDrafts` left off
+to get a single automatic review, when a draft is marked ready.
+
+## Review only when asked, not on open
+
+By default a new `pull_request` link does not review a pull request when it is
+opened, reopened or marked ready for review (`reviewOnOpen` is `false`): comment
+`@<app-slug> review` (write access required) or re-run the review check to
+start one. Link with `reviewOnOpen: true` to review on open (a
+`pull_request`-link setting; 400 without that trigger or on a coding agent's
+link). A pull request a Wardby coding run opened is always reviewed, on open and
+on push. Links made before this setting existed review on open. Re-linking
+without `reviewOnOpen` turns it back off, so always send the full desired state.
+If branch protection requires the review check, a pull request nobody asked a
+review for has no check and cannot merge, so do not require it on these
+repositories. Pushes are controlled separately by `reviewOnPush`.
 
 ## Large pull requests
 
@@ -289,7 +331,9 @@ publish `CHANGES_REQUESTED` and name the files not reviewed. `APPROVE` is
 also refused with `file_list_truncated` while the head's file list is cut
 (`fileListComplete: false`), and with `full_read_required` when the run read
 the head only with a `sinceSha` other than the `lastCoveredSha` it returned
-(the latest head this agent reviewed after reading every file).
+(the latest head this agent reviewed after reading every file). A run another
+control-plane copy takes over after a crash keeps the reads it had made up to
+its last completed step, so this guard holds across the takeover.
 
 Add this to a reviewer's system prompt:
 

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
-import { npmAdapter } from "../../../coding/registry/npm.js";
+import { loadJfrogRegistryConfig } from "../../../coding/registry/jfrog.js";
+import { createNpmAdapter, npmAdapter } from "../../../coding/registry/npm.js";
 import { pypiAdapter } from "../../../coding/registry/pypi.js";
 import { inOsvRange, isWaived, OsvAudit, splitWaived, versionKey } from "./audit.js";
 
@@ -542,6 +543,53 @@ describe("accepted advisories", () => {
         expect(ids(split.withheld)).toEqual([...indexes[name].withheld(version, accepted)].sort());
         expect(ids(split.waived)).toEqual(accepted ? [...indexes[name].waived(version, accepted)].sort() : []);
       }
+  });
+});
+
+describe("OsvAudit for private names", () => {
+  const privateNpm = createNpmAdapter(
+    loadJfrogRegistryConfig({
+      REGISTRY_JFROG_URL: "https://example.jfrog.io/acme",
+      REGISTRY_JFROG_NPM_REPO: "npm-local",
+      REGISTRY_JFROG_NPM_SCOPES: "@acme",
+    }),
+  );
+  const down = () =>
+    vi.fn(async () => {
+      throw new Error("offline");
+    });
+
+  it("does not fail a private name when OSV gives no answer, but still fails a public one", async () => {
+    const audit = new OsvAudit({ fetch: down(), failOpen: false });
+    await expect(audit.audit(privateNpm, "@acme/ui")).resolves.toMatchObject({});
+    await expect(audit.audit(privateNpm, "left-pad")).rejects.toMatchObject({ code: "wardby_audit_unavailable" });
+  });
+
+  it("still audits a private name: an advisory OSV does return withholds it", async () => {
+    const fetch = osv({
+      vulns: [
+        {
+          id: "GHSA-private",
+          affected: [{ package: { name: "@acme/ui", ecosystem: "npm" }, versions: ["1.0.0"] }],
+          database_specific: { severity: "HIGH" },
+        },
+      ],
+    });
+    const index = await new OsvAudit({ fetch, failOpen: false }).audit(privateNpm, "@acme/ui");
+    expect(index.withheld("1.0.0")).toEqual(["GHSA-private"]);
+  });
+
+  it("spares only the private versions of a lockfile when OSV is down", async () => {
+    const audit = new OsvAudit({ fetch: down(), failOpen: false });
+    const privateOnly = [{ name: "@acme/ui", version: "1.0.0" }];
+    expect(await audit.auditVersions(privateNpm, privateOnly)).toEqual(new Map());
+    await expect(
+      audit.auditVersions(privateNpm, [...privateOnly, { name: "left-pad", version: "1.0.0" }]),
+    ).rejects.toMatchObject({ code: "wardby_audit_unavailable" });
+    // With public names only, nothing changes from today.
+    await expect(audit.auditVersions(privateNpm, [{ name: "left-pad", version: "1.0.0" }])).rejects.toMatchObject({
+      code: "wardby_audit_unavailable",
+    });
   });
 });
 

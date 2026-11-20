@@ -53,10 +53,22 @@ describe("Claude tool runner image policy", () => {
     expect(python).toContain("python3-venv");
     expect(python).toContain("pytest==8.3.4");
     expect(python).toContain("ruff==0.16.7");
-    expect(python).toContain("ln -s /usr/bin/python3 /usr/bin/python");
+    // `python` is the managed CPython the image is built for (PYTHON_DEFAULT_VERSION), not Debian's python3.
+    expect(python).toContain("ARG PYTHON_DEFAULT_VERSION=3.12");
+    expect(python).toContain('ln -s "$python_home/bin/python3" /usr/bin/python');
+    expect(python).not.toContain("ln -s /usr/bin/python3 /usr/bin/python");
     for (const absent of ["/usr/bin/pip", "/usr/bin/pip3", "/usr/bin/gcc", "/usr/bin/curl"]) {
       expect(python).toContain(`test ! -e ${absent}`);
     }
     expect(python).toContain("USER 10001:10001");
+    // The tool runner process (not a login shell) runs `poetry lock`: it needs the baked interpreters' location itself.
+    expect(python).toContain("ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never");
+    // main.mjs imports ../coding/registry/pypi-lockfiles/session.js, which only this target ships (uv and poetry).
+    expect(python).toContain(
+      "COPY --from=build /build/dist/coding/registry/pypi-lockfiles /opt/wardby/coding/registry/pypi-lockfiles",
+    );
+    expect(python).toContain("COPY --from=build /build/dist/coding/registry/workspace-files.js");
+    expect(python).toContain("COPY --from=build /build/dist/coding/collect-exclude.js");
+    expect(dockerfile.slice(0, dockerfile.indexOf(" AS node-python"))).not.toContain("pypi-lockfiles/session.js");
   });
 });
