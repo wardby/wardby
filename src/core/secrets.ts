@@ -39,6 +39,8 @@ export type SecretMetadata = Pick<Secret, "id" | "name" | "keyId" | "ownerId" | 
     expiresAt: string | null;
     connectedAt: string;
     reauthReason?: string;
+    /** "legacy-origin" when discovered without protected-resource metadata; absent otherwise. */
+    discovery?: "legacy-origin";
   };
 };
 export interface SecretEntry {
@@ -278,6 +280,7 @@ function oauthListing(oauth: unknown): Pick<SecretMetadata, "kind" | "oauth"> {
       expiresAt: m.expiresAt,
       connectedAt: m.connectedAt,
       ...(m.reauthReason ? { reauthReason: m.reauthReason } : {}),
+      ...(m.discovery ? { discovery: m.discovery } : {}),
     },
   };
 }

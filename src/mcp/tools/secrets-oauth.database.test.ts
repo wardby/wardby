@@ -153,6 +153,41 @@ describe.skipIf(!process.env.DATABASE_URL)("create_secret with oauth (PostgreSQL
     await close();
   });
 
+  it("connects a server with only origin authorization-server metadata, and records legacy-origin", async () => {
+    await fake.close();
+    fake = await startFakeOAuthServer({ publicHost: HOST, legacyDiscovery: true });
+    const p = await principal();
+    const { call, close } = await connect(p);
+
+    const started = await call("create_secret", { name: "legacy-mcp", oauth: { resource: fake.mcpUrl } });
+    expect(started.isError).toBe(false);
+    const { url } = JSON.parse(started.text) as { url: string };
+    const html = await visitCallback(url);
+    const code = /([A-Z2-7]{4}-[A-Z2-7]{4})/.exec(html)?.[1] ?? "";
+    const done = await call("create_secret", { name: "legacy-mcp", confirmationCode: code });
+    expect(done.isError).toBe(false);
+    expect(JSON.parse(done.text)).toMatchObject({ name: "legacy-mcp", kind: "oauth", status: "connected" });
+
+    const listed = await call("list_secrets");
+    const entry = JSON.parse(listed.text) as { secrets?: unknown[] } | unknown[] as unknown;
+    const rows = (Array.isArray(entry) ? entry : ((entry as { secrets: unknown[] }).secrets ?? [])) as {
+      name: string;
+      oauth?: Record<string, unknown>;
+    }[];
+    expect(rows.find((r) => r.name === "legacy-mcp")?.oauth).toMatchObject({
+      status: "connected",
+      discovery: "legacy-origin",
+    });
+    for (const leak of LEAKS) expect(listed.text).not.toContain(leak);
+
+    const audit = await db.secretBrokerChange.findFirst({
+      where: { ownerId: p.id, secretName: "legacy-mcp" },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(audit?.after).toMatchObject({ oauthStatus: "connected", oauthDiscovery: "legacy-origin" });
+    await close();
+  });
+
   it("delete_secret revokes the refresh and access tokens at the provider, then deletes and audits", async () => {
     const p = await principal();
     const { call, close } = await connect(p);

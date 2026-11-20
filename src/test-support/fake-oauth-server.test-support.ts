@@ -71,6 +71,11 @@ export async function startFakeOAuthServer(
     checkClient?: boolean;
     /** Opt-in: answer every client registration with this status and JSON body (a string is sent as is). */
     registerResponse?: { status: number; body: unknown };
+    /**
+     * Opt-in: the 2025-03-26 MCP authorization shape. No protected-resource metadata (404), and the
+     * 401 challenge names none; authorization-server metadata is served at the origin as usual.
+     */
+    legacyDiscovery?: boolean;
   } = {},
 ): Promise<FakeOAuthServer> {
   const revocation = opts.revocation ?? true;
@@ -197,7 +202,9 @@ export async function startFakeOAuthServer(
         401,
         { error: "unauthorized" },
         {
-          "www-authenticate": `Bearer realm="${server.mcpUrl}", resource_metadata="${origin}/.well-known/oauth-protected-resource"`,
+          "www-authenticate": opts.legacyDiscovery
+            ? 'Bearer realm="OAuth", error="invalid_token"'
+            : `Bearer realm="${server.mcpUrl}", resource_metadata="${origin}/.well-known/oauth-protected-resource"`,
         },
       );
       return;
@@ -249,6 +256,7 @@ export async function startFakeOAuthServer(
     const run = async (): Promise<void> => {
       switch (route) {
         case "GET /.well-known/oauth-protected-resource":
+          if (opts.legacyDiscovery) break;
           sendJson(res, 200, {
             resource: server.mcpUrl,
             authorization_servers: [origin],

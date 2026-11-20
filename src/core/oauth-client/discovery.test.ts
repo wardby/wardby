@@ -392,3 +392,124 @@ describe("discoverOAuth", () => {
     for (const r of s.seen) expect(r.userAgent).toBe(`wardby/${packageVersion()}`);
   });
 });
+
+describe("discoverOAuth without protected-resource metadata (MCP authorization 2025-03-26)", () => {
+  it("uses the resource origin's authorization-server metadata and marks it legacy-origin", async () => {
+    const fake = await track(startFakeOAuthServer({ legacyDiscovery: true }));
+    const meta = await discoverOAuth(fake.mcpUrl, options);
+    expect(meta).toEqual({
+      resource: fake.mcpUrl,
+      issuer: fake.url,
+      authorizationEndpoint: `${fake.url}/authorize`,
+      tokenEndpoint: `${fake.url}/token`,
+      registrationEndpoint: `${fake.url}/register`,
+      revocationEndpoint: `${fake.url}/revoke`,
+      discovery: "legacy-origin",
+    });
+  });
+
+  it("asks only the origin, never a host a response names", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    const meta = await discoverOAuth(`${s.origin}/v1/mcp`, options);
+    expect(meta.issuer).toBe(s.origin);
+    expect(meta.discovery).toBe("legacy-origin");
+    expect(s.seen.map((r) => r.url)).toEqual([
+      "/v1/mcp",
+      "/.well-known/oauth-protected-resource/v1/mcp",
+      "/.well-known/oauth-protected-resource",
+      "/.well-known/oauth-authorization-server",
+    ]);
+  });
+
+  it("refuses an issuer other than the origin", async () => {
+    for (const issuer of ["https://evil.example.com", "http://127.0.0.1:1", "ORIGIN/tenant"]) {
+      const s = await track(
+        inline((req, res, origin) => {
+          if (req.url === "/.well-known/oauth-authorization-server")
+            return json(res, asMeta(origin, { issuer: issuer.replace("ORIGIN", origin) }));
+        }),
+      );
+      expect(await failureCode(discoverOAuth(`${s.origin}/v1/mcp`, options)), issuer).toBe("discovery_failed");
+    }
+  });
+
+  it("refuses endpoints on a host the fetch policy does not allow", async () => {
+    for (const field of ["authorization_endpoint", "token_endpoint", "registration_endpoint", "revocation_endpoint"]) {
+      const s = await track(
+        inline((req, res, origin) => {
+          if (req.url === "/.well-known/oauth-authorization-server")
+            return json(res, asMeta(origin, { [field]: "http://10.0.0.1/x" }));
+        }),
+      );
+      expect(await failureCode(discoverOAuth(`${s.origin}/v1/mcp`, options)), field).toBe("discovery_failed");
+    }
+  });
+
+  it("keeps the S256 and authorization_code checks", async () => {
+    for (const extra of [
+      { code_challenge_methods_supported: ["plain"] },
+      { grant_types_supported: ["client_credentials"] },
+    ]) {
+      const s = await track(
+        inline((req, res, origin) => {
+          if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin, extra));
+        }),
+      );
+      expect(await failureCode(discoverOAuth(`${s.origin}/v1/mcp`, options))).toBe("discovery_failed");
+    }
+  });
+
+  it("does not guess default endpoints when the origin has no metadata either", async () => {
+    const s = await track(
+      inline((req, res) => {
+        if (["/authorize", "/token", "/register"].includes(req.url ?? "")) return json(res, {});
+      }),
+    );
+    expect(await failureCode(discoverOAuth(`${s.origin}/v1/mcp`, options))).toBe("discovery_failed");
+  });
+
+  it("prefers protected-resource metadata when it is served", async () => {
+    const fake = await track(startFakeOAuthServer());
+    const meta = await discoverOAuth(fake.mcpUrl, options);
+    expect(meta.discovery).toBeUndefined();
+    expect(meta.scopesSupported).toEqual(["read", "write", "admin"]);
+  });
+
+  it("does not fall back when protected-resource metadata is served but invalid", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.url === "/.well-known/oauth-protected-resource/v1/mcp")
+          return json(res, { resource: "https://other.example.com/mcp", authorization_servers: [origin] });
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    expect(await failureCode(discoverOAuth(`${s.origin}/v1/mcp`, options))).toBe("discovery_failed");
+  });
+
+  it("does not fall back when a challenge names a metadata document the server does not serve", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.method === "POST") {
+          res.writeHead(401, { "www-authenticate": `Bearer resource_metadata="${origin}/meta/prm"` }).end();
+          return true;
+        }
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    expect(await failureCode(discoverOAuth(`${s.origin}/v1/mcp`, options))).toBe("discovery_failed");
+  });
+
+  it("gives provider_unavailable, not a fallback, when protected-resource metadata answers 5xx", async () => {
+    const s = await track(
+      inline((req, res, origin) => {
+        if (req.url?.startsWith("/.well-known/oauth-protected-resource")) return json(res, {}, 503);
+        if (req.url === "/.well-known/oauth-authorization-server") return json(res, asMeta(origin));
+      }),
+    );
+    expect(await failureCode(discoverOAuth(`${s.origin}/v1/mcp`, options))).toBe("provider_unavailable");
+  });
+});

@@ -54,7 +54,7 @@ export const SECRET_OAUTH_MANAGED =
 export const SECRET_REAUTH_REQUIRED = (name: string) =>
   `secret_reauth_required: secret "${name}" needs connecting again (create_secret with oauth)`;
 export const SECRET_OAUTH_DISCOVERY_FAILED =
-  "secret_oauth_discovery_failed: the resource has no usable OAuth metadata (it needs protected-resource and authorization-server metadata with PKCE S256)";
+  "secret_oauth_discovery_failed: the resource has no usable OAuth metadata (tried its protected-resource metadata, then, when it has none, authorization-server metadata at its origin; it needs authorization-server metadata with PKCE S256)";
 /** The counterpart of SECRET_OAUTH_MANAGED: connecting under a name a non-OAuth secret already uses. */
 export const SECRET_NOT_OAUTH =
   "secret_oauth_name_taken: a secret with this name already exists and is not an OAuth secret; choose another name";
@@ -128,6 +128,11 @@ export interface OAuthSecretMeta {
   authMethod?: (typeof AUTH_METHODS)[number];
   /** The requested scope, space-separated. */
   scope?: string;
+  /**
+   * "legacy-origin": discovered without protected-resource metadata, from the resource origin's own
+   * authorization-server metadata (MCP authorization 2025-03-26). Absent: RFC 9728 discovery.
+   */
+  discovery?: "legacy-origin";
   /** ISO time the access token expires; null when the provider gave none. */
   expiresAt: string | null;
   status: "connected" | "reauth_required";
@@ -152,6 +157,7 @@ export const OAuthSecretMetaSchema: z.ZodType<OAuthSecretMeta> = z
     clientId: z.string(),
     authMethod: z.enum(AUTH_METHODS).optional(),
     scope: z.string().optional(),
+    discovery: z.literal("legacy-origin").optional(),
     expiresAt: z.string().nullable(),
     status: z.enum(["connected", "reauth_required"]),
     connectedAt: z.string(),
@@ -187,6 +193,7 @@ const ContextSchema = z
         registrationEndpoint: z.string().optional(),
         revocationEndpoint: z.string().optional(),
         scopesSupported: z.array(z.string()).optional(),
+        discovery: z.literal("legacy-origin").optional(),
       })
       .strict(),
     client: z.object({ clientId: z.string(), authMethod: z.enum(AUTH_METHODS).optional() }).strict(),
@@ -536,6 +543,7 @@ export async function finishOAuthSecretConnect(input: {
         clientId: ctx.client.clientId,
         ...(ctx.client.authMethod ? { authMethod: ctx.client.authMethod } : {}),
         ...(ctx.scope ? { scope: ctx.scope } : {}),
+        ...(ctx.meta.discovery ? { discovery: ctx.meta.discovery } : {}),
         expiresAt: done.result.expiresAt,
         status: "connected",
         connectedAt: now.toISOString(),
@@ -571,7 +579,11 @@ export async function finishOAuthSecretConnect(input: {
           secretName: name,
           actorId: ownerId,
           before: before ?? Prisma.JsonNull,
-          after: { ...p.broker, oauthStatus: "connected" },
+          after: {
+            ...p.broker,
+            oauthStatus: "connected",
+            ...(p.oauth.discovery ? { oauthDiscovery: p.oauth.discovery } : {}),
+          },
           via: "mcp",
         },
       });

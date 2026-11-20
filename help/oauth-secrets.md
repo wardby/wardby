@@ -3,7 +3,18 @@ id: oauth-secrets
 title: OAuth secrets for OAuth-only services and MCP servers
 summary: Connect a service that only offers OAuth sign-in with create_secret and oauth, then use it from a remote MCP server such as BrowserStack's; Wardby refreshes the token and you reconnect when it cannot.
 audience: operator
-tags: [oauth, oauth secret, create_secret oauth, reauth, browserstack mcp, oauth mcp server, secret_reauth_required]
+tags:
+  [
+    oauth,
+    oauth secret,
+    create_secret oauth,
+    reauth,
+    browserstack mcp,
+    atlassian mcp,
+    oauth mcp server,
+    oauth discovery,
+    secret_reauth_required,
+  ]
 appliesTo: ">=0.9.11"
 ---
 
@@ -24,6 +35,23 @@ Add `clientId` only when the provider has no dynamic client registration; regist
 URI `https://<your-wardby-host>/oauth/callback`. Without it you get
 [`secret_oauth_client_id_required`](errors/secret-oauth-client-id-required.md). The account you sign in with
 sets what every agent using the secret can do.
+
+## Which services can connect
+
+Wardby discovers the service's OAuth setup from its metadata. Two shapes work:
+
+- **Protected-resource metadata** (RFC 9728, the current MCP authorization spec): the service publishes
+  `/.well-known/oauth-protected-resource`, or names it in its `401` challenge, and that document names the
+  authorization server. The authorization server may be on another host.
+- **Origin authorization-server metadata** (the older MCP authorization spec, 2025-03-26): the service has no
+  protected-resource metadata, and its own origin publishes `/.well-known/oauth-authorization-server`, whose
+  `issuer` is exactly that origin. Atlassian's hosted MCP server (`https://mcp.atlassian.com/v1/mcp`) uses this
+  shape. In `list_secrets` such a secret shows `discovery: "legacy-origin"`, and the connect is audited with it.
+  Nothing binds the token to the resource in this shape, so Wardby trusts only the resource's own origin as its
+  authorization server.
+
+Either way the authorization server must support PKCE `S256`, and its endpoints must be https (or allowed by the
+fetch policy). Wardby never guesses default endpoints for a service with no metadata at all.
 
 From 0.9.12, a provider that accepts only loopback redirect addresses (BrowserStack's registration is one) is
 connected with `oauth.callback: "loopback"` and the Wardby CLI instead of the sign-in link. See the help article
