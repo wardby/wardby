@@ -213,6 +213,20 @@ describe("host provider tools", () => {
     for (const row of rows) expect(row.code).toBe(row.tool!.code);
   });
 
+  it("registers a provider whose credential uses HTTP Basic placement", async () => {
+    const p = await principal();
+    const { tools } = await seed(p);
+    await secret(p, "basic-token", TOKEN, { hosts: BROKER.hosts, placement: { kind: "basic", username: "bot" } });
+    const name = newName();
+    const { call } = await connect(p);
+    const result = await call("register_host_provider", {
+      ...args(name, tools),
+      credentials: [{ repositories: "acme/*", secret: "basic-token" }],
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).not.toContain(TOKEN);
+  });
+
   it("runs the copy, not the tool: a tool change waits for approval", async () => {
     const p = await principal();
     const { tools } = await seed(p);

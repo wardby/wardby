@@ -629,3 +629,18 @@ describe("document edits help", () => {
     expect(searchHelp(corpus, "document_version_not_found")[0]?.page.id).toBe("errors/document-version-not-found");
   });
 });
+
+describe("brokered secrets basic placement help", () => {
+  it("is found for basic auth, jira token and base64", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const corpus = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (q: string) =>
+      searchHelp(corpus, q)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    for (const q of ["basic auth", "jira token", "base64", "http basic"]) {
+      expect(top3(q), q).toContain("brokered-secrets");
+    }
+  });
+});

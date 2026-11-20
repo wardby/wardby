@@ -29,6 +29,50 @@ function setup(statuses: number[], bodies: string[] = [], headers: Array<Record<
 
 const base = { url: "https://oauth.fake.test/mcp", secretNames: ["s"], policy: {} as never };
 
+describe("brokeredFetch with a basic placement", () => {
+  it("sends Basic credentials and scrubs a response that echoes the Authorization header", async () => {
+    const token = "fake-basic-token-Zq81";
+    const composed = Buffer.from(`user@example.com:${token}`).toString("base64");
+    const calls: Fetched[] = [];
+    // A fake server that echoes the request's Authorization header in its body, a header and the url.
+    const fetchImpl = (async (url: string, init: Fetched["init"]) => {
+      calls.push({ url, init });
+      const echoed = init.headers?.authorization ?? "";
+      return {
+        status: 200,
+        headers: { "x-echo": echoed },
+        url: `https://your-site.atlassian.net/rest/api/echo#${echoed.slice("Basic ".length).replace(/=+$/, "")}`,
+        bodyBase64: Buffer.from(JSON.stringify({ authorization: echoed })).toString("base64"),
+      };
+    }) as unknown as typeof safeFetch;
+    const console_: string[] = [];
+    const secrets = {
+      resolve: async () =>
+        ({
+          value: token,
+          broker: { hosts: ["your-site.atlassian.net"], placement: { kind: "basic", username: "user@example.com" } },
+        }) as unknown as SecretEntry,
+    } as unknown as SecretsAccessor;
+    const out = (await brokeredFetch({
+      url: "https://your-site.atlassian.net/rest/api/3/myself",
+      init: {},
+      secretNames: ["JIRA"],
+      secrets,
+      fetchImpl,
+      policy: {},
+      redactFromConsole: (v) => console_.push(v),
+    })) as { headers: Record<string, string>; url: string; bodyBase64: string };
+    expect(calls[0].init.headers?.authorization).toBe(`Basic ${composed}`);
+    const body = Buffer.from(out.bodyBase64, "base64").toString("utf8");
+    for (const text of [body, out.headers["x-echo"], out.url]) {
+      expect(text).not.toContain(token);
+      expect(text).not.toContain(composed.replace(/=+$/, ""));
+    }
+    expect(out.headers["x-echo"]).toBe("Basic [REDACTED]");
+    expect(console_).toContain(token);
+  });
+});
+
 describe("brokeredFetch 401 retry", () => {
   it("refreshes once on a 401 and resends the same body with the new token", async () => {
     const t = setup([401, 200]);

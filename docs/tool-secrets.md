@@ -59,7 +59,7 @@ The config has these fields. Unknown fields are rejected.
 | -------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `hosts`        | yes      | 1 to 20 exact hostnames, for example `api.example.com`. No scheme, port, wildcard, or IP address (including short forms such as `127.1` or `0x7f.0.0.1`).         |
 | `pathPrefixes` | no       | Up to 20 paths that each start with `/`, with no `?`, `#`, backslash, control character, `%2F`, or `%5C`. When set, the request path must start with one of them. |
-| `placement`    | yes      | How the value is added to the request: `header`, `query`, `body`, or `aws-sigv4`. See [Placements](#placements).                                                  |
+| `placement`    | yes      | How the value is added to the request: `header`, `query`, `body`, `basic`, or `aws-sigv4`. See [Placements](#placements).                                         |
 
 A config that fails validation is refused with
 [`secret_broker_config_invalid`](../help/errors/secret-broker-config-invalid.md).
@@ -304,6 +304,36 @@ JSON `content-type` (`application/json` or `+json`), or a form body with
 }
 ```
 
+**HTTP Basic auth.** For APIs that take `Authorization: Basic
+base64(username:token)`, such as Jira Cloud and Confluence (email and API
+token), Bitbucket, Zendesk, Twilio and Artifactory. The secret's value is only
+the token or password: the host joins `username:value`, base64-encodes its
+UTF-8 bytes, and sets the `Authorization` header. Don't encode the value
+yourself and don't add the username to it; rotating the token then only needs a
+new value.
+
+```json
+{
+  "hosts": ["your-site.atlassian.net"],
+  "pathPrefixes": ["/rest/api/"],
+  "placement": { "kind": "basic", "username": "user@example.com" }
+}
+```
+
+The `username` is configuration, not a secret: it is stored in the broker config
+and shown wherever the config is. Per RFC 7617 it can't contain `:` or control
+characters, and it is at most 256 characters. It may be empty for a service that
+reads only the password. A request that already sets `Authorization`, or names
+another secret that places `Authorization`, is refused with
+[`secret_broker_conflict`](../help/errors/secret-broker-conflict.md). The value,
+the joined `username:value`, and its base64, unpadded base64 and base64url forms
+are all scrubbed from responses, so an API that echoes the header does not leak
+it.
+
+Existing `header` placements with `format: "Basic {value}"` and a pre-encoded
+value keep working. To move one to `basic`, set the new config and store the raw
+token as the value.
+
 **AWS SigV4.** The host signs the request with AWS's signer, so the tool gets an
 authorized call without ever holding the keys. The secret's value must be JSON:
 
@@ -347,8 +377,8 @@ or that the tool is not granted, fails with
 [`secret_brokered`](../help/errors/secret-brokered.md), so update tools that read
 the value to use `fetch` instead.
 
-A host provider's credentials must be brokered secrets, placed in a header or
-query parameter. See [host-providers.md](host-providers.md).
+A host provider's credentials must be brokered secrets, placed in a header
+(`header` or `basic`) or query parameter. See [host-providers.md](host-providers.md).
 
 ## What the host enforces
 
