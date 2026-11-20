@@ -3,6 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerSecretsTools } from "./secrets.js";
+import type { SecretElicitationPayload } from "./secret-elicitation.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 import type { SecretCipher } from "../../providers/secrets/types.js";
@@ -185,6 +186,32 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
         const row = existing ? { ...existing, ...update } : create;
         elicitationOutcomes.set(key, row);
         return row;
+      },
+      update: async ({
+        where: { ownerId_secretName },
+        data,
+      }: {
+        where: { ownerId_secretName: { ownerId: string; secretName: string } };
+        data: { outcome: unknown };
+      }) => {
+        const key = `${ownerId_secretName.ownerId}\0${ownerId_secretName.secretName}`;
+        const existing = elicitationOutcomes.get(key);
+        if (!existing) throw new Error("record not found");
+        const row = { ...existing, ...data };
+        elicitationOutcomes.set(key, row);
+        return row;
+      },
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: { ownerId: string; secretName: string };
+        data: { expiresAt: Date };
+      }) => {
+        const key = `${where.ownerId}\0${where.secretName}`;
+        const existing = elicitationOutcomes.get(key);
+        if (existing) elicitationOutcomes.set(key, { ...existing, ...data });
+        return { count: existing ? 1 : 0 };
       },
       deleteMany: async ({ where: { expiresAt } }: { where: { expiresAt: { lte: Date } } }) => {
         let count = 0;
@@ -676,6 +703,106 @@ describe("secrets tools", () => {
     await client.close();
   });
 
+  describe("re-entering a value (#581)", () => {
+    async function setup() {
+      const db = fakeDb();
+      const cipher = fakeCipher();
+      const mcp = buildMcpServer({
+        providers: { secrets: cipher } as never,
+        db,
+        config: { canonicalUri: CANONICAL_URI },
+      });
+      mcp.setFixedContext(fakeCtx(db, cipher, "p1", ["secrets:write"]));
+      registerSecretsTools(mcp, {
+        buildElicitationUrl: async (token: string) => `https://test.invalid/elicit/secret?t=${token}`,
+        protocolElicitation: false,
+        oauthLoopback: { origin: async () => "https://test.invalid", audience: "http" },
+      });
+      const client = await connectClient(mcp);
+      const { fulfillSecretElicitation } = await import("./secret-elicitation.js");
+      async function link(name: string) {
+        const res = await client.callTool({ name: "create_secret", arguments: { name } });
+        const body = parseText(res as never) as { status?: string; url: string };
+        expect(body.status).toBe("pending");
+        return mcp.verifyRequestState<SecretElicitationPayload>(new URL(body.url).searchParams.get("t")!);
+      }
+      const submit = (payload: SecretElicitationPayload, value: string) =>
+        fulfillSecretElicitation(payload, value, cipher, db);
+      return { db, cipher, client, link, submit };
+    }
+
+    it("the call that finishes a submitted entry returns it once; the next call mints a fresh link", async () => {
+      const { client, link, submit, db, cipher } = await setup();
+      const first = await link("KEY");
+      expect((await submit(first, "wrong-value\n")).ok).toBe(true);
+
+      const done = await client.callTool({ name: "create_secret", arguments: { name: "KEY" } });
+      expect(done.isError).toBeFalsy();
+      expect((parseText(done as never) as { name: string }).name).toBe("KEY");
+
+      const second = await link("KEY");
+      expect(second.linkId).not.toBe(first.linkId);
+      // Resubmitting the used link answers its own outcome without writing again.
+      expect((await submit(first, "replayed")).ok).toBe(true);
+      expect((await submit(second, "right-value")).ok).toBe(true);
+      const done2 = await client.callTool({ name: "create_secret", arguments: { name: "KEY" } });
+      expect(done2.isError).toBeFalsy();
+      const stored = await db.secret.findUnique({ where: { ownerId_name: { ownerId: "p1", name: "KEY" } } });
+      expect(await cipher.decrypt(stored!.ciphertext)).toBe("right-value");
+      await client.close();
+    });
+
+    it("a link minted before the last submission is refused, so it can't overwrite the newer value", async () => {
+      const { client, link, submit, db, cipher } = await setup();
+      const older = await link("KEY");
+      const newer = await link("KEY");
+      expect((await submit(newer, "newer-value")).ok).toBe(true);
+      const refused = await submit(older, "older-value");
+      expect(refused).toMatchObject({ ok: false, error: expect.stringMatching(/^secret_link_superseded/) });
+      const stored = await db.secret.findUnique({ where: { ownerId_name: { ownerId: "p1", name: "KEY" } } });
+      expect(await cipher.decrypt(stored!.ciphertext)).toBe("newer-value");
+      await client.close();
+    });
+
+    it("delete_secret then create_secret mints a fresh link, and an older link can't bring the secret back", async () => {
+      const { client, link, submit, db } = await setup();
+      const first = await link("KEY");
+      const open = await link("KEY");
+      await submit(first, "v1");
+      const created = parseText(
+        (await client.callTool({ name: "create_secret", arguments: { name: "KEY" } })) as never,
+      ) as { id: string };
+      const del = await client.callTool({ name: "delete_secret", arguments: { id: created.id } });
+      expect(del.isError).toBeFalsy();
+
+      const refused = await submit(open, "resurrected");
+      expect(refused).toMatchObject({ ok: false, error: expect.stringMatching(/^secret_link_superseded/) });
+      expect(await db.secret.findUnique({ where: { ownerId_name: { ownerId: "p1", name: "KEY" } } })).toBeNull();
+
+      const fresh = await link("KEY");
+      expect((await submit(fresh, "v2")).ok).toBe(true);
+      const again = await client.callTool({ name: "create_secret", arguments: { name: "KEY" } });
+      expect((parseText(again as never) as { name: string }).name).toBe("KEY");
+      await client.close();
+    });
+
+    it("a recorded error is reported once, then a fresh link lets the person try again", async () => {
+      const { client, link, submit, db } = await setup();
+      const first = await link("KEY");
+      const secrets = db.secret as unknown as { upsert: (...a: unknown[]) => Promise<unknown> };
+      const upsert = secrets.upsert;
+      secrets.upsert = async () => Promise.reject(new Error("storage_unavailable"));
+      expect(await submit(first, "v")).toMatchObject({ ok: false, error: "storage_unavailable" });
+      secrets.upsert = upsert;
+
+      const reported = await client.callTool({ name: "create_secret", arguments: { name: "KEY" } });
+      expect(reported.isError).toBe(true);
+      const retry = await link("KEY");
+      expect((await submit(retry, "v")).ok).toBe(true);
+      await client.close();
+    });
+  });
+
   describe("brokered secrets (fake db)", () => {
     const BROKER = {
       hosts: ["API.Example.com"],
@@ -728,6 +855,8 @@ describe("secrets tools", () => {
         ownerId: "p1",
         secretName: "K",
         kind: "create",
+        linkId: expect.any(String),
+        generation: 0,
         broker: { ...BROKER, hosts: ["api.example.com"] },
       });
       await client.close();

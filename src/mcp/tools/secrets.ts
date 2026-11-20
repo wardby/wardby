@@ -33,8 +33,11 @@ import { requireOwnedSecret } from "../auth/ownership.js";
 import { isOwnerAll, requireScope } from "../auth/resource-server.js";
 import { requireAgentAccess, requireBindable, requireBindingOwner } from "../auth/access.js";
 import {
+  clearSecretElicitationOutcome,
   clearUnbrokerOutcome,
+  consumeSecretElicitationOutcome,
   getSecretElicitationOutcome,
+  newCreateLink,
   type SecretElicitationPayload,
 } from "./secret-elicitation.js";
 import { allowedSecretNames, brokerCompatibilityWarnings } from "./secret-broker-compat.js";
@@ -382,7 +385,8 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         }
       }
 
-      const existingOutcome = await getSecretElicitationOutcome(ctx.principal.id, args.name, ctx.db);
+      // Read once: the next call with this name mints a fresh link, so a wrong value can be re-entered.
+      const existingOutcome = await consumeSecretElicitationOutcome(ctx.principal.id, args.name, ctx.db);
       if (existingOutcome) {
         if (!existingOutcome.ok) throw new McpError(400, existingOutcome.error);
         // The value was entered in the browser: kept rounds go as for a value passed here.
@@ -394,6 +398,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         ownerId: ctx.principal.id,
         secretName: args.name,
         kind: "create",
+        ...(await newCreateLink(ctx.principal.id, args.name, ctx.db)),
         ...(broker ? { broker } : {}),
         ...(hostManager ? { hostManager } : {}),
       };
@@ -620,6 +625,8 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
         fetchImpl: ctx.providers.sandboxFetch,
         actorId: ctx.principal.id,
       });
+      // A browser link still open for this name can't bring it back, and a new create_secret mints a fresh one.
+      if (secret) await clearSecretElicitationOutcome(secretOwnerId, secret.name, ctx.db);
       await removeRetainedRoundsOf(ctx, reached);
       return textResult({ deleted: args.id });
     },

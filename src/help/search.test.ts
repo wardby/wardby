@@ -663,3 +663,19 @@ describe("OAuth discovery help", () => {
     );
   });
 });
+
+describe("changing a secret's value help", () => {
+  it("is found for rotate secret, update secret and the error code", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const corpus = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (q: string) =>
+      searchHelp(corpus, q)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    for (const q of ["rotate secret", "update secret", "change secret value"]) {
+      expect(top3(q), q).toEqual(expect.arrayContaining(["brokered-secrets"]));
+    }
+    expect(searchHelp(corpus, "secret_link_superseded")[0]?.page.id).toBe("errors/secret-link-superseded");
+  });
+});

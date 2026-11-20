@@ -336,6 +336,71 @@ describe.skipIf(!process.env.DATABASE_URL)("brokered secrets over MCP (database)
     await client.close();
   });
 
+  it("a wrong value can be re-entered at once, keeping the broker config; delete then create mints a fresh link", async () => {
+    const p = await owner();
+    const { mcp, client, call } = await connect(p);
+    const linkOf = async (args: Record<string, unknown>) => {
+      const pending = await call("create_secret", args);
+      expect(pending.body).toMatchObject({ status: "pending" });
+      return mcp.verifyRequestState<SecretElicitationPayload>(
+        new URL(pending.body.url as string).searchParams.get("t")!,
+      );
+    };
+    const stale = await linkOf({ name: "GH", broker: BROKER });
+    const first = await linkOf({ name: "GH", broker: BROKER });
+    expect((await fulfillSecretElicitation(first, `${VALUE}-typo`, cipher, db, BROKER)).ok).toBe(true);
+    expect((await call("create_secret", { name: "GH" })).body).toMatchObject({ name: "GH", broker: BROKER });
+
+    // No broker passed: the stored config is kept when the value changes.
+    const second = await linkOf({ name: "GH" });
+    expect(await fulfillSecretElicitation(stale, "stale-value", cipher, db)).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/^secret_link_superseded/),
+    });
+    expect((await fulfillSecretElicitation(second, VALUE, cipher, db)).ok).toBe(true);
+    const done = await call("create_secret", { name: "GH" });
+    expect(done.body).toMatchObject({ name: "GH", broker: BROKER });
+    const row = await db.secret.findUnique({ where: { ownerId_name: { ownerId: p, name: "GH" } } });
+    expect(await cipher.decrypt(row!.ciphertext)).toBe(VALUE);
+
+    const open = await linkOf({ name: "GH" });
+    expect((await call("delete_secret", { id: done.body.id })).isError).toBe(false);
+    expect(await fulfillSecretElicitation(open, VALUE, cipher, db)).toMatchObject({ ok: false });
+    expect(await db.secret.findUnique({ where: { ownerId_name: { ownerId: p, name: "GH" } } })).toBeNull();
+    const fresh = await linkOf({ name: "GH" });
+    expect((await fulfillSecretElicitation(fresh, VALUE, cipher, db)).ok).toBe(true);
+    expect((await call("create_secret", { name: "GH" })).body).toMatchObject({ name: "GH", broker: null });
+    await client.close();
+  });
+
+  it("minting a link keeps the name's record alive at least as long as that link", async () => {
+    const p = await owner();
+    const { client, call } = await connect(p);
+    await call("create_secret", { name: "GH" });
+    const first = await db.secretElicitationOutcome.findUnique({
+      where: { ownerId_secretName: { ownerId: p, secretName: "GH" } },
+    });
+    expect(first).toBeNull(); // nothing recorded until a submission
+    await fulfillSecretElicitation(
+      { ownerId: p, secretName: "GH", kind: "create", linkId: "l1", generation: 0 },
+      VALUE,
+      cipher,
+      db,
+    );
+    await call("create_secret", { name: "GH" }); // consumes
+    const soon = new Date(Date.now() + 1_000);
+    await db.secretElicitationOutcome.update({
+      where: { ownerId_secretName: { ownerId: p, secretName: "GH" } },
+      data: { expiresAt: soon },
+    });
+    await call("create_secret", { name: "GH" }); // mints a link
+    const row = await db.secretElicitationOutcome.findUnique({
+      where: { ownerId_secretName: { ownerId: p, secretName: "GH" } },
+    });
+    expect(row!.expiresAt.getTime()).toBeGreaterThan(Date.now() + 9 * 60_000);
+    await client.close();
+  });
+
   describe("browser form against the database", () => {
     let server: Server | undefined;
     afterAll(async () => {
