@@ -14,9 +14,10 @@ brokered value is never merged with or overridden by one from the tool. It
 occurs when:
 
 - the tool sets the header, query parameter, or body field that a brokered
-  secret places (for SigV4: `authorization`, `x-amz-date`,
+  secret places (for a `basic` placement: `Authorization`; for SigV4: `authorization`, `x-amz-date`,
   `x-amz-security-token`, or `x-amz-content-sha256`);
-- two named secrets place the same header, parameter, or field;
+- two named secrets place the same header, parameter, or field (a `basic`
+  placement and a `header` placement named `Authorization` collide);
 - more than one AWS SigV4 secret is named in one request.
 
 1. Remove the conflicting header, parameter, or field from the tool's request.

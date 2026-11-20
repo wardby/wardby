@@ -55,6 +55,18 @@ const placement = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("body"), field: z.string().min(1).max(128) }).strict(),
   z
     .object({
+      kind: z.literal("basic"),
+      // RFC 7617: the user-id cannot contain ":" or control characters. It may be empty (a token-only
+      // service that reads the password alone). It is config, not a secret: shown wherever the config is.
+      username: z
+        .string()
+        .max(256, "username must be at most 256 characters")
+        .refine((u) => !u.includes(":"), 'username must not contain ":"')
+        .refine((u) => !/\p{Cc}/u.test(u), "username must not contain control characters"),
+    })
+    .strict(),
+  z
+    .object({
       kind: z.literal("aws-sigv4"),
       region: z.string().regex(/^[a-z0-9-]{1,32}$/),
       service: z.string().regex(/^[a-z0-9-]{1,64}$/),

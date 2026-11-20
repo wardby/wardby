@@ -9,6 +9,9 @@ describe("parseSecretBrokerConfig", () => {
       header,
       { kind: "query", name: "key" },
       { kind: "body", field: "api_key" },
+      { kind: "basic", username: "user@example.com" },
+      { kind: "basic", username: "" },
+      { kind: "basic", username: "x".repeat(256) },
       { kind: "aws-sigv4", region: "us-east-1", service: "s3" },
     ]) {
       expect(parseSecretBrokerConfig({ hosts: ["api.example.com"], placement }).placement).toEqual(placement);
@@ -57,6 +60,16 @@ describe("parseSecretBrokerConfig", () => {
     [{ hosts: ["example.com"], placement: { kind: "query", name: "k", extra: 1 } }],
     [{ hosts: ["example.com"], placement: { kind: "body", field: "f", extra: 1 } }],
     [{ hosts: ["example.com"], placement: { kind: "aws-sigv4", region: "us-east-1", service: "s3", extra: 1 } }],
+    // Basic usernames (RFC 7617): no ":", no control characters, at most 256 characters, required.
+    [{ hosts: ["example.com"], placement: { kind: "basic", username: "a:b" } }],
+    [{ hosts: ["example.com"], placement: { kind: "basic", username: "a\nb" } }],
+    [{ hosts: ["example.com"], placement: { kind: "basic", username: "a\u0000b" } }],
+    [{ hosts: ["example.com"], placement: { kind: "basic", username: "a\u007fb" } }],
+    [{ hosts: ["example.com"], placement: { kind: "basic", username: "a\u0085b" } }],
+    [{ hosts: ["example.com"], placement: { kind: "basic", username: "x".repeat(257) } }],
+    [{ hosts: ["example.com"], placement: { kind: "basic" } }],
+    [{ hosts: ["example.com"], placement: { kind: "basic", username: 1 } }],
+    [{ hosts: ["example.com"], placement: { kind: "basic", username: "u", extra: 1 } }],
   ])("rejects %j", (input) => {
     expect(() => parseSecretBrokerConfig(input)).toThrow(/^secret_broker_config_invalid: /);
   });

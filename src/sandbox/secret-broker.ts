@@ -67,6 +67,11 @@ export function applyBrokerPlacements(request: BrokerRequest, secrets: readonly 
       // A replacer function, not a string: "$$", "$&", "$'" in a value are literal, not patterns.
       headers[key] = p.format.replace("{value}", () => s.value);
       placed.add(`h:${key}`);
+    } else if (p.kind === "basic") {
+      if ("authorization" in headers || placed.has("h:authorization"))
+        conflict(`header "Authorization" is set by the broker for "${s.name}"`);
+      headers.authorization = `Basic ${basicCredentials(p.username, s.value)}`;
+      placed.add("h:authorization");
     } else if (p.kind === "query") {
       if (url.searchParams.has(p.name) || placed.has(`q:${p.name}`))
         conflict(`query parameter "${p.name}" is set by the broker for "${s.name}"`);
@@ -79,6 +84,11 @@ export function applyBrokerPlacements(request: BrokerRequest, secrets: readonly 
     }
   }
   return { ...request, url: url.href, headers, body };
+}
+
+/** RFC 7617 credentials: base64 of the UTF-8 bytes of `username:value`. */
+function basicCredentials(username: string, value: string): string {
+  return Buffer.from(`${username}:${value}`, "utf8").toString("base64");
 }
 
 function placeBodyField(
@@ -114,7 +124,11 @@ function placeBodyField(
 
 export function brokerScrubValues(secrets: readonly BrokeredSecret[]): string[] {
   return secrets.flatMap((s) => {
-    if (s.broker.placement.kind !== "aws-sigv4") return [s.value];
+    const p = s.broker.placement;
+    // base64(username:value) does not contain base64(value) (3-byte alignment), so the composed string
+    // is scrubbed too: encodedForms turns it into the base64, unpadded and base64url forms a server may echo.
+    if (p.kind === "basic") return [s.value, `${p.username}:${s.value}`];
+    if (p.kind !== "aws-sigv4") return [s.value];
     const creds = parseSigV4Value(s.value);
     return [creds.secretAccessKey, ...(creds.sessionToken ? [creds.sessionToken] : [])];
   });
@@ -122,7 +136,8 @@ export function brokerScrubValues(secrets: readonly BrokeredSecret[]): string[] 
 
 /**
  * The strings console output must not show for one secret the tool may use: its value, for a
- * brokered SigV4 secret the secret key and session token alone, and for an OAuth secret every value
+ * brokered SigV4 secret the secret key and session token alone, for a brokered Basic secret the joined
+ * username:value too, and for an OAuth secret every value
  * it lists (access token, refresh token, client secret). A value that won't parse adds nothing.
  */
 export function consoleRedactionValues(entry: {

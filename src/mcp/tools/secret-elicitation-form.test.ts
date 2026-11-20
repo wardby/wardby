@@ -283,6 +283,13 @@ describe("handleSecretElicitationForm", () => {
     expect(html).toContain("&quot;&gt;&lt;b&gt;{value}");
   });
 
+  it("brokerFieldset pre-selects and escapes a basic username", () => {
+    const html = brokerFieldset({ hosts: ["a.example.com"], placement: { kind: "basic", username: '"><b>' } });
+    expect(html).toContain('<option value="basic" selected>');
+    expect(html).not.toContain("<b>");
+    expect(html).toContain('name="basicUsername" value="&quot;&gt;&lt;b&gt;"');
+  });
+
   it("brokerFieldset groups each placement's fields so CSS shows only the selected one", () => {
     const html = brokerFieldset();
     const group = (kind: string) =>
@@ -291,6 +298,7 @@ describe("handleSecretElicitationForm", () => {
     expect(group("header")).toContain('name="headerFormat"');
     expect(group("query")).toContain('name="queryName"');
     expect(group("body")).toContain('name="bodyField"');
+    expect(group("basic")).toContain('name="basicUsername"');
     expect(group("aws-sigv4")).toContain('name="awsRegion"');
     expect(group("aws-sigv4")).toContain('name="awsService"');
     expect(group("aws-sigv4")).toContain("secretAccessKey");
@@ -344,6 +352,31 @@ describe("handleSecretElicitationForm", () => {
       expect(config?.placement).toEqual({ kind: "aws-sigv4", region: "us-east-1", service: "s3" });
     });
 
+    it("builds a basic placement", () => {
+      const config = brokerConfigFromForm(
+        form({
+          brokered: "1",
+          hosts: "your-site.atlassian.net",
+          pathPrefixes: "/rest/api/",
+          placement: "basic",
+          basicUsername: "user@example.com",
+        }),
+      );
+      expect(config).toEqual({
+        hosts: ["your-site.atlassian.net"],
+        pathPrefixes: ["/rest/api/"],
+        placement: { kind: "basic", username: "user@example.com" },
+      });
+    });
+
+    it("rejects a basic username containing a colon", () => {
+      expect(() =>
+        brokerConfigFromForm(
+          form({ brokered: "1", hosts: "api.example.com", placement: "basic", basicUsername: "a:b" }),
+        ),
+      ).toThrow(/^secret_broker_config_invalid/);
+    });
+
     it("rejects an empty host list", () => {
       expect(() =>
         brokerConfigFromForm(form({ brokered: "1", hosts: "  \n", placement: "query", queryName: "api_key" })),
@@ -392,6 +425,23 @@ describe("handleSecretElicitationForm", () => {
     expect(body).not.toContain('name="value"');
     expect(body).not.toContain('name="brokered"');
     expect(body).not.toMatch(/<script/i);
+  });
+
+  it("GET unbroker page shows a basic placement's username, escaped", async () => {
+    const base = await startTestServer({
+      verify: async () => ({ ownerId: "p1", secretName: "JIRA", kind: "unbroker", brokerHash: "h" }),
+      secrets: fakeCipher(),
+      db: fakeDb([
+        {
+          name: "JIRA",
+          ownerId: "p1",
+          broker: { hosts: ["your-site.atlassian.net"], placement: { kind: "basic", username: "u<b>@example.com" } },
+        },
+      ]),
+    });
+    const body = await (await fetch(`${base}/secret?t=whatever`)).text();
+    expect(body).toContain("HTTP Basic auth as user <code>u&lt;b&gt;@example.com</code>");
+    expect(body).not.toContain("u<b>");
   });
 
   it("POST unbroker with the wrong name is refused and records nothing", async () => {

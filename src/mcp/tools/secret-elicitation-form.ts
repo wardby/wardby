@@ -68,6 +68,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background:
   .broker-fields:has(option[value="header"]:checked) .placement-header,
   .broker-fields:has(option[value="query"]:checked) .placement-query,
   .broker-fields:has(option[value="body"]:checked) .placement-body,
+  .broker-fields:has(option[value="basic"]:checked) .placement-basic,
   .broker-fields:has(option[value="aws-sigv4"]:checked) .placement-aws-sigv4 { display: block; }
 }
 `;
@@ -86,7 +87,8 @@ export function brokerFieldset(prefill?: SecretBrokerConfig): string {
     `<label>Path prefixes (optional, one per line)<textarea name="pathPrefixes" rows="2">${escape(prefill?.pathPrefixes?.join("\n") ?? "")}</textarea></label>` +
     `<label>Placement<select name="placement">` +
     `<option value="header"${sel("header")}>Header</option><option value="query"${sel("query")}>Query parameter</option>` +
-    `<option value="body"${sel("body")}>Body field</option><option value="aws-sigv4"${sel("aws-sigv4")}>AWS SigV4</option></select></label>` +
+    `<option value="body"${sel("body")}>Body field</option><option value="basic"${sel("basic")}>HTTP Basic auth</option>` +
+    `<option value="aws-sigv4"${sel("aws-sigv4")}>AWS SigV4</option></select></label>` +
     `<div class="placement placement-header">` +
     `<label>Header name<input name="headerName" value="${escape(p?.kind === "header" ? p.name : "Authorization")}"></label>` +
     `<label>Header format<input name="headerFormat" value="${escape(p?.kind === "header" ? p.format : "Bearer {value}")}"></label>` +
@@ -98,6 +100,10 @@ export function brokerFieldset(prefill?: SecretBrokerConfig): string {
     `<div class="placement placement-body">` +
     `<label>Body field name<input name="bodyField" value="${escape(p?.kind === "body" ? p.field : "")}"></label>` +
     `<p class="hint">A top-level field of a JSON-object or form-encoded body.</p>` +
+    `</div>` +
+    `<div class="placement placement-basic">` +
+    `<label>Username<input name="basicUsername" value="${escape(p?.kind === "basic" ? p.username : "")}"></label>` +
+    `<p class="hint">Sent as <code>Authorization: Basic base64(username:value)</code>. Enter only the token or password as the value; Wardby does the encoding.</p>` +
     `</div>` +
     `<div class="placement placement-aws-sigv4">` +
     `<label>AWS region<input name="awsRegion" value="${escape(p?.kind === "aws-sigv4" ? p.region : "")}"></label>` +
@@ -126,9 +132,11 @@ export function brokerConfigFromForm(body: URLSearchParams): SecretBrokerConfig 
         ? { kind, name: body.get("queryName") ?? "" }
         : kind === "body"
           ? { kind, field: body.get("bodyField") ?? "" }
-          : kind === "aws-sigv4"
-            ? { kind, region: body.get("awsRegion") ?? "", service: body.get("awsService") ?? "" }
-            : { kind };
+          : kind === "basic"
+            ? { kind, username: body.get("basicUsername") ?? "" }
+            : kind === "aws-sigv4"
+              ? { kind, region: body.get("awsRegion") ?? "", service: body.get("awsService") ?? "" }
+              : { kind };
   const prefixes = lines(body.get("pathPrefixes"));
   return parseSecretBrokerConfig({
     hosts: lines(body.get("hosts")),
@@ -259,7 +267,9 @@ function describeBroker(broker: SecretBrokerConfig | null): string {
         ? `query parameter <code>${escape(p.name)}</code>`
         : p.kind === "body"
           ? `body field <code>${escape(p.field)}</code>`
-          : `AWS SigV4 (region <code>${escape(p.region)}</code>, service <code>${escape(p.service)}</code>)`;
+          : p.kind === "basic"
+            ? `HTTP Basic auth as user <code>${escape(p.username)}</code>`
+            : `AWS SigV4 (region <code>${escape(p.region)}</code>, service <code>${escape(p.service)}</code>)`;
   const list = (items: readonly string[]) => items.map((item) => `<code>${escape(item)}</code>`).join(", ");
   return (
     `<ul class="broker-summary">` +

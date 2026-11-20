@@ -3,7 +3,7 @@ id: errors/secret-broker-config-invalid
 title: Secret broker config invalid
 summary: A broker config failed validation: hosts, path prefixes, or placement are malformed.
 audience: operator
-tags: [error, secrets, secret_broker_config_invalid]
+tags: [error, secrets, secret_broker_config_invalid, basic auth, username]
 appliesTo: ">=0.6.0"
 ---
 
@@ -20,6 +20,8 @@ each problem. Common causes:
   backslash, a control character, `%2F`, or `%5C`;
 - a header `format` does not contain `{value}` exactly once or contains a line
   break, or the header name is not allowed (`Host`, `Content-Length` and similar);
+- a `basic` placement's `username` contains `:` or a control character, is
+  longer than 256 characters, or is missing (use `""` for no username);
 - an AWS `region` or `service` is malformed;
 - the config or its placement has fields it does not define.
 

@@ -29,6 +29,17 @@ const b: BrokeredSecret = {
   broker: { hosts: ["api.example.com"], placement: { kind: "body", field: "api_key" } },
 };
 
+const jira: BrokeredSecret = {
+  name: "JIRA",
+  value: "fake-jira-token-7Kq9",
+  broker: {
+    hosts: ["your-site.atlassian.net"],
+    pathPrefixes: ["/rest/api/"],
+    placement: { kind: "basic", username: "user@example.com" },
+  },
+};
+const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
+
 describe("checkBrokerDestination", () => {
   it("allows an https URL on an allowed host and path", () => {
     expect(() => checkBrokerDestination("https://api.github.com/repos/o/r", [gh])).not.toThrow();
@@ -131,6 +142,51 @@ describe("applyBrokerPlacements", () => {
     [{ url: "https://api.example.com/x", method: "GET", headers: {} }, b, "secret_broker_body_invalid"],
   ])("rejects %j", (request, secret, code) => {
     expect(() => applyBrokerPlacements(request, [secret])).toThrow(new RegExp(`^${code}`));
+  });
+  it("places HTTP Basic credentials as base64 of username:value", () => {
+    const out = applyBrokerPlacements(
+      { url: "https://your-site.atlassian.net/rest/api/3/myself", method: "GET", headers: { Accept: "x" } },
+      [jira],
+    );
+    expect(out.headers).toEqual({
+      accept: "x",
+      authorization: `Basic ${b64("user@example.com:fake-jira-token-7Kq9")}`,
+    });
+  });
+  it("encodes a non-ASCII username as UTF-8 and allows an empty username", () => {
+    const utf8 = { ...jira, broker: { ...jira.broker, placement: { kind: "basic" as const, username: "zoë" } } };
+    expect(
+      applyBrokerPlacements({ url: "https://your-site.atlassian.net/rest/api/", method: "GET", headers: {} }, [utf8])
+        .headers.authorization,
+    ).toBe(`Basic ${Buffer.from("zo\u00eb:fake-jira-token-7Kq9", "utf8").toString("base64")}`);
+    const empty = { ...jira, broker: { ...jira.broker, placement: { kind: "basic" as const, username: "" } } };
+    expect(
+      applyBrokerPlacements({ url: "https://your-site.atlassian.net/rest/api/", method: "GET", headers: {} }, [empty])
+        .headers.authorization,
+    ).toBe(`Basic ${b64(":fake-jira-token-7Kq9")}`);
+  });
+  it("places a value with $ patterns verbatim in Basic credentials", () => {
+    const dollar = { ...jira, value: "a$&b$$c$'d" };
+    expect(
+      applyBrokerPlacements({ url: "https://your-site.atlassian.net/rest/api/", method: "GET", headers: {} }, [dollar])
+        .headers.authorization,
+    ).toBe(`Basic ${b64("user@example.com:a$&b$$c$'d")}`);
+  });
+  it("rejects a Basic placement when the tool sets Authorization, in any case", () => {
+    for (const name of ["Authorization", "authorization", "AUTHORIZATION"]) {
+      expect(() =>
+        applyBrokerPlacements(
+          { url: "https://your-site.atlassian.net/rest/api/", method: "GET", headers: { [name]: "Bearer x" } },
+          [jira],
+        ),
+      ).toThrow(/^secret_broker_conflict/);
+    }
+  });
+  it("rejects a Basic placement next to another secret's Authorization header, in either order", () => {
+    const req = { url: "https://your-site.atlassian.net/rest/api/", method: "GET", headers: {} };
+    expect(() => applyBrokerPlacements(req, [jira, gh])).toThrow(/^secret_broker_conflict/);
+    expect(() => applyBrokerPlacements(req, [gh, jira])).toThrow(/^secret_broker_conflict/);
+    expect(() => applyBrokerPlacements(req, [jira, { ...jira, name: "JIRA2" }])).toThrow(/^secret_broker_conflict/);
   });
   it("rejects two secrets placing the same header", () => {
     expect(() =>
@@ -237,6 +293,49 @@ describe("scrubBrokeredResponse", () => {
       broker: { hosts: ["s3.amazonaws.com"], placement: { kind: "aws-sigv4", region: "us-east-1", service: "s3" } },
     };
     expect(brokerScrubValues([sig]).sort()).toEqual(["secretkey123", "tok-123456"]);
+  });
+});
+
+describe("Basic placement scrubbing", () => {
+  const composed = "user@example.com:fake-jira-token-7Kq9";
+  it("lists the composed username:value as a scrub value", () => {
+    expect(brokerScrubValues([jira])).toEqual(["fake-jira-token-7Kq9", composed]);
+  });
+  it("scrubs an echoed Authorization header, whose base64 does not contain base64(value)", () => {
+    const header = `Basic ${b64(composed)}`;
+    // The case the composed form exists for: the value's own encodings are not substrings of the header.
+    for (const form of [
+      b64(jira.value),
+      b64(jira.value).replace(/=+$/, ""),
+      Buffer.from(jira.value).toString("base64url"),
+    ]) {
+      expect(header).not.toContain(form);
+    }
+    const forms = [
+      b64(composed),
+      b64(composed).replace(/=+$/, ""),
+      Buffer.from(composed, "utf8").toString("base64url"),
+    ];
+    const echo = JSON.stringify({ headers: { Authorization: header }, unpadded: forms[1], url: forms[2] });
+    const out = scrubBrokeredResponse(
+      {
+        url: `https://your-site.atlassian.net/rest/api/echo?a=${forms[2]}`,
+        headers: { "x-echo-authorization": header },
+        bodyBase64: Buffer.from(echo).toString("base64"),
+      },
+      brokerScrubValues([jira]),
+    );
+    const text = Buffer.from(out.bodyBase64, "base64").toString("utf8");
+    for (const form of forms) {
+      expect(text).not.toContain(form);
+      expect(out.url).not.toContain(form);
+      expect(out.headers["x-echo-authorization"]).not.toContain(form);
+    }
+    expect(out.headers["x-echo-authorization"]).toBe("Basic [REDACTED]");
+    expect(holdsValueFragment(text, [jira.value])).toBe(false);
+  });
+  it("adds the composed value to console redaction", () => {
+    expect(consoleRedactionValues({ value: jira.value, broker: jira.broker })).toEqual([jira.value, composed]);
   });
 });
 

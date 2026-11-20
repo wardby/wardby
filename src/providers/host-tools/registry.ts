@@ -211,10 +211,10 @@ function requireBroker(name: string, stored: unknown, hosts: readonly string[]):
     throw new HostProviderError("host_provider_secret_not_brokered", `secret "${name}" must be brokered`);
   }
   const broker = parseSecretBrokerConfig(stored);
-  if (broker.placement.kind !== "header" && broker.placement.kind !== "query") {
+  if (!["header", "query", "basic"].includes(broker.placement.kind)) {
     throw new HostProviderError(
       "host_provider_secret_placement",
-      `secret "${name}" must be placed in a header or query parameter`,
+      `secret "${name}" must be placed in a header (including basic) or query parameter`,
     );
   }
   const missing = hosts.filter((h) => !broker.hosts.includes(h));

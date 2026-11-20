@@ -55,7 +55,7 @@ import {
 } from "./oauth-loopback-link.js";
 
 const BROKER_SCHEMA_DOC =
-  '{ hosts: exact hostnames, pathPrefixes?: ["/..."], placement: { kind: "header", name, format containing {value} } | { kind: "query", name } | { kind: "body", field } | { kind: "aws-sigv4", region, service } }';
+  '{ hosts: exact hostnames, pathPrefixes?: ["/..."], placement: { kind: "header", name, format containing {value} } | { kind: "query", name } | { kind: "body", field } | { kind: "basic", username } (Authorization: Basic base64(username:value); store only the token) | { kind: "aws-sigv4", region, service } }';
 
 /** Validates a caller-supplied broker config; an invalid one is the caller's 400. */
 function parseBrokerArg(input: unknown): SecretBrokerConfig {

@@ -3,7 +3,23 @@ id: brokered-secrets
 title: Brokered secrets and the secret broker
 summary: Let tools use a secret only by sending it to hosts you choose, without ever reading its value.
 audience: operator
-tags: [secrets, brokered, secret broker, security, tools, fetch, sigv4, set_secret_broker]
+tags:
+  [
+    secrets,
+    brokered,
+    secret broker,
+    security,
+    tools,
+    fetch,
+    sigv4,
+    set_secret_broker,
+    basic auth,
+    http basic,
+    base64,
+    jira token,
+    api token,
+    username,
+  ]
 appliesTo: ">=0.6.0"
 ---
 
@@ -33,13 +49,34 @@ must compute with the value itself.
 The config is `{ hosts, pathPrefixes?, placement }`. Hosts are exact hostnames
 such as `api.example.com`, and the request must use https on the default port.
 
-## The four placements
+## The five placements
 
 - **header**: `{ "kind": "header", "name": "Authorization", "format": "Bearer {value}" }`
 - **query**: `{ "kind": "query", "name": "api_key" }`
 - **body**: `{ "kind": "body", "field": "token" }`, for a JSON-object or form body
+- **basic**: `{ "kind": "basic", "username": "user@example.com" }`, for HTTP Basic
+  auth. The host sends `Authorization: Basic base64(username:value)`
 - **aws-sigv4**: `{ "kind": "aws-sigv4", "region": "us-east-1", "service": "s3" }`,
   where the value is JSON `{ "accessKeyId", "secretAccessKey", "sessionToken?" }`
+
+### HTTP Basic auth (Jira, Confluence, Bitbucket and others)
+
+Store only the token or password as the secret's value. Don't encode it and
+don't include the username: the host builds and base64-encodes
+`username:value` for each request, so rotating the token is just a new value.
+The username is config, not a secret, and is shown wherever the config is.
+
+```json
+{
+  "hosts": ["your-site.atlassian.net"],
+  "pathPrefixes": ["/rest/api/"],
+  "placement": { "kind": "basic", "username": "user@example.com" }
+}
+```
+
+The username can't contain `:` or control characters and is at most 256
+characters. It may be empty, for services that read only the password. A tool
+must not set its own `Authorization` header on the same request.
 
 ## Use it in a tool
 

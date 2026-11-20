@@ -25,8 +25,10 @@ provider, including its tool code, whoever owns the tools it names.
 1. Create a tool for each operation with `create_tool`. Each does one host call. See
    [Tool contract](#tool-contract).
 2. Store each credential with `create_secret`, and broker it with `set_secret_broker`
-   ([tool-secrets.md](tool-secrets.md)). Allow every API host and place it in a header or
-   query parameter. Repository credentials also allow the git host; the permission
+   ([tool-secrets.md](tool-secrets.md)). Allow every API host and place it in a header
+   (`header` or `basic`) or query parameter. For an API that uses HTTP Basic auth, use the
+   `basic` placement so the stored value is the raw token, which git also uses with
+   `gitUsername`. Repository credentials also allow the git host; the permission
    credential needs only the API hosts.
 3. Store a webhook secret of at least 16 characters. Don't attach it to any agent.
 4. Call `register_host_provider`:
@@ -70,8 +72,8 @@ provider, including its tool code, whoever owns the tools it names.
 
 The tools and secrets you name must be yours. Secret rules, each refused with a named code:
 
-- Credentials and `permissionCredential` must be brokered, placed in a header or query
-  parameter, and allowed on the API hosts (credentials also on the git host; the permission credential needs only the API hosts).
+- Credentials and `permissionCredential` must be brokered, placed in a header (`header` or
+  `basic`) or query parameter, and allowed on the API hosts (credentials also on the git host; the permission credential needs only the API hosts).
 - `permissionCredential` can't also be listed in `credentials`
   (`host_provider_permission_secret_shared`), so no other operation can reach it.
 - The webhook secret can't be a credential or permission secret of any provider, and can't
