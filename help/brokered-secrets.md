@@ -19,6 +19,11 @@ tags:
     jira token,
     api token,
     username,
+    rotate secret,
+    update secret,
+    change secret value,
+    re-enter secret,
+    secret_link_superseded,
   ]
 appliesTo: ">=0.6.0"
 ---
@@ -104,6 +109,15 @@ alone never removes it. Every change is audited.
 
 For OAuth-only services, see the oauth-secrets help article.
 
+## Change a secret's value
+
+Call `create_secret` again with the same name, with a new `value` or without one
+for a new browser link. The secret keeps its attachments and its broker config,
+unless you pass a new `broker` too. From 0.10.2 you can do this straight after
+a wrong entry: once `create_secret` has reported a submitted value, the next call
+returns a new link. A link created before a later entry or a delete is refused
+with [`secret_link_superseded`](errors/secret-link-superseded.md).
+
 ## Related
 
 - [Host providers](../docs/host-providers.md): a provider's credentials must be brokered
@@ -111,7 +125,8 @@ For OAuth-only services, see the oauth-secrets help article.
 - [Remote MCP servers](../docs/mcp-servers.md) (0.8.0+): a server's credentials are brokered secrets
 - Full guide: [`docs/tool-secrets.md`](../docs/tool-secrets.md)
 - [Use native agents, tools, and data](native-capabilities.md)
-- Errors: [`secret_brokered`](errors/secret-brokered.md),
+- Errors: [`secret_link_superseded`](errors/secret-link-superseded.md),
+  [`secret_brokered`](errors/secret-brokered.md),
   [`secret_not_brokered`](errors/secret-not-brokered.md),
   [`secret_broker_destination_denied`](errors/secret-broker-destination-denied.md),
   [`secret_broker_conflict`](errors/secret-broker-conflict.md),

@@ -20,7 +20,15 @@
  * config: `set_secret_broker { broker: null }` never removes it directly).
  * Payloads and outcomes written before `kind` existed have none and count as
  * "create".
+ *
+ * A "create" outcome is read once: the create_secret call that returns it
+ * marks it consumed, so the next call mints a fresh link and a wrong value
+ * can be re-entered straight away. delete_secret leaves a consumed marker
+ * too. The row stays until it expires so a link minted before the last
+ * submission (or delete) is refused instead of overwriting a newer value;
+ * resubmitting the link that was used just answers its recorded outcome.
  */
+import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "#prisma";
 import {
   createSecret,
@@ -52,6 +60,16 @@ export interface SecretElicitationPayload {
   brokerHash?: string;
   /** The caller passed the hosts:admin check when the link was minted. */
   hostManager?: boolean;
+  /**
+   * "create" only: identifies this link, so resubmitting it answers its own recorded outcome.
+   * Links minted before this field existed have none and are answered as they always were.
+   */
+  linkId?: string;
+  /**
+   * "create" only: the name's entry generation when the link was minted. Every submission
+   * and every delete moves it on, so a link minted before one is refused.
+   */
+  generation?: number;
 }
 
 export type SecretElicitationOutcome =
@@ -70,6 +88,28 @@ function kindMismatch(payload: SecretElicitationPayload, expected: SecretElicita
     kind: expected,
     error: `elicitation_kind_mismatch: this link is for a "${actual}" request, not "${expected}"`,
   };
+}
+
+/**
+ * What the table stores for a "create": the outcome plus how it was reached. Rows written
+ * before these fields existed have none of them.
+ */
+type StoredCreateOutcome = SecretElicitationOutcome & {
+  /** The link that was submitted; absent on a delete marker. */
+  linkId?: string;
+  /** Counts submissions and deletes of this name; a link carrying a lower one is refused. */
+  generation?: number;
+  /** A create_secret call has returned this outcome, or the secret was deleted. */
+  consumed?: boolean;
+};
+
+const SECRET_LINK_SUPERSEDED =
+  "secret_link_superseded: this link was replaced by a later entry or delete of this secret; call create_secret again for a new link";
+
+/** The outcome alone, without the bookkeeping fields. */
+function bareOutcome(stored: StoredCreateOutcome): SecretElicitationOutcome {
+  const { linkId: _linkId, generation: _generation, consumed: _consumed, ...outcome } = stored;
+  return outcome;
 }
 
 /** A stored outcome's kind; one written before `kind` existed is a "create". */
@@ -107,7 +147,78 @@ export async function getSecretElicitationOutcome(
   await pruneExpired(db, now);
   const row = await db.secretElicitationOutcome.findUnique({ where: { ownerId_secretName: { ownerId, secretName } } });
   if (!row || kindOf(row.outcome) !== kind) return undefined;
-  return row.outcome as SecretElicitationOutcome;
+  if (kind === "create" && (row.outcome as StoredCreateOutcome).consumed) return undefined;
+  return kind === "create"
+    ? bareOutcome(row.outcome as StoredCreateOutcome)
+    : (row.outcome as SecretElicitationOutcome);
+}
+
+/**
+ * Returns a submitted "create" outcome once and marks it consumed, so the next create_secret
+ * with this name mints a fresh link (the person can re-enter a wrong value straight away).
+ */
+export async function consumeSecretElicitationOutcome(
+  ownerId: string,
+  secretName: string,
+  db: PrismaClient,
+): Promise<SecretElicitationOutcome | undefined> {
+  const outcome = await getSecretElicitationOutcome(ownerId, secretName, db, "create");
+  if (!outcome) return undefined;
+  const row = await db.secretElicitationOutcome.findUnique({ where: { ownerId_secretName: { ownerId, secretName } } });
+  if (row) {
+    await db.secretElicitationOutcome.update({
+      where: { ownerId_secretName: { ownerId, secretName } },
+      data: { outcome: { ...(row.outcome as StoredCreateOutcome), consumed: true } },
+    });
+  }
+  return outcome;
+}
+
+/** The stored "create" row for a name, if there is one (an unbroker outcome is not). */
+async function storedCreate(
+  db: PrismaClient,
+  ownerId: string,
+  secretName: string,
+): Promise<StoredCreateOutcome | undefined> {
+  const row = await db.secretElicitationOutcome.findUnique({ where: { ownerId_secretName: { ownerId, secretName } } });
+  return row && kindOf(row.outcome) === "create" ? (row.outcome as StoredCreateOutcome) : undefined;
+}
+
+/** The fields a new "create" link carries: see SecretElicitationPayload.linkId and generation. */
+export async function newCreateLink(
+  ownerId: string,
+  secretName: string,
+  db: PrismaClient,
+): Promise<{ linkId: string; generation: number }> {
+  const stored = await storedCreate(db, ownerId, secretName);
+  if (stored) {
+    // The row outlives every link minted from it, so the generation can't reset while one is open.
+    await db.secretElicitationOutcome.updateMany({
+      where: { ownerId, secretName },
+      data: { expiresAt: new Date(Date.now() + ELICITATION_TTL_MS) },
+    });
+  }
+  return { linkId: randomUUID(), generation: stored?.generation ?? 0 };
+}
+
+/**
+ * Called when a secret is deleted: forgets any outcome for its name and refuses every
+ * browser link minted before now, so an open form can't bring the deleted secret back.
+ */
+export async function clearSecretElicitationOutcome(
+  ownerId: string,
+  secretName: string,
+  db: PrismaClient,
+  now: Date = new Date(),
+): Promise<void> {
+  const marker: StoredCreateOutcome = {
+    ok: false,
+    kind: "create",
+    error: "secret_deleted",
+    generation: ((await storedCreate(db, ownerId, secretName))?.generation ?? 0) + 1,
+    consumed: true,
+  };
+  await recordOutcome(db, ownerId, secretName, marker, now);
 }
 
 async function recordOutcome(
@@ -147,7 +258,18 @@ export async function fulfillSecretElicitation(
   const existing = await db.secretElicitationOutcome.findUnique({
     where: { ownerId_secretName: { ownerId, secretName } },
   });
-  if (existing && kindOf(existing.outcome) === "create") return existing.outcome as SecretElicitationOutcome;
+  const previous =
+    existing && kindOf(existing.outcome) === "create" ? (existing.outcome as StoredCreateOutcome) : undefined;
+  if (previous) {
+    // A link or row from before links carried an id: answered as before, without writing.
+    if (payload.linkId === undefined || previous.generation === undefined) return bareOutcome(previous);
+    // This link was the one submitted: answer what it did, without writing again.
+    if (previous.linkId === payload.linkId) return bareOutcome(previous);
+    // Minted before the last submission or delete: refused (not recorded), so it can't overwrite.
+    if ((payload.generation ?? 0) < previous.generation) {
+      return { ok: false, kind: "create", error: SECRET_LINK_SUPERSEDED };
+    }
+  }
   if (await isStaleForHostProvider(db, payload)) {
     return { ok: false, kind: "create", error: HOST_PROVIDER_LINK_STALE };
   }
@@ -180,7 +302,13 @@ export async function fulfillSecretElicitation(
     if (isCorrectableInput(outcome.error)) return outcome;
   }
 
-  await recordOutcome(db, ownerId, secretName, outcome, now);
+  const stored: StoredCreateOutcome = {
+    ...outcome,
+    ...(payload.linkId !== undefined
+      ? { linkId: payload.linkId, generation: Math.max(previous?.generation ?? 0, payload.generation ?? 0) + 1 }
+      : {}),
+  };
+  await recordOutcome(db, ownerId, secretName, stored, now);
   return outcome;
 }
 

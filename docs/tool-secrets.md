@@ -24,6 +24,25 @@ ever reading its value.
 Only the agent's owner can bind secrets and grant them to tools. A binding
 resolves only while the secret's owner is the agent's current owner.
 
+### Changing a secret's value
+
+To change a value, for example after pasting the wrong token, call
+`create_secret` again with the same name. Pass the new `value`, or omit it to get
+a new browser link. The secret keeps its id, its attachments, and its broker
+config, unless you pass a new `broker` in the same call.
+
+From 0.10.2 you can re-enter a value straight away. Each browser link is answered
+once: the `create_secret` call that reports a submitted value is the last one to
+return it, and the next call with that name returns a new link. Before 0.10.2 the
+same name returned the earlier result for 10 minutes.
+
+A browser link is refused with
+[`secret_link_superseded`](../help/errors/secret-link-superseded.md) when it
+was created before a later value was submitted for that name, or before the
+secret was deleted. An older form left open in a tab cannot overwrite a newer
+value or bring back a deleted secret. Submitting the same link again answers
+with what it did the first time and writes nothing.
+
 ## Readable vs brokered
 
 A **readable** secret (the default) hands its value to tool code. Any tool that
@@ -513,6 +532,7 @@ it is needed, with `secrets.get` or `fetch(url, { secrets })`.
 | [`secret_broker_body_invalid`](../help/errors/secret-broker-body-invalid.md)               | Body placement needs a JSON-object or form-encoded body.                   |
 | [`secret_broker_value_invalid`](../help/errors/secret-broker-value-invalid.md)             | The value is too short, or is not the JSON a SigV4 secret needs.           |
 | [`secret_broker_changed`](../help/errors/secret-broker-changed.md)                         | A removal link was created before the broker config last changed.          |
+| [`secret_link_superseded`](../help/errors/secret-link-superseded.md)                       | A value-entry link was replaced by a later entry or a delete.              |
 | [`secret_broker_config_invalid`](../help/errors/secret-broker-config-invalid.md)           | The broker config failed validation.                                       |
 | [`secret_reauth_required`](../help/errors/secret-reauth-required.md)                       | An OAuth secret must be connected again.                                   |
 | [`secret_oauth_discovery_failed`](../help/errors/secret-oauth-discovery-failed.md)         | The service has no usable OAuth metadata.                                  |
