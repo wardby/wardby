@@ -12,6 +12,11 @@ export interface OAuthMetadata {
   registrationEndpoint?: string;
   revocationEndpoint?: string;
   scopesSupported?: string[];
+  /**
+   * Set when the resource has no protected-resource metadata (RFC 9728) and its own origin's
+   * authorization-server metadata was used instead (MCP authorization spec 2025-03-26). Absent: RFC 9728.
+   */
+  discovery?: "legacy-origin";
 }
 
 const resourceMetadataSchema = z.object({
@@ -66,7 +71,13 @@ function wellKnown(base: string, suffix: string, appendPath: boolean): string {
 
 type Fetch = (url: string, init: { method: "GET" }) => ReturnType<typeof oauthFetch>;
 
-/** First candidate that answers 200; any 4xx moves on, a 5xx is a provider outage, anything else fails. */
+/** What firstDocument returns when every candidate answered 4xx. */
+const NOT_FOUND = Symbol("not-found");
+
+/**
+ * First candidate that answers 200; any 4xx moves on, a 5xx is a provider outage, anything else fails.
+ * `NOT_FOUND` when every candidate answered 4xx.
+ */
 async function firstDocument(candidates: string[], get: Fetch, options?: SafeFetchOptions): Promise<unknown> {
   for (const url of candidates) {
     if (!isAllowedEndpoint(url, options)) fail();
@@ -75,7 +86,11 @@ async function firstDocument(candidates: string[], get: Fetch, options?: SafeFet
     if (r.status >= 500) throw new OAuthProtocolError("provider_unavailable", "The OAuth provider is unavailable.");
     if (r.status < 400 || r.status >= 500) fail();
   }
-  return fail();
+  return NOT_FOUND;
+}
+
+function found(document: unknown): unknown {
+  return document === NOT_FOUND ? fail() : document;
 }
 
 export async function discoverOAuth(
@@ -120,23 +135,42 @@ export async function discoverOAuth(
   const candidates = challenged
     ? [challenged]
     : [...new Set([wellKnown(resource, "oauth-protected-resource", false), root])];
-  const prm = resourceMetadataSchema.safeParse(await firstDocument(candidates, get, options));
-  if (!prm.success || !sameUrl(prm.data.resource, resource)) fail();
-  const authServer = prm.data.authorization_servers[0];
+  const document = await firstDocument(candidates, get, options);
+
+  // 2b. None at all, and the challenge named none: the 2025-03-26 MCP flow, where the resource's own
+  // origin is its authorization server. Only the origin (never a host from a response), and only real
+  // metadata (no default /authorize, /token, /register). A challenge that named a document it then did
+  // not serve, or a document that does not validate, is not this shape: those still fail.
+  const legacy = document === NOT_FOUND && !challenged;
+  let resourceId: string;
+  let authServer: string;
+  let scopesSupported: string[] | undefined;
+  if (legacy) {
+    resourceId = resource;
+    authServer = new URL(resource).origin;
+  } else {
+    const prm = resourceMetadataSchema.safeParse(found(document));
+    if (!prm.success || !sameUrl(prm.data.resource, resource)) fail();
+    resourceId = prm.data.resource;
+    authServer = prm.data.authorization_servers[0];
+    scopesSupported = prm.data.scopes_supported;
+  }
   if (!isAllowedEndpoint(authServer, options)) fail();
 
   // 3. Authorization-server metadata (RFC 8414, then OpenID discovery).
   const as = serverMetadataSchema.safeParse(
-    await firstDocument(
-      [
-        ...new Set([
-          wellKnown(authServer, "oauth-authorization-server", false),
-          wellKnown(authServer, "openid-configuration", false),
-          wellKnown(authServer, "openid-configuration", true),
-        ]),
-      ],
-      get,
-      options,
+    found(
+      await firstDocument(
+        [
+          ...new Set([
+            wellKnown(authServer, "oauth-authorization-server", false),
+            wellKnown(authServer, "openid-configuration", false),
+            wellKnown(authServer, "openid-configuration", true),
+          ]),
+        ],
+        get,
+        options,
+      ),
     ),
   );
   if (!as.success || !sameUrl(as.data.issuer, authServer)) fail();
@@ -147,12 +181,13 @@ export async function discoverOAuth(
     if (endpoint !== undefined && !isAllowedEndpoint(endpoint, options)) fail();
   }
   return {
-    resource: prm.data.resource,
+    resource: resourceId,
     issuer: m.issuer,
     authorizationEndpoint: m.authorization_endpoint,
     tokenEndpoint: m.token_endpoint,
     ...(m.registration_endpoint ? { registrationEndpoint: m.registration_endpoint } : {}),
     ...(m.revocation_endpoint ? { revocationEndpoint: m.revocation_endpoint } : {}),
-    ...(prm.data.scopes_supported ? { scopesSupported: prm.data.scopes_supported } : {}),
+    ...(scopesSupported ? { scopesSupported } : {}),
+    ...(legacy ? { discovery: "legacy-origin" as const } : {}),
   };
 }

@@ -644,3 +644,22 @@ describe("brokered secrets basic placement help", () => {
     }
   });
 });
+
+describe("OAuth discovery help", () => {
+  it("is found for atlassian mcp, oauth discovery and the error code", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const corpus = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (q: string) =>
+      searchHelp(corpus, q)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    expect(top3("atlassian mcp")).toContain("oauth-secrets");
+    expect(top3("oauth discovery")).toEqual(
+      expect.arrayContaining(["oauth-secrets", "errors/secret-oauth-discovery-failed"]),
+    );
+    expect(searchHelp(corpus, "secret_oauth_discovery_failed")[0]?.page.id).toBe(
+      "errors/secret-oauth-discovery-failed",
+    );
+  });
+});

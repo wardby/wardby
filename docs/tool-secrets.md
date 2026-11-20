@@ -108,9 +108,22 @@ browser back to `https://<your-wardby-host>/oauth/callback` (the host of
 
 Provider requirements:
 
-- The service publishes OAuth metadata (protected-resource and
-  authorization-server metadata, with PKCE `S256`). Otherwise the call fails
-  with [`secret_oauth_discovery_failed`](../help/errors/secret-oauth-discovery-failed.md).
+- The service publishes OAuth metadata in one of two shapes. Otherwise the
+  call fails with
+  [`secret_oauth_discovery_failed`](../help/errors/secret-oauth-discovery-failed.md),
+  whose article lists every URL Wardby tries.
+  - Protected-resource metadata (RFC 9728), from the service's `401`
+    challenge or its `/.well-known/oauth-protected-resource` path, naming an
+    authorization server whose metadata supports PKCE `S256`.
+  - With no protected-resource metadata at all (the MCP authorization spec of
+    2025-03-26, used for example by Atlassian's hosted MCP server):
+    authorization-server metadata at the resource's own origin, whose `issuer`
+    is exactly that origin, with PKCE `S256`. `list_secrets` shows such a
+    secret's `oauth.discovery` as `"legacy-origin"`, and the connect's audit
+    entry records `oauthDiscovery: "legacy-origin"`. Nothing in this shape
+    binds the token to the resource, so only the resource's own origin is
+    trusted as its authorization server. Default endpoint paths are never
+    guessed.
 - Wardby registers itself with the provider (dynamic client registration). If
   the provider does not offer that, register a client yourself with the redirect
   URI `https://<your-wardby-host>/oauth/callback` and pass its id as
@@ -241,8 +254,9 @@ Security:
   server or host provider is not deleted until you update or delete them.
 - `list_secrets` shows `kind: "oauth"` and an `oauth` object with the
   `resource`, `status` (`connected` or `reauth_required`), `expiresAt`,
-  `connectedAt` and, when reconnecting is needed, `reauthReason`. It never
-  shows token values.
+  `connectedAt`, when reconnecting is needed `reauthReason`, and
+  `discovery: "legacy-origin"` for a secret connected through origin
+  authorization-server metadata. It never shows token values.
 
 ### Rules
 
