@@ -1466,6 +1466,25 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
       expect(result.summary).toBe(comment);
     });
 
+    it("reads the script's value out of Claude Code's task output, as an object or as JSON text", async () => {
+      const comment = "Draft for review\n\n## Type\nBug";
+      for (const result of [{ ticket: "SIM-1", comment }, JSON.stringify({ ticket: "SIM-1", comment })]) {
+        const path = await resultFile({
+          summary: "Dynamic workflow completed",
+          agentCount: 5,
+          logs: [],
+          result,
+          workflowProgress: [],
+          totalTokens: 1,
+          totalToolCalls: 1,
+        });
+        const { result: out } = await run([started, endedWith(path), answer("no_changes")], {
+          workflow: { name: "fix-bug", args: "SIM-1", replyField: "comment" },
+        });
+        expect(out.summary).toBe(comment);
+      }
+    });
+
     it("uses prBody and prTitle on a change, and ignores replyField there", async () => {
       const path = await resultFile({ prTitle: "fix: SHALP-1 use the local date", prBody: "Body.", comment: "c" });
       const { result } = await run([started, endedWith(path), answer("changes_ready")], {

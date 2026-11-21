@@ -450,7 +450,7 @@ function profileStamp(authorization: RepositoryAuthorization) {
   };
 }
 
-const profileJsonSchema = {
+export const profileJsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -552,6 +552,7 @@ const profileJsonSchema = {
       properties: {
         name: { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$" },
         repository: { type: "string", minLength: 1, maxLength: 300 },
+        replyField: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]{0,63}$" },
       },
       required: ["name"],
       additionalProperties: false,

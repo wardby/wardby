@@ -281,6 +281,20 @@ export async function readWorkflowResult(
   }
   const object = asObject(parsed);
   if (!object) return { problem: "not_object" };
+  // Claude Code's task output: { summary, agentCount, logs, result, workflowProgress, ... }, with the
+  // script's returned value in `result` (an object, or that object as JSON text).
+  if ("result" in object && ("workflowProgress" in object || "agentCount" in object)) {
+    let inner: unknown = object.result;
+    if (typeof inner === "string") {
+      try {
+        inner = JSON.parse(inner);
+      } catch {
+        return { problem: "result_not_json" };
+      }
+    }
+    const value = asObject(inner);
+    return value ? { value, shape: "task_output" } : { problem: "result_not_object" };
+  }
   return { value: object, shape: "object" };
 }
 
