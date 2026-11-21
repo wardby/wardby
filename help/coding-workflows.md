@@ -51,7 +51,9 @@ Claude Code only. A Codex agent can't run a workflow.
 "workflowArgs": { ... } }` passes `workflowArgs` (a JSON object, at most
    16 KiB) to the script as `args`. A lead agent passes it the same way:
    `delegate_to_<name>` takes `workflowArgs` when the sub-agent has a
-   workflow. Without `workflowArgs`, `args` is the request text as a string:
+   workflow. Like `task`, only the agent's owner may pass `workflowArgs`, unless
+   the owner allows it with `codingProfile.allowWebhookTaskOverride`. Without
+   `workflowArgs`, `args` is the request text as a string:
    the task alone, without the agent's standing instructions.
 
 ## Tell a Wardby run from a laptop run

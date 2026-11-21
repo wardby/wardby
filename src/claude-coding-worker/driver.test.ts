@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1457,7 +1457,8 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
   describe("the script's own result", () => {
     let dir: string;
     beforeEach(async () => {
-      dir = await mkdtemp(join(tmpdir(), "wf-result-"));
+      // The real path: the worker refuses a result path with a link anywhere on it (macOS's tmpdir has one).
+      dir = await realpath(await mkdtemp(join(tmpdir(), "wf-result-")));
     });
     afterEach(async () => {
       await rm(dir, { recursive: true, force: true });
@@ -1516,7 +1517,12 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
       ];
       const link = join(dir, "link.output");
       await symlink(cases[0], link);
-      for (const path of [...cases, link, "relative/path"]) {
+      // A linked folder on the way is refused too, not only a link at the end.
+      await mkdir(join(dir, "real"));
+      await writeFile(join(dir, "real", "w1.output"), JSON.stringify({ comment: "through a link" }));
+      await symlink(join(dir, "real"), join(dir, "linked"));
+      const throughLink = join(dir, "linked", "w1.output");
+      for (const path of [...cases, link, throughLink, "relative/path"]) {
         const { result } = await run([started, endedWith(path), answer("no_changes")], {
           workflow: { name: "fix-bug", args: "x", replyField: "comment" },
         });

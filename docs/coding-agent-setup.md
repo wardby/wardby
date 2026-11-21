@@ -933,7 +933,8 @@ inside the worker.
   becomes the script's `args`, and so does `delegate_to_<name>` when the
   sub-agent has a workflow. Without it, `args` is the run's request text as a
   string (the task, without the agent's standing instructions).
-  `workflowArgs` for an agent without a workflow is refused with
+  Like `task`, a non-owner may pass `workflowArgs` only when the owner set
+  `allowWebhookTaskOverride`. `workflowArgs` for an agent without a workflow is refused with
   `workflow_args_without_workflow`.
 - In sub-agent prompts, name files by their `/workspace` path: sub-agents start
   in a folder of instruction files and otherwise look there first.

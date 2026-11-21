@@ -161,21 +161,30 @@ function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
 function assertOverrideAllowed(
   principalId: string,
   agent: { id: string } & CodingOverrideAgent,
-  args: { task?: string; baseRef?: string; branch?: string; repository?: string; repositories?: string[] },
+  args: {
+    task?: string;
+    baseRef?: string;
+    branch?: string;
+    repository?: string;
+    repositories?: string[];
+    workflowArgs?: unknown;
+  },
 ): void {
   if (
     args.task === undefined &&
     args.baseRef === undefined &&
     args.branch === undefined &&
     args.repository === undefined &&
-    args.repositories === undefined
+    args.repositories === undefined &&
+    // A workflow script's args steer the run like task text (#582).
+    args.workflowArgs === undefined
   ) {
     return;
   }
   if (!codingOverrideAllowed(principalId, agent)) {
     throw new McpError(
       403,
-      `Agent "${agent.id}": only its owner can pass a task, baseRef, branch, repository or repositories, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
+      `Agent "${agent.id}": only its owner can pass a task, baseRef, branch, repository, repositories or workflowArgs, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
     );
   }
 }
@@ -191,7 +200,14 @@ async function requireTriggerable<A extends TriggerableAgent>(
   ctx: McpRequestContext,
   row: A | null,
   id: string,
-  args: { task?: string; baseRef?: string; branch?: string; repository?: string; repositories?: string[] },
+  args: {
+    task?: string;
+    baseRef?: string;
+    branch?: string;
+    repository?: string;
+    repositories?: string[];
+    workflowArgs?: unknown;
+  },
   db: Pick<PrismaClient, "resourceGrant"> = ctx.db,
 ): Promise<A> {
   const { agent } = await assertAgentAccess(ctx, row, id, "execute", db);
@@ -265,7 +281,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         workflowArgs: {
           type: "object",
           description:
-            "Coding agents with a workflow only (codingProfile.workflow): passed to the workflow script as its args, a JSON object of at most 16 KiB. Without it, args is the task text. See help article coding-workflows.",
+            "Coding agents with a workflow only (codingProfile.workflow): passed to the workflow script as its args, a JSON object of at most 16 KiB. Without it, args is the task text. Like task, only the agent's owner may pass it unless the owner allows it (codingProfile.allowWebhookTaskOverride). See help article coding-workflows.",
         },
         baseRef: { type: "string" },
         branch: {

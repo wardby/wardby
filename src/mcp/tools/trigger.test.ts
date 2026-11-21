@@ -461,6 +461,35 @@ describe("trigger_agent", () => {
       level,
     });
 
+    it("a non-owner may pass workflowArgs only when the owner opted in, like a task (#582)", async () => {
+      const workflowAgent = (optIn: boolean): FakeAgentRow => ({
+        ...coding(optIn),
+        codingProfile: {
+          ...coding(optIn).codingProfile,
+          provider: "claude-code",
+          workflowName: "triage",
+          gitHistoryDepth: 1,
+        },
+      });
+      const closed = await as("g", workflowAgent(false), [grant("execute")]);
+      const refused = await closed.client.callTool({
+        name: "trigger_agent",
+        arguments: { agentId: "a1", workflowArgs: { ticket: "SHALP-1" } },
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused)).toMatch(/workflowArgs/);
+      expect(JSON.stringify(refused)).toMatch(/allowWebhookTaskOverride/);
+      expect((closed.db as any).runs.size).toBe(0);
+      await closed.client.close();
+      const open = await as("g", workflowAgent(true), [grant("execute")]);
+      const ok = await open.client.callTool({
+        name: "trigger_agent",
+        arguments: { agentId: "a1", workflowArgs: { ticket: "SHALP-1" } },
+      });
+      expect(ok.isError).toBeFalsy();
+      await open.client.close();
+    });
+
     it("an execute-grantee triggers, and the run records it as the triggerer; a read-grantee gets 403", async () => {
       const runner = await as("g", { id: "a1", name: "greeter", ownerId: "owner" }, [grant("execute")]);
       const ok = await runner.client.callTool({ name: "trigger_agent", arguments: { agentId: "a1" } });

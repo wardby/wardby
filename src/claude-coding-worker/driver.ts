@@ -1,4 +1,5 @@
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import {
   CODING_PROTOCOL_VERSION,
@@ -275,10 +276,18 @@ export async function readWorkflowResult(
   if (typeof path !== "string" || !isAbsolute(path)) return { problem: "no_file" };
   let text: string;
   try {
-    const info = await lstat(path);
-    if (!info.isFile()) return { problem: "not_file" };
-    if (info.size > MAX_WORKFLOW_RESULT_BYTES) return { problem: "too_large" };
-    text = await readFile(path, "utf8");
+    // No link anywhere on the path, then one open (never following a link) whose own handle is
+    // checked and read: the file checked is the file read.
+    if ((await realpath(path)) !== path) return { problem: "not_file" };
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) return { problem: "not_file" };
+      if (info.size > MAX_WORKFLOW_RESULT_BYTES) return { problem: "too_large" };
+      text = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
   } catch {
     return { problem: "unreadable" };
   }
