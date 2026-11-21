@@ -3,7 +3,20 @@ id: repo-instructions-and-skills
 title: Repository instructions and skills in coding runs
 summary: What AGENTS.md, CLAUDE.md, and repo skills a coding run loads, and how to turn repo skills off per agent with codingProfile.repoSkills.
 audience: all
-tags: [coding, skills, repoSkills, claudeBareMode, CLAUDE.md, AGENTS.md, SKILL.md, codex, claude-code]
+tags:
+  [
+    coding,
+    skills,
+    repoSkills,
+    claudeBareMode,
+    CLAUDE.md,
+    AGENTS.md,
+    SKILL.md,
+    codex,
+    claude-code,
+    workflow,
+    .claude/workflows,
+  ]
 appliesTo: ">=0.6.0"
 ---
 
@@ -78,6 +91,14 @@ never loaded in either mode.
 ```json
 { "id": "<agent-id>", "codingProfile": { "claudeBareMode": false } }
 ```
+
+## Workflow scripts (Claude Code)
+
+A Claude Code agent can run a workflow script, `.claude/workflows/<name>.js`,
+named on the agent (`codingProfile.workflow`). Only that one script is
+loaded, from the default repository or from a linked repository. Other
+workflow files are never loaded. A workflow run is always in native mode. See
+[Run a Claude Code workflow script](coding-workflows.md).
 
 ## See also
 

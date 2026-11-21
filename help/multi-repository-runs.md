@@ -48,6 +48,11 @@ own folder, `/repos/<name>`:
 
 ## Good to know
 
+- A linked repository can supply a Claude Code agent's workflow script
+  (`codingProfile.workflow.repository`), read at the commit resolved for the
+  run. It still supplies no instructions or skills: those come from the default
+  repository. See [Run a Claude Code workflow script](coding-workflows.md).
+
 - A `ref: { "fromFile": "<path>" }` is read from the default repository's base
   branch when the run is dispatched. See
   [`repository_ref_unreadable`](errors/repository-ref-unreadable.md).
