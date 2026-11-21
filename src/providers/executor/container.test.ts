@@ -2026,6 +2026,60 @@ describe("ContainerExecutor", () => {
       expect((await launched(false)).claudeContext).toEqual({ files: [{ path: "CLAUDE.md", content: "Use pnpm." }] });
     });
 
+    describe("workflow runs (#582)", () => {
+      const workflowRun = { ...claudeRun, gitHistoryDepth: 1, workflowName: "fix-bug", workflowRepository: null };
+      const SCRIPT = "export const meta = { name: 'fix-bug', description: 'x' }\nreturn 1\n";
+
+      async function launch(run: typeof workflowRun & { workflowArgs?: unknown }, withScript = true) {
+        const created = await harness(run, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
+        const workspace = join(created.root, "vcs", "run-1", "workspace");
+        await mkdir(join(workspace, ".claude", "workflows"), { recursive: true });
+        await writeFile(join(workspace, "CLAUDE.md"), "Use pnpm.");
+        if (withScript) await writeFile(join(workspace, ".claude", "workflows", "fix-bug.js"), SCRIPT);
+        await writeFile(join(workspace, ".claude", "workflows", "other.js"), "return 2\n");
+        let input: Record<string, unknown> | undefined;
+        created.jobs.onLaunch = () => {
+          input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        };
+        await created.executor.start("run-1");
+        return { created, input };
+      }
+
+      it("ships the run's own script first, native mode, and the task text as args", async () => {
+        const { input } = await launch(workflowRun);
+        // args defaults to the run's own task text (not the composed prompt with its extra lines).
+        expect(input!.workflow).toEqual({ name: "fix-bug", args: expect.any(String) });
+        expect((input!.workflow as { args: string }).args).not.toMatch(/base commit/i);
+        expect(input!.claudeBareMode).toBe(false);
+        const files = (input!.claudeContext as { files: { path: string; content: string }[] }).files;
+        expect(files[0]).toEqual({ path: ".claude/workflows/fix-bug.js", content: SCRIPT });
+        // Only the run's own script: another workflow in the repository is never shipped.
+        expect(files.map((file) => file.path)).not.toContain(".claude/workflows/other.js");
+      });
+
+      it("passes workflowArgs as args when the trigger gave them", async () => {
+        const { input } = await launch({ ...workflowRun, workflowArgs: { ticket: "X-1" } });
+        expect(input!.workflow).toEqual({ name: "fix-bug", args: { ticket: "X-1" } });
+      });
+
+      it("fails before launch with coding_failure_workflow_unavailable when the script is missing", async () => {
+        const { created } = await launch(workflowRun, false);
+        expect(created.jobs.launches).toBe(0);
+        expect(created.store.terminations).toEqual([
+          expect.objectContaining({
+            status: "failed",
+            error: expect.stringMatching(/^coding_failure_workflow_unavailable:coding_diag_/),
+          }),
+        ]);
+      });
+
+      it("adds nothing to a run without a workflow", async () => {
+        const { input } = await launch({ ...workflowRun, workflowName: null });
+        expect(input).not.toHaveProperty("workflow");
+        expect(input!.claudeBareMode).toBeUndefined();
+      });
+    });
+
     it("logs one further warn line, with the overflow count, for skips beyond the first 50", async () => {
       const created = await harness(claudeRun, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
       const workspace = join(created.root, "vcs", "run-1", "workspace");
