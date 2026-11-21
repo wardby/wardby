@@ -4,6 +4,7 @@ import { authorizeRepositoryLink } from "../core/runner.js";
 import { createPrismaClient } from "../core/db.js";
 import type { RepoAccessGate } from "../core/repo-access.js";
 import { seedDb } from "./coding-db.js";
+import { BUILDER_AGENT, REVIEWER_AGENT, seedCodingAgents } from "./coding-seed.js";
 
 const db = createPrismaClient();
 const agentIds: string[] = [];
@@ -37,5 +38,34 @@ describe.skipIf(!process.env.DATABASE_URL)("quickstart reviewer link (PostgreSQL
     });
     expect(result).toEqual({ ok: true });
     expect(authorizeUse).toHaveBeenCalledWith(expect.objectContaining({ provider: "local", repository }));
+  });
+
+  it("seeds the coding builder's profile as create_agent stores it (gitHistory as its two columns)", async () => {
+    const owner = await db.principal.create({
+      data: { id: `qs-owner-${randomUUID()}`, subject: `qs-${randomUUID()}` },
+    });
+    try {
+      const result = await seedCodingAgents(seedDb(db), {
+        ownerId: owner.id,
+        provider: "claude-code",
+        builderModel: "claude-haiku-4-5",
+        reviewerModel: "claude-haiku-4-5",
+        repository: "local:/tmp/qs-seed-test",
+        baseRef: "main",
+        services: [],
+      });
+      expect(result.builder).toMatchObject({ status: "created" });
+      const builder = await db.agent.findUniqueOrThrow({ where: { name: BUILDER_AGENT } });
+      const profile = await db.codingAgentProfile.findUniqueOrThrow({ where: { agentId: builder.id } });
+      expect(profile).toMatchObject({
+        repository: "local:/tmp/qs-seed-test",
+        gitHistoryDepth: null,
+        gitHistoryFull: false,
+        planDocument: null,
+      });
+    } finally {
+      await db.agent.deleteMany({ where: { name: { in: [BUILDER_AGENT, REVIEWER_AGENT] }, ownerId: owner.id } });
+      await db.principal.delete({ where: { id: owner.id } });
+    }
   });
 });
