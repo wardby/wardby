@@ -6,6 +6,7 @@
  * docs/private/2026-09-26-resource-sharing-grants-spec-and-plan.md.
  */
 import { Prisma, type CodingAgentProfile, type NativeExecutionMode } from "#prisma";
+import { codingProfileColumns } from "../../coding/profile-columns.js";
 import { z } from "zod";
 import {
   RUN_STEPS_LEVELS,
@@ -666,17 +667,6 @@ function requireModelAvailable(ctx: McpRequestContext, model: string, kind: "nat
   }
 }
 
-/** The stored columns for a validated profile: gitHistory is kept as gitHistoryDepth + gitHistoryFull (full overrides depth). */
-function profileColumns(profile: CodingProfile) {
-  const { gitHistory, planDocument, ...rest } = profile;
-  return {
-    ...rest,
-    planDocument: planDocument ?? Prisma.DbNull,
-    gitHistoryDepth: gitHistory && gitHistory.depth !== "full" ? gitHistory.depth : null,
-    gitHistoryFull: gitHistory?.depth === "full",
-  };
-}
-
 function storedProfile(profile: CodingAgentProfile): CodingProfile {
   return CodingProfileSchema.parse({
     provider: profile.provider,
@@ -846,7 +836,9 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             ? {
                 codingProfile: {
                   create: {
-                    ...profileColumns(planChecked ? { ...codingProfile, planDocument: planChecked } : codingProfile),
+                    ...codingProfileColumns(
+                      planChecked ? { ...codingProfile, planDocument: planChecked } : codingProfile,
+                    ),
                     ...profileStamp(authorization),
                   },
                 },
@@ -1226,8 +1218,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
                 ? { delete: true as const }
                 : undefined
               : existing.codingProfile
-                ? { update: { ...profileColumns(nextProfile!), ...stamp, ...trace } }
-                : { create: { ...profileColumns(nextProfile!), ...stamp, ...trace } };
+                ? { update: { ...codingProfileColumns(nextProfile!), ...stamp, ...trace } }
+                : { create: { ...codingProfileColumns(nextProfile!), ...stamp, ...trace } };
           const scheduleStart = await scheduleStartFields(tx, existing, {
             schedule: nextSchedule,
             timezone: nextTimezone,
