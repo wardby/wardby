@@ -101,6 +101,7 @@ async function harness(
     runStepsLevel?: RunStepsLevel | null;
     runStepsCeiling?: RunStepsLevel;
     audit?: (event: ProxyAuditEvent) => void;
+    workflow?: boolean;
   } = {},
 ) {
   const events: ProxyAuditEvent[] = [];
@@ -136,8 +137,9 @@ async function harness(
     deadlineAt: new Date(NOW.getTime() + (opts.deadlineMs ?? 60_000)),
     budgetUsd: 1,
     ...(opts.runStepsLevel ? { runStepsLevel: opts.runStepsLevel } : {}),
+    ...(opts.workflow ? { workflow: true } : {}),
   });
-  const execute = async (rawBody: string, requestKey: string) => {
+  const execute = async (rawBody: string, requestKey: string, agentId?: string) => {
     const sink = new TestSink();
     await proxy.execute(
       {
@@ -146,6 +148,7 @@ async function harness(
         rawBody,
         requestKey,
         anthropicBeta: protocol === "anthropic-messages" ? CLAUDE_CODE_ANTHROPIC_BETAS.join(",") : undefined,
+        ...(agentId !== undefined ? { agentId } : {}),
       },
       sink,
     );
@@ -225,6 +228,65 @@ describe("CodingProxy run steps", () => {
       ],
     ]);
     expect(h.resultBatches()[0].capability).toBe(h.session.capability);
+  });
+
+  describe("workflow sub-agents (#582)", () => {
+    const tree = {
+      phases: [{ index: 1, title: "Triage: Intake" }],
+      agents: [{ id: "ab1d62e7e65c99f79", label: "intake", phaseIndex: 1, state: "start", attempt: 1 }],
+    };
+
+    it("tags a workflow session's steps with the request's sub-agent id", async () => {
+      const stream = await stepsFixture("anthropic-run-command-stream.txt");
+      const h = await harness("anthropic-messages", sse(stream), { workflow: true });
+      await h.execute(await stepsFixture("anthropic-tool-result-request.json"), "k1", "ab1d62e7e65c99f79");
+      const steps = h.stepBatches().flatMap((s) => s.batch.steps);
+      expect(steps.length).toBeGreaterThan(0);
+      expect(steps.every((step) => step.agent === "ab1d62e7e65c99f79")).toBe(true);
+    });
+
+    it("ignores the header on any other session, and a malformed id on a workflow session", async () => {
+      const stream = await stepsFixture("anthropic-run-command-stream.txt");
+      const plain = await harness("anthropic-messages", sse(stream));
+      await plain.execute(await stepsFixture("anthropic-tool-result-request.json"), "k1", "ab1d62e7e65c99f79");
+      const workflow = await harness("anthropic-messages", sse(stream), { workflow: true });
+      await workflow.execute(await stepsFixture("anthropic-tool-result-request.json"), "k1", "not an id!");
+      for (const h of [plain, workflow]) {
+        const steps = h.stepBatches().flatMap((s) => s.batch.steps);
+        expect(steps.length).toBeGreaterThan(0);
+        expect(steps.some((step) => "agent" in step)).toBe(false);
+      }
+    });
+
+    it("relays the worker's tree for a workflow session, with the run capability", async () => {
+      const h = await harness("anthropic-messages", sse(""), { workflow: true });
+      await h.proxy.workflowProgress(h.session.capability, JSON.stringify(tree));
+      expect(h.submitted).toEqual([
+        { capability: h.session.capability, runId: "run-steps-1", batch: { steps: [], results: [], workflow: tree } },
+      ]);
+    });
+
+    it("refuses a tree from any other session, a bad capability or a body outside the schema", async () => {
+      const plain = await harness("anthropic-messages", sse(""));
+      await expect(plain.proxy.workflowProgress(plain.session.capability, JSON.stringify(tree))).rejects.toMatchObject({
+        status: 403,
+        code: "not_a_workflow_session",
+      });
+      const h = await harness("anthropic-messages", sse(""), { workflow: true });
+      await expect(h.proxy.workflowProgress("rrp_wrong", JSON.stringify(tree))).rejects.toMatchObject({ status: 401 });
+      for (const body of [
+        "not json",
+        JSON.stringify({ phases: [], agents: [], extra: 1 }),
+        JSON.stringify({ ...tree, agents: [{ ...tree.agents[0], id: "has space" }] }),
+      ]) {
+        await expect(h.proxy.workflowProgress(h.session.capability, body)).rejects.toMatchObject({
+          status: 400,
+          code: "invalid_workflow_progress",
+        });
+      }
+      expect(h.submitted).toEqual([]);
+      expect(plain.submitted).toEqual([]);
+    });
   });
 
   it("relays a Codex stream byte for byte and hands over its steps and results", async () => {

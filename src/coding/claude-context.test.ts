@@ -9,6 +9,7 @@ import {
   MAX_SKILL_ENTRIES,
   buildClaudeContext,
   importsOf,
+  readWorkflowScript,
 } from "./claude-context.js";
 import { CLAUDE_CONTEXT_LIMITS } from "./protocol.js";
 
@@ -301,5 +302,52 @@ describe("buildClaudeContext", () => {
     expect(ctx.files).toEqual([]);
     expect(ctx.skipped).toEqual([]);
     expect(ctx.skippedOverflow).toBe(1);
+  });
+});
+
+describe("readWorkflowScript (#582)", () => {
+  async function repo(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), "wf-script-"));
+    await mkdir(join(root, ".claude/workflows"), { recursive: true });
+    return root;
+  }
+
+  it("reads .claude/workflows/<name>.js", async () => {
+    const root = await repo();
+    await writeFile(join(root, ".claude/workflows/fix-bug.js"), "export const meta = { name: 'fix-bug' }\n");
+    expect(await readWorkflowScript(root, "fix-bug")).toEqual({
+      file: { path: ".claude/workflows/fix-bug.js", content: "export const meta = { name: 'fix-bug' }\n" },
+    });
+  });
+
+  it("reports a missing script, a bad name, and never reads outside the directory", async () => {
+    const root = await repo();
+    expect(await readWorkflowScript(root, "nope")).toEqual({ problem: "missing" });
+    for (const name of ["../x", "a/b", "", "a.b"]) {
+      expect(await readWorkflowScript(root, name), name).toEqual({ problem: "invalid_name" });
+    }
+  });
+
+  it("refuses a symlinked script or a symlinked workflows directory", async () => {
+    const root = await repo();
+    const outside = await mkdtemp(join(tmpdir(), "wf-outside-"));
+    await writeFile(join(outside, "x.js"), "secret");
+    await symlink(join(outside, "x.js"), join(root, ".claude/workflows/linked.js"));
+    expect(await readWorkflowScript(root, "linked")).toEqual({ problem: "symlink" });
+
+    const other = await mkdtemp(join(tmpdir(), "wf-dir-"));
+    await mkdir(join(other, ".claude"), { recursive: true });
+    await symlink(outside, join(other, ".claude/workflows"));
+    expect(await readWorkflowScript(other, "x")).toEqual({ problem: "symlink" });
+  });
+
+  it("refuses a script over the size limit, one that is not UTF-8, and a directory", async () => {
+    const root = await repo();
+    await writeFile(join(root, ".claude/workflows/big.js"), "x".repeat(CLAUDE_CONTEXT_LIMITS.maxFileBytes + 1));
+    expect(await readWorkflowScript(root, "big")).toEqual({ problem: "too_large" });
+    await writeFile(join(root, ".claude/workflows/bin.js"), Buffer.from([0xff, 0xfe, 0x00]));
+    expect(await readWorkflowScript(root, "bin")).toEqual({ problem: "not_utf8" });
+    await mkdir(join(root, ".claude/workflows/dir.js"));
+    expect(await readWorkflowScript(root, "dir")).toEqual({ problem: "not_file" });
   });
 });

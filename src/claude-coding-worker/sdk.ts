@@ -36,6 +36,56 @@ const WORKER_TOOL_NAMES = [
  */
 export const WARDBY_TOOLS_TIMEOUT_MS = 7_200_000 + 60_000;
 
+const WORKFLOW_TOOL = "Workflow";
+const WORKFLOW_REFUSED =
+  "Wardby runs only this run's own workflow, once: call Workflow with just its name, and nothing else.";
+
+type PreToolUseResult = {
+  hookSpecificOutput?: {
+    hookEventName: "PreToolUse";
+    permissionDecision?: "allow" | "deny";
+    permissionDecisionReason?: string;
+    updatedInput?: Record<string, unknown>;
+  };
+};
+
+/**
+ * The PreToolUse guard on a workflow run's Workflow tool (#582). It allows exactly one call, for the
+ * run's own workflow name, with only `name` (and `args`, which it replaces) in the input, and puts
+ * Wardby's args in it, so the model never copies them. Everything else is denied: a second call,
+ * another name, an inline `script`, a `scriptPath`, `remote`, `resumeFromRunId`. In-process (an
+ * SDK hook, not a settings file), so repository settings can't remove it.
+ */
+export function workflowGuard(workflow: {
+  name: string;
+  args: unknown;
+}): (input: { tool_input?: unknown }) => Promise<PreToolUseResult> {
+  let launched = false;
+  return async (input) => {
+    const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
+    const keys = Object.keys(toolInput);
+    const allowed =
+      !launched && toolInput.name === workflow.name && keys.every((key) => key === "name" || key === "args");
+    if (!allowed) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: WORKFLOW_REFUSED,
+        },
+      };
+    }
+    launched = true;
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        updatedInput: { name: workflow.name, args: workflow.args },
+      },
+    };
+  };
+}
+
 export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string, unknown> {
   // Claude Code passes the MCP config on its own command line: in header mode (Substrate) only the
   // gateway's placeholder may ever go there.
@@ -54,10 +104,15 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     model: config.model,
     maxTurns: config.maxTurns,
     maxBudgetUsd: config.budgetUsd,
-    tools: skills ? ["Skill"] : [],
+    tools: [...(skills ? ["Skill"] : []), ...(config.workflow ? [WORKFLOW_TOOL] : [])],
     // On a run with MCP tools, the server-level rule allows every tool of wardby_mcp: the proxy and
     // the gateway allow only the run's pinned tools, and dontAsk denies anything not allowed here.
-    allowedTools: [TOOL_NAME, ...(skills ? ["Skill"] : []), ...(config.mcp ? [`mcp__${WARDBY_MCP_SERVER}`] : [])],
+    allowedTools: [
+      TOOL_NAME,
+      ...(skills ? ["Skill"] : []),
+      ...(config.workflow ? [WORKFLOW_TOOL] : []),
+      ...(config.mcp ? [`mcp__${WARDBY_MCP_SERVER}`] : []),
+    ],
     disallowedTools: [PREPARE_DEPENDENCIES_TOOL_NAME, ...WORKER_TOOL_NAMES],
     strictMcpConfig: true,
     mcpServers: {
@@ -90,6 +145,10 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     // a hook in any project file (settings or SKILL.md frontmatter) is ignored. This SDK's
     // managedSettings keeps only restrictive keys; allowManagedHooksOnly is the hook lock it accepts.
     ...(context ? { managedSettings: { allowManagedHooksOnly: true } } : {}),
+    // Only on a workflow run (#582): the guard is the one in-process hook.
+    ...(config.workflow
+      ? { hooks: { PreToolUse: [{ matcher: WORKFLOW_TOOL, hooks: [workflowGuard(config.workflow)] }] } }
+      : {}),
     systemPrompt: config.developerInstructions,
     outputFormat: { type: "json_schema", schema: config.outputSchema },
     permissionMode: "dontAsk",

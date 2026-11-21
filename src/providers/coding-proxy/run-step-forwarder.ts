@@ -56,6 +56,7 @@ function estimate(batch: RunStepBatch): number {
     if (step.kind === "tool") bytes += (step.input?.length ?? 0) * 3;
   }
   for (const result of batch.results) bytes += 128 + (result.output?.length ?? 0) * 3;
+  if (batch.workflow) bytes += JSON.stringify(batch.workflow).length * 3;
   return bytes;
 }
 
@@ -92,6 +93,8 @@ function split(batch: RunStepBatch, runId: string): RunStepBatch[] {
     resultBytes += bytes;
   }
   if (results.length > 0) parts.push({ steps: [], results });
+  // A workflow tree (#582) travels alone: the wire schema bounds it well under one POST.
+  if (batch.workflow) parts.push({ steps: [], results: [], workflow: batch.workflow });
   return parts;
 }
 

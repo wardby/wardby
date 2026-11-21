@@ -24,7 +24,12 @@ import { withLinkedIssue, type LinkedIssueText } from "../../coding/linked-issue
 import { withOriginalRequest } from "../../coding/original-request-note.js";
 import { originalRequestOf } from "../../core/request-text.js";
 import { planPullRequestLine, readPlanVersions, type BuildPlan } from "../../core/plans/build.js";
-import { buildClaudeContext, MAX_RECORDED_SKIPS, type ClaudeContext } from "../../coding/claude-context.js";
+import {
+  buildClaudeContext,
+  MAX_RECORDED_SKIPS,
+  readWorkflowScript,
+  type ClaudeContext,
+} from "../../coding/claude-context.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
 import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
@@ -93,6 +98,7 @@ import {
   type ClaudeCommandTimeouts,
 } from "../../coding/command-timeouts.js";
 import {
+  CLAUDE_CONTEXT_LIMITS,
   CODING_PROTOCOL_VERSION,
   CodingRunResultSchema,
   CodingTaskInputSchema,
@@ -625,6 +631,16 @@ function jobRepositories(
   });
 }
 
+/**
+ * Where a workflow run's script is read from (#582): the default checkout, or the prepared folder of
+ * the named link (a read copy or a writable extra). Null when the link is not one of the run's folders.
+ */
+function workflowRoot(linkName: string | null, main: PreparedWorkspace, workspaces: RunWorkspaces): string | null {
+  if (linkName === null) return main.workspacePath;
+  const prepared = workspaces.readOnly.find((copy) => copy.name === linkName) ?? workspaces.writable.get(linkName);
+  return prepared?.workspacePath ?? null;
+}
+
 /** The rows that are folders under /repos/: every row but the remote ones (#536), which are never mounted or prepared. */
 function folderRows(rows: readonly RunRepositorySnapshot[]): RunRepositorySnapshot[] {
   return rows.filter((row) => !row.asRemote);
@@ -833,6 +849,14 @@ export interface ContainerRunSnapshot {
   gitHistoryDepth?: number | null;
   /** Full git history, fixed at dispatch (CodingRun.gitHistoryFull); absent on older snapshots = false. */
   gitHistoryFull?: boolean;
+  /** The workflow script's name, fixed at dispatch (CodingRun.workflowName, #582); absent or null = not a workflow run. */
+  workflowName?: string | null;
+  /** The link the workflow script is read from (CodingRun.workflowRepository); null = the default repository. */
+  workflowRepository?: string | null;
+  /** trigger_agent's workflowArgs (CodingRun.workflowArgs); null = the task text. */
+  workflowArgs?: unknown;
+  /** The result field that is the run's reply (CodingRun.workflowReplyField); null = the session's summary. */
+  workflowReplyField?: string | null;
   /** Coding-run services resolved at dispatch (CodingRun.services); parsed with parseStoredServices. */
   services?: unknown;
   /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
@@ -1168,6 +1192,10 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       sessionResume: row.codingRun.sessionResume,
       gitHistoryDepth: row.codingRun.gitHistoryDepth,
       gitHistoryFull: row.codingRun.gitHistoryFull,
+      workflowName: row.codingRun.workflowName,
+      workflowRepository: row.codingRun.workflowRepository,
+      workflowArgs: row.codingRun.workflowArgs,
+      workflowReplyField: row.codingRun.workflowReplyField,
       services: row.codingRun.services,
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
@@ -1822,12 +1850,16 @@ export interface CodingSessionController {
     mcpTokenHash?: string;
     /** The run's run-steps level (Run.runStepsLevel); the proxy reads tool output only at detail. */
     runStepsLevel?: RunStepsLevel;
+    /** A workflow run (#582): the proxy accepts the Workflow tool's request shapes for it alone. */
+    workflow?: boolean;
   }): Promise<{ id: string; capability: string }>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether the proxy refused a request of this session for budget. */
   budgetExhausted?(sessionId: string): Promise<boolean>;
   /** The code of the first model-provider failure the proxy relayed for this session, if any. */
   upstreamFailure?(sessionId: string): Promise<string | null>;
+  /** The proxy's own first refusal of one of the session's requests (a fixed code), if any. */
+  requestRefusal?(sessionId: string): Promise<string | null>;
 }
 
 /**
@@ -2333,6 +2365,14 @@ export class ContainerExecutor implements Executor {
           terms: this.modelTerms(run),
           ...(mcpToken ? { mcpTools, mcpTokenHash: mcpTokenHash(mcpToken) } : {}),
           ...(run.runStepsLevel ? { runStepsLevel: run.runStepsLevel } : {}),
+          ...(run.provider === "claude-code" && run.workflowName ? { workflow: true } : {}),
+          // Native mode (opted into, or a workflow run's) with repository skills on: the worker may offer
+          // Claude Code's Skill tool, which the proxy accepts for this session alone (#582).
+          ...(run.provider === "claude-code" &&
+          (run.claudeBareMode === false || run.workflowName) &&
+          run.repoSkills !== false
+            ? { skills: true }
+            : {}),
         });
         spendEnabled = true;
         sessionId = session.id;
@@ -3004,9 +3044,20 @@ export class ContainerExecutor implements Executor {
         }
         const status = jobState === "lost" ? "lost" : "failed";
         const provider = status === "failed" ? await this.providerFailure(sessionId) : null;
+        // The proxy refused one of the run's requests (a tool or request shape it does not allow): name
+        // that, not the worker's stream failure. The code goes to one operator line, never the run.
+        const refused = status === "failed" && !provider ? await this.proxyRefusal(sessionId) : null;
+        if (refused) {
+          containerLog.warn(
+            { event: "coding.proxy_refused", runId: run.runId, code: refused },
+            "the coding proxy refused this coding run's request",
+          );
+        }
         const failure = provider
           ? this.providerFailureOf(run, provider, `job_${reason}`, { issues: collected?.diagnosticIssues })
-          : this.failure(`job_${reason}`, { issues: collected?.diagnosticIssues });
+          : this.failure(refused ? `coding_proxy_refused:${reason}` : `job_${reason}`, {
+              issues: collected?.diagnosticIssues,
+            });
         providerClass = provider?.class;
         await this.recordRefusal(run.runId, sessionId);
         await this.options.store.terminate(run.runId, status, failure.error, failure.audit);
@@ -5030,6 +5081,29 @@ export class ContainerExecutor implements Executor {
         );
       }
     }
+    // A workflow run (#582) needs its script: read from the default checkout or the named link's
+    // folder, with the same rules as every context file. Without it the run cannot run, so it fails
+    // here, before any model call.
+    const workflow = run.provider === "claude-code" && run.workflowName ? run.workflowName : null;
+    let workflowFile: ClaudeContextFile | null = null;
+    if (workflow) {
+      const root = workflowRoot(run.workflowRepository ?? null, workspace, workspaces);
+      if (!root) throw new Error("coding_workflow_unavailable: repository");
+      const read = await readWorkflowScript(root, workflow);
+      if ("problem" in read) throw new Error(`coding_workflow_unavailable: ${read.problem}`);
+      workflowFile = read.file;
+    }
+    const workflowArgs =
+      run.workflowArgs && typeof run.workflowArgs === "object" && !Array.isArray(run.workflowArgs)
+        ? {
+            ...(run.workflowArgs as Record<string, unknown>),
+            // Reserved: marks a Wardby run, so one script can work both here and on a laptop. A
+            // script cannot read the environment; this is what it sees. Never anything secret.
+            wardby: { runId: run.runId, baseSha: startCommit(workspace) },
+          }
+        : // The run's own request, never the composed task: scripts parse args (a ticket key, JSON),
+          // and the standing-instructions header would break that. Older rows have no request.
+          (run.request ?? run.task);
     const build = (contextFiles: ClaudeContextFile[], withPlan: boolean) =>
       CodingTaskInputSchema.parse({
         schemaVersion: CODING_PROTOCOL_VERSION,
@@ -5056,7 +5130,18 @@ export class ContainerExecutor implements Executor {
         // Only when off: every other run's input stays exactly what older workers expect.
         ...(run.repoSkills === false ? { repoSkills: false } : {}),
         // Only when off: every other run's input stays exactly what older workers expect.
-        ...(run.claudeBareMode === false ? { claudeBareMode: false } : {}),
+        // A workflow run is always native: the Workflow tool reads the script from disk (#582).
+        ...(run.claudeBareMode === false || workflow ? { claudeBareMode: false } : {}),
+        // Only on a workflow run: every other run's input stays exactly what older workers expect.
+        ...(workflow
+          ? {
+              workflow: {
+                name: workflow,
+                args: workflowArgs,
+                ...(run.workflowReplyField ? { replyField: run.workflowReplyField } : {}),
+              },
+            }
+          : {}),
         // Only when on: every other run's input stays exactly what older workers expect. The volume
         // size (the job spec's limits.diskMb) bounds what the cache may restore.
         ...(run.dependencyCache
@@ -5098,15 +5183,24 @@ export class ContainerExecutor implements Executor {
     // character becomes \u00XX), so a hostile repository could still push input.json past
     // MAX_CODING_BASE_INPUT_BYTES and fail the launch. Drop context files from the tail (skills, then the
     // deepest imports; the root instructions go last) until the serialized input fits.
-    const contextFiles = [...(claudeContext?.files ?? [])];
+    // The workflow script comes first and is never dropped: the rest of the context makes room for it.
+    const repositoryFiles = (claudeContext?.files ?? []).filter((file) => file.path !== workflowFile?.path);
+    const contextFiles = workflowFile
+      ? [workflowFile, ...repositoryFiles.slice(0, CLAUDE_CONTEXT_LIMITS.maxFiles - 1)]
+      : [...repositoryFiles];
+    const keep = workflowFile ? 1 : 0;
     const skipped = [...(claudeContext?.skipped ?? [])];
-    let skippedOverflow = claudeContext?.skippedOverflow ?? 0;
+    let skippedOverflow =
+      (claudeContext?.skippedOverflow ?? 0) + Math.max(0, repositoryFiles.length - (contextFiles.length - keep));
     let serialized = JSON.stringify(build(contextFiles, false));
-    while (contextFiles.length > 0 && Buffer.byteLength(serialized) > MAX_CODING_BASE_INPUT_BYTES) {
+    while (contextFiles.length > keep && Buffer.byteLength(serialized) > MAX_CODING_BASE_INPUT_BYTES) {
       const dropped = contextFiles.pop()!;
       if (skipped.length < MAX_RECORDED_SKIPS) skipped.push({ path: dropped.path, reason: "limit" });
       else skippedOverflow++;
       serialized = JSON.stringify(build(contextFiles, false));
+    }
+    if (Buffer.byteLength(serialized) > MAX_CODING_BASE_INPUT_BYTES && workflowFile) {
+      throw new Error("coding_workflow_unavailable: too_large");
     }
     serialized = JSON.stringify(build(contextFiles, true));
     for (const skip of skipped) {
@@ -5363,6 +5457,12 @@ export class ContainerExecutor implements Executor {
     return this.options.sessions.budgetExhausted(sessionId).catch(() => false);
   }
 
+  /** The proxy's own first refusal of this run's requests, if any. Never throws. */
+  private async proxyRefusal(sessionId: string | null | undefined): Promise<string | null> {
+    if (!sessionId || !this.options.sessions.requestRefusal) return null;
+    return this.options.sessions.requestRefusal(sessionId).catch(() => null);
+  }
+
   /** The model-provider failure the proxy relayed for this run's session, classified. Never throws. */
   private async providerFailure(
     sessionId: string | null | undefined,
@@ -5565,6 +5665,12 @@ async function removeResultBundles(slots: readonly RepositorySlot[]): Promise<vo
  * "workspace" because "github" contains "git".
  */
 export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: string]> = [
+  // A workflow run (#582) whose script could not be read: fails before any model call.
+  ["coding_workflow_unavailable", "workflow_unavailable"],
+  // The coding proxy refused a request of the run (a tool or request shape it does not allow).
+  ["coding_proxy_refused", "proxy_refused"],
+  // The worker's workflow ended failed or was stopped (it arrives as job_<code>).
+  ["job_coding_workflow_failed", "workflow_failed"],
   // Claude Code reached the agent's turn limit (codingProfile.maxTurns) before finishing.
   ["job_coding_turn_limit", "turn_limit"],
   // A service sidecar never became ready (src/providers/jobs/kubernetes.ts).

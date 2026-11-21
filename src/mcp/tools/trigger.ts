@@ -59,9 +59,15 @@ import { isOwnerAll } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import type { PrismaClient } from "#prisma";
 import { textResult } from "./text-result.js";
+import {
+  WORKFLOW_ARGS_WITHOUT_WORKFLOW_ERROR,
+  WORKFLOW_ARGS_WITHOUT_WORKFLOW_MESSAGE,
+  WorkflowArgsSchema,
+} from "../../coding/workflow-args.js";
 import { codingOverrideAllowed, type CodingOverrideAgent } from "../../core/coding-override.js";
 
 const DEFAULT_TASK_TTL_MS = 24 * 60 * 60 * 1000;
+export { MAX_WORKFLOW_ARGS_BYTES } from "../../coding/workflow-args.js";
 
 const TriggerAgentSchema = z
   .object({
@@ -72,6 +78,8 @@ const TriggerAgentSchema = z
     repository: z.string().min(1).max(300).optional(),
     repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
     continuePriorRun: z.string().trim().min(1).max(128).optional(),
+    /** The workflow script's args (#582): a JSON object, at most MAX_WORKFLOW_ARGS_BYTES serialized. */
+    workflowArgs: WorkflowArgsSchema.optional(),
     issue: z.unknown().optional(),
     review: z
       .object({
@@ -153,21 +161,30 @@ function parseTriggerArgs(args: unknown): z.infer<typeof TriggerAgentSchema> {
 function assertOverrideAllowed(
   principalId: string,
   agent: { id: string } & CodingOverrideAgent,
-  args: { task?: string; baseRef?: string; branch?: string; repository?: string; repositories?: string[] },
+  args: {
+    task?: string;
+    baseRef?: string;
+    branch?: string;
+    repository?: string;
+    repositories?: string[];
+    workflowArgs?: unknown;
+  },
 ): void {
   if (
     args.task === undefined &&
     args.baseRef === undefined &&
     args.branch === undefined &&
     args.repository === undefined &&
-    args.repositories === undefined
+    args.repositories === undefined &&
+    // A workflow script's args steer the run like task text (#582).
+    args.workflowArgs === undefined
   ) {
     return;
   }
   if (!codingOverrideAllowed(principalId, agent)) {
     throw new McpError(
       403,
-      `Agent "${agent.id}": only its owner can pass a task, baseRef, branch, repository or repositories, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
+      `Agent "${agent.id}": only its owner can pass a task, baseRef, branch, repository, repositories or workflowArgs, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
     );
   }
 }
@@ -183,7 +200,14 @@ async function requireTriggerable<A extends TriggerableAgent>(
   ctx: McpRequestContext,
   row: A | null,
   id: string,
-  args: { task?: string; baseRef?: string; branch?: string; repository?: string; repositories?: string[] },
+  args: {
+    task?: string;
+    baseRef?: string;
+    branch?: string;
+    repository?: string;
+    repositories?: string[];
+    workflowArgs?: unknown;
+  },
   db: Pick<PrismaClient, "resourceGrant"> = ctx.db,
 ): Promise<A> {
   const { agent } = await assertAgentAccess(ctx, row, id, "execute", db);
@@ -254,6 +278,11 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       properties: {
         agentId: { type: "string" },
         task: { type: "string" },
+        workflowArgs: {
+          type: "object",
+          description:
+            "Coding agents with a workflow only (codingProfile.workflow): passed to the workflow script as its args, a JSON object of at most 16 KiB. Without it, args is the task text. Like task, only the agent's owner may pass it unless the owner allows it (codingProfile.allowWebhookTaskOverride). See help article coding-workflows.",
+        },
         baseRef: { type: "string" },
         branch: {
           type: "string",
@@ -325,6 +354,9 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         review = await resolveLocalReview(ctx, agent.id, args.review);
       }
       if (args.continuePriorRun !== undefined) await checkContinuePriorRun(ctx, agent, args.continuePriorRun, args);
+      if (args.workflowArgs !== undefined && !agent.codingProfile?.workflowName) {
+        throw new McpError(400, `${WORKFLOW_ARGS_WITHOUT_WORKFLOW_ERROR}: ${WORKFLOW_ARGS_WITHOUT_WORKFLOW_MESSAGE}`);
+      }
       if (
         agent.kind !== "coding" &&
         (args.task !== undefined ||
@@ -414,6 +446,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           agentId: agent.id,
           trigger: "manual",
           codingTask: args.task,
+          ...(args.workflowArgs !== undefined ? { codingWorkflowArgs: args.workflowArgs } : {}),
           codingBaseRef: args.baseRef,
           codingBranch: args.branch,
           codingRepository: args.repository,

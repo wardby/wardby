@@ -240,7 +240,12 @@ function dependencyGate(initialSetup, workspacePath, loadDependencyCache, loadPy
 /** run_command's description: the run's time limits, so the model can ask for more on a long command. */
 export function runCommandDescription(limits) {
   const seconds = (ms) => `${Math.floor(ms / 1000)} s`;
-  const base = "Run one bounded shell command in the isolated repository workspace.";
+  // Where commands run, by path: a workflow's sub-agents start in a folder of instruction files and
+  // otherwise take it for the repository (#582).
+  const base =
+    "Run one bounded shell command in the isolated repository workspace: the repository is checked out at " +
+    "/workspace, where every command starts (other repositories of the run are under /repos/<name>). " +
+    "The session's own working folder holds only instruction files and is not visible here.";
   if (limits.maxMs <= limits.defaultMs) return `${base} A command is stopped after ${seconds(limits.defaultMs)}.`;
   return `${base} A command is stopped after ${seconds(limits.defaultMs)} unless timeout_ms asks for more, up to ${seconds(limits.maxMs)}.`;
 }

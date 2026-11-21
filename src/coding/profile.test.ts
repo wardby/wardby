@@ -35,6 +35,7 @@ describe("CodingProfileSchema", () => {
       sessionResume: false,
       planDocument: null,
       buildFromPlan: false,
+      workflow: null,
     });
   });
 
@@ -308,5 +309,52 @@ describe("planDocument", () => {
     { store: "wardby", reviewers: ["p1"], onApproved: "build" },
   ])("refuses %j", (planDocument) => {
     expect(() => CodingProfileSchema.parse({ ...base, planDocument })).toThrow();
+  });
+});
+
+describe("workflow (#582)", () => {
+  const base = { repository: "acme/app", provider: "claude-code", gitHistory: { depth: 1 } } as const;
+
+  it("accepts a named workflow from the default or a linked repository", () => {
+    expect(CodingProfileSchema.parse({ ...base, workflow: { name: "fix-bug" } }).workflow).toEqual({ name: "fix-bug" });
+    expect(
+      CodingProfileSchema.parse({ ...base, workflow: { name: "fix_bug-2", repository: "github:acme/processes" } })
+        .workflow,
+    ).toEqual({ name: "fix_bug-2", repository: "github:acme/processes" });
+  });
+
+  it("accepts a replyField naming a result field, and refuses anything else", () => {
+    expect(
+      CodingProfileSchema.parse({ ...base, workflow: { name: "shalp-triage", replyField: "comment" } }).workflow,
+    ).toEqual({ name: "shalp-triage", replyField: "comment" });
+    for (const replyField of ["", "1st", "a.b", "a-b", "x".repeat(65)]) {
+      expect(CodingProfileSchema.safeParse({ ...base, workflow: { name: "w", replyField } }).success).toBe(false);
+    }
+  });
+
+  it("defaults to no workflow", () => {
+    expect(CodingProfileSchema.parse({ repository: "acme/app" }).workflow).toBeNull();
+  });
+
+  it("is Claude Code only", () => {
+    const result = CodingProfileSchema.safeParse({ ...base, provider: "codex", workflow: { name: "fix-bug" } });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error?.issues)).toMatch(/Claude Code agents only/);
+  });
+
+  it("needs git history", () => {
+    const result = CodingProfileSchema.safeParse({ ...base, gitHistory: null, workflow: { name: "fix-bug" } });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error?.issues)).toMatch(/needs git history/);
+  });
+
+  it("refuses names that are not a plain file name, and unknown fields", () => {
+    for (const name of ["", "../x", "a/b", "fix.bug", "x".repeat(65), "has space"]) {
+      expect(CodingProfileSchema.safeParse({ ...base, workflow: { name } }).success, name).toBe(false);
+    }
+    expect(CodingProfileSchema.safeParse({ ...base, workflow: { name: "ok", remote: true } }).success).toBe(false);
+    expect(CodingProfileSchema.safeParse({ ...base, workflow: { name: "ok", repository: "a\nb" } }).success).toBe(
+      false,
+    );
   });
 });

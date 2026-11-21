@@ -3013,3 +3013,81 @@ test("a run over several repositories shows one pull request line each and lists
   expect(await ui.find({ type: "Text", text: "git clone https://github.com/upstream-org/upstream.git" })).toBeDefined();
   expect(await ui.find({ type: "Text", text: /your-org\/api wardby/ })).toBeUndefined();
 });
+
+test("a workflow run's steps are grouped by phase and sub-agent, main session first (#582)", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  engine(on, []);
+  const workflow = {
+    phases: [
+      { index: 1, title: "Triage: Intake" },
+      { index: 2, title: "Triage: Investigate" },
+    ],
+    agents: [
+      { id: "a1", label: "intake", phaseIndex: 1, state: "done", attempt: 1 },
+      { id: "a2", label: "duplicates", phaseIndex: 2, state: "done", attempt: 1 },
+      { id: "a3", label: "impact", phaseIndex: 2, state: "failed", attempt: 2 },
+    ],
+  };
+  // Parallel agents a2 and a3 interleave in time; the card draws each agent's steps together.
+  const steps = [
+    { seq: 1, agent: null, summary: "Workflow sim-triage" },
+    { seq: 2, agent: "a1", summary: "cat tickets/SIM-1.md" },
+    { seq: 3, agent: "a2", summary: "ls tickets" },
+    { seq: 4, agent: "a3", summary: "grep -c undefined logs/app.log" },
+    { seq: 5, agent: "a2", summary: "cat tickets/SIM-0.md" },
+  ];
+  on("mcp.call", (_, e) => {
+    const reply = (value: unknown) => ({
+      value: { content: [{ type: "text", text: JSON.stringify(value) }], isError: false },
+    });
+    if (e.tool === "list_runs") return reply([runRow("r1", "succeeded", 60_000)]);
+    if (e.tool === "get_run") return reply({ id: "r1", status: "succeeded", codingResult: { outcome: "no_changes" } });
+    if (e.tool === "get_run_steps")
+      return reply({
+        runId: "r1",
+        level: "summary",
+        steps: steps.map((s) => ({
+          seq: s.seq,
+          at: iso(1000),
+          kind: "tool",
+          tool: "Bash",
+          summary: s.summary,
+          status: "ok",
+          ...(s.agent ? { agent: s.agent } : {}),
+        })),
+        next: null,
+        dropped: 0,
+        workflow,
+      });
+    return reply({});
+  });
+  await $.session.start({ cwd: "/", surface: "desktop", isInteractive: true });
+  await $.command.run({ command: "wardby-runs", args: "" });
+  await clock.settle();
+  const ui = await $.ui.mount({ ...PANE, surface: "terminal" });
+  await openRun(ui, "terminal", "r1");
+  await clock.settle();
+  const all = await texts(ui);
+  const order = [
+    "Main session",
+    "Workflow sim-triage",
+    "Triage: Intake",
+    "intake",
+    "cat tickets/SIM-1.md",
+    "Triage: Investigate",
+    "duplicates",
+    "ls tickets",
+    "cat tickets/SIM-0.md",
+    "impact",
+    "grep -c undefined",
+  ];
+  let at = -1;
+  for (const piece of order) {
+    const next = all.indexOf(piece, at + 1);
+    expect(next, piece).toBeGreaterThan(at);
+    at = next;
+  }
+  expect(all).toContain("failed · attempt 2");
+  expect(await ui.find({ key: "step-group-agent-a3" })).toBeDefined();
+  await ui.unmount();
+});

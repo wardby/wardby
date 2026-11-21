@@ -450,7 +450,7 @@ function profileStamp(authorization: RepositoryAuthorization) {
   };
 }
 
-const profileJsonSchema = {
+export const profileJsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -544,6 +544,18 @@ const profileJsonSchema = {
       type: "boolean",
       description:
         "Refuse to build from a plan set that is not fully approved (plan_not_approved); give runs the approved versions. Default false.",
+    },
+    workflow: {
+      type: ["object", "null"],
+      description:
+        "Claude Code only: run this repository workflow script, .claude/workflows/<name>.js, with Claude Code's own Workflow tool (see help article coding-workflows). { name, repository?, replyField? }: repository is a link name (omitted = the default repository); replyField names a string field of the script's returned object to use, word for word, as the run's reply (prTitle/prBody from the result are used for a pull request). Needs gitHistory (for example { \"depth\": 1 }). trigger_agent workflowArgs becomes the script's args. null turns it off.",
+      properties: {
+        name: { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$" },
+        repository: { type: "string", minLength: 1, maxLength: 300 },
+        replyField: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]{0,63}$" },
+      },
+      required: ["name"],
+      additionalProperties: false,
     },
     packageAllowlist: {
       type: "object",
@@ -697,6 +709,14 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     sessionResume: profile.sessionResume,
     planDocument: profile.planDocument ?? null,
     buildFromPlan: profile.buildFromPlan,
+    workflow:
+      profile.workflowName == null
+        ? null
+        : {
+            name: profile.workflowName,
+            ...(profile.workflowRepository ? { repository: profile.workflowRepository } : {}),
+            ...(profile.workflowReplyField ? { replyField: profile.workflowReplyField } : {}),
+          },
   });
 }
 

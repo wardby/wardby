@@ -16,6 +16,10 @@ import {
 import type { DependencyCacheService } from "./dependency-cache/service.js";
 import type { ProxyProtocol } from "./types.js";
 import { MCP_ROUTE_PATH } from "./mcp-route.js";
+
+/** The worker's workflow-progress route (#582) and its body bound. */
+export const WORKFLOW_PROGRESS_PATH = "/wardby/workflow-progress";
+const WORKFLOW_PROGRESS_MAX_BYTES = 1024 * 1024;
 import { SUBSTRATE_UPLOAD_MS } from "./substrate/routes.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
@@ -389,6 +393,29 @@ export async function startCodingProxyServer(
         await config.mcp(request, response);
         return;
       }
+      if (request.url === WORKFLOW_PROGRESS_PATH) {
+        // A workflow run's phases and sub-agents (#582), from the worker, for the run's steps. The
+        // capability is the run's (x-api-key, as on its model requests); the body is bounded.
+        if (request.method !== "POST") {
+          closeIfBodyUnread(request, response);
+          sendError(response, 405, "method_not_allowed");
+          return;
+        }
+        if (request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+          closeIfBodyUnread(request, response);
+          sendError(response, 415, "unsupported_content_type");
+          return;
+        }
+        const apiKey = request.headers["x-api-key"];
+        const rawBody = await readBody(
+          request,
+          WORKFLOW_PROGRESS_MAX_BYTES,
+          AbortSignal.timeout(HTTP_LIMITS.requestMs),
+        );
+        await proxy.workflowProgress(typeof apiKey === "string" ? apiKey : "", rawBody);
+        response.writeHead(204, { "cache-control": "no-store" }).end();
+        return;
+      }
       if (request.method === "HEAD" && request.url === "/api/hello") {
         response.writeHead(200, { "cache-control": "no-store" }).end();
         return;
@@ -414,6 +441,8 @@ export async function startCodingProxyServer(
       const requestKeyHeader = request.headers["idempotency-key"];
       const apiKeyHeader = request.headers["x-api-key"];
       const anthropicBetaHeader = request.headers["anthropic-beta"];
+      // Claude Code's sub-agent id (#582): read only for a workflow session's steps, never forwarded.
+      const agentIdHeader = request.headers["x-claude-code-agent-id"];
       // The capability travels in exactly one header. Claude sends x-api-key; Codex sends a Bearer,
       // except on Substrate, where the egress gateway injects the run's capability as X-Api-Key and
       // Codex (header mode, src/coding-worker/sdk.ts) sends no Authorization at all. A request with
@@ -436,6 +465,7 @@ export async function startCodingProxyServer(
           rawBody,
           requestKey: Array.isArray(requestKeyHeader) ? undefined : requestKeyHeader,
           anthropicBeta: Array.isArray(anthropicBetaHeader) ? "" : anthropicBetaHeader,
+          ...(typeof agentIdHeader === "string" ? { agentId: agentIdHeader } : {}),
         },
         responseSink(response),
       );

@@ -434,3 +434,39 @@ async function skillNames(
   }
   return { names: names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)), truncated };
 }
+
+/** Why a run's workflow script could not be read (#582): each maps to coding_workflow_unavailable. */
+export type WorkflowScriptProblem = "missing" | "symlink" | "not_file" | "too_large" | "not_utf8" | "invalid_name";
+
+/**
+ * Reads the one workflow script a workflow run executes, `.claude/workflows/<name>.js` in the
+ * checkout at `root`, with the same rules as every other context file: no symlink (the file or
+ * any directory on the way), a regular file, valid UTF-8, at most CLAUDE_CONTEXT_LIMITS.maxFileBytes.
+ * Unlike the rest of the context a problem is returned, not skipped: a workflow run without its
+ * script cannot run, so the caller fails it before any model call.
+ */
+export async function readWorkflowScript(
+  root: string,
+  name: string,
+): Promise<{ file: ClaudeContextFile } | { problem: WorkflowScriptProblem }> {
+  const rel = `.claude/workflows/${name}.js`;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(name) || !isAllowedContextPath(rel)) return { problem: "invalid_name" };
+  const realRoot = await realpath(root);
+  const inspection = await inspect(root, rel);
+  if (inspection.kind === "absent") return { problem: "missing" };
+  if (inspection.kind === "skip") return { problem: workflowProblemOf(inspection.reason) };
+  const read = await readChecked(realRoot, root, rel, inspection.stats);
+  if (read.kind === "absent") return { problem: "missing" };
+  if (read.kind === "skip") return { problem: workflowProblemOf(read.reason) };
+  try {
+    return { file: { path: rel, content: decoder.decode(read.bytes) } };
+  } catch {
+    return { problem: "not_utf8" };
+  }
+}
+
+function workflowProblemOf(reason: ClaudeContextSkip["reason"]): WorkflowScriptProblem {
+  return reason === "symlink" || reason === "not_file" || reason === "too_large" || reason === "not_utf8"
+    ? reason
+    : "missing";
+}

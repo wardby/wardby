@@ -1,9 +1,13 @@
-import { access, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS, type CodingTaskInput } from "../coding/protocol.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
+  parseCodingAgentOutputJson,
+  type CodingTaskInput,
+} from "../coding/protocol.js";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import { repositoriesTaskNote, workerTaskNote } from "../coding-worker/task-note.js";
 import { INJECTED_MCP_TOKEN_PLACEHOLDER } from "../coding-worker/mcp-config.js";
@@ -1355,5 +1359,208 @@ describe("plan file placement", () => {
         }),
       ).rejects.toThrow("worker_plan_files_failed");
     }
+  });
+});
+
+describe("runClaudeCodingWorker workflow runs (#582)", () => {
+  const script = { path: ".claude/workflows/fix-bug.js", content: "export const meta = { name: 'fix-bug' }\n" };
+  const workflowInput: CodingTaskInput = {
+    ...input,
+    claudeBareMode: false,
+    claudeContext: { files: [{ path: "CLAUDE.md", content: "Use pnpm." }, script] },
+    workflow: { name: "fix-bug", args: { ticket: "X-1" } },
+  };
+  const answer = (outcome: string, runId = input.runId) => ({
+    type: "result",
+    subtype: "success",
+    result: JSON.stringify({ schemaVersion: 1, runId, outcome, summary: `${outcome} summary`, tests: [] }),
+  });
+  const started = { type: "system", subtype: "task_started", task_type: "local_workflow", task_id: "w1" };
+  const ended = (status: string) => ({ type: "system", subtype: "task_notification", task_id: "w1", status });
+
+  async function run(messages: Record<string, unknown>[], overrides: Partial<CodingTaskInput> = {}) {
+    let captured: ClaudeQueryOptions | undefined;
+    let workflowFiles: string[] = [];
+    const root = await mkdtemp(join(tmpdir(), "wf-driver-"));
+    const createQuery: ClaudeQueryFactory = (options) => {
+      captured = options;
+      return (async function* () {
+        workflowFiles = options.contextDirectory
+          ? await readdir(join(options.contextDirectory, ".claude/workflows")).catch(() => [])
+          : [];
+        for (const message of messages) yield message as never;
+      })();
+    };
+    try {
+      const result = await runClaudeCodingWorker({
+        input: { ...workflowInput, ...overrides },
+        proxyBaseUrl: "http://wardby-proxy:8787/",
+        capability: "rrp_worker_capability",
+        signal: new AbortController().signal,
+        createQuery,
+        contextRoot: join(root, "ctx"),
+      });
+      return { result, captured: captured!, workflowFiles };
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it("asks for the Workflow call, and takes the answer after the workflow ends, not an early one", async () => {
+    const { result, captured } = await run([
+      started,
+      answer("no_changes"),
+      ended("completed"),
+      answer("changes_ready"),
+    ]);
+    expect(result.outcome).toBe("changes_ready");
+    expect(captured.workflow).toEqual({ name: "fix-bug", args: { ticket: "X-1" } });
+    expect(captured.prompt).toMatch(/Workflow tool exactly once with \{"name": "fix-bug"\}/);
+    expect(captured.prompt).not.toContain(input.task);
+    expect(captured.contextDirectory).not.toBeNull();
+  });
+
+  it("gives the launch turn a placeholder that passes the output schema, so it ends without retries", async () => {
+    const { captured } = await run([started, ended("completed"), answer("no_changes")]);
+    const placeholder = /placeholder final JSON, which Wardby ignores: (\{.*\})/.exec(captured.prompt)?.[1];
+    expect(placeholder).toBeDefined();
+    expect(parseCodingAgentOutputJson(placeholder!)).toMatchObject({ outcome: "no_changes", runId: input.runId });
+  });
+
+  it("sets Wardby's run id when the session copied the workflow's own id", async () => {
+    const { result } = await run([started, ended("completed"), answer("changes_ready", "wf_abc123")]);
+    expect(result.runId).toBe(input.runId);
+  });
+
+  it("fails with coding_workflow_failed when the workflow never started, failed or was stopped", async () => {
+    await expect(run([answer("changes_ready")])).rejects.toThrow("coding_workflow_failed");
+    await expect(run([started, ended("failed"), answer("changes_ready")])).rejects.toThrow("coding_workflow_failed");
+    await expect(run([started, ended("stopped"), answer("changes_ready")])).rejects.toThrow("coding_workflow_failed");
+    // Ended but nothing answered after it: the workflow finished, so the answer is rebuilt, not lost.
+    const { result } = await run([started, answer("no_changes"), ended("completed")]);
+    expect(result).toMatchObject({ outcome: "changes_ready", summary: "Workflow fix-bug completed.", tests: [] });
+  });
+
+  it("writes only the run's own workflow script into the context directory", async () => {
+    const other = { path: ".claude/workflows/other.js", content: "return 2\n" };
+    const { workflowFiles } = await run([started, ended("completed"), answer("no_changes")], {
+      claudeContext: { files: [{ path: "CLAUDE.md", content: "x" }, script, other] },
+    });
+    expect(workflowFiles).toEqual(["fix-bug.js"]);
+  });
+
+  it("fails rather than run a workflow without native mode", async () => {
+    await expect(
+      run([started, ended("completed"), answer("no_changes")], { claudeBareMode: undefined }),
+    ).rejects.toThrow("coding_workflow_failed");
+  });
+  describe("the script's own result", () => {
+    let dir: string;
+    beforeEach(async () => {
+      // The real path: the worker refuses a result path with a link anywhere on it (macOS's tmpdir has one).
+      dir = await realpath(await mkdtemp(join(tmpdir(), "wf-result-")));
+    });
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true });
+    });
+    const resultFile = async (value: unknown) => {
+      const path = join(dir, "w1.output");
+      await writeFile(path, typeof value === "string" ? value : JSON.stringify(value));
+      return path;
+    };
+    const endedWith = (path: string) => ({ ...ended("completed"), output_file: path });
+
+    it("uses the replyField value, word for word, as a no-change run's summary", async () => {
+      const comment = "## Type\nBug\n\n## Team\nTNG";
+      const path = await resultFile({ ticket: "SHALP-1", comment, postSteps: ["laptop only"] });
+      const { result } = await run([started, endedWith(path), answer("no_changes")], {
+        workflow: { name: "fix-bug", args: "SHALP-1", replyField: "comment" },
+      });
+      expect(result.summary).toBe(comment);
+    });
+
+    it("reads the script's value out of Claude Code's task output, as an object or as JSON text", async () => {
+      const comment = "Draft for review\n\n## Type\nBug";
+      for (const result of [{ ticket: "SIM-1", comment }, JSON.stringify({ ticket: "SIM-1", comment })]) {
+        const path = await resultFile({
+          summary: "Dynamic workflow completed",
+          agentCount: 5,
+          logs: [],
+          result,
+          workflowProgress: [],
+          totalTokens: 1,
+          totalToolCalls: 1,
+        });
+        const { result: out } = await run([started, endedWith(path), answer("no_changes")], {
+          workflow: { name: "fix-bug", args: "SIM-1", replyField: "comment" },
+        });
+        expect(out.summary).toBe(comment);
+      }
+    });
+
+    it("uses prBody and prTitle on a change, and ignores replyField there", async () => {
+      const path = await resultFile({ prTitle: "fix: SHALP-1 use the local date", prBody: "Body.", comment: "c" });
+      const { result } = await run([started, endedWith(path), answer("changes_ready")], {
+        workflow: { name: "fix-bug", args: "SHALP-1", replyField: "comment" },
+      });
+      expect(result.summary).toBe("Body.");
+      // The output schema's usual normalising applies: the conventional type prefix comes off the title.
+      expect((result as { commitTitle?: string }).commitTitle).toBe("SHALP-1 use the local date");
+    });
+
+    it("keeps the session's summary when the field is missing, not a string, or the file is unusable", async () => {
+      const cases = [
+        await resultFile({ other: "x" }),
+        await resultFile({ comment: 42 }),
+        await resultFile("not json"),
+        await resultFile([1, 2]),
+      ];
+      const link = join(dir, "link.output");
+      await symlink(cases[0], link);
+      // A linked folder on the way is refused too, not only a link at the end.
+      await mkdir(join(dir, "real"));
+      await writeFile(join(dir, "real", "w1.output"), JSON.stringify({ comment: "through a link" }));
+      await symlink(join(dir, "real"), join(dir, "linked"));
+      const throughLink = join(dir, "linked", "w1.output");
+      for (const path of [...cases, link, throughLink, "relative/path"]) {
+        const { result } = await run([started, endedWith(path), answer("no_changes")], {
+          workflow: { name: "fix-bug", args: "x", replyField: "comment" },
+        });
+        expect(result.summary).toBe("no_changes summary");
+      }
+    });
+
+    it("rebuilds the answer from the workflow's value when the session's final answer fails after it completed", async () => {
+      const comment = "Draft for review (SIM-1 triage)";
+      const path = await resultFile({ ticket: "SIM-1", comment });
+      const retriesExhausted = { type: "result", subtype: "error_max_structured_output_retries", is_error: true };
+      const { result } = await run([started, endedWith(path), retriesExhausted], {
+        workflow: { name: "fix-bug", args: "SIM-1", replyField: "comment" },
+      });
+      // changes_ready lets collection decide from the workspace; the reply is the script's own text.
+      expect(result).toMatchObject({ outcome: "changes_ready", summary: comment, tests: [] });
+    });
+
+    it("rebuilds an answer that fails the output schema, and still fails a run whose workflow did not end", async () => {
+      const path = await resultFile({ comment: "c" });
+      const missingTests = {
+        type: "result",
+        subtype: "success",
+        result: JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome: "no_changes", summary: "s" }),
+      };
+      const { result } = await run([started, endedWith(path), missingTests], {
+        workflow: { name: "fix-bug", args: "x", replyField: "comment" },
+      });
+      expect(result).toMatchObject({ summary: "c", tests: [] });
+      const retriesExhausted = { type: "result", subtype: "error_max_structured_output_retries", is_error: true };
+      await expect(run([started, retriesExhausted])).rejects.toThrow();
+    });
+
+    it("bounds a long prTitle as any commit title, keeping prBody", async () => {
+      const path = await resultFile({ prTitle: "x".repeat(500), prBody: "Body." });
+      const { result } = await run([started, endedWith(path), answer("changes_ready")]);
+      expect(result.summary).toBe("Body.");
+      expect(((result as { commitTitle?: string }).commitTitle ?? "").length).toBeLessThan(500);
+    });
   });
 });

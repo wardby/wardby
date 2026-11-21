@@ -17,6 +17,11 @@
  * reasons about cost, not one here plus one in the engine.
  */
 
+import {
+  WORKFLOW_ARGS_WITHOUT_WORKFLOW_ERROR,
+  WORKFLOW_ARGS_WITHOUT_WORKFLOW_MESSAGE,
+  WorkflowArgsSchema,
+} from "../coding/workflow-args.js";
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { Prisma, type PrismaClient, type Run, type RunTrigger } from "#prisma";
@@ -192,6 +197,8 @@ export function delegateToolDef(
   repositories: readonly string[] = [],
   /** The child's repository link names a run can add (#537); none keeps the cached definition. */
   repositoryNames: readonly string[] = [],
+  /** The child runs a workflow script (#582); false keeps the cached definition. */
+  workflow = false,
 ): LoadedTool {
   // With the flag off the description stays byte-identical to before, so
   // existing leads keep their cached tool definitions.
@@ -257,6 +264,15 @@ export function delegateToolDef(
         },
         ...repositoryProperty,
         ...repositoriesProperty,
+        ...(workflow
+          ? {
+              workflowArgs: {
+                type: "object",
+                description:
+                  "Passed to this sub-agent's workflow script as its args: a JSON object of at most 16 KiB. Without it, args is the task text.",
+              },
+            }
+          : {}),
       },
       required: ["task"],
       additionalProperties: false,
@@ -282,6 +298,7 @@ const DelegateArgs = z
     repository: z.string().min(1).max(300).optional(),
     repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
     planNumber: z.number().int().min(1).max(MAX_PLAN_NUMBER).optional(),
+    workflowArgs: WorkflowArgsSchema.optional(),
   })
   .strict();
 
@@ -324,7 +341,9 @@ const DELEGATION_CHILD_SELECT = {
   ownerId: true,
   nativeExecutionMode: true,
   runSteps: true,
-  codingProfile: { select: { allowWebhookTaskOverride: true, timeoutSec: true, repository: true, baseRef: true } },
+  codingProfile: {
+    select: { allowWebhookTaskOverride: true, timeoutSec: true, repository: true, baseRef: true, workflowName: true },
+  },
 } as const satisfies Prisma.AgentSelect;
 
 /** The child agent fields a delegation decides on. */
@@ -378,6 +397,14 @@ export async function authorizeDelegation(
               ? 'This sub-agent belongs to another owner and runs only its own instructions: delegate with task "" and no datastoreRef.'
               : null;
     if (refusal) return { refusal: JSON.stringify({ error: "cross_owner_not_allowed", message: refusal }) };
+  }
+  if (args.workflowArgs !== undefined && !(childAgent.kind === "coding" && childAgent.codingProfile?.workflowName)) {
+    return {
+      refusal: JSON.stringify({
+        error: WORKFLOW_ARGS_WITHOUT_WORKFLOW_ERROR,
+        message: WORKFLOW_ARGS_WITHOUT_WORKFLOW_MESSAGE,
+      }),
+    };
   }
   if (args.continuePriorRun !== undefined && childAgent.kind !== "coding") {
     return {
@@ -1006,7 +1033,11 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
     // call time regardless of whether the tool was advertised here.
     const subAgentEdges = await db.agentSubAgent.findMany({
       where: { parentAgentId: agent.id },
-      select: { boundName: true, childAgentId: true },
+      select: {
+        boundName: true,
+        childAgentId: true,
+        child: { select: { kind: true, codingProfile: { select: { workflowName: true } } } },
+      },
     });
     // Each coding child's repository list, pinned for this run; dispatch re-validates the choice.
     const childLinks =
@@ -1064,7 +1095,14 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
     const delegateTools = await Promise.all(
       subAgentEdges.map(async (edge): Promise<LoadedTool> => {
         const { repositories, names } = await repositoriesOf(edge.childAgentId);
-        return delegateToolDef(edge.boundName, agent.parallelDelegations, repositories, names);
+        return delegateToolDef(
+          edge.boundName,
+          agent.parallelDelegations,
+          repositories,
+          names,
+          // A coding child that runs a workflow script (#582): its tool also takes workflowArgs.
+          edge.child?.kind === "coding" && Boolean(edge.child.codingProfile?.workflowName),
+        );
       }),
     );
     // Only queried when the runner was given review hosts. buildReviewHosts
@@ -1719,6 +1757,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 agentId: edge.childAgentId,
                 trigger: "subagent",
                 codingTask: args.task,
+                ...(args.workflowArgs !== undefined ? { codingWorkflowArgs: args.workflowArgs } : {}),
                 continuesCodingRunId: args.continuePriorRun,
                 mergeOrder: args.mergeOrder,
                 planNumber: args.planNumber,
@@ -2475,6 +2514,7 @@ export async function durableDelegate(
         ...(coding
           ? {
               codingTask: dispatchArgs.task,
+              ...(dispatchArgs.workflowArgs !== undefined ? { codingWorkflowArgs: dispatchArgs.workflowArgs } : {}),
               continuesCodingRunId: dispatchArgs.continuePriorRun,
               mergeOrder: dispatchArgs.mergeOrder,
               planNumber: dispatchArgs.planNumber,

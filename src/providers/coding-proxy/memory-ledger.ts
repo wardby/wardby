@@ -21,6 +21,7 @@ function cloneSession(session: ProxySession): ProxySession {
     budgetExhaustedAt: session.budgetExhaustedAt ? new Date(session.budgetExhaustedAt) : null,
     budgetRefusal: session.budgetRefusal ? { ...session.budgetRefusal } : null,
     upstreamFailure: session.upstreamFailure ?? null,
+    requestRefusal: session.requestRefusal ?? null,
     terms: session.terms
       ? { version: session.terms.version, entry: { ...session.terms.entry, efforts: [...session.terms.entry.efforts] } }
       : null,
@@ -71,6 +72,8 @@ export class MemoryProxyLedger implements ProxyLedger {
       mcpTokenHash: input.mcpTokenHash ?? null,
       mcpCallCount: 0,
       runStepsLevel: input.runStepsLevel ?? null,
+      workflow: input.workflow === true,
+      skills: input.skills === true,
     };
     this.sessions.set(session.id, session);
     this.sessionByCapability.set(session.capabilityHash, session.id);
@@ -327,6 +330,15 @@ export class MemoryProxyLedger implements ProxyLedger {
   async recordUpstreamFailure(sessionId: string, code: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session) session.upstreamFailure ??= code;
+  }
+
+  async recordRequestRefusal(sessionId: string, code: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (session) session.requestRefusal ??= code;
+  }
+
+  async requestRefusal(sessionId: string): Promise<string | null> {
+    return this.sessions.get(sessionId)?.requestRefusal ?? null;
   }
 
   async upstreamFailure(sessionId: string): Promise<string | null> {

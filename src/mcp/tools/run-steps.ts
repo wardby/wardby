@@ -33,7 +33,10 @@ export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOpt
       "text, redacted. Others get the lines only. level is the run's own, fixed when it started. " +
       "To follow a running run, call again with after set to the last seq you have. " +
       `next is the after for the next page, or null. limit defaults to ${RUN_STEPS_DEFAULT_LIMIT}, at most ` +
-      `${RUN_STEPS_MAX_LIMIT}. dropped counts steps past the per-run limit. Same access as get_run.`,
+      `${RUN_STEPS_MAX_LIMIT}. dropped counts steps past the per-run limit. Same access as get_run. ` +
+      "A workflow run (codingProfile.workflow) also returns workflow: its phases ({ index, title }) and sub-agents " +
+      "({ id, label, phaseIndex, state, attempt }); a step a sub-agent made has agent set to that sub-agent's id, " +
+      "a step with no agent is the main session's. Titles and labels come from the repository's script.",
     inputSchema: {
       type: "object",
       properties: {
@@ -66,9 +69,16 @@ export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOpt
           tool: true,
           summary: true,
           status: true,
+          agentRef: true,
           ...(showDetail ? { detail: true } : {}),
         },
       });
+      // A workflow run's phases and sub-agents (#582): each step's `agent` is one of workflow.agents' ids.
+      // Best effort: a failure here leaves the steps ungrouped, never the call failed.
+      const workflow: unknown = await Promise.resolve()
+        .then(() => ctx.db.codingRun.findUnique({ where: { runId: run.id }, select: { workflowProgress: true } }))
+        .then((coding) => coding?.workflowProgress ?? null)
+        .catch(() => null);
       const page = rows.slice(0, take);
       const now = (opts.now ?? (() => new Date()))();
       const expired =
@@ -86,8 +96,10 @@ export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOpt
           tool: s.tool,
           summary: s.summary,
           status: s.status,
+          ...(s.agentRef ? { agent: s.agentRef } : {}),
           ...(showDetail ? { detail: s.detail ?? null } : {}),
         })),
+        ...(workflow ? { workflow } : {}),
         next: rows.length > take ? page[page.length - 1].seq : null,
         dropped: run.stepsDropped,
         ...(expired ? { expired: true, meaning: EXPIRED_MEANING } : {}),

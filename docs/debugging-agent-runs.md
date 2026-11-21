@@ -102,6 +102,7 @@ failed, and the ID is what an operator searches for.
 | `executor` while running checks | The run may have run out of memory, among other causes    | Reduce what the checks run; send the ID to an operator if it repeats |
 | `merge_conflict`                | The branch conflicts with its target                      | Read the `merge-conflict` help article                               |
 | `service_unready`               | A service the run needs, such as Postgres, didn't start   | Check `.wardby/services.yaml` and the agent's `services`             |
+| `proxy_refused`                 | The coding proxy refused one of the run's model requests  | Read the `coding.proxy_refused` log line's code; check versions      |
 | `coding_turn_limit`             | The run used all its turns                                | Raise `maxTurns` or narrow the task                                  |
 | `budgetEvents`, or `refused`    | The run, run tree or budget group ran out of money        | Raise the budget or check spend with `cost_report`                   |
 | `packageRefusals`               | A package isn't allowed or is too new                     | Add it to `packageAllowlist`, or wait out the release age limit      |
@@ -196,6 +197,15 @@ replies after relaying them and posts them to the server's run-steps listener
 slows the run. Without the two settings in the table below, coding runs record no
 steps; native runs are unaffected. Steps for a Claude Code or Codex run need the
 listener, which only `wardby serve` runs.
+
+A Claude Code workflow run (`codingProfile.workflow`) groups its steps. The
+proxy tags each step with the sub-agent whose model request produced it (Claude
+Code's `x-claude-code-agent-id`, read on workflow runs only), and the worker
+reports the script's phases and sub-agents through the proxy's
+`/wardby/workflow-progress` route, relayed with the steps. `get_run_steps`
+returns the tree as `workflow` and each sub-agent step's `agent`; the
+`wardby-runs` pane draws Phase, then sub-agent, then its steps. Titles and
+labels are the script's text, redacted by exact value and cut to 200 characters.
 
 **Levels.**
 

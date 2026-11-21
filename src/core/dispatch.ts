@@ -1,4 +1,5 @@
-import type { Prisma, PrismaClient, Run, RunTrigger, Task } from "#prisma";
+import { Prisma, type PrismaClient, type Run, type RunTrigger, type Task } from "#prisma";
+import { runProtectedPaths } from "../coding/protected-paths.js";
 import { ExecutorClosingError, type Executor } from "../providers/executor/types.js";
 import { codeProviderOf } from "../coding/code-host.js";
 import {
@@ -243,6 +244,8 @@ export interface DispatchRunOptions {
   planInputFiles?: PlanFile[];
   /** The coding run returns its plan folder, stored when it ends. Coding agents only. */
   collectPlanFiles?: boolean;
+  /** trigger_agent's workflowArgs: the workflow script's `args` (#582). Only for an agent with a workflow. */
+  codingWorkflowArgs?: Record<string, unknown>;
   /** The plan this coding run writes or builds from, when it is not the attributed issue's number. */
   planNumber?: number;
   /** The ticket of the plan a `buildFromPlan` run builds, stored on the run (spec §7). */
@@ -1552,7 +1555,10 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               provider: agent.codingProfile.provider,
               model: input.model,
               timeoutSec: agent.codingProfile.timeoutSec,
-              protectedPaths: agent.codingProfile.protectedPaths as Prisma.InputJsonValue,
+              protectedPaths: runProtectedPaths(
+                agent.codingProfile.protectedPaths as string[],
+                agent.codingProfile.workflowName !== null,
+              ),
               collectExclude: agent.codingProfile.collectExclude as Prisma.InputJsonValue,
               packageAllowlist: agent.codingProfile.packageAllowlist as Prisma.InputJsonValue,
               packagePolicy: agent.codingProfile.packagePolicy as Prisma.InputJsonValue,
@@ -1573,6 +1579,14 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               // A continuation keeps its root's setting, matching the rows copied from it.
               gitHistoryDepth: gitHistory ? gitHistory.depth : agent.codingProfile.gitHistoryDepth,
               gitHistoryFull: gitHistory ? gitHistory.full : agent.codingProfile.gitHistoryFull,
+              // Fixed here (#582): the workflow a run executes never changes mid-run.
+              workflowName: agent.codingProfile.workflowName,
+              workflowRepository: agent.codingProfile.workflowRepository,
+              workflowReplyField: agent.codingProfile.workflowReplyField,
+              workflowArgs:
+                agent.codingProfile.workflowName !== null && options.codingWorkflowArgs !== undefined
+                  ? (options.codingWorkflowArgs as Prisma.InputJsonObject)
+                  : Prisma.DbNull,
               // Fixed here so a run's tracing never changes mid-run.
               debugTrace: traced,
               debugTraceMaxMb: traced ? agent.codingProfile.debugTraceMaxMb : null,

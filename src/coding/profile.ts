@@ -113,6 +113,39 @@ const gitHistorySchema = z
   .object({ depth: z.union([z.number().int().min(1).max(MAX_GIT_HISTORY_DEPTH), z.literal("full")]) })
   .strict()
   .nullable();
+/** A workflow script's name: the file `.claude/workflows/<name>.js` (docs: coding workflows, #582). */
+export const WORKFLOW_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+/** A field of a workflow script's returned object (workflow.replyField). */
+export const WORKFLOW_REPLY_FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+/**
+ * Claude Code runs only: run this workflow script (`.claude/workflows/<name>.js`) with Claude Code's
+ * own Workflow tool. `repository` is a link name (omitted = the default repository), read at the
+ * commit resolved for the run. Null = no workflow.
+ */
+export const WorkflowSchema = z
+  .object({
+    name: z
+      .string()
+      .regex(WORKFLOW_NAME, "must be 1-64 letters, digits, _ or - (the file .claude/workflows/<name>.js)"),
+    repository: z
+      .string()
+      .min(1)
+      .max(300)
+      .refine((value) => !INVALID_SINGLE_LINE_CONTROL.test(value), "must not contain control characters")
+      .optional(),
+    /**
+     * The field of the script's returned object that is the run's reply, posted word for word (the
+     * pull request body comes from prBody). Omitted = the session's own summary of the result.
+     */
+    replyField: z
+      .string()
+      .regex(WORKFLOW_REPLY_FIELD, "must be 1-64 letters, digits or _, starting with a letter or _")
+      .optional(),
+  })
+  .strict()
+  .nullable();
+export type CodingWorkflow = NonNullable<z.infer<typeof WorkflowSchema>>;
+
 /** Claude Code runs only: the most agent turns a run may take; null = the worker default (DEFAULT_CLAUDE_MAX_TURNS). */
 const maxTurnsSchema = z.number().int().min(1).max(MAX_CODING_TURNS).nullable();
 /**
@@ -227,6 +260,8 @@ const codingProfileFields = {
   planDocument: PlanDocumentSchema.nullable(),
   /** Refuse to build from a plan set that is not fully approved. */
   buildFromPlan: z.boolean(),
+  /** Run a repository workflow script instead of a free-form task (Claude Code only, #582). */
+  workflow: WorkflowSchema,
 };
 
 export const CodingProfileSchema = z
@@ -255,9 +290,25 @@ export const CodingProfileSchema = z
     sessionResume: codingProfileFields.sessionResume.default(false),
     planDocument: codingProfileFields.planDocument.default(null),
     buildFromPlan: codingProfileFields.buildFromPlan.default(false),
+    workflow: codingProfileFields.workflow.default(null),
   })
   .strict()
   .superRefine((profile, ctx) => {
+    if (profile.workflow !== null && profile.provider !== "claude-code") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["workflow"],
+        message: "workflow applies to Claude Code agents only (provider claude-code); set it to null",
+      });
+    }
+    if (profile.workflow !== null && profile.gitHistory === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["workflow"],
+        message:
+          'a workflow run needs git history: set gitHistory (for example { "depth": 1 }) so the script\'s git commands and commits work',
+      });
+    }
     if (profile.sessionResume && profile.provider !== "claude-code") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -300,6 +351,7 @@ export const CodingProfilePatchSchema = z
     sessionResume: codingProfileFields.sessionResume.optional(),
     planDocument: codingProfileFields.planDocument.optional(),
     buildFromPlan: codingProfileFields.buildFromPlan.optional(),
+    workflow: codingProfileFields.workflow.optional(),
   })
   .strict();
 

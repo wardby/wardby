@@ -611,10 +611,13 @@ export function isSafeContextPath(path: string): boolean {
 
 const ALLOWED_CONTEXT_FILES = new Set(["CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md"]);
 const CONTEXT_SKILL_PATH = /^\.claude\/skills\/[^/]+\/SKILL\.md$/;
+/** A workflow script (#582): `.claude/workflows/<name>.js`, shipped only on a workflow run. */
+export const CONTEXT_WORKFLOW_PATH = /^\.claude\/workflows\/[A-Za-z0-9_-]{1,64}\.js$/;
 
 /**
  * Whether a Claude Code context file may be shipped to (and written by) the worker: a safe path
- * that is CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, a .claude/skills/<name>/SKILL.md, or any other
+ * that is CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, a .claude/skills/<name>/SKILL.md, a
+ * .claude/workflows/<name>.js workflow script (#582: read only for the run's own workflow), or any other
  * Markdown file outside every .claude directory that is not a CLAUDE.local.md. This keeps
  * repository settings, hooks, MCP configuration, agents, commands, and personal memory out of
  * Claude Code's native loading. Not part of the input schema: a refused file is dropped, and never
@@ -622,7 +625,7 @@ const CONTEXT_SKILL_PATH = /^\.claude\/skills\/[^/]+\/SKILL\.md$/;
  */
 export function isAllowedContextPath(path: string): boolean {
   if (!isSafeContextPath(path)) return false;
-  if (ALLOWED_CONTEXT_FILES.has(path) || CONTEXT_SKILL_PATH.test(path)) return true;
+  if (ALLOWED_CONTEXT_FILES.has(path) || CONTEXT_SKILL_PATH.test(path) || CONTEXT_WORKFLOW_PATH.test(path)) return true;
   const segments = path.toLowerCase().split("/");
   if (!path.endsWith(".md")) return false;
   if (segments.includes(".claude")) return false;
@@ -826,6 +829,23 @@ export const CodingTaskInputSchema = z
      */
     claudeContext: z
       .object({ files: z.array(ClaudeContextFileSchema).min(1).max(CLAUDE_CONTEXT_LIMITS.maxFiles) })
+      .strict()
+      .optional(),
+    /**
+     * Claude Code only (#582): run the workflow script `.claude/workflows/<name>.js` (shipped in
+     * claudeContext) with the Workflow tool. `args` is trigger_agent's workflowArgs, or the task text.
+     * Written only on a workflow run.
+     */
+    workflow: z
+      .object({
+        name: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+        args: z.union([z.string(), z.record(z.string(), z.unknown())]),
+        /** The string field of the script's returned object to use, word for word, as the run's summary. */
+        replyField: z
+          .string()
+          .regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/)
+          .optional(),
+      })
       .strict()
       .optional(),
     /** Extra repositories (#537), mounted at /repos/<name>; written only when the run has some. */

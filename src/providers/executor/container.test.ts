@@ -776,6 +776,7 @@ class FakeSessions implements CodingSessionController {
   exhausted = new Set<string>();
   /** The first upstream failure code the proxy relayed, per session. */
   upstreamFailures = new Map<string, string>();
+  requestRefusals = new Map<string, string>();
   lastInput?: Parameters<CodingSessionController["createSession"]>[0];
 
   constructor(
@@ -803,6 +804,10 @@ class FakeSessions implements CodingSessionController {
   async budgetExhausted(sessionId: string): Promise<boolean> {
     return this.exhausted.has(sessionId);
   }
+  async requestRefusal(sessionId: string): Promise<string | null> {
+    return this.requestRefusals.get(sessionId) ?? null;
+  }
+
   async upstreamFailure(sessionId: string): Promise<string | null> {
     return this.upstreamFailures.get(sessionId) ?? null;
   }
@@ -2024,6 +2029,91 @@ describe("ContainerExecutor", () => {
         ],
       });
       expect((await launched(false)).claudeContext).toEqual({ files: [{ path: "CLAUDE.md", content: "Use pnpm." }] });
+    });
+
+    describe("workflow runs (#582)", () => {
+      const workflowRun = {
+        ...claudeRun,
+        gitHistoryDepth: 1,
+        workflowName: "fix-bug" as string | null,
+        workflowRepository: null,
+      };
+      const SCRIPT = "export const meta = { name: 'fix-bug', description: 'x' }\nreturn 1\n";
+
+      async function launch(run: typeof workflowRun & { workflowArgs?: unknown }, withScript = true) {
+        const created = await harness(run, IMAGE, new InMemoryCodingRunObserver(), claudeImages);
+        const workspace = join(created.root, "vcs", "run-1", "workspace");
+        await mkdir(join(workspace, ".claude", "workflows"), { recursive: true });
+        await writeFile(join(workspace, "CLAUDE.md"), "Use pnpm.");
+        if (withScript) await writeFile(join(workspace, ".claude", "workflows", "fix-bug.js"), SCRIPT);
+        await writeFile(join(workspace, ".claude", "workflows", "other.js"), "return 2\n");
+        let input: Record<string, unknown> | undefined;
+        created.jobs.onLaunch = () => {
+          input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+        };
+        await created.executor.start("run-1");
+        return { created, input };
+      }
+
+      it("ships the run's own script first, native mode, and the task text as args", async () => {
+        const { input } = await launch(workflowRun);
+        // args defaults to the run's own task text (not the composed prompt with its extra lines).
+        expect(input!.workflow).toEqual({ name: "fix-bug", args: expect.any(String) });
+        expect((input!.workflow as { args: string }).args).not.toMatch(/base commit/i);
+        expect(input!.claudeBareMode).toBe(false);
+        const files = (input!.claudeContext as { files: { path: string; content: string }[] }).files;
+        expect(files[0]).toEqual({ path: ".claude/workflows/fix-bug.js", content: SCRIPT });
+        // Only the run's own script: another workflow in the repository is never shipped.
+        expect(files.map((file) => file.path)).not.toContain(".claude/workflows/other.js");
+      });
+
+      it("passes the run's own request as args, never the standing instructions", async () => {
+        const { input } = await launch({
+          ...workflowRun,
+          task: "Standing instructions for this coding agent:\nBe careful.\n\nRequest:\nSHALP-7363",
+          request: "SHALP-7363",
+        } as typeof workflowRun);
+        expect(input!.workflow).toEqual({ name: "fix-bug", args: "SHALP-7363" });
+      });
+
+      it("passes the run's replyField to the worker", async () => {
+        const { input } = await launch({ ...workflowRun, workflowReplyField: "comment" } as typeof workflowRun);
+        expect(input!.workflow).toMatchObject({ name: "fix-bug", replyField: "comment" });
+      });
+
+      it("passes workflowArgs as args when the trigger gave them", async () => {
+        const { input } = await launch({ ...workflowRun, workflowArgs: { ticket: "X-1" } });
+        // Plus the reserved wardby field, so a script can tell it runs on Wardby.
+        expect(input!.workflow).toEqual({
+          name: "fix-bug",
+          args: { ticket: "X-1", wardby: { runId: "run-1", baseSha: expect.stringMatching(/^[0-9a-f]{40}$/) } },
+        });
+      });
+
+      it("fails before launch with coding_failure_workflow_unavailable when the script is missing", async () => {
+        const { created } = await launch(workflowRun, false);
+        expect(created.jobs.launches).toBe(0);
+        expect(created.store.terminations).toEqual([
+          expect.objectContaining({
+            status: "failed",
+            error: expect.stringMatching(/^coding_failure_workflow_unavailable:coding_diag_/),
+          }),
+        ]);
+      });
+
+      it("registers the proxy session as a workflow session with repository skills (#582)", async () => {
+        const { created } = await launch(workflowRun);
+        expect(created.sessions.lastInput).toMatchObject({ workflow: true, skills: true });
+        const off = await launch({ ...workflowRun, repoSkills: false } as typeof workflowRun);
+        expect(off.created.sessions.lastInput).toMatchObject({ workflow: true });
+        expect(off.created.sessions.lastInput).not.toHaveProperty("skills");
+      });
+
+      it("adds nothing to a run without a workflow", async () => {
+        const { input } = await launch({ ...workflowRun, workflowName: null });
+        expect(input).not.toHaveProperty("workflow");
+        expect(input!.claudeBareMode).toBeUndefined();
+      });
     });
 
     it("logs one further warn line, with the overflow count, for skips beyond the first 50", async () => {
@@ -3710,6 +3800,37 @@ describe("ContainerExecutor", () => {
         },
       ]);
       expect(JSON.stringify(created.vcs.notifyFinishedCalls)).not.toContain(code);
+    });
+
+    it("names a failed job whose request the proxy refused as proxy_refused, with the code on one operator line", async () => {
+      const created = await harness();
+      created.sessions.requestRefusals.set("session-1", "tools_not_allowed");
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      logged.length = 0;
+      await created.executor.start("run-1");
+      expect(created.store.terminations).toEqual([
+        {
+          status: "failed",
+          error: expect.stringMatching(/^coding_failure_proxy_refused:coding_diag_/),
+          audit: { failureCategory: "proxy_refused", diagnosticId: expect.stringMatching(/^coding_diag_/) },
+        },
+      ]);
+      expect(logged.filter((entry) => entry.payload.event === "coding.proxy_refused")).toEqual([
+        {
+          level: "warn",
+          payload: { event: "coding.proxy_refused", runId: "run-1", code: "tools_not_allowed" },
+          message: expect.any(String),
+        },
+      ]);
+      // A provider failure still wins: it is the more specific cause.
+      const both = await harness();
+      both.sessions.requestRefusals.set("session-1", "tools_not_allowed");
+      both.sessions.upstreamFailures.set("session-1", "rate_limit_exceeded");
+      both.jobs.statusValue = { state: "failed" };
+      both.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await both.executor.start("run-1");
+      expect((both.store.terminations[0] as { error: string }).error).toBe("coding_provider_rate_limited");
     });
 
     it("reports budget exhaustion over a provider failure when the session has both", async () => {

@@ -4266,3 +4266,13 @@ describe("coding agents on local repositories", () => {
     expect(JSON.parse((result.content as { text: string }[])[0].text).codingProfile.repository).toBe(`local:${repo}`);
   });
 });
+
+describe("codingProfile.workflow JSON schema (#582)", () => {
+  it("lists exactly the fields the profile schema accepts", async () => {
+    const { profileJsonSchema } = await import("./agents.js");
+    const { WorkflowSchema } = await import("../../coding/profile.js");
+    const json = (profileJsonSchema.properties.workflow as { properties: Record<string, unknown> }).properties;
+    const zod = WorkflowSchema.unwrap().shape;
+    expect(Object.keys(json).sort()).toEqual(Object.keys(zod).sort());
+  });
+});

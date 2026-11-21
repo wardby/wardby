@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as controlChars from "./control-chars.js";
 import { traceLogCapture } from "./log-capture.test-support.js";
-import { RunStepWriter, type RunStepWriterDb } from "./writer.js";
+import { RunStepWriter, redactedWorkflow, type RunStepWriterDb } from "./writer.js";
 import type { ExtractedStep } from "./types.js";
 
 // A fake value only: never a real credential.
@@ -280,4 +280,76 @@ describe("RunStepWriter, through its default logger at trace level and console",
       expect(capture.text()).not.toContain(FAKE_SECRET);
     },
   );
+});
+
+describe("workflow runs (#582)", () => {
+  const tx = () => ({
+    $queryRaw: vi.fn(async () => []),
+    runStep: {
+      findMany: vi.fn(async () => []),
+      findFirst: vi.fn(async () => null),
+      createMany: vi.fn(async () => ({ count: 1 })),
+      updateMany: vi.fn(async () => ({ count: 0 })),
+      update: vi.fn(async () => undefined),
+    },
+    codingRun: { updateMany: vi.fn(async () => ({ count: 1 })) },
+  });
+  const writerWith = (t: ReturnType<typeof tx>) =>
+    new RunStepWriter({
+      db: {
+        run: { findUnique: vi.fn(async () => ({ agentId: "a1", runStepsLevel: null })) },
+        runStep: {},
+        codingRun: {},
+        $transaction: vi.fn(async (fn: (client: unknown) => Promise<unknown>) => fn(t)),
+      } as unknown as RunStepWriterDb,
+      secretValues: async () => [FAKE_SECRET],
+      level: "summary",
+      retentionDays: 30,
+    });
+
+  it("stores the sub-agent of a step, and drops a malformed one", async () => {
+    const t = tx();
+    await writerWith(t).record("r1", {
+      steps: [
+        { kind: "tool", callId: "c1", tool: "Bash", text: "npm test", truncated: false, agent: "ab1d62e7e65c99f79" },
+        { kind: "said", callId: "s1", text: "done", truncated: false, agent: "not an id" },
+        { kind: "said", callId: "s2", text: "main session", truncated: false },
+      ],
+      results: [],
+    });
+    const rows = (t.runStep.createMany.mock.calls[0] as unknown as [{ data: { agentRef: string | null }[] }])[0].data;
+    expect(rows.map((row) => row.agentRef)).toEqual(["ab1d62e7e65c99f79", null, null]);
+  });
+
+  it("stores the tree with secret values and control characters out of every title and label", async () => {
+    const t = tx();
+    await writerWith(t).record("r1", {
+      steps: [],
+      results: [],
+      workflow: {
+        phases: [{ index: 1, title: `Triage \u001b[31m${FAKE_SECRET}` }],
+        agents: [
+          { id: "a1", label: `look up ${FAKE_SECRET}`, phaseIndex: 1, state: "start", attempt: 1 },
+          { id: FAKE_SECRET.replace(/[^A-Za-z0-9_-]/g, ""), label: "x", phaseIndex: 1, state: "done", attempt: 1 },
+        ],
+      },
+    });
+    const [{ data }] = t.codingRun.updateMany.mock.calls[0] as unknown as [{ data: { workflowProgress: unknown } }];
+    const stored = JSON.stringify(data.workflowProgress);
+    expect(stored).not.toContain(FAKE_SECRET);
+    expect(stored).not.toContain("\u001b");
+    expect((data.workflowProgress as { agents: unknown[] }).agents).toHaveLength(1);
+  });
+
+  it("redactedWorkflow bounds titles and keeps unknown states out", () => {
+    const tree = redactedWorkflow(
+      {
+        phases: [{ index: 1, title: "t".repeat(800) }],
+        agents: [{ id: "a1", label: "l", phaseIndex: null, state: "BAD", attempt: 0 }],
+      },
+      [],
+    );
+    expect(tree.phases[0].title).toHaveLength(200);
+    expect(tree.agents[0].state).toBe("unknown");
+  });
 });

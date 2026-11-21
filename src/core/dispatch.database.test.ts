@@ -168,6 +168,56 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     expect(await loadPlanFiles(db, runId, "input")).toEqual([{ path: "plan.md", content: "# P" }]);
   });
 
+  it("fixes the agent's workflow and the trigger's workflowArgs on the coding run (#582)", async () => {
+    const { agentId } = await codingAgent();
+    await db.codingAgentProfile.update({
+      where: { agentId },
+      data: {
+        workflowName: "fix-bug",
+        workflowRepository: "upstream",
+        workflowReplyField: "comment",
+        gitHistoryDepth: 1,
+      },
+    });
+    const { executor } = fakeExecutor();
+    const withArgs = await dispatchRun({
+      db,
+      executor,
+      agentId,
+      codingTask: "X-1",
+      codingWorkflowArgs: { ticket: "X-1" },
+    });
+    expect(await db.codingRun.findUniqueOrThrow({ where: { runId: withArgs!.run.id } })).toMatchObject({
+      workflowName: "fix-bug",
+      workflowRepository: "upstream",
+      workflowReplyField: "comment",
+      workflowArgs: { ticket: "X-1" },
+    });
+    // A workflow run may not change .claude/ (its own scripts included).
+    expect((await db.codingRun.findUniqueOrThrow({ where: { runId: withArgs!.run.id } })).protectedPaths).toContain(
+      ".claude/**",
+    );
+    const withoutArgs = await dispatchRun({ db, executor, agentId, codingTask: "X-2" });
+    expect((await db.codingRun.findUniqueOrThrow({ where: { runId: withoutArgs!.run.id } })).workflowArgs).toBeNull();
+
+    // An agent without a workflow never stores args, whatever the caller passed.
+    const plain = await codingAgent();
+    const ignored = await dispatchRun({
+      db,
+      executor,
+      agentId: plain.agentId,
+      codingTask: "x",
+      codingWorkflowArgs: { a: 1 },
+    });
+    expect(await db.codingRun.findUniqueOrThrow({ where: { runId: ignored!.run.id } })).toMatchObject({
+      workflowName: null,
+      workflowArgs: null,
+    });
+    expect((await db.codingRun.findUniqueOrThrow({ where: { runId: ignored!.run.id } })).protectedPaths).not.toContain(
+      ".claude/**",
+    );
+  });
+
   it("refuses input plan files over the limit before anything is created", async () => {
     const { agentId } = await codingAgent();
     const { executor } = fakeExecutor();

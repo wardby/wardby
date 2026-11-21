@@ -906,6 +906,69 @@ the agent's commands); Claude Code itself always runs on
 `CODING_CLAUDE_WORKER_IMAGE`. See
 [Bring-Your-Own Coding-Worker Images](coding-worker-byo-images.md).
 
+## Workflow scripts (Claude Code)
+
+A Claude Code agent can run a repository workflow script instead of a
+free-form task: a `.claude/workflows/<name>.js` file that runs a fixed process
+in phases, with a sub-agent per step, using Claude Code's own `Workflow` tool
+inside the worker.
+
+```json
+{
+  "codingProfile": {
+    "provider": "claude-code",
+    "workflow": { "name": "fix-bug", "repository": "processes" },
+    "gitHistory": { "depth": 1 }
+  }
+}
+```
+
+- `workflow.name` is the file name without `.js` (letters, digits, `_`, `-`,
+  at most 64 characters). `workflow.repository` is a link name. When it's
+  omitted, the script comes from the default repository. A linked repository
+  is read at the commit resolved for the run, with that link's read grant.
+- A workflow needs `gitHistory`, because scripts use git. With it, the
+  script's own local commits are collected onto Wardby's branch.
+- `trigger_agent` takes `workflowArgs`, a JSON object of at most 16 KiB that
+  becomes the script's `args`, and so does `delegate_to_<name>` when the
+  sub-agent has a workflow. Without it, `args` is the run's request text as a
+  string (the task, without the agent's standing instructions).
+  Like `task`, a non-owner may pass `workflowArgs` only when the owner set
+  `allowWebhookTaskOverride`. `workflowArgs` for an agent without a workflow is refused with
+  `workflow_args_without_workflow`.
+- In sub-agent prompts, name files by their `/workspace` path: sub-agents start
+  in a folder of instruction files and otherwise look there first.
+- When `args` is an object, Wardby adds a reserved `wardby` field
+  (`{ runId, baseSha }`), so a script can tell a Wardby run from a laptop run.
+- `workflow.replyField` names a string field of the script's result to use,
+  word for word, as a no-change run's reply; an issue the delegating lead
+  posts to gets that text in place of the lead's reply. On a run with a pull
+  request, the result's `prTitle` and `prBody` are the commit title and
+  description.
+- The run is always in native mode (whatever `claudeBareMode` says), the only
+  workflow loaded is the named one, and `.claude/**` is added to the run's
+  protected paths.
+- Inside the worker, a guard allows one `Workflow` call, for that name, and
+  fills in the args. An inline script, a script path, a remote run or a
+  second call is refused.
+- Once the workflow has completed, the run keeps its result even when the
+  session can't give a valid final answer: Wardby builds it from the
+  script's returned value (`replyField`, `prTitle` and `prBody`), and
+  collection decides from the workspace whether anything changed.
+- The run's result is the session's answer after the workflow completes. A
+  workflow that fails, is stopped or never starts fails the run with
+  `coding_failure_workflow_failed`. A missing or unreadable script fails the
+  run before launch with `coding_failure_workflow_unavailable`.
+- Sub-agents have the same tools and sandbox as any Claude Code run:
+  `run_command` and the agent's attached MCP tools, no Claude Code built-ins,
+  no Docker, and no network beyond the run's allowance. Their model calls go
+  through the coding proxy and count toward the run's budget, and parallel
+  sub-agents each reserve their own hold (see [Budgets](#budgets)).
+- A script should leave branches, pushes and pull requests to Wardby. When
+  its result has string `prTitle` and `prBody`, the pull request uses them.
+
+Codex agents can't run workflow scripts.
+
 ## Branch names
 
 A coding run pushes to a branch under `wardby/`. Wardby picks the name when it

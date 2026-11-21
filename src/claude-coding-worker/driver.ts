@@ -1,3 +1,6 @@
+import { constants } from "node:fs";
+import { open, realpath } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import {
   CODING_PROTOCOL_VERSION,
   parseCodingAgentOutputJson,
@@ -8,6 +11,7 @@ import {
   type DependencyCacheReport,
   type GitHistoryInput,
   type PlanFileWire,
+  CONTEXT_WORKFLOW_PATH,
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_CLAUDE_MAX_TURNS,
   TEST_OUTCOME_DESCRIPTION,
@@ -22,6 +26,7 @@ import {
 import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
 import { describeError, type DebugTracer } from "../coding-worker/debug-trace.js";
 import { workerTaskNote } from "../coding-worker/task-note.js";
+import { WorkflowProgressReporter } from "./workflow-progress.js";
 import {
   assertMcpHeaderPlaceholder,
   type MCP_TOKEN_HEADER,
@@ -187,6 +192,11 @@ export interface ClaudeQueryOptions {
    * wardby_mcp). With `header` (Substrate), the token is the gateway's placeholder, sent in that header.
    */
   mcp?: { url: string; token: string; header?: typeof MCP_TOKEN_HEADER };
+  /**
+   * Set only on a workflow run (#582): the script to run and its args. sdk.ts enables the Workflow
+   * tool and a guard that allows exactly one call, for this name, and puts these args in it.
+   */
+  workflow?: { name: string; args: unknown };
 }
 
 export type ClaudeQueryFactory = (options: ClaudeQueryOptions) => AsyncIterable<ClaudeSdkMessage>;
@@ -240,6 +250,136 @@ export interface ClaudeWorkerRunOptions {
   resultBundle?: (repository: GitHistoryInput["repositories"][number], timeoutMs: number) => Promise<unknown>;
   /** One operator log line (a fixed-code JSON object); stderr by default. */
   operatorLog?: (event: Record<string, string>) => void;
+}
+
+/** Whether the session's final JSON passes the output schema. */
+function validAgentOutput(json: string): boolean {
+  try {
+    parseCodingAgentOutputJson(json);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The most a workflow script's result file may be. */
+const MAX_WORKFLOW_RESULT_BYTES = 1024 * 1024;
+
+/**
+ * The value a workflow script returned (#582), from the file Claude Code names in its
+ * task_notification: an absolute path to a regular file (never a symlink), at most 1 MiB, holding a
+ * JSON object. `shape` says how it was found, for the trace. Never throws.
+ */
+export async function readWorkflowResult(
+  path: unknown,
+): Promise<{ value: Record<string, unknown>; shape: string } | { problem: string }> {
+  if (typeof path !== "string" || !isAbsolute(path)) return { problem: "no_file" };
+  let text: string;
+  try {
+    // No link anywhere on the path, then one open (never following a link) whose own handle is
+    // checked and read: the file checked is the file read.
+    if ((await realpath(path)) !== path) return { problem: "not_file" };
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) return { problem: "not_file" };
+      if (info.size > MAX_WORKFLOW_RESULT_BYTES) return { problem: "too_large" };
+      text = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return { problem: "unreadable" };
+  }
+  const asObject = (value: unknown): Record<string, unknown> | null =>
+    value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { problem: "not_json" };
+  }
+  const object = asObject(parsed);
+  if (!object) return { problem: "not_object" };
+  // Claude Code's task output: { summary, agentCount, logs, result, workflowProgress, ... }, with the
+  // script's returned value in `result` (an object, or that object as JSON text).
+  if ("result" in object && ("workflowProgress" in object || "agentCount" in object)) {
+    let inner: unknown = object.result;
+    if (typeof inner === "string") {
+      try {
+        inner = JSON.parse(inner);
+      } catch {
+        return { problem: "result_not_json" };
+      }
+    }
+    const value = asObject(inner);
+    return value ? { value, shape: "task_output" } : { problem: "result_not_object" };
+  }
+  return { value: object, shape: "object" };
+}
+
+/**
+ * The session's final JSON with the script's own values over it: prTitle as the commit title and
+ * prBody as the summary on a change, else the replyField value as the summary. A value the output
+ * schema refuses (a title too long, say) is left out, so the script can never fail the run here.
+ */
+export function applyWorkflowResult(
+  finalJson: string,
+  result: Record<string, unknown>,
+  replyField: string | undefined,
+): { json: string; used: string[] } | null {
+  let session: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(finalJson) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    session = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const text = (key: string | undefined) =>
+    key !== undefined && typeof result[key] === "string" && result[key].trim() !== "" ? result[key] : undefined;
+  const change = session.outcome === "changes_ready";
+  const reply = text(replyField);
+  const summary = change ? (text("prBody") ?? reply) : reply;
+  const summaryKey = change && text("prBody") !== undefined ? "prBody" : replyField;
+  const candidates: Array<[field: string, from: string, value: string | undefined]> = [
+    ["summary", summaryKey ?? "", summary],
+    ["commitTitle", "prTitle", change ? text("prTitle") : undefined],
+  ];
+  let next = session;
+  const used: string[] = [];
+  for (const [field, from, value] of candidates) {
+    if (value === undefined) continue;
+    const attempt = { ...next, [field]: value };
+    try {
+      parseCodingAgentOutputJson(JSON.stringify(attempt));
+    } catch {
+      continue;
+    }
+    next = attempt;
+    used.push(from);
+  }
+  return used.length > 0 ? { json: JSON.stringify(next), used } : null;
+}
+
+/**
+ * A workflow run's prompt (#582): the script does the work, so the session only starts it and then
+ * reports its result. Wardby fills the args (the guard in sdk.ts), so the model never copies them.
+ */
+function workflowPrompt(name: string, runId: string): string {
+  return [
+    `Run this repository's workflow script by calling the Workflow tool exactly once with {"name": "${name}"}.`,
+    "Do not do the task yourself and do not run any other tools while it runs: the workflow does the work.",
+    "The call returns at once, while the workflow runs in the background. End this turn right away with exactly this",
+    `placeholder final JSON, which Wardby ignores: {"schemaVersion": 1, "runId": "${runId}", "outcome": "no_changes", "summary": "Workflow running", "tests": []}`,
+    "You will then be told when the workflow finishes, with its result, in a new turn.",
+    "In that turn, write the real final JSON from the result, with every required field:",
+    '"schemaVersion": 1, "runId", "outcome" ("changes_ready" when the workflow changed files, else "no_changes"),',
+    '"summary" (what the workflow did and the files it changed), and "tests" (each test command the workflow ran with',
+    'its outcome, or [] when it ran none). When the result has string fields "prTitle" and "prBody", use them as',
+    "commitTitle and summary.",
+    `The final JSON runId must be ${runId}.`,
+  ].join("\n");
 }
 
 function boundedPrompt(task: string, runId: string, note: string | undefined, mcp: boolean): string {
@@ -477,7 +617,11 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     }
     return withCache(output);
   };
-  const files = options.input.claudeContext?.files ?? [];
+  // Only the run's own workflow script is ever written (#582): any other workflow file is dropped.
+  const ownScript = options.input.workflow ? `.claude/workflows/${options.input.workflow.name}.js` : undefined;
+  const files = (options.input.claudeContext?.files ?? []).filter(
+    (file) => !CONTEXT_WORKFLOW_PATH.test(file.path) || file.path === ownScript,
+  );
   let bareMode = options.input.claudeBareMode !== false;
   // Bare mode puts the repository context in the system prompt; native mode writes it to disk for
   // Claude Code to load itself.
@@ -504,13 +648,18 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     : undefined;
   const security = claudeWorkerSecurityInstructions(mcp !== undefined, options.input.gitHistory !== undefined);
   const developerInstructions = injected ? `${security}\n\n${injected}` : security;
+  const workflow = options.input.workflow;
+  // A workflow run needs native mode: the Workflow tool reads the script from the context directory.
+  if (workflow && (bareMode || !context)) throw new Error("coding_workflow_failed");
   const stream = options.createQuery({
-    prompt: boundedPrompt(
-      options.input.task,
-      options.input.runId,
-      workerTaskNote(dependencyCache, options.input.repositories, options.input.gitHistory),
-      mcp !== undefined,
-    ),
+    prompt: workflow
+      ? workflowPrompt(workflow.name, options.input.runId)
+      : boundedPrompt(
+          options.input.task,
+          options.input.runId,
+          workerTaskNote(dependencyCache, options.input.repositories, options.input.gitHistory),
+          mcp !== undefined,
+        ),
     model: options.input.model,
     budgetUsd: options.input.budgetUsd,
     maxTurns: options.input.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS,
@@ -533,6 +682,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     ...(options.input.resumeSessionId ? { resumeSessionId: options.input.resumeSessionId } : {}),
     ...(options.trace ? { stderr: (data: string) => options.trace?.record("sdk_stderr", data) } : {}),
     ...(mcp ? { mcp } : {}),
+    ...(workflow ? { workflow: { name: workflow.name, args: workflow.args } } : {}),
   });
   let finalJson: string | undefined;
   let failed = false;
@@ -540,8 +690,26 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   let streamFailed: string | false = false;
   let budgetRefused = false;
   let toolUnreachable = false;
+  // A workflow run whose session could not give a valid final answer after the workflow completed:
+  // the worker builds it from the workflow's own value instead of failing a finished run (#582).
+  let workflowAnswerMissing = false;
   // The last API failure the SDK reported, as a stream failure code: names a failed turn's cause.
   let apiError: string | undefined;
+  // A workflow run (#582): the run's result is the session's answer after the workflow ends, never
+  // one given while it runs (the model may answer early). Tracked from the SDK's task messages.
+  const workflowState = {
+    started: false,
+    ended: undefined as undefined | "completed" | "failed" | "stopped",
+    // Where Claude Code wrote the script's returned value (task_notification.output_file).
+    outputFile: undefined as string | undefined,
+  };
+  // The workflow's phases and sub-agents, for the run's steps (#582).
+  const progressReporter = workflow
+    ? new WorkflowProgressReporter({
+        proxyBaseUrl: options.proxyBaseUrl.endsWith("/") ? options.proxyBaseUrl : `${options.proxyBaseUrl}/`,
+        capability: options.capability,
+      })
+    : undefined;
   try {
     for await (const message of stream) {
       // Every SDK message, raw: init, assistant (tool_use with the command), user (tool_result), result.
@@ -550,6 +718,22 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
       if (toolServerUnreachable(message)) {
         toolUnreachable = true;
         break;
+      }
+      if (workflow && message.type === "system") {
+        const task = message as {
+          subtype?: unknown;
+          task_type?: unknown;
+          status?: unknown;
+          output_file?: unknown;
+          workflow_progress?: unknown;
+        };
+        if (task.subtype === "task_progress") progressReporter?.update(task.workflow_progress);
+        if (task.subtype === "task_started" && task.task_type === "local_workflow") workflowState.started = true;
+        else if (task.subtype === "task_notification" && workflowState.started && !workflowState.ended) {
+          workflowState.ended =
+            task.status === "completed" ? "completed" : task.status === "stopped" ? "stopped" : "failed";
+          if (typeof task.output_file === "string") workflowState.outputFile = task.output_file;
+        }
       }
       if (message.type === "system") {
         const sessionId = (message as { session_id?: unknown }).session_id;
@@ -565,12 +749,20 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         });
       } else if (message.type === "result") {
         const errored = message.subtype !== "success" || (message as { is_error?: unknown }).is_error === true;
-        if (errored && resultRefusedForBudget(message)) budgetRefused = true;
-        else if (message.subtype === "success" && typeof message.result === "string") finalJson = message.result;
-        else if (message.subtype === "error_max_budget_usd") {
+        if (errored && resultRefusedForBudget(message)) {
+          budgetRefused = true;
+          // A workflow keeps running in the background on refused calls: end the session now.
+          if (workflow) break;
+        } else if (message.subtype === "success" && typeof message.result === "string") {
+          // A workflow run's answer counts only once the workflow has ended (see workflowState); the
+          // launch turn's placeholder is ignored, and marked so in the trace.
+          if (!workflow || workflowState.ended) finalJson = message.result;
+          else options.trace?.record("workflow_placeholder_ignored", { workflowStarted: workflowState.started });
+        } else if (message.subtype === "error_max_budget_usd") {
           budgetRefused = true;
           break;
         } else if (message.subtype === "error_max_turns") turnLimit = true;
+        else if (workflow && workflowState.ended === "completed") workflowAnswerMissing = true;
         else failed = true;
       }
     }
@@ -582,12 +774,43 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     else if (err instanceof Error && MAX_TURNS_MESSAGE.test(err.message)) turnLimit = true;
     else streamFailed = apiError ?? streamFailureCode(err);
   }
+  // The tree's last state reaches the run's steps, whatever the run's outcome (bounded wait).
+  await progressReporter?.flush();
   if (budgetRefused) return finish(budgetExhausted(options.input));
   if (streamFailed) throw new Error(streamFailed);
   if (turnLimit) throw new Error("coding_turn_limit");
   if (toolUnreachable) throw new Error("worker_tool_runner_unreachable");
   if (failed) throw new Error(apiError ?? "coding_turn_failed");
+  // The workflow never started, never ended, or ended failed or stopped: the run did not do its work.
+  if (workflow && workflowState.ended !== "completed") throw new Error("coding_workflow_failed");
+  // The workflow finished: an answer the session could not give, or gave invalid, is rebuilt from
+  // the workflow's value below. changes_ready lets collection decide from the workspace itself.
+  if (workflow && (workflowAnswerMissing || !finalJson || !validAgentOutput(finalJson))) {
+    options.trace?.record("workflow_answer_rebuilt", {
+      reason: workflowAnswerMissing ? "no_valid_answer" : !finalJson ? "no_answer" : "invalid_answer",
+    });
+    finalJson = JSON.stringify({
+      schemaVersion: CODING_PROTOCOL_VERSION,
+      runId: options.input.runId,
+      outcome: "changes_ready",
+      summary: `Workflow ${workflow.name} completed.`,
+      tests: [],
+    });
+  }
   if (!finalJson) throw new Error("coding_output_missing");
+  // The script's own values, word for word, over the session's retelling of them (#582).
+  if (workflow) {
+    const read = await readWorkflowResult(workflowState.outputFile);
+    // Which fields were used, never their values: the trace is operator diagnostics.
+    const applied = "value" in read ? applyWorkflowResult(finalJson, read.value, workflow.replyField) : null;
+    options.trace?.record("workflow_result", {
+      ...("value" in read
+        ? { shape: read.shape, keys: Object.keys(read.value).slice(0, 32) }
+        : { problem: read.problem }),
+      used: applied?.used ?? [],
+    });
+    if (applied) finalJson = applied.json;
+  }
   let output: CodingAgentOutput;
   try {
     output = parseCodingAgentOutputJson(finalJson);
@@ -595,6 +818,9 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     if (safeWorkerErrorCode(error) !== "worker_failed") throw error;
     throw new Error("coding_output_invalid", { cause: error });
   }
+  // A workflow run's session has seen the workflow's own run id (wf_...) and may copy it: Wardby
+  // knows which run this is, so it sets it.
+  if (workflow) output = { ...output, runId: options.input.runId };
   if (output.runId !== options.input.runId) throw new Error("coding_output_run_mismatch");
   // Only a changes_ready workspace is collected into a pull request; lockfiles pointed at the proxy
   // would otherwise commit sandbox-only download URLs. The warnings name repository paths, so they

@@ -38,7 +38,13 @@ import {
 import { RUN_STEPS_LEVELS, type RunStepsLevel } from "../../core/run-steps/config.js";
 import { SeenIds } from "../../core/run-steps/seen.js";
 import { CLAUDE_RESULT_TOOL } from "../../core/run-steps/summarize.js";
-import type { RunStepBatch, RunStepSubmitter } from "../../core/run-steps/types.js";
+import { WorkflowProgressSchema } from "../../core/run-steps/wire.js";
+import {
+  STEP_AGENT_REF,
+  type ExtractedStep,
+  type RunStepBatch,
+  type RunStepSubmitter,
+} from "../../core/run-steps/types.js";
 import type {
   CredentialResolver,
   ExpiredRequest,
@@ -79,6 +85,12 @@ export const OPTIONAL_ANTHROPIC_BETAS = ["per-turn-control-2026-07-01"] as const
 const APPROVED_ANTHROPIC_BETAS = new Set<string>([...CLAUDE_CODE_ANTHROPIC_BETAS, ...OPTIONAL_ANTHROPIC_BETAS]);
 const WARDBY_COMMAND_TOOL = "mcp__wardby_tools__run_command";
 const STRUCTURED_OUTPUT_TOOL = CLAUDE_RESULT_TOOL;
+/** Claude Code's Workflow tool (#582): allowed only for a workflow session. */
+const WORKFLOW_TOOL = "Workflow";
+/** Claude Code's Skill tool: allowed only for a session whose run has repository skills in native mode (#582). */
+export const SKILL_TOOL = "Skill";
+/** The thinking.display values Claude Code's workflow sub-agents send (#582). */
+const WORKFLOW_THINKING_DISPLAY = new Set(["omitted", "summarized"]);
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_TOOL_TEXT_BYTES = 256 * 1024;
 /**
@@ -114,6 +126,8 @@ export interface ExecuteProxyRequest {
   rawBody: string;
   requestKey?: string;
   anthropicBeta?: string;
+  /** Claude Code's x-claude-code-agent-id: on a workflow session, the sub-agent its steps belong to (#582). */
+  agentId?: string;
 }
 
 /** What this session's replies and requests are read for. */
@@ -138,6 +152,10 @@ export interface CreateCodingProxySession {
   mcpTokenHash?: string;
   /** The run's level (Run.runStepsLevel), fixed at dispatch; absent counts as summary. */
   runStepsLevel?: RunStepsLevel;
+  /** A workflow run (#582): its requests may use the Workflow tool's shapes. Absent = false. */
+  workflow?: boolean;
+  /** Native mode with repository skills (#582): its requests may use the Skill tool. Absent = false. */
+  skills?: boolean;
 }
 
 export interface CreatedCodingProxySession {
@@ -802,15 +820,47 @@ function validateMcpTool(tool: Record<string, unknown>): void {
   if (tool.cache_control !== undefined) validateCacheControl(tool.cache_control);
 }
 
-function validateApprovedTool(value: unknown, mcpTools: ReadonlySet<string>): void {
+/**
+ * Claude Code's Workflow tool (#582), as it advertises it on a workflow run: a plain client tool.
+ * Accepted only for a workflow session; the worker's guard decides what a call may do.
+ */
+function validateWorkflowTool(tool: Record<string, unknown>): void {
+  onlyKeys(tool, ["name", "description", "input_schema", "cache_control", "type"]);
+  if (
+    typeof tool.description !== "string" ||
+    tool.description.length > MAX_TOOL_TEXT_BYTES ||
+    (tool.type !== undefined && tool.type !== "custom")
+  ) {
+    throw new CodingProxyError(400, "tools_not_allowed");
+  }
+  record(tool.input_schema, "tools_not_allowed");
+  if (tool.cache_control !== undefined) validateCacheControl(tool.cache_control);
+}
+
+/**
+ * Claude Code's Skill tool, offered in native mode when the repository has skills: a plain client
+ * tool whose calls load a skill's instructions. Accepted only for a session registered with skills.
+ */
+function validateSkillTool(tool: Record<string, unknown>): void {
+  validateWorkflowTool(tool);
+}
+
+function validateApprovedTool(value: unknown, mcpTools: ReadonlySet<string>, workflow: boolean, skills = false): void {
   const tool = record(value, "tools_not_allowed");
   if (tool.name === WARDBY_COMMAND_TOOL) return validateCommandTool(tool);
   if (tool.name === STRUCTURED_OUTPUT_TOOL) return validateStructuredOutputTool(tool);
   if (typeof tool.name === "string" && mcpTools.has(tool.name)) return validateMcpTool(tool);
+  if (workflow && tool.name === WORKFLOW_TOOL) return validateWorkflowTool(tool);
+  if (skills && tool.name === SKILL_TOOL) return validateSkillTool(tool);
   throw new CodingProxyError(400, "tools_not_allowed");
 }
 
-function validateToolUseBlock(value: Record<string, unknown>, mcpTools: ReadonlySet<string>): void {
+function validateToolUseBlock(
+  value: Record<string, unknown>,
+  mcpTools: ReadonlySet<string>,
+  workflow: boolean,
+  skills = false,
+): void {
   onlyKeys(value, ["type", "id", "name", "input"]);
   if (typeof value.id !== "string" || value.id.length < 1 || value.id.length > 512) {
     throw new CodingProxyError(400, "unsupported_anthropic_feature");
@@ -820,6 +870,10 @@ function validateToolUseBlock(value: Record<string, unknown>, mcpTools: Readonly
   if (typeof value.name === "string" && mcpTools.has(value.name)) {
     return void record(value.input, "unsupported_anthropic_feature");
   }
+  // A workflow session's earlier Workflow call, replayed in the conversation history (#582).
+  if (workflow && value.name === WORKFLOW_TOOL) return void record(value.input, "unsupported_anthropic_feature");
+  // A skills session's earlier Skill call, replayed in the conversation history.
+  if (skills && value.name === SKILL_TOOL) return void record(value.input, "unsupported_anthropic_feature");
   throw new CodingProxyError(400, "unsupported_anthropic_feature");
 }
 
@@ -846,14 +900,20 @@ function validateThinkingBlock(value: Record<string, unknown>): void {
   }
 }
 
-function validateMessageBlocks(value: unknown, role: unknown, mcpTools: ReadonlySet<string>): void {
+function validateMessageBlocks(
+  value: unknown,
+  role: unknown,
+  mcpTools: ReadonlySet<string>,
+  workflow: boolean,
+  skills = false,
+): void {
   if (!Array.isArray(value) || value.length > 10_000) throw new CodingProxyError(400, "invalid_anthropic_request");
   for (const candidate of value) {
     const block = record(candidate);
     if (block.type === "text") {
       validateTextBlock(block);
     } else if (block.type === "tool_use" && role === "assistant") {
-      validateToolUseBlock(block, mcpTools);
+      validateToolUseBlock(block, mcpTools, workflow, skills);
     } else if (block.type === "tool_result" && role === "user") {
       validateToolResultBlock(block);
     } else if (block.type === "thinking" && role === "assistant") {
@@ -928,6 +988,10 @@ function parseAnthropicRequest(
   betaHeader: string | undefined,
   shape: AnthropicModelShape,
   mcpTools: ReadonlySet<string>,
+  /** A workflow session (#582): accept the Workflow tool's request shapes, and only then. */
+  workflow = false,
+  /** A session with repository skills in native mode: accept the Skill tool, and only then. */
+  skills = false,
 ): ParsedRequest {
   const beta = parseAnthropicBeta(betaHeader);
   if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
@@ -989,11 +1053,21 @@ function parseAnthropicRequest(
         continue;
       }
     }
-    validateMessageBlocks(message.content, message.role, mcpTools);
+    // A workflow session (#582): Claude Code tells the session a workflow finished in a user
+    // message with plain string content. Bounded like any tool text; any other session keeps blocks only.
+    if (workflow && message.role === "user" && typeof message.content === "string") {
+      if (Buffer.byteLength(message.content) > MAX_TOOL_TEXT_BYTES) {
+        throw new CodingProxyError(400, "unsupported_anthropic_feature");
+      }
+      continue;
+    }
+    validateMessageBlocks(message.content, message.role, mcpTools, workflow, skills);
   }
   if (body.tools !== undefined) {
     // run_command and StructuredOutput, plus one per pinned MCP tool.
-    if (!Array.isArray(body.tools) || body.tools.length > 2 + mcpTools.size) {
+    // A workflow session also has the Workflow tool (#582).
+    // A skills session also has the Skill tool.
+    if (!Array.isArray(body.tools) || body.tools.length > 2 + mcpTools.size + (workflow ? 1 : 0) + (skills ? 1 : 0)) {
       throw new CodingProxyError(400, "tools_not_allowed");
     }
     const names = new Set<string>();
@@ -1002,7 +1076,7 @@ function parseAnthropicRequest(
       if (typeof definition.name !== "string" || names.has(definition.name))
         throw new CodingProxyError(400, "tools_not_allowed");
       names.add(definition.name);
-      validateApprovedTool(definition, mcpTools);
+      validateApprovedTool(definition, mcpTools, workflow, skills);
     }
   }
   if (body.metadata !== undefined) {
@@ -1015,8 +1089,13 @@ function parseAnthropicRequest(
     requireAnthropicBeta(beta.values, "interleaved-thinking-2025-05-14");
     requireAnthropicBeta(beta.values, "thinking-token-count-2026-05-13");
     const thinking = record(body.thinking);
+    // A workflow session's sub-agents also send thinking.display (#582): one of two fixed values.
+    if (workflow && thinking.display !== undefined && !WORKFLOW_THINKING_DISPLAY.has(thinking.display as string)) {
+      throw new CodingProxyError(400, "unsupported_anthropic_feature");
+    }
+    const thinkingKeys = workflow ? ["display"] : [];
     if (manualThinking) {
-      onlyKeys(thinking, ["type", "budget_tokens"]);
+      onlyKeys(thinking, ["type", "budget_tokens", ...thinkingKeys]);
       const budget = thinking.budget_tokens;
       if (
         thinking.type !== "enabled" ||
@@ -1028,7 +1107,7 @@ function parseAnthropicRequest(
         throw new CodingProxyError(400, "unsupported_anthropic_feature");
       }
     } else {
-      onlyKeys(thinking, ["type"]);
+      onlyKeys(thinking, ["type", ...thinkingKeys]);
       if (thinking.type !== "adaptive") throw new CodingProxyError(400, "unsupported_anthropic_feature");
     }
   }
@@ -1071,13 +1150,15 @@ function parseRequest(
   anthropicBeta: string | undefined,
   shape: AnthropicModelShape,
   mcpTools: ReadonlySet<string>,
+  workflow = false,
+  skills = false,
 ): ParsedRequest {
   if (protocol !== "anthropic-messages" && anthropicBeta !== undefined) {
     throw new CodingProxyError(400, "invalid_anthropic_beta");
   }
   try {
     return protocol === "anthropic-messages"
-      ? parseAnthropicRequest(rawBody, anthropicBeta, shape, mcpTools)
+      ? parseAnthropicRequest(rawBody, anthropicBeta, shape, mcpTools, workflow, skills)
       : parseOpenAiRequest(rawBody);
   } catch (error) {
     // JSON nested deeply enough (inside a free-form tool schema, say) overflows
@@ -1221,6 +1302,8 @@ export class CodingProxy {
       terms: input.terms,
       ...(mcp ? { mcpTools: input.mcpTools, mcpTokenHash: input.mcpTokenHash } : {}),
       ...(input.runStepsLevel ? { runStepsLevel: input.runStepsLevel } : {}),
+      ...(input.workflow === true ? { workflow: true } : {}),
+      ...(input.skills === true ? { skills: true } : {}),
     });
     this.audit({ type: "session.created", runId: input.runId });
     return {
@@ -1255,6 +1338,11 @@ export class CodingProxy {
     return this.ledger.upstreamFailure(sessionId);
   }
 
+  /** The proxy's own first refusal of one of this session's requests (a fixed code), if any. */
+  requestRefusal(sessionId: string): Promise<string | null> {
+    return this.ledger.requestRefusal(sessionId);
+  }
+
   async execute(input: ExecuteProxyRequest, sink: ProxyResponseSink): Promise<void> {
     const session = await this.authenticate(input.bearer);
     // The run's agent exists from its first model request on (both protocols arrive here).
@@ -1277,6 +1365,8 @@ export class CodingProxy {
         input.anthropicBeta,
         shape,
         claudeMcpToolNames(session.mcpTools),
+        session.workflow === true,
+        session.skills === true,
       );
     } catch (error) {
       // The session is already authenticated and no credential has been
@@ -1284,11 +1374,14 @@ export class CodingProxy {
       // is attributable, then refuse.
       if (error instanceof CodingProxyError) {
         this.audit({ type: "request.rejected", runId: session.runId, status: error.status, reason: error.code });
+        // So a run that fails on it can name the cause (a fixed code, never the request).
+        await this.ledger.recordRequestRefusal(session.id, error.code).catch(() => undefined);
       }
       throw error;
     }
     if (!session.allowedModels.includes(parsed.model)) {
       this.audit({ type: "request.rejected", runId: session.runId, model: parsed.model, reason: "model_not_allowed" });
+      await this.ledger.recordRequestRefusal(session.id, "model_not_allowed").catch(() => undefined);
       throw new CodingProxyError(403, "model_not_allowed");
     }
     let terms: { pricing: ModelPricing; version: string };
@@ -1524,8 +1617,13 @@ export class CodingProxy {
     }
 
     try {
-      if (parsed.stream) await this.forwardStream(session, request, upstream, sink, progress, input.bearer);
-      else await this.forwardJson(session, request, upstream, sink, input.bearer);
+      // A workflow session's sub-agent (#582): a well-formed id tags this reply's steps; any other value is ignored.
+      const agent =
+        session.workflow === true && input.agentId !== undefined && STEP_AGENT_REF.test(input.agentId)
+          ? input.agentId
+          : undefined;
+      if (parsed.stream) await this.forwardStream(session, request, upstream, sink, progress, input.bearer, agent);
+      else await this.forwardJson(session, request, upstream, sink, input.bearer, agent);
     } catch (error) {
       await this.markUncertain(
         session,
@@ -1723,6 +1821,7 @@ export class CodingProxy {
     upstream: Response,
     sink: ProxyResponseSink,
     capability: string,
+    agent?: string,
   ): Promise<void> {
     const declaredLength = Number(upstream.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_UPSTREAM_JSON_BYTES) {
@@ -1746,7 +1845,7 @@ export class CodingProxy {
     const capture = stepCapture(session, this.runStepsCeiling);
     if (capture !== "none") {
       this.submitSteps(capability, session.runId, () => ({
-        steps: stepsFromJson(session.protocol, value, { detail: capture === "detail" }),
+        steps: tagged(stepsFromJson(session.protocol, value, { detail: capture === "detail" }), agent),
         results: [],
       }));
     }
@@ -1759,6 +1858,7 @@ export class CodingProxy {
     sink: ProxyResponseSink,
     progress: RelayProgress,
     capability: string,
+    agent?: string,
   ): Promise<void> {
     if (!upstream.body) throw new Error("missing_upstream_body");
     sink.start(upstream.status, { "content-type": "text/event-stream", "cache-control": "no-store" });
@@ -1831,8 +1931,29 @@ export class CodingProxy {
     } finally {
       // The reply's steps, also when the stream broke (then its open text is marked cut).
       const extractor = steps;
-      if (extractor) this.submitSteps(capability, session.runId, () => ({ steps: extractor.finish(), results: [] }));
+      if (extractor) {
+        this.submitSteps(capability, session.runId, () => ({ steps: tagged(extractor.finish(), agent), results: [] }));
+      }
     }
+  }
+
+  /**
+   * A workflow run's tree from its worker (#582), relayed with the run's steps. Only a workflow
+   * session may send one; a body outside the schema is refused without echoing any of it.
+   */
+  async workflowProgress(bearer: string, rawBody: string): Promise<void> {
+    const session = await this.authenticate(bearer);
+    if (session.workflow !== true) throw new CodingProxyError(403, "not_a_workflow_session");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new CodingProxyError(400, "invalid_workflow_progress");
+    }
+    const tree = WorkflowProgressSchema.safeParse(parsed);
+    if (!tree.success) throw new CodingProxyError(400, "invalid_workflow_progress");
+    if (stepCapture(session, this.runStepsCeiling) === "none") return;
+    this.submitSteps(bearer, session.runId, () => ({ steps: [], results: [], workflow: tree.data }));
   }
 
   /** Queues a step batch for the control plane. Best effort: any failure drops the steps, never the request. */
@@ -1840,7 +1961,9 @@ export class CodingProxy {
     if (!this.steps) return;
     try {
       const batch = build();
-      if (batch.steps.length > 0 || batch.results.length > 0) this.steps.submit(capability, runId, batch);
+      if (batch.steps.length > 0 || batch.results.length > 0 || batch.workflow) {
+        this.steps.submit(capability, runId, batch);
+      }
     } catch {
       // Dropped: steps are never a reason to fail a model request.
     }
@@ -2034,4 +2157,9 @@ function responseHeadersOf(upstream: Response): { contentType?: string; contentE
   const contentType = clean(upstream.headers.get("content-type"));
   const contentEncoding = clean(upstream.headers.get("content-encoding"));
   return { ...(contentType ? { contentType } : {}), ...(contentEncoding ? { contentEncoding } : {}) };
+}
+
+/** A workflow sub-agent's steps carry its id (#582); the main session's stay untagged. */
+function tagged(steps: ExtractedStep[], agent: string | undefined): ExtractedStep[] {
+  return agent === undefined ? steps : steps.map((step) => ({ ...step, agent }));
 }

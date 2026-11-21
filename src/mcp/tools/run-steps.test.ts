@@ -20,6 +20,7 @@ interface FakeStep {
   summary: string;
   status: string | null;
   detail: string | null;
+  agentRef?: string | null;
 }
 interface FakeRun {
   id: string;
@@ -51,7 +52,7 @@ const run = (overrides: Partial<FakeRun> = {}): FakeRun => ({
   ...overrides,
 });
 
-function fakeStepsDb(runs: FakeRun[], grants: FakeGrantSeed[] = []): PrismaClient {
+function fakeStepsDb(runs: FakeRun[], grants: FakeGrantSeed[] = [], workflowProgress?: unknown): PrismaClient {
   const agents = new Map([["a1", { id: "a1", ownerId: "owner" }]]);
   return {
     resourceGrant: fakeResourceGrants(grants),
@@ -77,8 +78,9 @@ function fakeStepsDb(runs: FakeRun[], grants: FakeGrantSeed[] = []): PrismaClien
           .filter((s) => s.seq > q.where.seq.gt)
           .sort((a, b) => a.seq - b.seq)
           .slice(0, q.take)
-          .map((s) => Object.fromEntries(Object.keys(q.select).map((key) => [key, s[key as keyof FakeStep]]))),
+          .map((s) => Object.fromEntries(Object.keys(q.select).map((key) => [key, s[key as keyof FakeStep] ?? null]))),
     },
+    ...(workflowProgress !== undefined ? { codingRun: { findUnique: async () => ({ workflowProgress }) } } : {}),
   } as unknown as PrismaClient;
 }
 
@@ -218,5 +220,21 @@ describe("get_run_steps", () => {
     expect(JSON.parse(out.text).steps[0]).not.toHaveProperty("detail");
     expect(out.text).not.toContain("SHOULD-NOT-SHOW");
     expect(selects[0]).not.toHaveProperty("detail");
+  });
+
+  it("returns a workflow run's tree and each sub-agent step's agent (#582)", async () => {
+    const tree = {
+      phases: [{ index: 1, title: "Triage: Intake" }],
+      agents: [{ id: "ab1d62e7e65c99f79", label: "intake", phaseIndex: 1, state: "done", attempt: 1 }],
+    };
+    const steps = [{ ...step(1), agentRef: "ab1d62e7e65c99f79" }, step(2)];
+    const call = await setup(fakeStepsDb([run({ steps })], [], tree), "trig");
+    const body = JSON.parse((await call({ runId: "r1" })).text) as {
+      steps: Record<string, unknown>[];
+      workflow?: unknown;
+    };
+    expect(body.workflow).toEqual(tree);
+    expect(body.steps[0].agent).toBe("ab1d62e7e65c99f79");
+    expect(body.steps[1]).not.toHaveProperty("agent");
   });
 });

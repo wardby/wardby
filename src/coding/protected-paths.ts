@@ -12,6 +12,18 @@
 export const WARDBY_PROTECTED_PATHS = [".wardby/**", "!.wardby/services.yaml"] as const;
 
 /**
+ * Added to a workflow run's protected paths at dispatch (#582): the run may not change Claude Code's
+ * repository configuration, its workflow scripts included, so a workflow can't rewrite itself or
+ * another workflow in its pull request.
+ */
+export const WORKFLOW_PROTECTED_PATHS = [".claude/**"] as const;
+
+/** A run's protected paths: the agent's, plus WORKFLOW_PROTECTED_PATHS on a workflow run. */
+export function runProtectedPaths(agentPaths: readonly string[], workflow: boolean): string[] {
+  return workflow ? [...new Set([...agentPaths, ...WORKFLOW_PROTECTED_PATHS])] : [...agentPaths];
+}
+
+/**
  * A leading "!" makes a protectedPaths entry an exception (providers/vcs/git.ts
  * protectedPathMatcher): one literal file path carved out of the agent's own
  * patterns. Exceptions take no wildcards, so "!**" or "!.github/**" cannot

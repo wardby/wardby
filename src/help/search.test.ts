@@ -679,3 +679,29 @@ describe("changing a secret's value help", () => {
     expect(searchHelp(corpus, "secret_link_superseded")[0]?.page.id).toBe("errors/secret-link-superseded");
   });
 });
+
+describe("coding workflows help (#582)", () => {
+  it("is found for workflow, .claude/workflows and workflowArgs, and each error code finds its article", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const corpus = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (q: string) =>
+      searchHelp(corpus, q)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    for (const q of [
+      "workflow",
+      ".claude/workflows",
+      "workflowArgs",
+      "workflow script",
+      "replyField",
+      "workflow reply",
+    ]) {
+      expect(top3(q), q).toContain("coding-workflows");
+    }
+    expect(searchHelp(corpus, "coding_failure_workflow_unavailable")[0]?.page.id).toBe(
+      "errors/coding-workflow-unavailable",
+    );
+    expect(searchHelp(corpus, "coding_failure_workflow_failed")[0]?.page.id).toBe("errors/coding-workflow-failed");
+  });
+});
