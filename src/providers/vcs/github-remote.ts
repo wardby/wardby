@@ -3,8 +3,6 @@ import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protoco
 import { logger } from "../../core/logger.js";
 import { commitIssueKey, conventionalSubject } from "../../coding/commit-subject.js";
 
-/** The longest compare link with a pre-filled description (#586); a longer one leaves the body out. */
-const MAX_COMPARE_URL = 8000;
 import { validateChangedPath } from "./git.js";
 import {
   isLockfilePath,
@@ -22,6 +20,9 @@ import type {
   FinalizeChangesDetails,
   PreparedWorkspace,
 } from "./types.js";
+
+/** The longest compare link with a pre-filled description (#586); a longer one leaves the body out. */
+const MAX_COMPARE_URL = 8000;
 
 export interface GitHubRemoteOptions {
   github: GitHubRepositoryAccess;
@@ -208,7 +209,10 @@ export class GitHubRemote implements GitRemote {
     prepared: PreparedWorkspace,
     details?: FinalizeChangesDetails,
   ): { branchUrl: string; compareUrl: string } {
-    const path = (ref: string) => ref.split("/").map(encodeURIComponent).join("/");
+    // Every segment percent-encoded, parentheses too, so the link can't end a Markdown link early.
+    const segment = (part: string) =>
+      encodeURIComponent(part).replace(/[()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    const path = (ref: string) => ref.split("/").map(segment).join("/");
     const base = `https://github.com/${prepared.repository}`;
     const query = new URLSearchParams({ expand: "1" });
     if (details?.commit?.title) {

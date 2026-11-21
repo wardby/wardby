@@ -3304,6 +3304,16 @@ describe("ContainerExecutor", () => {
       ]);
     });
 
+    it("records the first description of a branch-only root's pull request on the root (#586)", async () => {
+      const created = await fixRound({ rootBranchOnly: true });
+      created.vcs.finalizeDescription = { kind: "written", sha256: NEW_SHA };
+      await created.executor.start("run-1");
+      expect(created.recorded).toEqual([
+        { rootRunId: "root-run", expectedSha256: null, sha256: NEW_SHA, agentTextRunId: "run-1" },
+      ]);
+      expect(created.store.completions[0].record?.prDescriptionOutcome).toBe("written");
+    });
+
     it("a legacy rebuild matches a description written out by hand, as a fresh run's pull request carried it", async () => {
       const created = await fixRound(
         {},
@@ -7299,6 +7309,31 @@ describe("ContainerExecutor with several repositories (#537)", () => {
       });
       await both.executor.start("run-1");
       expect(both.vcs.finalizeCalls.map((call) => call.details?.pullRequest)).toEqual(["none", undefined]);
+    });
+
+    it("leaves a branch-only repository out of the merge order, and numbers the rest without it (#586)", async () => {
+      const three = await multi(
+        [writeRow("tools", { repository: "openai/tools" }), writeRow("docs", { repository: "openai/docs" })],
+        {
+          pullRequests: [
+            { name: "tools", description: "Tools change.", pullRequest: "none" },
+            { name: "docs", description: "Docs change." },
+          ],
+        },
+      );
+      await three.executor.start("run-1");
+      expect(three.store.completions[0].record?.mergeOrder).toBe(1);
+      expect(extrasOf(three)?.map((extra) => [extra.name, extra.mergeOrder])).toEqual([
+        ["tools", null],
+        ["docs", 2],
+      ]);
+      // One pull request beside a branch-only push is a lone pull request: no order at all.
+      const two = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        pullRequests: [{ name: "tools", description: "Tools change.", pullRequest: "none" }],
+      });
+      await two.executor.start("run-1");
+      expect(two.store.completions[0].record?.mergeOrder).toBeUndefined();
+      expect(extrasOf(two)?.[0].mergeOrder).toBeNull();
     });
 
     it("(b) collects and publishes a changed extra even when the worker says no_changes", async () => {

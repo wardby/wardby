@@ -1360,6 +1360,37 @@ describe("branch-only runs (#586)", () => {
     expect(body.indexOf("Fixed the blank card.")).toBeLessThan(body.indexOf("Pushed branch"));
   });
 
+  it("names a branch-only repository beside the pull requests of a mixed run, and when a sub-run failed", () => {
+    const tools = {
+      ...branchOutcome(pushed)!,
+      repository: "acme/tools",
+      branchUrl: "https://github.com/acme/tools/tree/wardby/run-r1",
+    };
+    const opened = {
+      outcome: "pull_request_opened",
+      repository: REPO,
+      pullRequestNumber: 73,
+      codeProvider: "github",
+    } as const;
+    const mixed = outcomeBody({ id: "r1", status: "succeeded", finalText: "done" }, REPO, [opened], [], {
+      branches: [tools],
+    });
+    expect(mixed).toContain("✅ Opened #73");
+    expect(mixed).toContain(`Pushed branch [\`wardby/run-r1\`](${tools.branchUrl}) in acme/tools`);
+    const failed = outcomeBody(
+      { id: "r1", status: "succeeded", finalText: "done" },
+      REPO,
+      [opened],
+      [{ id: "c9", status: "failed" }],
+      {
+        branches: [tools],
+      },
+    );
+    expect(failed).toContain("Pushed branch [`wardby/run-r1`]");
+    const stopped = outcomeBody({ id: "r1", status: "failed", finalText: null }, REPO, [], [], { branches: [tools] });
+    expect(stopped).toContain("Pushed branch [`wardby/run-r1`]");
+  });
+
   it("collects the branches of the run's coding sub-runs", async () => {
     const database = {
       run: {

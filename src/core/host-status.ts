@@ -295,7 +295,14 @@ export function outcomeBody(
   const links = pullRequests.map((pr) =>
     pr.outcome === "pull_request_opened" ? `Opened ${refOf(pr)}` : `Pushed changes to ${refOf(pr)}`,
   );
-  const partial = links.length > 0 ? `\n\n${links.join(", ")}.` : "";
+  // Branches pushed with no pull request (#586): one line each, in every body, beside any pull requests.
+  const branchLines = (opts.branches ?? []).map((branch) => {
+    const where = branch.repository.toLowerCase() === repository.toLowerCase() ? "" : ` in ${branch.repository}`;
+    const open = branch.compareUrl ? ` ([open a pull request](${branch.compareUrl}))` : "";
+    return `Pushed branch [\`${branch.headRef}\`](${branch.branchUrl})${where}${open}.`;
+  });
+  const branchNote = branchLines.length > 0 ? `\n\n${branchLines.join("\n")}` : "";
+  const partial = `${links.length > 0 ? `\n\n${links.join(", ")}.` : ""}${branchNote}`;
   const refusals = opts.packageRefusals ?? [];
   const blocked = isBlockedByRefusals(run, {
     pullRequests,
@@ -401,25 +408,18 @@ export function outcomeBody(
     const others = links.filter((_, i) => !kept.includes(pullRequests[i]));
     const otherLinks = others.length > 0 ? `\n\n${others.join(", ")}.` : "";
     const icon = kept.length === failedChildren.length ? "⚠️" : "❌";
-    return `${icon} ${lines.join(" ")}${otherLinks}${quoted}\n\n${footer}`;
+    return `${icon} ${lines.join(" ")}${otherLinks}${branchNote}${quoted}\n\n${footer}`;
   }
   const failedChecks = pullRequests.reduce((sum, pr) => sum + (pr.failedChecks ?? 0), 0);
   const skippedChecks = pullRequests.reduce((sum, pr) => sum + (pr.skippedChecks ?? 0), 0);
   if (links.length > 0 && failedChecks > 0) {
     const skipped = skippedChecks > 0 ? ` and ${skippedChecks} skipped` : "";
-    return `⚠️ ${links.join(", ")}, but ${checksOf(failedChecks)} failed${skipped} in the run: see the pull request's description before merging.\n\n${footer}`;
+    return `⚠️ ${links.join(", ")}, but ${checksOf(failedChecks)} failed${skipped} in the run: see the pull request's description before merging.${branchNote}\n\n${footer}`;
   }
   if (links.length > 0 && skippedChecks > 0) {
-    return `✅ ${links.join(", ")}. ${checksOf(skippedChecks)} could not be run and ${skippedChecks === 1 ? "was" : "were"} skipped: see the pull request's description.\n\n${footer}`;
+    return `✅ ${links.join(", ")}. ${checksOf(skippedChecks)} could not be run and ${skippedChecks === 1 ? "was" : "were"} skipped: see the pull request's description.${branchNote}\n\n${footer}`;
   }
-  if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
-  // Branches pushed with no pull request (#586): one line each, after the reply.
-  const branchLines = (opts.branches ?? []).map((branch) => {
-    const where = branch.repository.toLowerCase() === repository.toLowerCase() ? "" : ` in ${branch.repository}`;
-    const open = branch.compareUrl ? ` ([open a pull request](${branch.compareUrl}))` : "";
-    return `Pushed branch [\`${branch.headRef}\`](${branch.branchUrl})${where}${open}.`;
-  });
-  const branchNote = branchLines.length > 0 ? `\n\n${branchLines.join("\n")}` : "";
+  if (links.length > 0) return `✅ ${links.join(", ")}.${branchNote}\n\n${footer}`;
   if (opts.fullReplyFollows && fullReplyOf(run, pullRequests, failedChildren) !== null) {
     const follows = opts.statusInThread ? FULL_REPLY_FOLLOWS_IN_CONVERSATION : FULL_REPLY_FOLLOWS;
     return opts.replyAsAnswer

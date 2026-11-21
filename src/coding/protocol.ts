@@ -903,7 +903,6 @@ const optionalTag = z.preprocess(normalizeCodingTag, tagSchema) as unknown as Op
 const nullable = <T extends z.ZodTypeAny>(schema: T) =>
   z.preprocess((v) => (v === null ? undefined : v), schema.optional());
 
-/** One pull request's note in a multi-repository run (#537); `workspace` names /workspace. */
 /** The final answer's pullRequest field, for both workers' JSON schemas and prompts (#586). */
 export const PULL_REQUEST_CHOICE_DESCRIPTION =
   'Set to "none" only when the task says not to open a pull request: the branch is pushed and no pull request is opened. Otherwise leave it out (null).';
@@ -917,6 +916,7 @@ export const pullRequestChoice = z.preprocess(
   z.literal("none").optional(),
 );
 
+/** One pull request's note in a multi-repository run (#537); `workspace` names /workspace. */
 export const PullRequestNoteSchema = z
   .object({
     name: z.string().min(1).max(63),

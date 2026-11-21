@@ -114,6 +114,15 @@ describe("GitHubRemote branch only (#586)", () => {
     expect(compare.searchParams.get("body")).toBe("Fixes the blank card.");
   });
 
+  it("percent-encodes parentheses in a branch, so the link can't end a Markdown link early", () => {
+    const links = remoteWith().branchLinks({ ...(prepared as object), baseRef: "release(1)" } as never, {
+      summary: "s",
+      commit: { title: "t" },
+    });
+    expect(links.compareUrl).toContain("/compare/release%281%29...wardby/run-run-1?");
+    expect(links.compareUrl.split("?")[0]).not.toMatch(/[()]/);
+  });
+
   it("leaves the description out of a compare link that would be too long", () => {
     const links = remoteWith().branchLinks(prepared, { summary: "x".repeat(10_000), commit: { title: "t" } });
     expect(links.compareUrl.length).toBeLessThanOrEqual(8000);

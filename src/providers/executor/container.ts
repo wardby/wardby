@@ -380,7 +380,13 @@ interface RepositoryPublish {
   mergeOrder: number;
   /** Its step should it be the run's only push: what a run with one repository records (null = none). */
   soleMergeOrder: number | null;
+  /** It asked for branch only (#586): no pull request, so no step in the merge order. */
+  branchOnly: boolean;
 }
+
+/** A push that takes a step in the merge order: anything but no changes, or a branch-only push (#586). */
+const takesMergeStep = (publish: RepositoryPublish) =>
+  publish.finalized.outcome !== "no_changes" && !publish.branchOnly;
 
 const isNoLongerActive = (error: unknown) => error instanceof Error && error.message === "coding_run_no_longer_active";
 
@@ -3971,7 +3977,8 @@ export class ContainerExecutor implements Executor {
     // step after its own (inherited 3: the default 3, the first extra 5), which may leave a gap.
     // publishRecords keeps the number only when two or more repositories pushed; a lone push records
     // soleMergeOrder, as a run with one repository would.
-    const pushedSoFar = published.filter((publish) => publish.finalized.outcome !== "no_changes");
+    // A branch-only push (#586) opens no pull request, so it takes no step.
+    const pushedSoFar = published.filter(takesMergeStep);
     const numbered = Math.min(MAX_MERGE_ORDER, (latest.mergeOrder ?? 0) + pushedSoFar.length + 1);
     const mergeOrder = slot.extra
       ? (note?.mergeOrder ?? numbered)
@@ -4014,7 +4021,17 @@ export class ContainerExecutor implements Executor {
         : {}),
       ...(slot.resultBundle ? { resultBundle: slot.resultBundle } : {}),
     });
-    return { slot, finalized, current: latest, view, agentOutput, descriptionState, mergeOrder, soleMergeOrder };
+    return {
+      slot,
+      finalized,
+      current: latest,
+      view,
+      agentOutput,
+      descriptionState,
+      mergeOrder,
+      soleMergeOrder,
+      branchOnly,
+    };
   }
 
   /**
@@ -4039,11 +4056,13 @@ export class ContainerExecutor implements Executor {
     let record: CodingRunRecord = dependencyCacheRecord(output);
     const extras: ExtraPublishRecord[] = [];
     // Numbered only when the run pushed two or more repositories; a lone push keeps a single run's order.
-    const several = done.filter((publish) => publish.finalized.outcome !== "no_changes").length >= 2;
+    // A branch-only push (#586) is left out: it has no pull request to order.
+    const several = done.filter(takesMergeStep).length >= 2;
     for (const publish of done) {
       const { finalized, view, slot } = publish;
       const mergeOrder = several ? publish.mergeOrder : publish.soleMergeOrder;
       const pushed = finalized.outcome !== "no_changes";
+      const ordered = takesMergeStep(publish);
       const name = slot.extra?.name;
       const description = !pushed
         ? await this.refreshDescriptionInTime(view, publish.agentOutput, slot.workspace, name)
@@ -4051,7 +4070,7 @@ export class ContainerExecutor implements Executor {
             (): CodingRunRecord => ({}),
           );
       if (slot.extra && pushed && !view.rootCodingRunId && run.rootCodingRunId) {
-        await this.recordFirstExtraDescription(run, slot.extra.name, description);
+        await this.recordFirstDescription(run, description, slot.extra.name);
       }
       const result = this.publishedResult(publish, options.budgetStopped);
       if (!slot.extra) {
@@ -4061,7 +4080,7 @@ export class ContainerExecutor implements Executor {
           ...record,
           ...(pushed ? pushedRecord(finalized) : {}),
           ...description,
-          ...(pushed && run.mergeOrder == null && mergeOrder != null ? { mergeOrder } : {}),
+          ...(ordered && run.mergeOrder == null && mergeOrder != null ? { mergeOrder } : {}),
         };
         continue;
       }
@@ -4075,7 +4094,7 @@ export class ContainerExecutor implements Executor {
             : null,
         resultBranch: finalized.outcome === "branch_pushed" ? finalized.headRef : null,
         baseSha: pushed ? finalized.baseCommit : null,
-        mergeOrder: pushed ? mergeOrder : null,
+        mergeOrder: ordered ? mergeOrder : null,
         ...(description.prDescriptionOutcome ? { prDescriptionOutcome: description.prDescriptionOutcome } : {}),
         ...(description.prDescriptionSha256 && description.prDescriptionRunId
           ? { prDescriptionSha256: description.prDescriptionSha256, prDescriptionRunId: description.prDescriptionRunId }
@@ -4363,6 +4382,16 @@ export class ContainerExecutor implements Executor {
         ? { prDescriptionOutcome: "written", prDescriptionSha256: outcome.sha256, prDescriptionRunId: run.runId }
         : {};
     }
+    // A branch-only root's follow-up (#586) wrote its branch's first description: recorded on the
+    // root's row, where every later round reads its baseline, as a first run's would be.
+    if (outcome?.kind === "written" && run.rootBranchOnly) {
+      await this.recordFirstDescription(
+        run,
+        { prDescriptionSha256: outcome.sha256, prDescriptionRunId: run.runId },
+        name,
+      );
+      return { prDescriptionOutcome: "written" };
+    }
     if (!state) return {};
     if ("failed" in state) return { prDescriptionOutcome: "skipped:error" };
     if (!outcome || outcome.kind === "written") return {};
@@ -4396,14 +4425,15 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
-   * An extra repository whose first pull request a continuation opened: its description hash is
-   * recorded on the root run's row of that name too (only while that row records none), where every
-   * later round reads its baseline and mark-ready keeps its state. Never throws.
+   * A pull request a continuation opened first (an extra repository's, or a branch-only root's,
+   * #586): its description hash is recorded on the root run's row (of that name, for an extra; only
+   * while that row records none), where every later round reads its baseline and mark-ready keeps
+   * its state. Never throws.
    */
-  private async recordFirstExtraDescription(
+  private async recordFirstDescription(
     run: ContainerRunSnapshot,
-    name: string,
     description: CodingRunRecord,
+    name?: string,
   ): Promise<void> {
     const store = this.options.store;
     const { prDescriptionSha256: sha256, prDescriptionRunId: agentTextRunId } = description;
@@ -4414,11 +4444,11 @@ export class ContainerExecutor implements Executor {
         expectedSha256: null,
         sha256,
         agentTextRunId,
-        name,
+        ...(name !== undefined ? { name } : {}),
       });
       if (!won) {
         containerLog.warn(
-          { runId: run.runId, rootRunId: run.rootCodingRunId, repository: name },
+          { runId: run.runId, rootRunId: run.rootCodingRunId, ...(name !== undefined ? { repository: name } : {}) },
           "the root run already records a description for this repository's pull request; not recorded",
         );
       }
