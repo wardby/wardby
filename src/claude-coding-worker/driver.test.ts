@@ -1378,7 +1378,12 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
   const started = { type: "system", subtype: "task_started", task_type: "local_workflow", task_id: "w1" };
   const ended = (status: string) => ({ type: "system", subtype: "task_notification", task_id: "w1", status });
 
-  async function run(messages: Record<string, unknown>[], overrides: Partial<CodingTaskInput> = {}) {
+  async function run(
+    messages: Record<string, unknown>[],
+    overrides: Partial<CodingTaskInput> = {},
+    // The real SDK can throw after its last message; a trace recorder sees what the driver keeps.
+    { throwAfter, record }: { throwAfter?: string; record?: (kind: string, data: unknown) => void } = {},
+  ) {
     let captured: ClaudeQueryOptions | undefined;
     let workflowFiles: string[] = [];
     const root = await mkdtemp(join(tmpdir(), "wf-driver-"));
@@ -1389,10 +1394,12 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
           ? await readdir(join(options.contextDirectory, ".claude/workflows")).catch(() => [])
           : [];
         for (const message of messages) yield message as never;
+        if (throwAfter !== undefined) throw new Error(throwAfter);
       })();
     };
     try {
       const result = await runClaudeCodingWorker({
+        ...(record ? { trace: { record, bytesWritten: () => 0 } as never } : {}),
         input: { ...workflowInput, ...overrides },
         proxyBaseUrl: "http://wardby-proxy:8787/",
         capability: "rrp_worker_capability",
@@ -1539,6 +1546,49 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
       });
       // changes_ready lets collection decide from the workspace; the reply is the script's own text.
       expect(result).toMatchObject({ outcome: "changes_ready", summary: comment, tests: [] });
+    });
+
+    describe("when the SDK throws after its structured-output retries (#595)", () => {
+      // Fake provider text, standing in for the SDK's echo of the model's invalid output.
+      const thrown = "Claude Code returned an error result: fake-provider-text-7f3a after 5 attempts";
+      const retriesExhausted = { type: "result", subtype: "error_max_structured_output_retries", is_error: true };
+
+      it("rebuilds the answer from a completed workflow's value, keeping none of the thrown text", async () => {
+        const comment = "Draft for review (SIM-2 triage)";
+        const path = await resultFile({ ticket: "SIM-2", comment });
+        const record = vi.fn();
+        const { result } = await run(
+          [started, endedWith(path), retriesExhausted],
+          { workflow: { name: "fix-bug", args: "SIM-2", replyField: "comment" } },
+          { throwAfter: thrown, record },
+        );
+        expect(result).toMatchObject({ outcome: "changes_ready", summary: comment, tests: [] });
+        const kinds = record.mock.calls.map(([kind]) => kind);
+        expect(kinds).toContain("workflow_answer_rebuilt");
+        expect(kinds).toContain("workflow_answer_stream_ended");
+        expect(kinds).not.toContain("stream_error");
+        expect(JSON.stringify(record.mock.calls)).not.toContain("fake-provider-text-7f3a");
+        expect(JSON.stringify(result)).not.toContain("fake-provider-text-7f3a");
+      });
+
+      it("still fails the run when the workflow is still running or ended failed", async () => {
+        await expect(run([started, retriesExhausted], {}, { throwAfter: thrown })).rejects.toThrow(
+          /^coding_stream_failed$/,
+        );
+        await expect(run([started, ended("failed"), retriesExhausted], {}, { throwAfter: thrown })).rejects.toThrow(
+          /^coding_stream_failed$/,
+        );
+      });
+
+      it("still fails with the stream failure code on a throw with no error result before it", async () => {
+        const path = await resultFile({ comment: "c" });
+        await expect(run([started, endedWith(path)], {}, { throwAfter: thrown })).rejects.toThrow(
+          /^coding_stream_failed$/,
+        );
+        await expect(run([started, endedWith(path)], {}, { throwAfter: "API Error: 500" })).rejects.toThrow(
+          /^coding_stream_upstream_error$/,
+        );
+      });
     });
 
     it("rebuilds an answer that fails the output schema, and still fails a run whose workflow did not end", async () => {

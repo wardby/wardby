@@ -773,12 +773,19 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
       }
     }
   } catch (err) {
-    options.trace?.record("stream_error", describeError(err));
-    // The SDK can also end the stream by throwing at the turn limit. Only that
-    // is read from the error; its text (which can carry provider content) is never kept.
-    if (err instanceof Error && isBudgetRefusal(err.message)) budgetRefused = true;
-    else if (err instanceof Error && MAX_TURNS_MESSAGE.test(err.message)) turnLimit = true;
-    else streamFailed = apiError ?? streamFailureCode(err);
+    // After a completed workflow's error result (seen above, so workflowAnswerMissing), the SDK
+    // throws that same error: the run is not failed, and its answer is rebuilt below (#595). This is
+    // decided by the result already seen, never the thrown text, and none of that text is kept.
+    if (workflow && workflowState.ended === "completed" && workflowAnswerMissing) {
+      options.trace?.record("workflow_answer_stream_ended", { afterErrorResult: true });
+    } else {
+      options.trace?.record("stream_error", describeError(err));
+      // The SDK can also end the stream by throwing at the turn limit. Only that
+      // is read from the error; its text (which can carry provider content) is never kept.
+      if (err instanceof Error && isBudgetRefusal(err.message)) budgetRefused = true;
+      else if (err instanceof Error && MAX_TURNS_MESSAGE.test(err.message)) turnLimit = true;
+      else streamFailed = apiError ?? streamFailureCode(err);
+    }
   }
   // The tree's last state reaches the run's steps, whatever the run's outcome (bounded wait).
   await progressReporter?.flush();
