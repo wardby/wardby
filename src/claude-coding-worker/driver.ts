@@ -251,6 +251,16 @@ export interface ClaudeWorkerRunOptions {
   operatorLog?: (event: Record<string, string>) => void;
 }
 
+/** Whether the session's final JSON passes the output schema. */
+function validAgentOutput(json: string): boolean {
+  try {
+    parseCodingAgentOutputJson(json);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The most a workflow script's result file may be. */
 const MAX_WORKFLOW_RESULT_BYTES = 1024 * 1024;
 
@@ -354,8 +364,11 @@ function workflowPrompt(name: string, runId: string): string {
     "The call returns at once, while the workflow runs in the background. End this turn right away with exactly this",
     `placeholder final JSON, which Wardby ignores: {"schemaVersion": 1, "runId": "${runId}", "outcome": "no_changes", "summary": "Workflow running", "tests": []}`,
     "You will then be told when the workflow finishes, with its result, in a new turn.",
-    "In that turn, write the real final JSON from the result: the outcome, a summary of what the workflow did and the files it changed,",
-    'and, when the result has string fields "prTitle" and "prBody", use them as commitTitle and summary.',
+    "In that turn, write the real final JSON from the result, with every required field:",
+    '"schemaVersion": 1, "runId", "outcome" ("changes_ready" when the workflow changed files, else "no_changes"),',
+    '"summary" (what the workflow did and the files it changed), and "tests" (each test command the workflow ran with',
+    'its outcome, or [] when it ran none). When the result has string fields "prTitle" and "prBody", use them as',
+    "commitTitle and summary.",
     `The final JSON runId must be ${runId}.`,
   ].join("\n");
 }
@@ -668,6 +681,9 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   let streamFailed: string | false = false;
   let budgetRefused = false;
   let toolUnreachable = false;
+  // A workflow run whose session could not give a valid final answer after the workflow completed:
+  // the worker builds it from the workflow's own value instead of failing a finished run (#582).
+  let workflowAnswerMissing = false;
   // The last API failure the SDK reported, as a stream failure code: names a failed turn's cause.
   let apiError: string | undefined;
   // A workflow run (#582): the run's result is the session's answer after the workflow ends, never
@@ -737,6 +753,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
           budgetRefused = true;
           break;
         } else if (message.subtype === "error_max_turns") turnLimit = true;
+        else if (workflow && workflowState.ended === "completed") workflowAnswerMissing = true;
         else failed = true;
       }
     }
@@ -757,6 +774,20 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   if (failed) throw new Error(apiError ?? "coding_turn_failed");
   // The workflow never started, never ended, or ended failed or stopped: the run did not do its work.
   if (workflow && workflowState.ended !== "completed") throw new Error("coding_workflow_failed");
+  // The workflow finished: an answer the session could not give, or gave invalid, is rebuilt from
+  // the workflow's value below. changes_ready lets collection decide from the workspace itself.
+  if (workflow && (workflowAnswerMissing || !finalJson || !validAgentOutput(finalJson))) {
+    options.trace?.record("workflow_answer_rebuilt", {
+      reason: workflowAnswerMissing ? "no_valid_answer" : !finalJson ? "no_answer" : "invalid_answer",
+    });
+    finalJson = JSON.stringify({
+      schemaVersion: CODING_PROTOCOL_VERSION,
+      runId: options.input.runId,
+      outcome: "changes_ready",
+      summary: `Workflow ${workflow.name} completed.`,
+      tests: [],
+    });
+  }
   if (!finalJson) throw new Error("coding_output_missing");
   // The script's own values, word for word, over the session's retelling of them (#582).
   if (workflow) {

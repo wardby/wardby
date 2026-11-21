@@ -950,6 +950,10 @@ inside the worker.
 - Inside the worker, a guard allows one `Workflow` call, for that name, and
   fills in the args. An inline script, a script path, a remote run or a
   second call is refused.
+- Once the workflow has completed, the run keeps its result even when the
+  session can't give a valid final answer: Wardby builds it from the
+  script's returned value (`replyField`, `prTitle` and `prBody`), and
+  collection decides from the workspace whether anything changed.
 - The run's result is the session's answer after the workflow completes. A
   workflow that fails, is stopped or never starts fails the run with
   `coding_failure_workflow_failed`. A missing or unreadable script fails the

@@ -1436,8 +1436,9 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
     await expect(run([answer("changes_ready")])).rejects.toThrow("coding_workflow_failed");
     await expect(run([started, ended("failed"), answer("changes_ready")])).rejects.toThrow("coding_workflow_failed");
     await expect(run([started, ended("stopped"), answer("changes_ready")])).rejects.toThrow("coding_workflow_failed");
-    // Ended but nothing answered after it: no output.
-    await expect(run([started, answer("no_changes"), ended("completed")])).rejects.toThrow("coding_output_missing");
+    // Ended but nothing answered after it: the workflow finished, so the answer is rebuilt, not lost.
+    const { result } = await run([started, answer("no_changes"), ended("completed")]);
+    expect(result).toMatchObject({ outcome: "changes_ready", summary: "Workflow fix-bug completed.", tests: [] });
   });
 
   it("writes only the run's own workflow script into the context directory", async () => {
@@ -1521,6 +1522,32 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
         });
         expect(result.summary).toBe("no_changes summary");
       }
+    });
+
+    it("rebuilds the answer from the workflow's value when the session's final answer fails after it completed", async () => {
+      const comment = "Draft for review (SIM-1 triage)";
+      const path = await resultFile({ ticket: "SIM-1", comment });
+      const retriesExhausted = { type: "result", subtype: "error_max_structured_output_retries", is_error: true };
+      const { result } = await run([started, endedWith(path), retriesExhausted], {
+        workflow: { name: "fix-bug", args: "SIM-1", replyField: "comment" },
+      });
+      // changes_ready lets collection decide from the workspace; the reply is the script's own text.
+      expect(result).toMatchObject({ outcome: "changes_ready", summary: comment, tests: [] });
+    });
+
+    it("rebuilds an answer that fails the output schema, and still fails a run whose workflow did not end", async () => {
+      const path = await resultFile({ comment: "c" });
+      const missingTests = {
+        type: "result",
+        subtype: "success",
+        result: JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome: "no_changes", summary: "s" }),
+      };
+      const { result } = await run([started, endedWith(path), missingTests], {
+        workflow: { name: "fix-bug", args: "x", replyField: "comment" },
+      });
+      expect(result).toMatchObject({ summary: "c", tests: [] });
+      const retriesExhausted = { type: "result", subtype: "error_max_structured_output_retries", is_error: true };
+      await expect(run([started, retriesExhausted])).rejects.toThrow();
     });
 
     it("bounds a long prTitle as any commit title, keeping prBody", async () => {

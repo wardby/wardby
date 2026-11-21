@@ -99,6 +99,10 @@ returned. To use one of the script's fields word for word instead, name it:
 - The run calls the workflow once. Wardby fills in `args`. A second call,
   another workflow, an inline script, a script path or a remote run is
   refused.
+- Once the workflow has completed, the run keeps its result even when the
+  session can't give a valid final answer: Wardby builds it from the
+  script's returned value (`replyField`, `prTitle` and `prBody`), and
+  collection decides from the workspace whether anything changed.
 - The run's result is the session's answer after the workflow finishes. If
   the workflow fails, is stopped or never starts, the run fails with
   [`coding_failure_workflow_failed`](errors/coding-workflow-failed.md).
