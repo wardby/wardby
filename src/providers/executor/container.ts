@@ -1847,6 +1847,8 @@ export interface CodingSessionController {
     mcpTokenHash?: string;
     /** The run's run-steps level (Run.runStepsLevel); the proxy reads tool output only at detail. */
     runStepsLevel?: RunStepsLevel;
+    /** A workflow run (#582): the proxy accepts the Workflow tool's request shapes for it alone. */
+    workflow?: boolean;
   }): Promise<{ id: string; capability: string }>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether the proxy refused a request of this session for budget. */
@@ -2358,6 +2360,7 @@ export class ContainerExecutor implements Executor {
           terms: this.modelTerms(run),
           ...(mcpToken ? { mcpTools, mcpTokenHash: mcpTokenHash(mcpToken) } : {}),
           ...(run.runStepsLevel ? { runStepsLevel: run.runStepsLevel } : {}),
+          ...(run.provider === "claude-code" && run.workflowName ? { workflow: true } : {}),
         });
         spendEnabled = true;
         sessionId = session.id;

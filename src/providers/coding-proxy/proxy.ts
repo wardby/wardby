@@ -79,6 +79,10 @@ export const OPTIONAL_ANTHROPIC_BETAS = ["per-turn-control-2026-07-01"] as const
 const APPROVED_ANTHROPIC_BETAS = new Set<string>([...CLAUDE_CODE_ANTHROPIC_BETAS, ...OPTIONAL_ANTHROPIC_BETAS]);
 const WARDBY_COMMAND_TOOL = "mcp__wardby_tools__run_command";
 const STRUCTURED_OUTPUT_TOOL = CLAUDE_RESULT_TOOL;
+/** Claude Code's Workflow tool (#582): allowed only for a workflow session. */
+const WORKFLOW_TOOL = "Workflow";
+/** The thinking.display values Claude Code's workflow sub-agents send (#582). */
+const WORKFLOW_THINKING_DISPLAY = new Set(["omitted", "summarized"]);
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_TOOL_TEXT_BYTES = 256 * 1024;
 /**
@@ -138,6 +142,8 @@ export interface CreateCodingProxySession {
   mcpTokenHash?: string;
   /** The run's level (Run.runStepsLevel), fixed at dispatch; absent counts as summary. */
   runStepsLevel?: RunStepsLevel;
+  /** A workflow run (#582): its requests may use the Workflow tool's shapes. Absent = false. */
+  workflow?: boolean;
 }
 
 export interface CreatedCodingProxySession {
@@ -802,15 +808,33 @@ function validateMcpTool(tool: Record<string, unknown>): void {
   if (tool.cache_control !== undefined) validateCacheControl(tool.cache_control);
 }
 
-function validateApprovedTool(value: unknown, mcpTools: ReadonlySet<string>): void {
+/**
+ * Claude Code's Workflow tool (#582), as it advertises it on a workflow run: a plain client tool.
+ * Accepted only for a workflow session; the worker's guard decides what a call may do.
+ */
+function validateWorkflowTool(tool: Record<string, unknown>): void {
+  onlyKeys(tool, ["name", "description", "input_schema", "cache_control", "type"]);
+  if (
+    typeof tool.description !== "string" ||
+    tool.description.length > MAX_TOOL_TEXT_BYTES ||
+    (tool.type !== undefined && tool.type !== "custom")
+  ) {
+    throw new CodingProxyError(400, "tools_not_allowed");
+  }
+  record(tool.input_schema, "tools_not_allowed");
+  if (tool.cache_control !== undefined) validateCacheControl(tool.cache_control);
+}
+
+function validateApprovedTool(value: unknown, mcpTools: ReadonlySet<string>, workflow: boolean): void {
   const tool = record(value, "tools_not_allowed");
   if (tool.name === WARDBY_COMMAND_TOOL) return validateCommandTool(tool);
   if (tool.name === STRUCTURED_OUTPUT_TOOL) return validateStructuredOutputTool(tool);
   if (typeof tool.name === "string" && mcpTools.has(tool.name)) return validateMcpTool(tool);
+  if (workflow && tool.name === WORKFLOW_TOOL) return validateWorkflowTool(tool);
   throw new CodingProxyError(400, "tools_not_allowed");
 }
 
-function validateToolUseBlock(value: Record<string, unknown>, mcpTools: ReadonlySet<string>): void {
+function validateToolUseBlock(value: Record<string, unknown>, mcpTools: ReadonlySet<string>, workflow: boolean): void {
   onlyKeys(value, ["type", "id", "name", "input"]);
   if (typeof value.id !== "string" || value.id.length < 1 || value.id.length > 512) {
     throw new CodingProxyError(400, "unsupported_anthropic_feature");
@@ -820,6 +844,8 @@ function validateToolUseBlock(value: Record<string, unknown>, mcpTools: Readonly
   if (typeof value.name === "string" && mcpTools.has(value.name)) {
     return void record(value.input, "unsupported_anthropic_feature");
   }
+  // A workflow session's earlier Workflow call, replayed in the conversation history (#582).
+  if (workflow && value.name === WORKFLOW_TOOL) return void record(value.input, "unsupported_anthropic_feature");
   throw new CodingProxyError(400, "unsupported_anthropic_feature");
 }
 
@@ -846,14 +872,14 @@ function validateThinkingBlock(value: Record<string, unknown>): void {
   }
 }
 
-function validateMessageBlocks(value: unknown, role: unknown, mcpTools: ReadonlySet<string>): void {
+function validateMessageBlocks(value: unknown, role: unknown, mcpTools: ReadonlySet<string>, workflow: boolean): void {
   if (!Array.isArray(value) || value.length > 10_000) throw new CodingProxyError(400, "invalid_anthropic_request");
   for (const candidate of value) {
     const block = record(candidate);
     if (block.type === "text") {
       validateTextBlock(block);
     } else if (block.type === "tool_use" && role === "assistant") {
-      validateToolUseBlock(block, mcpTools);
+      validateToolUseBlock(block, mcpTools, workflow);
     } else if (block.type === "tool_result" && role === "user") {
       validateToolResultBlock(block);
     } else if (block.type === "thinking" && role === "assistant") {
@@ -928,6 +954,8 @@ function parseAnthropicRequest(
   betaHeader: string | undefined,
   shape: AnthropicModelShape,
   mcpTools: ReadonlySet<string>,
+  /** A workflow session (#582): accept the Workflow tool's request shapes, and only then. */
+  workflow = false,
 ): ParsedRequest {
   const beta = parseAnthropicBeta(betaHeader);
   if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
@@ -989,11 +1017,20 @@ function parseAnthropicRequest(
         continue;
       }
     }
-    validateMessageBlocks(message.content, message.role, mcpTools);
+    // A workflow session (#582): Claude Code tells the session a workflow finished in a user
+    // message with plain string content. Bounded like any tool text; any other session keeps blocks only.
+    if (workflow && message.role === "user" && typeof message.content === "string") {
+      if (Buffer.byteLength(message.content) > MAX_TOOL_TEXT_BYTES) {
+        throw new CodingProxyError(400, "unsupported_anthropic_feature");
+      }
+      continue;
+    }
+    validateMessageBlocks(message.content, message.role, mcpTools, workflow);
   }
   if (body.tools !== undefined) {
     // run_command and StructuredOutput, plus one per pinned MCP tool.
-    if (!Array.isArray(body.tools) || body.tools.length > 2 + mcpTools.size) {
+    // A workflow session also has the Workflow tool (#582).
+    if (!Array.isArray(body.tools) || body.tools.length > 2 + mcpTools.size + (workflow ? 1 : 0)) {
       throw new CodingProxyError(400, "tools_not_allowed");
     }
     const names = new Set<string>();
@@ -1002,7 +1039,7 @@ function parseAnthropicRequest(
       if (typeof definition.name !== "string" || names.has(definition.name))
         throw new CodingProxyError(400, "tools_not_allowed");
       names.add(definition.name);
-      validateApprovedTool(definition, mcpTools);
+      validateApprovedTool(definition, mcpTools, workflow);
     }
   }
   if (body.metadata !== undefined) {
@@ -1015,8 +1052,13 @@ function parseAnthropicRequest(
     requireAnthropicBeta(beta.values, "interleaved-thinking-2025-05-14");
     requireAnthropicBeta(beta.values, "thinking-token-count-2026-05-13");
     const thinking = record(body.thinking);
+    // A workflow session's sub-agents also send thinking.display (#582): one of two fixed values.
+    if (workflow && thinking.display !== undefined && !WORKFLOW_THINKING_DISPLAY.has(thinking.display as string)) {
+      throw new CodingProxyError(400, "unsupported_anthropic_feature");
+    }
+    const thinkingKeys = workflow ? ["display"] : [];
     if (manualThinking) {
-      onlyKeys(thinking, ["type", "budget_tokens"]);
+      onlyKeys(thinking, ["type", "budget_tokens", ...thinkingKeys]);
       const budget = thinking.budget_tokens;
       if (
         thinking.type !== "enabled" ||
@@ -1028,7 +1070,7 @@ function parseAnthropicRequest(
         throw new CodingProxyError(400, "unsupported_anthropic_feature");
       }
     } else {
-      onlyKeys(thinking, ["type"]);
+      onlyKeys(thinking, ["type", ...thinkingKeys]);
       if (thinking.type !== "adaptive") throw new CodingProxyError(400, "unsupported_anthropic_feature");
     }
   }
@@ -1071,13 +1113,14 @@ function parseRequest(
   anthropicBeta: string | undefined,
   shape: AnthropicModelShape,
   mcpTools: ReadonlySet<string>,
+  workflow = false,
 ): ParsedRequest {
   if (protocol !== "anthropic-messages" && anthropicBeta !== undefined) {
     throw new CodingProxyError(400, "invalid_anthropic_beta");
   }
   try {
     return protocol === "anthropic-messages"
-      ? parseAnthropicRequest(rawBody, anthropicBeta, shape, mcpTools)
+      ? parseAnthropicRequest(rawBody, anthropicBeta, shape, mcpTools, workflow)
       : parseOpenAiRequest(rawBody);
   } catch (error) {
     // JSON nested deeply enough (inside a free-form tool schema, say) overflows
@@ -1221,6 +1264,7 @@ export class CodingProxy {
       terms: input.terms,
       ...(mcp ? { mcpTools: input.mcpTools, mcpTokenHash: input.mcpTokenHash } : {}),
       ...(input.runStepsLevel ? { runStepsLevel: input.runStepsLevel } : {}),
+      ...(input.workflow === true ? { workflow: true } : {}),
     });
     this.audit({ type: "session.created", runId: input.runId });
     return {
@@ -1277,6 +1321,7 @@ export class CodingProxy {
         input.anthropicBeta,
         shape,
         claudeMcpToolNames(session.mcpTools),
+        session.workflow === true,
       );
     } catch (error) {
       // The session is already authenticated and no credential has been

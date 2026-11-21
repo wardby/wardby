@@ -100,6 +100,7 @@ async function harness(
     leaseMs?: number;
     ownerId?: string;
     mcpTools?: McpToolPin[];
+    workflow?: boolean;
   } = {},
 ): Promise<Harness> {
   const ledger = overrides.ledger ?? new MemoryProxyLedger({ now: overrides.now ?? (() => NOW) });
@@ -132,6 +133,7 @@ async function harness(
     budgetUsd: overrides.budgetUsd ?? 1,
     terms: overrides.terms,
     ...(overrides.mcpTools ? { mcpTools: overrides.mcpTools, mcpTokenHash: `mcp-hash-${Math.random()}` } : {}),
+    ...(overrides.workflow ? { workflow: true } : {}),
   });
   return { proxy, ledger, session, fetch, events };
 }
@@ -3100,6 +3102,97 @@ describe("a retry after the first try's proxy died", () => {
 
     await stop(h);
     await pending;
+  });
+});
+
+describe("workflow sessions (#582)", () => {
+  const runCommandTool = {
+    name: "mcp__wardby_tools__run_command",
+    description: "Run a command",
+    input_schema: { type: "object", properties: { command: { type: "string" } } },
+  };
+  const structuredOutputTool = { name: "StructuredOutput", description: "Report", input_schema: { type: "object" } };
+  const workflowTool = { name: "Workflow", description: "Run a workflow script", input_schema: { type: "object" } };
+  const anthropicReply = async () => {
+    const response = JSON.parse(await fixture("anthropic-message-response.json"));
+    return async () => Response.json(response);
+  };
+  const claude = async (workflow: boolean) =>
+    harness({ protocol: "anthropic-messages", fetch: await anthropicReply(), workflow });
+  const body = async (change: (body: Record<string, unknown>) => void) => {
+    const value = JSON.parse(await fixture("anthropic-sdk-request.json"));
+    value.stream = false;
+    change(value);
+    return JSON.stringify(value);
+  };
+  const shapes: [string, (value: Record<string, unknown>) => void, string][] = [
+    ["the Workflow tool", (v) => (v.tools = [runCommandTool, structuredOutputTool, workflowTool]), "tools_not_allowed"],
+    [
+      "a Workflow tool_use in the history",
+      (v) =>
+        (v.messages as unknown[]).push(
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "toolu_wf_1", name: "Workflow", input: { name: "fix-bug" } }],
+          },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_wf_1", content: "launched" }] },
+        ),
+      "unsupported_anthropic_feature",
+    ],
+    [
+      "the task notification as a string user message",
+      (v) => (v.messages as unknown[]).push({ role: "user", content: "<task-notification>done</task-notification>" }),
+      "invalid_anthropic_request",
+    ],
+  ];
+
+  for (const [index, [name, change, code]] of shapes.entries()) {
+    it(`forwards ${name} for a workflow session, and refuses it (${code}) for any other`, async () => {
+      const workflow = await claude(true);
+      await execute(workflow, `wf-shape-${index}`, new TestSink(), await body(change));
+      expect(workflow.fetch).toHaveBeenCalledTimes(1);
+
+      const plain = await claude(false);
+      await expect(execute(plain, `plain-shape-${index}`, new TestSink(), await body(change))).rejects.toMatchObject({
+        status: 400,
+        code,
+      });
+      expect(plain.fetch).not.toHaveBeenCalled();
+    });
+  }
+
+  it("still refuses any other tool, a second extra tool, and an unknown thinking.display on a workflow session", async () => {
+    const h = await claude(true);
+    await expect(
+      execute(
+        h,
+        "wf-bash",
+        new TestSink(),
+        await body((v) => (v.tools = [runCommandTool, { ...workflowTool, name: "Bash" }])),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+    await expect(
+      execute(
+        h,
+        "wf-four",
+        new TestSink(),
+        await body((v) => (v.tools = [runCommandTool, structuredOutputTool, workflowTool, { ...workflowTool }])),
+      ),
+    ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+    await expect(
+      execute(
+        h,
+        "wf-tooluse-other",
+        new TestSink(),
+        await body((v) =>
+          (v.messages as unknown[]).push({
+            role: "assistant",
+            content: [{ type: "tool_use", id: "toolu_x", name: "Bash", input: { command: "id" } }],
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(h.fetch).not.toHaveBeenCalled();
   });
 });
 

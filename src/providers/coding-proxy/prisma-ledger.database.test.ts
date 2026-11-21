@@ -59,6 +59,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       protocol: "openai-responses",
       // Created without a level, as a session from before run steps detail.
       runStepsLevel: null,
+      // Not a workflow run (#582).
+      workflow: false,
       budgetExhaustedAt: null,
       upstreamFailure: null,
       // Created without terms, as a session from before the catalog.
@@ -182,9 +184,11 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         budgetUsd: 1,
         registryTokenHash: `level-registry-${suffix}`,
         runStepsLevel: "detail",
+        workflow: true,
       });
       expect(await ledger.findSessionByCapabilityHash(`level-hash-${suffix}`)).toMatchObject({
         runStepsLevel: "detail",
+        workflow: true,
       });
     } finally {
       await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${dSession}`;

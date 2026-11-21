@@ -66,6 +66,8 @@ export interface ProxySession {
   mcpCallCount: number;
   /** The run's Run.runStepsLevel, copied at session creation; null on sessions from before run steps detail. */
   runStepsLevel: RunStepsLevel | null;
+  /** A workflow run (#582): its requests may use the Workflow tool's shapes. False on older sessions. */
+  workflow: boolean;
 }
 
 export interface ProxyRequest {
@@ -129,6 +131,8 @@ export interface CreateProxySessionInput {
   mcpTokenHash?: string;
   /** The run's level, fixed at dispatch; absent counts as summary. */
   runStepsLevel?: RunStepsLevel;
+  /** A workflow run (#582); absent = false. */
+  workflow?: boolean;
 }
 
 export interface ReserveProxyRequestInput {
