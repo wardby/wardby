@@ -187,6 +187,10 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       workflowRepository: "upstream",
       workflowArgs: { ticket: "X-1" },
     });
+    // A workflow run may not change .claude/ (its own scripts included).
+    expect((await db.codingRun.findUniqueOrThrow({ where: { runId: withArgs!.run.id } })).protectedPaths).toContain(
+      ".claude/**",
+    );
     const withoutArgs = await dispatchRun({ db, executor, agentId, codingTask: "X-2" });
     expect((await db.codingRun.findUniqueOrThrow({ where: { runId: withoutArgs!.run.id } })).workflowArgs).toBeNull();
 
@@ -203,6 +207,9 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
       workflowName: null,
       workflowArgs: null,
     });
+    expect((await db.codingRun.findUniqueOrThrow({ where: { runId: ignored!.run.id } })).protectedPaths).not.toContain(
+      ".claude/**",
+    );
   });
 
   it("refuses input plan files over the limit before anything is created", async () => {

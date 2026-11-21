@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient, type Run, type RunTrigger, type Task } from "#prisma";
+import { runProtectedPaths } from "../coding/protected-paths.js";
 import { ExecutorClosingError, type Executor } from "../providers/executor/types.js";
 import { codeProviderOf } from "../coding/code-host.js";
 import {
@@ -1554,7 +1555,10 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               provider: agent.codingProfile.provider,
               model: input.model,
               timeoutSec: agent.codingProfile.timeoutSec,
-              protectedPaths: agent.codingProfile.protectedPaths as Prisma.InputJsonValue,
+              protectedPaths: runProtectedPaths(
+                agent.codingProfile.protectedPaths as string[],
+                agent.codingProfile.workflowName !== null,
+              ) as Prisma.InputJsonValue,
               collectExclude: agent.codingProfile.collectExclude as Prisma.InputJsonValue,
               packageAllowlist: agent.codingProfile.packageAllowlist as Prisma.InputJsonValue,
               packagePolicy: agent.codingProfile.packagePolicy as Prisma.InputJsonValue,
