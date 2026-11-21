@@ -1,6 +1,8 @@
 import { budgetStoppedChangesSentence, CONTINUATION_CLOSED_ERROR } from "../../coding/continuation-wording.js";
 import { normalizeGitHubRepository, normalizeGitRef } from "../../coding/protocol.js";
 import { logger } from "../../core/logger.js";
+import { commitIssueKey, conventionalSubject } from "../../coding/commit-subject.js";
+
 import { validateChangedPath } from "./git.js";
 import {
   isLockfilePath,
@@ -18,6 +20,9 @@ import type {
   FinalizeChangesDetails,
   PreparedWorkspace,
 } from "./types.js";
+
+/** The longest compare link with a pre-filled description (#586); a longer one leaves the body out. */
+const MAX_COMPARE_URL = 8000;
 
 export interface GitHubRemoteOptions {
   github: GitHubRepositoryAccess;
@@ -98,9 +103,11 @@ export class GitHubRemote implements GitRemote {
     repository: string;
     baseRef: string;
     headRef: string;
-    continuation?: { rootRunId: string };
+    continuation?: { rootRunId: string; branchOnly?: boolean };
   }): Promise<void> {
     if (!input.continuation || !this.options.github.findOpenPullRequest) return;
+    // The root pushed only a branch (#586): there is no pull request to still be open.
+    if (input.continuation.branchOnly) return;
     const request = {
       runId: input.continuation.rootRunId,
       repository: input.repository,
@@ -193,6 +200,41 @@ export class GitHubRemote implements GitRemote {
     }
   }
 
+  /**
+   * A branch pushed with no pull request (#586): its page, and the compare page that opens a pull
+   * request from it with the run's title and, when the link stays short enough, its description
+   * already filled in, so a person opening it by hand gets the run's text.
+   */
+  branchLinks(
+    prepared: PreparedWorkspace,
+    details?: FinalizeChangesDetails,
+  ): { branchUrl: string; compareUrl: string } {
+    // Every segment percent-encoded, parentheses too, so the link can't end a Markdown link early.
+    const segment = (part: string) =>
+      encodeURIComponent(part).replace(/[()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    const path = (ref: string) => ref.split("/").map(segment).join("/");
+    const base = `https://github.com/${prepared.repository}`;
+    const query = new URLSearchParams({ expand: "1" });
+    if (details?.commit?.title) {
+      query.set(
+        "title",
+        conventionalSubject({
+          runId: prepared.runId,
+          ...details.commit,
+          issueKey: commitIssueKey(details.issue?.key, details.tag),
+        }),
+      );
+    }
+    const compare = `${base}/compare/${path(prepared.baseRef)}...${path(prepared.headRef)}`;
+    const withBody = new URLSearchParams(query);
+    if (details?.summary) withBody.set("body", details.summary);
+    const full = `${compare}?${withBody.toString()}`;
+    return {
+      branchUrl: `${base}/tree/${path(prepared.headRef)}`,
+      compareUrl: full.length <= MAX_COMPARE_URL ? full : `${compare}?${query.toString()}`,
+    };
+  }
+
   async publish({ workspace: prepared, details, changedPaths, commitSha }: PublishInput): Promise<PublishResult> {
     // Revision-in-place: identify the PR by the run that originally opened
     // it (createOrFindDraftPullRequest's marker-based lookup keys on that
@@ -225,7 +267,8 @@ export class GitHubRemote implements GitRemote {
       ...(details?.related ? { related: details.related } : {}),
     });
     let description: DescriptionWriteOutcome | undefined;
-    if (prepared.continuation) {
+    // A follow-up of a branch-only root (#586) opens the first pull request: written like a first run's.
+    if (prepared.continuation && !prepared.continuation.branchOnly) {
       description = await this.updateDescription(prepared, details, changedPaths, commitSha);
     } else if (pullRequest.descriptionSha256) {
       description = { kind: "written", sha256: pullRequest.descriptionSha256 };

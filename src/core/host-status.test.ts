@@ -3,6 +3,7 @@ import type { RunStatus } from "#prisma";
 import type { CodeReviewHost } from "../providers/review-host/types.js";
 import { CONTINUATION_CLOSED_HOST_LINE } from "../coding/continuation-wording.js";
 import {
+  branchOutcome,
   collectRunOutcome,
   completeHostStatus,
   fullReplyComments,
@@ -1324,5 +1325,89 @@ describe("pullRequestOutcome's provider", () => {
 
   it("comes from a hosted repository's prefix", () => {
     expect(pullRequestOutcome({ ...result, repository: "bitbucket:acme/api" })?.codeProvider).toBe("bitbucket");
+  });
+});
+
+describe("branch-only runs (#586)", () => {
+  const pushed = {
+    outcome: "branch_pushed",
+    repository: REPO,
+    headRef: "wardby/run-r1",
+    branchUrl: `https://github.com/${REPO}/tree/wardby/run-r1`,
+    compareUrl: `https://github.com/${REPO}/compare/main...wardby/run-r1?expand=1`,
+  };
+
+  it("reads a hosted branch_pushed result, and not a local one (no links)", () => {
+    expect(branchOutcome(pushed)).toEqual({
+      repository: REPO,
+      headRef: "wardby/run-r1",
+      branchUrl: pushed.branchUrl,
+      compareUrl: pushed.compareUrl,
+    });
+    expect(branchOutcome({ ...pushed, branchUrl: undefined, compareUrl: undefined })).toBeNull();
+    expect(branchOutcome({ ...pushed, outcome: "pull_request_opened" })).toBeNull();
+  });
+
+  it("names the pushed branch after the reply, with a link to open a pull request", () => {
+    const body = outcomeBody({ id: "r1", status: "succeeded", finalText: "Fixed the blank card." }, REPO, [], [], {
+      branches: [branchOutcome(pushed)!],
+      replyAsAnswer: true,
+    });
+    expect(body).toContain("Fixed the blank card.");
+    expect(body).toContain(
+      `Pushed branch [\`wardby/run-r1\`](${pushed.branchUrl}) ([open a pull request](${pushed.compareUrl})).`,
+    );
+    expect(body.indexOf("Fixed the blank card.")).toBeLessThan(body.indexOf("Pushed branch"));
+  });
+
+  it("names a branch-only repository beside the pull requests of a mixed run, and when a sub-run failed", () => {
+    const tools = {
+      ...branchOutcome(pushed)!,
+      repository: "acme/tools",
+      branchUrl: "https://github.com/acme/tools/tree/wardby/run-r1",
+    };
+    const opened = {
+      outcome: "pull_request_opened",
+      repository: REPO,
+      pullRequestNumber: 73,
+      codeProvider: "github",
+    } as const;
+    const mixed = outcomeBody({ id: "r1", status: "succeeded", finalText: "done" }, REPO, [opened], [], {
+      branches: [tools],
+    });
+    expect(mixed).toContain("✅ Opened #73");
+    expect(mixed).toContain(`Pushed branch [\`wardby/run-r1\`](${tools.branchUrl}) in acme/tools`);
+    const failed = outcomeBody(
+      { id: "r1", status: "succeeded", finalText: "done" },
+      REPO,
+      [opened],
+      [{ id: "c9", status: "failed" }],
+      {
+        branches: [tools],
+      },
+    );
+    expect(failed).toContain("Pushed branch [`wardby/run-r1`]");
+    const stopped = outcomeBody({ id: "r1", status: "failed", finalText: null }, REPO, [], [], { branches: [tools] });
+    expect(stopped).toContain("Pushed branch [`wardby/run-r1`]");
+  });
+
+  it("collects the branches of the run's coding sub-runs", async () => {
+    const database = {
+      run: {
+        findUnique: vi.fn(async () => null),
+        findMany: vi.fn(async () => [
+          {
+            id: "c1",
+            status: "succeeded",
+            error: null,
+            finalText: "x",
+            codingRun: { result: pushed, failureCategory: null, services: [] },
+          },
+        ]),
+      },
+    } as never;
+    const out = await collectRunOutcome(database, { id: "r1", status: "succeeded", finalText: null });
+    expect(out.branches.map((b) => b.headRef)).toEqual(["wardby/run-r1"]);
+    expect(out.pullRequests).toEqual([]);
   });
 });

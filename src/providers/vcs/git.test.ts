@@ -1781,6 +1781,81 @@ describe("GitVcsProvider per-repository workspaces (real git)", { timeout: 30_00
     );
   });
 
+  it("pushes the branch and opens no pull request when the run asked for none (#586)", async () => {
+    const { rootDir, main, remote, input } = await setup();
+    const published: string[] = [];
+    const prRemote: GitRemote = {
+      ...remote,
+      publish: async ({ workspace }) => {
+        published.push(workspace.headRef);
+        return { kind: "pull_request", number: 7, url: "https://github.com/test/app/pull/7" };
+      },
+      branchLinks: (workspace) => ({
+        branchUrl: `https://github.com/${workspace.repository}/tree/${workspace.headRef}`,
+        compareUrl: `https://github.com/${workspace.repository}/compare/main...${workspace.headRef}?expand=1`,
+      }),
+    };
+    const provider = new GitVcsProvider({ rootDir, remote: prRemote });
+    const workspace = await provider.prepareWorkspace(input);
+    await writeFile(resolve(workspace.workspacePath, "fix.txt"), "fix\n");
+    const result = await provider.finalizeChanges(workspace, { pullRequest: "none", summary: "s" });
+    expect(result).toMatchObject({
+      outcome: "branch_pushed",
+      headRef: "wardby/run-run-1",
+      branchUrl: "https://github.com/test/app/tree/wardby/run-run-1",
+      compareUrl: "https://github.com/test/app/compare/main...wardby/run-run-1?expand=1",
+    });
+    expect(published).toEqual([]);
+    expect(run(main.bare, ["rev-parse", "refs/heads/wardby/run-run-1"])).toBe(
+      (result as { commitSha: string }).commitSha,
+    );
+  });
+
+  it("hands a branch-only root's flag to the remote's open check when a follow-up prepares (#586)", async () => {
+    const { rootDir, remote, input } = await setup();
+    const checked: unknown[] = [];
+    const tracking: GitRemote = {
+      ...remote,
+      assertContinuationOpen: async (target) => void checked.push(target.continuation),
+    };
+    const first = new GitVcsProvider({ rootDir, remote: tracking });
+    const workspace = await first.prepareWorkspace(input);
+    await writeFile(resolve(workspace.workspacePath, "a.txt"), "a\n");
+    await first.finalizeChanges(workspace, { pullRequest: "none" });
+    await first.cleanup(workspace);
+    const followUp = new GitVcsProvider({ rootDir: resolve(rootDir, "..", "vcs-2"), remote: tracking });
+    await followUp.prepareWorkspace({
+      ...input,
+      runId: "run-2",
+      continuation: { rootRunId: "run-1", branchOnly: true },
+    });
+    expect(checked.at(-1)).toEqual({ rootRunId: "run-1", branchOnly: true });
+  });
+
+  it("reports a branch-only root's first pull request as opened, not updated (#586)", async () => {
+    const { rootDir, remote, input } = await setup();
+    const prRemote: GitRemote = {
+      ...remote,
+      publish: async () => ({ kind: "pull_request", number: 1, url: "https://github.com/test/app/pull/1" }),
+    };
+    const first = new GitVcsProvider({ rootDir, remote: prRemote });
+    const root = await first.prepareWorkspace(input);
+    await writeFile(resolve(root.workspacePath, "a.txt"), "a\n");
+    await first.finalizeChanges(root, { pullRequest: "none" });
+    await first.cleanup(root);
+    const followUp = new GitVcsProvider({ rootDir: resolve(rootDir, "..", "vcs-3"), remote: prRemote });
+    const workspace = await followUp.prepareWorkspace({
+      ...input,
+      runId: "run-2",
+      continuation: { rootRunId: "run-1", branchOnly: true },
+    });
+    await writeFile(resolve(workspace.workspacePath, "b.txt"), "b\n");
+    expect(await followUp.finalizeChanges(workspace)).toMatchObject({
+      outcome: "pull_request_opened",
+      pullRequestNumber: 1,
+    });
+  });
+
   it("refuses a slot before the default workspace exists, and a slot name that isn't a repository name", async () => {
     const { rootDir, tools, provider, input } = await setup();
     await expect(

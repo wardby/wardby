@@ -972,6 +972,21 @@ export class GitVcsProvider implements VcsProvider {
     commitSha: string,
   ): Promise<FinalizeChangesResult> {
     await this.remote.assertContinuationOpen(prepared);
+    // Branch only (#586): push, and open, update or describe no pull request. The remote's links let
+    // a person open one from the branch later.
+    if (details?.pullRequest === "none") {
+      await this.pushOnce(prepared, commitSha);
+      const links = this.remote.branchLinks?.(prepared, details) ?? {};
+      return {
+        outcome: "branch_pushed",
+        repository: prepared.repository,
+        baseRef: prepared.baseRef,
+        baseCommit: prepared.baseCommit,
+        headRef: prepared.headRef,
+        commitSha,
+        ...links,
+      };
+    }
     // Before the push: a description comment must already exist when the push starts a review.
     await this.remote
       .proposeDescriptionBeforePush?.({ workspace: prepared, details, changedPaths: changed, commitSha })
@@ -990,7 +1005,9 @@ export class GitVcsProvider implements VcsProvider {
       };
     }
     return {
-      outcome: prepared.continuation ? "pull_request_updated" : "pull_request_opened",
+      // A follow-up of a branch-only root (#586) opens the branch's first pull request.
+      outcome:
+        prepared.continuation && !prepared.continuation.branchOnly ? "pull_request_updated" : "pull_request_opened",
       repository: prepared.repository,
       baseRef: prepared.baseRef,
       baseCommit: prepared.baseCommit,
@@ -1393,10 +1410,14 @@ export class GitVcsProvider implements VcsProvider {
     // branchRunId: a writable extra whose branch is named for another run (a
     // continuation's root) but does not exist yet, so it is created off
     // baseRef like a fresh run's; dispatch chose it, this checks only its shape.
-    let continuation: { rootRunId: string } | undefined;
+    let continuation: { rootRunId: string; branchOnly?: boolean } | undefined;
     if (input.continuation) {
       if (!SAFE_RUN_ID.test(input.continuation.rootRunId)) throw new Error("vcs_root_run_id_invalid");
-      continuation = { rootRunId: input.continuation.rootRunId };
+      continuation = {
+        rootRunId: input.continuation.rootRunId,
+        // The root pushed only a branch (#586): kept, so the remote skips its open-PR check.
+        ...(input.continuation.branchOnly === true ? { branchOnly: true } : {}),
+      };
     }
     if (input.branchRunId !== undefined && !SAFE_RUN_ID.test(input.branchRunId)) {
       throw new Error("vcs_branch_run_id_invalid");

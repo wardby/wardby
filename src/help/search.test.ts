@@ -704,4 +704,17 @@ describe("coding workflows help (#582)", () => {
     );
     expect(searchHelp(corpus, "coding_failure_workflow_failed")[0]?.page.id).toBe("errors/coding-workflow-failed");
   });
+
+  it("finds the branch-only article (#586)", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const corpus = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    const top3 = (q: string) =>
+      searchHelp(corpus, q)
+        .slice(0, 3)
+        .map((r) => r.page.id);
+    for (const q of ["branch only", "no pull request", "pullRequest none", "push branch without pull request"]) {
+      expect(top3(q), q).toContain("coding-branch-only");
+    }
+  });
 });

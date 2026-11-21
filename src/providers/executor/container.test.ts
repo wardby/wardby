@@ -682,7 +682,7 @@ class FakeVcs implements VcsProvider {
     if (this.finalizeEmpty) {
       return { outcome: "no_changes", repository: workspace.repository, baseRef: "main", baseCommit: "a".repeat(40) };
     }
-    if (this.pushBranchOnly) {
+    if (this.pushBranchOnly || details?.pullRequest === "none") {
       return {
         outcome: "branch_pushed",
         repository: workspace.repository,
@@ -690,6 +690,13 @@ class FakeVcs implements VcsProvider {
         baseCommit: "a".repeat(40),
         headRef: workspace.headRef,
         commitSha: "b".repeat(40),
+        // A hosted remote's links (#586), as GitHubRemote.branchLinks gives them.
+        ...(details?.pullRequest === "none"
+          ? {
+              branchUrl: `https://github.com/${workspace.repository}/tree/${workspace.headRef}`,
+              compareUrl: `https://github.com/${workspace.repository}/compare/main...${workspace.headRef}?expand=1`,
+            }
+          : {}),
       };
     }
     return {
@@ -2736,6 +2743,32 @@ describe("ContainerExecutor", () => {
     });
   });
 
+  it("passes the run's branch-only choice to the push and stores the branch's links (#586)", async () => {
+    const created = await harness();
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "changes_ready",
+      summary: "Fixed it.",
+      tests: [],
+      pullRequest: "none",
+    });
+    await created.executor.start("run-1");
+    expect(created.vcs.lastFinalizeDetails?.pullRequest).toBe("none");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.store.run.result).toMatchObject({
+      outcome: "branch_pushed",
+      headRef: "wardby/run-run-1",
+      branchUrl: "https://github.com/openai/example/tree/wardby/run-run-1",
+      compareUrl: "https://github.com/openai/example/compare/main...wardby/run-run-1?expand=1",
+    });
+    expect(created.store.run.result).not.toHaveProperty("pullRequestUrl");
+    // Without the choice the push gets no such detail.
+    const normal = await harness();
+    await normal.executor.start("run-1");
+    expect(normal.vcs.lastFinalizeDetails).not.toHaveProperty("pullRequest");
+  });
+
   it("records a pushed local branch as a succeeded run with resultBranch and baseSha", async () => {
     // The profile schema still names GitHub repositories only; the fake VCS stands in for a local one.
     const created = await harness();
@@ -3269,6 +3302,16 @@ describe("ContainerExecutor", () => {
       expect(created.recorded).toEqual([
         { rootRunId: "root-run", expectedSha256: null, sha256: NEW_SHA, agentTextRunId: "run-1" },
       ]);
+    });
+
+    it("records the first description of a branch-only root's pull request on the root (#586)", async () => {
+      const created = await fixRound({ rootBranchOnly: true });
+      created.vcs.finalizeDescription = { kind: "written", sha256: NEW_SHA };
+      await created.executor.start("run-1");
+      expect(created.recorded).toEqual([
+        { rootRunId: "root-run", expectedSha256: null, sha256: NEW_SHA, agentTextRunId: "run-1" },
+      ]);
+      expect(created.store.completions[0].record?.prDescriptionOutcome).toBe("written");
     });
 
     it("a legacy rebuild matches a description written out by hand, as a fresh run's pull request carried it", async () => {
@@ -7250,6 +7293,47 @@ describe("ContainerExecutor with several repositories (#537)", () => {
           }),
         }),
       ]);
+    });
+
+    it("gives each repository its own branch-only choice: an extra's note, the default's own field (#586)", async () => {
+      const created = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        pullRequests: [{ name: "tools", description: "Tools change.", pullRequest: "none" }],
+      });
+      await created.executor.start("run-1");
+      const [main, tools] = created.vcs.finalizeCalls;
+      expect(main.details).not.toHaveProperty("pullRequest");
+      expect(tools.details?.pullRequest).toBe("none");
+      const both = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        pullRequest: "none",
+        pullRequests: [{ name: "tools", description: "Tools change." }],
+      });
+      await both.executor.start("run-1");
+      expect(both.vcs.finalizeCalls.map((call) => call.details?.pullRequest)).toEqual(["none", undefined]);
+    });
+
+    it("leaves a branch-only repository out of the merge order, and numbers the rest without it (#586)", async () => {
+      const three = await multi(
+        [writeRow("tools", { repository: "openai/tools" }), writeRow("docs", { repository: "openai/docs" })],
+        {
+          pullRequests: [
+            { name: "tools", description: "Tools change.", pullRequest: "none" },
+            { name: "docs", description: "Docs change." },
+          ],
+        },
+      );
+      await three.executor.start("run-1");
+      expect(three.store.completions[0].record?.mergeOrder).toBe(1);
+      expect(extrasOf(three)?.map((extra) => [extra.name, extra.mergeOrder])).toEqual([
+        ["tools", null],
+        ["docs", 2],
+      ]);
+      // One pull request beside a branch-only push is a lone pull request: no order at all.
+      const two = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        pullRequests: [{ name: "tools", description: "Tools change.", pullRequest: "none" }],
+      });
+      await two.executor.start("run-1");
+      expect(two.store.completions[0].record?.mergeOrder).toBeUndefined();
+      expect(extrasOf(two)?.[0].mergeOrder).toBeNull();
     });
 
     it("(b) collects and publishes a changed extra even when the worker says no_changes", async () => {

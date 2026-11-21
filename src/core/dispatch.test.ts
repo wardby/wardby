@@ -1857,6 +1857,70 @@ describe("dispatchRun", () => {
       ).rejects.toThrow(/never opened a pull request/);
     });
 
+    describe("a hosted run that pushed only its branch (#586)", () => {
+      function hostedRun(runId: string, outcome: "branch_pushed" | "no_changes", overrides: Record<string, any> = {}) {
+        const agent = codingAgent();
+        const repository = agent.codingProfile.repository;
+        const headRef = `wardby/run-${runId}`;
+        return {
+          runId,
+          repository,
+          baseRef: "main",
+          headRef,
+          rootCodingRunId: null,
+          run: { agent: { ownerId: "owner_1" } },
+          result: {
+            schemaVersion: 1,
+            outcome,
+            repository,
+            baseRef: "main",
+            ...(outcome === "branch_pushed"
+              ? {
+                  headRef,
+                  commitSha: "b".repeat(40),
+                  branchUrl: `https://github.com/${repository}/tree/${headRef}`,
+                }
+              : {}),
+            summary: "Done",
+            tests: [],
+            usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+          },
+          ...overrides,
+        };
+      }
+
+      it("continues on the pushed branch, like a local repository's", async () => {
+        const agent = codingAgent({ ownerId: "owner_1" });
+        const state = fakeDb(agent, [hostedRun("root_run", "branch_pushed")]);
+        const result = await dispatchRun({
+          db: state.db,
+          executor: { async start() {}, async stop() {} },
+          agentId: agent.id,
+          continuesCodingRunId: "root_run",
+        });
+        expect(state.codingRuns).toContainEqual(
+          expect.objectContaining({
+            runId: result?.run.id,
+            headRef: "wardby/run-root_run",
+            rootCodingRunId: "root_run",
+          }),
+        );
+      });
+
+      it("still refuses a hosted run with neither a pull request nor a pushed branch", async () => {
+        const agent = codingAgent({ ownerId: "owner_1" });
+        const state = fakeDb(agent, [hostedRun("root_run", "no_changes")]);
+        await expect(
+          dispatchRun({
+            db: state.db,
+            executor: { async start() {}, async stop() {} },
+            agentId: agent.id,
+            continuesCodingRunId: "root_run",
+          }),
+        ).rejects.toMatchObject({ reason: "no_pull_request" });
+      });
+    });
+
     describe("a local repository (no pull requests)", () => {
       const LOCAL = "local:/srv/repos/app";
       function localCodingRun(

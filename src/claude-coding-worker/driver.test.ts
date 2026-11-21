@@ -1556,6 +1556,15 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
       await expect(run([started, retriesExhausted])).rejects.toThrow();
     });
 
+    it("takes the script's own pullRequest none on a change, whatever the session said (#586)", async () => {
+      const path = await resultFile({ prTitle: "fix: engineer lane", prBody: "Body.", pullRequest: "none" });
+      const { result } = await run([started, endedWith(path), answer("changes_ready")]);
+      expect((result as { pullRequest?: string }).pullRequest).toBe("none");
+      const none = await resultFile({ prBody: "Body." });
+      const { result: normal } = await run([started, endedWith(none), answer("changes_ready")]);
+      expect(normal).not.toHaveProperty("pullRequest");
+    });
+
     it("bounds a long prTitle as any commit title, keeping prBody", async () => {
       const path = await resultFile({ prTitle: "x".repeat(500), prBody: "Body." });
       const { result } = await run([started, endedWith(path), answer("changes_ready")]);

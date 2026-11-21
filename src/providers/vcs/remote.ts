@@ -50,10 +50,19 @@ export interface GitRemote {
     repository: string;
     baseRef: string;
     headRef: string;
-    continuation?: { rootRunId: string };
+    continuation?: { rootRunId: string; branchOnly?: boolean };
   }): Promise<void>;
   /** After a successful push: GitHub opens or finds the draft PR; local returns the branch. */
   publish(input: PublishInput): Promise<PublishResult>;
+  /**
+   * A branch pushed with no pull request (#586): its page, and a link that opens a pull request from
+   * it, pre-filled from the run where the host allows. Built from the repository and branch alone.
+   * Unset (local): no links.
+   */
+  branchLinks?(
+    workspace: PreparedWorkspace,
+    details?: FinalizeChangesDetails,
+  ): { branchUrl?: string; compareUrl?: string };
   /** The error pushOnce throws when the remote branch moved since the clone. */
   conflictError(): Error;
   /**

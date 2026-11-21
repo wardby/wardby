@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
-import { PLAN_FOLDER_PATH, type CodingTaskInput } from "../coding/protocol.js";
+import { PLAN_FOLDER_PATH, PULL_REQUEST_CHOICE_DESCRIPTION, type CodingTaskInput } from "../coding/protocol.js";
 import { repositoriesTaskNote, workerTaskNote } from "./task-note.js";
 import {
   CODING_OUTPUT_JSON_SCHEMA,
@@ -1169,8 +1169,9 @@ describe("several repositories (#537)", () => {
           title: { type: ["string", "null"] },
           description: { type: "string" },
           mergeOrder: { type: ["integer", "null"], minimum: 1, maximum: 99 },
+          pullRequest: { type: ["string", "null"], enum: ["none", null], description: PULL_REQUEST_CHOICE_DESCRIPTION },
         },
-        required: ["name", "title", "description", "mergeOrder"],
+        required: ["name", "title", "description", "mergeOrder", "pullRequest"],
         additionalProperties: false,
       },
     });

@@ -101,6 +101,7 @@ import {
   CLAUDE_CONTEXT_LIMITS,
   CODING_PROTOCOL_VERSION,
   CodingRunResultSchema,
+  publicCodingRunResult,
   CodingTaskInputSchema,
   COMMIT_SHA,
   GitHistoryInputSchema,
@@ -379,7 +380,13 @@ interface RepositoryPublish {
   mergeOrder: number;
   /** Its step should it be the run's only push: what a run with one repository records (null = none). */
   soleMergeOrder: number | null;
+  /** It asked for branch only (#586): no pull request, so no step in the merge order. */
+  branchOnly: boolean;
 }
+
+/** A push that takes a step in the merge order: anything but no changes, or a branch-only push (#586). */
+const takesMergeStep = (publish: RepositoryPublish) =>
+  publish.finalized.outcome !== "no_changes" && !publish.branchOnly;
 
 const isNoLongerActive = (error: unknown) => error instanceof Error && error.message === "coding_run_no_longer_active";
 
@@ -789,6 +796,8 @@ export interface ContainerRunSnapshot {
   collectExclude: unknown;
   /** Revision-in-place: set when this run continues another run's branch/PR. See preflight(). */
   rootCodingRunId: string | null;
+  /** The root pushed its branch with no pull request, and no round since opened one (#586). */
+  rootBranchOnly?: boolean;
   /** The issue that triggered this run (CodingRun.issueProvider/issueKey); null when none. */
   issueProvider?: string | null;
   issueKey?: string | null;
@@ -1125,6 +1134,9 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         })
       : null;
     const repositories = await this.loadRepositories(runId, row.agentId, row.codingRun.rootCodingRunId);
+    const rootBranchOnly = row.codingRun.rootCodingRunId
+      ? await this.rootBranchOnly(row.codingRun.rootCodingRunId)
+      : false;
     // The run's secrets, identity and version only (one query): for warm rounds' fingerprint, and for
     // the versions a Claude Code run with session resume launches with (transcript capture compares
     // them). A failed read leaves them unknown: never warm, and no transcript stored.
@@ -1157,6 +1169,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       protectedPaths: row.codingRun.protectedPaths,
       collectExclude: row.codingRun.collectExclude,
       rootCodingRunId: row.codingRun.rootCodingRunId,
+      ...(rootBranchOnly ? { rootBranchOnly: true } : {}),
       issueProvider: row.codingRun.issueProvider,
       issueKey: row.codingRun.issueKey,
       ...(await this.planLineSource(row.codingRun)),
@@ -1314,6 +1327,27 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       ...(pr.state ? { state: pr.state } : {}),
       ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
     }));
+  }
+
+  /**
+   * Whether a continuation's root pushed only a branch (#586): the root or a round since is
+   * branch_pushed, and none of them opened a pull request. A failed read answers false (the usual
+   * continuation checks then apply).
+   */
+  async rootBranchOnly(rootRunId: string): Promise<boolean> {
+    try {
+      const rows = await this.db.codingRun.findMany({
+        where: { OR: [{ runId: rootRunId }, { rootCodingRunId: rootRunId }] },
+        select: { result: true },
+      });
+      const outcomes = rows.map((row) => publicCodingRunResult(row.result)?.outcome);
+      return (
+        outcomes.includes("branch_pushed") &&
+        !outcomes.some((outcome) => outcome === "pull_request_opened" || outcome === "pull_request_updated")
+      );
+    } catch {
+      return false;
+    }
   }
 
   async pullRequestMarkedReady(rootRunId: string, name?: string): Promise<boolean> {
@@ -2947,7 +2981,9 @@ export class ContainerExecutor implements Executor {
         headRef: run.headRef,
         protectedPaths: profile.protectedPaths,
         collectExclude: [...normalizeCollectExclusions(run.collectExclude).paths],
-        continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
+        continuation: run.rootCodingRunId
+          ? { rootRunId: run.rootCodingRunId, ...(run.rootBranchOnly ? { branchOnly: true } : {}) }
+          : undefined,
         // Git history (#536), with the run's remote rows fetched into the default repository.
         ...historyPrepareFields(run, { remotes: true, strict: true }),
       };
@@ -3566,6 +3602,8 @@ export class ContainerExecutor implements Executor {
     // keepDescription: a continuation's existing description is left as it is (no update, no proposal).
     const descriptionState = options.keepDescription ? null : await this.descriptionStateFor(current);
     const finalized = await this.options.vcs.finalizeChanges(workspace, {
+      // The run asked to push its branch with no pull request (#586).
+      ...(output.pullRequest === "none" ? { pullRequest: "none" as const } : {}),
       summary,
       tests: output.tests,
       tag: output.tag,
@@ -3939,7 +3977,8 @@ export class ContainerExecutor implements Executor {
     // step after its own (inherited 3: the default 3, the first extra 5), which may leave a gap.
     // publishRecords keeps the number only when two or more repositories pushed; a lone push records
     // soleMergeOrder, as a run with one repository would.
-    const pushedSoFar = published.filter((publish) => publish.finalized.outcome !== "no_changes");
+    // A branch-only push (#586) opens no pull request, so it takes no step.
+    const pushedSoFar = published.filter(takesMergeStep);
     const numbered = Math.min(MAX_MERGE_ORDER, (latest.mergeOrder ?? 0) + pushedSoFar.length + 1);
     const mergeOrder = slot.extra
       ? (note?.mergeOrder ?? numbered)
@@ -3964,7 +4003,10 @@ export class ContainerExecutor implements Executor {
           ]
         : [],
     );
+    // Each repository's own choice (#586): an extra's note, the default repository's top-level field.
+    const branchOnly = slot.extra ? note?.pullRequest === "none" : output.pullRequest === "none";
     const finalized = await this.options.vcs.finalizeChanges(slot.workspace, {
+      ...(branchOnly ? { pullRequest: "none" as const } : {}),
       summary: agentOutput.summary,
       tests: output.tests,
       tag: agentOutput.tag,
@@ -3979,7 +4021,17 @@ export class ContainerExecutor implements Executor {
         : {}),
       ...(slot.resultBundle ? { resultBundle: slot.resultBundle } : {}),
     });
-    return { slot, finalized, current: latest, view, agentOutput, descriptionState, mergeOrder, soleMergeOrder };
+    return {
+      slot,
+      finalized,
+      current: latest,
+      view,
+      agentOutput,
+      descriptionState,
+      mergeOrder,
+      soleMergeOrder,
+      branchOnly,
+    };
   }
 
   /**
@@ -4004,11 +4056,13 @@ export class ContainerExecutor implements Executor {
     let record: CodingRunRecord = dependencyCacheRecord(output);
     const extras: ExtraPublishRecord[] = [];
     // Numbered only when the run pushed two or more repositories; a lone push keeps a single run's order.
-    const several = done.filter((publish) => publish.finalized.outcome !== "no_changes").length >= 2;
+    // A branch-only push (#586) is left out: it has no pull request to order.
+    const several = done.filter(takesMergeStep).length >= 2;
     for (const publish of done) {
       const { finalized, view, slot } = publish;
       const mergeOrder = several ? publish.mergeOrder : publish.soleMergeOrder;
       const pushed = finalized.outcome !== "no_changes";
+      const ordered = takesMergeStep(publish);
       const name = slot.extra?.name;
       const description = !pushed
         ? await this.refreshDescriptionInTime(view, publish.agentOutput, slot.workspace, name)
@@ -4016,7 +4070,7 @@ export class ContainerExecutor implements Executor {
             (): CodingRunRecord => ({}),
           );
       if (slot.extra && pushed && !view.rootCodingRunId && run.rootCodingRunId) {
-        await this.recordFirstExtraDescription(run, slot.extra.name, description);
+        await this.recordFirstDescription(run, description, slot.extra.name);
       }
       const result = this.publishedResult(publish, options.budgetStopped);
       if (!slot.extra) {
@@ -4026,7 +4080,7 @@ export class ContainerExecutor implements Executor {
           ...record,
           ...(pushed ? pushedRecord(finalized) : {}),
           ...description,
-          ...(pushed && run.mergeOrder == null && mergeOrder != null ? { mergeOrder } : {}),
+          ...(ordered && run.mergeOrder == null && mergeOrder != null ? { mergeOrder } : {}),
         };
         continue;
       }
@@ -4040,7 +4094,7 @@ export class ContainerExecutor implements Executor {
             : null,
         resultBranch: finalized.outcome === "branch_pushed" ? finalized.headRef : null,
         baseSha: pushed ? finalized.baseCommit : null,
-        mergeOrder: pushed ? mergeOrder : null,
+        mergeOrder: ordered ? mergeOrder : null,
         ...(description.prDescriptionOutcome ? { prDescriptionOutcome: description.prDescriptionOutcome } : {}),
         ...(description.prDescriptionSha256 && description.prDescriptionRunId
           ? { prDescriptionSha256: description.prDescriptionSha256, prDescriptionRunId: description.prDescriptionRunId }
@@ -4328,6 +4382,16 @@ export class ContainerExecutor implements Executor {
         ? { prDescriptionOutcome: "written", prDescriptionSha256: outcome.sha256, prDescriptionRunId: run.runId }
         : {};
     }
+    // A branch-only root's follow-up (#586) wrote its branch's first description: recorded on the
+    // root's row, where every later round reads its baseline, as a first run's would be.
+    if (outcome?.kind === "written" && run.rootBranchOnly) {
+      await this.recordFirstDescription(
+        run,
+        { prDescriptionSha256: outcome.sha256, prDescriptionRunId: run.runId },
+        name,
+      );
+      return { prDescriptionOutcome: "written" };
+    }
     if (!state) return {};
     if ("failed" in state) return { prDescriptionOutcome: "skipped:error" };
     if (!outcome || outcome.kind === "written") return {};
@@ -4361,14 +4425,15 @@ export class ContainerExecutor implements Executor {
   }
 
   /**
-   * An extra repository whose first pull request a continuation opened: its description hash is
-   * recorded on the root run's row of that name too (only while that row records none), where every
-   * later round reads its baseline and mark-ready keeps its state. Never throws.
+   * A pull request a continuation opened first (an extra repository's, or a branch-only root's,
+   * #586): its description hash is recorded on the root run's row (of that name, for an extra; only
+   * while that row records none), where every later round reads its baseline and mark-ready keeps
+   * its state. Never throws.
    */
-  private async recordFirstExtraDescription(
+  private async recordFirstDescription(
     run: ContainerRunSnapshot,
-    name: string,
     description: CodingRunRecord,
+    name?: string,
   ): Promise<void> {
     const store = this.options.store;
     const { prDescriptionSha256: sha256, prDescriptionRunId: agentTextRunId } = description;
@@ -4379,11 +4444,11 @@ export class ContainerExecutor implements Executor {
         expectedSha256: null,
         sha256,
         agentTextRunId,
-        name,
+        ...(name !== undefined ? { name } : {}),
       });
       if (!won) {
         containerLog.warn(
-          { runId: run.runId, rootRunId: run.rootCodingRunId, repository: name },
+          { runId: run.runId, rootRunId: run.rootCodingRunId, ...(name !== undefined ? { repository: name } : {}) },
           "the root run already records a description for this repository's pull request; not recorded",
         );
       }
@@ -4532,7 +4597,13 @@ export class ContainerExecutor implements Executor {
             pullRequestNumber: finalized.pullRequestNumber,
           }
         : outcome === "branch_pushed" && finalized?.outcome === "branch_pushed"
-          ? { headRef: finalized.headRef, commitSha: finalized.commitSha }
+          ? {
+              headRef: finalized.headRef,
+              commitSha: finalized.commitSha,
+              // A branch-only run on a hosted remote (#586): where the branch is, and how to open a PR.
+              ...(finalized.branchUrl ? { branchUrl: finalized.branchUrl } : {}),
+              ...(finalized.compareUrl ? { compareUrl: finalized.compareUrl } : {}),
+            }
           : {}),
       summary: output.summary,
       tests: output.tests,
@@ -5387,7 +5458,9 @@ export class ContainerExecutor implements Executor {
       headRef: run.headRef,
       protectedPaths: run.protectedPaths,
       collectExclude,
-      continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
+      continuation: run.rootCodingRunId
+        ? { rootRunId: run.rootCodingRunId, ...(run.rootBranchOnly ? { branchOnly: true } : {}) }
+        : undefined,
       // A history workspace is recovered only as one (its root .git is allowed then).
       ...historyPrepareFields(run, { remotes: true, strict: false }),
     };
