@@ -3,7 +3,11 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS, type CodingTaskInput } from "../coding/protocol.js";
+import {
+  DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
+  parseCodingAgentOutputJson,
+  type CodingTaskInput,
+} from "../coding/protocol.js";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import { repositoriesTaskNote, workerTaskNote } from "../coding-worker/task-note.js";
 import { INJECTED_MCP_TOKEN_PLACEHOLDER } from "../coding-worker/mcp-config.js";
@@ -1414,6 +1418,13 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
     expect(captured.prompt).toMatch(/Workflow tool exactly once with \{"name": "fix-bug"\}/);
     expect(captured.prompt).not.toContain(input.task);
     expect(captured.contextDirectory).not.toBeNull();
+  });
+
+  it("gives the launch turn a placeholder that passes the output schema, so it ends without retries", async () => {
+    const { captured } = await run([started, ended("completed"), answer("no_changes")]);
+    const placeholder = /placeholder final JSON, which Wardby ignores: (\{.*\})/.exec(captured.prompt)?.[1];
+    expect(placeholder).toBeDefined();
+    expect(parseCodingAgentOutputJson(placeholder!)).toMatchObject({ outcome: "no_changes", runId: input.runId });
   });
 
   it("sets Wardby's run id when the session copied the workflow's own id", async () => {

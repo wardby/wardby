@@ -351,8 +351,10 @@ function workflowPrompt(name: string, runId: string): string {
   return [
     `Run this repository's workflow script by calling the Workflow tool exactly once with {"name": "${name}"}.`,
     "Do not do the task yourself and do not run any other tools while it runs: the workflow does the work.",
-    "After the call returns, stop and wait: you will be told when the workflow finishes, with its result.",
-    "Then write the final JSON from that result: the outcome, a summary of what the workflow did and the files it changed,",
+    "The call returns at once, while the workflow runs in the background. End this turn right away with exactly this",
+    `placeholder final JSON, which Wardby ignores: {"schemaVersion": 1, "runId": "${runId}", "outcome": "no_changes", "summary": "Workflow running", "tests": []}`,
+    "You will then be told when the workflow finishes, with its result, in a new turn.",
+    "In that turn, write the real final JSON from the result: the outcome, a summary of what the workflow did and the files it changed,",
     'and, when the result has string fields "prTitle" and "prBody", use them as commitTitle and summary.',
     `The final JSON runId must be ${runId}.`,
   ].join("\n");
@@ -727,8 +729,10 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
           // A workflow keeps running in the background on refused calls: end the session now.
           if (workflow) break;
         } else if (message.subtype === "success" && typeof message.result === "string") {
-          // A workflow run's answer counts only once the workflow has ended (see workflowState).
+          // A workflow run's answer counts only once the workflow has ended (see workflowState); the
+          // launch turn's placeholder is ignored, and marked so in the trace.
           if (!workflow || workflowState.ended) finalJson = message.result;
+          else options.trace?.record("workflow_placeholder_ignored", { workflowStarted: workflowState.started });
         } else if (message.subtype === "error_max_budget_usd") {
           budgetRefused = true;
           break;
