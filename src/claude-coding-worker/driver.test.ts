@@ -1357,3 +1357,89 @@ describe("plan file placement", () => {
     }
   });
 });
+
+describe("runClaudeCodingWorker workflow runs (#582)", () => {
+  const script = { path: ".claude/workflows/fix-bug.js", content: "export const meta = { name: 'fix-bug' }\n" };
+  const workflowInput: CodingTaskInput = {
+    ...input,
+    claudeBareMode: false,
+    claudeContext: { files: [{ path: "CLAUDE.md", content: "Use pnpm." }, script] },
+    workflow: { name: "fix-bug", args: { ticket: "X-1" } },
+  };
+  const answer = (outcome: string, runId = input.runId) => ({
+    type: "result",
+    subtype: "success",
+    result: JSON.stringify({ schemaVersion: 1, runId, outcome, summary: `${outcome} summary`, tests: [] }),
+  });
+  const started = { type: "system", subtype: "task_started", task_type: "local_workflow", task_id: "w1" };
+  const ended = (status: string) => ({ type: "system", subtype: "task_notification", task_id: "w1", status });
+
+  async function run(messages: Record<string, unknown>[], overrides: Partial<CodingTaskInput> = {}) {
+    let captured: ClaudeQueryOptions | undefined;
+    let workflowFiles: string[] = [];
+    const root = await mkdtemp(join(tmpdir(), "wf-driver-"));
+    const createQuery: ClaudeQueryFactory = (options) => {
+      captured = options;
+      return (async function* () {
+        workflowFiles = options.contextDirectory
+          ? await readdir(join(options.contextDirectory, ".claude/workflows")).catch(() => [])
+          : [];
+        for (const message of messages) yield message as never;
+      })();
+    };
+    try {
+      const result = await runClaudeCodingWorker({
+        input: { ...workflowInput, ...overrides },
+        proxyBaseUrl: "http://wardby-proxy:8787/",
+        capability: "rrp_worker_capability",
+        signal: new AbortController().signal,
+        createQuery,
+        contextRoot: join(root, "ctx"),
+      });
+      return { result, captured: captured!, workflowFiles };
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it("asks for the Workflow call, and takes the answer after the workflow ends, not an early one", async () => {
+    const { result, captured } = await run([
+      started,
+      answer("no_changes"),
+      ended("completed"),
+      answer("changes_ready"),
+    ]);
+    expect(result.outcome).toBe("changes_ready");
+    expect(captured.workflow).toEqual({ name: "fix-bug", args: { ticket: "X-1" } });
+    expect(captured.prompt).toMatch(/Workflow tool exactly once with \{"name": "fix-bug"\}/);
+    expect(captured.prompt).not.toContain(input.task);
+    expect(captured.contextDirectory).not.toBeNull();
+  });
+
+  it("sets Wardby's run id when the session copied the workflow's own id", async () => {
+    const { result } = await run([started, ended("completed"), answer("changes_ready", "wf_abc123")]);
+    expect(result.runId).toBe(input.runId);
+  });
+
+  it("fails with coding_workflow_failed when the workflow never started, failed or was stopped", async () => {
+    await expect(run([answer("changes_ready")])).rejects.toThrow("coding_workflow_failed");
+    await expect(run([started, ended("failed"), answer("changes_ready")])).rejects.toThrow("coding_workflow_failed");
+    await expect(run([started, ended("stopped"), answer("changes_ready")])).rejects.toThrow("coding_workflow_failed");
+    // Ended but nothing answered after it: no output.
+    await expect(run([started, answer("no_changes"), ended("completed")])).rejects.toThrow("coding_output_missing");
+  });
+
+  it("writes only the run's own workflow script into the context directory", async () => {
+    const other = { path: ".claude/workflows/other.js", content: "return 2\n" };
+    const { workflowFiles } = await run([started, ended("completed"), answer("no_changes")], {
+      claudeContext: { files: [{ path: "CLAUDE.md", content: "x" }, script, other] },
+    });
+    expect(workflowFiles).toEqual(["fix-bug.js"]);
+  });
+
+  it("fails rather than run a workflow without native mode", async () => {
+    await expect(
+      run([started, ended("completed"), answer("no_changes")], { claudeBareMode: undefined }),
+    ).rejects.toThrow("coding_workflow_failed");
+  });
+});

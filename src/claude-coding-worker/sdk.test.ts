@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ClaudeQueryOptions } from "./driver.js";
-import { buildClaudeSdkOptions, WARDBY_TOOLS_TIMEOUT_MS } from "./sdk.js";
+import { buildClaudeSdkOptions, WARDBY_TOOLS_TIMEOUT_MS, workflowGuard } from "./sdk.js";
 import { MAX_CLAUDE_COMMAND_TIMEOUT_MS } from "../coding/command-timeouts.js";
 import { KILL_GRACE_MS, MAX_COMMAND_TIMEOUT_MS } from "../claude-tool-runner/command.mjs";
 
@@ -214,5 +214,48 @@ describe("Claude SDK configuration", () => {
     expect(sdkController.signal.aborted).toBe(false);
     controller.abort();
     expect(sdkController.signal.aborted).toBe(true);
+  });
+});
+
+describe("workflow runs (#582)", () => {
+  const workflow = { name: "fix-bug", args: { ticket: "X-1" } };
+
+  it("adds the Workflow tool, allows it, and installs the guard only on a workflow run", () => {
+    const options = buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context", workflow });
+    expect(options.tools).toContain("Workflow");
+    expect(options.allowedTools).toContain("Workflow");
+    const hooks = options.hooks as { PreToolUse: { matcher: string; hooks: unknown[] }[] };
+    expect(hooks.PreToolUse).toEqual([{ matcher: "Workflow", hooks: [expect.any(Function)] }]);
+
+    const plain = buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context" });
+    expect(plain.tools).not.toContain("Workflow");
+    expect(plain.allowedTools).not.toContain("Workflow");
+    expect(plain).not.toHaveProperty("hooks");
+  });
+
+  it("allows one call for the run's own name, and puts Wardby's args in it", async () => {
+    const guard = workflowGuard(workflow);
+    const first = await guard({ tool_input: { name: "fix-bug", args: { ticket: "OTHER" } } });
+    expect(first.hookSpecificOutput).toEqual({
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      updatedInput: { name: "fix-bug", args: { ticket: "X-1" } },
+    });
+    const second = await guard({ tool_input: { name: "fix-bug" } });
+    expect(second.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("denies another name, an inline script, a scriptPath, remote and resume", async () => {
+    for (const toolInput of [
+      { name: "other" },
+      { script: "export const meta = {}" },
+      { scriptPath: "/tmp/x.js" },
+      { name: "fix-bug", remote: true },
+      { name: "fix-bug", resumeFromRunId: "wf_1" },
+      {},
+    ]) {
+      const result = await workflowGuard(workflow)({ tool_input: toolInput });
+      expect(result.hookSpecificOutput?.permissionDecision, JSON.stringify(toolInput)).toBe("deny");
+    }
   });
 });

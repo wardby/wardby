@@ -2027,7 +2027,12 @@ describe("ContainerExecutor", () => {
     });
 
     describe("workflow runs (#582)", () => {
-      const workflowRun = { ...claudeRun, gitHistoryDepth: 1, workflowName: "fix-bug", workflowRepository: null };
+      const workflowRun = {
+        ...claudeRun,
+        gitHistoryDepth: 1,
+        workflowName: "fix-bug" as string | null,
+        workflowRepository: null,
+      };
       const SCRIPT = "export const meta = { name: 'fix-bug', description: 'x' }\nreturn 1\n";
 
       async function launch(run: typeof workflowRun & { workflowArgs?: unknown }, withScript = true) {

@@ -8,6 +8,7 @@ import {
   type DependencyCacheReport,
   type GitHistoryInput,
   type PlanFileWire,
+  CONTEXT_WORKFLOW_PATH,
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_CLAUDE_MAX_TURNS,
   TEST_OUTCOME_DESCRIPTION,
@@ -187,6 +188,11 @@ export interface ClaudeQueryOptions {
    * wardby_mcp). With `header` (Substrate), the token is the gateway's placeholder, sent in that header.
    */
   mcp?: { url: string; token: string; header?: typeof MCP_TOKEN_HEADER };
+  /**
+   * Set only on a workflow run (#582): the script to run and its args. sdk.ts enables the Workflow
+   * tool and a guard that allows exactly one call, for this name, and puts these args in it.
+   */
+  workflow?: { name: string; args: unknown };
 }
 
 export type ClaudeQueryFactory = (options: ClaudeQueryOptions) => AsyncIterable<ClaudeSdkMessage>;
@@ -240,6 +246,21 @@ export interface ClaudeWorkerRunOptions {
   resultBundle?: (repository: GitHistoryInput["repositories"][number], timeoutMs: number) => Promise<unknown>;
   /** One operator log line (a fixed-code JSON object); stderr by default. */
   operatorLog?: (event: Record<string, string>) => void;
+}
+
+/**
+ * A workflow run's prompt (#582): the script does the work, so the session only starts it and then
+ * reports its result. Wardby fills the args (the guard in sdk.ts), so the model never copies them.
+ */
+function workflowPrompt(name: string, runId: string): string {
+  return [
+    `Run this repository's workflow script by calling the Workflow tool exactly once with {"name": "${name}"}.`,
+    "Do not do the task yourself and do not run any other tools while it runs: the workflow does the work.",
+    "After the call returns, stop and wait: you will be told when the workflow finishes, with its result.",
+    "Then write the final JSON from that result: the outcome, a summary of what the workflow did and the files it changed,",
+    'and, when the result has string fields "prTitle" and "prBody", use them as commitTitle and summary.',
+    `The final JSON runId must be ${runId}.`,
+  ].join("\n");
 }
 
 function boundedPrompt(task: string, runId: string, note: string | undefined, mcp: boolean): string {
@@ -477,7 +498,11 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     }
     return withCache(output);
   };
-  const files = options.input.claudeContext?.files ?? [];
+  // Only the run's own workflow script is ever written (#582): any other workflow file is dropped.
+  const ownScript = options.input.workflow ? `.claude/workflows/${options.input.workflow.name}.js` : undefined;
+  const files = (options.input.claudeContext?.files ?? []).filter(
+    (file) => !CONTEXT_WORKFLOW_PATH.test(file.path) || file.path === ownScript,
+  );
   let bareMode = options.input.claudeBareMode !== false;
   // Bare mode puts the repository context in the system prompt; native mode writes it to disk for
   // Claude Code to load itself.
@@ -504,13 +529,18 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     : undefined;
   const security = claudeWorkerSecurityInstructions(mcp !== undefined, options.input.gitHistory !== undefined);
   const developerInstructions = injected ? `${security}\n\n${injected}` : security;
+  const workflow = options.input.workflow;
+  // A workflow run needs native mode: the Workflow tool reads the script from the context directory.
+  if (workflow && (bareMode || !context)) throw new Error("coding_workflow_failed");
   const stream = options.createQuery({
-    prompt: boundedPrompt(
-      options.input.task,
-      options.input.runId,
-      workerTaskNote(dependencyCache, options.input.repositories, options.input.gitHistory),
-      mcp !== undefined,
-    ),
+    prompt: workflow
+      ? workflowPrompt(workflow.name, options.input.runId)
+      : boundedPrompt(
+          options.input.task,
+          options.input.runId,
+          workerTaskNote(dependencyCache, options.input.repositories, options.input.gitHistory),
+          mcp !== undefined,
+        ),
     model: options.input.model,
     budgetUsd: options.input.budgetUsd,
     maxTurns: options.input.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS,
@@ -533,6 +563,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     ...(options.input.resumeSessionId ? { resumeSessionId: options.input.resumeSessionId } : {}),
     ...(options.trace ? { stderr: (data: string) => options.trace?.record("sdk_stderr", data) } : {}),
     ...(mcp ? { mcp } : {}),
+    ...(workflow ? { workflow: { name: workflow.name, args: workflow.args } } : {}),
   });
   let finalJson: string | undefined;
   let failed = false;
@@ -542,6 +573,9 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   let toolUnreachable = false;
   // The last API failure the SDK reported, as a stream failure code: names a failed turn's cause.
   let apiError: string | undefined;
+  // A workflow run (#582): the run's result is the session's answer after the workflow ends, never
+  // one given while it runs (the model may answer early). Tracked from the SDK's task messages.
+  const workflowState = { started: false, ended: undefined as undefined | "completed" | "failed" | "stopped" };
   try {
     for await (const message of stream) {
       // Every SDK message, raw: init, assistant (tool_use with the command), user (tool_result), result.
@@ -550,6 +584,14 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
       if (toolServerUnreachable(message)) {
         toolUnreachable = true;
         break;
+      }
+      if (workflow && message.type === "system") {
+        const task = message as { subtype?: unknown; task_type?: unknown; status?: unknown };
+        if (task.subtype === "task_started" && task.task_type === "local_workflow") workflowState.started = true;
+        else if (task.subtype === "task_notification" && workflowState.started && !workflowState.ended) {
+          workflowState.ended =
+            task.status === "completed" ? "completed" : task.status === "stopped" ? "stopped" : "failed";
+        }
       }
       if (message.type === "system") {
         const sessionId = (message as { session_id?: unknown }).session_id;
@@ -565,9 +607,14 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         });
       } else if (message.type === "result") {
         const errored = message.subtype !== "success" || (message as { is_error?: unknown }).is_error === true;
-        if (errored && resultRefusedForBudget(message)) budgetRefused = true;
-        else if (message.subtype === "success" && typeof message.result === "string") finalJson = message.result;
-        else if (message.subtype === "error_max_budget_usd") {
+        if (errored && resultRefusedForBudget(message)) {
+          budgetRefused = true;
+          // A workflow keeps running in the background on refused calls: end the session now.
+          if (workflow) break;
+        } else if (message.subtype === "success" && typeof message.result === "string") {
+          // A workflow run's answer counts only once the workflow has ended (see workflowState).
+          if (!workflow || workflowState.ended) finalJson = message.result;
+        } else if (message.subtype === "error_max_budget_usd") {
           budgetRefused = true;
           break;
         } else if (message.subtype === "error_max_turns") turnLimit = true;
@@ -587,6 +634,8 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   if (turnLimit) throw new Error("coding_turn_limit");
   if (toolUnreachable) throw new Error("worker_tool_runner_unreachable");
   if (failed) throw new Error(apiError ?? "coding_turn_failed");
+  // The workflow never started, never ended, or ended failed or stopped: the run did not do its work.
+  if (workflow && workflowState.ended !== "completed") throw new Error("coding_workflow_failed");
   if (!finalJson) throw new Error("coding_output_missing");
   let output: CodingAgentOutput;
   try {
@@ -595,6 +644,9 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     if (safeWorkerErrorCode(error) !== "worker_failed") throw error;
     throw new Error("coding_output_invalid", { cause: error });
   }
+  // A workflow run's session has seen the workflow's own run id (wf_...) and may copy it: Wardby
+  // knows which run this is, so it sets it.
+  if (workflow) output = { ...output, runId: options.input.runId };
   if (output.runId !== options.input.runId) throw new Error("coding_output_run_mismatch");
   // Only a changes_ready workspace is collected into a pull request; lockfiles pointed at the proxy
   // would otherwise commit sandbox-only download URLs. The warnings name repository paths, so they
