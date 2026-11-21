@@ -1558,7 +1558,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               protectedPaths: runProtectedPaths(
                 agent.codingProfile.protectedPaths as string[],
                 agent.codingProfile.workflowName !== null,
-              ) as Prisma.InputJsonValue,
+              ),
               collectExclude: agent.codingProfile.collectExclude as Prisma.InputJsonValue,
               packageAllowlist: agent.codingProfile.packageAllowlist as Prisma.InputJsonValue,
               packagePolicy: agent.codingProfile.packagePolicy as Prisma.InputJsonValue,
