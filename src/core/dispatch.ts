@@ -1582,6 +1582,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               // Fixed here (#582): the workflow a run executes never changes mid-run.
               workflowName: agent.codingProfile.workflowName,
               workflowRepository: agent.codingProfile.workflowRepository,
+              workflowReplyField: agent.codingProfile.workflowReplyField,
               workflowArgs:
                 agent.codingProfile.workflowName !== null && options.codingWorkflowArgs !== undefined
                   ? (options.codingWorkflowArgs as Prisma.InputJsonObject)

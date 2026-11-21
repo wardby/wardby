@@ -59,11 +59,15 @@ import { isOwnerAll } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import type { PrismaClient } from "#prisma";
 import { textResult } from "./text-result.js";
+import {
+  WORKFLOW_ARGS_WITHOUT_WORKFLOW_ERROR,
+  WORKFLOW_ARGS_WITHOUT_WORKFLOW_MESSAGE,
+  WorkflowArgsSchema,
+} from "../../coding/workflow-args.js";
 import { codingOverrideAllowed, type CodingOverrideAgent } from "../../core/coding-override.js";
 
 const DEFAULT_TASK_TTL_MS = 24 * 60 * 60 * 1000;
-/** The most a workflow script's args may be, as JSON (#582). */
-export const MAX_WORKFLOW_ARGS_BYTES = 16 * 1024;
+export { MAX_WORKFLOW_ARGS_BYTES } from "../../coding/workflow-args.js";
 
 const TriggerAgentSchema = z
   .object({
@@ -75,13 +79,7 @@ const TriggerAgentSchema = z
     repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
     continuePriorRun: z.string().trim().min(1).max(128).optional(),
     /** The workflow script's args (#582): a JSON object, at most MAX_WORKFLOW_ARGS_BYTES serialized. */
-    workflowArgs: z
-      .record(z.string(), z.unknown())
-      .refine(
-        (value) => Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_WORKFLOW_ARGS_BYTES,
-        "workflowArgs must be at most 16 KiB as JSON",
-      )
-      .optional(),
+    workflowArgs: WorkflowArgsSchema.optional(),
     issue: z.unknown().optional(),
     review: z
       .object({
@@ -341,10 +339,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       }
       if (args.continuePriorRun !== undefined) await checkContinuePriorRun(ctx, agent, args.continuePriorRun, args);
       if (args.workflowArgs !== undefined && !agent.codingProfile?.workflowName) {
-        throw new McpError(
-          400,
-          "workflow_args_without_workflow: workflowArgs is only valid for a coding agent with a workflow (codingProfile.workflow).",
-        );
+        throw new McpError(400, `${WORKFLOW_ARGS_WITHOUT_WORKFLOW_ERROR}: ${WORKFLOW_ARGS_WITHOUT_WORKFLOW_MESSAGE}`);
       }
       if (
         agent.kind !== "coding" &&

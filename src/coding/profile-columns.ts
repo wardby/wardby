@@ -18,5 +18,6 @@ export function codingProfileColumns(profile: CodingProfile) {
     // A workflow (#582) is kept as workflowName + workflowRepository; null name = no workflow.
     workflowName: workflow?.name ?? null,
     workflowRepository: workflow?.repository ?? null,
+    workflowReplyField: workflow?.replyField ?? null,
   };
 }

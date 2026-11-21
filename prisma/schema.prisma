@@ -518,6 +518,8 @@ model CodingAgentProfile {
   workflowName             String?
   /// The link name the workflow script is read from; null = the default repository.
   workflowRepository       String?
+  /// The string field of the script's returned object that is the run's reply, word for word; null = the session's summary.
+  workflowReplyField       String?
   /// Git history in runs: the full history; overrides gitHistoryDepth.
   gitHistoryFull           Boolean           @default(false)
   packageAllowlist         Json              @default("{}")
@@ -623,6 +625,8 @@ model CodingRun {
   workflowName          String?
   /// Fixed at dispatch from the profile's workflowRepository; null = the default repository.
   workflowRepository    String?
+  /// Fixed at dispatch from the profile's workflowReplyField; non-null = the run's summary is that field of the script's result.
+  workflowReplyField    String?
   /// trigger_agent's workflowArgs (a JSON object), the script's `args`; null = the task text.
   workflowArgs          Json?
   packageAllowlist      Json                @default("{}")

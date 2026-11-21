@@ -323,6 +323,15 @@ describe("workflow (#582)", () => {
     ).toEqual({ name: "fix_bug-2", repository: "github:acme/processes" });
   });
 
+  it("accepts a replyField naming a result field, and refuses anything else", () => {
+    expect(
+      CodingProfileSchema.parse({ ...base, workflow: { name: "shalp-triage", replyField: "comment" } }).workflow,
+    ).toEqual({ name: "shalp-triage", replyField: "comment" });
+    for (const replyField of ["", "1st", "a.b", "a-b", "x".repeat(65)]) {
+      expect(CodingProfileSchema.safeParse({ ...base, workflow: { name: "w", replyField } }).success).toBe(false);
+    }
+  });
+
   it("defaults to no workflow", () => {
     expect(CodingProfileSchema.parse({ repository: "acme/app" }).workflow).toBeNull();
   });

@@ -930,9 +930,18 @@ inside the worker.
 - A workflow needs `gitHistory`, because scripts use git. With it, the
   script's own local commits are collected onto Wardby's branch.
 - `trigger_agent` takes `workflowArgs`, a JSON object of at most 16 KiB that
-  becomes the script's `args`. Without it, `args` is the run's task text as a
-  string. `workflowArgs` for an agent without a workflow is refused with
+  becomes the script's `args`, and so does `delegate_to_<name>` when the
+  sub-agent has a workflow. Without it, `args` is the run's request text as a
+  string (the task, without the agent's standing instructions).
+  `workflowArgs` for an agent without a workflow is refused with
   `workflow_args_without_workflow`.
+- When `args` is an object, Wardby adds a reserved `wardby` field
+  (`{ runId, baseSha }`), so a script can tell a Wardby run from a laptop run.
+- `workflow.replyField` names a string field of the script's result to use,
+  word for word, as a no-change run's reply; an issue the delegating lead
+  posts to gets that text in place of the lead's reply. On a run with a pull
+  request, the result's `prTitle` and `prBody` are the commit title and
+  description.
 - The run is always in native mode (whatever `claudeBareMode` says), the only
   workflow loaded is the named one, and `.claude/**` is added to the run's
   protected paths.

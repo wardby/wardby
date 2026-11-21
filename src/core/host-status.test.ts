@@ -842,6 +842,40 @@ describe("collectRunOutcome", () => {
   });
 });
 
+describe("collectRunOutcome workflow replies (#582)", () => {
+  const child = (id: string, status: string, finalText: string | null, workflowReplyField: string | null) => ({
+    id,
+    status,
+    error: null,
+    finalText,
+    codingRun: {
+      result: { outcome: "no_changes" },
+      failureCategory: null,
+      services: [],
+      workflowReplyField,
+    },
+  });
+  const outcomeOf = (children: unknown[]) =>
+    collectRunOutcome(
+      { run: { findUnique: vi.fn(async () => null), findMany: vi.fn(async () => children) } } as never,
+      { id: "r1", status: "succeeded", finalText: "the lead's retelling" },
+    );
+
+  it("returns the one workflow sub-run's text as the reply", async () => {
+    const out = await outcomeOf([child("c1", "succeeded", "## Type\nBug", "comment")]);
+    expect(out.workflowReply).toBe("## Type\nBug");
+  });
+
+  it("has no workflow reply without a replyField, with two of them, or for a failed sub-run", async () => {
+    expect((await outcomeOf([child("c1", "succeeded", "x", null)])).workflowReply).toBeUndefined();
+    expect(
+      (await outcomeOf([child("c1", "succeeded", "a", "comment"), child("c2", "succeeded", "b", "comment")]))
+        .workflowReply,
+    ).toBeUndefined();
+    expect((await outcomeOf([child("c1", "failed", "x", "comment")])).workflowReply).toBeUndefined();
+  });
+});
+
 describe("collectRunOutcome with several repositories (#537)", () => {
   const opened = (repository: string, n: number) => ({
     outcome: "pull_request_opened",

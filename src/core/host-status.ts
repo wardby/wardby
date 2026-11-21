@@ -468,6 +468,8 @@ export async function collectRunOutcome(
   noChanges: boolean;
   budgetSentence?: string;
   packageAudit?: PackageAuditOutcome;
+  /** The one workflow sub-run's reply (#582), posted word for word in place of the run's own. */
+  workflowReply?: string;
 }> {
   const children = await db.run.findMany({
     where: { parentRunId: run.id },
@@ -475,9 +477,11 @@ export async function collectRunOutcome(
       id: true,
       status: true,
       error: true,
+      finalText: true,
       codingRun: {
         select: {
           result: true,
+          workflowReplyField: true,
           failureCategory: true,
           services: true,
           packageAuditMode: true,
@@ -542,11 +546,17 @@ export async function collectRunOutcome(
     const result = c.codingRun?.result;
     return result && typeof result === "object" && !Array.isArray(result) && result.outcome === "no_changes";
   });
+  // A workflow sub-run with a replyField ends with the script's own text as its summary: when exactly
+  // one did, that text is the reply, so no model retells it on the way to the issue.
+  const workflowReplies = children.flatMap((c) =>
+    c.status === "succeeded" && c.codingRun?.workflowReplyField && c.finalText?.trim() ? [c.finalText] : [],
+  );
   return {
     pullRequests,
     failedChildren,
     packageRefusals,
     noChanges,
+    ...(workflowReplies.length === 1 ? { workflowReply: workflowReplies[0] } : {}),
     ...(budgetSentence ? { budgetSentence } : {}),
     ...(packageAudit ? { packageAudit } : {}),
   };
@@ -658,14 +668,16 @@ export async function completeHostStatus(
     if (!status.commentId && !opts.postIfMissing) return;
     const host = hosts[status.provider];
     if (!host) return;
-    const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges, packageAudit } =
+    const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges, packageAudit, workflowReply } =
       await collectRunOutcome(db, run);
+    // A workflow sub-run's reply (#582) is posted word for word in place of this run's own.
+    const shown = workflowReply ? { ...run, finalText: workflowReply } : run;
     await recordGitHubIssuePullRequests(db, status, run.id, pullRequests);
     // A blocked status is built from the refusals alone, so the agent's reply is not posted after it.
     const fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
       ? null
-      : fullReplyOf(run, pullRequests, failedChildren);
-    const outcome = outcomeBody(run, status.repository, pullRequests, failedChildren, {
+      : fullReplyOf(shown, pullRequests, failedChildren);
+    const outcome = outcomeBody(shown, status.repository, pullRequests, failedChildren, {
       budgetSentence,
       fromIssue: failedChildren.some((c) => c.status === "budget_exhausted")
         ? await runCameFromGitHubIssue(db, status, run.id)

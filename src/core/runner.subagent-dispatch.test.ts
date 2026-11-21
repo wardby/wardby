@@ -55,6 +55,7 @@ interface FakeCodingProfile {
   toolchain: string;
   toolchainVersion: string | null;
   workerImageRef: string | null;
+  workflowName?: string | null;
 }
 
 interface FakeAgent {
@@ -1168,6 +1169,78 @@ describe("delegate_to_<boundName> dispatch tool", () => {
       }>;
       const codingRun = await db.codingRun.findUnique({ where: { runId: child.id } });
       expect((codingRun as { mergeOrder: number | null } | null)?.mergeOrder).toBe(2);
+    });
+
+    describe("workflowArgs (#582)", () => {
+      const lead: FakeAgent = {
+        id: "lead-agent",
+        name: "shalp-triage-lead",
+        systemPrompt: "You delegate.",
+        model: "m",
+        budgetUsd: 5,
+        maxTurns: 10,
+      };
+      const setup = (workflowName: string | null) => {
+        const child: FakeAgent = { ...codingAgent("triage-agent"), codingProfile: { ...codingProfile, workflowName } };
+        return fakeDb(
+          [lead, child],
+          [{ parentAgentId: "lead-agent", childAgentId: "triage-agent", boundName: "triage" }],
+        );
+      };
+
+      it("the tool takes workflowArgs only for a workflow child", () => {
+        const withWorkflow = delegateToolDef("triage", false, [], [], true).jsonSchema as {
+          properties: Record<string, unknown>;
+        };
+        expect(withWorkflow.properties).toHaveProperty("workflowArgs");
+        const without = delegateToolDef("triage", false).jsonSchema as { properties: Record<string, unknown> };
+        expect(without.properties).not.toHaveProperty("workflowArgs");
+      });
+
+      it("a workflow child's run records the lead's workflowArgs", async () => {
+        const db = setup("shalp-triage");
+        const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+        const executor = fakeCodingExecutor(db, { status: "succeeded", finalText: "done", costUsd: 0.02 });
+        const llm = scriptedLlm([
+          toolCall(
+            "delegate_to_triage",
+            JSON.stringify({ task: "SHALP-7363", workflowArgs: { ticket: "SHALP-7363" } }),
+          ),
+          finalAnswer("done"),
+        ]);
+        await executeRun(parentRun.id, providers(llm, executor), db);
+        const [child] = (await db.run.findMany({ where: { parentRunId: { in: [parentRun.id] } } })) as Array<{
+          id: string;
+        }>;
+        const codingRun = (await db.codingRun.findUnique({ where: { runId: child.id } })) as {
+          workflowArgs?: unknown;
+        } | null;
+        expect(codingRun?.workflowArgs).toEqual({ ticket: "SHALP-7363" });
+      });
+
+      it("refuses workflowArgs for a child without a workflow, starting nothing", async () => {
+        const db = setup(null);
+        const parentRun = await db.run.create({ data: { agentId: "lead-agent" } });
+        const started: string[] = [];
+        const executor = {
+          async start(runId: string) {
+            started.push(runId);
+          },
+          async stop() {},
+        };
+        const llm = scriptedLlm([
+          toolCall("delegate_to_triage", JSON.stringify({ task: "x", workflowArgs: { ticket: "SHALP-1" } })),
+          finalAnswer("stopped"),
+        ]);
+        await executeRun(parentRun.id, providers(llm, executor), db);
+        expect(started).toEqual([]);
+        expect(toolResultSeen(llm, 1)).toMatchObject({ error: "workflow_args_without_workflow" });
+      });
+
+      it("refuses workflowArgs over 16 KiB", () => {
+        const parsed = parseDelegateArgs(JSON.stringify({ task: "x", workflowArgs: { big: "a".repeat(17 * 1024) } }));
+        expect("refusal" in parsed).toBe(true);
+      });
     });
 
     it("rejects an out-of-range mergeOrder as a tool refusal, never reaching dispatchRun", async () => {

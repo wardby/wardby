@@ -855,6 +855,8 @@ export interface ContainerRunSnapshot {
   workflowRepository?: string | null;
   /** trigger_agent's workflowArgs (CodingRun.workflowArgs); null = the task text. */
   workflowArgs?: unknown;
+  /** The result field that is the run's reply (CodingRun.workflowReplyField); null = the session's summary. */
+  workflowReplyField?: string | null;
   /** Coding-run services resolved at dispatch (CodingRun.services); parsed with parseStoredServices. */
   services?: unknown;
   /** The terminal failure category, once the run has one (CodingRun.failureCategory). */
@@ -1193,6 +1195,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       workflowName: row.codingRun.workflowName,
       workflowRepository: row.codingRun.workflowRepository,
       workflowArgs: row.codingRun.workflowArgs,
+      workflowReplyField: row.codingRun.workflowReplyField,
       services: row.codingRun.services,
       failureCategory: row.codingRun.failureCategory,
       profileRepository: row.agent.codingProfile?.repository ?? null,
@@ -5072,8 +5075,15 @@ export class ContainerExecutor implements Executor {
     }
     const workflowArgs =
       run.workflowArgs && typeof run.workflowArgs === "object" && !Array.isArray(run.workflowArgs)
-        ? (run.workflowArgs as Record<string, unknown>)
-        : run.task;
+        ? {
+            ...(run.workflowArgs as Record<string, unknown>),
+            // Reserved: marks a Wardby run, so one script can work both here and on a laptop. A
+            // script cannot read the environment; this is what it sees. Never anything secret.
+            wardby: { runId: run.runId, baseSha: startCommit(workspace) },
+          }
+        : // The run's own request, never the composed task: scripts parse args (a ticket key, JSON),
+          // and the standing-instructions header would break that. Older rows have no request.
+          (run.request ?? run.task);
     const build = (contextFiles: ClaudeContextFile[], withPlan: boolean) =>
       CodingTaskInputSchema.parse({
         schemaVersion: CODING_PROTOCOL_VERSION,
@@ -5103,7 +5113,15 @@ export class ContainerExecutor implements Executor {
         // A workflow run is always native: the Workflow tool reads the script from disk (#582).
         ...(run.claudeBareMode === false || workflow ? { claudeBareMode: false } : {}),
         // Only on a workflow run: every other run's input stays exactly what older workers expect.
-        ...(workflow ? { workflow: { name: workflow, args: workflowArgs } } : {}),
+        ...(workflow
+          ? {
+              workflow: {
+                name: workflow,
+                args: workflowArgs,
+                ...(run.workflowReplyField ? { replyField: run.workflowReplyField } : {}),
+              },
+            }
+          : {}),
         // Only when on: every other run's input stays exactly what older workers expect. The volume
         // size (the job spec's limits.diskMb) bounds what the cache may restore.
         ...(run.dependencyCache

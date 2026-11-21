@@ -261,6 +261,32 @@ describe("completeIssueStatus", () => {
     expect(markdown).not.toContain("> ");
     expect(markdown).not.toContain("Finished without");
   });
+  it("posts a workflow sub-run's reply word for word in place of the lead's (#582)", async () => {
+    const t = tracker();
+    const children = [
+      {
+        id: "c1",
+        status: "succeeded",
+        error: null,
+        finalText: "Draft for review\n\n## Type\nBug",
+        codingRun: {
+          result: { outcome: "no_changes" },
+          failureCategory: null,
+          services: [],
+          workflowReplyField: "comment",
+        },
+      },
+    ];
+    const d = db(
+      { runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null },
+      undefined,
+      { findMany: vi.fn(async () => children) },
+    );
+    await completeIssueStatus(d, { id: "r1", status: "succeeded", finalText: "The lead's retelling." }, { jira: t });
+    const { markdown } = (t.editComment as any).mock.calls[0][2];
+    expect(markdown).toContain("## Type");
+    expect(markdown).not.toContain("The lead's retelling.");
+  });
   it('says "Done." on Jira when the run finished without a reply', async () => {
     const t = tracker();
     const d = db({ runId: "r1", issueKey: "PROJ-1", provider: "jira", commentId: "c-1", completedAt: null });

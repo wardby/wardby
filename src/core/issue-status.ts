@@ -135,8 +135,10 @@ export async function completeIssueStatus(
     let body: string;
     let fullReply: string | null = null;
     if (writable) {
-      const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges, packageAudit } =
+      const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges, packageAudit, workflowReply } =
         await collectRunOutcome(db, run);
+      // A workflow sub-run's reply (#582) is posted word for word in place of this run's own.
+      const shown = workflowReply ? { ...run, finalText: workflowReply } : run;
       const foreign = await continuedForAnotherIssue(
         db,
         pullRequests.flatMap((pr) => (pr.pullRequestUrl && pr.runId ? [pr.runId] : [])),
@@ -175,8 +177,8 @@ export async function completeIssueStatus(
       // A blocked status is built from the refusals alone, so the agent's reply is not posted after it.
       fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
         ? null
-        : fullReplyOf(run, pullRequests, failedChildren);
-      const outcome = outcomeBody(run, "", pullRequests, failedChildren, {
+        : fullReplyOf(shown, pullRequests, failedChildren);
+      const outcome = outcomeBody(shown, "", pullRequests, failedChildren, {
         budgetSentence,
         packageRefusals,
         packageAudit,

@@ -172,7 +172,12 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     const { agentId } = await codingAgent();
     await db.codingAgentProfile.update({
       where: { agentId },
-      data: { workflowName: "fix-bug", workflowRepository: "upstream", gitHistoryDepth: 1 },
+      data: {
+        workflowName: "fix-bug",
+        workflowRepository: "upstream",
+        workflowReplyField: "comment",
+        gitHistoryDepth: 1,
+      },
     });
     const { executor } = fakeExecutor();
     const withArgs = await dispatchRun({
@@ -185,6 +190,7 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     expect(await db.codingRun.findUniqueOrThrow({ where: { runId: withArgs!.run.id } })).toMatchObject({
       workflowName: "fix-bug",
       workflowRepository: "upstream",
+      workflowReplyField: "comment",
       workflowArgs: { ticket: "X-1" },
     });
     // A workflow run may not change .claude/ (its own scripts included).

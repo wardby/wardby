@@ -1,3 +1,5 @@
+import { lstat, readFile } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import {
   CODING_PROTOCOL_VERSION,
   parseCodingAgentOutputJson,
@@ -246,6 +248,84 @@ export interface ClaudeWorkerRunOptions {
   resultBundle?: (repository: GitHistoryInput["repositories"][number], timeoutMs: number) => Promise<unknown>;
   /** One operator log line (a fixed-code JSON object); stderr by default. */
   operatorLog?: (event: Record<string, string>) => void;
+}
+
+/** The most a workflow script's result file may be. */
+const MAX_WORKFLOW_RESULT_BYTES = 1024 * 1024;
+
+/**
+ * The value a workflow script returned (#582), from the file Claude Code names in its
+ * task_notification: an absolute path to a regular file (never a symlink), at most 1 MiB, holding a
+ * JSON object. `shape` says how it was found, for the trace. Never throws.
+ */
+export async function readWorkflowResult(
+  path: unknown,
+): Promise<{ value: Record<string, unknown>; shape: string } | { problem: string }> {
+  if (typeof path !== "string" || !isAbsolute(path)) return { problem: "no_file" };
+  let text: string;
+  try {
+    const info = await lstat(path);
+    if (!info.isFile()) return { problem: "not_file" };
+    if (info.size > MAX_WORKFLOW_RESULT_BYTES) return { problem: "too_large" };
+    text = await readFile(path, "utf8");
+  } catch {
+    return { problem: "unreadable" };
+  }
+  const asObject = (value: unknown): Record<string, unknown> | null =>
+    value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { problem: "not_json" };
+  }
+  const object = asObject(parsed);
+  if (!object) return { problem: "not_object" };
+  return { value: object, shape: "object" };
+}
+
+/**
+ * The session's final JSON with the script's own values over it: prTitle as the commit title and
+ * prBody as the summary on a change, else the replyField value as the summary. A value the output
+ * schema refuses (a title too long, say) is left out, so the script can never fail the run here.
+ */
+export function applyWorkflowResult(
+  finalJson: string,
+  result: Record<string, unknown>,
+  replyField: string | undefined,
+): { json: string; used: string[] } | null {
+  let session: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(finalJson) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    session = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const text = (key: string | undefined) =>
+    key !== undefined && typeof result[key] === "string" && result[key].trim() !== "" ? result[key] : undefined;
+  const change = session.outcome === "changes_ready";
+  const reply = text(replyField);
+  const summary = change ? (text("prBody") ?? reply) : reply;
+  const summaryKey = change && text("prBody") !== undefined ? "prBody" : replyField;
+  const candidates: Array<[field: string, from: string, value: string | undefined]> = [
+    ["summary", summaryKey ?? "", summary],
+    ["commitTitle", "prTitle", change ? text("prTitle") : undefined],
+  ];
+  let next = session;
+  const used: string[] = [];
+  for (const [field, from, value] of candidates) {
+    if (value === undefined) continue;
+    const attempt = { ...next, [field]: value };
+    try {
+      parseCodingAgentOutputJson(JSON.stringify(attempt));
+    } catch {
+      continue;
+    }
+    next = attempt;
+    used.push(from);
+  }
+  return used.length > 0 ? { json: JSON.stringify(next), used } : null;
 }
 
 /**
@@ -575,7 +655,12 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   let apiError: string | undefined;
   // A workflow run (#582): the run's result is the session's answer after the workflow ends, never
   // one given while it runs (the model may answer early). Tracked from the SDK's task messages.
-  const workflowState = { started: false, ended: undefined as undefined | "completed" | "failed" | "stopped" };
+  const workflowState = {
+    started: false,
+    ended: undefined as undefined | "completed" | "failed" | "stopped",
+    // Where Claude Code wrote the script's returned value (task_notification.output_file).
+    outputFile: undefined as string | undefined,
+  };
   try {
     for await (const message of stream) {
       // Every SDK message, raw: init, assistant (tool_use with the command), user (tool_result), result.
@@ -586,11 +671,12 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         break;
       }
       if (workflow && message.type === "system") {
-        const task = message as { subtype?: unknown; task_type?: unknown; status?: unknown };
+        const task = message as { subtype?: unknown; task_type?: unknown; status?: unknown; output_file?: unknown };
         if (task.subtype === "task_started" && task.task_type === "local_workflow") workflowState.started = true;
         else if (task.subtype === "task_notification" && workflowState.started && !workflowState.ended) {
           workflowState.ended =
             task.status === "completed" ? "completed" : task.status === "stopped" ? "stopped" : "failed";
+          if (typeof task.output_file === "string") workflowState.outputFile = task.output_file;
         }
       }
       if (message.type === "system") {
@@ -637,6 +723,19 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   // The workflow never started, never ended, or ended failed or stopped: the run did not do its work.
   if (workflow && workflowState.ended !== "completed") throw new Error("coding_workflow_failed");
   if (!finalJson) throw new Error("coding_output_missing");
+  // The script's own values, word for word, over the session's retelling of them (#582).
+  if (workflow) {
+    const read = await readWorkflowResult(workflowState.outputFile);
+    // Which fields were used, never their values: the trace is operator diagnostics.
+    const applied = "value" in read ? applyWorkflowResult(finalJson, read.value, workflow.replyField) : null;
+    options.trace?.record("workflow_result", {
+      ...("value" in read
+        ? { shape: read.shape, keys: Object.keys(read.value).slice(0, 32) }
+        : { problem: read.problem }),
+      used: applied?.used ?? [],
+    });
+    if (applied) finalJson = applied.json;
+  }
   let output: CodingAgentOutput;
   try {
     output = parseCodingAgentOutputJson(finalJson);

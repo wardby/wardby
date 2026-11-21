@@ -1,8 +1,8 @@
-import { access, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS, type CodingTaskInput } from "../coding/protocol.js";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import { repositoriesTaskNote, workerTaskNote } from "../coding-worker/task-note.js";
@@ -1441,5 +1441,63 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
     await expect(
       run([started, ended("completed"), answer("no_changes")], { claudeBareMode: undefined }),
     ).rejects.toThrow("coding_workflow_failed");
+  });
+  describe("the script's own result", () => {
+    let dir: string;
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), "wf-result-"));
+    });
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true });
+    });
+    const resultFile = async (value: unknown) => {
+      const path = join(dir, "w1.output");
+      await writeFile(path, typeof value === "string" ? value : JSON.stringify(value));
+      return path;
+    };
+    const endedWith = (path: string) => ({ ...ended("completed"), output_file: path });
+
+    it("uses the replyField value, word for word, as a no-change run's summary", async () => {
+      const comment = "## Type\nBug\n\n## Team\nTNG";
+      const path = await resultFile({ ticket: "SHALP-1", comment, postSteps: ["laptop only"] });
+      const { result } = await run([started, endedWith(path), answer("no_changes")], {
+        workflow: { name: "fix-bug", args: "SHALP-1", replyField: "comment" },
+      });
+      expect(result.summary).toBe(comment);
+    });
+
+    it("uses prBody and prTitle on a change, and ignores replyField there", async () => {
+      const path = await resultFile({ prTitle: "fix: SHALP-1 use the local date", prBody: "Body.", comment: "c" });
+      const { result } = await run([started, endedWith(path), answer("changes_ready")], {
+        workflow: { name: "fix-bug", args: "SHALP-1", replyField: "comment" },
+      });
+      expect(result.summary).toBe("Body.");
+      // The output schema's usual normalising applies: the conventional type prefix comes off the title.
+      expect((result as { commitTitle?: string }).commitTitle).toBe("SHALP-1 use the local date");
+    });
+
+    it("keeps the session's summary when the field is missing, not a string, or the file is unusable", async () => {
+      const cases = [
+        await resultFile({ other: "x" }),
+        await resultFile({ comment: 42 }),
+        await resultFile("not json"),
+        await resultFile([1, 2]),
+      ];
+      const link = join(dir, "link.output");
+      await symlink(cases[0], link);
+      for (const path of [...cases, link, "relative/path"]) {
+        const { result } = await run([started, endedWith(path), answer("no_changes")], {
+          workflow: { name: "fix-bug", args: "x", replyField: "comment" },
+        });
+        expect(result.summary).toBe("no_changes summary");
+      }
+    });
+
+    it("bounds a long prTitle as any commit title, keeping prBody", async () => {
+      const path = await resultFile({ prTitle: "x".repeat(500), prBody: "Body." });
+      const { result } = await run([started, endedWith(path), answer("changes_ready")]);
+      expect(result.summary).toBe("Body.");
+      expect(((result as { commitTitle?: string }).commitTitle ?? "").length).toBeLessThan(500);
+    });
   });
 });

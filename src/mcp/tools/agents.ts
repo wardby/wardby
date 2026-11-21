@@ -548,7 +548,7 @@ const profileJsonSchema = {
     workflow: {
       type: ["object", "null"],
       description:
-        "Claude Code only: run this repository workflow script, .claude/workflows/<name>.js, with Claude Code's own Workflow tool (see help article coding-workflows). { name, repository? }: repository is a link name (omitted = the default repository). Needs gitHistory (for example { \"depth\": 1 }). trigger_agent workflowArgs becomes the script's args. null turns it off.",
+        "Claude Code only: run this repository workflow script, .claude/workflows/<name>.js, with Claude Code's own Workflow tool (see help article coding-workflows). { name, repository?, replyField? }: repository is a link name (omitted = the default repository); replyField names a string field of the script's returned object to use, word for word, as the run's reply (prTitle/prBody from the result are used for a pull request). Needs gitHistory (for example { \"depth\": 1 }). trigger_agent workflowArgs becomes the script's args. null turns it off.",
       properties: {
         name: { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$" },
         repository: { type: "string", minLength: 1, maxLength: 300 },
@@ -714,6 +714,7 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
         : {
             name: profile.workflowName,
             ...(profile.workflowRepository ? { repository: profile.workflowRepository } : {}),
+            ...(profile.workflowReplyField ? { replyField: profile.workflowReplyField } : {}),
           },
   });
 }

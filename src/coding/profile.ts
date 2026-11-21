@@ -115,6 +115,8 @@ const gitHistorySchema = z
   .nullable();
 /** A workflow script's name: the file `.claude/workflows/<name>.js` (docs: coding workflows, #582). */
 export const WORKFLOW_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+/** A field of a workflow script's returned object (workflow.replyField). */
+export const WORKFLOW_REPLY_FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 /**
  * Claude Code runs only: run this workflow script (`.claude/workflows/<name>.js`) with Claude Code's
  * own Workflow tool. `repository` is a link name (omitted = the default repository), read at the
@@ -130,6 +132,14 @@ export const WorkflowSchema = z
       .min(1)
       .max(300)
       .refine((value) => !INVALID_SINGLE_LINE_CONTROL.test(value), "must not contain control characters")
+      .optional(),
+    /**
+     * The field of the script's returned object that is the run's reply, posted word for word (the
+     * pull request body comes from prBody). Omitted = the session's own summary of the result.
+     */
+    replyField: z
+      .string()
+      .regex(WORKFLOW_REPLY_FIELD, "must be 1-64 letters, digits or _, starting with a letter or _")
       .optional(),
   })
   .strict()

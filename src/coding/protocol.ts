@@ -840,6 +840,11 @@ export const CodingTaskInputSchema = z
       .object({
         name: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
         args: z.union([z.string(), z.record(z.string(), z.unknown())]),
+        /** The string field of the script's returned object to use, word for word, as the run's summary. */
+        replyField: z
+          .string()
+          .regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/)
+          .optional(),
       })
       .strict()
       .optional(),

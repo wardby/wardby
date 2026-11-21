@@ -2062,9 +2062,27 @@ describe("ContainerExecutor", () => {
         expect(files.map((file) => file.path)).not.toContain(".claude/workflows/other.js");
       });
 
+      it("passes the run's own request as args, never the standing instructions", async () => {
+        const { input } = await launch({
+          ...workflowRun,
+          task: "Standing instructions for this coding agent:\nBe careful.\n\nRequest:\nSHALP-7363",
+          request: "SHALP-7363",
+        } as typeof workflowRun);
+        expect(input!.workflow).toEqual({ name: "fix-bug", args: "SHALP-7363" });
+      });
+
+      it("passes the run's replyField to the worker", async () => {
+        const { input } = await launch({ ...workflowRun, workflowReplyField: "comment" } as typeof workflowRun);
+        expect(input!.workflow).toMatchObject({ name: "fix-bug", replyField: "comment" });
+      });
+
       it("passes workflowArgs as args when the trigger gave them", async () => {
         const { input } = await launch({ ...workflowRun, workflowArgs: { ticket: "X-1" } });
-        expect(input!.workflow).toEqual({ name: "fix-bug", args: { ticket: "X-1" } });
+        // Plus the reserved wardby field, so a script can tell it runs on Wardby.
+        expect(input!.workflow).toEqual({
+          name: "fix-bug",
+          args: { ticket: "X-1", wardby: { runId: "run-1", baseSha: expect.stringMatching(/^[0-9a-f]{40}$/) } },
+        });
       });
 
       it("fails before launch with coding_failure_workflow_unavailable when the script is missing", async () => {

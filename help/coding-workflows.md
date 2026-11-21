@@ -10,6 +10,8 @@ tags:
     .claude/workflows,
     workflow script,
     workflowArgs,
+    replyField,
+    args.wardby,
     codingProfile.workflow,
     claude-code,
     coding agents,
@@ -47,8 +49,43 @@ Claude Code only. A Codex agent can't run a workflow.
 
 3. Trigger the agent. `trigger_agent { "agentId": "<agent>", "task": "...",
 "workflowArgs": { ... } }` passes `workflowArgs` (a JSON object, at most
-   16 KiB) to the script as `args`. Without `workflowArgs`, `args` is the
-   task text, as a string.
+   16 KiB) to the script as `args`. A lead agent passes it the same way:
+   `delegate_to_<name>` takes `workflowArgs` when the sub-agent has a
+   workflow. Without `workflowArgs`, `args` is the request text as a string:
+   the task alone, without the agent's standing instructions.
+
+## Tell a Wardby run from a laptop run
+
+A script can't read environment variables or files, so it can't detect
+Wardby by itself. When `args` is an object, Wardby adds a reserved `wardby`
+field, `{ "runId": "...", "baseSha": "..." }`: the run's id and the commit
+the checkout starts at. A script can branch on it:
+
+```js
+const ON_WARDBY = Boolean(args && args.wardby);
+```
+
+Any `wardby` key you pass in `workflowArgs` is replaced. A run whose `args`
+is a string gets no marker, so pass an object when the script needs one.
+
+## Post the script text word for word
+
+By default the run's reply is the session's summary of what the workflow
+returned. To use one of the script's fields word for word instead, name it:
+
+```json
+{ "workflow": { "name": "triage", "replyField": "comment" } }
+```
+
+- A run with no pull request uses that string field as its reply. When a
+  lead agent delegated the run and posts to an issue (GitHub or Jira), the
+  issue gets that text in place of the lead's own reply, as long as exactly
+  one such sub-run finished.
+- A run with a pull request uses the result's string `prTitle` and `prBody`
+  as the commit title and pull request description, word for word, with the
+  usual limits.
+- A missing or non-string field, or a result Wardby can't read, keeps the
+  session's summary.
 
 ## What a run does
 
@@ -66,7 +103,7 @@ Claude Code only. A Codex agent can't run a workflow.
   the workflow fails, is stopped or never starts, the run fails with
   [`coding_failure_workflow_failed`](errors/coding-workflow-failed.md).
 - When the workflow's result has string `prTitle` and `prBody` fields, the
-  pull request uses them.
+  pull request uses them (see [the script's text word for word](#post-the-script-text-word-for-word)).
 
 ## What a script can and cannot do
 

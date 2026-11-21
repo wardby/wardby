@@ -689,7 +689,14 @@ describe("coding workflows help (#582)", () => {
       searchHelp(corpus, q)
         .slice(0, 3)
         .map((r) => r.page.id);
-    for (const q of ["workflow", ".claude/workflows", "workflowArgs", "workflow script"]) {
+    for (const q of [
+      "workflow",
+      ".claude/workflows",
+      "workflowArgs",
+      "workflow script",
+      "replyField",
+      "workflow reply",
+    ]) {
       expect(top3(q), q).toContain("coding-workflows");
     }
     expect(searchHelp(corpus, "coding_failure_workflow_unavailable")[0]?.page.id).toBe(
