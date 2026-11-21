@@ -4,12 +4,12 @@ title: Durable data and migration boundaries
 description: Relational definitions and migrations persist identity, run lifecycle, accounting and integration state.
 tags: [database, schema, migrations]
 status: stable
-generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:22:57.805Z }
+generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-11-16T06:04:47.589Z }
 sources:
   - id: run
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/prisma/schema.prisma#L327-L379
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/prisma/schema.prisma#L359-L402
   - id: proxy
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/prisma/schema.prisma#L807-L845
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/prisma/schema.prisma#L952-L997
   - id: notify
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/prisma/migrations/20261003030000_viewer_notify_fixes/migration.sql#L1-L47
   - id: package
@@ -22,17 +22,17 @@ wardby:
     - id: run
       repo: github:wardby/wardby
       path: prisma/schema.prisma
-      lines: [327, 379]
+      lines: [359, 402]
       symbol: Run
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:52761459ccb0f62de1ca181d8c506ad51ebfc470b56440eabd80e23c01d0699a
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
+      spanHash: sha256:3fd4906c77e1e3e8de6e03527ea63019e0ecc51ed14bdd57c8415e452e086f54
     - id: proxy
       repo: github:wardby/wardby
       path: prisma/schema.prisma
-      lines: [807, 845]
+      lines: [952, 997]
       symbol: CodingProxySession
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:992812db47e0a461bab6f9527a8e0d8bb9708b0452bbeba1d23169293532d338
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
+      spanHash: sha256:fc297c6d67bcaa66c92d1ad75e8342d8dd42f50d095d13da891b91d11593f5d3
     - id: notify
       repo: github:wardby/wardby
       path: prisma/migrations/20261003030000_viewer_notify_fixes/migration.sql
@@ -50,7 +50,7 @@ wardby:
   confidence: high
 ---
 
-Prisma defines the durable relational boundary shared by the control plane, executors, gateways and coding proxy. The schema contains agents and attachments, principals and grants, schedules, budgets, runs, accounting ledgers, repository and issue workflow state, authentication state and notification delivery records. Run carries execution ownership, heartbeat and pinned model terms; CodingRun and proxy tables specialize coding execution.[^run][^proxy]
+Prisma defines the durable relational boundary shared by the control plane, executors, gateways and coding proxy. The schema contains agents and attachments, principals and grants, schedules, budgets, runs, accounting ledgers, repository and issue workflow state, authentication state, documents, transcripts and notification delivery records. Run carries execution ownership, heartbeat and pinned model terms; CodingRun and proxy tables specialize coding execution, including pinned remote MCP tools and their call limits.[^run][^proxy]
 
 Persistence and consumption proceed through these steps:
 
@@ -63,9 +63,9 @@ The database owns durable identity, accounting and recovery state; blob contents
 
 **What to do:** follow [CLAUDE.md, Database / Prisma](../../CLAUDE.md#database--prisma--strict) for schema work. Review [nullable tool uniqueness](nullable-tool-uniqueness.md) and [viewer notification isolation](viewer-notify-write-isolation.md) for database behavior that the declarative schema alone does not convey.
 
-[^run]: prisma/schema.prisma, lines 327-379.
+[^run]: prisma/schema.prisma, lines 359-402.
 
-[^proxy]: prisma/schema.prisma, lines 807-845.
+[^proxy]: prisma/schema.prisma, lines 952-997.
 
 [^notify]: prisma/migrations/20261003030000_viewer_notify_fixes/migration.sql, lines 1-47.
 

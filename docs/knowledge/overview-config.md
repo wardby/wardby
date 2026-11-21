@@ -9,7 +9,7 @@ sources:
   - id: bootstrap
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/env.ts#L11-L27
   - id: providers
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/config/providers.ts#L74-L87
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/config/providers.ts#L83-L96
   - id: cache
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/config/dependency-cache.ts#L36-L53
 wardby:
@@ -27,9 +27,9 @@ wardby:
     - id: providers
       repo: github:wardby/wardby
       path: src/config/providers.ts
-      lines: [74, 87]
+      lines: [83, 96]
       symbol: loadProviderConfig
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
       spanHash: sha256:32457f939e01bc19814b04ef4ed3d7d944416518080247c7d0e1eb318c5cc5f6
     - id: cache
       repo: github:wardby/wardby
@@ -55,6 +55,6 @@ The area owns configuration shapes and validation, not durable settings or crede
 
 [^bootstrap]: src/env.ts, lines 11-27.
 
-[^providers]: src/config/providers.ts, lines 74-87.
+[^providers]: src/config/providers.ts, lines 83-96.
 
 [^cache]: src/config/dependency-cache.ts, lines 36-53.
