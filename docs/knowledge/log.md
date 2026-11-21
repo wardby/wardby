@@ -7,3 +7,5 @@
 - 2026-10-16: Completed coverage discovery for areas 4–11; added descriptor-bound file reads, proxy settlement projections, warm input publication, blob absence semantics, nullable tool uniqueness, viewer notification isolation, and import rename-target contracts. Re-anchored eight moved citations across delegation admission, schedule claims, terminal run state, and transactional authorization; existing claims remain current.
 
 - 2026-10-17: Added one overview for each of the eleven coverage areas and completed discovery across all areas; added HTTP dispatcher bootstrap, first-writer pricing, private/shared datastore separation and failed workspace staging contracts. Existing citations and claims remain unchanged; refreshed coverage dates and counts, including overviews and cross-area concepts.
+
+- 2026-11-09: Added Serializable scan-planning and transcript-audience contracts; refreshed delegation slots and MCP, coding, proxy, native-worker and provider overviews; re-anchored moved or changed citations throughout the bundle and updated coverage.
