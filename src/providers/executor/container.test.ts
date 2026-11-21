@@ -7549,6 +7549,27 @@ describe("ContainerExecutor with several repositories (#537)", () => {
         ]);
       });
 
+      it("records each extra's first description once after a branch-only root: a new one and a continued one (#586)", async () => {
+        const created = await multi(
+          [writeRow("tools", { headRef: "wardby/run-root-run" }), continued("docs")],
+          {},
+          { ...CONTINUATION, rootBranchOnly: true },
+        );
+        created.store.pullRequestDescriptionBaseline = async () => ({ ...baseline, recordedSha256: null });
+        const recorded: Array<{ name?: string; expectedSha256: string | null }> = [];
+        created.store.recordPullRequestDescription = async (input) => {
+          recorded.push(input);
+          return true;
+        };
+        created.vcs.slotDescriptions.set("tools", { kind: "written", sha256: "e".repeat(64) });
+        created.vcs.slotDescriptions.set("docs", { kind: "written", sha256: "d".repeat(64) });
+        await created.executor.start("run-1");
+        expect(created.store.run.status).toBe("succeeded");
+        const extras = recorded.filter((input) => input.name !== undefined);
+        expect(extras.map((input) => input.name).sort()).toEqual(["docs", "tools"]);
+        expect(extras.every((input) => input.expectedSha256 === null)).toBe(true);
+      });
+
       it("records nothing on the root's row for an extra that continued its pull request", async () => {
         const created = await multi([continued("tools")], {}, CONTINUATION);
         const asked: Array<string | undefined> = [];
