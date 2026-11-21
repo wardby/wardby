@@ -59,8 +59,10 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       protocol: "openai-responses",
       // Created without a level, as a session from before run steps detail.
       runStepsLevel: null,
-      // Not a workflow run (#582).
+      // Not a workflow run (#582), and no Skill tool.
       workflow: false,
+      skills: false,
+      requestRefusal: null,
       budgetExhaustedAt: null,
       upstreamFailure: null,
       // Created without terms, as a session from before the catalog.
@@ -185,11 +187,17 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         registryTokenHash: `level-registry-${suffix}`,
         runStepsLevel: "detail",
         workflow: true,
+        skills: true,
       });
       expect(await ledger.findSessionByCapabilityHash(`level-hash-${suffix}`)).toMatchObject({
         runStepsLevel: "detail",
         workflow: true,
+        skills: true,
       });
+      // The first refusal is kept; a later one does not replace it.
+      await ledger.recordRequestRefusal(dSession, "tools_not_allowed");
+      await ledger.recordRequestRefusal(dSession, "model_not_allowed");
+      expect(await ledger.requestRefusal(dSession)).toBe("tools_not_allowed");
     } finally {
       await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "id" = ${dSession}`;
       await db.codingRun.deleteMany({ where: { runId: dRun } });

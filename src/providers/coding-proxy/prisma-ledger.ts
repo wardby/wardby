@@ -52,6 +52,7 @@ interface SessionRow {
   registryTokenHash: string | null;
   budgetExhaustedAt?: Date | null;
   upstreamFailure?: string | null;
+  requestRefusal?: string | null;
   /** Selected by findSessionByCapabilityHash and findSessionByMcpTokenHash only. */
   pricingVersion?: string | null;
   catalogEntry?: unknown;
@@ -62,6 +63,7 @@ interface SessionRow {
   runStepsLevel?: string | null;
   /** Selected by findSessionByCapabilityHash and findSessionByMcpTokenHash only. */
   workflow?: boolean | null;
+  skills?: boolean | null;
 }
 
 interface RequestRow {
@@ -117,12 +119,14 @@ function sessionFromRow(row: SessionRow): ProxySession {
     registryTokenHash: row.registryTokenHash,
     budgetExhaustedAt: row.budgetExhaustedAt ?? null,
     upstreamFailure: row.upstreamFailure ?? null,
+    requestRefusal: row.requestRefusal ?? null,
     terms: sessionTerms(row),
     mcpTools: sessionMcpTools(row),
     mcpTokenHash: row.mcpTokenHash ?? null,
     mcpCallCount: Number(row.mcpCallCount ?? 0),
     runStepsLevel: isRunStepsLevel(row.runStepsLevel) ? row.runStepsLevel : null,
     workflow: row.workflow === true,
+    skills: row.skills === true,
   };
 }
 
@@ -226,21 +230,21 @@ export class PrismaProxyLedger implements ProxyLedger {
       INSERT INTO "CodingProxySession"
         ("id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt",
          "budgetUsd", "status", "registryTokenHash", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "runStepsLevel",
-         "workflow", "createdAt", "updatedAt")
+         "workflow", "skills", "createdAt", "updatedAt")
       VALUES
         (${input.id}, ${input.runId}, ${input.capabilityHash}, ${input.credentialRef}, ${input.protocol}, ${models}::jsonb,
          ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash},
          ${terms?.version ?? null}, ${terms ? JSON.stringify(terms.entry) : null}::jsonb,
          ${input.mcpTools ? JSON.stringify(input.mcpTools) : null}::jsonb, ${input.mcpTokenHash ?? null},
          ${input.runStepsLevel ?? null}::"RunStepsLevel",
-         ${input.workflow === true}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ${input.workflow === true}, ${input.skills === true}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `;
   }
 
   async findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
       SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
-             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel", "workflow"
+             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel", "workflow", "skills", "requestRefusal"
       FROM "CodingProxySession" WHERE "capabilityHash" = ${capabilityHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : null;
@@ -249,7 +253,7 @@ export class PrismaProxyLedger implements ProxyLedger {
   async findSessionByMcpTokenHash(mcpTokenHash: string): Promise<ProxySession | undefined> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
       SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
-             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel", "workflow"
+             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel", "workflow", "skills", "requestRefusal"
       FROM "CodingProxySession" WHERE "mcpTokenHash" = ${mcpTokenHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : undefined;
@@ -682,6 +686,20 @@ export class PrismaProxyLedger implements ProxyLedger {
       UPDATE "CodingProxySession" SET "upstreamFailure" = ${code}, "updatedAt" = CURRENT_TIMESTAMP
       WHERE "id" = ${sessionId} AND "upstreamFailure" IS NULL
     `;
+  }
+
+  async recordRequestRefusal(sessionId: string, code: string): Promise<void> {
+    await this.db.$executeRaw`
+      UPDATE "CodingProxySession" SET "requestRefusal" = ${code}, "updatedAt" = CURRENT_TIMESTAMP
+      WHERE "id" = ${sessionId} AND "requestRefusal" IS NULL
+    `;
+  }
+
+  async requestRefusal(sessionId: string): Promise<string | null> {
+    const rows = await this.db.$queryRaw<{ requestRefusal: string | null }[]>`
+      SELECT "requestRefusal" FROM "CodingProxySession" WHERE "id" = ${sessionId}
+    `;
+    return rows[0]?.requestRefusal ?? null;
   }
 
   async upstreamFailure(sessionId: string): Promise<string | null> {

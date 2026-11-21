@@ -776,6 +776,7 @@ class FakeSessions implements CodingSessionController {
   exhausted = new Set<string>();
   /** The first upstream failure code the proxy relayed, per session. */
   upstreamFailures = new Map<string, string>();
+  requestRefusals = new Map<string, string>();
   lastInput?: Parameters<CodingSessionController["createSession"]>[0];
 
   constructor(
@@ -803,6 +804,10 @@ class FakeSessions implements CodingSessionController {
   async budgetExhausted(sessionId: string): Promise<boolean> {
     return this.exhausted.has(sessionId);
   }
+  async requestRefusal(sessionId: string): Promise<string | null> {
+    return this.requestRefusals.get(sessionId) ?? null;
+  }
+
   async upstreamFailure(sessionId: string): Promise<string | null> {
     return this.upstreamFailures.get(sessionId) ?? null;
   }
@@ -2094,6 +2099,14 @@ describe("ContainerExecutor", () => {
             error: expect.stringMatching(/^coding_failure_workflow_unavailable:coding_diag_/),
           }),
         ]);
+      });
+
+      it("registers the proxy session as a workflow session with repository skills (#582)", async () => {
+        const { created } = await launch(workflowRun);
+        expect(created.sessions.lastInput).toMatchObject({ workflow: true, skills: true });
+        const off = await launch({ ...workflowRun, repoSkills: false } as typeof workflowRun);
+        expect(off.created.sessions.lastInput).toMatchObject({ workflow: true });
+        expect(off.created.sessions.lastInput).not.toHaveProperty("skills");
       });
 
       it("adds nothing to a run without a workflow", async () => {
@@ -3787,6 +3800,37 @@ describe("ContainerExecutor", () => {
         },
       ]);
       expect(JSON.stringify(created.vcs.notifyFinishedCalls)).not.toContain(code);
+    });
+
+    it("names a failed job whose request the proxy refused as proxy_refused, with the code on one operator line", async () => {
+      const created = await harness();
+      created.sessions.requestRefusals.set("session-1", "tools_not_allowed");
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      logged.length = 0;
+      await created.executor.start("run-1");
+      expect(created.store.terminations).toEqual([
+        {
+          status: "failed",
+          error: expect.stringMatching(/^coding_failure_proxy_refused:coding_diag_/),
+          audit: { failureCategory: "proxy_refused", diagnosticId: expect.stringMatching(/^coding_diag_/) },
+        },
+      ]);
+      expect(logged.filter((entry) => entry.payload.event === "coding.proxy_refused")).toEqual([
+        {
+          level: "warn",
+          payload: { event: "coding.proxy_refused", runId: "run-1", code: "tools_not_allowed" },
+          message: expect.any(String),
+        },
+      ]);
+      // A provider failure still wins: it is the more specific cause.
+      const both = await harness();
+      both.sessions.requestRefusals.set("session-1", "tools_not_allowed");
+      both.sessions.upstreamFailures.set("session-1", "rate_limit_exceeded");
+      both.jobs.statusValue = { state: "failed" };
+      both.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_stream_failed" };
+      await both.executor.start("run-1");
+      expect((both.store.terminations[0] as { error: string }).error).toBe("coding_provider_rate_limited");
     });
 
     it("reports budget exhaustion over a provider failure when the session has both", async () => {

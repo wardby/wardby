@@ -1077,6 +1077,8 @@ model CodingProxySession {
   /// first provider failure the proxy relayed for this session; lets the
   /// executor say the model provider refused the run.
   upstreamFailure           String?
+  /// The proxy's own first refusal of one of the session's requests: a fixed code such as tools_not_allowed.
+  requestRefusal            String?
   /// The run's catalog entry, copied from Run.pricingSnapshot when the session
   /// is created; the proxy prices and shapes requests from it. Null on
   /// sessions from before the model catalog (the proxy falls back to the
@@ -1099,6 +1101,8 @@ model CodingProxySession {
   /// Code's Workflow tool sends (the tool itself, its sub-agents' thinking.display, the
   /// task-notification turn) for this session only.
   workflow                  Boolean                  @default(false)
+  /// A Claude Code run in native mode with repository skills on (#582): its requests may use the Skill tool.
+  skills                    Boolean                  @default(false)
   /// MCP tools/call count for this run (capped by WARDBY_MCP_MAX_CALLS_PER_RUN).
   mcpCallCount              Int                      @default(0)
   /// Package registry: ecosystems where a lockfile plan of this run failed or refused an entry, so a

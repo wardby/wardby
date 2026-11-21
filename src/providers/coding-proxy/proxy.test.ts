@@ -100,6 +100,7 @@ async function harness(
     leaseMs?: number;
     ownerId?: string;
     mcpTools?: McpToolPin[];
+    skills?: boolean;
     workflow?: boolean;
   } = {},
 ): Promise<Harness> {
@@ -134,6 +135,7 @@ async function harness(
     terms: overrides.terms,
     ...(overrides.mcpTools ? { mcpTools: overrides.mcpTools, mcpTokenHash: `mcp-hash-${Math.random()}` } : {}),
     ...(overrides.workflow ? { workflow: true } : {}),
+    ...(overrides.skills ? { skills: true } : {}),
   });
   return { proxy, ledger, session, fetch, events };
 }
@@ -3160,6 +3162,60 @@ describe("workflow sessions (#582)", () => {
       expect(plain.fetch).not.toHaveBeenCalled();
     });
   }
+
+  describe("repository skills in native mode", () => {
+    const skillTool = { name: "Skill", description: "Load a skill", input_schema: { type: "object" } };
+    const skills = async (on: boolean, workflow = false) =>
+      harness({ protocol: "anthropic-messages", fetch: await anthropicReply(), skills: on, workflow });
+    const withSkillTool = (v: Record<string, unknown>) => (v.tools = [runCommandTool, structuredOutputTool, skillTool]);
+    const withSkillCall = (v: Record<string, unknown>) =>
+      (v.messages as unknown[]).push(
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_sk_1", name: "Skill", input: { skill: "test" } }],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_sk_1", content: "skill text" }] },
+      );
+
+    it("forwards the Skill tool and a Skill call for a skills session, and refuses both for any other", async () => {
+      const on = await skills(true);
+      await execute(on, "sk-tool", new TestSink(), await body(withSkillTool));
+      await execute(on, "sk-call", new TestSink(), await body(withSkillCall));
+      expect(on.fetch).toHaveBeenCalledTimes(2);
+      const off = await skills(false);
+      await expect(execute(off, "sk-off-tool", new TestSink(), await body(withSkillTool))).rejects.toMatchObject({
+        status: 400,
+        code: "tools_not_allowed",
+      });
+      await expect(execute(off, "sk-off-call", new TestSink(), await body(withSkillCall))).rejects.toMatchObject({
+        status: 400,
+        code: "unsupported_anthropic_feature",
+      });
+      expect(off.fetch).not.toHaveBeenCalled();
+      // The refusal is recorded on the session (its code only), so a failed run can name it.
+      expect(await off.proxy.requestRefusal(off.session.id)).toBe("tools_not_allowed");
+    });
+
+    it("counts Skill in a workflow session's tool cap, and still refuses a further tool", async () => {
+      const h = await skills(true, true);
+      await execute(
+        h,
+        "sk-wf",
+        new TestSink(),
+        await body((v) => (v.tools = [runCommandTool, structuredOutputTool, workflowTool, skillTool])),
+      );
+      expect(h.fetch).toHaveBeenCalledTimes(1);
+      const extra = { name: "WebFetch", description: "x", input_schema: { type: "object" } };
+      await expect(
+        execute(
+          h,
+          "sk-wf-extra",
+          new TestSink(),
+          await body((v) => (v.tools = [runCommandTool, structuredOutputTool, workflowTool, skillTool, extra])),
+        ),
+      ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+    });
+  });
 
   it("still refuses any other tool, a second extra tool, and an unknown thinking.display on a workflow session", async () => {
     const h = await claude(true);

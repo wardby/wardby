@@ -1858,6 +1858,8 @@ export interface CodingSessionController {
   budgetExhausted?(sessionId: string): Promise<boolean>;
   /** The code of the first model-provider failure the proxy relayed for this session, if any. */
   upstreamFailure?(sessionId: string): Promise<string | null>;
+  /** The proxy's own first refusal of one of the session's requests (a fixed code), if any. */
+  requestRefusal?(sessionId: string): Promise<string | null>;
 }
 
 /**
@@ -2364,6 +2366,13 @@ export class ContainerExecutor implements Executor {
           ...(mcpToken ? { mcpTools, mcpTokenHash: mcpTokenHash(mcpToken) } : {}),
           ...(run.runStepsLevel ? { runStepsLevel: run.runStepsLevel } : {}),
           ...(run.provider === "claude-code" && run.workflowName ? { workflow: true } : {}),
+          // Native mode (opted into, or a workflow run's) with repository skills on: the worker may offer
+          // Claude Code's Skill tool, which the proxy accepts for this session alone (#582).
+          ...(run.provider === "claude-code" &&
+          (run.claudeBareMode === false || run.workflowName) &&
+          run.repoSkills !== false
+            ? { skills: true }
+            : {}),
         });
         spendEnabled = true;
         sessionId = session.id;
@@ -3035,9 +3044,20 @@ export class ContainerExecutor implements Executor {
         }
         const status = jobState === "lost" ? "lost" : "failed";
         const provider = status === "failed" ? await this.providerFailure(sessionId) : null;
+        // The proxy refused one of the run's requests (a tool or request shape it does not allow): name
+        // that, not the worker's stream failure. The code goes to one operator line, never the run.
+        const refused = status === "failed" && !provider ? await this.proxyRefusal(sessionId) : null;
+        if (refused) {
+          containerLog.warn(
+            { event: "coding.proxy_refused", runId: run.runId, code: refused },
+            "the coding proxy refused this coding run's request",
+          );
+        }
         const failure = provider
           ? this.providerFailureOf(run, provider, `job_${reason}`, { issues: collected?.diagnosticIssues })
-          : this.failure(`job_${reason}`, { issues: collected?.diagnosticIssues });
+          : this.failure(refused ? `coding_proxy_refused:${reason}` : `job_${reason}`, {
+              issues: collected?.diagnosticIssues,
+            });
         providerClass = provider?.class;
         await this.recordRefusal(run.runId, sessionId);
         await this.options.store.terminate(run.runId, status, failure.error, failure.audit);
@@ -5437,6 +5457,12 @@ export class ContainerExecutor implements Executor {
     return this.options.sessions.budgetExhausted(sessionId).catch(() => false);
   }
 
+  /** The proxy's own first refusal of this run's requests, if any. Never throws. */
+  private async proxyRefusal(sessionId: string | null | undefined): Promise<string | null> {
+    if (!sessionId || !this.options.sessions.requestRefusal) return null;
+    return this.options.sessions.requestRefusal(sessionId).catch(() => null);
+  }
+
   /** The model-provider failure the proxy relayed for this run's session, classified. Never throws. */
   private async providerFailure(
     sessionId: string | null | undefined,
@@ -5641,6 +5667,8 @@ async function removeResultBundles(slots: readonly RepositorySlot[]): Promise<vo
 export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: string]> = [
   // A workflow run (#582) whose script could not be read: fails before any model call.
   ["coding_workflow_unavailable", "workflow_unavailable"],
+  // The coding proxy refused a request of the run (a tool or request shape it does not allow).
+  ["coding_proxy_refused", "proxy_refused"],
   // The worker's workflow ended failed or was stopped (it arrives as job_<code>).
   ["job_coding_workflow_failed", "workflow_failed"],
   // Claude Code reached the agent's turn limit (codingProfile.maxTurns) before finishing.

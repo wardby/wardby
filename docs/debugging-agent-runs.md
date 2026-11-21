@@ -102,6 +102,7 @@ failed, and the ID is what an operator searches for.
 | `executor` while running checks | The run may have run out of memory, among other causes    | Reduce what the checks run; send the ID to an operator if it repeats |
 | `merge_conflict`                | The branch conflicts with its target                      | Read the `merge-conflict` help article                               |
 | `service_unready`               | A service the run needs, such as Postgres, didn't start   | Check `.wardby/services.yaml` and the agent's `services`             |
+| `proxy_refused`                 | The coding proxy refused one of the run's model requests  | Read the `coding.proxy_refused` log line's code; check versions      |
 | `coding_turn_limit`             | The run used all its turns                                | Raise `maxTurns` or narrow the task                                  |
 | `budgetEvents`, or `refused`    | The run, run tree or budget group ran out of money        | Raise the budget or check spend with `cost_report`                   |
 | `packageRefusals`               | A package isn't allowed or is too new                     | Add it to `packageAllowlist`, or wait out the release age limit      |

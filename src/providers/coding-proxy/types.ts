@@ -56,6 +56,8 @@ export interface ProxySession {
   budgetRefusal?: ProxyRefusalRecord | null;
   /** The code of the first upstream failure the proxy relayed for this session. */
   upstreamFailure?: string | null;
+  /** The proxy's own first refusal of a request of this session (a fixed code, e.g. tools_not_allowed). */
+  requestRefusal?: string | null;
   /** The run's catalog entry, copied at session creation; null on sessions from before the catalog. */
   terms?: ProxyModelTerms | null;
   /** The run's pinned MCP tools (no URLs or secrets); null when the run has none, and on older sessions. */
@@ -68,6 +70,8 @@ export interface ProxySession {
   runStepsLevel: RunStepsLevel | null;
   /** A workflow run (#582): its requests may use the Workflow tool's shapes. False on older sessions. */
   workflow: boolean;
+  /** Native mode with repository skills (#582): its requests may use the Skill tool. False on older sessions. */
+  skills: boolean;
 }
 
 export interface ProxyRequest {
@@ -133,6 +137,8 @@ export interface CreateProxySessionInput {
   runStepsLevel?: RunStepsLevel;
   /** A workflow run (#582); absent = false. */
   workflow?: boolean;
+  /** Native mode with repository skills on; absent = false. */
+  skills?: boolean;
 }
 
 export interface ReserveProxyRequestInput {
@@ -235,6 +241,10 @@ export interface ProxyLedger {
   recordUpstreamFailure(sessionId: string, code: string): Promise<void>;
   /** The first upstream failure code relayed for this session, if any. */
   upstreamFailure(sessionId: string): Promise<string | null>;
+  /** Records the proxy's refusal of a request (a fixed code); only the first one is kept. */
+  recordRequestRefusal(sessionId: string, code: string): Promise<void>;
+  /** The proxy's first request refusal for this session, if any. */
+  requestRefusal(sessionId: string): Promise<string | null>;
   getRequest(requestId: string): Promise<ProxyRequest | null>;
 }
 
