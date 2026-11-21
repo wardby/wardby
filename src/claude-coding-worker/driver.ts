@@ -25,6 +25,7 @@ import {
 import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
 import { describeError, type DebugTracer } from "../coding-worker/debug-trace.js";
 import { workerTaskNote } from "../coding-worker/task-note.js";
+import { WorkflowProgressReporter } from "./workflow-progress.js";
 import {
   assertMcpHeaderPlaceholder,
   type MCP_TOKEN_HEADER,
@@ -675,6 +676,13 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     // Where Claude Code wrote the script's returned value (task_notification.output_file).
     outputFile: undefined as string | undefined,
   };
+  // The workflow's phases and sub-agents, for the run's steps (#582).
+  const progressReporter = workflow
+    ? new WorkflowProgressReporter({
+        proxyBaseUrl: options.proxyBaseUrl.endsWith("/") ? options.proxyBaseUrl : `${options.proxyBaseUrl}/`,
+        capability: options.capability,
+      })
+    : undefined;
   try {
     for await (const message of stream) {
       // Every SDK message, raw: init, assistant (tool_use with the command), user (tool_result), result.
@@ -685,7 +693,14 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         break;
       }
       if (workflow && message.type === "system") {
-        const task = message as { subtype?: unknown; task_type?: unknown; status?: unknown; output_file?: unknown };
+        const task = message as {
+          subtype?: unknown;
+          task_type?: unknown;
+          status?: unknown;
+          output_file?: unknown;
+          workflow_progress?: unknown;
+        };
+        if (task.subtype === "task_progress") progressReporter?.update(task.workflow_progress);
         if (task.subtype === "task_started" && task.task_type === "local_workflow") workflowState.started = true;
         else if (task.subtype === "task_notification" && workflowState.started && !workflowState.ended) {
           workflowState.ended =
@@ -729,6 +744,8 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     else if (err instanceof Error && MAX_TURNS_MESSAGE.test(err.message)) turnLimit = true;
     else streamFailed = apiError ?? streamFailureCode(err);
   }
+  // The tree's last state reaches the run's steps, whatever the run's outcome (bounded wait).
+  await progressReporter?.flush();
   if (budgetRefused) return finish(budgetExhausted(options.input));
   if (streamFailed) throw new Error(streamFailed);
   if (turnLimit) throw new Error("coding_turn_limit");

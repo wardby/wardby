@@ -18,6 +18,7 @@ import type {
   RunRow,
   Step,
   Steps,
+  WorkflowTree,
   TextField,
 } from "../types";
 
@@ -137,7 +138,7 @@ function taskUrl(task: string | null): string | null {
 const selected = atom({ plugin: "wardby-runs", key: "selected" } as const, null);
 const detail = atom({ plugin: "wardby-runs", key: "detail" } as const, null, { shape: "detail-4" });
 // A run's steps as get_run_steps returned them (stored already redacted); drawn as plain text only.
-const runSteps = atom({ plugin: "wardby-runs", key: "steps" } as const, null, { shape: "steps-2" });
+const runSteps = atom({ plugin: "wardby-runs", key: "steps" } as const, null, { shape: "steps-3" });
 // The step whose detail is shown (one at a time), and the terminal's cursor among steps with detail.
 const openStep = atom({ plugin: "wardby-runs", key: "openStep" } as const, null, { shape: "open-step-1" });
 const poll = atom({ plugin: "wardby-runs", key: "poll" } as const, { at: 0, error: null }, { shape: "poll-2" });
@@ -1585,9 +1586,100 @@ function toSteps(value: unknown): Step[] {
         status: str(s.status),
         // An empty detail is no detail: nothing to expand.
         detail: typeof s.detail === "string" && plainText(s.detail) !== "" ? plainText(s.detail) : null,
+        agent: typeof s.agent === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(s.agent) ? s.agent : null,
       },
     ];
   });
+}
+
+/** get_run_steps' workflow tree (#582), keeping only well-formed parts; null when there is none. */
+function toWorkflow(value: unknown): WorkflowTree | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  const list = (x: unknown) => (Array.isArray(x) ? (x as Record<string, unknown>[]) : []);
+  const phases = list(v.phases).flatMap((p) =>
+    typeof p === "object" && p !== null && typeof p.index === "number"
+      ? [{ index: p.index, title: plainText(String(p.title ?? "")) }]
+      : [],
+  );
+  const agents = list(v.agents).flatMap((a) =>
+    typeof a === "object" && a !== null && typeof a.id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(a.id)
+      ? [
+          {
+            id: a.id,
+            label: plainText(String(a.label ?? "")),
+            phaseIndex: typeof a.phaseIndex === "number" ? a.phaseIndex : null,
+            state: plainText(String(a.state ?? "")),
+            attempt: typeof a.attempt === "number" ? a.attempt : 0,
+          },
+        ]
+      : [],
+  );
+  return phases.length > 0 || agents.length > 0 ? { phases, agents } : null;
+}
+
+/** A row of the steps card: a step, or a heading for a workflow phase or sub-agent. */
+type StepRow = { step: Step } | { heading: { key: string; text: string; sub: string | null; level: 1 | 2 } };
+
+/**
+ * A workflow run's steps grouped for reading (#582). A finished run: the main session's steps, then
+ * each phase in order with each of its sub-agents (label, state, retry) and that agent's own steps
+ * in order, so parallel agents read apart. A running run: in time order, with a heading wherever the
+ * sub-agent changes. Any other run: the steps as they are.
+ */
+function groupSteps(steps: Step[], workflow: WorkflowTree | null, mode: Steps["mode"]): StepRow[] {
+  if (!workflow) return steps.map((step) => ({ step }));
+  const agents = new Map(workflow.agents.map((agent) => [agent.id, agent]));
+  const phaseTitle = (index: number | null) =>
+    workflow.phases.find((phase) => phase.index === index)?.title ?? (index === null ? "Other" : `Phase ${index}`);
+  const agentSub = (id: string) => {
+    const agent = agents.get(id);
+    if (!agent) return null;
+    return [agent.state, agent.attempt > 1 ? `attempt ${agent.attempt}` : ""].filter(Boolean).join(" · ") || null;
+  };
+  const agentHeading = (id: string | null): StepRow => {
+    if (id === null) return { heading: { key: "main", text: "Main session", sub: null, level: 1 } };
+    const agent = agents.get(id);
+    const text = agent ? `${phaseTitle(agent.phaseIndex)} · ${agent.label || "agent"}` : "Sub-agent";
+    return { heading: { key: `agent-${id}`, text, sub: agentSub(id), level: 2 } };
+  };
+  if (mode === "recent") {
+    const rows: StepRow[] = [];
+    let current: string | null | undefined;
+    for (const step of steps) {
+      if (step.agent !== current) rows.push(agentHeading(step.agent));
+      current = step.agent;
+      rows.push({ step });
+    }
+    return rows;
+  }
+  const byAgent = new Map<string | null, Step[]>();
+  for (const step of steps) byAgent.set(step.agent, [...(byAgent.get(step.agent) ?? []), step]);
+  const rows: StepRow[] = [];
+  const main = byAgent.get(null) ?? [];
+  if (main.length > 0) rows.push(agentHeading(null), ...main.map((step) => ({ step })));
+  const phases = [...workflow.phases].sort((a, b) => a.index - b.index);
+  const placed = new Set<string | null>([null]);
+  for (const phase of phases) {
+    const inPhase = workflow.agents.filter((agent) => agent.phaseIndex === phase.index);
+    rows.push({
+      heading: { key: `phase-${phase.index}`, text: phase.title || `Phase ${phase.index}`, sub: null, level: 1 },
+    });
+    for (const agent of inPhase) {
+      placed.add(agent.id);
+      const own = byAgent.get(agent.id) ?? [];
+      rows.push({
+        heading: { key: `agent-${agent.id}`, text: agent.label || "agent", sub: agentSub(agent.id), level: 2 },
+      });
+      rows.push(...own.map((step) => ({ step })));
+    }
+  }
+  // Sub-agents outside every phase, or steps from an agent the tree does not name yet.
+  for (const [id, own] of byAgent) {
+    if (placed.has(id)) continue;
+    rows.push(agentHeading(id), ...own.map((step) => ({ step })));
+  }
+  return rows;
 }
 
 /* eslint-disable no-control-regex -- matching control characters is the point */
@@ -2230,6 +2322,7 @@ export const register: Register = (on, options) => {
         dropped: 0,
         expired: false,
         notice: null,
+        workflow: null,
       };
       try {
         if (stepsSupport === "no") {
@@ -2270,6 +2363,7 @@ export const register: Register = (on, options) => {
           next: typeof reply.next === "number" ? reply.next : null,
           dropped: num(reply.dropped),
           expired: reply.expired === true,
+          workflow: toWorkflow(reply.workflow),
         }));
       } catch (err) {
         const message = err instanceof Error ? err.message : "";
@@ -3957,7 +4051,9 @@ export const register: Register = (on, options) => {
         const saidCut = (step: Step) => collapse(step.summary, Math.max(20, inner - 8), 2);
         // A step opens when it has detail, or when it is something said that does not fit its two rows.
         const canOpen = (step: Step) => step.detail !== null || (step.kind !== "tool" && saidCut(step).more > 0);
-        const openSeqs = stepsOf.steps.filter(canOpen).map((s) => s.seq);
+        // A workflow run's steps grouped by phase and sub-agent (#582); the cursor follows the drawn order.
+        const rows = groupSteps(stepsOf.steps, stepsOf.workflow ?? null, stepsOf.mode);
+        const openSeqs = rows.flatMap((row) => ("step" in row && canOpen(row.step) ? [row.step.seq] : []));
         return card(
           "steps-card",
           "steps",
@@ -3969,7 +4065,24 @@ export const register: Register = (on, options) => {
                 stepsOf.level !== "off" &&
                 pill(stepsOf.level, stepsOf.level === "detail" ? "amber" : "grey")}
             </Box>
-            {stepsOf.steps.map((step) => {
+            {rows.map((row) => {
+              if ("heading" in row) {
+                const { key, text, sub, level } = row.heading;
+                return (
+                  <Box
+                    key={`step-group-${key}`}
+                    paddingLeft={level === 2 ? 2 : 0}
+                    gap={1}
+                    marginTop={level === 1 ? 1 : 0}
+                  >
+                    <Text bold={level === 1} dimColor={level === 2} wrap="truncate-end">
+                      {level === 1 ? text : `▸ ${text}`}
+                    </Text>
+                    {sub && <Text dimColor>{sub}</Text>}
+                  </Box>
+                );
+              }
+              const step = row.step;
               const isTool = step.kind === "tool";
               const result = stepMark(step);
               const openable = canOpen(step);

@@ -73,6 +73,14 @@ export type Step = {
   status: string | null;
   /** The step's detail text (wardby 0.9.0+, detail level, owner and starter only); null otherwise. */
   detail: string | null;
+  /** A workflow run's sub-agent that made it (an id in Steps.workflow.agents); null = the main session. */
+  agent: string | null;
+};
+
+/** A workflow run's phases and sub-agents (get_run_steps' workflow); titles and labels are the script's. */
+export type WorkflowTree = {
+  phases: { index: number; title: string }[];
+  agents: { id: string; label: string; phaseIndex: number | null; state: string; attempt: number }[];
 };
 
 /** The step whose detail is shown (one at a time), and the terminal's cursor among steps with detail. */
@@ -92,6 +100,8 @@ export type Steps = {
   expired: boolean;
   /** A fixed hint shown instead of steps (auto mode refused get_run_steps). */
   notice: string | null;
+  /** A workflow run's tree: steps are drawn grouped by phase and sub-agent. Null for any other run. */
+  workflow: WorkflowTree | null;
 };
 
 export type Poll = {

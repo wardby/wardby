@@ -20,7 +20,7 @@
  * carry the run id, a fixed event code and an error's name: never text, never an error's message.
  */
 import { createHash } from "node:crypto";
-import type { PrismaClient } from "#prisma";
+import type { Prisma, PrismaClient } from "#prisma";
 import { REDACTED, redactSecrets } from "../../coding/redact.js";
 import { logger } from "../logger.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
@@ -35,9 +35,15 @@ import {
   STEP_CALL_ID,
   STEP_STATUS,
   STEP_TOOL_NAME,
+  STEP_AGENT_REF,
+  WORKFLOW_AGENT_STATE,
+  MAX_WORKFLOW_PHASES,
+  MAX_WORKFLOW_AGENTS,
+  MAX_WORKFLOW_LABEL_CHARS,
   type ExtractedStep,
   type RunStepBatch,
   type RunStepSink,
+  type WorkflowProgress,
   tailOf,
 } from "./types.js";
 
@@ -51,7 +57,7 @@ const DROPPED_PER_RUN = 10_000;
 const DROPPED_TOTAL = 200_000;
 const callKey = (callId: string): string => createHash("sha256").update(callId).digest("hex").slice(0, 32);
 
-export type RunStepWriterDb = Pick<PrismaClient, "run" | "runStep" | "$transaction">;
+export type RunStepWriterDb = Pick<PrismaClient, "run" | "runStep" | "codingRun" | "$transaction">;
 
 export interface RunStepWriterDeps {
   db: RunStepWriterDb;
@@ -138,7 +144,7 @@ export class RunStepWriter implements RunStepSink {
 
   record(runId: string, batch: RunStepBatch, extraSecretValues: readonly string[] = []): Promise<void> {
     if (this.deps.level === "off") return Promise.resolve();
-    if (batch.steps.length === 0 && batch.results.length === 0) return Promise.resolve();
+    if (batch.steps.length === 0 && batch.results.length === 0 && !batch.workflow) return Promise.resolve();
     const previous = this.queues.get(runId) ?? Promise.resolve();
     const next = previous
       .then(() => this.write(runId, batch, extraSecretValues))
@@ -193,7 +199,7 @@ export class RunStepWriter implements RunStepSink {
     // Read fresh for every batch that stores text (steps, or outputs at detail), never cached: a
     // rotated or newly attached secret must be covered. Rejects (and the batch is dropped) when the
     // values can't be read: never an unredacted write.
-    const needsValues = extracted.length > 0 || outputs;
+    const needsValues = extracted.length > 0 || outputs || batch.workflow !== undefined;
     const own = needsValues ? await this.deps.secretValues(run.agentId) : [];
     const extras = needsValues ? extraSecretValues.filter(Boolean) : [];
     const rawValues = [...own, ...extras];
@@ -225,9 +231,15 @@ export class RunStepWriter implements RunStepSink {
       callId: step.callId,
       summary: (summarize ??= stepSummarizer(values))(step),
       detail: detailed ? detailOf().step(step).slice(0, MAX_STEP_DETAIL_CHARS) : null,
+      // The workflow sub-agent behind it (#582): an opaque id, kept only when well formed and secret-free.
+      agentRef:
+        step.agent !== undefined && STEP_AGENT_REF.test(step.agent) && redactSecrets(step.agent, values) === step.agent
+          ? step.agent
+          : null,
       at,
       expiresAt,
     }));
+    const workflow = batch.workflow ? redactedWorkflow(batch.workflow, values) : undefined;
     const maxSteps = this.deps.maxSteps ?? MAX_RUN_STEPS;
     const counted = this.droppedIds.get(runId) ?? new Set<string>();
     if (this.droppedIds.has(runId)) {
@@ -282,6 +294,12 @@ export class RunStepWriter implements RunStepSink {
           data: { status: result.status, detail: joinDetail(open.detail, suffix) },
         });
       }
+      // The tree as it stands replaces the stored one; only a coding run has one.
+      if (workflow)
+        await tx.codingRun.updateMany({
+          where: { runId },
+          data: { workflowProgress: workflow as unknown as Prisma.InputJsonObject },
+        });
     }, TX);
     if (newlyDropped.length > 0) this.rememberDropped(runId, counted, newlyDropped);
   }
@@ -317,4 +335,29 @@ export function buildRunStepWriter(
     secretValues: async (agentId) =>
       (await loadAgentSecretValues(db, cipher, agentId)).flatMap((entry) => entry.values),
   });
+}
+
+/**
+ * A workflow tree (#582) ready to store: each title and label (repository text) made plain, masked
+ * by exact value, and cut to MAX_WORKFLOW_LABEL_CHARS; an agent whose id holds a secret value is left
+ * out. Bounded by the wire schema already.
+ */
+export function redactedWorkflow(tree: WorkflowProgress, values: readonly string[]): WorkflowProgress {
+  const clean = (text: string) =>
+    redactSecrets(stripControlSequences(redactSecrets(text, values)), values).slice(0, MAX_WORKFLOW_LABEL_CHARS);
+  return {
+    phases: tree.phases
+      .slice(0, MAX_WORKFLOW_PHASES)
+      .map((phase) => ({ index: phase.index, title: clean(phase.title) })),
+    agents: tree.agents
+      .slice(0, MAX_WORKFLOW_AGENTS)
+      .filter((agent) => STEP_AGENT_REF.test(agent.id) && redactSecrets(agent.id, values) === agent.id)
+      .map((agent) => ({
+        id: agent.id,
+        label: clean(agent.label),
+        phaseIndex: agent.phaseIndex,
+        state: WORKFLOW_AGENT_STATE.test(agent.state) ? agent.state : "unknown",
+        attempt: agent.attempt,
+      })),
+  };
 }

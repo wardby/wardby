@@ -95,6 +95,24 @@ and its `step` events never include detail.
 
 You can read a run's steps when you can read the run with `get_run`.
 
+### Workflow runs
+
+A Claude Code run of a workflow script (see `coding-workflows`) groups its
+steps by the script's phases and sub-agents:
+
+- `get_run_steps` also returns `workflow`: the phases (`index`, `title`) and the
+  sub-agents (`id`, `label`, `phaseIndex`, `state`, `attempt`).
+- A step a sub-agent made has `agent`, that sub-agent's `id`. A step without it
+  is the main session's (starting the workflow and reporting its result).
+- The `wardby-runs` pane shows a finished run as its main session, then each
+  phase with each sub-agent's own steps under it, so sub-agents that ran in
+  parallel read apart; a running run stays in time order with a heading where
+  the sub-agent changes.
+
+Phase titles and labels come from the repository's script. They are redacted
+like any step text and cut to 200 characters. Grouping needs the run-steps
+listener, like every coding run's steps.
+
 A run records at most 2,000 steps. Later steps are not recorded; `dropped`
 counts them.
 

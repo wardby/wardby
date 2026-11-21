@@ -197,6 +197,15 @@ slows the run. Without the two settings in the table below, coding runs record n
 steps; native runs are unaffected. Steps for a Claude Code or Codex run need the
 listener, which only `wardby serve` runs.
 
+A Claude Code workflow run (`codingProfile.workflow`) groups its steps. The
+proxy tags each step with the sub-agent whose model request produced it (Claude
+Code's `x-claude-code-agent-id`, read on workflow runs only), and the worker
+reports the script's phases and sub-agents through the proxy's
+`/wardby/workflow-progress` route, relayed with the steps. `get_run_steps`
+returns the tree as `workflow` and each sub-agent step's `agent`; the
+`wardby-runs` pane draws Phase, then sub-agent, then its steps. Titles and
+labels are the script's text, redacted by exact value and cut to 200 characters.
+
 **Levels.**
 
 | Level     | Tool input           | Tool result                             | Model text           |

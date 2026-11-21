@@ -16,8 +16,10 @@ export type ExtractedStep =
       input?: string;
       /** The input was cut (it may end in the start of a secret). */
       inputTruncated?: boolean;
+      /** The workflow sub-agent whose request produced it (STEP_AGENT_REF); absent for the main session. */
+      agent?: string;
     }
-  | { kind: "said"; callId: string; text: string; truncated: boolean };
+  | { kind: "said"; callId: string; text: string; truncated: boolean; agent?: string };
 
 export type StepStatus = "ok" | "error" | `exit ${number}`;
 
@@ -34,7 +36,28 @@ export interface ExtractedResult {
 export interface RunStepBatch {
   steps: ExtractedStep[];
   results: ExtractedResult[];
+  /** A workflow run's phases and sub-agents as they stand (#582): replaces the stored tree. */
+  workflow?: WorkflowProgress;
 }
+
+/**
+ * A workflow run's tree (#582), from Claude Code's task_progress events: its phases and each
+ * sub-agent (the id its model requests carry, so steps group under it). Titles and labels come from
+ * the repository's script: untrusted text, redacted by exact value before it is stored.
+ */
+export interface WorkflowProgress {
+  phases: { index: number; title: string }[];
+  agents: { id: string; label: string; phaseIndex: number | null; state: string; attempt: number }[];
+}
+
+/** A workflow sub-agent's id as Claude Code sends it (x-claude-code-agent-id). */
+export const STEP_AGENT_REF = /^[A-Za-z0-9_-]{1,64}$/;
+/** A sub-agent's state in the tree (start, done, failed, queued, ...). */
+export const WORKFLOW_AGENT_STATE = /^[a-z_]{1,24}$/;
+export const MAX_WORKFLOW_PHASES = 64;
+export const MAX_WORKFLOW_AGENTS = 1_000;
+/** The most of a phase title or agent label kept. */
+export const MAX_WORKFLOW_LABEL_CHARS = 200;
 
 /**
  * Where trusted code hands a run's steps: redacts by exact value, then writes. Never rejects.

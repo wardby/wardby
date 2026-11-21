@@ -627,6 +627,8 @@ model CodingRun {
   workflowRepository    String?
   /// Fixed at dispatch from the profile's workflowReplyField; non-null = the run's summary is that field of the script's result.
   workflowReplyField    String?
+  /// A workflow run's phases and sub-agents as the worker last reported them (redacted): { phases, agents }.
+  workflowProgress      Json?
   /// trigger_agent's workflowArgs (a JSON object), the script's `args`; null = the task text.
   workflowArgs          Json?
   packageAllowlist      Json                @default("{}")
@@ -787,6 +789,8 @@ model RunStep {
   /// The detail level's text: redacted tool input (~4 KB), then the last ~2 KB of its output once
   /// the result is back, or the model's text (~8 KB). At most 16,384 characters. Null below detail.
   detail    String?
+  /// A workflow run's sub-agent that produced the step (#582): an id in CodingRun.workflowProgress.agents; null = the main session.
+  agentRef  String?
   expiresAt DateTime
 
   @@unique([runId, seq])
