@@ -1108,6 +1108,10 @@ model CodingProxySession {
   /// Package registry: ecosystems where a lockfile plan of this run failed or refused an entry, so a
   /// metadata miss walks the graph instead of being refused. Shared by every proxy replica.
   registryPlanFallback      String[]                 @default([])
+  /// Package registry: ecosystems where the run sent a lockfile the plan could not read (an unsupported
+  /// format, such as a Poetry lockfile), so nothing was checked ahead and refusals came one at a time.
+  /// The status comments and get_run say so. Ecosystem ids only.
+  registryPlanUnchecked     String[]                 @default([])
   /// Package registry: lockfile plans this run has started (capped by REGISTRY_PLAN_MAX_PER_RUN).
   registryPlans             Int                      @default(0)
   /// Package registry: set while a lockfile plan of this run is running (one at a time); a lease, so a

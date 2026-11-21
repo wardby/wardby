@@ -236,25 +236,32 @@ type RefusalOutcome = {
   failedChildren: readonly FailedChild[];
   packageRefusals?: readonly RegistryRefusalSummary[];
   noChanges?: boolean;
+  /** A workflow sub-run's reply (collectRunOutcome): the run answered, so it is never blocked. */
+  workflowReply?: string;
 };
 
 /**
- * The refusals that can block the run: all of them when a coding sub-run failed, otherwise all but
- * listing-only ones, which the installer may only have looked at (see LISTING_REFUSAL_FILENAME).
+ * The refusals that can block the run: never plan-only ones, which the run may never have asked for;
+ * otherwise all of them when a coding sub-run failed, and all but listing-only ones, which the installer
+ * may only have looked at, when none did (see LISTING_REFUSAL_FILENAME).
  */
-export function blockingRefusals(outcome: Omit<RefusalOutcome, "noChanges">): RegistryRefusalSummary[] {
-  const refusals = outcome.packageRefusals ?? [];
-  return outcome.failedChildren.length > 0 ? [...refusals] : warningRefusals(refusals);
+export function blockingRefusals(
+  outcome: Omit<RefusalOutcome, "noChanges" | "workflowReply">,
+): RegistryRefusalSummary[] {
+  const refusals = (outcome.packageRefusals ?? []).filter((refusal) => refusal.planOnly !== true);
+  return outcome.failedChildren.length > 0 ? refusals : warningRefusals(refusals);
 }
 
 /**
  * Whether package refusals blocked the run: it succeeded, but nothing reached a pull request, a coding
- * sub-run made no changes or failed, and packages were refused (blockingRefusals). The GitHub and Jira
- * status comments and the Slack `run_blocked` event all use it, so they always agree.
+ * sub-run made no changes or failed, packages were refused (blockingRefusals), and no workflow sub-run's
+ * reply answered the request (a reply wins: its refusals are ⚠️ lines). The GitHub and Jira status
+ * comments and the Slack `run_blocked` event all use it, so they always agree.
  */
 export function isBlockedByRefusals(run: Pick<FinishedRun, "status">, outcome: RefusalOutcome): boolean {
   return (
     run.status === "succeeded" &&
+    !outcome.workflowReply &&
     outcome.pullRequests.length === 0 &&
     (outcome.noChanges === true || outcome.failedChildren.length > 0) &&
     blockingRefusals(outcome).length > 0
@@ -286,6 +293,10 @@ export function outcomeBody(
     packageAudit?: { mode: PackageAuditMode; summary: PackageAuditSummary };
     /** Branches the run pushed with no pull request (#586): named after the reply, with a link to open one. */
     branches?: BranchOutcome[];
+    /** A workflow sub-run's reply (#582), already in `run.finalText`: the run is then never blocked. */
+    workflowReply?: string;
+    /** A coding sub-run's lockfile could not be planned (collectRunOutcome): said in the refusal block. */
+    lockfileUnchecked?: boolean;
   } = {},
 ): string {
   const refOf = (pr: PullRequestOutcome): string =>
@@ -309,6 +320,7 @@ export function outcomeBody(
     failedChildren,
     packageRefusals: refusals,
     noChanges: opts.noChanges,
+    workflowReply: opts.workflowReply,
   });
   const blockedBy = blocked ? blockingRefusals({ pullRequests, failedChildren, packageRefusals: refusals }) : [];
   // The ⚠️ line: on a no-changes run it keeps listing-only refusals (see LISTING_REFUSAL_FILENAME), and
@@ -319,13 +331,14 @@ export function outcomeBody(
     : noChangesRun
       ? refusals
       : warningRefusals(refusals);
+  const unchecked = { lockfileUnchecked: opts.lockfileUnchecked === true };
   const warning =
     (links.length > 0 || run.status === "succeeded") && warned.length > 0
-      ? packageRefusalWording(warned, { blocked: false })
+      ? packageRefusalWording(warned, { blocked: false, ...(blocked ? {} : unchecked) })
       : "";
   const audit = opts.packageAudit ? packageAuditWording(opts.packageAudit.mode, opts.packageAudit.summary) : "";
   const footer = warning + (warning ? "\n\n" : "") + audit + (audit ? "\n\n" : "") + runLine(run.id);
-  if (blocked) return packageRefusalWording(blockedBy) + "\n\n" + footer;
+  if (blocked) return packageRefusalWording(blockedBy, unchecked) + "\n\n" + footer;
   if (run.status === "lost") {
     return `❌ Interrupted before it finished (for example, wardby restarted). Repeat your request to retry.${partial}\n\n${footer}`;
   }
@@ -503,6 +516,8 @@ export async function collectRunOutcome(
   workflowReply?: string;
   /** Branches pushed with no pull request on a hosted remote (#586). */
   branches: BranchOutcome[];
+  /** A coding sub-run sent a lockfile the registry's plan could not read, so nothing was checked ahead. */
+  lockfileUnchecked: boolean;
 }> {
   const children = await db.run.findMany({
     where: { parentRunId: run.id },
@@ -519,6 +534,7 @@ export async function collectRunOutcome(
           services: true,
           packageAuditMode: true,
           repositories: { select: { result: true }, orderBy: { position: "asc" } },
+          proxySession: { select: { registryPlanUnchecked: true } },
         },
       },
     },
@@ -593,12 +609,14 @@ export async function collectRunOutcome(
   const workflowReplies = children.flatMap((c) =>
     c.status === "succeeded" && c.codingRun?.workflowReplyField && c.finalText?.trim() ? [c.finalText] : [],
   );
+  const lockfileUnchecked = children.some((c) => (c.codingRun?.proxySession?.registryPlanUnchecked ?? []).length > 0);
   return {
     pullRequests,
     failedChildren,
     packageRefusals,
     noChanges,
     branches,
+    lockfileUnchecked,
     ...(workflowReplies.length === 1 ? { workflowReply: workflowReplies[0] } : {}),
     ...(budgetSentence ? { budgetSentence } : {}),
     ...(packageAudit ? { packageAudit } : {}),
@@ -720,12 +738,19 @@ export async function completeHostStatus(
       packageAudit,
       workflowReply,
       branches,
+      lockfileUnchecked,
     } = await collectRunOutcome(db, run);
     // A workflow sub-run's reply (#582) is posted word for word in place of this run's own.
     const shown = workflowReply ? { ...run, finalText: workflowReply } : run;
     await recordGitHubIssuePullRequests(db, status, run.id, pullRequests);
     // A blocked status is built from the refusals alone, so the agent's reply is not posted after it.
-    const fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
+    const fullReply = isBlockedByRefusals(run, {
+      pullRequests,
+      failedChildren,
+      packageRefusals,
+      noChanges,
+      workflowReply,
+    })
       ? null
       : fullReplyOf(shown, pullRequests, failedChildren);
     const outcome = outcomeBody(shown, status.repository, pullRequests, failedChildren, {
@@ -737,6 +762,8 @@ export async function completeHostStatus(
       packageAudit,
       noChanges,
       branches,
+      workflowReply,
+      lockfileUnchecked,
       fullReplyFollows: true,
       statusInThread: status.commentKind === "inline",
     });

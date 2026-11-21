@@ -183,6 +183,10 @@ export interface RegistryStore {
   planFallback(runId: string): Promise<string[]>;
   /** Adds an ecosystem to the run's plan fallback (a no-op when already there). Never cleared for the run. */
   addPlanFallback(runId: string, ecosystem: string): Promise<void>;
+  /** Records that the run sent this ecosystem a lockfile the plan could not read (`wardby_lockfile_unsupported`
+   *  or `wardby_plan_unsupported`), so its refusals come one at a time; a no-op when already recorded. Read by
+   *  the control plane for the status comments and get_run, never cleared for the run. */
+  addPlanUnchecked(runId: string, ecosystem: string): Promise<void>;
   /** Starts a lockfile plan for the run, atomically: "busy" while another plan's lease (held by any replica) is
    *  live, "limit" once the run has started `max` plans, otherwise counts the plan, takes the lease and
    *  returns "started". */
@@ -229,7 +233,10 @@ export class MemoryRegistryStore implements RegistryStore {
   /** runId -> dependency cache session state (shareable with the cache's memory store). */
   readonly cacheSessions = new Map<string, DependencyCacheSessionState>();
   /** runId -> the run's shared plan state (the columns of its CodingProxySession). */
-  readonly planStates = new Map<string, { fallback: Set<string>; plans: number; leaseUntil: Date | null }>();
+  readonly planStates = new Map<
+    string,
+    { fallback: Set<string>; unchecked: Set<string>; plans: number; leaseUntil: Date | null }
+  >();
   /** reservation id -> a download streaming now. */
   readonly reservations = new Map<string, { runId: string; bytes: number; expiresAt: Date }>();
   private reservationCounter = 0;
@@ -393,7 +400,7 @@ export class MemoryRegistryStore implements RegistryStore {
   private planState(runId: string) {
     let state = this.planStates.get(runId);
     if (!state) {
-      state = { fallback: new Set(), plans: 0, leaseUntil: null };
+      state = { fallback: new Set(), unchecked: new Set(), plans: 0, leaseUntil: null };
       this.planStates.set(runId, state);
     }
     return state;
@@ -405,6 +412,10 @@ export class MemoryRegistryStore implements RegistryStore {
 
   async addPlanFallback(runId: string, ecosystem: string): Promise<void> {
     this.planState(runId).fallback.add(ecosystem);
+  }
+
+  async addPlanUnchecked(runId: string, ecosystem: string): Promise<void> {
+    this.planState(runId).unchecked.add(ecosystem);
   }
 
   async startPlan(runId: string, input: { max: number; leaseUntil: Date; now: Date }): Promise<PlanStart> {

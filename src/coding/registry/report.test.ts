@@ -4,6 +4,8 @@ import {
   acceptedAdvisoriesReason,
   LISTING_REFUSAL_FILENAME,
   parseAcceptedAdvisories,
+  PLAN_REFUSAL_FILENAME,
+  warningRefusals,
   summarizeRegistryFetches,
 } from "./report.js";
 
@@ -163,6 +165,41 @@ describe("summarizeRegistryFetches", () => {
       ]);
     },
   );
+
+  it("marks a refusal only a lockfile plan recorded, until a request-time one of the same package joins it", () => {
+    const row = { sizeBytes: null, outcome: "refused", ecosystem: "pypi" };
+    const plan = { ...row, filename: PLAN_REFUSAL_FILENAME };
+    const { packageRefusals } = summarizeRegistryFetches([
+      { ...plan, name: "docopt", version: "0.6.2", reason: "wardby_file_not_allowed" },
+      { ...plan, name: "docopt", version: "0.6.2", reason: "wardby_file_not_allowed" },
+      // Planned, then the installer asked for it and was refused: a real refusal.
+      { ...plan, name: "requested", version: "1.0", reason: "wardby_file_not_allowed" },
+      {
+        ...row,
+        name: "requested",
+        version: "1.0",
+        reason: "wardby_file_not_allowed",
+        filename: "requested-1.0.tar.gz",
+      },
+    ]);
+    expect(packageRefusals).toEqual([
+      {
+        ecosystem: "pypi",
+        name: "docopt",
+        reason: "wardby_file_not_allowed",
+        hint: refusalHint("wardby_file_not_allowed"),
+        planOnly: true,
+      },
+      {
+        ecosystem: "pypi",
+        name: "requested",
+        reason: "wardby_file_not_allowed",
+        hint: refusalHint("wardby_file_not_allowed"),
+      },
+    ]);
+    // A plan-only refusal is still a warning (the pull request description keeps it).
+    expect(warningRefusals(packageRefusals).map((r) => r.name)).toEqual(["docopt", "requested"]);
+  });
 
   it("carries a served row's accepted-advisories reason onto its package, each id once", () => {
     const row = { sizeBytes: 5, filename: null };

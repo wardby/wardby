@@ -1388,14 +1388,11 @@ only from an index weighs less than a refused download. Once any version of
 that name is served later in the same coding run, it is dropped like any
 other refusal the run got past. If nothing of that name was served,
 `wardby-packages` and `get_run` list it (`get_run` marks it
-`"listingOnly": true`), and the status shows it according to the outcome:
-
-- a coding sub-run failed: it counts toward ⛔ blocked, like any refusal;
-- the run made no changes: it is a ⚠️ dependency install line, not ⛔ (for
-  example, a package whose only release has nothing but too-new wheels);
-- a pull request was opened or updated: it adds no **Dependency install
-  incomplete** warning, no ⚠️ line, and no entry in the pull request's
-  package section.
+`"listingOnly": true`). A refusal only a lockfile plan recorded is marked
+`"planOnly": true`. How the status shows each, ⛔ blocked or a ⚠️ warning,
+is in [When a refusal blocks the run](../help/errors/package-refusals.md#when-a-refusal-blocks-the-run).
+A listing-only refusal adds no entry to the pull request's package section;
+a plan-only one is listed there like any other refusal.
 
 ## Safeguards
 
@@ -1679,7 +1676,10 @@ still counts.
 `get_run` also returns `packagePlan: { "approved": <n>, "refused": <n> }`:
 the exact versions lockfile plans approved for the run, and the distinct
 entries they refused (each refusal is also in `packageRefusals`, unless that
-version was served later). A run with
+version was served later). When the run sent a lockfile the plan couldn't
+read (for example a `poetry.lock`), `packagePlan` also has `unchecked` (the
+ecosystems) and `uncheckedNote`, the line the status comments add to their
+refusal list. A run with
 [package audit mode](#package-audit-mode) on also returns `packageAuditMode`
 and `packageAudit`, and its pull request opens with a caution banner listing
 the packages installed outside the allowlist.

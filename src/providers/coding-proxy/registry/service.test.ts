@@ -296,6 +296,7 @@ describe("RegistryService", () => {
         inner.recordDependencyCacheLockHash(runId, lockHash, max),
       planFallback: (runId) => inner.planFallback(runId),
       addPlanFallback: (runId, ecosystem) => inner.addPlanFallback(runId, ecosystem),
+      addPlanUnchecked: (runId, ecosystem) => inner.addPlanUnchecked(runId, ecosystem),
       startPlan: (runId, input) => inner.startPlan(runId, input),
       endPlan: (runId) => inner.endPlan(runId),
       reserveDownload: (runId, input) => inner.reserveDownload(runId, input),

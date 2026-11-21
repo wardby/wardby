@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { LISTING_REFUSAL_FILENAME } from "../coding/registry/report.js";
+import { UNCHECKED_LOCKFILE_LINE } from "../coding/registry/refusal-wording.js";
+import { LISTING_REFUSAL_FILENAME, PLAN_REFUSAL_FILENAME } from "../coding/registry/report.js";
 import {
   blockingRefusals,
   collectRunOutcome,
@@ -473,5 +474,188 @@ describe("package blocked status", () => {
     } finally {
       setWorkflowEventSink(null);
     }
+  });
+});
+
+describe("package refusals on an answer-only or plan-only run (#597)", () => {
+  const refusedRow = (filename: string | null, name = "docopt") => ({
+    runId: "c",
+    ecosystem: "pypi",
+    name,
+    version: "0.6.2",
+    outcome: "refused",
+    reason: "wardby_file_not_allowed",
+    sizeBytes: null,
+    filename,
+  });
+  const reply = "## Type\nBug\n\nTriaged: the crash is in the parser.";
+  const workflowChild = {
+    id: "c",
+    status: "succeeded",
+    error: null,
+    finalText: reply,
+    codingRun: {
+      result: { outcome: "no_changes" },
+      failureCategory: null,
+      services: [],
+      workflowReplyField: "comment",
+    },
+  };
+  const statusDb = (provider: "github" | "jira", children: unknown[], rows: unknown[]) => {
+    const status = { provider, repository: "repo", issueKey: "PROJ-1", commentId: "comment", completedAt: null };
+    return {
+      agent: { findUnique: async () => ({ name: "lead" }) },
+      runHostCheck: { findUnique: async () => null },
+      runHostStatus: { findUnique: async () => status, updateMany: vi.fn(async () => ({ count: 1 })) },
+      runIssueStatus: { findUnique: async () => status, updateMany: vi.fn(async () => ({ count: 1 })) },
+      agentIssueProject: { findUnique: async () => ({ access: "write" }) },
+      $queryRaw: async () => [],
+      run: {
+        findUnique: async () => ({ agentId: "a", parentRunId: null, codingRun: null }),
+        findMany: async () => children,
+      },
+      registryFetch: { findMany: vi.fn(async () => rows) },
+    };
+  };
+  const posted = async (provider: "github" | "jira", children: unknown[], rows: unknown[]) => {
+    const editComment = vi.fn(async () => undefined);
+    const comment = vi.fn(async () => ({ id: "follow-up" }));
+    const db = statusDb(provider, children, rows);
+    const lead = { ...run, finalText: "The lead's retelling." };
+    if (provider === "github") {
+      await completeHostStatus(db as never, lead, { github: { editComment, comment } } as never);
+      return (editComment.mock.calls[0] as unknown as [string, { body: string }])[1].body;
+    }
+    await completeIssueStatus(db as never, lead, { jira: { editComment, comment } } as never);
+    return (editComment.mock.calls[0] as unknown as [string, string, { markdown: string }])[2].markdown;
+  };
+  const finished = { ...run, status: "succeeded", agentId: "a", parentRunId: null, error: null };
+
+  it.each([
+    ["github", "a plan refusal", PLAN_REFUSAL_FILENAME],
+    ["jira", "a plan refusal", PLAN_REFUSAL_FILENAME],
+    ["github", "a request-time refusal", "docopt-0.6.2.tar.gz"],
+    ["jira", "a request-time refusal", "docopt-0.6.2.tar.gz"],
+  ] as const)(
+    "%s: a workflow reply with no changes and %s is posted word for word, then the ⚠️ note",
+    async (provider, _, filename) => {
+      const body = await posted(provider, [workflowChild], [refusedRow(filename)]);
+      expect(body).not.toContain("⛔");
+      expect(body).not.toContain("no changes were made");
+      expect(body).not.toContain("The lead's retelling.");
+      expect(body).toMatch(/^✅/);
+      const replyAt = body.indexOf("Triaged: the crash is in the parser.");
+      expect(replyAt).toBeGreaterThan(0);
+      // Jira posts the reply as the answer; GitHub quotes it under the status line.
+      if (provider === "jira") expect(body).toContain(reply);
+      else
+        expect(body).toContain(
+          reply
+            .split("\n")
+            .map((line) => `> ${line}`)
+            .join("\n"),
+        );
+      const warningAt = body.indexOf("Dependency install incomplete.");
+      expect(warningAt).toBeGreaterThan(replyAt);
+      expect(body.slice(warningAt)).toContain("docopt");
+    },
+  );
+
+  it.each([PLAN_REFUSAL_FILENAME, "docopt-0.6.2.tar.gz"])(
+    "sends no Slack run_blocked for a workflow reply with a refusal (%s)",
+    async (filename) => {
+      const sink = vi.fn();
+      setWorkflowEventSink(sink);
+      try {
+        await emitRunFinishedEvents(statusDb("github", [workflowChild], [refusedRow(filename)]) as never, finished);
+        expect(sink).not.toHaveBeenCalled();
+      } finally {
+        setWorkflowEventSink(null);
+      }
+    },
+  );
+
+  it("still blocks a coding run that requested a refused package and made no changes (no workflow reply)", async () => {
+    const child = { ...workflowChild, codingRun: { ...workflowChild.codingRun, workflowReplyField: null } };
+    const rows = [refusedRow("docopt-0.6.2.tar.gz")];
+    for (const provider of ["github", "jira"] as const) {
+      expect(await posted(provider, [child], rows)).toMatch(/^⛔ \*\*Blocked by the package registry/);
+    }
+    const sink = vi.fn();
+    setWorkflowEventSink(sink);
+    try {
+      await emitRunFinishedEvents(statusDb("github", [child], rows) as never, finished);
+      expect(sink).toHaveBeenCalledWith(
+        expect.objectContaining({ payload: expect.objectContaining({ kind: "run_blocked" }) }),
+      );
+    } finally {
+      setWorkflowEventSink(null);
+    }
+  });
+
+  it("never blocks on a refusal only the lockfile plan recorded, even when a sub-run failed", () => {
+    const planOnly = [
+      { ecosystem: "pypi", name: "docopt", reason: "wardby_file_not_allowed", planOnly: true as const },
+    ];
+    const failedChildren = [{ id: "c", status: "failed" }];
+    for (const outcome of [
+      { pullRequests: [], failedChildren: [], packageRefusals: planOnly, noChanges: true },
+      { pullRequests: [], failedChildren, packageRefusals: planOnly },
+      { pullRequests: [], failedChildren, packageRefusals: planOnly, noChanges: true },
+    ]) {
+      expect(isBlockedByRefusals(run, outcome)).toBe(false);
+      expect(blockingRefusals(outcome)).toEqual([]);
+    }
+    const noChanges = outcomeBody(run, "repo", [], [], { packageRefusals: planOnly, noChanges: true });
+    expect(noChanges).not.toContain("⛔");
+    expect(noChanges).toContain("⚠️ **Dependency install incomplete.**");
+    expect(noChanges).toContain("`docopt`");
+    const failed = outcomeBody(run, "repo", [], failedChildren, { packageRefusals: planOnly });
+    expect(failed).not.toContain("⛔");
+    expect(failed).toContain("`docopt`");
+  });
+
+  it("blocks on a plan refusal followed by a request-time refusal of the same package", async () => {
+    const child = { id: "c", status: "succeeded", codingRun: { result: { outcome: "no_changes" } } };
+    const planned = statusDb("github", [child], [refusedRow(PLAN_REFUSAL_FILENAME)]);
+    const plannedOutcome = await collectRunOutcome(planned as never, run);
+    expect(plannedOutcome.packageRefusals).toEqual([expect.objectContaining({ name: "docopt", planOnly: true })]);
+    expect(isBlockedByRefusals(run, plannedOutcome)).toBe(false);
+    const requested = statusDb(
+      "github",
+      [child],
+      [refusedRow(PLAN_REFUSAL_FILENAME), refusedRow("docopt-0.6.2.tar.gz")],
+    );
+    const requestedOutcome = await collectRunOutcome(requested as never, run);
+    expect(requestedOutcome.packageRefusals[0]?.planOnly).toBeUndefined();
+    expect(isBlockedByRefusals(run, requestedOutcome)).toBe(true);
+    expect(outcomeBody(run, "repo", [], [], requestedOutcome)).toMatch(/^⛔/);
+  });
+
+  it("says the lockfile wasn't checked ahead only when a sub-run's plan could not read it", async () => {
+    const child = (unchecked: string[] | null) => ({
+      id: "c",
+      status: "succeeded",
+      codingRun: {
+        result: { outcome: "no_changes" },
+        proxySession: unchecked === null ? null : { registryPlanUnchecked: unchecked },
+      },
+    });
+    const rows = [refusedRow("docopt-0.6.2.tar.gz")];
+    const unchecked = await collectRunOutcome(statusDb("github", [child(["pypi"])], rows) as never, run);
+    expect(unchecked.lockfileUnchecked).toBe(true);
+    expect(outcomeBody(run, "repo", [], [], unchecked)).toContain(UNCHECKED_LOCKFILE_LINE);
+    // In the ⚠️ block too (a reply answered the request).
+    expect(outcomeBody({ ...run, finalText: "ok" }, "repo", [], [], { ...unchecked, noChanges: false })).toContain(
+      UNCHECKED_LOCKFILE_LINE,
+    );
+    for (const value of [[], null]) {
+      const checked = await collectRunOutcome(statusDb("github", [child(value)], rows) as never, run);
+      expect(checked.lockfileUnchecked).toBe(false);
+      expect(outcomeBody(run, "repo", [], [], checked)).not.toContain(UNCHECKED_LOCKFILE_LINE);
+    }
+    // No refusals: no refusal block, so no line.
+    const quiet = await collectRunOutcome(statusDb("github", [child(["pypi"])], []) as never, run);
+    expect(outcomeBody(run, "repo", [], [], quiet)).not.toContain(UNCHECKED_LOCKFILE_LINE);
   });
 });

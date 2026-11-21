@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerRunTools } from "./runs.js";
 import { refusalHint } from "../../coding/registry/refusal-hints.js";
+import { UNCHECKED_LOCKFILE_LINE } from "../../coding/registry/refusal-wording.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
@@ -78,6 +79,8 @@ interface FakeRunRow {
     createdAt: Date;
   }>;
   approvedVersions?: number;
+  /** CodingProxySession.registryPlanUnchecked; absent = no session row. */
+  planUnchecked?: string[];
   budgetEvents?: Array<{ kind: string; limit: string; at: Date; details: unknown }>;
   localPullRequest?: Record<string, unknown> | null;
   /** What a select of parentRunId + agent (name, budget, group) sees. */
@@ -95,6 +98,7 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
       localPullRequest: _lpr,
       registryFetches: _registryFetches,
       approvedVersions: _approved,
+      planUnchecked: _unchecked,
       budgetEvents: _budgetEvents,
       parentRunId: _parentRunId,
       budgetAgent: _budgetAgent,
@@ -145,6 +149,12 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
     },
     registryApprovedVersion: {
       count: async ({ where }: { where: { runId: string } }) => runRows.get(where.runId)?.approvedVersions ?? 0,
+    },
+    codingProxySession: {
+      findUnique: async ({ where }: { where: { runId: string } }) => {
+        const unchecked = runRows.get(where.runId)?.planUnchecked;
+        return unchecked ? { registryPlanUnchecked: unchecked } : null;
+      },
     },
     registryFetch: {
       findMany: async ({ where }: { where: { runId: string } }) =>
@@ -771,9 +781,10 @@ describe("run observability tools", () => {
     expect(hint).toBeDefined();
     expect(codingBody.packageRefusals).toEqual([
       { ecosystem: "npm", name: "left-pad", reason: "wardby_package_not_allowed", hint },
-      { ecosystem: "npm", name: "evil", reason: "wardby_package_not_allowed", hint },
-      { ecosystem: "npm", name: "stray", reason: "wardby_package_not_allowed", hint },
+      { ecosystem: "npm", name: "evil", reason: "wardby_package_not_allowed", hint, planOnly: true },
+      { ecosystem: "npm", name: "stray", reason: "wardby_package_not_allowed", hint, planOnly: true },
     ]);
+    // The plan read the lockfile, so no unchecked line.
     expect(codingBody.packagePlan).toEqual({ approved: 42, refused: 2 });
 
     const nonCodingResult = await client.callTool({ name: "get_run", arguments: { runId: "r2" } });
@@ -782,6 +793,51 @@ describe("run observability tools", () => {
     expect(nonCodingBody).not.toHaveProperty("packageCount");
     expect(nonCodingBody).not.toHaveProperty("packageRefusals");
     expect(nonCodingBody).not.toHaveProperty("packagePlan");
+    await client.close();
+  });
+
+  it("get_run says a lockfile wasn't checked ahead only when the plan could not read it (#597)", async () => {
+    const now = new Date();
+    const base = {
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual",
+      turns: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costUsd: 0,
+      finalText: "x",
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+      codingRun: { jobBackend: "docker", jobHandle: "h", protectedPaths: [], result: null },
+    };
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [
+        { ...base, id: "r1", planUnchecked: ["pypi"] },
+        { ...base, id: "r2", planUnchecked: [] },
+        { ...base, id: "r3" },
+      ],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+    const planOf = async (runId: string) =>
+      (
+        parseText((await client.callTool({ name: "get_run", arguments: { runId } })) as never) as {
+          packagePlan: unknown;
+        }
+      ).packagePlan;
+    expect(await planOf("r1")).toEqual({
+      approved: 0,
+      refused: 0,
+      unchecked: ["pypi"],
+      uncheckedNote: UNCHECKED_LOCKFILE_LINE,
+    });
+    expect(await planOf("r2")).toEqual({ approved: 0, refused: 0 });
+    expect(await planOf("r3")).toEqual({ approved: 0, refused: 0 });
     await client.close();
   });
 

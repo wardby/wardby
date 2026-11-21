@@ -144,6 +144,7 @@ export async function completeIssueStatus(
         packageAudit,
         workflowReply,
         branches,
+        lockfileUnchecked,
       } = await collectRunOutcome(db, run);
       // A workflow sub-run's reply (#582) is posted word for word in place of this run's own.
       const shown = workflowReply ? { ...run, finalText: workflowReply } : run;
@@ -183,7 +184,7 @@ export async function completeIssueStatus(
             })
           : { notes: [] };
       // A blocked status is built from the refusals alone, so the agent's reply is not posted after it.
-      fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges })
+      fullReply = isBlockedByRefusals(run, { pullRequests, failedChildren, packageRefusals, noChanges, workflowReply })
         ? null
         : fullReplyOf(shown, pullRequests, failedChildren);
       const outcome = outcomeBody(shown, "", pullRequests, failedChildren, {
@@ -192,6 +193,8 @@ export async function completeIssueStatus(
         packageAudit,
         noChanges,
         branches,
+        workflowReply,
+        lockfileUnchecked,
         fullReplyFollows: true,
         noPullRequestText: "Done.",
         fromIssue: true,

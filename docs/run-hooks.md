@@ -32,7 +32,7 @@ Hooks deliver whether or not Slack is configured.
 | ------------------ | ----------------------------------------------------------------------------------------------- |
 | `run_completed`    | A run finished, in any end state: succeeded, failed, budget_exhausted, cancelled, lost, refused |
 | `run_failed`       | A top-level run did not succeed                                                                 |
-| `run_blocked`      | A top-level run was blocked by package refusals                                                 |
+| `run_blocked`      | A top-level run was blocked by package refusals (see the rule below the table)                  |
 | `issue_picked_up`  | A Jira or GitHub issue was picked up                                                            |
 | `pr_opened`        | A pull request was opened                                                                       |
 | `review_posted`    | A review verdict was posted                                                                     |
@@ -43,6 +43,9 @@ Hooks deliver whether or not Slack is configured.
 `run_completed` fires for coding and native agents alike. By default it fires
 for top-level runs only; a hook with `runs: "all"` also gets the runs a lead
 delegated to (each child separately, with `parentRunId` set).
+
+`run_blocked` fires only when the run's status comment would show ⛔, by the
+rule in [When a refusal blocks the run](../help/errors/package-refusals.md#when-a-refusal-blocks-the-run).
 
 ## What the tool receives
 

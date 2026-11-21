@@ -151,9 +151,9 @@ and hints; a Claude Code agent also gets those lines after any failed
 command. The registry also records packages it hides from the index: one
 with only source distributions (`wardby_file_not_allowed`), or whose every
 wheel is too new (`wardby_version_filtered`). The installer may only have
-looked at that index, so such a refusal (`get_run` marks it `listingOnly`)
-adds nothing to a pull request, shows as a ⚠️ line on a run that made no
-changes, and blocks the status (⛔) only when a coding sub-run failed.
+looked at that index, so `get_run` marks such a refusal `listingOnly`, and
+one only the lockfile plan found `planOnly`. How each shows on the status is
+in [When a refusal blocks the run](errors/package-refusals.md#when-a-refusal-blocks-the-run).
 
 The quickstart's coding step offers the packages a local repository declares
 (`package.json`, `pyproject.toml` including its build-system packages,
@@ -218,11 +218,11 @@ restored from a verified snapshot instead of running `npm ci`. Read the
 
 ## Blocked status comments
 
-If a coding child records package refusals, reports no changes or fails, and no
-pull request or pushed changes result, GitHub and Jira status comments show
-⛔ **Blocked by the package registry: no changes were made.** Otherwise, the
-status keeps the agent's reply or answer, or the pull request link, and adds a
-⚠️ dependency install warning. Refusal lists show at most ten distinct entries and a count
+GitHub and Jira status comments show package refusals as ⛔ **Blocked by the
+package registry: no changes were made.** or as a ⚠️ dependency install
+warning that keeps the agent's reply or answer, or the pull request link. See
+[When a refusal blocks the run](errors/package-refusals.md#when-a-refusal-blocks-the-run)
+for the rule. Refusal lists show at most ten distinct entries and a count
 of the rest; `get_run` has the full list.
 A refusal the run got past does not count: when the registry later served the
 same package (or, for a refused version, that version) to the same coding run,
