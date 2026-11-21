@@ -513,6 +513,11 @@ model CodingAgentProfile {
   planDocument             Json?
   /// Runs refuse to build from an unapproved plan set (plan_not_approved).
   buildFromPlan            Boolean           @default(false)
+  /// Coding workflows (#582): run .claude/workflows/<workflowName>.js with Claude Code's Workflow
+  /// tool. Null = no workflow. Claude Code only; needs git history.
+  workflowName             String?
+  /// The link name the workflow script is read from; null = the default repository.
+  workflowRepository       String?
   /// Git history in runs: the full history; overrides gitHistoryDepth.
   gitHistoryFull           Boolean           @default(false)
   packageAllowlist         Json              @default("{}")
@@ -614,6 +619,12 @@ model CodingRun {
   gitHistoryDepth       Int?
   /// Fixed at dispatch from the profile's gitHistoryFull.
   gitHistoryFull        Boolean             @default(false)
+  /// Fixed at dispatch from the profile's workflowName (#582); null = not a workflow run.
+  workflowName          String?
+  /// Fixed at dispatch from the profile's workflowRepository; null = the default repository.
+  workflowRepository    String?
+  /// trigger_agent's workflowArgs (a JSON object), the script's `args`; null = the task text.
+  workflowArgs          Json?
   packageAllowlist      Json                @default("{}")
   packagePolicy         Json                @default("{}")
   /// Fixed at dispatch from the profile's debugTraceUntil: the worker writes a

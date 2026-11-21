@@ -544,6 +544,17 @@ const profileJsonSchema = {
       description:
         "Refuse to build from a plan set that is not fully approved (plan_not_approved); give runs the approved versions. Default false.",
     },
+    workflow: {
+      type: ["object", "null"],
+      description:
+        "Claude Code only: run this repository workflow script, .claude/workflows/<name>.js, with Claude Code's own Workflow tool (see help article coding-workflows). { name, repository? }: repository is a link name (omitted = the default repository). Needs gitHistory (for example { \"depth\": 1 }). trigger_agent workflowArgs becomes the script's args. null turns it off.",
+      properties: {
+        name: { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$" },
+        repository: { type: "string", minLength: 1, maxLength: 300 },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
     packageAllowlist: {
       type: "object",
       description:
@@ -668,12 +679,14 @@ function requireModelAvailable(ctx: McpRequestContext, model: string, kind: "nat
 
 /** The stored columns for a validated profile: gitHistory is kept as gitHistoryDepth + gitHistoryFull (full overrides depth). */
 function profileColumns(profile: CodingProfile) {
-  const { gitHistory, planDocument, ...rest } = profile;
+  const { gitHistory, planDocument, workflow, ...rest } = profile;
   return {
     ...rest,
     planDocument: planDocument ?? Prisma.DbNull,
     gitHistoryDepth: gitHistory && gitHistory.depth !== "full" ? gitHistory.depth : null,
     gitHistoryFull: gitHistory?.depth === "full",
+    workflowName: workflow?.name ?? null,
+    workflowRepository: workflow?.repository ?? null,
   };
 }
 
@@ -707,6 +720,13 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
     sessionResume: profile.sessionResume,
     planDocument: profile.planDocument ?? null,
     buildFromPlan: profile.buildFromPlan,
+    workflow:
+      profile.workflowName == null
+        ? null
+        : {
+            name: profile.workflowName,
+            ...(profile.workflowRepository ? { repository: profile.workflowRepository } : {}),
+          },
   });
 }
 
