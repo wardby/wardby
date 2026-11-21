@@ -935,6 +935,8 @@ inside the worker.
   string (the task, without the agent's standing instructions).
   `workflowArgs` for an agent without a workflow is refused with
   `workflow_args_without_workflow`.
+- In sub-agent prompts, name files by their `/workspace` path: sub-agents start
+  in a folder of instruction files and otherwise look there first.
 - When `args` is an object, Wardby adds a reserved `wardby` field
   (`{ runId, baseSha }`), so a script can tell a Wardby run from a laptop run.
 - `workflow.replyField` names a string field of the script's result to use,

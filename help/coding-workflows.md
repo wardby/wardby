@@ -102,6 +102,9 @@ returned. To use one of the script's fields word for word instead, name it:
 - The run's result is the session's answer after the workflow finishes. If
   the workflow fails, is stopped or never starts, the run fails with
   [`coding_failure_workflow_failed`](errors/coding-workflow-failed.md).
+- The run's steps are grouped by the script's phases and sub-agents
+  (`get_run_steps` returns `workflow` and each sub-agent step's `agent`); see
+  [run steps](run-steps.md#workflow-runs).
 - When the workflow's result has string `prTitle` and `prBody` fields, the
   pull request uses them (see [the script's text word for word](#post-the-script-text-word-for-word)).
 
@@ -116,6 +119,9 @@ Every sub-agent works in the same sandbox as any coding run:
   Steps that run tests with `docker compose` need a direct path: run the
   commands in the run's worker image (see [custom worker images](build-claude-code-image.md)),
   with backing services from [`.wardby/services.yaml`](coding-services.md).
+- Name files by their path in `/workspace` in each sub-agent's prompt (for
+  example "Read /workspace/tickets/SIM-1.md"). Sub-agents start in a folder
+  that holds only the run's instruction files and otherwise look there first.
 - Leave git and the pull request to Wardby. Local commits are kept on
   Wardby's branch (git history is on), but skip creating branches, pushing
   and opening pull requests.

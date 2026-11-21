@@ -122,6 +122,8 @@ test("offers run_command with the setup's per-command timeouts, and the old 60 s
   );
   assert.equal(capped.inputSchema.properties.timeout_ms.maximum, 300_000);
   assert.match(capped.description, /stopped after 300 s\.$/);
+  // Where commands run, by path (#582): sub-agents otherwise look in their own instruction folder.
+  assert.match(capped.description, /checked out at \/workspace, where every command starts/);
   const legacy = await listRunCommand(parseToolSetup(undefined));
   assert.equal(legacy.inputSchema.properties.timeout_ms.maximum, 120_000);
 });
