@@ -135,8 +135,16 @@ export async function completeIssueStatus(
     let body: string;
     let fullReply: string | null = null;
     if (writable) {
-      const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges, packageAudit, workflowReply } =
-        await collectRunOutcome(db, run);
+      const {
+        pullRequests,
+        failedChildren,
+        budgetSentence,
+        packageRefusals,
+        noChanges,
+        packageAudit,
+        workflowReply,
+        branches,
+      } = await collectRunOutcome(db, run);
       // A workflow sub-run's reply (#582) is posted word for word in place of this run's own.
       const shown = workflowReply ? { ...run, finalText: workflowReply } : run;
       const foreign = await continuedForAnotherIssue(
@@ -183,6 +191,7 @@ export async function completeIssueStatus(
         packageRefusals,
         packageAudit,
         noChanges,
+        branches,
         fullReplyFollows: true,
         noPullRequestText: "Done.",
         fromIssue: true,

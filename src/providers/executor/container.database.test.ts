@@ -35,6 +35,55 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     await db.$disconnect();
   });
 
+  it("knows a continuation's root pushed only a branch until a round opens a pull request (#586)", async () => {
+    const ids = ["root", "round2", "round3"].map((name) => `container-branch-${name}-${randomUUID()}`);
+    const [root, round2, round3] = ids;
+    const result = (outcome: string) => ({
+      schemaVersion: 1,
+      outcome,
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: `wardby/run-${root}`,
+      commitSha: "b".repeat(40),
+      ...(outcome === "pull_request_opened"
+        ? { pullRequestUrl: "https://github.com/openai/example/pull/9", pullRequestNumber: 9 }
+        : {}),
+      summary: "s",
+      tests: [],
+      usage: { tokensIn: 0, tokensOut: 0, costUsd: 0 },
+    });
+    const coding = (runId: string, rootCodingRunId: string | null, outcome: string | null) => ({
+      runId,
+      task: "Fix it.",
+      repository: "openai/example",
+      baseRef: "main",
+      headRef: `wardby/run-${root}`,
+      provider: "claude-code",
+      model: "claude-sonnet-5",
+      timeoutSec: 900,
+      allowedEgress: [],
+      protectedPaths: ["CODEOWNERS"],
+      budgetReservedUsd: 1,
+      rootCodingRunId,
+      ...(outcome ? { result: result(outcome) } : {}),
+    });
+    try {
+      for (const id of ids) await db.run.create({ data: { id, agentId, executionManaged: true } });
+      await db.codingRun.create({ data: coding(root, null, "branch_pushed") });
+      await db.codingRun.create({ data: coding(round2, root, null) });
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.rootBranchOnly(root)).resolves.toBe(true);
+      await expect(store.load(round2)).resolves.toMatchObject({ rootBranchOnly: true });
+      // A later round opened the pull request: the root is no longer branch-only.
+      await db.codingRun.create({ data: coding(round3, root, "pull_request_opened") });
+      await expect(store.rootBranchOnly(root)).resolves.toBe(false);
+      expect(await store.load(round2)).not.toHaveProperty("rootBranchOnly");
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId: { in: ids } } });
+      await db.run.deleteMany({ where: { id: { in: ids } } });
+    }
+  });
+
   it("warm rounds: finds the round a continuation follows, records warmStart, and loads the prompt's hash", async () => {
     const ids = ["root", "round2", "round3", "later"].map((name) => `container-warm-${name}-${randomUUID()}`);
     const [root, round2, round3, later] = ids;

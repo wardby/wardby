@@ -1006,6 +1006,26 @@ requests; it skips one it knows is merged or closed. For any other pull
 request it assumes the pull request is open, so after closing or merging one on
 the host, use a new `branch` name for the next run.
 
+## Branch only: no pull request
+
+A coding run can push its branch and open no pull request. Its final answer sets
+`"pullRequest": "none"`, which both Codex and Claude Code agents do when the task
+says not to open a pull request, and a workflow script can return the same field.
+In a multi-repository run, each entry of `pullRequests` carries its own choice,
+and the top-level field is the default repository's.
+
+- The result is `branch_pushed`, like a local repository's. On GitHub it adds
+  `branchUrl` and `compareUrl`, a link that opens a pull request from the branch
+  with the run's title and, when it fits, its description filled in.
+- The status comment on the issue or ticket carries the reply and names the
+  branch with those links. Jira's pull-request status moves, reviewer triggers,
+  review fix rounds and mark-ready don't run without a pull request, and a
+  branch-only repository is left out of the run's merge order.
+- A continuation (`continuePriorRun`) works on the same branch; if it doesn't ask
+  for branch only, it opens the pull request.
+- Any value other than `"none"` is ignored, so a run can only ever do less than
+  the normal path.
+
 ## Pull request titles and commit messages
 
 Every coding run's commit, and the draft pull request it opens, use a

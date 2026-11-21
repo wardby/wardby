@@ -904,12 +904,27 @@ const nullable = <T extends z.ZodTypeAny>(schema: T) =>
   z.preprocess((v) => (v === null ? undefined : v), schema.optional());
 
 /** One pull request's note in a multi-repository run (#537); `workspace` names /workspace. */
+/** The final answer's pullRequest field, for both workers' JSON schemas and prompts (#586). */
+export const PULL_REQUEST_CHOICE_DESCRIPTION =
+  'Set to "none" only when the task says not to open a pull request: the branch is pushed and no pull request is opened. Otherwise leave it out (null).';
+
+/**
+ * A run's request to push its branch without opening a pull request (#586): "none". Model-written,
+ * so normalized rather than rejected: any other value, null included, is the normal path.
+ */
+export const pullRequestChoice = z.preprocess(
+  (value) => (value === "none" ? "none" : undefined),
+  z.literal("none").optional(),
+);
+
 export const PullRequestNoteSchema = z
   .object({
     name: z.string().min(1).max(63),
     title: optionalTag,
     description: summaryText(),
     mergeOrder: nullable(z.number().int().min(1).max(99)),
+    // This extra repository's branch only, with no pull request (#586).
+    pullRequest: pullRequestChoice,
   })
   .strict();
 export type PullRequestNote = z.infer<typeof PullRequestNoteSchema>;
@@ -928,6 +943,8 @@ const agentOutputFields = {
   commitType: z.preprocess(normalizeCommitType, z.enum(COMMIT_TYPES).optional()),
   commitScope: z.preprocess(normalizeCommitScope, z.string().optional()),
   commitTitle: z.preprocess(normalizeCommitTitle, z.string().optional()),
+  // The default repository's branch only, with no pull request (#586).
+  pullRequest: pullRequestChoice,
 };
 
 function redactAgentOutput<
@@ -1090,6 +1107,13 @@ export const CodingWorkerOutputSchema = z
     ...(dependencyCache !== undefined ? { dependencyCache } : {}),
   }));
 
+/** A branch page or compare link Wardby built from the repository and branch: https, bounded. */
+const branchLinkSchema = z
+  .string()
+  .max(8192)
+  .url()
+  .refine((value) => value.startsWith("https://"), "must be an https URL");
+
 const pullRequestUrlSchema = z
   .string()
   .url()
@@ -1124,6 +1148,9 @@ export const CodingRunResultSchema = z
       .optional(),
     pullRequestUrl: pullRequestUrlSchema.optional(),
     pullRequestNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    // A branch pushed with no pull request (#586): the remote's page for it, and where to open one.
+    branchUrl: branchLinkSchema.optional(),
+    compareUrl: branchLinkSchema.optional(),
     summary: summaryText(),
     tests: z.array(testResultSchema).max(MAX_CODING_TESTS),
     usage: usageSchema,

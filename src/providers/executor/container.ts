@@ -101,6 +101,7 @@ import {
   CLAUDE_CONTEXT_LIMITS,
   CODING_PROTOCOL_VERSION,
   CodingRunResultSchema,
+  publicCodingRunResult,
   CodingTaskInputSchema,
   COMMIT_SHA,
   GitHistoryInputSchema,
@@ -789,6 +790,8 @@ export interface ContainerRunSnapshot {
   collectExclude: unknown;
   /** Revision-in-place: set when this run continues another run's branch/PR. See preflight(). */
   rootCodingRunId: string | null;
+  /** The root pushed its branch with no pull request, and no round since opened one (#586). */
+  rootBranchOnly?: boolean;
   /** The issue that triggered this run (CodingRun.issueProvider/issueKey); null when none. */
   issueProvider?: string | null;
   issueKey?: string | null;
@@ -1125,6 +1128,9 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
         })
       : null;
     const repositories = await this.loadRepositories(runId, row.agentId, row.codingRun.rootCodingRunId);
+    const rootBranchOnly = row.codingRun.rootCodingRunId
+      ? await this.rootBranchOnly(row.codingRun.rootCodingRunId)
+      : false;
     // The run's secrets, identity and version only (one query): for warm rounds' fingerprint, and for
     // the versions a Claude Code run with session resume launches with (transcript capture compares
     // them). A failed read leaves them unknown: never warm, and no transcript stored.
@@ -1157,6 +1163,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       protectedPaths: row.codingRun.protectedPaths,
       collectExclude: row.codingRun.collectExclude,
       rootCodingRunId: row.codingRun.rootCodingRunId,
+      ...(rootBranchOnly ? { rootBranchOnly: true } : {}),
       issueProvider: row.codingRun.issueProvider,
       issueKey: row.codingRun.issueKey,
       ...(await this.planLineSource(row.codingRun)),
@@ -1314,6 +1321,27 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       ...(pr.state ? { state: pr.state } : {}),
       ...(pr.mergeOrder !== undefined ? { mergeOrder: pr.mergeOrder } : {}),
     }));
+  }
+
+  /**
+   * Whether a continuation's root pushed only a branch (#586): the root or a round since is
+   * branch_pushed, and none of them opened a pull request. A failed read answers false (the usual
+   * continuation checks then apply).
+   */
+  async rootBranchOnly(rootRunId: string): Promise<boolean> {
+    try {
+      const rows = await this.db.codingRun.findMany({
+        where: { OR: [{ runId: rootRunId }, { rootCodingRunId: rootRunId }] },
+        select: { result: true },
+      });
+      const outcomes = rows.map((row) => publicCodingRunResult(row.result)?.outcome);
+      return (
+        outcomes.includes("branch_pushed") &&
+        !outcomes.some((outcome) => outcome === "pull_request_opened" || outcome === "pull_request_updated")
+      );
+    } catch {
+      return false;
+    }
   }
 
   async pullRequestMarkedReady(rootRunId: string, name?: string): Promise<boolean> {
@@ -2947,7 +2975,9 @@ export class ContainerExecutor implements Executor {
         headRef: run.headRef,
         protectedPaths: profile.protectedPaths,
         collectExclude: [...normalizeCollectExclusions(run.collectExclude).paths],
-        continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
+        continuation: run.rootCodingRunId
+          ? { rootRunId: run.rootCodingRunId, ...(run.rootBranchOnly ? { branchOnly: true } : {}) }
+          : undefined,
         // Git history (#536), with the run's remote rows fetched into the default repository.
         ...historyPrepareFields(run, { remotes: true, strict: true }),
       };
@@ -3566,6 +3596,8 @@ export class ContainerExecutor implements Executor {
     // keepDescription: a continuation's existing description is left as it is (no update, no proposal).
     const descriptionState = options.keepDescription ? null : await this.descriptionStateFor(current);
     const finalized = await this.options.vcs.finalizeChanges(workspace, {
+      // The run asked to push its branch with no pull request (#586).
+      ...(output.pullRequest === "none" ? { pullRequest: "none" as const } : {}),
       summary,
       tests: output.tests,
       tag: output.tag,
@@ -3964,7 +3996,10 @@ export class ContainerExecutor implements Executor {
           ]
         : [],
     );
+    // Each repository's own choice (#586): an extra's note, the default repository's top-level field.
+    const branchOnly = slot.extra ? note?.pullRequest === "none" : output.pullRequest === "none";
     const finalized = await this.options.vcs.finalizeChanges(slot.workspace, {
+      ...(branchOnly ? { pullRequest: "none" as const } : {}),
       summary: agentOutput.summary,
       tests: output.tests,
       tag: agentOutput.tag,
@@ -4532,7 +4567,13 @@ export class ContainerExecutor implements Executor {
             pullRequestNumber: finalized.pullRequestNumber,
           }
         : outcome === "branch_pushed" && finalized?.outcome === "branch_pushed"
-          ? { headRef: finalized.headRef, commitSha: finalized.commitSha }
+          ? {
+              headRef: finalized.headRef,
+              commitSha: finalized.commitSha,
+              // A branch-only run on a hosted remote (#586): where the branch is, and how to open a PR.
+              ...(finalized.branchUrl ? { branchUrl: finalized.branchUrl } : {}),
+              ...(finalized.compareUrl ? { compareUrl: finalized.compareUrl } : {}),
+            }
           : {}),
       summary: output.summary,
       tests: output.tests,
@@ -5387,7 +5428,9 @@ export class ContainerExecutor implements Executor {
       headRef: run.headRef,
       protectedPaths: run.protectedPaths,
       collectExclude,
-      continuation: run.rootCodingRunId ? { rootRunId: run.rootCodingRunId } : undefined,
+      continuation: run.rootCodingRunId
+        ? { rootRunId: run.rootCodingRunId, ...(run.rootBranchOnly ? { branchOnly: true } : {}) }
+        : undefined,
       // A history workspace is recovered only as one (its root .git is allowed then).
       ...historyPrepareFields(run, { remotes: true, strict: false }),
     };

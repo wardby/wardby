@@ -11,6 +11,7 @@ import {
   type DependencyCacheReport,
   TEST_OUTCOME_DESCRIPTION,
   TEST_OUTCOMES,
+  PULL_REQUEST_CHOICE_DESCRIPTION,
 } from "../coding/protocol.js";
 import {
   COMMIT_SCOPE_DESCRIPTION,
@@ -50,6 +51,7 @@ identifier only, not a description; set "tag" to null if there is none.
 Also set "commitType", "commitScope" and "commitTitle": they become the conventional-commit subject of the
 pull request title and of this run's commit, describing this run's own change (not earlier runs').
 Return them as plain values (no "type:" prefix in the title); use null for "commitScope" when no area fits.
+Set "pullRequest" to "none" only when the task says not to open a pull request; otherwise null.
 Return only the requested JSON object. The trusted host validates and finalizes all changes.`;
 
 // OpenAI's strict Structured Outputs mode requires every property in an object schema with
@@ -86,6 +88,7 @@ export const CODING_OUTPUT_JSON_SCHEMA = {
       type: ["string", "null"],
       description: COMMIT_TITLE_DESCRIPTION,
     },
+    pullRequest: { type: ["string", "null"], enum: ["none", null], description: PULL_REQUEST_CHOICE_DESCRIPTION },
     tests: {
       type: "array",
       maxItems: 64,
@@ -109,6 +112,7 @@ export const CODING_OUTPUT_JSON_SCHEMA = {
     "commitType",
     "commitScope",
     "commitTitle",
+    "pullRequest",
     "tests",
   ],
   additionalProperties: false,
@@ -130,8 +134,13 @@ export function codingOutputJsonSchema(multi: boolean) {
             title: { type: ["string", "null"] },
             description: { type: "string" },
             mergeOrder: { type: ["integer", "null"], minimum: 1, maximum: 99 },
+            pullRequest: {
+              type: ["string", "null"],
+              enum: ["none", null],
+              description: PULL_REQUEST_CHOICE_DESCRIPTION,
+            },
           },
-          required: ["name", "title", "description", "mergeOrder"],
+          required: ["name", "title", "description", "mergeOrder", "pullRequest"],
           additionalProperties: false,
         },
       },

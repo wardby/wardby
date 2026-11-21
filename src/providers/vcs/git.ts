@@ -972,6 +972,21 @@ export class GitVcsProvider implements VcsProvider {
     commitSha: string,
   ): Promise<FinalizeChangesResult> {
     await this.remote.assertContinuationOpen(prepared);
+    // Branch only (#586): push, and open, update or describe no pull request. The remote's links let
+    // a person open one from the branch later.
+    if (details?.pullRequest === "none") {
+      await this.pushOnce(prepared, commitSha);
+      const links = this.remote.branchLinks?.(prepared, details) ?? {};
+      return {
+        outcome: "branch_pushed",
+        repository: prepared.repository,
+        baseRef: prepared.baseRef,
+        baseCommit: prepared.baseCommit,
+        headRef: prepared.headRef,
+        commitSha,
+        ...links,
+      };
+    }
     // Before the push: a description comment must already exist when the push starts a review.
     await this.remote
       .proposeDescriptionBeforePush?.({ workspace: prepared, details, changedPaths: changed, commitSha })

@@ -41,7 +41,8 @@ export interface VcsPrepareInput {
    * trusts baseRef, no more, and cannot independently re-verify a database
    * fact.
    */
-  continuation?: { rootRunId: string };
+  /** branchOnly: the root pushed only a branch, with no pull request yet (#586). */
+  continuation?: { rootRunId: string; branchOnly?: boolean };
   /**
    * A writable extra repository of a run with several: prepared at
    * `<run>/repos/<name>/{workspace,git}` beside the run's default workspace,
@@ -115,7 +116,8 @@ export interface PreparedWorkspace {
   gitMetadataPath: string;
   protectedPaths: string[];
   collectExclude: string[];
-  continuation?: { rootRunId: string };
+  /** branchOnly: the root pushed only a branch, with no pull request yet (#586). */
+  continuation?: { rootRunId: string; branchOnly?: boolean };
   /** See VcsPrepareInput.slot. */
   slot?: { name: string };
   /** See VcsPrepareInput.branchRunId: the publish identity when it is not this run's own. */
@@ -163,6 +165,8 @@ export type ContinuationTarget = Pick<
 
 /** Already-validated/redacted agent-authored fields (coding/protocol.ts) surfaced in the opened PR, if any. */
 export interface FinalizeChangesDetails {
+  /** "none": push the branch and open no pull request (#586); the run's own choice. */
+  pullRequest?: "none";
   summary?: string;
   tests?: readonly { command: string; outcome: TestOutcome }[];
   tag?: string;
@@ -242,6 +246,9 @@ export type FinalizeChangesResult =
       baseCommit: string;
       headRef: string;
       commitSha: string;
+      /** A branch-only run on a hosted remote (#586): the branch's page, and where to open a PR from it. */
+      branchUrl?: string;
+      compareUrl?: string;
     };
 
 export interface VcsProvider {

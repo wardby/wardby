@@ -111,6 +111,9 @@ returned. To use one of the script's fields word for word instead, name it:
 - The run's steps are grouped by the script's phases and sub-agents
   (`get_run_steps` returns `workflow` and each sub-agent step's `agent`); see
   [run steps](run-steps.md#workflow-runs).
+- A result with `pullRequest: "none"` pushes the branch and opens no pull
+  request (see [branch only](coding-branch-only.md)): for example a fix an
+  engineer will finish.
 - When the workflow's result has string `prTitle` and `prBody` fields, the
   pull request uses them (see [the script's text word for word](#post-the-script-text-word-for-word)).
 

@@ -682,7 +682,7 @@ class FakeVcs implements VcsProvider {
     if (this.finalizeEmpty) {
       return { outcome: "no_changes", repository: workspace.repository, baseRef: "main", baseCommit: "a".repeat(40) };
     }
-    if (this.pushBranchOnly) {
+    if (this.pushBranchOnly || details?.pullRequest === "none") {
       return {
         outcome: "branch_pushed",
         repository: workspace.repository,
@@ -690,6 +690,13 @@ class FakeVcs implements VcsProvider {
         baseCommit: "a".repeat(40),
         headRef: workspace.headRef,
         commitSha: "b".repeat(40),
+        // A hosted remote's links (#586), as GitHubRemote.branchLinks gives them.
+        ...(details?.pullRequest === "none"
+          ? {
+              branchUrl: `https://github.com/${workspace.repository}/tree/${workspace.headRef}`,
+              compareUrl: `https://github.com/${workspace.repository}/compare/main...${workspace.headRef}?expand=1`,
+            }
+          : {}),
       };
     }
     return {
@@ -2734,6 +2741,32 @@ describe("ContainerExecutor", () => {
       outcome: "cancelled",
       budgetActualUsd: 0.25,
     });
+  });
+
+  it("passes the run's branch-only choice to the push and stores the branch's links (#586)", async () => {
+    const created = await harness();
+    created.jobs.result.resultArtifact = JSON.stringify({
+      schemaVersion: 1,
+      runId: "run-1",
+      outcome: "changes_ready",
+      summary: "Fixed it.",
+      tests: [],
+      pullRequest: "none",
+    });
+    await created.executor.start("run-1");
+    expect(created.vcs.lastFinalizeDetails?.pullRequest).toBe("none");
+    expect(created.store.run.status).toBe("succeeded");
+    expect(created.store.run.result).toMatchObject({
+      outcome: "branch_pushed",
+      headRef: "wardby/run-run-1",
+      branchUrl: "https://github.com/openai/example/tree/wardby/run-run-1",
+      compareUrl: "https://github.com/openai/example/compare/main...wardby/run-run-1?expand=1",
+    });
+    expect(created.store.run.result).not.toHaveProperty("pullRequestUrl");
+    // Without the choice the push gets no such detail.
+    const normal = await harness();
+    await normal.executor.start("run-1");
+    expect(normal.vcs.lastFinalizeDetails).not.toHaveProperty("pullRequest");
   });
 
   it("records a pushed local branch as a succeeded run with resultBranch and baseSha", async () => {
@@ -7250,6 +7283,22 @@ describe("ContainerExecutor with several repositories (#537)", () => {
           }),
         }),
       ]);
+    });
+
+    it("gives each repository its own branch-only choice: an extra's note, the default's own field (#586)", async () => {
+      const created = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        pullRequests: [{ name: "tools", description: "Tools change.", pullRequest: "none" }],
+      });
+      await created.executor.start("run-1");
+      const [main, tools] = created.vcs.finalizeCalls;
+      expect(main.details).not.toHaveProperty("pullRequest");
+      expect(tools.details?.pullRequest).toBe("none");
+      const both = await multi([writeRow("tools", { repository: "openai/tools" })], {
+        pullRequest: "none",
+        pullRequests: [{ name: "tools", description: "Tools change." }],
+      });
+      await both.executor.start("run-1");
+      expect(both.vcs.finalizeCalls.map((call) => call.details?.pullRequest)).toEqual(["none", undefined]);
     });
 
     it("(b) collects and publishes a changed extra even when the worker says no_changes", async () => {

@@ -155,6 +155,28 @@ export function pullRequestOutcome(result: unknown): PullRequestOutcome | null {
   };
 }
 
+/** A branch pushed with no pull request on a hosted remote (#586), as the status comment names it. */
+export interface BranchOutcome {
+  repository: string;
+  headRef: string;
+  branchUrl: string;
+  compareUrl?: string;
+}
+
+/** A coding result's pushed branch with no pull request, or null (a local repository's has no links). */
+export function branchOutcome(result: unknown): BranchOutcome | null {
+  if (!result || typeof result !== "object") return null;
+  const r = result as Record<string, unknown>;
+  if (r.outcome !== "branch_pushed" || typeof r.repository !== "string" || typeof r.headRef !== "string") return null;
+  if (typeof r.branchUrl !== "string" || !r.branchUrl.startsWith("https://")) return null;
+  return {
+    repository: r.repository,
+    headRef: r.headRef,
+    branchUrl: r.branchUrl,
+    ...(typeof r.compareUrl === "string" && r.compareUrl.startsWith("https://") ? { compareUrl: r.compareUrl } : {}),
+  };
+}
+
 /**
  * Only counts reach the comment: test commands are agent-authored and belong in the PR body.
  * A deliberate red run (test-first, before the fix) is not a failed check.
@@ -262,6 +284,8 @@ export function outcomeBody(
     statusInThread?: boolean;
     /** Package audit mode on any coding sub-run: a short block above the run line, whatever the outcome. */
     packageAudit?: { mode: PackageAuditMode; summary: PackageAuditSummary };
+    /** Branches the run pushed with no pull request (#586): named after the reply, with a link to open one. */
+    branches?: BranchOutcome[];
   } = {},
 ): string {
   const refOf = (pr: PullRequestOutcome): string =>
@@ -389,14 +413,21 @@ export function outcomeBody(
     return `✅ ${links.join(", ")}. ${checksOf(skippedChecks)} could not be run and ${skippedChecks === 1 ? "was" : "were"} skipped: see the pull request's description.\n\n${footer}`;
   }
   if (links.length > 0) return `✅ ${links.join(", ")}.\n\n${footer}`;
+  // Branches pushed with no pull request (#586): one line each, after the reply.
+  const branchLines = (opts.branches ?? []).map((branch) => {
+    const where = branch.repository.toLowerCase() === repository.toLowerCase() ? "" : ` in ${branch.repository}`;
+    const open = branch.compareUrl ? ` ([open a pull request](${branch.compareUrl}))` : "";
+    return `Pushed branch [\`${branch.headRef}\`](${branch.branchUrl})${where}${open}.`;
+  });
+  const branchNote = branchLines.length > 0 ? `\n\n${branchLines.join("\n")}` : "";
   if (opts.fullReplyFollows && fullReplyOf(run, pullRequests, failedChildren) !== null) {
     const follows = opts.statusInThread ? FULL_REPLY_FOLLOWS_IN_CONVERSATION : FULL_REPLY_FOLLOWS;
     return opts.replyAsAnswer
-      ? `✅ ${follows}\n\n${footer}`
-      : `✅ Finished without opening a pull request. ${follows}\n\n${footer}`;
+      ? `✅ ${follows}${branchNote}\n\n${footer}`
+      : `✅ Finished without opening a pull request. ${follows}${branchNote}\n\n${footer}`;
   }
-  if (opts.replyAsAnswer && reply) return `✅ ${cutReply(reply)}\n\n${footer}`;
-  return `✅ ${opts.noPullRequestText ?? "Finished without opening a pull request."}${quoted}\n\n${footer}`;
+  if (opts.replyAsAnswer && reply) return `✅ ${cutReply(reply)}${branchNote}\n\n${footer}`;
+  return `✅ ${opts.noPullRequestText ?? "Finished without opening a pull request."}${quoted}${branchNote}\n\n${footer}`;
 }
 
 /** Package audit mode on a run's coding sub-runs: the strongest mode, and what it recorded across them. */
@@ -470,6 +501,8 @@ export async function collectRunOutcome(
   packageAudit?: PackageAuditOutcome;
   /** The one workflow sub-run's reply (#582), posted word for word in place of the run's own. */
   workflowReply?: string;
+  /** Branches pushed with no pull request on a hosted remote (#586). */
+  branches: BranchOutcome[];
 }> {
   const children = await db.run.findMany({
     where: { parentRunId: run.id },
@@ -500,11 +533,20 @@ export async function collectRunOutcome(
       const pr = pullRequestOutcome(result);
       return pr ? [{ ...pr, runId }] : [];
     });
+  const own = await ownCodingRun(db, run.id);
   const pullRequests = [
     // A top-level coding run (a scheduled run, a fix round) lists its own pull requests first.
-    ...pullRequestsOf(run.id, await ownCodingRun(db, run.id)),
+    ...pullRequestsOf(run.id, own),
     ...children.flatMap((c) => pullRequestsOf(c.id, c.codingRun)),
   ];
+  const branchesOf = (
+    codingRun: { result: unknown; repositories?: Array<{ result: unknown }> } | null | undefined,
+  ): BranchOutcome[] =>
+    [codingRun?.result, ...(codingRun?.repositories ?? []).map((row) => row.result)].flatMap((result) => {
+      const branch = branchOutcome(result);
+      return branch ? [branch] : [];
+    });
+  const branches = [...branchesOf(own), ...children.flatMap((c) => branchesOf(c.codingRun))];
   const failedChildren = children
     .filter((c) => TERMINAL.has(c.status) && c.status !== "succeeded")
     .map((c) => ({
@@ -556,6 +598,7 @@ export async function collectRunOutcome(
     failedChildren,
     packageRefusals,
     noChanges,
+    branches,
     ...(workflowReplies.length === 1 ? { workflowReply: workflowReplies[0] } : {}),
     ...(budgetSentence ? { budgetSentence } : {}),
     ...(packageAudit ? { packageAudit } : {}),
@@ -668,8 +711,16 @@ export async function completeHostStatus(
     if (!status.commentId && !opts.postIfMissing) return;
     const host = hosts[status.provider];
     if (!host) return;
-    const { pullRequests, failedChildren, budgetSentence, packageRefusals, noChanges, packageAudit, workflowReply } =
-      await collectRunOutcome(db, run);
+    const {
+      pullRequests,
+      failedChildren,
+      budgetSentence,
+      packageRefusals,
+      noChanges,
+      packageAudit,
+      workflowReply,
+      branches,
+    } = await collectRunOutcome(db, run);
     // A workflow sub-run's reply (#582) is posted word for word in place of this run's own.
     const shown = workflowReply ? { ...run, finalText: workflowReply } : run;
     await recordGitHubIssuePullRequests(db, status, run.id, pullRequests);
@@ -685,6 +736,7 @@ export async function completeHostStatus(
       packageRefusals,
       packageAudit,
       noChanges,
+      branches,
       fullReplyFollows: true,
       statusInThread: status.commentKind === "inline",
     });

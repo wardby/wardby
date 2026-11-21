@@ -703,7 +703,12 @@ async function continuationRoot(
   // continuation does on the pull request's head branch.
   if (codeProviderOf(root.repository) === "local") {
     if (!(await pushedRootBranch(reader, root))) throw new ContinuationRefusedError("no_pushed_branch");
-  } else if ((await rootPullRequests(reader, root.runId)).length === 0) {
+  } else if (
+    (await rootPullRequests(reader, root.runId)).length === 0 &&
+    // A hosted run that pushed its branch with no pull request (#586) is continued on that branch, as a
+    // local repository's is; a follow-up that does not ask for branch only then opens the PR.
+    !(await pushedRootBranch(reader, root))
+  ) {
     throw new ContinuationRefusedError("no_pull_request");
   }
   return { runId: root.runId, baseRef: root.baseRef, headRef: root.headRef };
