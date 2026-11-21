@@ -8,6 +8,7 @@
  * authorization stamp the MCP tools give a local repository ("local_root").
  */
 import { CodingProfileSchema } from "../coding/profile.js";
+import { codingProfileColumns } from "../coding/profile-columns.js";
 import { codingProviderSupportsModel, type CodingProvider } from "../coding/provider.js";
 import { THOROUGH_REVIEWER_PROMPT } from "./reviewer-prompt.js";
 
@@ -419,7 +420,9 @@ export async function seedCodingAgents(
   });
   if (builder.status !== "skipped") {
     await db.upsertCodingProfile(builder.id, {
-      ...profile,
+      // The stored columns, as create_agent writes them: the parsed profile has fields (gitHistory,
+      // planDocument) that are not columns.
+      ...codingProfileColumns(profile),
       repositoryAuthorizedVia: stamp.authorizedVia,
       repositoryAuthorizedById: stamp.authorizedById,
       repositoryAuthorizedAt: stamp.authorizedAt,
