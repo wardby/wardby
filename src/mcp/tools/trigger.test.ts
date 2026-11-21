@@ -361,6 +361,45 @@ describe("trigger_agent", () => {
     await client.close();
   });
 
+  it("refuses workflowArgs for an agent without a workflow, and args over 16 KiB, without creating a run", async () => {
+    const db = fakeDb([
+      { id: "a1", name: "greeter", ownerId: "p1" },
+      {
+        id: "a2",
+        name: "coder",
+        ownerId: "p1",
+        kind: "coding",
+        codingProfile: { provider: "claude-code", repository: "o/r", baseRef: "main", allowWebhookTaskOverride: false },
+      },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+    const text = (r: unknown) => (r as { content: { text: string }[] }).content[0].text;
+
+    for (const agentId of ["a1", "a2"]) {
+      const result = await client.callTool({
+        name: "trigger_agent",
+        arguments: { agentId, workflowArgs: { ticket: "X-1" } },
+      });
+      expect(result.isError, agentId).toBe(true);
+      expect(text(result), agentId).toMatch(/^workflow_args_without_workflow/);
+    }
+    const big = await client.callTool({
+      name: "trigger_agent",
+      arguments: { agentId: "a2", workflowArgs: { blob: "x".repeat(16 * 1024) } },
+    });
+    expect(big.isError).toBe(true);
+    expect(text(big)).toMatch(/at most 16 KiB/);
+    const notObject = await client.callTool({
+      name: "trigger_agent",
+      arguments: { agentId: "a2", workflowArgs: "X-1" },
+    });
+    expect(notObject.isError).toBe(true);
+    await client.close();
+  });
+
   it("any principal can trigger an owner-less agent through its everyone-execute grant, and only through it", async () => {
     const granted = fakeDb(
       [{ id: "a1", name: "greeter", ownerId: null }],

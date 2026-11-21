@@ -62,6 +62,8 @@ import { textResult } from "./text-result.js";
 import { codingOverrideAllowed, type CodingOverrideAgent } from "../../core/coding-override.js";
 
 const DEFAULT_TASK_TTL_MS = 24 * 60 * 60 * 1000;
+/** The most a workflow script's args may be, as JSON (#582). */
+export const MAX_WORKFLOW_ARGS_BYTES = 16 * 1024;
 
 const TriggerAgentSchema = z
   .object({
@@ -72,6 +74,14 @@ const TriggerAgentSchema = z
     repository: z.string().min(1).max(300).optional(),
     repositories: z.array(z.string().min(1).max(63)).max(32).optional(),
     continuePriorRun: z.string().trim().min(1).max(128).optional(),
+    /** The workflow script's args (#582): a JSON object, at most MAX_WORKFLOW_ARGS_BYTES serialized. */
+    workflowArgs: z
+      .record(z.string(), z.unknown())
+      .refine(
+        (value) => Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_WORKFLOW_ARGS_BYTES,
+        "workflowArgs must be at most 16 KiB as JSON",
+      )
+      .optional(),
     issue: z.unknown().optional(),
     review: z
       .object({
@@ -254,6 +264,11 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       properties: {
         agentId: { type: "string" },
         task: { type: "string" },
+        workflowArgs: {
+          type: "object",
+          description:
+            "Coding agents with a workflow only (codingProfile.workflow): passed to the workflow script as its args, a JSON object of at most 16 KiB. Without it, args is the task text. See help article coding-workflows.",
+        },
         baseRef: { type: "string" },
         branch: {
           type: "string",
@@ -325,6 +340,12 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
         review = await resolveLocalReview(ctx, agent.id, args.review);
       }
       if (args.continuePriorRun !== undefined) await checkContinuePriorRun(ctx, agent, args.continuePriorRun, args);
+      if (args.workflowArgs !== undefined && !agent.codingProfile?.workflowName) {
+        throw new McpError(
+          400,
+          "workflow_args_without_workflow: workflowArgs is only valid for a coding agent with a workflow (codingProfile.workflow).",
+        );
+      }
       if (
         agent.kind !== "coding" &&
         (args.task !== undefined ||
@@ -414,6 +435,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           agentId: agent.id,
           trigger: "manual",
           codingTask: args.task,
+          ...(args.workflowArgs !== undefined ? { codingWorkflowArgs: args.workflowArgs } : {}),
           codingBaseRef: args.baseRef,
           codingBranch: args.branch,
           codingRepository: args.repository,
