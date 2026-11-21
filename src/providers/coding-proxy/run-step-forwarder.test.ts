@@ -460,3 +460,21 @@ describe("RunStepForwarder", () => {
     );
   });
 });
+
+describe("RunStepForwarder workflow trees (#582)", () => {
+  it("posts a workflow tree on its own, after the batch's steps", async () => {
+    const fetchImpl = accepted();
+    const forwarder = new RunStepForwarder({ url: URL_BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const workflow = {
+      phases: [{ index: 1, title: "Triage: Intake" }],
+      agents: [{ id: "a1", label: "intake", phaseIndex: 1, state: "start", attempt: 1 }],
+    };
+    forwarder.submit(CAP, "r1", { ...batch, workflow });
+    await forwarder.flush();
+    const bodies = fetchImpl.mock.calls.map(([, init]) => JSON.parse(init.body as string));
+    expect(bodies).toEqual([
+      { runId: "r1", steps: batch.steps, results: [] },
+      { runId: "r1", steps: [], results: [], workflow },
+    ]);
+  });
+});

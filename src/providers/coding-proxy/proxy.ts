@@ -38,7 +38,13 @@ import {
 import { RUN_STEPS_LEVELS, type RunStepsLevel } from "../../core/run-steps/config.js";
 import { SeenIds } from "../../core/run-steps/seen.js";
 import { CLAUDE_RESULT_TOOL } from "../../core/run-steps/summarize.js";
-import type { RunStepBatch, RunStepSubmitter } from "../../core/run-steps/types.js";
+import { WorkflowProgressSchema } from "../../core/run-steps/wire.js";
+import {
+  STEP_AGENT_REF,
+  type ExtractedStep,
+  type RunStepBatch,
+  type RunStepSubmitter,
+} from "../../core/run-steps/types.js";
 import type {
   CredentialResolver,
   ExpiredRequest,
@@ -118,6 +124,8 @@ export interface ExecuteProxyRequest {
   rawBody: string;
   requestKey?: string;
   anthropicBeta?: string;
+  /** Claude Code's x-claude-code-agent-id: on a workflow session, the sub-agent its steps belong to (#582). */
+  agentId?: string;
 }
 
 /** What this session's replies and requests are read for. */
@@ -1569,8 +1577,13 @@ export class CodingProxy {
     }
 
     try {
-      if (parsed.stream) await this.forwardStream(session, request, upstream, sink, progress, input.bearer);
-      else await this.forwardJson(session, request, upstream, sink, input.bearer);
+      // A workflow session's sub-agent (#582): a well-formed id tags this reply's steps; any other value is ignored.
+      const agent =
+        session.workflow === true && input.agentId !== undefined && STEP_AGENT_REF.test(input.agentId)
+          ? input.agentId
+          : undefined;
+      if (parsed.stream) await this.forwardStream(session, request, upstream, sink, progress, input.bearer, agent);
+      else await this.forwardJson(session, request, upstream, sink, input.bearer, agent);
     } catch (error) {
       await this.markUncertain(
         session,
@@ -1768,6 +1781,7 @@ export class CodingProxy {
     upstream: Response,
     sink: ProxyResponseSink,
     capability: string,
+    agent?: string,
   ): Promise<void> {
     const declaredLength = Number(upstream.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_UPSTREAM_JSON_BYTES) {
@@ -1791,7 +1805,7 @@ export class CodingProxy {
     const capture = stepCapture(session, this.runStepsCeiling);
     if (capture !== "none") {
       this.submitSteps(capability, session.runId, () => ({
-        steps: stepsFromJson(session.protocol, value, { detail: capture === "detail" }),
+        steps: tagged(stepsFromJson(session.protocol, value, { detail: capture === "detail" }), agent),
         results: [],
       }));
     }
@@ -1804,6 +1818,7 @@ export class CodingProxy {
     sink: ProxyResponseSink,
     progress: RelayProgress,
     capability: string,
+    agent?: string,
   ): Promise<void> {
     if (!upstream.body) throw new Error("missing_upstream_body");
     sink.start(upstream.status, { "content-type": "text/event-stream", "cache-control": "no-store" });
@@ -1876,8 +1891,29 @@ export class CodingProxy {
     } finally {
       // The reply's steps, also when the stream broke (then its open text is marked cut).
       const extractor = steps;
-      if (extractor) this.submitSteps(capability, session.runId, () => ({ steps: extractor.finish(), results: [] }));
+      if (extractor) {
+        this.submitSteps(capability, session.runId, () => ({ steps: tagged(extractor.finish(), agent), results: [] }));
+      }
     }
+  }
+
+  /**
+   * A workflow run's tree from its worker (#582), relayed with the run's steps. Only a workflow
+   * session may send one; a body outside the schema is refused without echoing any of it.
+   */
+  async workflowProgress(bearer: string, rawBody: string): Promise<void> {
+    const session = await this.authenticate(bearer);
+    if (session.workflow !== true) throw new CodingProxyError(403, "not_a_workflow_session");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new CodingProxyError(400, "invalid_workflow_progress");
+    }
+    const tree = WorkflowProgressSchema.safeParse(parsed);
+    if (!tree.success) throw new CodingProxyError(400, "invalid_workflow_progress");
+    if (stepCapture(session, this.runStepsCeiling) === "none") return;
+    this.submitSteps(bearer, session.runId, () => ({ steps: [], results: [], workflow: tree.data }));
   }
 
   /** Queues a step batch for the control plane. Best effort: any failure drops the steps, never the request. */
@@ -1885,7 +1921,9 @@ export class CodingProxy {
     if (!this.steps) return;
     try {
       const batch = build();
-      if (batch.steps.length > 0 || batch.results.length > 0) this.steps.submit(capability, runId, batch);
+      if (batch.steps.length > 0 || batch.results.length > 0 || batch.workflow) {
+        this.steps.submit(capability, runId, batch);
+      }
     } catch {
       // Dropped: steps are never a reason to fail a model request.
     }
@@ -2079,4 +2117,9 @@ function responseHeadersOf(upstream: Response): { contentType?: string; contentE
   const contentType = clean(upstream.headers.get("content-type"));
   const contentEncoding = clean(upstream.headers.get("content-encoding"));
   return { ...(contentType ? { contentType } : {}), ...(contentEncoding ? { contentEncoding } : {}) };
+}
+
+/** A workflow sub-agent's steps carry its id (#582); the main session's stay untagged. */
+function tagged(steps: ExtractedStep[], agent: string | undefined): ExtractedStep[] {
+  return agent === undefined ? steps : steps.map((step) => ({ ...step, agent }));
 }
