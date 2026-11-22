@@ -43,6 +43,18 @@ export const PLAN_REFUSAL_FILENAME = "-/plan";
  *   too-new wheels can be why);
  * - a pull request resulted: it adds nothing, neither to the description's
  *   install warning and package section nor to the status (warningRefusals).
+ *
+ * The plan rule: a refusal every row of which a lockfile plan recorded
+ * (PLAN_REFUSAL_FILENAME) is marked `planOnly`. The plan checks the whole
+ * lockfile, including packages the run never asks for (a dev dependency), so
+ * such a refusal never blocks: it is a ⚠️ line on the status, in every case
+ * (a sub-run failed included), never ⛔ or `run_blocked` (blockingRefusals),
+ * and it stays in the pull request description like any other refusal. A
+ * request-time refusal of the same package and reason (a download, or an
+ * index listing) joins it, and it is then no longer plan-only.
+ *
+ * Whatever the rows, a run that posts a workflow sub-run's reply (#582) is
+ * never blocked: its refusals are all ⚠️ lines (isBlockedByRefusals).
  */
 export const LISTING_REFUSAL_FILENAME = "-/listing";
 
@@ -104,6 +116,8 @@ export type RegistryRefusalSummary = {
   hint?: string;
   /** Every row behind it was an index listing's (LISTING_REFUSAL_FILENAME); absent otherwise. */
   listingOnly?: true;
+  /** Every row behind it was a lockfile plan's (PLAN_REFUSAL_FILENAME); absent otherwise. Never blocks. */
+  planOnly?: true;
 };
 
 /**
@@ -133,7 +147,10 @@ export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
 } {
   const packages = new Map<string, RegistryPackageSummary>();
   // Each refusal with the run + version pairs it still stands for (version "" = the whole name).
-  const refusals = new Map<string, { summary: RegistryRefusalSummary; versions: Set<string>; listing: boolean }>();
+  const refusals = new Map<
+    string,
+    { summary: RegistryRefusalSummary; versions: Set<string>; listing: boolean; plan: boolean }
+  >();
   for (const row of rows) {
     if (row.outcome === "served" && row.version) {
       const key = `${row.ecosystem}\0${row.name}\0${row.version}`;
@@ -163,17 +180,19 @@ export function summarizeRegistryFetches(rows: readonly RegistryFetchRow[]): {
           summary: { ecosystem: row.ecosystem, name: row.name, reason, ...(hint ? { hint } : {}) },
           versions: new Set(),
           listing: true,
+          plan: true,
         };
         refusals.set(key, refusal);
       }
       refusal.versions.add(`${row.runId ?? ""}\0${row.version ?? ""}`);
       refusal.listing &&= row.filename === LISTING_REFUSAL_FILENAME;
+      refusal.plan &&= row.filename === PLAN_REFUSAL_FILENAME;
     }
   }
   return {
     packages: [...packages.values()],
-    packageRefusals: [...refusals.values()].map(({ summary, listing }) =>
-      listing ? { ...summary, listingOnly: true as const } : summary,
+    packageRefusals: [...refusals.values()].map(({ summary, listing, plan }) =>
+      listing ? { ...summary, listingOnly: true as const } : plan ? { ...summary, planOnly: true as const } : summary,
     ),
   };
 }

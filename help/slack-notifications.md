@@ -45,8 +45,11 @@ there as well. The run events of a run a GitHub issue mention started keep a
 thread of their own.
 
 A `run_blocked` event uses the same ⛔ package registry wording and fixes as
-[Run status comments](status-comments.md). See [Package refusal errors](errors/package-refusals.md)
-for allowlist, release-age, advisory, and malware guidance.
+[Run status comments](status-comments.md), and is sent only when a status
+comment would show ⛔: see
+[When a refusal blocks the run](errors/package-refusals.md#when-a-refusal-blocks-the-run).
+See [Package refusal errors](errors/package-refusals.md) for allowlist,
+release-age, advisory, and malware guidance.
 
 Notifications never post code, diffs, review text, or run output to Slack. A
 run's report reaches Slack only through a run hook an admin approved to

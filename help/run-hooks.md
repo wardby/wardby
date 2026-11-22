@@ -31,6 +31,8 @@ The tool decides where it goes: Slack, email, a ticket, a webhook.
   runs a lead delegated to (default `"top_level"`).
 - The Slack events too: `run_failed`, `run_blocked`, `issue_picked_up`,
   `pr_opened`, `review_posted`, `review_fix`, `pr_closed`, `packages_audited`.
+  `run_blocked` follows the same rule as the ⛔ status comment:
+  [When a refusal blocks the run](errors/package-refusals.md#when-a-refusal-blocks-the-run).
 
 One agent can have many hooks, and one tool can serve many agents; each hook
 is delivered on its own, retried with backoff up to 10 times.

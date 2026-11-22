@@ -411,6 +411,7 @@ export const pypiLockfilePlan: LockfilePlanSupport = {
   fetchPublishTimes: fetchPypiPublishTimes,
   edgeSatisfies: pypiEdgeSatisfies,
   dependenciesOf: pypiDependenciesOf,
+  namesFilelessReleases: true,
 };
 
 // --- uv.lock URLs ----------------------------------------------------------------

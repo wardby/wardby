@@ -27,8 +27,8 @@ Eight kinds of lifecycle event can post to a linked channel:
 
 A successful run normally shows up as `pr_opened` or `review_posted`. A run
 blocked by package refusals instead emits `run_blocked`, once per run, using
-the same rule and guidance as [status comments](../help/status-comments.md): a
-run that answered, or worked around a refusal, is not blocked. Child
+the same rule and guidance as [status comments](../help/status-comments.md):
+see [When a refusal blocks the run](../help/errors/package-refusals.md#when-a-refusal-blocks-the-run). Child
 coding runs surface through their parent's events.
 
 Some runs do not post `run_failed` at all:

@@ -23,12 +23,19 @@ export function codeSpan(value: string): string {
 }
 
 /**
+ * Said with a run's refusals when a coding sub-run's lockfile could not be planned (the registry does not
+ * read that lockfile format), so the registry refused packages one at a time, as the installer met them.
+ */
+export const UNCHECKED_LOCKFILE_LINE =
+  "The lockfile wasn't checked ahead (the registry can't read its format), so refusals appear as the installer meets them.";
+
+/**
  * The ⛔ blocked status (or, with `blocked: false`, the ⚠️ warning) for a run's refusals, as GitHub/Jira
  * Markdown or, with `slack`, as Slack mrkdwn (already escaped).
  */
 export function packageRefusalWording(
   refusals: readonly RegistryRefusalSummary[],
-  opts: { blocked?: boolean; slack?: boolean } = {},
+  opts: { blocked?: boolean; slack?: boolean; lockfileUnchecked?: boolean } = {},
 ): string {
   const blocked = opts.blocked ?? true;
   const bold = (text: string) => (opts.slack ? `*${text}*` : `**${text}**`);
@@ -52,6 +59,7 @@ export function packageRefusalWording(
       ? `⛔ ${bold("Blocked by the package registry: no changes were made.")} Coding sub-runs couldn't install:`
       : `⚠️ ${bold("Dependency install incomplete.")} Coding sub-runs couldn't install:`,
     ...lines,
+    ...(opts.lockfileUnchecked ? ["", UNCHECKED_LOCKFILE_LINE] : []),
     "",
     "To unblock: use `update_agent` to update `codingProfile.packageAllowlist` or `codingProfile.packagePolicy` as appropriate (needs `packages:approve` or `agents:admin`), then mention `@wardby` again. ",
   ].join("\n");

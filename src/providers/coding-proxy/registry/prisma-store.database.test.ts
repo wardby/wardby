@@ -338,6 +338,21 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaRegistryStore (database)", () 
       expect((await a.planFallback(runId)).sort()).toEqual(["npm", "pypi"]);
     });
 
+    it("records each ecosystem whose lockfile the plan could not read once, apart from the fallback", async () => {
+      const { runId, agentId } = await seedRun({ registryTokenHash: `h-${randomUUID()}`, allowlist: {} });
+      runIds.push(runId);
+      agentIds.push(agentId);
+      const { a, b } = replicas();
+      const unchecked = async () =>
+        (await db.codingProxySession.findUnique({ where: { runId }, select: { registryPlanUnchecked: true } }))
+          ?.registryPlanUnchecked;
+      expect(await unchecked()).toEqual([]);
+      await a.addPlanUnchecked(runId, "pypi");
+      await b.addPlanUnchecked(runId, "pypi");
+      expect(await unchecked()).toEqual(["pypi"]);
+      expect(await a.planFallback(runId)).toEqual([]);
+    });
+
     it("runs one plan at a time and at most the limit, across replicas, and lets a lapsed lease go", async () => {
       const { runId, agentId } = await seedRun({ registryTokenHash: `h-${randomUUID()}`, allowlist: {} });
       runIds.push(runId);

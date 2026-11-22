@@ -74,9 +74,10 @@ thread) right after the reaction. When the run ends, the App edits that
 comment with the outcome:
 
 - the pull requests the run's coding sub-runs opened or pushed to;
-- ⛔ **Blocked by the package registry: no changes were made.** when coding
-  sub-runs recorded package refusals and no pull request or pushed changes
-  resulted. The comment lists up to ten distinct refusals, with reasons,
+- ⛔ **Blocked by the package registry: no changes were made.** when package
+  refusals blocked the run (see
+  [When a refusal blocks the run](../help/errors/package-refusals.md#when-a-refusal-blocks-the-run);
+  other refusals are a ⚠️ warning). The comment lists up to ten distinct refusals, with reasons,
   registry codes and fixes; use `get_run` for the full list. An approver updates
   `codingProfile.packageAllowlist` or `codingProfile.packagePolicy` with
   `update_agent` (needs `packages:approve` or `agents:admin`), then the

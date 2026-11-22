@@ -9,6 +9,7 @@ import { findReadableRun } from "./run-access.js";
 import { RUN_REPOSITORY_SELECT, publicRunRepository } from "../../coding/run-repositories.js";
 import { publicCodingRunResult, sanitizeDependencyCacheReport } from "../../coding/protocol.js";
 import { countPlanRefusals, summarizeRegistryFetches } from "../../coding/registry/report.js";
+import { UNCHECKED_LOCKFILE_LINE } from "../../coding/registry/refusal-wording.js";
 import { summarizePackageAudit } from "../../coding/registry/audit-mode.js";
 import { storedServiceLabels } from "../../coding/services/catalog.js";
 import { textResult } from "./text-result.js";
@@ -454,11 +455,22 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       // The packages themselves page through get_run_packages: a run can install more than a reply holds.
       const { packages, packageRefusals } = summarizeRegistryFetches(registryFetches);
       // Lockfile verification (POST /registry/<ecosystem>/-/plan): exact
-      // versions approved for the run, and distinct entries it refused.
+      // versions approved for the run, and distinct entries it refused. When
+      // the run sent a lockfile the plan could not read, the ecosystems (ids
+      // only) and the fixed line the status comments show.
+      const unchecked = codingRun
+        ? ((
+            await ctx.db.codingProxySession.findUnique({
+              where: { runId: run.id },
+              select: { registryPlanUnchecked: true },
+            })
+          )?.registryPlanUnchecked ?? [])
+        : [];
       const packagePlan = codingRun
         ? {
             approved: await ctx.db.registryApprovedVersion.count({ where: { runId: run.id } }),
             refused: countPlanRefusals(registryFetches),
+            ...(unchecked.length > 0 ? { unchecked, uncheckedNote: UNCHECKED_LOCKFILE_LINE } : {}),
           }
         : undefined;
       // Package audit mode, fixed at dispatch: what the registry served only

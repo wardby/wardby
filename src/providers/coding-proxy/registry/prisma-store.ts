@@ -323,6 +323,14 @@ export class PrismaRegistryStore implements RegistryStore {
         AND NOT (${ecosystem} = ANY(COALESCE("registryPlanFallback", ARRAY[]::TEXT[])))`;
   }
 
+  async addPlanUnchecked(runId: string, ecosystem: string): Promise<void> {
+    await this.db.$executeRaw`
+      UPDATE "CodingProxySession"
+      SET "registryPlanUnchecked" = array_append(COALESCE("registryPlanUnchecked", ARRAY[]::TEXT[]), ${ecosystem})
+      WHERE "runId" = ${runId}
+        AND NOT (${ecosystem} = ANY(COALESCE("registryPlanUnchecked", ARRAY[]::TEXT[])))`;
+  }
+
   async startPlan(runId: string, input: { max: number; leaseUntil: Date; now: Date }): Promise<PlanStart> {
     // One UPDATE with its conditions in the WHERE, so two replicas can never both start a plan the run's
     // lease or limit forbids.

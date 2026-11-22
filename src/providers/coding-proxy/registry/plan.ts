@@ -31,7 +31,11 @@
  * blocking advisories is approved and marked too). The work is
  * bounded: facts are fetched only for entries reached (so a lockfile of
  * unrelated packages costs nothing upstream), with bounded concurrency and a
- * deadline.
+ * deadline. The one exception is an ecosystem whose releases may have no file
+ * the registry serves (`namesFilelessReleases`, PyPI: no wheel): there an
+ * entry never reached is read too, in the same bounded way, so one with
+ * nothing to install is refused for that reason (`wardby_file_not_allowed`)
+ * rather than as merely unreached.
  */
 import { matchRoot } from "../../../coding/registry/allowlist.js";
 import type {
@@ -340,6 +344,26 @@ export async function verifyLockfilePlan(input: PlanInput): Promise<PlanResult> 
   // ways is not audited.
   for (const entry of approvedEntries) approve(entry, undefined);
   for (const [entry, relation] of relations) approve(entry, relation);
+  // Entries the walk never reached (outside the allowlist's graph, or reachable only through a refused
+  // entry) are read too where a release may have nothing to install, so the real reason is named.
+  if (support.namesFilelessReleases) {
+    const unreached = lockfile.entries.filter(
+      (entry) =>
+        entry.kind === "registry" &&
+        !refusals.has(entry) &&
+        !approved.has(versionKey(entry.name, entry.version)) &&
+        !outcomes.has(versionKey(entry.name, entry.version)),
+    );
+    if (unreached.length > 0) {
+      signal.throwIfAborted();
+      await loadFacts(input, unreached, outcomes);
+    }
+    for (const entry of unreached) {
+      const outcome = outcomes.get(versionKey(entry.name, entry.version));
+      if (outcome && "refusal" in outcome && outcome.refusal.code === "wardby_file_not_allowed")
+        refusals.set(entry, outcome.refusal);
+    }
+  }
   const refused = new Map<string, PlanRefusal>();
   for (const entry of lockfile.entries) {
     if (entry.kind === "bundled") continue;

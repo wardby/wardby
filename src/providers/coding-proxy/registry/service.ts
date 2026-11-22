@@ -858,14 +858,19 @@ export class RegistryService {
     if (!context) throw new RegistryError(401, "invalid_capability", "the registry token is not valid for a live run");
     const support = adapter.lockfilePlan;
     const auditVersions = this.options.audit.auditVersions?.bind(this.options.audit);
-    if (!support || !auditVersions)
+    if (!support || !auditVersions) {
+      // Nothing checked ahead: the status comments and get_run say refusals come as the installer meets them.
+      await this.options.store.addPlanUnchecked(context.runId, adapter.id).catch(() => undefined);
       throw new RegistryError(404, "wardby_plan_unsupported", `the ${adapter.id} registry does not verify lockfiles`);
+    }
     try {
       return await this.runPlan(request, adapter, support, auditVersions, context);
     } catch (error) {
       // A failed plan leaves the lockfile's packages without allowances: metadata misses walk for the rest
       // of the run, on every replica. The plan's own error is the one to show, so a failed write is dropped.
       await this.options.store.addPlanFallback(context.runId, adapter.id).catch(() => undefined);
+      if (error instanceof RegistryError && error.code === "wardby_lockfile_unsupported")
+        await this.options.store.addPlanUnchecked(context.runId, adapter.id).catch(() => undefined);
       throw error;
     }
   }

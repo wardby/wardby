@@ -293,6 +293,13 @@ export interface LockfilePlanSupport {
    *  proxy's event loop (a YAML or yarn lockfile, which is far costlier to
    *  read than JSON). Its parse must provide `dependencyKeys`. */
   parsesOffThread?(body: string): boolean;
+  /** Set when `fetchVersionFact` refuses a release that has no file the
+   *  registry may serve (403 `wardby_file_not_allowed`; PyPI: no wheel), a
+   *  verdict about the release itself. The plan then also reads the facts of
+   *  each registry entry it never reached, so such an entry is refused with
+   *  that reason rather than `wardby_package_not_allowed`. Unset (npm): an
+   *  entry the plan never reached is not read. */
+  readonly namesFilelessReleases?: boolean;
 }
 
 export interface WorkerConfigInput {
