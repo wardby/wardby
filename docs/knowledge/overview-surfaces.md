@@ -4,16 +4,16 @@ title: Viewer, observability and knowledge tooling
 description: Read projections, metrics and cited knowledge expose runtime state and architecture without owning execution.
 tags: [viewer, observability, knowledge, tooling]
 status: stable
-generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:23:52.509Z }
+generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-11-16T06:04:47.590Z }
 sources:
   - id: viewer
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/viewer/http.ts#L109-L137
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/viewer/http.ts#L83-L105
   - id: events
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/viewer/event-bus.ts#L59-L113
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/viewer/event-bus.ts#L1-L27
   - id: metrics
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/observability/metrics-server.ts#L21-L43
   - id: knowledge
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/knowledge/check.ts#L68-L86
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/knowledge/check.ts#L69-L87
   - id: fixtures
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/tools/codex-request-shape.ts#L48-L76
 wardby:
@@ -24,17 +24,17 @@ wardby:
     - id: viewer
       repo: github:wardby/wardby
       path: src/viewer/http.ts
-      lines: [109, 137]
+      lines: [83, 105]
       symbol: createViewerApi.handle
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:03dea11ad42963e9244fcd1b0ecc870b56dd2c2f71524de88138dfe852fbdea5
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
+      spanHash: sha256:a5029b3c590592acf9ee89a0dec539f5d6e588a7d66f2e7127adc7594829f4b4
     - id: events
       repo: github:wardby/wardby
       path: src/viewer/event-bus.ts
-      lines: [59, 113]
+      lines: [1, 27]
       symbol: createViewerEventBus
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:6a7a2ebbe033f611c7a94ab29f2fcdaf8c1957bf680a36e502406232d81a0301
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
+      spanHash: sha256:71caff586673e9731769a82a712aca56f4c6150f9df03c2d47896828cc93d87d
     - id: metrics
       repo: github:wardby/wardby
       path: src/observability/metrics-server.ts
@@ -45,9 +45,9 @@ wardby:
     - id: knowledge
       repo: github:wardby/wardby
       path: src/knowledge/check.ts
-      lines: [68, 86]
+      lines: [69, 87]
       symbol: checkBundle
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
       spanHash: sha256:819ec7779ed8ce9529dfe3364d02936c31f88d98125ad3429094729510151bf1
     - id: fixtures
       repo: github:wardby/wardby
@@ -59,12 +59,12 @@ wardby:
   confidence: high
 ---
 
-These supporting surfaces turn authoritative state into operator views and engineering evidence. Viewer serves authenticated graph and run-detail projections plus live events; observability exposes Prometheus data; knowledge tooling parses, checks and selects cited concepts; developer tools record and compare provider request fixtures.[^viewer][^metrics][^knowledge][^fixtures]
+These supporting surfaces turn authoritative state into operator views and engineering evidence. Viewer serves authenticated graph and run-detail projections plus documents and live events; observability exposes Prometheus data; knowledge tooling parses, checks and selects cited concepts; developer tools record and compare provider request fixtures.[^viewer][^metrics][^knowledge][^fixtures]
 
 The main flows are:
 
 1. Viewer authenticates a request and requires admin:view before serving graph, run, infrastructure or event routes.
-2. A lazy Postgres LISTEN connection validates notifications and fans them out to subscribers. The SSE layer signals reconnection gaps so clients can refetch authoritative projections.
+2. The viewer wraps the shared core LISTEN bus with its channel and event schema; the bus validates notifications and fans them out to subscribers. The SSE layer signals reconnection gaps so clients can refetch authoritative projections.
 3. The metrics listener exposes its supplied registry at a separate endpoint; the coding proxy supplies request observations.
 4. Knowledge checks parse each concept and compare citation hashes against repository content. Fixture-shape tooling summarizes request keys and types so SDK changes can be reviewed against proxy validation.[^viewer][^events][^metrics][^knowledge][^fixtures]
 
@@ -72,12 +72,12 @@ The area owns API schemas, projections, stream subscriptions, metric registries 
 
 **What to do:** preserve [viewer write isolation](viewer-notify-write-isolation.md); observation must not become a dependency of authoritative state changes. See [viewer API](../viewer-api.md), [observability](../observability.md), [architecture knowledge](../knowledge.md) and [Codex request compatibility](../coding-worker-isolation.md) for the owning guides.
 
-[^viewer]: src/viewer/http.ts, lines 109-137.
+[^viewer]: src/viewer/http.ts, lines 83-105.
 
-[^events]: src/viewer/event-bus.ts, lines 59-113.
+[^events]: src/viewer/event-bus.ts, lines 1-27.
 
 [^metrics]: src/observability/metrics-server.ts, lines 21-43.
 
-[^knowledge]: src/knowledge/check.ts, lines 68-86.
+[^knowledge]: src/knowledge/check.ts, lines 69-87.
 
 [^fixtures]: src/tools/codex-request-shape.ts, lines 48-76.

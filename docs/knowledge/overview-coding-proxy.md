@@ -4,16 +4,16 @@ title: Coding proxy and package mediation
 description: Run capabilities gate model reservations, package policy and optional dependency snapshots.
 tags: [proxy, packages, budgets]
 status: stable
-generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:22:32.722Z }
+generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-11-16T06:04:47.588Z }
 sources:
   - id: runtime
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/runtime.ts#L83-L159
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/providers/coding-proxy/runtime.ts#L267-L317
   - id: session
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/proxy.ts#L978-L1020
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/providers/coding-proxy/proxy.ts#L1142-L1197
   - id: model
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/proxy.ts#L1041-L1094
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/providers/coding-proxy/proxy.ts#L1219-L1284
   - id: plan
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/registry/service.ts#L585-L632
+    url: https://github.com/wardby/wardby/blob/8b17cbf18ad48bdcac71bf5857c4b31eab388bc9/src/providers/coding-proxy/registry/service.ts#L668-L715
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -22,35 +22,35 @@ wardby:
     - id: runtime
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/runtime.ts
-      lines: [83, 159]
+      lines: [267, 317]
       symbol: startConfiguredCodingProxy
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:e0c409bf7f5d1198dc24c3e98979f711519b4b3c0630ad841d87b27db4d11206
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
+      spanHash: sha256:5707326924e9e0c1bfae06e5977e2c06daf548c9b8c778d3bea10b522c395efc
     - id: session
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/proxy.ts
-      lines: [978, 1020]
+      lines: [1142, 1197]
       symbol: CodingProxy.createSession
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:976389493738ea51632f2dfbcf503b96f2506aa5105f82942efce825e075fb9e
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
+      spanHash: sha256:e05b3d7c87c98d6b93add7a4309a4800e3a32f4bc2397d29842622b15eaca026
     - id: model
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/proxy.ts
-      lines: [1041, 1094]
+      lines: [1219, 1284]
       symbol: CodingProxy.execute
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:b439b84431007b244f246836807cbae4b4a075c4bf1a1f618c11877e7d0082b7
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
+      spanHash: sha256:00db7965d92fabb6b53c3581f17826cc9036ef61e47d97e6e2efa74221b23ed2
     - id: plan
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/registry/service.ts
-      lines: [585, 632]
+      lines: [668, 715]
       symbol: RegistryService.planLockfile / runPlan
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 8b17cbf18ad48bdcac71bf5857c4b31eab388bc9
       spanHash: sha256:f3a6b41a918c6c88275abf0f72536341483cdcd1d3aceaf8e3b7e4821513413d
   confidence: high
 ---
 
-The coding proxy is the trusted egress and metering boundary for coding workers. Its runtime composes the persistent model ledger, registry service, vulnerability auditing and optional blob-backed dependency cache. Model and registry access use distinct credentials derived for the run.[^runtime][^session]
+The coding proxy is the trusted egress and metering boundary for coding workers. Its runtime composes the persistent model ledger, registry service, vulnerability auditing and optional blob-backed dependency cache. Model and registry access use distinct credentials derived for the run; sessions can also pin remote MCP tools with a separate token hash.[^runtime][^session]
 
 Requests proceed through these steps:
 
@@ -63,10 +63,10 @@ The area owns model-session and request accounting, registry facts and approvals
 
 **What to do:** preserve [settlement versus reporting isolation](proxy-settlement-projections.md) and [blob absence semantics](blob-not-found-semantics.md). See [package policy](../coding-packages.md) and [worker isolation](../coding-worker-isolation.md) for operator guidance.
 
-[^runtime]: src/providers/coding-proxy/runtime.ts, lines 83-159.
+[^runtime]: src/providers/coding-proxy/runtime.ts, lines 267-317.
 
-[^session]: src/providers/coding-proxy/proxy.ts, lines 978-1020.
+[^session]: src/providers/coding-proxy/proxy.ts, lines 1142-1197.
 
-[^model]: src/providers/coding-proxy/proxy.ts, lines 1041-1094.
+[^model]: src/providers/coding-proxy/proxy.ts, lines 1219-1284.
 
-[^plan]: src/providers/coding-proxy/registry/service.ts, lines 585-632.
+[^plan]: src/providers/coding-proxy/registry/service.ts, lines 668-715.

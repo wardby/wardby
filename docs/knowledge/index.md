@@ -41,17 +41,18 @@
 
 - [Nullable tool ownership leaves a uniqueness gap](nullable-tool-uniqueness.md) — The owner-and-name unique index does not deduplicate ownerless tools in PostgreSQL.
 - [HTTP prompt discovery cannot use per-call identity](mcp-http-prompt-discovery.md) — The HTTP factory exposes everyone-readable agent prompts rather than the authenticated caller’s full agent set.
+- [Serializable authorization needs narrow predicate locks](serializable-predicate-locks.md) — Sequential scans can make unrelated ownership and grant mutations repeatedly conflict on small tables.
 
 ## Coverage
 
-1. src/mcp/ (tools, auth, access, grants): covered 2026-10-17 (6 concepts)
+1. src/mcp/ (tools, auth, access, grants): covered 2026-11-16 (7 concepts)
 2. src/config/ and env handling: covered 2026-10-17 (2 concepts)
-3. src/core/ runner, scheduler, dispatch, budgets, delegation: covered 2026-10-17 (7 concepts)
-4. src/coding/ and src/coding-worker/, src/claude-*/ (coding runs, workers): covered 2026-10-17 (2 concepts)
-5. src/providers/coding-proxy/ (proxy, package registry): covered 2026-10-17 (3 concepts)
-6. src/sandbox/ and src/native-worker/ (native sandbox, isolation): covered 2026-10-17 (3 concepts)
-7. src/providers/ other seams (LLM, auth, storage, VCS, executors): covered 2026-10-17 (7 concepts)
-8. prisma/ (schema, migrations): covered 2026-10-17 (3 concepts)
+3. src/core/ runner, scheduler, dispatch, budgets, delegation: covered 2026-11-16 (8 concepts)
+4. src/coding/ and src/coding-worker/, src/claude-*/ (coding runs, workers): covered 2026-11-16 (2 concepts)
+5. src/providers/coding-proxy/ (proxy, package registry): covered 2026-11-16 (3 concepts)
+6. src/sandbox/ and src/native-worker/ (native sandbox, isolation): covered 2026-11-16 (3 concepts)
+7. src/providers/ other seams (LLM, auth, storage, VCS, executors): covered 2026-11-16 (7 concepts)
+8. prisma/ (schema, migrations): covered 2026-11-16 (3 concepts)
 9. deploy/ (Terraform, Kubernetes, scripts): covered 2026-10-17 (2 concepts)
 10. src/quickstart/, src/import/, the CLI files in src/: covered 2026-10-17 (4 concepts)
-11. src/viewer/, src/observability/, src/knowledge/, src/tools/: covered 2026-10-17 (2 concepts)
+11. src/viewer/, src/observability/, src/knowledge/, src/tools/: covered 2026-11-16 (2 concepts)
