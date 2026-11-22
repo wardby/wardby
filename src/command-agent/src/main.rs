@@ -11,6 +11,11 @@ mod env;
 mod frame;
 #[allow(dead_code)]
 mod header;
+#[allow(dead_code)]
+mod reaper;
+#[allow(dead_code)]
+#[allow(unsafe_code)] // the one module with system calls; see its SAFETY comments
+mod sys;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
