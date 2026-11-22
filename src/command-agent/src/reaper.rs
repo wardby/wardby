@@ -81,6 +81,7 @@ impl Reaper {
     }
 
     /// Stops tracking `pid` (for a child the caller reaped some other way).
+    #[cfg(test)]
     pub fn forget(&self, pid: i32) {
         self.lock().remove(&pid);
     }
