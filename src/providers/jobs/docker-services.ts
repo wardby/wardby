@@ -6,7 +6,7 @@
  * spec, never from repository content, and are re-validated here rather than trusted from dispatch.
  */
 import { CODING_SERVICE_NAME } from "../../coding/protocol.js";
-import { StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
+import { sidecarOnly, StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
 import {
   CODING_WORKER_GID,
   CODING_WORKER_UID,
@@ -65,7 +65,9 @@ export function validateDockerServices(spec: JobSpec): ResolvedCodingService[] {
 }
 
 /** Its data path at its disk size, then SERVICE_SCRATCH_MIB for each writable path: the Kubernetes sizes. */
-export function serviceTmpfsOptions(service: ResolvedCodingService): Record<string, string> {
+export function serviceTmpfsOptions(entry: ResolvedCodingService): Record<string, string> {
+  // Type-only change for the toolchain kind (#599): only a sidecar has a data path.
+  const service = sidecarOnly(entry);
   const mounts = [
     { path: service.dataPath, sizeMib: service.resources.diskMib },
     ...service.writablePaths.map((path) => ({ path, sizeMib: SERVICE_SCRATCH_MIB })),

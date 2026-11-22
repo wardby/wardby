@@ -15,7 +15,7 @@ import type {
   V1Toleration,
   V1Volume,
 } from "@kubernetes/client-node";
-import { StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
+import { sidecarOnly, StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
 import { MCP_TOKEN_ENV } from "../../coding/mcp-token.js";
 import {
   jobRepositoriesValid,
@@ -266,9 +266,11 @@ function containerSecurity() {
  * their names are built, so the sidecar's volumeMounts and the pod's volumes can never disagree.
  */
 function serviceStorage(
-  service: ResolvedCodingService,
+  entry: ResolvedCodingService,
   index: number,
 ): Array<{ name: string; mountPath: string; sizeMib: number }> {
+  // Type-only change for the toolchain kind (#599): only a sidecar has a data path.
+  const service = sidecarOnly(entry);
   return [
     { name: `service-${index}-data`, mountPath: service.dataPath, sizeMib: service.resources.diskMib },
     ...service.writablePaths.map((path, scratch) => ({
@@ -287,11 +289,9 @@ function serviceStorage(
  * data path and at each writable path. Same pod, same network namespace: the worker reaches it on
  * 127.0.0.1, and the run's NetworkPolicy needs no change.
  */
-function serviceSidecar(
-  service: ResolvedCodingService,
-  index: number,
-  profile: KubernetesPlatformProfile,
-): V1Container {
+function serviceSidecar(entry: ResolvedCodingService, index: number, profile: KubernetesPlatformProfile): V1Container {
+  // Type-only change for the toolchain kind (#599): only a sidecar has a readiness command.
+  const service = sidecarOnly(entry);
   const env = Object.entries(service.serviceEnv)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, value]) => ({ name, value }));

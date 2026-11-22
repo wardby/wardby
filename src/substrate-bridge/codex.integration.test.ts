@@ -23,7 +23,7 @@ import { BLOB, REPO_BLOB, substrateRunToken } from "../providers/jobs/substrate/
 import type { JobSpec } from "../providers/jobs/types.js";
 import { serviceStartScript } from "../providers/jobs/substrate/service-script.js";
 import { SERVICE_WAIT_SCRIPT } from "../providers/jobs/substrate/specs.js";
-import type { ResolvedCodingService } from "../coding/services/catalog.js";
+import type { ResolvedCodingService, ResolvedSidecarService } from "../coding/services/catalog.js";
 import { LocalBlobStore } from "../providers/storage/local.js";
 import { run as runCodex, spawnCodexWorker, type CodexHandle, type CodexOptions } from "./codex.js";
 import { INJECTED_MCP_TOKEN_PLACEHOLDER, PLACEHOLDER_CAPABILITY, WARM_ROUNDS_ENV } from "./constants.js";
@@ -376,7 +376,8 @@ describe("Codex bridge, end to end without Substrate", () => {
   });
 
   describe.skipIf(!existsSync("/bin/sh"))("services", () => {
-    const FAKE_SERVICE: ResolvedCodingService = {
+    const FAKE_SERVICE: ResolvedSidecarService = {
+      kind: "sidecar",
       name: "fakedb",
       version: "1",
       image: `registry.example/fakedb@sha256:${"c".repeat(64)}`,

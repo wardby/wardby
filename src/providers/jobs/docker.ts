@@ -46,6 +46,7 @@ import {
   WORKER_PATHS,
 } from "./docker-isolation.js";
 import type { CodingProvider } from "../../coding/provider.js";
+import { sidecarOnly } from "../../coding/services/catalog.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   assertServiceContainerInspection,
@@ -1124,7 +1125,8 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     failure: ServiceFailure,
     onProbeFailed: (attempts: number) => Promise<void>,
   ): Promise<number> {
-    const { command, periodSeconds, timeoutSeconds, failureThreshold } = planned.service.readiness;
+    // Type-only change for the toolchain kind (#599): only a sidecar has a catalog readiness command.
+    const { command, periodSeconds, timeoutSeconds, failureThreshold } = sidecarOnly(planned.service).readiness;
     const name = planned.service.name;
     let failures = 0;
     for (;;) {

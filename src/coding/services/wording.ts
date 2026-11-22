@@ -62,6 +62,7 @@ const UNSTARTABLE_REASON_CLAUSES: Record<UnstartableServiceReason, string> = {
   start_command_missing: "its service catalog entry has no start command",
   data_path_reserved: "its service catalog entry's data path overlaps a directory the job launcher reserves",
   setup_too_large: "its service catalog entry's environment and commands are too large for the job launcher",
+  toolchain_unsupported: "it is a toolchain, and toolchains are not supported on this launcher yet",
 };
 
 /** A per-service service_launcher_unsupported sentence (the launcher can run services, but not this one). */

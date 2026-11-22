@@ -100,8 +100,13 @@ export function servicesFingerprint(services: readonly ResolvedCodingService[] |
         ...(service.substrateImage === undefined ? {} : { substrateImage: service.substrateImage }),
         // The start command (catalog, not secret: env goes in by name) changes what the holder runs.
         ...(service.startCommand === undefined ? {} : { startCommand: service.startCommand }),
-        port: service.port,
-        dataPath: service.dataPath,
+        // A sidecar keeps its fields (and so its fingerprint); a toolchain has kind and setupCommand instead.
+        ...(service.kind === "toolchain"
+          ? {
+              kind: service.kind,
+              ...(service.setupCommand === undefined ? {} : { setupCommand: service.setupCommand }),
+            }
+          : { port: service.port, dataPath: service.dataPath }),
         serviceEnvKeys: Object.keys(service.serviceEnv).sort(),
         testEnvKeys: Object.keys(service.testEnv).sort(),
         catalogId: service.catalogId ?? null,

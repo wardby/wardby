@@ -42,7 +42,7 @@
  * is done: the readiness command alone passes before createdb has run or the
  * mysql user exists (mysqladmin ping answers even "Access denied").
  */
-import type { CodingServiceDefinition } from "./catalog.js";
+import type { CodingSidecarDefinition } from "./catalog.js";
 
 /**
  * Initialise PGDATA on first start (the password reaches initdb through a 0600 file in /tmp, removed
@@ -88,7 +88,7 @@ export const MYSQL_SUBSTRATE_SCRIPT = [
   'wait "$pid"',
 ].join(" ");
 
-function postgres(version: string, digest: string, substrateDigest: string): CodingServiceDefinition {
+function postgres(version: string, digest: string, substrateDigest: string): CodingSidecarDefinition {
   return {
     name: "postgres",
     version,
@@ -123,7 +123,7 @@ function postgres(version: string, digest: string, substrateDigest: string): Cod
   };
 }
 
-export const BUILTIN_CODING_SERVICES: readonly CodingServiceDefinition[] = Object.freeze([
+export const BUILTIN_CODING_SERVICES: readonly CodingSidecarDefinition[] = Object.freeze([
   postgres(
     "15",
     "sha256:724292da1f2e50bdccfc3302ce75bbba7f4a6076701b588cc795fcac65683550",

@@ -158,6 +158,23 @@ describe("warmFingerprint services", () => {
     expect(servicesFingerprint(undefined)).toBeUndefined();
   });
 
+  it("tells a toolchain from a sidecar and changes with its setup command", () => {
+    const toolchain = {
+      kind: "toolchain" as const,
+      name: "python-dev",
+      version: "3.13",
+      image: `registry.example/team/python-dev@sha256:${"d".repeat(64)}`,
+      serviceEnv: {},
+      testEnv: {},
+      resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 1024 },
+      writablePaths: [],
+    };
+    const hash = servicesFingerprint([toolchain]);
+    expect(hash).toMatch(WARM_FINGERPRINT);
+    expect(servicesFingerprint([{ ...toolchain, setupCommand: ["render-config"] }])).not.toBe(hash);
+    expect(servicesFingerprint([toolchain, postgres16])).not.toBe(servicesFingerprint([postgres16]));
+  });
+
   it("pins the hash", () => {
     const hash = servicesFingerprint([postgres16]);
     expect(hash).toBe("b41a35708596d2ebcffeb8483d705f560320a773652babd0d914417537f62d0b");

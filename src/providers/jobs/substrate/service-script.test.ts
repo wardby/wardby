@@ -12,6 +12,7 @@ import {
   ResolvedCodingServiceSchema,
   resolvedFromDefinition,
   type ResolvedCodingService,
+  type ResolvedSidecarService,
 } from "../../../coding/services/catalog.js";
 import {
   MAX_SERVICE_SCRIPT_BYTES,
@@ -114,13 +115,14 @@ const PINNED_MYSQL =
     "idle",
   ].join("\n") + "\n";
 
-function builtin(name: string, version: string): ResolvedCodingService {
+function builtin(name: string, version: string): ResolvedSidecarService {
   const definition = BUILTIN_CODING_SERVICES.find((s) => s.name === name && s.version === version);
   if (!definition) throw new Error(`no built-in ${name} ${version}`);
   return resolvedFromDefinition(definition);
 }
 
-const FAKE_SERVICE: ResolvedCodingService = {
+const FAKE_SERVICE: ResolvedSidecarService = {
+  kind: "sidecar",
   name: "fakedb",
   version: "1",
   image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,
@@ -200,7 +202,7 @@ describe("serviceStartScript in a real shell", () => {
     async () => {
       const dir = tempDir();
       const out = join(dir, "env.out");
-      const service: ResolvedCodingService = {
+      const service: ResolvedSidecarService = {
         ...FAKE_SERVICE,
         startCommand: ["/bin/sh", "-c", 'printf "%s|%s" "$FAKEDB_PASSWORD" "$FAKEDB_QUOTE" > "$0"; exec sleep 30', out],
         readiness: { ...FAKE_SERVICE.readiness, command: ["/bin/sh", "-c", 'test -f "$0"', out] },
@@ -217,7 +219,7 @@ describe("serviceStartScript in a real shell", () => {
     const marker = join(dir, "pwned");
     const out = join(dir, "env.out");
     const value = `x'; touch ${marker}; echo '\n$(touch ${marker})`;
-    const service: ResolvedCodingService = {
+    const service: ResolvedSidecarService = {
       ...FAKE_SERVICE,
       serviceEnv: { FAKEDB_PASSWORD: value },
       startCommand: ["/bin/sh", "-c", 'printf "%s" "$FAKEDB_PASSWORD" > "$0"; exec sleep 30', out],
@@ -232,7 +234,7 @@ describe("serviceStartScript in a real shell", () => {
   it("passes a leading - argument through as one argument, not an option of the script", async () => {
     const dir = tempDir();
     const out = join(dir, "args.out");
-    const service: ResolvedCodingService = {
+    const service: ResolvedSidecarService = {
       ...FAKE_SERVICE,
       startCommand: ["/bin/sh", "-c", 'printf "%s|%s" "$1" "$#" > "$0"; exec sleep 30', out, "-e --rf x"],
       readiness: { ...FAKE_SERVICE.readiness, command: ["/bin/sh", "-c", 'test -f "$0"', out] },
@@ -247,7 +249,7 @@ describe("serviceStartScript in a real shell", () => {
     const dir = tempDir();
     const out = join(dir, "env.out");
     const value = "a\\b\\nc\\\\'\\";
-    const service: ResolvedCodingService = {
+    const service: ResolvedSidecarService = {
       ...FAKE_SERVICE,
       serviceEnv: { FAKEDB_PASSWORD: value },
       startCommand: ["/bin/sh", "-c", 'printf "%s" "$FAKEDB_PASSWORD" > "$0"; exec sleep 30', out],
@@ -260,7 +262,7 @@ describe("serviceStartScript in a real shell", () => {
 
   it("fails after the threshold and never exits", async () => {
     const dir = tempDir();
-    const service: ResolvedCodingService = {
+    const service: ResolvedSidecarService = {
       ...FAKE_SERVICE,
       startCommand: ["sleep", "30"],
       readiness: { command: ["false"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 2 },
@@ -281,7 +283,7 @@ describe("serviceStartScript in a real shell", () => {
 
   it("reports a start command that exits", async () => {
     const dir = tempDir();
-    const service: ResolvedCodingService = {
+    const service: ResolvedSidecarService = {
       ...FAKE_SERVICE,
       startCommand: ["true"],
       readiness: { command: ["false"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 5 },
@@ -295,14 +297,14 @@ describe("serviceStartScript in a real shell", () => {
   // A substrateImage entry's own script runs its setup after the daemon answers (createdb, the mysql
   // user), so its readiness command alone can pass too early: it is ready only once the script has
   // also written $WARDBY_SERVICE_SETUP_DONE.
-  const SUBSTRATE_FAKE: ResolvedCodingService = {
+  const SUBSTRATE_FAKE: ResolvedSidecarService = {
     ...FAKE_SERVICE,
     substrateImage: `registry.example/fakedb-substrate@sha256:${"c".repeat(64)}`,
   };
 
   it("keeps a substrateImage entry probing until its setup is done, then fails it at the threshold", async () => {
     const dir = tempDir();
-    const service: ResolvedCodingService = {
+    const service: ResolvedSidecarService = {
       ...SUBSTRATE_FAKE,
       startCommand: ["sleep", "30"],
       readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 2 },
@@ -324,7 +326,7 @@ describe("serviceStartScript in a real shell", () => {
   it("makes a substrateImage entry ready only after its script writes the setup-done file", async () => {
     const dir = tempDir();
     const out = join(dir, "var.out");
-    const service: ResolvedCodingService = {
+    const service: ResolvedSidecarService = {
       ...SUBSTRATE_FAKE,
       startCommand: [
         "/bin/sh",
@@ -351,7 +353,7 @@ describe("serviceStartScript in a real shell", () => {
   it("clears a setup-done file left from before the script started", async () => {
     const dir = tempDir();
     writeFileSync(join(dir, "setup-done"), "");
-    const service: ResolvedCodingService = {
+    const service: ResolvedSidecarService = {
       ...SUBSTRATE_FAKE,
       startCommand: ["sleep", "30"],
       readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 2 },
@@ -369,7 +371,7 @@ describe("serviceStartScript in a real shell", () => {
       if (found) symlinkSync(found, join(bin, tool));
     }
     mkdirSync(dir, { recursive: true });
-    const service: ResolvedCodingService = {
+    const service: ResolvedSidecarService = {
       ...FAKE_SERVICE,
       startCommand: ["sleep", "30"],
       readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 3 },

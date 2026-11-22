@@ -63,6 +63,12 @@ export const MAX_CODING_DISK_MB = 32_768;
 export const CODING_SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 export const CODING_SERVICE_VERSION = /^[0-9A-Za-z][0-9A-Za-z._-]{0,19}$/;
 export const MAX_CODING_SERVICES = 5;
+/**
+ * A catalog entry's kind (src/coding/services/catalog.ts): "sidecar", a fresh instance next to the
+ * run; "toolchain", the team image the run's commands are forwarded to.
+ */
+export const CODING_SERVICE_KINDS = ["sidecar", "toolchain"] as const;
+export type CodingServiceKind = (typeof CODING_SERVICE_KINDS)[number];
 /** A variable a service hands the agent's shells (DATABASE_URL, PGHOST, REDIS_URL, ...). */
 export const CODING_SERVICE_ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 export const MAX_CODING_SERVICE_ENV = 16;
@@ -217,6 +223,12 @@ const workerServiceSchema = z
     name: z.string().regex(CODING_SERVICE_NAME),
     version: z.string().regex(CODING_SERVICE_VERSION),
     testEnv: CodingServiceTestEnvSchema,
+    /**
+     * Absent means "sidecar": the control plane writes it only for a toolchain, so a sidecar run's
+     * input is unchanged for workers that predate toolchains. (Not a zod default: the control plane
+     * parses the input before writing it, and a default would write the key for every service.)
+     */
+    kind: z.enum(CODING_SERVICE_KINDS).optional(),
   })
   .strict();
 

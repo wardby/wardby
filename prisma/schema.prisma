@@ -803,8 +803,10 @@ model RunStep {
 /// (list/get_service: agents:read; create/update/delete_service:
 /// services:manage, audit-logged).
 /// Built-in rows ship with wardby, seeded by migration, and change only with a
-/// wardby release. `kind` is "sidecar" (a fresh instance in each run's pod);
-/// "external" is reserved.
+/// wardby release. `kind` is "sidecar" (a fresh instance in each run's pod) or
+/// "toolchain" (a team image the run's commands are forwarded to, sharing the
+/// run's workspace: no port, readiness, startCommand or dataPath; optional
+/// setupCommand); "external" is reserved.
 model CodingService {
   id             String   @id @default(cuid())
   name           String
@@ -815,21 +817,25 @@ model CodingService {
   /// Digest-pinned image the Substrate job launcher runs instead of `image` (with startCommand, as that
   /// image's entrypoint is not used); null: Substrate runs `image`. Docker and Kubernetes never read it.
   substrateImage String?
-  port           Int
+  /// Null for a toolchain.
+  port           Int?
   /// Environment for the service container itself: throwaway per-run values, never secrets.
   serviceEnv     Json     @default("{}")
   /// Variables the agent's shells receive (DATABASE_URL, PG*, REDIS_URL, ...).
   testEnv        Json     @default("{}")
-  /// { command, periodSeconds, timeoutSeconds, failureThreshold }: the sidecar's startup probe.
-  readiness      Json
+  /// { command, periodSeconds, timeoutSeconds, failureThreshold }: the sidecar's startup probe. Null for a toolchain.
+  readiness      Json?
   /// The argv that starts the service on the Substrate job launcher, which overrides the container
   /// command: the image's ENTRYPOINT + CMD, or with substrateImage a script that initialises and runs
   /// the service as that image's non-root user; null: the entry cannot run there.
   startCommand   Json?
+  /// Toolchains only: the argv run once in the toolchain container before any forwarded command
+  /// (output never captured, only its exit code); null: none, and always null for a sidecar.
+  setupCommand   Json?
   /// { cpuMillicores, memoryMib, diskMib }: requests equal limits.
   resources      Json
-  /// Where the service writes its data: an emptyDir in the run pod.
-  dataPath       String
+  /// Where the service writes its data: an emptyDir in the run pod. Null for a toolchain.
+  dataPath       String?
   /// Further directories the image writes to (socket directory, /tmp): each an emptyDir.
   writablePaths  Json     @default("[]")
   builtin        Boolean  @default(false)

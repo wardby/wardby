@@ -17,7 +17,7 @@ import { BLOB, REPO_BLOB, substrateRunToken, toolActorSubject } from "../provide
 import type { SubstrateRunLayout } from "../providers/jobs/substrate/run-store.js";
 import { serviceStartScript } from "../providers/jobs/substrate/service-script.js";
 import { SERVICE_WAIT_SCRIPT } from "../providers/jobs/substrate/specs.js";
-import type { ResolvedCodingService } from "../coding/services/catalog.js";
+import type { ResolvedCodingService, ResolvedSidecarService } from "../coding/services/catalog.js";
 import { capabilityHash } from "../providers/coding-proxy/capability-hash.js";
 import { MemoryRelayStore } from "../providers/coding-proxy/substrate/memory-relay-store.js";
 import { createSubstrateRoutes } from "../providers/coding-proxy/substrate/routes.js";
@@ -2008,7 +2008,8 @@ process.exit(status);
   });
 
   describe.skipIf(!existsSync("/bin/sh"))("services", () => {
-    const FAKE_SERVICE: ResolvedCodingService = {
+    const FAKE_SERVICE: ResolvedSidecarService = {
+      kind: "sidecar",
       name: "fakedb",
       version: "1",
       image: `registry.example/fakedb@sha256:${"c".repeat(64)}`,
@@ -2021,7 +2022,7 @@ process.exit(status);
       dataPath: "/var/lib/fakedb",
       writablePaths: [],
     };
-    const failing: ResolvedCodingService = {
+    const failing: ResolvedSidecarService = {
       ...FAKE_SERVICE,
       readiness: { command: ["false"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 2 },
     };

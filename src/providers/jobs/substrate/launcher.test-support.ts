@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { V1Secret } from "@kubernetes/client-node";
 import { BUILTIN_CODING_SERVICES } from "../../../coding/services/builtins.js";
-import { resolvedFromDefinition, type ResolvedCodingService } from "../../../coding/services/catalog.js";
+import {
+  resolvedFromDefinition,
+  type ResolvedCodingService,
+  type ResolvedSidecarService,
+} from "../../../coding/services/catalog.js";
 import { MemoryRelayStore } from "../../coding-proxy/substrate/memory-relay-store.js";
 import { LocalBlobStore } from "../../storage/local.js";
 import type { BlobInfo } from "../../storage/types.js";
@@ -292,7 +296,8 @@ export async function allBlobs(h: Harness): Promise<Map<string, string>> {
 }
 
 /** A fake service (no substrateImage): every catalog value that must stay out of a template is a marker. */
-export const FAKE_SERVICE: ResolvedCodingService = {
+export const FAKE_SERVICE: ResolvedSidecarService = {
+  kind: "sidecar",
   name: "fakedb",
   version: "1",
   image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,
@@ -312,7 +317,7 @@ export const FAKE_SERVICE: ResolvedCodingService = {
 };
 
 /** The built-in postgres 16 entry, as dispatch snapshots it (with its substrateImage). */
-export const POSTGRES_16_SERVICE: ResolvedCodingService = (() => {
+export const POSTGRES_16_SERVICE: ResolvedSidecarService = (() => {
   const definition = BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16");
   if (!definition) throw new Error("no built-in postgres 16");
   return resolvedFromDefinition(definition);

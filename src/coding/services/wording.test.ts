@@ -13,9 +13,10 @@ import {
   unknownServiceSentence,
   unstartableServiceSentence,
 } from "./wording.js";
-import type { ResolvedCodingService } from "./catalog.js";
+import type { ResolvedSidecarService } from "./catalog.js";
 
-const FAKE_SERVICE: ResolvedCodingService = {
+const FAKE_SERVICE: ResolvedSidecarService = {
+  kind: "sidecar",
   name: "fakedb",
   version: "1.2.3-fake",
   image: `registry.example/fakedb-image@sha256:${"b".repeat(64)}`,
