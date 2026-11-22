@@ -1486,6 +1486,28 @@ describe("npm rebuild after the seal", () => {
     expect(listing).not.toContain(".rebuilt");
   });
 
+  it("puts npmArgs before npm's own arguments for both the install and the rebuild (a toolchain's client)", async () => {
+    await writeRepo(SCRIPTED);
+    // A stand-in for the forwarding client: `run <address> <token> -- npm <args>` runs the fake npm.
+    const client = join(root, "fake-client");
+    const seen = join(root, "client.log");
+    await writeFile(
+      client,
+      `#!/bin/sh\necho "$1 $2 $3 $4 $5" >> "${seen}"\nshift 5\nexec "${join(root, "fake-npm")}" "$@"\n`,
+    );
+    await chmod(client, 0o755);
+    const { projects } = await prepareAll({
+      npmPath: client,
+      npmArgs: ["run", "127.0.0.1:7071", "/opt/wardby-cmd/token", "--", "npm"],
+    });
+    expect(projects).toEqual([expect.objectContaining({ path: ".", result: "cold", rebuild: "ok" })]);
+    expect(await npmCalls()).toEqual([["ci", "--ignore-scripts", "--no-audit", "--no-fund"], ["rebuild"]]);
+    expect((await readFile(seen, "utf8")).trim().split("\n")).toEqual([
+      "run 127.0.0.1:7071 /opt/wardby-cmd/token -- npm",
+      "run 127.0.0.1:7071 /opt/wardby-cmd/token -- npm",
+    ]);
+  });
+
   it("rebuilds a restored hit too", async () => {
     await writeRepo(SCRIPTED);
     hitWith(await realTarSnapshot(SCRIPTED));

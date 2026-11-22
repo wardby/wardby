@@ -6,7 +6,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parseToolSetup, toolEnvironment } from "./command.mjs";
+import { COMMAND_AGENT, parseToolSetup, toolEnvironment, toolchainEnvironment } from "./command.mjs";
 import {
   BUDGET_MEASURE_TIMEOUT_MS,
   DEFAULT_TIMEOUTS,
@@ -153,7 +153,10 @@ async function connect(socketPath) {
 const callTool = (client, name, args = {}) => client.request("tools/call", { name, arguments: args });
 const toolJson = (response) => JSON.parse(response.result.content[0].text);
 
-async function withRunner({ dependencyCache = true, diskMb = 2048, workspaceReused = false, module } = {}, body) {
+async function withRunner(
+  { dependencyCache = true, diskMb = 2048, workspaceReused = false, toolchain, module } = {},
+  body,
+) {
   const directory = await mkdtemp(join(tmpdir(), "wardby-claude-depcache-"));
   const workspace = join(directory, "workspace");
   const socketPath = join(directory, "runner.sock");
@@ -175,6 +178,7 @@ async function withRunner({ dependencyCache = true, diskMb = 2048, workspaceReus
       ],
       ...(dependencyCache ? { dependencyCache: true, ...(diskMb === null ? {} : { diskMb }) } : {}),
       ...(workspaceReused ? { workspaceReused: true } : {}),
+      ...(toolchain ? { toolchain } : {}),
     }),
     workspace,
   );
@@ -270,6 +274,27 @@ test("prepares once per tool runner, with the commands' env and setup files, and
     } finally {
       delete process.env.WARDBY_RUN_CAPABILITY;
     }
+  });
+});
+
+test("on a toolchain run, the dependency cache's npm is forwarded to the toolchain with its environment", async () => {
+  const module = fakeModule();
+  const toolchain = { address: "127.0.0.1:7071", tokenFile: "/opt/wardby-cmd/token" };
+  await withRunner({ module, toolchain }, async ({ connect, workspace, setup }) => {
+    const client = await connect();
+    toolJson(await callTool(client, PREPARE_DEPENDENCIES_TOOL));
+    const [options] = module.calls.prepare;
+    assert.equal(options.npmPath, COMMAND_AGENT);
+    assert.deepEqual(options.npmArgs, ["run", toolchain.address, toolchain.tokenFile, "--", "npm"]);
+    assert.deepEqual(options.env, toolchainEnvironment(setup, workspace));
+    assert.equal(options.env.PATH, undefined);
+  });
+  // Without a toolchain: the shim here, as before.
+  const plain = fakeModule();
+  await withRunner({ module: plain }, async ({ connect }) => {
+    toolJson(await callTool(await connect(), PREPARE_DEPENDENCIES_TOOL));
+    assert.equal(plain.calls.prepare[0].npmPath, undefined);
+    assert.equal(plain.calls.prepare[0].npmArgs, undefined);
   });
 });
 

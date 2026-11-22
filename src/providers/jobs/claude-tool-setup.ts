@@ -19,6 +19,13 @@ import type { JobSpec } from "./types.js";
 const TOOL_WORKSPACE = "/workspace";
 
 /**
+ * Where a toolchain's command agent listens on the run's loopback, and the run's token file in the
+ * agent folder every launcher mounts into the tool runner (#599). Fixed wire constants, shared
+ * with src/command-agent and the launchers.
+ */
+export const TOOLCHAIN_AGENT = { address: "127.0.0.1:7071", tokenFile: "/opt/wardby-cmd/token" } as const;
+
+/**
  * The tool runner's parseToolSetup bounds (src/claude-tool-runner/command.mjs; a test keeps them
  * equal). A setup past any of them would stop the tool runner before it reports ready, so the
  * launcher refuses to build one instead.
@@ -46,6 +53,8 @@ export interface ClaudeToolSetup {
    * rounds), so the tool runner skips the cache (`reused_workspace`). The proxy refuses it anyway.
    */
   workspaceReused?: true;
+  /** The run's toolchain (#599): the tool runner forwards every command to its agent. */
+  toolchain?: { address: string; tokenFile: string };
 }
 
 export interface ClaudeToolSetupOptions {
@@ -82,6 +91,7 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
         }
       : {}),
     ...(spec.commandTimeouts ? { commandTimeouts: { ...spec.commandTimeouts } } : {}),
+    ...(hasToolchain(spec) ? { toolchain: { ...TOOLCHAIN_AGENT } } : {}),
   };
   const raw = JSON.stringify(setup);
   const limits = CLAUDE_TOOL_SETUP_LIMITS;
@@ -96,4 +106,10 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
     throw new Error("claude_tool_setup_too_large");
   }
   return raw;
+}
+
+function hasToolchain(spec: JobSpec): boolean {
+  // `kind` is being added to ResolvedCodingService alongside this (#599); read it defensively until
+  // both land, so this compiles with and without it.
+  return (spec.services ?? []).some((service) => (service as { kind?: string }).kind === "toolchain");
 }

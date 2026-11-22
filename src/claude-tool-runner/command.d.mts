@@ -8,6 +8,8 @@ export declare const MAX_COMMAND_TIMEOUT_MS: number;
 export declare const KILL_GRACE_MS: number;
 export declare const TOOL_SETUP_ENV: string;
 export declare const SHIM_DIRECTORY: string;
+export declare const COMMAND_AGENT: string;
+export declare const TOOLCHAIN_FAILURES: ReadonlySet<string>;
 export declare const MAX_ENV_ENTRIES: number;
 export declare const MAX_ENV_VALUE_BYTES: number;
 export declare const MAX_FILES: number;
@@ -25,11 +27,14 @@ export interface ToolSetup {
   readonly workspaceReused?: true;
   /** The run's run_command time limits, from the launcher; absent from an older one. */
   readonly commandTimeouts?: Readonly<{ defaultMs: number; maxMs: number }>;
+  /** The run's toolchain (#599): every command is forwarded to its command agent. */
+  readonly toolchain?: Readonly<{ address: string; tokenFile: string }>;
 }
 
 export declare function commandTimeoutLimits(setup?: ToolSetup): { defaultMs: number; maxMs: number };
 
 export declare function toolEnvironment(workspacePath?: string): Record<string, string>;
+export declare function toolchainEnvironment(setup?: ToolSetup, workspacePath?: string): Record<string, string>;
 export declare function commandEnvironment(setup?: ToolSetup, workspacePath?: string): Record<string, string>;
 export declare function prepareCommandWorkspace(setup?: ToolSetup, workspacePath?: string): Promise<void>;
 export declare function parseToolSetup(raw: string | undefined, workspacePath?: string): ToolSetup;
@@ -38,6 +43,13 @@ export declare function runCommand(
   timeoutMs: number,
   workspacePath?: string,
   setup?: ToolSetup,
+  options?: {
+    spawn?: typeof import("node:child_process").spawn;
+    lookup?: (
+      access: import("../coding-worker/registry-refusals.mjs").RegistryAccess | undefined,
+      since?: Date,
+    ) => Promise<import("../coding-worker/registry-refusals.mjs").RecentRefusal[]>;
+  },
 ): Promise<{ code: number; output: string }>;
 export declare function withPackageRefusals(
   result: { code: number; output: string },
