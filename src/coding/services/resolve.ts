@@ -1,8 +1,10 @@
 /**
  * Dispatch-time resolution (docs/coding-services.md): each service the
- * repository declares must exist in the catalog, as that exact version, and the
- * agent must be allowed its name. The first failure refuses the whole run with
- * its host sentence; otherwise every entry is snapshotted for the run.
+ * repository declares must exist in the catalog, as that exact version, be
+ * declared under the key its kind belongs to (a toolchain under `toolchain:`, a
+ * sidecar under `services:`), and the agent must be allowed its name. The first
+ * failure refuses the whole run with its host sentence; otherwise every entry is
+ * snapshotted for the run, the toolchain first.
  *
  * The task text is also checked here: the agent's instructions plus the note
  * these services would add (servicesInstructionNote) plus the request must
@@ -16,9 +18,10 @@ import {
   type CodingServiceRow,
   type ResolvedCodingService,
 } from "./catalog.js";
-import type { DeclaredService } from "./declaration.js";
+import { declaredEntries, type ServiceDeclaration } from "./declaration.js";
 import { servicesInstructionNote } from "./note.js";
 import {
+  misplacedServiceSentence,
   notAllowedServiceSentence,
   serviceRefusal,
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
@@ -42,11 +45,12 @@ const keyOf = (service: { name: string; version: string }): string => `${service
  */
 export async function resolveRunServices(
   catalog: CodingServiceCatalogReader,
-  declared: readonly DeclaredService[],
+  declaration: ServiceDeclaration,
   allowed: readonly string[],
   task: string,
   instructions?: string | null,
 ): Promise<ServiceResolution> {
+  const declared = declaredEntries(declaration);
   if (declared.length === 0) return { services: [] };
   const rows = await catalog.findMany({ where: { OR: declared.map(({ name, version }) => ({ name, version })) } });
   const entries = new Map(rows.map((row) => [keyOf(row), catalogEntryFromRow(row)]));
@@ -54,6 +58,15 @@ export async function resolveRunServices(
   for (const service of declared) {
     if (!entries.has(keyOf(service))) {
       return { refusal: serviceRefusal("service_unknown", unknownServiceSentence(service.name, service.version)) };
+    }
+  }
+  for (const service of declared) {
+    const kind = entries.get(keyOf(service))!.kind;
+    const underToolchain = service === declaration.toolchain;
+    if ((kind === "toolchain") !== underToolchain) {
+      return {
+        refusal: serviceRefusal("service_declaration_invalid", misplacedServiceSentence(service.name, kind)),
+      };
     }
   }
   const allowedNames = new Set(allowed);

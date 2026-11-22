@@ -460,6 +460,26 @@ describe("substrateServiceProblems", () => {
     expect(substrateServiceProblems(BUILTIN_CODING_SERVICES.map((d) => resolvedFromDefinition(d)))).toEqual([]);
   });
 
+  it("refuses a toolchain until the Substrate launcher starts them, and checks the rest", () => {
+    const toolchain: ResolvedCodingService = {
+      kind: "toolchain",
+      name: "python-dev",
+      version: "3.13",
+      image: `registry.example/team/python-dev@sha256:${"d".repeat(64)}`,
+      serviceEnv: {},
+      testEnv: {},
+      resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 1024 },
+      writablePaths: [],
+    };
+    expect(substrateServiceProblems([toolchain, FAKE_SERVICE])).toEqual([
+      { name: "python-dev", reason: "toolchain_unsupported" },
+    ]);
+    expect(substrateServiceProblems([toolchain, WITHOUT_START])).toEqual([
+      { name: "fakedb", reason: "start_command_missing" },
+      { name: "python-dev", reason: "toolchain_unsupported" },
+    ]);
+  });
+
   it("flags a missing start command", () => {
     expect(substrateServiceProblems([WITHOUT_START])).toEqual([{ name: "fakedb", reason: "start_command_missing" }]);
   });

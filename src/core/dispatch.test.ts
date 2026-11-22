@@ -2484,6 +2484,74 @@ describe("coding-run services", () => {
     expect(unstartableCodingServices).toHaveBeenCalledWith([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
   });
 
+  describe("a toolchain", () => {
+    const TOOLCHAIN_ROW = {
+      id: "svc-python-dev",
+      builtin: false,
+      createdById: null,
+      name: "python-dev",
+      version: "3.13",
+      kind: "toolchain",
+      image: `registry.example/team/python-dev@sha256:${"d".repeat(64)}`,
+      substrateImage: null,
+      port: null,
+      serviceEnv: {},
+      testEnv: {},
+      readiness: null,
+      startCommand: null,
+      setupCommand: null,
+      resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 1024 },
+      dataPath: null,
+      writablePaths: [],
+    };
+    const WITH_TOOLCHAIN = 'toolchain:\n  python-dev: "3.13"\nservices:\n  postgres: "16"\n';
+
+    it("refuses a Codex agent's run, never running it without the toolchain", async () => {
+      const agent = servicesAgent(["postgres", "python-dev"]);
+      const state = fakeDb(agent, [], {}, [...CATALOG, TOOLCHAIN_ROW]);
+      const { executor, start, unstartableCodingServices } = servicesExecutor(WITH_TOOLCHAIN);
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run).toMatchObject({
+        status: "refused",
+        error:
+          "service_launcher_unsupported: This repository asks for the toolchain `python-dev`, which this agent can't use: toolchains are not supported for Codex agents yet.",
+      });
+      expect(unstartableCodingServices).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+    });
+
+    it("refuses one the launcher can't start yet, saying so", async () => {
+      const base = servicesAgent(["postgres", "python-dev"]);
+      const agent = {
+        ...base,
+        model: "claude-sonnet-5",
+        codingProfile: { ...base.codingProfile, provider: "claude-code" },
+      };
+      const state = fakeDb(agent, [], {}, [...CATALOG, TOOLCHAIN_ROW]);
+      const { executor, start } = servicesExecutor(WITH_TOOLCHAIN, true, [
+        { name: "python-dev", reason: "toolchain_unsupported" },
+      ]);
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run.status).toBe("refused");
+      expect(result?.run.error).toBe(
+        "service_launcher_unsupported: This repository asks for the toolchain `python-dev`, which this wardby deployment can't start: toolchains are not supported on this launcher yet.",
+      );
+      expect(start).not.toHaveBeenCalled();
+    });
+
+    it("refuses a toolchain declared under services:", async () => {
+      const agent = servicesAgent(["python-dev"]);
+      const state = fakeDb(agent, [], {}, [...CATALOG, TOOLCHAIN_ROW]);
+      const { executor, start } = servicesExecutor('services:\n  python-dev: "3.13"\n');
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run.status).toBe("refused");
+      expect(result?.run.error).toBe(
+        "service_declaration_invalid: `.wardby/services.yaml` is invalid: `python-dev` is a toolchain; declare it under `toolchain:`.",
+      );
+      expect(start).not.toHaveBeenCalled();
+    });
+  });
+
   it("dispatches when the launcher can start every service", async () => {
     const agent = servicesAgent();
     const state = fakeDb(agent, [], {}, CATALOG);

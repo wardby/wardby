@@ -20,6 +20,7 @@ import {
   MAX_SERVICE_DECLARATION_BYTES,
   SERVICE_DECLARATION_PATH,
   ServiceDeclarationError,
+  declaredEntries,
   parseServiceDeclaration,
   type DeclaredService,
 } from "../coding/services/declaration.js";
@@ -71,7 +72,7 @@ export function parseStarterChoice(value: string): StarterService[] {
 
 /** The services a starter choice declares, as parseServiceDeclaration would read them back. */
 export function starterDeclaredServices(choices: readonly StarterService[]): DeclaredService[] {
-  return parseServiceDeclaration(starterServicesYaml(choices));
+  return parseServiceDeclaration(starterServicesYaml(choices)).services;
 }
 
 /** The checked-out branch and its commit; null when HEAD is detached or the branch has no commits. */
@@ -94,7 +95,17 @@ export async function repoDefaultBranch(dir: string): Promise<{ branch: string; 
 }
 
 export type DeclaredServicesStatus =
-  { kind: "absent" } | { kind: "valid"; services: DeclaredService[] } | { kind: "invalid"; reason: string };
+  | { kind: "absent" }
+  /** `services`: every entry, the toolchain (also in `toolchain`) first. */
+  | { kind: "valid"; services: DeclaredService[]; toolchain?: DeclaredService }
+  | { kind: "invalid"; reason: string };
+
+/** "python-dev 3.13 (toolchain), postgres 16" for a valid declaration's entries. */
+export function declaredServicesLabel(status: { services: DeclaredService[]; toolchain?: DeclaredService }): string {
+  return status.services
+    .map((service) => `${service.name} ${service.version}${service === status.toolchain ? " (toolchain)" : ""}`)
+    .join(", ");
+}
 
 /** The committed `.wardby/services.yaml` at `ref`, validated; `dir` must sit inside `roots`. */
 export async function inspectDeclaredServices(
@@ -115,7 +126,12 @@ export async function inspectDeclaredServices(
   }
   if (text === null) return { kind: "absent" };
   try {
-    return { kind: "valid", services: parseServiceDeclaration(text) };
+    const declaration = parseServiceDeclaration(text);
+    return {
+      kind: "valid",
+      services: declaredEntries(declaration),
+      ...(declaration.toolchain ? { toolchain: declaration.toolchain } : {}),
+    };
   } catch (error) {
     if (error instanceof ServiceDeclarationError) return { kind: "invalid", reason: error.reason };
     throw error;

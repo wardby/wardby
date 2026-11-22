@@ -1,24 +1,43 @@
 /**
  * The paragraph dispatch adds to a coding agent's standing instructions when
  * its run has services (docs/coding-services.md): which services, the
- * variables each sets, and that they start empty. The worker sees only its task
- * text, so this is how the builder learns the contract.
+ * variables each sets, and that they start empty; and, for a toolchain, that
+ * the run's commands run in that image. The worker sees only its task text, so
+ * this is how the builder learns the contract.
  */
 import type { ResolvedCodingService } from "./catalog.js";
 
-export function servicesInstructionNote(
-  services: readonly Pick<ResolvedCodingService, "name" | "version" | "testEnv">[],
-): string | undefined {
+type NoteEntry = Pick<ResolvedCodingService, "name" | "version" | "testEnv"> & { kind?: ResolvedCodingService["kind"] };
+
+const variablesOf = (entry: NoteEntry): string =>
+  Object.entries(entry.testEnv)
+    .map(([name, value]) => `${name}=${value}`)
+    .join(", ");
+
+export function servicesInstructionNote(services: readonly NoteEntry[]): string | undefined {
   if (services.length === 0) return undefined;
-  const lines = services.map((service) => {
-    const variables = Object.entries(service.testEnv)
-      .map(([name, value]) => `${name}=${value}`)
-      .join(", ");
-    return `- ${service.name} ${service.version}${variables ? `: ${variables}` : ""}`;
-  });
-  return [
-    "Services for this run: wardby started these next to your workspace, reachable on 127.0.0.1. Each one starts empty; create any schema or data your tests need.",
-    ...lines,
-    "These variables are already set in your shell environment; tests should read them instead of hard-coding connection details. Where two services set the same variable, the one listed first wins.",
-  ].join("\n");
+  const toolchain = services.find((service) => service.kind === "toolchain");
+  const sidecars = services.filter((service) => service.kind !== "toolchain");
+  const lines: string[] = [];
+  if (toolchain) {
+    const variables = variablesOf(toolchain);
+    lines.push(
+      `Toolchain for this run: wardby runs your shell commands on this workspace in the \`${toolchain.name} ${toolchain.version}\` image, with its own interpreters, packages and settings. Use what it already has rather than installing another interpreter or rewriting its configuration.${variables ? ` It sets: ${variables}.` : ""}`,
+    );
+  }
+  if (sidecars.length > 0) {
+    lines.push(
+      "Services for this run: wardby started these next to your workspace, reachable on 127.0.0.1. Each one starts empty; create any schema or data your tests need.",
+      ...sidecars.map((service) => {
+        const variables = variablesOf(service);
+        return `- ${service.name} ${service.version}${variables ? `: ${variables}` : ""}`;
+      }),
+    );
+  }
+  if (sidecars.length > 0 || (toolchain && variablesOf(toolchain))) {
+    lines.push(
+      "These variables are already set in your shell environment; tests should read them instead of hard-coding connection details. Where two services set the same variable, the one listed first wins.",
+    );
+  }
+  return lines.join("\n");
 }

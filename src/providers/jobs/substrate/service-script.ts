@@ -113,6 +113,11 @@ export function substrateServiceProblems(services: readonly ResolvedCodingServic
   const problems: UnstartableService[] = [];
   let total = 0;
   for (const service of servicesInOrder(services)) {
+    // Until the Substrate launcher starts toolchains: refused at dispatch, never treated as a sidecar.
+    if (service.kind === "toolchain") {
+      problems.push({ name: service.name, reason: "toolchain_unsupported" });
+      continue;
+    }
     if (service.startCommand === undefined) {
       problems.push({ name: service.name, reason: "start_command_missing" });
       continue;
