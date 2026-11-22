@@ -26,9 +26,21 @@ import {
   type DockerJobLauncherOptions,
   parseWorkerDiagnosticLine,
 } from "./docker.js";
-import { buildDockerIsolationPlan, NETWORK_KEEPER_SCRIPT, WORKER_PATHS } from "./docker-isolation.js";
+import {
+  buildDockerIsolationPlan,
+  NETWORK_KEEPER_SCRIPT,
+  specToolchain,
+  TOOLCHAIN_AGENT_PATH,
+  toolchainHostEntries,
+  WORKER_PATHS,
+} from "./docker-isolation.js";
 import { storageInitScript } from "./storage-init.js";
-import { dockerServiceContainerName, serviceMemoryMib, serviceTmpfsOptions } from "./docker-services.js";
+import {
+  buildServiceCreateArgs,
+  dockerServiceContainerName,
+  serviceMemoryMib,
+  serviceTmpfsOptions,
+} from "./docker-services.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
 import type { ServiceStateUpdate } from "./service-state.js";
 import type { JobHandle, JobResult, JobSpec, MaterializeWorkspaceOptions } from "./types.js";
@@ -458,6 +470,7 @@ class FakeDocker implements DockerCommandRunner {
       [WORKER_PATHS.workspace, true, "workspace"],
       ...this.repositoryMounts(),
       [WORKER_PATHS.tool, true, "tool"],
+      ...(specToolchain(this.job) ? [[TOOLCHAIN_AGENT_PATH, false, "cmd"]] : []),
     ];
     const memoryMb = Math.min(512, Math.max(128, Math.floor(this.job.limits.memoryMb / 3)));
     return {
@@ -1260,7 +1273,7 @@ class ServicesFakeDocker extends FakeDocker {
         Dns: [],
         DnsOptions: [],
         DnsSearch: [],
-        ExtraHosts: null,
+        ExtraHosts: toolchainHostEntries(this.job),
         PortBindings: {},
         PublishAllPorts: false,
       },
@@ -1274,13 +1287,25 @@ class ServicesFakeDocker extends FakeDocker {
     const service = this.serviceContainers.get(name)!;
     const memory = serviceMemoryMib(service) * 1024 * 1024;
     const running = this.running.has(name);
+    // What Docker reports for the create arguments the launcher built: env, entrypoint and mounts.
+    const created = buildServiceCreateArgs(this.job, service);
+    const flag = (f: string) => created.flatMap((v, i) => (v === f ? [created[i + 1]] : []));
+    const toolchain = service.kind === "toolchain";
+    const storage = this.plan.names.storageVolume;
+    const mounts = flag("--mount").map((spec) => {
+      const target = /dst=([^,]+)/.exec(spec)![1];
+      return { target, subpath: /volume-subpath=([^,]+)/.exec(spec)![1], readOnly: spec.endsWith(",readonly") };
+    });
     return {
       Id: "e".repeat(64),
       Config: {
         User: "10001:10001",
         Image: service.image,
-        Env: ["PATH=/usr/bin:/bin", ...Object.entries(service.serviceEnv).map(([key, value]) => `${key}=${value}`)],
+        Env: ["PATH=/usr/bin:/bin", ...flag("--env")],
         Labels: this.resourceLabels.get(name),
+        ...(toolchain
+          ? { Entrypoint: flag("--entrypoint"), Cmd: created.slice(created.indexOf(service.image) + 1) }
+          : {}),
       },
       HostConfig: {
         NetworkMode: `container:${NETWORK_KEEPER_ID}`,
@@ -1312,8 +1337,19 @@ class ServicesFakeDocker extends FakeDocker {
         PortBindings: {},
         PublishAllPorts: false,
         Tmpfs: serviceTmpfsOptions(service),
+        ...(toolchain
+          ? {
+              Mounts: mounts.map((m) => ({
+                Type: "volume",
+                Source: storage,
+                Target: m.target,
+                ...(m.readOnly ? { ReadOnly: true } : {}),
+                VolumeOptions: { NoCopy: true, Subpath: m.subpath },
+              })),
+            }
+          : {}),
       },
-      Mounts: [],
+      Mounts: mounts.map((m) => ({ Type: "volume", Name: storage, Destination: m.target, RW: !m.readOnly })),
       NetworkSettings: { Networks: {}, Ports: {} },
       State: { Running: running, Status: running ? "running" : "exited" },
     };
@@ -1370,26 +1406,6 @@ describe("Docker launcher with services", () => {
     const { launcher } = await harness("docker-supports-services");
     expect(launcher.supportsServicesFor("codex")).toBe(true);
     expect(launcher.supportsServicesFor("claude-code")).toBe(true);
-  });
-
-  it("refuses a toolchain at dispatch: only the Kubernetes launcher starts one so far (#599)", async () => {
-    const { launcher } = await harness("docker-toolchain-unsupported");
-    const toolchain = resolvedFromDefinition(
-      CodingServiceDefinitionSchema.parse({
-        name: "python-dev",
-        version: "3.13",
-        kind: "toolchain",
-        image: `localhost:5001/team@sha256:${"c".repeat(64)}`,
-        resources: { cpuMillicores: 500, memoryMib: 512, diskMib: 256 },
-      }),
-    );
-    const postgres = resolvedFromDefinition(
-      BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
-    );
-    expect(launcher.unstartableServices([postgres, toolchain])).toEqual([
-      { name: "python-dev", reason: "toolchain_unsupported" },
-    ]);
-    expect(launcher.unstartableServices([postgres])).toEqual([]);
   });
 
   it("starts the network keeper, then each service, then the worker in the keeper's namespace", async () => {
@@ -1659,6 +1675,42 @@ describe("Docker launcher with services", () => {
   });
 
   const claudeRun = { provider: "claude-code", toolImage, limits: claudeLimits } as const;
+
+  it("on a toolchain run, copies the agent before any service and waits for it like a probe (#599)", async () => {
+    const toolchain = resolvedFromDefinition(
+      CodingServiceDefinitionSchema.parse({
+        name: "python-dev",
+        version: "3.13",
+        kind: "toolchain",
+        image: `localhost:5001/team@sha256:${"c".repeat(64)}`,
+        resources: { cpuMillicores: 500, memoryMib: 512, diskMib: 256 },
+        hostAliases: ["elastic"],
+      }),
+    );
+    const created = await servicesHarness("docker-services-toolchain", {
+      ...claudeRun,
+      services: [POSTGRES, toolchain],
+    });
+    created.docker.present.add(POSTGRES.image);
+    created.docker.present.add(toolchain.image);
+    const handle = await created.launcher.launch(created.spec);
+    const names = created.docker.plan.names;
+    const container = dockerServiceContainerName(created.spec.runId, "python-dev");
+    const sequence = created.docker.calls.map((call) => call.args);
+    const copied = sequence.findIndex(
+      (args) => args[1] === "exec" && args[2] === names.keeperContainer && args.join(" ").includes("wardby-cmd"),
+    );
+    const firstService = sequence.findIndex(
+      (args) => args[1] === "create" && args.includes(names.networkKeeperContainer),
+    );
+    expect(copied).toBeGreaterThanOrEqual(0);
+    expect(copied).toBeLessThan(firstService);
+    // The token is made inside the keeper (randomBytes), so no argument ever carries one.
+    expect(sequence[copied].join(" ")).toContain("crypto.randomBytes(32)");
+    const probe = sequence.find((args) => args[1] === "exec" && args[2] === container)!;
+    expect(probe.slice(3)).toEqual(["/opt/wardby-cmd/wardby-cmd", "ready", "127.0.0.1:7071"]);
+    await expect(created.launcher.status(handle)).resolves.toEqual({ state: "running" });
+  });
 
   it("starts a Claude run's services before its tool runner, which joins the keeper's namespace, and keeps the agent on the run network", async () => {
     const created = await servicesHarness("docker-services-claude", claudeRun);

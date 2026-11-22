@@ -6,7 +6,14 @@
  * spec, never from repository content, and are re-validated here rather than trusted from dispatch.
  */
 import { CODING_SERVICE_NAME } from "../../coding/protocol.js";
-import { sidecarOnly, StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
+import {
+  isToolchainService,
+  sidecarOnly,
+  StoredCodingServicesSchema,
+  type ResolvedCodingService,
+  type ResolvedToolchainService,
+} from "../../coding/services/catalog.js";
+import { TOOLCHAIN_AGENT } from "./claude-tool-setup.js";
 import {
   CODING_WORKER_GID,
   CODING_WORKER_UID,
@@ -15,9 +22,17 @@ import {
   isolationLabelArgs,
   isolationNames,
   isolationToken,
+  assertExactMountSet,
+  TOOLCHAIN_AGENT_PATH,
+  WORKER_PATHS,
   type DockerContainerInspection,
 } from "./docker-isolation.js";
-import { SERVICE_SCRATCH_MIB, serviceEphemeralStorageMib } from "./kubernetes-isolation.js";
+import {
+  SERVICE_SCRATCH_MIB,
+  serviceEphemeralStorageMib,
+  TOOLCHAIN_FIXED_ENV,
+  TOOLCHAIN_HOME,
+} from "./kubernetes-isolation.js";
 import type { JobSpec } from "./types.js";
 
 /** Every Docker run container is PID-bounded; the catalog has no PID field. */
@@ -66,11 +81,12 @@ export function validateDockerServices(spec: JobSpec): ResolvedCodingService[] {
 
 /** Its data path at its disk size, then SERVICE_SCRATCH_MIB for each writable path: the Kubernetes sizes. */
 export function serviceTmpfsOptions(entry: ResolvedCodingService): Record<string, string> {
-  // Type-only change for the toolchain kind (#599): only a sidecar has a data path.
-  const service = sidecarOnly(entry);
+  // A toolchain has no data path: its disk backs HOME instead (pip, Poetry and git write there).
   const mounts = [
-    { path: service.dataPath, sizeMib: service.resources.diskMib },
-    ...service.writablePaths.map((path) => ({ path, sizeMib: SERVICE_SCRATCH_MIB })),
+    isToolchainService(entry)
+      ? { path: TOOLCHAIN_HOME, sizeMib: entry.resources.diskMib }
+      : { path: sidecarOnly(entry).dataPath, sizeMib: entry.resources.diskMib },
+    ...entry.writablePaths.map((path) => ({ path, sizeMib: SERVICE_SCRATCH_MIB })),
   ];
   return Object.fromEntries(
     mounts.map(({ path, sizeMib }) => [
@@ -85,10 +101,41 @@ export function serviceMemoryMib(service: ResolvedCodingService): number {
   return service.resources.memoryMib + serviceEphemeralStorageMib(service) + SERVICE_SHM_MIB;
 }
 
+/** The container's environment: serviceEnv, and for a toolchain Wardby's fixed values over it. */
+function containerEnvironment(service: ResolvedCodingService): Record<string, string> {
+  return isToolchainService(service) ? { ...service.serviceEnv, ...TOOLCHAIN_FIXED_ENV } : service.serviceEnv;
+}
+
+/** A toolchain's entrypoint is the command agent from storage `cmd`; the workspace is seeded already. */
+const TOOLCHAIN_ENTRYPOINT = `${TOOLCHAIN_AGENT_PATH}/wardby-cmd`;
+
+function toolchainCommand(spec: JobSpec, service: ResolvedToolchainService): string[] {
+  const setup = service.setupCommand ?? [];
+  return [
+    "serve",
+    "--listen",
+    TOOLCHAIN_AGENT.address,
+    "--token-file",
+    TOOLCHAIN_AGENT.tokenFile,
+    "--wait-timeout-sec",
+    String(spec.timeoutSec),
+    ...(setup.length > 0 ? ["--", ...setup] : []),
+  ];
+}
+
+/** What a toolchain mounts of the run's storage volume: the shared workspace and the agent's directory. */
+function toolchainMounts(): Array<{ path: string; writable: boolean; subpath: string }> {
+  return [
+    { path: WORKER_PATHS.workspace, writable: true, subpath: "workspace" },
+    { path: TOOLCHAIN_AGENT_PATH, writable: false, subpath: "cmd" },
+  ];
+}
+
 export function buildServiceCreateArgs(spec: JobSpec, service: ResolvedCodingService): string[] {
   const names = isolationNames(spec.runId);
   const memoryMib = serviceMemoryMib(service);
-  const env = Object.entries(service.serviceEnv)
+  const toolchain = isToolchainService(service) ? service : undefined;
+  const env = Object.entries(containerEnvironment(service))
     .sort(([left], [right]) => left.localeCompare(right))
     .flatMap(([name, value]) => ["--env", `${name}=${value}`]);
   return [
@@ -126,6 +173,13 @@ export function buildServiceCreateArgs(spec: JobSpec, service: ResolvedCodingSer
     "--pids-limit",
     String(SERVICE_PIDS_LIMIT),
     ...Object.entries(serviceTmpfsOptions(service)).flatMap(([path, options]) => ["--tmpfs", `${path}:${options}`]),
+    // A toolchain (#599) shares the run's workspace and reads the agent from `cmd`; a sidecar mounts nothing.
+    ...(toolchain
+      ? toolchainMounts().flatMap(({ path, writable, subpath }) => [
+          "--mount",
+          `type=volume,src=${names.storageVolume},dst=${path},volume-subpath=${subpath},volume-nocopy${writable ? "" : ",readonly"}`,
+        ])
+      : []),
     ...env,
     "--restart",
     "no",
@@ -136,7 +190,9 @@ export function buildServiceCreateArgs(spec: JobSpec, service: ResolvedCodingSer
     "--log-opt",
     "max-file=2",
     ...isolationLabelArgs(spec.runId),
+    ...(toolchain ? ["--entrypoint", TOOLCHAIN_ENTRYPOINT] : []),
     service.image,
+    ...(toolchain ? toolchainCommand(spec, toolchain) : []),
   ];
 }
 
@@ -211,15 +267,24 @@ export function assertServiceContainerInspection(
     (host.GroupAdd?.length ?? 0) !== 0 ||
     Object.keys(host.PortBindings ?? {}).length !== 0 ||
     host.PublishAllPorts !== false ||
-    (host.Mounts?.length ?? 0) !== 0 ||
-    (container.Mounts?.length ?? 0) !== 0 ||
+    (!isToolchainService(service) && ((host.Mounts?.length ?? 0) !== 0 || (container.Mounts?.length ?? 0) !== 0)) ||
     Object.keys(container.NetworkSettings?.Networks ?? {}).length !== 0 ||
     Object.keys(container.NetworkSettings?.Ports ?? {}).length !== 0 ||
     Object.keys(actualTmpfs).length !== Object.keys(expectedTmpfs).length ||
     Object.entries(expectedTmpfs).some(([path, options]) => actualTmpfs[path] !== options) ||
     env.some((value) => value.startsWith("WARDBY_")) ||
-    Object.entries(service.serviceEnv).some(([name, value]) => !env.includes(`${name}=${value}`))
+    Object.entries(containerEnvironment(service)).some(([name, value]) => !env.includes(`${name}=${value}`))
   ) {
     throw isolationError();
+  }
+  if (isToolchainService(service)) {
+    // Exactly the workspace and the read-only agent directory, and the agent as its entrypoint.
+    assertExactMountSet(container, names, toolchainMounts());
+    if (
+      JSON.stringify(container.Config?.Entrypoint ?? null) !== JSON.stringify([TOOLCHAIN_ENTRYPOINT]) ||
+      JSON.stringify(container.Config?.Cmd ?? null) !== JSON.stringify(toolchainCommand(spec, service))
+    ) {
+      throw isolationError();
+    }
   }
 }

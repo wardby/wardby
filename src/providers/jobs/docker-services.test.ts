@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
-import { resolvedFromDefinition, type ResolvedCodingService } from "../../coding/services/catalog.js";
+import {
+  CodingServiceDefinitionSchema,
+  resolvedFromDefinition,
+  type ResolvedCodingService,
+  type ResolvedToolchainService,
+} from "../../coding/services/catalog.js";
 import { isolationNames, isolationToken, type DockerContainerInspection } from "./docker-isolation.js";
 import {
   assertServiceContainerInspection,
@@ -253,5 +258,138 @@ describe("Docker service containers", () => {
     expect(() => assertServiceContainerInspection(valid, spec, REDIS, KEEPER_ID)).toThrow(
       "docker_isolation_unsupported",
     );
+  });
+});
+
+describe("Docker toolchain container (#599)", () => {
+  const TOOLCHAIN = resolvedFromDefinition(
+    CodingServiceDefinitionSchema.parse({
+      name: "python-dev",
+      version: "3.13",
+      kind: "toolchain",
+      image: `registry.example/team-python@sha256:${"c".repeat(64)}`,
+      serviceEnv: { DB_HOST: "127.0.0.1", HOME: "/image-home" },
+      resources: { cpuMillicores: 500, memoryMib: 512, diskMib: 256 },
+      writablePaths: ["/tmp"],
+      setupCommand: ["sh", "-c", "render-config"],
+    }),
+  ) as ResolvedToolchainService;
+  const claude: JobSpec = {
+    ...spec,
+    provider: "claude-code",
+    toolImage: `registry.example/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`,
+    limits: { cpus: 1.5, memoryMb: 1024, pids: 256, diskMb: 512 },
+    services: [POSTGRES, TOOLCHAIN],
+  };
+  const storage = isolationNames(claude.runId).storageVolume;
+  const args = () => buildServiceCreateArgs(claude, TOOLCHAIN);
+  const FIXED = [
+    "GIT_CONFIG_COUNT=1",
+    "GIT_CONFIG_KEY_0=safe.directory",
+    "GIT_CONFIG_VALUE_0=/workspace",
+    "HOME=/home/wardby",
+    "LOGNAME=wardby",
+    "USER=wardby",
+  ];
+
+  function toolchainInspection(): DockerContainerInspection {
+    const base = validServiceInspection();
+    const memory = serviceMemoryMib(TOOLCHAIN) * 1024 * 1024;
+    const built = args();
+    const imageAt = built.indexOf(TOOLCHAIN.image);
+    return {
+      ...base,
+      Config: {
+        ...base.Config,
+        Image: TOOLCHAIN.image,
+        Env: ["PATH=/venv/bin:/usr/bin:/bin", "DB_HOST=127.0.0.1", ...FIXED],
+        Entrypoint: ["/opt/wardby-cmd/wardby-cmd"],
+        Cmd: built.slice(imageAt + 1),
+      },
+      HostConfig: {
+        ...base.HostConfig,
+        Memory: memory,
+        MemorySwap: memory,
+        Tmpfs: serviceTmpfsOptions(TOOLCHAIN),
+        Mounts: [
+          {
+            Type: "volume",
+            Source: storage,
+            Target: "/workspace",
+            VolumeOptions: { NoCopy: true, Subpath: "workspace" },
+          },
+          {
+            Type: "volume",
+            Source: storage,
+            Target: "/opt/wardby-cmd",
+            ReadOnly: true,
+            VolumeOptions: { NoCopy: true, Subpath: "cmd" },
+          },
+        ],
+      },
+      Mounts: [
+        { Type: "volume", Name: storage, Destination: "/workspace", RW: true },
+        { Type: "volume", Name: storage, Destination: "/opt/wardby-cmd", RW: false },
+      ],
+    };
+  }
+
+  it("runs the team image with the command agent as its entrypoint and setupCommand after --", () => {
+    const built = args();
+    expect(flagValues(built, "--entrypoint")).toEqual(["/opt/wardby-cmd/wardby-cmd"]);
+    expect(built.slice(built.indexOf(TOOLCHAIN.image) + 1)).toEqual([
+      "serve",
+      "--listen",
+      "127.0.0.1:7071",
+      "--token-file",
+      "/opt/wardby-cmd/token",
+      "--wait-timeout-sec",
+      String(claude.timeoutSec),
+      "--",
+      "sh",
+      "-c",
+      "render-config",
+    ]);
+  });
+
+  it("shares the workspace and mounts the agent directory read-only, under the services' hardening", () => {
+    const built = args();
+    expect(flagValues(built, "--mount")).toEqual([
+      `type=volume,src=${storage},dst=/workspace,volume-subpath=workspace,volume-nocopy`,
+      `type=volume,src=${storage},dst=/opt/wardby-cmd,volume-subpath=cmd,volume-nocopy,readonly`,
+    ]);
+    expect(flagValues(built, "--user")).toEqual(["10001:10001"]);
+    expect(built).toContain("--read-only");
+    expect(flagValues(built, "--network")).toEqual([
+      `container:${isolationNames(claude.runId).networkKeeperContainer}`,
+    ]);
+    expect(Object.keys(serviceTmpfsOptions(TOOLCHAIN))).toEqual(["/home/wardby", "/tmp"]);
+  });
+
+  it("gives it serviceEnv plus wardby's fixed values, which win", () => {
+    expect(flagValues(args(), "--env")).toEqual(["DB_HOST=127.0.0.1", ...FIXED]);
+  });
+
+  it("attests the toolchain container it built", () => {
+    expect(() => assertServiceContainerInspection(toolchainInspection(), claude, TOOLCHAIN, KEEPER_ID)).not.toThrow();
+  });
+
+  it("rejects an extra mount, a writable agent directory or another entrypoint", () => {
+    const extra = toolchainInspection();
+    extra.Mounts = [...extra.Mounts!, { Type: "volume", Name: storage, Destination: "/data", RW: true }];
+    const writable = toolchainInspection();
+    writable.Mounts = writable.Mounts!.map((m) => ({ ...m, RW: true }));
+    const entry = toolchainInspection();
+    entry.Config = { ...entry.Config, Entrypoint: ["/bin/sh"] };
+    for (const inspection of [extra, writable, entry]) {
+      expect(() => assertServiceContainerInspection(inspection, claude, TOOLCHAIN, KEEPER_ID)).toThrow();
+    }
+  });
+
+  it("leaves an ordinary sidecar's container exactly as it was", () => {
+    expect(buildServiceCreateArgs(claude, POSTGRES)).toEqual(
+      buildServiceCreateArgs({ ...claude, services: [POSTGRES] }, POSTGRES),
+    );
+    expect(flagValues(buildServiceCreateArgs(claude, POSTGRES), "--mount")).toEqual([]);
   });
 });

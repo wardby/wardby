@@ -93,7 +93,7 @@ const TOOLCHAIN_SEEDED_MARKER = "/run/wardby/input/.seeded";
  * the tool runner sends the same ones with every command (command.mjs toolchainEnvironment). Never a
  * secret.
  */
-const TOOLCHAIN_FIXED_ENV: Readonly<Record<string, string>> = {
+export const TOOLCHAIN_FIXED_ENV: Readonly<Record<string, string>> = {
   HOME: TOOLCHAIN_HOME,
   USER: "wardby",
   LOGNAME: "wardby",
