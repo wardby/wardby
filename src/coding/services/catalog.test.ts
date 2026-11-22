@@ -341,10 +341,10 @@ describe("stored services", () => {
     expect(JSON.stringify(workerServices([resolved]))).not.toContain("cloudnative-pg");
   });
 
-  it("tells the worker which service is the toolchain, and nothing of its image or setup", () => {
+  it("gives the worker a toolchain's name and test variables only: the input format is unchanged (#599)", () => {
     const toolchain = resolvedFromDefinition(CodingServiceDefinitionSchema.parse(PYTHON_DEV));
     expect(workerServices([toolchain, resolved])).toEqual([
-      { name: "python-dev", version: "3.13", testEnv: PYTHON_DEV.testEnv, kind: "toolchain" },
+      { name: "python-dev", version: "3.13", testEnv: PYTHON_DEV.testEnv },
       { name: "postgres", version: "16", testEnv: postgres16.testEnv },
     ]);
     const text = JSON.stringify(workerServices([toolchain]));

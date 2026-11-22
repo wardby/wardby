@@ -181,19 +181,8 @@ describe("CodingTaskInputSchema", () => {
     expect(CodingTaskInputSchema.parse({ ...input, services })).toMatchObject({ services });
   });
 
-  it("marks a toolchain by kind, and leaves a sidecar's kind out as before", () => {
-    const services = [
-      { name: "python-dev", version: "3.13", testEnv: {}, kind: "toolchain" as const },
-      { name: "postgres", version: "16", testEnv: {} },
-    ];
-    const parsed = CodingTaskInputSchema.parse({ ...input, services });
-    expect(parsed.services).toEqual(services);
-    expect(parsed.services?.[1]).not.toHaveProperty("kind");
-  });
-
   it.each([
     ["an unknown key", [{ name: "postgres", version: "16", testEnv: {}, image: "postgres:16" }]],
-    ["an unknown kind", [{ name: "postgres", version: "16", testEnv: {}, kind: "external" }]],
     ["an upper-case name", [{ name: "Postgres", version: "16", testEnv: {} }]],
     ["a version with a space", [{ name: "postgres", version: "16 beta", testEnv: {} }]],
     ["a reserved variable", [{ name: "postgres", version: "16", testEnv: { PATH: "/tmp" } }]],

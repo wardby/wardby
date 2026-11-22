@@ -21,7 +21,8 @@ import {
  * image that the run's commands are forwarded to (wardby-cmd), sharing the run's /workspace (a run
  * has at most one). "external" is reserved for shared services reached through the proxy.
  */
-export { CODING_SERVICE_KINDS, type CodingServiceKind } from "../protocol.js";
+export const CODING_SERVICE_KINDS = ["sidecar", "toolchain"] as const;
+export type CodingServiceKind = (typeof CODING_SERVICE_KINDS)[number];
 /** How many service names one agent may be allowed. */
 export const MAX_AGENT_SERVICES = 16;
 export const MAX_SERVICE_ENV = 32;
@@ -393,16 +394,12 @@ export function parseAllowedServiceNames(value: unknown): string[] {
 
 /**
  * What the worker receives for each service (CodingTaskInput.services): never the image or the
- * service's own environment. `kind` is written for a toolchain only; the worker reads it absent as
- * "sidecar", so a sidecar run's input stays readable by workers that predate toolchains.
+ * service's own environment, and not its kind: the Claude tool runner learns of a toolchain from its
+ * own setup (claude-tool-setup.ts), so the worker input format, which the published Codex driver
+ * image must match exactly, is unchanged by toolchains (#599).
  */
 export function workerServices(
   services: readonly ResolvedCodingService[],
-): Array<{ name: string; version: string; testEnv: Record<string, string>; kind?: "toolchain" }> {
-  return services.map(({ name, version, testEnv, kind }) => ({
-    name,
-    version,
-    testEnv,
-    ...(kind === "toolchain" ? { kind } : {}),
-  }));
+): Array<{ name: string; version: string; testEnv: Record<string, string> }> {
+  return services.map(({ name, version, testEnv }) => ({ name, version, testEnv }));
 }
