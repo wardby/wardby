@@ -8,6 +8,7 @@ import { parseServiceDeclaration } from "../coding/services/declaration.js";
 import {
   STARTER_SERVICES_BRANCH,
   commitStarterServices,
+  declaredServicesLabel,
   inspectDeclaredServices,
   parseStarterChoice,
   repoDefaultBranch,
@@ -78,7 +79,7 @@ describe("starterServicesYaml", () => {
       ],
     ],
   ] as const)("is accepted by parseServiceDeclaration for %j", (choices, expected) => {
-    expect(parseServiceDeclaration(starterServicesYaml([...choices]))).toEqual(expected);
+    expect(parseServiceDeclaration(starterServicesYaml([...choices]))).toEqual({ services: expected });
   });
 
   it("parses the --starter-services flag", () => {
@@ -282,6 +283,27 @@ describe("inspectDeclaredServices", () => {
       kind: "valid",
       services: [{ name: "postgres", version: "16" }],
     });
+  });
+
+  it("lists a toolchain first and labels it", async () => {
+    git("stash", "-q", "--include-untracked");
+    mkdirSync(join(dir, ".wardby"));
+    writeFileSync(
+      join(dir, ".wardby", "services.yaml"),
+      'services:\n  postgres: "16"\ntoolchain:\n  python-dev: "3.13"\n',
+    );
+    git("add", ".wardby/services.yaml");
+    git("commit", "-q", "-m", "services");
+    const result = await inspectDeclaredServices(dir, [dir], "main");
+    expect(result).toEqual({
+      kind: "valid",
+      services: [
+        { name: "python-dev", version: "3.13" },
+        { name: "postgres", version: "16" },
+      ],
+      toolchain: { name: "python-dev", version: "3.13" },
+    });
+    expect(result.kind === "valid" && declaredServicesLabel(result)).toBe("python-dev 3.13 (toolchain), postgres 16");
   });
 
   it("reports an invalid file with its reason", async () => {

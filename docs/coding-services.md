@@ -322,6 +322,132 @@ predates driver v11 rejects the run input once services are on it. For a
 Claude Code agent, build the custom image `FROM` the tool runner image of the
 same wardby release.
 
+## Running the agent's commands in your own image (toolchain)
+
+Many test suites need things Wardby's standard images can't provide through the
+package proxy: a C extension with no Linux wheel, system libraries, a specific
+interpreter, or the settings your team's own dev or CI image already has. A
+**toolchain** is a catalog entry for that image. A run that declares one starts
+your image, unchanged, next to the run, sharing the run's `/workspace`, and
+every command the agent runs is sent there. Reading and editing files,
+collection and the pull request work as before.
+
+Toolchains work for **Claude Code agents on the Kubernetes job launcher**. On
+the Docker and Substrate launchers, and for Codex agents, dispatch refuses a run
+that declares one (see "Errors"). A toolchain is not the same thing as
+`codingProfile.toolchain` (`node` or `node-python`), which picks Wardby's own
+standard image.
+
+### What your image needs
+
+- **A POSIX shell at `/bin/sh`.** Wardby doesn't install anything in your
+  image. Its command agent, a static binary, comes from the run and is your
+  image's entrypoint for the run, so your image's own entrypoint does not run
+  (see `setupCommand` below).
+- **Files readable by any user.** The container runs as the run's user (uid
+  10001), not your image's `USER`, with a read-only root filesystem and no
+  Linux capabilities. Your interpreter, packages and code must be readable by
+  other users (mode 755/644 is typical).
+- **Every directory it writes listed in `writablePaths`**, such as `/tmp`.
+  `HOME` is a scratch directory Wardby provides at `/home/wardby`, sized by the
+  entry's `resources.diskMib`, so pip, Poetry and git configuration work.
+  `USER` and `LOGNAME` are set to `wardby`, so code that asks who it is
+  running as (Python's `getpass.getuser()`, for example) works even though
+  uid 10001 isn't in your image's passwd file. Tools that read the passwd file
+  directly, such as `ssh`, still see no name.
+- **`git`, if the agent uses git history** (`codingProfile.gitHistory`).
+- **No credentials.** The agent can read everything in the image. Pass registry
+  credentials to your build as build secrets (`RUN --mount=type=secret,...`),
+  never through `ARG` or `ENV`, and check with `docker image inspect` and a
+  search for `.npmrc`, `pip.conf`, `.netrc` and `auth.toml` before you
+  register the image.
+- **The cluster's CPU architecture.** An image built only for amd64 won't start
+  on arm64 nodes.
+
+Try it locally under the same rules first:
+`docker run --rm --read-only --user 10001:10001 --cap-drop ALL --tmpfs /tmp -e HOME=/tmp <image> sh -c '<one of your tests>'`.
+
+### How commands see your image
+
+- Commands run in your image's environment: its `ENV` (including its `PATH`),
+  then the entry's `serviceEnv`, then Wardby's own settings for the run (the
+  package proxy's `PIP_*`, `UV_*` and `NPM_CONFIG_*` values, other services'
+  `testEnv`, `HOME`, `USER`, `LOGNAME`, `TMPDIR`). Later values win.
+- Commands run in a plain shell, not a login shell, so `/etc/profile` doesn't
+  reset `PATH`.
+- Commands start in `/workspace`. If your image ships its own copy of your
+  code (an editable install, for example), check that imports load from
+  `/workspace` (`python -c 'import yourpkg; print(yourpkg.__file__)'`).
+- Packages already in your image did not pass the package proxy's checks; the
+  catalog listing says so. Packages a run installs still go through the proxy.
+  Wardby's `npm` and `uv` shims are not available in a toolchain.
+- Wardby points `uv.lock` and `poetry.lock` at the package proxy with its own
+  Python before the agent starts. Give the agent the `node-python` standard
+  image (`codingProfile.toolchain`, `toolchainVersion`) with the same Python
+  version as your image, so the project's Python requirement allows it.
+- Long test suites may need more than the default per-command time limit; set
+  `CODING_BASH_DEFAULT_TIMEOUT_MS` and `CODING_BASH_MAX_TIMEOUT_MS`.
+
+### Register, declare and allow it
+
+Register the image with `create_service` (`services:manage` plus the admin
+role), pinned by digest:
+
+```json
+{
+  "name": "python-dev",
+  "version": "3.13",
+  "kind": "toolchain",
+  "image": "registry.example.com/team/python-dev@sha256:<digest>",
+  "serviceEnv": { "DB_HOST": "127.0.0.1" },
+  "resources": { "cpuMillicores": 1000, "memoryMib": 1024, "diskMib": 512 },
+  "writablePaths": ["/tmp"],
+  "setupCommand": ["sh", "-c", "render-config > \"$HOME/app.ini\""]
+}
+```
+
+A toolchain takes `image`, `serviceEnv`, `testEnv`, `resources`,
+`writablePaths`, `setupCommand` and `hostAliases`. It refuses `dataPath`,
+`readiness`, `port` and `startCommand`.
+
+`hostAliases` lists host names your code hard-codes for its services, such as
+compose service names: `"hostAliases": ["elastic", "mq"]`. In a run every
+service listens on `127.0.0.1`, so Wardby resolves each of these names to
+`127.0.0.1` with a real hosts entry (your image can't edit `/etc/hosts`
+itself, and resolver tricks such as `HOSTALIASES` don't reach every client).
+Use lower-case host names, at most 16, not `localhost`. Where you can, make
+the host configurable instead, as you would for a database or cache. `setupCommand` runs once per run, after the workspace is
+ready and before the agent's first command. It sees your image's `ENV`,
+`serviceEnv`, `HOME`, `USER` and `LOGNAME`, but not other services' `testEnv`
+or the package proxy's settings, so it can render configuration but not
+install packages. Write its output to `HOME` or `/tmp`, not `/workspace`
+(anything there is collected into the pull request), and point your app's
+config-path variables at it in `serviceEnv`. Its output is never captured.
+
+Declare it in `.wardby/services.yaml` under its own key, beside any services
+the tests need, and allow its name on the agent like any service:
+
+```yaml
+toolchain:
+  python-dev: "3.13"
+services:
+  postgres: "16"
+```
+
+`toolchain:` takes exactly one entry. Wardby's Claude Code agent and tool
+runner images from this release carry the command agent; older ones can't run
+a toolchain.
+
+If something goes wrong inside the toolchain, the agent sees one of these lines
+as a command's output, with exit code 125:
+
+- `wardby-cmd: toolchain_setup_failed`: `setupCommand` exited non-zero or
+  didn't finish within the run's timeout. Reproduce it locally with the
+  `docker run` line above.
+- `wardby-cmd: toolchain_unusable:shell`: the image has no `/bin/sh`.
+- `wardby-cmd: toolchain_unusable:agent`: the toolchain can't be reached;
+  check that the agent uses this release's images.
+
 ## Letting a coding agent change the declaration
 
 Wardby always protects `.wardby/` in coding runs, except
@@ -347,16 +473,19 @@ Protected-path entries also accept a leading `!` for your own exceptions:
 
 ## Errors
 
-| Problem                                        | When     | Run                                        | What the requester sees                                                                                                                                                               |
-| ---------------------------------------------- | -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `services.yaml` is invalid                     | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: <line and reason>."                                                                                                                              |
-| The file couldn't be read                      | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."                                                                           |
-| A name and version the catalog doesn't have    | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                                                                                           |
-| A service the agent isn't allowed              | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                               |
-| Services on a deployment that can't start them | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes, Docker or Substrate job launcher."                                        |
-| A service this launcher can't start            | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for `<name>`, which this wardby deployment can't start: <reason>." (Substrate; reasons below)                                                                   |
-| A service never became ready                   | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |
-| The run's changes touched a protected path     | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change." |
+| Problem                                         | When     | Run                                        | What the requester sees                                                                                                                                                               |
+| ----------------------------------------------- | -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `services.yaml` is invalid                      | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: <line and reason>."                                                                                                                              |
+| The file couldn't be read                       | Dispatch | refused, `service_declaration_unavailable` | "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again."                                                                           |
+| A name and version the catalog doesn't have     | Dispatch | refused, `service_unknown`                 | "This repository asks for `<name> <version>`, which wardby's service catalog doesn't have."                                                                                           |
+| A service the agent isn't allowed               | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                               |
+| Services on a deployment that can't start them  | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes, Docker or Substrate job launcher."                                        |
+| A service this launcher can't start             | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for `<name>`, which this wardby deployment can't start: <reason>." (Substrate; reasons below)                                                                   |
+| A toolchain on the Docker or Substrate launcher | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for the toolchain `<name>`, which this wardby deployment can't start: toolchains are not supported on this launcher yet."                                       |
+| A toolchain for a Codex agent                   | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for the toolchain `<name>`, which this agent can't use: toolchains are not supported for Codex agents yet."                                                     |
+| An entry under the wrong key in `services.yaml` | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: `<name>` is a toolchain; declare it under `toolchain:`." (or the reverse for a service)                                                          |
+| A service never became ready                    | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |
+| The run's changes touched a protected path      | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change." |
 
 For a coding sub-agent of a sandboxed run, these refusals appear when the run starts instead of at dispatch, and the parent's delegation call receives the result.
 

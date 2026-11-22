@@ -1,0 +1,68 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { storageInitScript, toolchainAgentScript } from "./storage-init.js";
+
+/** Runs a storage-init script the way the pod does (`node -e`), against a temporary storage root. */
+function runScript(script: string): void {
+  const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+}
+
+describe("toolchainAgentScript (#599)", () => {
+  const roots: string[] = [];
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  function setup() {
+    const root = mkdtempSync(join(tmpdir(), "wardby-storage-"));
+    roots.push(root);
+    const source = join(root, "source-wardby-cmd");
+    writeFileSync(source, "#!/bin/sh\necho agent\n");
+    const script = [
+      storageInitScript(root, ["workspace", "input", "output", "cmd"]),
+      toolchainAgentScript(root, source),
+    ];
+    return { root, source, script: script.join("\n") };
+  }
+
+  it("copies the agent into storage/cmd and writes a 32-byte run token only the run uid can read", () => {
+    const { root, source, script } = setup();
+    runScript(script);
+    expect(readFileSync(join(root, "cmd", "wardby-cmd"), "utf8")).toBe(readFileSync(source, "utf8"));
+    expect(statSync(join(root, "cmd", "wardby-cmd")).mode & 0o777).toBe(0o500);
+    const token = readFileSync(join(root, "cmd", "token"), "utf8");
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(statSync(join(root, "cmd", "token")).mode & 0o777).toBe(0o400);
+    expect(statSync(join(root, "cmd")).mode & 0o777).toBe(0o700);
+  });
+
+  it("keeps the token across a storage-init restart (the toolchain read it when it started)", () => {
+    const { root, script } = setup();
+    runScript(script);
+    const first = readFileSync(join(root, "cmd", "token"), "utf8");
+    runScript(script);
+    expect(readFileSync(join(root, "cmd", "token"), "utf8")).toBe(first);
+  });
+
+  it("gives every run a different token", () => {
+    const one = setup();
+    const two = setup();
+    runScript(one.script);
+    runScript(two.script);
+    expect(readFileSync(join(one.root, "cmd", "token"), "utf8")).not.toBe(
+      readFileSync(join(two.root, "cmd", "token"), "utf8"),
+    );
+  });
+
+  it("never prints the token", () => {
+    const { script } = setup();
+    const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+});

@@ -23,6 +23,21 @@ export const KILL_GRACE_MS = 2_000;
 export const TOOL_SETUP_ENV = "WARDBY_TOOL_SETUP";
 /** The npm shim (src/coding-worker/npm-shim.mjs), ahead of the real npm. */
 export const SHIM_DIRECTORY = "/opt/wardby/bin";
+/**
+ * A toolchain run's client (#599): the `wardby-cmd` binary built into this image
+ * (src/command-agent). `wardby-cmd run <address> <tokenFile> -- argv...` forwards one command to
+ * the toolchain container's agent and exits with the remote exit code.
+ */
+export const COMMAND_AGENT = "/opt/wardby/bin/wardby-cmd";
+/** Where the launcher puts the agent's binary and the run's token, in every container that mounts it. */
+const COMMAND_AGENT_DIR = "/opt/wardby-cmd/";
+/** The client's own failures: exit 125 and a last stderr line `wardby-cmd: <one of these>`. */
+const COMMAND_AGENT_EXIT = 125;
+export const TOOLCHAIN_FAILURES = Object.freeze(
+  new Set(["toolchain_unusable:agent", "toolchain_unusable:shell", "toolchain_setup_failed", "connection lost"]),
+);
+/** How much of a toolchain command's stderr is kept, apart from the capped output, to find that line. */
+const STDERR_TAIL_BYTES = 256;
 
 const RESERVED_NAMES = new Set(["HOME", "LANG", "PATH", "TMPDIR", TOOL_SETUP_ENV]);
 /** Workspace-relative cache root: registry config files (parseToolSetup) and the
@@ -111,6 +126,27 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
     if (!bounded(limits.defaultMs) || !bounded(limits.maxMs) || limits.defaultMs > limits.maxMs) throw invalid();
     commandTimeouts = Object.freeze({ defaultMs: limits.defaultMs, maxMs: limits.maxMs });
   }
+  // The run's toolchain (claude-tool-setup.ts, #599): every command goes to its command agent on the
+  // run's loopback. Only a loopback address and a token file in the agent's own folder.
+  let toolchain;
+  if (value.toolchain !== undefined) {
+    const given = value.toolchain;
+    if (!given || typeof given !== "object" || Array.isArray(given)) throw invalid();
+    if (Object.keys(given).some((key) => key !== "address" && key !== "tokenFile")) throw invalid();
+    const address = typeof given.address === "string" ? /^127\.0\.0\.1:([0-9]{1,5})$/.exec(given.address) : null;
+    const port = address ? Number(address[1]) : 0;
+    if (port < 1 || port > 65_535) throw invalid();
+    const { tokenFile } = given;
+    if (
+      typeof tokenFile !== "string" ||
+      !tokenFile.startsWith(COMMAND_AGENT_DIR) ||
+      tokenFile.length === COMMAND_AGENT_DIR.length ||
+      tokenFile.includes("\0") ||
+      tokenFile.split("/").some((segment) => segment === "..")
+    )
+      throw invalid();
+    toolchain = Object.freeze({ address: given.address, tokenFile });
+  }
   if (!Array.isArray(value.files) || value.files.length > MAX_FILES) throw invalid();
   const cacheRoot = `${cacheRootFor(workspacePath)}/`;
   const files = value.files.map((file) => {
@@ -126,6 +162,7 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
     ...(value.diskMb !== undefined ? { diskMb: value.diskMb } : {}),
     ...(commandTimeouts ? { commandTimeouts } : {}),
     ...(value.workspaceReused === true ? { workspaceReused: true } : {}),
+    ...(toolchain ? { toolchain } : {}),
   });
 }
 
@@ -137,6 +174,34 @@ export function commandTimeoutLimits(setup = EMPTY_SETUP) {
 /** Exactly what a command's shell gets (runCommand); the dependency cache's npm runs with it too. */
 export function commandEnvironment(setup = EMPTY_SETUP, workspacePath = "/workspace") {
   return { ...setup.env, ...toolEnvironment(workspacePath) };
+}
+
+/**
+ * What a toolchain command gets (spec section 3, last wins): the setup's variables (service test
+ * variables, registry settings), then Wardby's fixed values. Never PATH or LANG: the toolchain image
+ * keeps its own. The agent adds these on top of the container's environment.
+ */
+export function toolchainEnvironment(setup = EMPTY_SETUP, workspacePath = "/workspace") {
+  return {
+    ...setup.env,
+    HOME: "/home/wardby",
+    USER: "wardby",
+    LOGNAME: "wardby",
+    TMPDIR: cacheTmpDirFor(workspacePath),
+    // The workspace belongs to another uid in some launchers; git refuses it without this.
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "safe.directory",
+    GIT_CONFIG_VALUE_0: workspacePath,
+  };
+}
+
+/** The client's fixed failure (e.g. `toolchain_setup_failed`) when a toolchain command exits 125 with it. */
+function toolchainFailure(code, stderrTail) {
+  if (code !== COMMAND_AGENT_EXIT) return undefined;
+  const lines = stderrTail.toString("utf8").split("\n");
+  const last = lines.at(-1) === "" ? lines.at(-2) : lines.at(-1);
+  const reason = last?.startsWith("wardby-cmd: ") ? last.slice("wardby-cmd: ".length) : undefined;
+  return reason !== undefined && TOOLCHAIN_FAILURES.has(reason) ? reason : undefined;
 }
 
 /** What runCommand does to the workspace before each command: the setup files and TMPDIR. */
@@ -188,14 +253,31 @@ export async function withPackageRefusals(result, env, startedAt, lookup = recen
   return lines.length > 0 ? { ...result, output: `${result.output}\n${lines.join("\n")}\n` } : result;
 }
 
-export async function runCommand(command, timeoutMs, workspacePath = "/workspace", setup = EMPTY_SETUP) {
+/**
+ * Runs one command for the model. With a toolchain (#599) it is forwarded through the client as
+ * `/bin/sh -c` (no login shell: the image's own environment stands); otherwise `/bin/sh -lc` here.
+ * Either way: its own process group, the 64 KiB cap, the timeout (SIGTERM to the group, SIGKILL
+ * after KILL_GRACE_MS, exit 124; killing the client kills the remote command), and the registry's
+ * refusals on failure. `spawn` and `lookup` are for tests.
+ */
+export async function runCommand(
+  command,
+  timeoutMs,
+  workspacePath = "/workspace",
+  setup = EMPTY_SETUP,
+  { spawn: spawnCommand = spawn, lookup = recentRefusals } = {},
+) {
   if (Buffer.byteLength(command) > MAX_COMMAND_BYTES) throw new Error("tool_command_too_large");
   const timeout = Math.max(MIN_COMMAND_TIMEOUT_MS, Math.min(commandTimeoutLimits(setup).maxMs, timeoutMs));
   await prepareCommandWorkspace(setup, workspacePath);
-  const env = commandEnvironment(setup, workspacePath);
+  const { toolchain } = setup;
+  const env = toolchain ? toolchainEnvironment(setup, workspacePath) : commandEnvironment(setup, workspacePath);
+  const [file, args] = toolchain
+    ? [COMMAND_AGENT, ["run", toolchain.address, toolchain.tokenFile, "--", "/bin/sh", "-c", command]]
+    : ["/bin/sh", ["-lc", command]];
   const startedAt = Date.now();
   const result = await new Promise((resolve) => {
-    const child = spawn("/bin/sh", ["-lc", command], {
+    const child = spawnCommand(file, args, {
       cwd: workspacePath,
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -205,6 +287,7 @@ export async function runCommand(command, timeoutMs, workspacePath = "/workspace
     const chunks = [];
     let size = 0;
     let timedOut = false;
+    let stderrTail = Buffer.alloc(0);
     const append = (chunk) => {
       if (size >= MAX_OUTPUT_BYTES) return;
       const bounded = Buffer.from(chunk).subarray(0, MAX_OUTPUT_BYTES - size);
@@ -212,7 +295,10 @@ export async function runCommand(command, timeoutMs, workspacePath = "/workspace
       size += bounded.byteLength;
     };
     child.stdout.on("data", append);
-    child.stderr.on("data", append);
+    child.stderr.on("data", (chunk) => {
+      append(chunk);
+      if (toolchain) stderrTail = Buffer.concat([stderrTail, Buffer.from(chunk)]).subarray(-STDERR_TAIL_BYTES);
+    });
     const timer = setTimeout(() => {
       timedOut = true;
       signalGroup(child.pid, "SIGTERM");
@@ -220,14 +306,21 @@ export async function runCommand(command, timeoutMs, workspacePath = "/workspace
     }, timeout);
     child.once("close", (code) => {
       clearTimeout(timer);
-      resolve({ code: timedOut ? 124 : (code ?? 1), output: Buffer.concat(chunks).toString("utf8") });
+      if (timedOut) return resolve({ code: 124, output: Buffer.concat(chunks).toString("utf8") });
+      // The client's own failure is the run's signal: its fixed line alone, nothing else the agent sent.
+      const failure = toolchain ? toolchainFailure(code, stderrTail) : undefined;
+      if (failure) return resolve({ code: COMMAND_AGENT_EXIT, output: `wardby-cmd: ${failure}`, fixed: true });
+      resolve({ code: code ?? 1, output: Buffer.concat(chunks).toString("utf8") });
     });
     child.once("error", () => {
       clearTimeout(timer);
-      resolve({ code: 1, output: "tool execution failed" });
+      // A missing client: this image is too old for the run's toolchain.
+      if (toolchain) resolve({ code: COMMAND_AGENT_EXIT, output: "wardby-cmd: toolchain_unusable:agent", fixed: true });
+      else resolve({ code: 1, output: "tool execution failed" });
     });
   });
-  return withPackageRefusals(result, env, startedAt);
+  if (result.fixed) return { code: result.code, output: result.output };
+  return withPackageRefusals(result, env, startedAt, lookup);
 }
 
 function signalGroup(pid, signal) {

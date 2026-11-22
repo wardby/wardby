@@ -1946,6 +1946,7 @@ describe("ContainerExecutor", () => {
 
     it("asks the job launcher which services it cannot start", async () => {
       const service = {
+        kind: "sidecar" as const,
         name: "fakedb",
         version: "1",
         image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,

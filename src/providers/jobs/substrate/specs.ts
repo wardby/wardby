@@ -19,7 +19,7 @@
 
 import { createHash } from "node:crypto";
 import type { V1Secret } from "@kubernetes/client-node";
-import { substrateServiceImage, type ResolvedCodingService } from "../../../coding/services/catalog.js";
+import { sidecarOnly, substrateServiceImage, type ResolvedCodingService } from "../../../coding/services/catalog.js";
 import { claudeToolLimits } from "../docker-isolation.js";
 import { SERVICE_SHM_MIB } from "../docker-services.js";
 import { SERVICE_SCRATCH_MIB } from "../kubernetes-isolation.js";
@@ -182,7 +182,9 @@ function holderStorage(spec: JobSpec): {
       actorVolume,
     ],
     repos,
-    services: services.map((s) => ({ name: s.name, image: substrateServiceImage(s), dataPath: s.dataPath })),
+    services: services
+      .map(sidecarOnly)
+      .map((s) => ({ name: s.name, image: substrateServiceImage(s), dataPath: s.dataPath })),
   };
 }
 
@@ -191,15 +193,17 @@ function holderStorage(spec: JobSpec): {
  * volumes (script and data). No env and no wakeup probe: values reach it only through start.sh.
  */
 function serviceContainers(spec: JobSpec): ContainerSpec[] {
-  return servicesInOrder(spec.services ?? []).map((service, i) => ({
-    name: `svc-${service.name}`,
-    image: substrateServiceImage(service),
-    command: ["/bin/sh", "-c", SERVICE_WAIT_SCRIPT],
-    volumeMounts: [
-      { name: `svc-${i}`, mountPath: SERVICE_SCRIPT_DIR },
-      { name: `svc-${i}-data`, mountPath: service.dataPath },
-    ],
-  }));
+  return servicesInOrder(spec.services ?? [])
+    .map(sidecarOnly)
+    .map((service, i) => ({
+      name: `svc-${service.name}`,
+      image: substrateServiceImage(service),
+      command: ["/bin/sh", "-c", SERVICE_WAIT_SCRIPT],
+      volumeMounts: [
+        { name: `svc-${i}`, mountPath: SERVICE_SCRIPT_DIR },
+        { name: `svc-${i}-data`, mountPath: service.dataPath },
+      ],
+    }));
 }
 
 export function agentTemplate(spec: JobSpec, config: SubstrateLaunchConfig): ActorTemplateSpec {

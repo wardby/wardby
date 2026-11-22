@@ -12,10 +12,13 @@ import {
   serviceUnreadySentence,
   unknownServiceSentence,
   unstartableServiceSentence,
+  codexToolchainSentence,
+  misplacedServiceSentence,
 } from "./wording.js";
-import type { ResolvedCodingService } from "./catalog.js";
+import type { ResolvedSidecarService } from "./catalog.js";
 
-const FAKE_SERVICE: ResolvedCodingService = {
+const FAKE_SERVICE: ResolvedSidecarService = {
+  kind: "sidecar",
   name: "fakedb",
   version: "1.2.3-fake",
   image: `registry.example/fakedb-image@sha256:${"b".repeat(64)}`,
@@ -70,6 +73,24 @@ describe("service refusals", () => {
     ]) {
       expect(text).not.toContain(value);
     }
+  });
+
+  it("words the toolchain refusals with only the toolchain's name", () => {
+    expect(unstartableServiceSentence({ name: "python-dev", reason: "toolchain_unsupported" })).toBe(
+      "This repository asks for the toolchain `python-dev`, which this wardby deployment can't start: toolchains are not supported on this launcher yet.",
+    );
+    expect(codexToolchainSentence("python-dev")).toBe(
+      "This repository asks for the toolchain `python-dev`, which this agent can't use: toolchains are not supported for Codex agents yet.",
+    );
+    expect(codexToolchainSentence("Bad Name`")).toBe(
+      "This repository asks for the toolchain, which this agent can't use: toolchains are not supported for Codex agents yet.",
+    );
+    expect(misplacedServiceSentence("python-dev", "toolchain")).toBe(
+      "`.wardby/services.yaml` is invalid: `python-dev` is a toolchain; declare it under `toolchain:`.",
+    );
+    expect(misplacedServiceSentence("postgres", "sidecar")).toBe(
+      "`.wardby/services.yaml` is invalid: `postgres` is a service, not a toolchain; declare it under `services:`.",
+    );
   });
 
   it("falls back to the generic launcher sentence for a name that isn't a catalog name", () => {

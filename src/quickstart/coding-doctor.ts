@@ -10,7 +10,7 @@ import { LOCAL_REPO_PREFIX, LocalRepoError, loadLocalRepoRoots, resolveLocalRepo
 import { imageVariable } from "../config/providers.js";
 import { isImmutableDockerImage } from "../providers/jobs/docker-isolation.js";
 import { CODING_PROXY_CONTAINER, type RunCommand } from "./coding.js";
-import { inspectDeclaredServices, repoDefaultBranch } from "./starter-services.js";
+import { declaredServicesLabel, inspectDeclaredServices, repoDefaultBranch } from "./starter-services.js";
 
 export interface LocalAgent {
   name: string;
@@ -52,7 +52,7 @@ async function agentLines(agent: LocalAgent, roots: string[]): Promise<string[]>
   else if (declared.kind === "invalid") {
     lines.push(`✗ ${agent.name}: .wardby/services.yaml on ${ref} is invalid: ${declared.reason}`);
   } else {
-    const list = declared.services.map((service) => `${service.name} ${service.version}`).join(", ");
+    const list = declaredServicesLabel(declared);
     lines.push(`✓ ${agent.name}: .wardby/services.yaml on ${ref} declares ${list || "no services"}`);
   }
   return lines;

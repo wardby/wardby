@@ -12,7 +12,7 @@
  *
  * Pure: it imports only the ResolvedCodingService and UnstartableService types.
  */
-import type { ResolvedCodingService } from "../../../coding/services/catalog.js";
+import { sidecarOnly, type ResolvedCodingService } from "../../../coding/services/catalog.js";
 import type { UnstartableService } from "../types.js";
 
 /** Where a service container sees its own script volume (start.sh, state). Never a catalog path. */
@@ -113,6 +113,11 @@ export function substrateServiceProblems(services: readonly ResolvedCodingServic
   const problems: UnstartableService[] = [];
   let total = 0;
   for (const service of servicesInOrder(services)) {
+    // Until the Substrate launcher starts toolchains: refused at dispatch, never treated as a sidecar.
+    if (service.kind === "toolchain") {
+      problems.push({ name: service.name, reason: "toolchain_unsupported" });
+      continue;
+    }
     if (service.startCommand === undefined) {
       problems.push({ name: service.name, reason: "start_command_missing" });
       continue;
@@ -143,10 +148,12 @@ export function servicesWaitMs(services: readonly ResolvedCodingService[], capMs
   // The cap is the launcher's startup timeout: one below the start marker bound or non-finite is a caller bug.
   if (!Number.isFinite(capMs) || capMs < SERVICE_START_MARKER_MS)
     throw new Error("substrate_services_wait_cap_invalid");
-  const probing = services.reduce(
-    (sum, { readiness }) =>
-      sum + readiness.failureThreshold * (readiness.periodSeconds + readiness.timeoutSeconds) * 1000,
-    0,
-  );
+  const probing = services
+    .map(sidecarOnly)
+    .reduce(
+      (sum, { readiness }) =>
+        sum + readiness.failureThreshold * (readiness.periodSeconds + readiness.timeoutSeconds) * 1000,
+      0,
+    );
   return Math.min(SERVICE_START_MARKER_MS + probing, capMs, MAX_SERVICES_WAIT_MS);
 }

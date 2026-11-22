@@ -899,6 +899,22 @@ One pod per run, built by the canonical, deny-by-default policy in
   would. The worker never receives a service's own
   environment, only the catalog's `testEnv`. Attestation compares sidecars like
   every other container.
+- **A toolchain sidecar** (only for a Claude Code run whose repository
+  declares a toolchain, see
+  [coding-services.md](coding-services.md#running-the-agents-commands-in-your-own-image-toolchain)):
+  `service-<name>`, after the other sidecars, running the team's image with
+  Wardby's command agent as its entrypoint, under the same security context.
+  Unlike other sidecars it shares the run's workspace: it mounts the `storage`
+  volume's `workspace` subPath at `/workspace`, its `cmd` subPath read-only
+  at `/opt/wardby-cmd` (the agent binary and the run's token, which
+  `storage-init` copies and writes there), and its `input` subPath read-only
+  (to wait for the keeper's seeded marker before `setupCommand`). The tool
+  runner mounts `cmd` read-only too and forwards every `run_command` to the
+  agent over the pod's loopback; the token keeps other sidecars, which never
+  mount `cmd`, from running commands there. Its startup probe only checks that
+  the agent listens. The entry's `hostAliases` become a second pod
+  `hostAliases` entry pointing at `127.0.0.1`; an alias may not be the coding
+  proxy's name.
 - **`keeper`**: trusted, holds the one `storage` volume (an `emptyDir` sized
   `spec.limits.diskMb` MiB, **disk-backed**, not `medium: Memory`) open for
   the pod's life; the seam streams the workspace and input artifact in and

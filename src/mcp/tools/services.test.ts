@@ -287,6 +287,94 @@ describe("coding service catalog tools", () => {
     await client.close();
   });
 
+  const TOOLCHAIN = {
+    name: "python-dev",
+    version: "3.13",
+    kind: "toolchain",
+    image: `registry.example/team/python-dev@sha256:${"d".repeat(64)}`,
+    serviceEnv: { APP_CONFIG: "/home/wardby/app.ini" },
+    testEnv: { APP_ENV: "test" },
+    resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 1024 },
+    setupCommand: ["/bin/sh", "-c", "render-config > /home/wardby/app.ini"],
+  };
+
+  it("creates a toolchain without a sidecar's fields, lists it with its note and changes its setup command", async () => {
+    const { client, rows } = await connect(ADMIN);
+    const created = await client.callTool({ name: "create_service", arguments: TOOLCHAIN });
+    expect(created.isError).toBeFalsy();
+    expect(JSON.parse(text(created))).toMatchObject({
+      kind: "toolchain",
+      setupCommand: TOOLCHAIN.setupCommand,
+      note: "Packages already in this image did not pass the proxy's checks.",
+    });
+    expect(rows.get("python-dev 3.13")).toMatchObject({ kind: "toolchain", builtin: false });
+    expect(rows.get("python-dev 3.13")).not.toHaveProperty("port");
+
+    const listed = JSON.parse(text(await client.callTool({ name: "list_services", arguments: {} })));
+    const entry = listed.find((candidate: { name: string }) => candidate.name === "python-dev");
+    expect(entry).toEqual({
+      name: "python-dev",
+      version: "3.13",
+      kind: "toolchain",
+      image: TOOLCHAIN.image,
+      note: "Packages already in this image did not pass the proxy's checks.",
+      builtin: false,
+    });
+    expect(listed.find((candidate: { name: string }) => candidate.name === "redis")).not.toHaveProperty("note");
+    const shown = JSON.parse(
+      text(await client.callTool({ name: "get_service", arguments: { name: "python-dev", version: "3.13" } })),
+    );
+    expect(shown.note).toBe("Packages already in this image did not pass the proxy's checks.");
+
+    const updated = await client.callTool({
+      name: "update_service",
+      arguments: { name: "python-dev", version: "3.13", setupCommand: ["true"] },
+    });
+    expect(updated.isError).toBeFalsy();
+    expect(rows.get("python-dev 3.13")?.setupCommand).toEqual(["true"]);
+    await client.close();
+  });
+
+  it.each([
+    ["dataPath", { dataPath: "/data" }],
+    ["readiness", { readiness: CUSTOM.readiness }],
+    ["port", { port: 8000 }],
+    ["startCommand", { startCommand: ["serve"] }],
+  ])("refuses a toolchain with %s, naming the field", async (field, patch) => {
+    const { client, rows } = await connect(ADMIN);
+    const refused = await client.callTool({ name: "create_service", arguments: { ...TOOLCHAIN, ...patch } });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain(`${field}: is not used by a toolchain`);
+    expect(rows.has("python-dev 3.13")).toBe(false);
+    await client.close();
+  });
+
+  it("refuses a setup command on a sidecar, and a change of kind", async () => {
+    const { client } = await connect(ADMIN);
+    const refused = await client.callTool({
+      name: "create_service",
+      arguments: { ...CUSTOM, setupCommand: ["true"] },
+    });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain("setupCommand: is only for a toolchain");
+    expect((await client.callTool({ name: "create_service", arguments: TOOLCHAIN })).isError).toBeFalsy();
+    const kindChange = await client.callTool({
+      name: "update_service",
+      arguments: { name: "python-dev", version: "3.13", kind: "sidecar" },
+    });
+    expect(kindChange.isError).toBe(true);
+    await client.close();
+  });
+
+  it("still requires a sidecar's port, readiness and data path", async () => {
+    const { client } = await connect(ADMIN);
+    const { dataPath: _dataPath, ...withoutData } = CUSTOM;
+    const refused = await client.callTool({ name: "create_service", arguments: withoutData });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain("dataPath");
+    await client.close();
+  });
+
   it("describes startCommand and substrateImage in both input schemas", async () => {
     const { client } = await connect(ADMIN);
     const { tools } = await client.listTools();

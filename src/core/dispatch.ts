@@ -13,18 +13,25 @@ import {
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
 import { isPackageAuditActive } from "../coding/registry/audit-mode.js";
 import { ModelUnavailableError, entryOf, type ResolvedCatalogEntry } from "../providers/llm/catalog-types.js";
-import { parseAllowedServiceNames, workerServices, type ResolvedCodingService } from "../coding/services/catalog.js";
+import {
+  parseAllowedServiceNames,
+  runToolchain,
+  workerServices,
+  type ResolvedCodingService,
+} from "../coding/services/catalog.js";
 import {
   MAX_SERVICE_DECLARATION_BYTES,
   ServiceDeclarationError,
+  declaredEntries,
   parseServiceDeclaration,
-  type DeclaredService,
+  type ServiceDeclaration,
 } from "../coding/services/declaration.js";
 import { servicesInstructionNote } from "../coding/services/note.js";
 import { resolveRunServices, type ServiceResolution } from "../coding/services/resolve.js";
 import {
   DECLARATION_UNAVAILABLE_SENTENCE,
   LAUNCHER_UNSUPPORTED_SENTENCE,
+  codexToolchainSentence,
   invalidDeclarationSentence,
   serviceRefusal,
   unstartableServiceSentence,
@@ -765,7 +772,7 @@ function resolveMergeOrder(options: DispatchRunOptions, inherited: number | null
 
 /** What dispatch learned about a coding run's .wardby/services.yaml before its transaction. */
 export type DeclarationOutcome =
-  { kind: "none" } | { kind: "declared"; services: DeclaredService[] } | { kind: "refused"; refusal: string };
+  { kind: "none" } | { kind: "declared"; declaration: ServiceDeclaration } | { kind: "refused"; refusal: string };
 
 interface ServiceDeclarationRead {
   /** The profile the branch was resolved from; the transaction refuses a profile that changed since. */
@@ -887,7 +894,7 @@ export async function readServiceDeclarationAt(
   }
   if (text === null) return { kind: "none" };
   try {
-    return { kind: "declared", services: parseServiceDeclaration(text) };
+    return { kind: "declared", declaration: parseServiceDeclaration(text) };
   } catch (err) {
     if (!(err instanceof ServiceDeclarationError)) throw err;
     return {
@@ -911,18 +918,24 @@ export async function resolveDispatchServices(
   instructions: string | null,
 ): Promise<ServiceResolution> {
   if (outcome.kind === "refused") return { refusal: outcome.refusal };
-  if (outcome.kind === "none" || outcome.services.length === 0) return { services: [] };
+  if (outcome.kind === "none" || declaredEntries(outcome.declaration).length === 0) return { services: [] };
   if (executor.supportsCodingServices?.(provider) !== true) {
     return { refusal: serviceRefusal("service_launcher_unsupported", LAUNCHER_UNSUPPORTED_SENTENCE) };
   }
   const resolution = await resolveRunServices(
     { findMany: (args) => tx.codingService.findMany(args) },
-    outcome.services,
+    outcome.declaration,
     parseAllowedServiceNames(allowed),
     request,
     instructions,
   );
   if ("services" in resolution) {
+    // Codex forwarding is a follow-up: until it lands a Codex run with a toolchain is refused, never
+    // run in the worker's own image as if the repository had declared none.
+    const toolchain = runToolchain(resolution.services);
+    if (toolchain && provider === "codex") {
+      return { refusal: serviceRefusal("service_launcher_unsupported", codexToolchainSentence(toolchain.name)) };
+    }
     // Unknown and disallowed services were refused above with their own codes; the launcher is
     // asked only about the validated catalog snapshot, and only a validated name reaches a sentence.
     const unstartable = executor.unstartableCodingServices?.(resolution.services) ?? [];

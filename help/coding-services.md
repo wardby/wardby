@@ -65,6 +65,10 @@ For a repository on the wardby host (`local:/absolute/path`), the declaration is
 read from the committed file at the run's base ref, never the working tree; see
 [Use local git repositories](local-repositories.md).
 
+To run the agent's commands in your team's own dev image instead of next to it,
+declare a toolchain; see
+[Run a coding agent's commands in your own dev image](coding-toolchain.md).
+
 If a run is refused or fails over its services, read the page for its code:
 
 - [`service_declaration_invalid`](errors/service-declaration-invalid.md)

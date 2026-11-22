@@ -20,41 +20,97 @@ describe("parseServiceDeclaration", () => {
       '  redis: "7"   # a cache for the session tests',
       "",
     ].join("\n");
-    expect(parseServiceDeclaration(text)).toEqual([
-      { name: "postgres", version: "16" },
-      { name: "redis", version: "7" },
-    ]);
+    expect(parseServiceDeclaration(text)).toEqual({
+      services: [
+        { name: "postgres", version: "16" },
+        { name: "redis", version: "7" },
+      ],
+    });
   });
 
   it("accepts bare and single-quoted versions and keeps every version a string", () => {
-    expect(parseServiceDeclaration("services:\n    mysql: 8.0\n    postgres: '16'\n")).toEqual([
-      { name: "mysql", version: "8.0" },
-      { name: "postgres", version: "16" },
-    ]);
+    expect(parseServiceDeclaration("services:\n    mysql: 8.0\n    postgres: '16'\n")).toEqual({
+      services: [
+        { name: "mysql", version: "8.0" },
+        { name: "postgres", version: "16" },
+      ],
+    });
   });
 
   it("tolerates CRLF line endings and a byte-order mark", () => {
-    expect(parseServiceDeclaration('﻿services:\r\n  postgres: "16"\r\n')).toEqual([
-      { name: "postgres", version: "16" },
-    ]);
+    expect(parseServiceDeclaration('﻿services:\r\n  postgres: "16"\r\n')).toEqual({
+      services: [{ name: "postgres", version: "16" }],
+    });
   });
 
   it("reads an empty list as no services", () => {
-    expect(parseServiceDeclaration("services:\n")).toEqual([]);
-    expect(parseServiceDeclaration("services: {}\n")).toEqual([]);
+    expect(parseServiceDeclaration("services:\n")).toEqual({ services: [] });
+    expect(parseServiceDeclaration("services: {}\n")).toEqual({ services: [] });
+  });
+
+  it("reads a toolchain with services, in either order", () => {
+    const expected = {
+      toolchain: { name: "python-dev", version: "3.13" },
+      services: [{ name: "postgres", version: "16" }],
+    };
+    expect(parseServiceDeclaration("toolchain:\n  python-dev: 3.13\nservices:\n  postgres: 16\n")).toEqual(expected);
+    expect(parseServiceDeclaration("services:\n    postgres: 16\ntoolchain:\n  python-dev: '3.13'\n")).toEqual(
+      expected,
+    );
+  });
+
+  it("reads a toolchain alone, with no services key", () => {
+    expect(parseServiceDeclaration('# our dev image\ntoolchain:\n  python-dev: "3.13"\n')).toEqual({
+      toolchain: { name: "python-dev", version: "3.13" },
+      services: [],
+    });
+  });
+
+  it("counts the toolchain toward the service limit", () => {
+    const text = `toolchain:\n  dev: "1"\nservices:\n${["a", "b", "c", "d", "e"].map((n) => `  ${n}: "1"`).join("\n")}\n`;
+    expect(reasonOf(text)).toBe("it lists more than 5 services");
   });
 
   it.each([
-    ["no services key", "# nothing here\n", "it has no `services:` key"],
+    ["no services key", "# nothing here\n", "it has no `services:` or `toolchain:` key"],
     [
       "another top-level key",
       'services:\n  postgres: "16"\nimage: evil\n',
-      "line 3: the only top-level key allowed is `services`",
+      "line 3: the only top-level keys allowed are `services` and `toolchain`, each once",
     ],
-    ["a second services key", "services:\nservices:\n", "line 2: the only top-level key allowed is `services`"],
-    ["a document marker", '---\nservices:\n  postgres: "16"\n', "line 1: the only top-level key allowed is `services`"],
-    ["a flow mapping", 'services: {postgres: "16"}\n', "line 1: the only top-level key allowed is `services`"],
-    ["an entry before services", '  postgres: "16"\nservices:\n', "line 1: entries must sit under `services:`"],
+    [
+      "a second services key",
+      "services:\nservices:\n",
+      "line 2: the only top-level keys allowed are `services` and `toolchain`, each once",
+    ],
+    [
+      "a document marker",
+      '---\nservices:\n  postgres: "16"\n',
+      "line 1: the only top-level keys allowed are `services` and `toolchain`, each once",
+    ],
+    [
+      "a flow mapping",
+      'services: {postgres: "16"}\n',
+      "line 1: the only top-level keys allowed are `services` and `toolchain`, each once",
+    ],
+    [
+      "a second toolchain key",
+      'toolchain:\n  dev: "1"\ntoolchain:\n  other: "1"\n',
+      "line 3: the only top-level keys allowed are `services` and `toolchain`, each once",
+    ],
+    ["two toolchains", 'toolchain:\n  dev: "1"\n  other: "1"\n', "line 3: `toolchain:` takes exactly one entry"],
+    ["an empty toolchain", "toolchain:\n", "`toolchain:` takes exactly one entry"],
+    ["an empty flow toolchain", "toolchain: {}\nservices:\n", "`toolchain:` takes exactly one entry"],
+    [
+      "the toolchain's name again under services",
+      'toolchain:\n  dev: "1"\nservices:\n  dev: "2"\n',
+      "line 4: `dev` is listed twice",
+    ],
+    [
+      "an entry before services",
+      '  postgres: "16"\nservices:\n',
+      "line 1: entries must sit under `services:` or `toolchain:`",
+    ],
     ["tabs", 'services:\n\tpostgres: "16"\n', "line 2: use spaces, not tabs"],
     [
       "a nested value",

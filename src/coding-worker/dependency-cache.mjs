@@ -1109,10 +1109,10 @@ async function chargeInstall(context, project) {
 }
 
 async function install(context, project, args) {
-  const { env, npmPath, signal, timeouts } = context;
+  const { env, npmPath, npmArgs = [], signal, timeouts } = context;
   context.created = join(project.dir, ROOT);
   const started = Date.now();
-  const code = await run(npmPath, args, {
+  const code = await run(npmPath, [...npmArgs, ...args], {
     cwd: project.dir,
     env,
     timeoutMs: timeouts.installMs,
@@ -1779,12 +1779,12 @@ function rebuildEnv(env) {
  * lockfile lists install scripts (snapshots are built with
  * --ignore-scripts). Output is never captured; a failure only logs.
  */
-async function rebuild({ workspace, path, env, npmPath, timeouts, signal, session, log }) {
+async function rebuild({ workspace, path, env, npmPath, npmArgs = [], timeouts, signal, session, log }) {
   const dir = path === "." ? workspace : join(workspace, ...path.split("/"));
   const started = Date.now();
   let outcome;
   try {
-    const code = await run(npmPath, ["rebuild"], {
+    const code = await run(npmPath, [...npmArgs, "rebuild"], {
       cwd: dir,
       env: rebuildEnv(env),
       timeoutMs: timeouts.rebuildMs,
@@ -1968,6 +1968,8 @@ export async function prepareDependencies({
   proxyUrl,
   token,
   npmPath = "/opt/wardby/bin/npm",
+  // Arguments before npm's own: a toolchain run's forwarding client (`run <address> <token> -- npm`, #599).
+  npmArgs = [],
   log = () => {},
   budgetBytes,
   usedBytes,
@@ -2036,6 +2038,7 @@ export async function prepareDependencies({
           projectPath: path,
           env,
           npmPath,
+          npmArgs,
           log: (event, fields) => say(event, { project: path, ...fields }),
           auth,
           budget,
@@ -2074,6 +2077,7 @@ export async function prepareDependencies({
         path,
         env,
         npmPath,
+        npmArgs,
         timeouts,
         signal: deadline.signal,
         session,

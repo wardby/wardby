@@ -8,6 +8,10 @@
  * decides which image runs next to every coding run that names it, and with
  * what. Each change is audit-logged (event coding.service_catalog.<action>).
  * Built-in entries ship with wardby and change only with a release.
+ *
+ * An entry is a sidecar (a fresh service next to each run) or a toolchain (a
+ * team image the run's commands are forwarded to, sharing its workspace); the
+ * zod schema enforces each kind's fields, so a refusal names the field.
  */
 import { z } from "zod";
 import {
@@ -38,6 +42,8 @@ const UpdateSchema = z
     testEnv: z.unknown().optional(),
     readiness: z.unknown().optional(),
     startCommand: z.unknown().optional(),
+    setupCommand: z.unknown().optional(),
+    hostAliases: z.unknown().optional(),
     resources: z.unknown().optional(),
     dataPath: z.unknown().optional(),
     writablePaths: z.unknown().optional(),
@@ -89,8 +95,18 @@ function refuseBuiltin(key: Key): McpError {
   );
 }
 
+/** What list_services and get_service say of every toolchain: its image's own packages were never checked. */
+export const TOOLCHAIN_PACKAGES_NOTE = "Packages already in this image did not pass the proxy's checks.";
+
 function view(row: CatalogRow) {
-  return { ...catalogEntryFromRow(row), builtin: row.builtin, createdAt: row.createdAt, updatedAt: row.updatedAt };
+  const entry = catalogEntryFromRow(row);
+  return {
+    ...entry,
+    ...(entry.kind === "toolchain" ? { note: TOOLCHAIN_PACKAGES_NOTE } : {}),
+    builtin: row.builtin,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 const keyJsonSchema = {
@@ -110,7 +126,7 @@ const definitionProperties = {
     type: "integer",
     minimum: 1,
     maximum: 65535,
-    description: "The port the service listens on (informational).",
+    description: "Sidecars only (required): the port the service listens on (informational).",
   },
   serviceEnv: {
     type: "object",
@@ -134,7 +150,7 @@ const definitionProperties = {
       failureThreshold: { type: "integer", minimum: 1, maximum: 120 },
     },
     description:
-      "Startup probe: a command in the service's image that succeeds once it accepts connections on 127.0.0.1.",
+      "Sidecars only (required): the startup probe, a command in the service's image that succeeds once it accepts connections on 127.0.0.1.",
   },
   startCommand: {
     type: "array",
@@ -142,7 +158,23 @@ const definitionProperties = {
     maxItems: 16,
     items: { type: "string" },
     description:
-      'The argv that starts the service on the Substrate job launcher: its image\'s ENTRYPOINT + CMD (e.g. ["redis-server", "--dir", "/data"]), or with substrateImage, a script (["/bin/sh", "-c", "..."]) that initialises and runs the service as that image\'s user, and as its last setup step writes the file named by $WARDBY_SERVICE_SETUP_DONE (e.g. `: > "$WARDBY_SERVICE_SETUP_DONE"`): on Substrate such an entry is ready only once that file exists and its readiness command passes. Required on the Substrate job launcher, which refuses an entry without it at dispatch; Docker and Kubernetes run the image\'s own entrypoint and ignore it. Each argument is one line of at most 4096 bytes. To remove it, delete and re-create the entry.',
+      'Sidecars only. The argv that starts the service on the Substrate job launcher: its image\'s ENTRYPOINT + CMD (e.g. ["redis-server", "--dir", "/data"]), or with substrateImage, a script (["/bin/sh", "-c", "..."]) that initialises and runs the service as that image\'s user, and as its last setup step writes the file named by $WARDBY_SERVICE_SETUP_DONE (e.g. `: > "$WARDBY_SERVICE_SETUP_DONE"`): on Substrate such an entry is ready only once that file exists and its readiness command passes. Required on the Substrate job launcher, which refuses an entry without it at dispatch; Docker and Kubernetes run the image\'s own entrypoint and ignore it. Each argument is one line of at most 4096 bytes. To remove it, delete and re-create the entry.',
+  },
+  setupCommand: {
+    type: "array",
+    minItems: 1,
+    maxItems: 16,
+    items: { type: "string" },
+    description:
+      'Toolchains only, optional: an argv run once in the toolchain container, in /workspace, before any of the run\'s commands (e.g. ["/bin/sh", "-c", "render-config > $HOME/app.ini"]). It gets the container\'s environment (the image\'s ENV plus serviceEnv), not the run\'s registry settings, so it can write configuration but not install packages; it must not write into /workspace. Its output is never kept; a non-zero exit fails the run with toolchain_setup_failed. Each argument is one line of at most 4096 bytes.',
+  },
+  hostAliases: {
+    type: "array",
+    minItems: 1,
+    maxItems: 16,
+    items: { type: "string" },
+    description:
+      'Toolchains only, optional: host names the team\'s code hard-codes for its services, such as compose names (e.g. ["elastic", "mq"]). Each resolves to 127.0.0.1 in the run, where every service listens: lower-case host names, at most 16, not "localhost". Applied as hosts entries by the job launcher, since the image cannot edit /etc/hosts itself.',
   },
   resources: {
     type: "object",
@@ -157,7 +189,8 @@ const definitionProperties = {
   },
   dataPath: {
     type: "string",
-    description: "Absolute directory the service writes its data to: an empty volume in each run.",
+    description:
+      "Sidecars only (required): absolute directory the service writes its data to, an empty volume in each run.",
   },
   writablePaths: {
     type: "array",
@@ -173,7 +206,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "list_services",
     scope: "agents:read",
     description:
-      "The coding-run service catalog (name, version, image, substrateImage when set, built in or not): the names a coding agent's codingProfile.services can allow.",
+      "The coding-run service catalog (name, version, kind, image, substrateImage when set, built in or not): the names a coding agent's codingProfile.services can allow. kind is sidecar (a service started next to each run) or toolchain (the image a run's commands run in).",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
       const rows = await ctx.db.codingService.findMany({ orderBy: [{ name: "asc" }, { version: "asc" }] });
@@ -184,7 +217,8 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
           kind: row.kind,
           image: row.image,
           ...(row.substrateImage ? { substrateImage: row.substrateImage } : {}),
-          port: row.port,
+          ...(row.port === null ? {} : { port: row.port }),
+          ...(row.kind === "toolchain" ? { note: TOOLCHAIN_PACKAGES_NOTE } : {}),
           builtin: row.builtin,
         })),
       );
@@ -212,13 +246,21 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "create_service",
     scope: "services:manage",
     description:
-      "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest; kind is sidecar (a fresh instance in each run's pod). Set startCommand for deployments on the Substrate job launcher.",
+      "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest. kind is sidecar (the default: a fresh instance next to each run, declared under services:, needing port, readiness and dataPath; set startCommand for deployments on the Substrate job launcher) or toolchain (a team's own dev image the run's commands run in, sharing its workspace, declared under toolchain:; no port, readiness, startCommand or dataPath; optional setupCommand and hostAliases). Packages already in a toolchain image did not pass the proxy's checks.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["name", "version", "image", "port", "readiness", "resources", "dataPath"],
-      // kind is checked by the zod schema (only "sidecar" today), so a refusal names the field.
-      properties: { ...definitionProperties, kind: { type: "string", description: 'Only "sidecar" today.' } },
+      // The per-kind fields (port, readiness, dataPath for a sidecar) are checked by the zod schema, so a refusal names the field.
+      required: ["name", "version", "image", "resources"],
+      properties: {
+        ...definitionProperties,
+        kind: {
+          type: "string",
+          enum: ["sidecar", "toolchain"],
+          description:
+            '"sidecar" (default): a service started next to each run. "toolchain": the image a run\'s commands run in. It cannot be changed later.',
+        },
+      },
     },
     handler: async (rawArgs: unknown, ctx) => {
       const definition = parse(CodingServiceDefinitionSchema, "create_service arguments", rawArgs);
@@ -241,7 +283,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "update_service",
     scope: "services:manage",
     description:
-      "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it and never change). Runs already dispatched keep the entry they started with. Set startCommand for deployments on the Substrate job launcher.",
+      "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it, and kind, never change). Runs already dispatched keep the entry they started with. Set startCommand on a sidecar for deployments on the Substrate job launcher, or setupCommand and hostAliases on a toolchain.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

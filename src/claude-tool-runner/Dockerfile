@@ -15,6 +15,15 @@ WORKDIR /runner
 COPY src/claude-tool-runner/package.json src/claude-tool-runner/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
+# wardby-cmd (src/command-agent): the toolchain command agent, one static musl binary. Built for
+# the target platform: it is native code. Toolchain runs copy it into the team's image.
+FROM rust:1.99-alpine@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS command-agent
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY src/command-agent/Cargo.toml src/command-agent/Cargo.lock src/command-agent/rust-toolchain.toml ./
+COPY src/command-agent/src ./src
+RUN cargo build --release --locked && install -m 0555 target/release/wardby-cmd /wardby-cmd
+
 # The tool runner every Claude Code run uses; the two targets below add only their toolchain.
 FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS base
 # perl-base: the pinned base image ships an older build; take Debian's security fixes.
@@ -74,6 +83,9 @@ RUN chmod 0755 /opt/wardby/coding-worker/wardby-packages.mjs /opt/wardby/coding-
     && test "$(sh -lc 'command -v wardby-packages')" = /opt/wardby/bin/wardby-packages \
     && test "$(sh -lc 'command -v uv')" = /opt/wardby/bin/uv \
     && /opt/wardby/bin/wardby-packages 2>&1 | grep -q "no package registry is configured"
+# wardby-cmd (the command-agent stage above): the launchers copy it into a toolchain container.
+COPY --from=command-agent /wardby-cmd /opt/wardby/bin/wardby-cmd
+RUN /opt/wardby/bin/wardby-cmd --version | grep -q "protocol 1"
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \

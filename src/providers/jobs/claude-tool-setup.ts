@@ -13,10 +13,18 @@ import { configuredRegistryAdapters } from "../../coding/registry/adapters.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT } from "./docker-isolation.js";
+import { runToolchain } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 
 /** Where the tool runner mounts the repository; the registry's config files live under its .cache. */
 const TOOL_WORKSPACE = "/workspace";
+
+/**
+ * Where a toolchain's command agent listens on the run's loopback, and the run's token file in the
+ * agent folder every launcher mounts into the tool runner (#599). Fixed wire constants, shared
+ * with src/command-agent and the launchers.
+ */
+export const TOOLCHAIN_AGENT = { address: "127.0.0.1:7071", tokenFile: "/opt/wardby-cmd/token" } as const;
 
 /**
  * The tool runner's parseToolSetup bounds (src/claude-tool-runner/command.mjs; a test keeps them
@@ -46,6 +54,8 @@ export interface ClaudeToolSetup {
    * rounds), so the tool runner skips the cache (`reused_workspace`). The proxy refuses it anyway.
    */
   workspaceReused?: true;
+  /** The run's toolchain (#599): the tool runner forwards every command to its agent. */
+  toolchain?: { address: string; tokenFile: string };
 }
 
 export interface ClaudeToolSetupOptions {
@@ -82,6 +92,7 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
         }
       : {}),
     ...(spec.commandTimeouts ? { commandTimeouts: { ...spec.commandTimeouts } } : {}),
+    ...(hasToolchain(spec) ? { toolchain: { ...TOOLCHAIN_AGENT } } : {}),
   };
   const raw = JSON.stringify(setup);
   const limits = CLAUDE_TOOL_SETUP_LIMITS;
@@ -96,4 +107,8 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
     throw new Error("claude_tool_setup_too_large");
   }
   return raw;
+}
+
+function hasToolchain(spec: JobSpec): boolean {
+  return runToolchain(spec.services ?? []) !== undefined;
 }

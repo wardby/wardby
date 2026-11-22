@@ -43,6 +43,15 @@ export function notAllowedServiceSentence(name: string): string {
   return `This repository asks for \`${name}\`, which this agent isn't allowed to use. An admin or the agent's owner can allow it.`;
 }
 
+/** A catalog entry declared under the other key: a toolchain under `services:`, or a sidecar under `toolchain:`. */
+export function misplacedServiceSentence(name: string, kind: "sidecar" | "toolchain"): string {
+  return invalidDeclarationSentence(
+    kind === "toolchain"
+      ? `\`${name}\` is a toolchain; declare it under \`toolchain:\``
+      : `\`${name}\` is a service, not a toolchain; declare it under \`services:\``,
+  );
+}
+
 /**
  * A `service_declaration_invalid` refusal for the resolver: the declared
  * services parsed, but the instruction note they add to the coding task would
@@ -62,13 +71,21 @@ const UNSTARTABLE_REASON_CLAUSES: Record<UnstartableServiceReason, string> = {
   start_command_missing: "its service catalog entry has no start command",
   data_path_reserved: "its service catalog entry's data path overlaps a directory the job launcher reserves",
   setup_too_large: "its service catalog entry's environment and commands are too large for the job launcher",
+  toolchain_unsupported: "toolchains are not supported on this launcher yet",
 };
 
 /** A per-service service_launcher_unsupported sentence (the launcher can run services, but not this one). */
 export function unstartableServiceSentence(service: UnstartableService): string {
   // Only the validated catalog name and a fixed clause: nothing else of the entry reaches a host.
   if (!CODING_SERVICE_NAME.test(service.name)) return LAUNCHER_UNSUPPORTED_SENTENCE;
-  return `This repository asks for \`${service.name}\`, which this wardby deployment can't start: ${UNSTARTABLE_REASON_CLAUSES[service.reason]}.`;
+  const what = service.reason === "toolchain_unsupported" ? "the toolchain " : "";
+  return `This repository asks for ${what}\`${service.name}\`, which this wardby deployment can't start: ${UNSTARTABLE_REASON_CLAUSES[service.reason]}.`;
+}
+
+/** service_launcher_unsupported for a Codex agent whose repository declares a toolchain (until Codex forwarding lands). */
+export function codexToolchainSentence(name: string): string {
+  const named = CODING_SERVICE_NAME.test(name) ? ` \`${name}\`` : "";
+  return `This repository asks for the toolchain${named}, which this agent can't use: toolchains are not supported for Codex agents yet.`;
 }
 
 /** The launcher's error when a service's sidecar never became ready: `coding_service_unready:<name>`. */

@@ -89,6 +89,8 @@ export interface PrepareDependenciesOptions {
   /** The registry token; defaults to the npmrc's _authToken for that registry. */
   readonly token?: string;
   readonly npmPath?: string;
+  /** Arguments before npm's own, e.g. a toolchain run's forwarding client (`run <address> <token> -- npm`). */
+  readonly npmArgs?: readonly string[];
   readonly log?: DependencyCacheLog;
   /** Workspace disk budget in bytes; defaults to CODING_DISK_MB, else DEFAULT_BUDGET_MB. */
   readonly budgetBytes?: number;
@@ -177,6 +179,7 @@ export interface PrepareProjectOptions {
   readonly projectPath?: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly npmPath: string;
+  readonly npmArgs?: readonly string[];
   readonly log: DependencyCacheLog;
   readonly auth: { readonly base: string; readonly token: string } | undefined;
   /** Shared across projects: decremented by what each restore unpacks. */

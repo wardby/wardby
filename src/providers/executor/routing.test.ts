@@ -186,6 +186,7 @@ describe("RoutingExecutor", () => {
 
 describe("RoutingExecutor coding services", () => {
   const SERVICE = {
+    kind: "sidecar" as const,
     name: "fakedb",
     version: "1",
     image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,

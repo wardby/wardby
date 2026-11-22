@@ -1,13 +1,14 @@
-# CodeQL for the desktop viewer's Rust (apps/viewer/src-tauri). Its analysis
-# takes several minutes, so it runs only when Rust changes, plus weekly on main
-# so new queries still reach unchanged code. See codeql.yml for the rest.
+# CodeQL for Wardby's Rust: the desktop viewer (apps/viewer/src-tauri) and the
+# toolchain command agent (src/command-agent). Its analysis takes several
+# minutes, so it runs only when Rust changes, plus weekly on main so new queries
+# still reach unchanged code. See codeql.yml for the rest.
 name: CodeQL (Rust)
 on:
   push:
     branches: [main]
-    paths: ["apps/viewer/src-tauri/**"]
+    paths: ["apps/viewer/src-tauri/**", "src/command-agent/**"]
   pull_request:
-    paths: ["apps/viewer/src-tauri/**"]
+    paths: ["apps/viewer/src-tauri/**", "src/command-agent/**"]
   schedule:
     - cron: "41 4 * * 2"
 permissions:

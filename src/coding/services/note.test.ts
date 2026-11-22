@@ -24,4 +24,31 @@ describe("servicesInstructionNote", () => {
       ].join("\n"),
     );
   });
+
+  it("leaves a sidecar-only note exactly as before when entries carry their kind", () => {
+    const entries = [{ name: "redis", version: "7", testEnv: {}, kind: "sidecar" as const }];
+    expect(servicesInstructionNote(entries)).toBe(
+      servicesInstructionNote([{ name: "redis", version: "7", testEnv: {} }]),
+    );
+  });
+
+  it("says the commands run in the toolchain, never that it is a service on 127.0.0.1", () => {
+    const note = servicesInstructionNote([{ name: "python-dev", version: "3.13", testEnv: {}, kind: "toolchain" }]);
+    expect(note).toBe(
+      "Toolchain for this run: wardby runs your shell commands on this workspace in the `python-dev 3.13` image, with its own interpreters, packages and settings. Use what it already has rather than installing another interpreter or rewriting its configuration.",
+    );
+  });
+
+  it("names the toolchain's variables, then the services", () => {
+    const note = servicesInstructionNote([
+      { name: "python-dev", version: "3.13", testEnv: { APP_ENV: "test" }, kind: "toolchain" },
+      { name: "redis", version: "7", testEnv: {}, kind: "sidecar" },
+    ])!;
+    const lines = note.split("\n");
+    expect(lines[0]).toMatch(/^Toolchain for this run: .* It sets: APP_ENV=test\.$/);
+    expect(lines[1]).toMatch(/^Services for this run:/);
+    expect(lines[2]).toBe("- redis 7");
+    expect(lines[3]).toMatch(/^These variables are already set/);
+    expect(lines).toHaveLength(4);
+  });
 });

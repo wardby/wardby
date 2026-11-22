@@ -16,8 +16,13 @@ import {
   MAX_CODING_SERVICES,
 } from "../protocol.js";
 
-/** "sidecar": a fresh instance in each run's pod. "external" is reserved for shared services reached through the proxy. */
-export const CODING_SERVICE_KINDS = ["sidecar"] as const;
+/**
+ * CODING_SERVICE_KINDS: "sidecar", a fresh instance in each run's pod; "toolchain", a team's own dev
+ * image that the run's commands are forwarded to (wardby-cmd), sharing the run's /workspace (a run
+ * has at most one). "external" is reserved for shared services reached through the proxy.
+ */
+export const CODING_SERVICE_KINDS = ["sidecar", "toolchain"] as const;
+export type CodingServiceKind = (typeof CODING_SERVICE_KINDS)[number];
 /** How many service names one agent may be allowed. */
 export const MAX_AGENT_SERVICES = 16;
 export const MAX_SERVICE_ENV = 32;
@@ -92,20 +97,57 @@ const imageDigestSchema = z
   .max(512)
   .refine(isRepositoryDigest, "must be a registry digest (repo@sha256:<64 hex>)");
 
-const serviceFields = {
+/** An argv of 1 to 16 non-empty arguments, each one line of at most MAX_START_ARG_BYTES. */
+const commandSchema = z
+  .array(singleLine(MAX_START_ARG_BYTES).refine((value) => value.length > 0, "must not be empty"))
+  .min(1)
+  .max(16);
+
+/** Fields every kind has. */
+const commonFields = {
   name: codingServiceNameSchema,
   version: codingServiceVersionSchema,
   image: imageDigestSchema,
   /**
    * The image the Substrate launcher runs instead of `image` (Docker and Kubernetes never read it):
    * for a service whose usual image cannot start there, as Substrate runs a service container as
-   * the image's default user without the capabilities a chown/gosu entrypoint needs. An entry that
+   * the image's default user without the capabilities a chown/gosu entrypoint needs. A sidecar that
    * sets it also sets startCommand, since that image's own entrypoint is not used.
    */
   substrateImage: imageDigestSchema.optional(),
-  port: z.number().int().min(1).max(65_535),
   serviceEnv: serviceEnvSchema.default({}),
   testEnv: CodingServiceTestEnvSchema.default({}),
+  resources: CodingServiceResourcesSchema,
+  writablePaths: z.array(pathSchema).max(MAX_WRITABLE_PATHS).default([]),
+};
+
+const onlyForToolchain = z.undefined({ error: "is only for a toolchain" }).optional();
+
+/** How many host names one toolchain entry may alias to the run's loopback. */
+export const MAX_HOST_ALIASES = 16;
+/** A lower-case host name: one or more DNS labels, at most 253 characters. */
+const HOST_ALIAS = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+/**
+ * Host names a team's code hard-codes for its services (compose names such as `elastic`), resolved
+ * to 127.0.0.1 in the run, where every service listens. Applied as real hosts entries by the
+ * launcher: the team image's root filesystem is read-only, so it cannot add them itself.
+ */
+const hostAliasesSchema = z
+  .array(
+    z
+      .string()
+      .regex(HOST_ALIAS, "must be a lower-case host name")
+      .refine((name) => name !== "localhost", "is already 127.0.0.1"),
+  )
+  .min(1)
+  .max(MAX_HOST_ALIASES)
+  .refine((names) => new Set(names).size === names.length, "must not repeat a name");
+const notForToolchain = z.undefined({ error: "is not used by a toolchain" }).optional();
+
+const sidecarFields = {
+  ...commonFields,
+  kind: z.literal("sidecar"),
+  port: z.number().int().min(1).max(65_535),
   readiness: CodingServiceReadinessSchema,
   /**
    * The argv that starts the service on the Substrate launcher, which overrides the container's
@@ -113,21 +155,51 @@ const serviceFields = {
    * initialises and runs the service as that image's non-root user. Docker and Kubernetes run the
    * image's own entrypoint and ignore it. Each argument is one line of at most MAX_START_ARG_BYTES.
    */
-  startCommand: z
-    .array(singleLine(MAX_START_ARG_BYTES).refine((value) => value.length > 0, "must not be empty"))
-    .min(1)
-    .max(16)
-    .optional(),
-  resources: CodingServiceResourcesSchema,
+  startCommand: commandSchema.optional(),
   dataPath: pathSchema,
-  writablePaths: z.array(pathSchema).max(MAX_WRITABLE_PATHS).default([]),
+  setupCommand: onlyForToolchain,
+  hostAliases: onlyForToolchain,
 };
+
+const toolchainFields = {
+  ...commonFields,
+  kind: z.literal("toolchain"),
+  /**
+   * Run once in the toolchain container before any forwarded command (cwd /workspace), with the
+   * container's environment; its output is never captured, only its exit code. Same bounds as
+   * startCommand.
+   */
+  setupCommand: commandSchema.optional(),
+  hostAliases: hostAliasesSchema.optional(),
+  port: notForToolchain,
+  readiness: notForToolchain,
+  startCommand: notForToolchain,
+  dataPath: notForToolchain,
+};
+
+/**
+ * Directories a toolchain container's launcher mounts itself (the shared workspace, the command
+ * agent's directory, HOME, wardby's run inputs): a writable path may not be or nest with one.
+ */
+export const TOOLCHAIN_RESERVED_PATHS = ["/workspace", "/opt/wardby-cmd", "/home/wardby", "/run/wardby"] as const;
+
+const overlaps = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+
+function checkMounts(paths: readonly string[], ctx: z.RefinementCtx): void {
+  for (const [index, a] of paths.entries()) {
+    for (const b of paths.slice(index + 1)) {
+      if (overlaps(a, b)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["writablePaths"], message: `${a} and ${b} overlap` });
+      }
+    }
+  }
+}
 
 /**
  * Every mount is its own emptyDir, so no two may be the same directory or nest; and a Substrate-only
  * image comes with the start command that replaces its entrypoint.
  */
-function checkEntry(
+function checkSidecar(
   value: { dataPath: string; writablePaths: string[]; substrateImage?: string; startCommand?: string[] },
   ctx: z.RefinementCtx,
 ): void {
@@ -138,35 +210,88 @@ function checkEntry(
       message: "is required with substrateImage (that image's own entrypoint is not used)",
     });
   }
-  const paths = [value.dataPath, ...value.writablePaths];
-  for (const [index, a] of paths.entries()) {
-    for (const b of paths.slice(index + 1)) {
-      if (a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["writablePaths"], message: `${a} and ${b} overlap` });
-      }
+  checkMounts([value.dataPath, ...value.writablePaths], ctx);
+}
+
+/** A toolchain's writable paths are emptyDirs too, and stay clear of the directories its launcher mounts. */
+function checkToolchain(value: { writablePaths: string[] }, ctx: z.RefinementCtx): void {
+  checkMounts(value.writablePaths, ctx);
+  for (const path of value.writablePaths) {
+    const reserved = TOOLCHAIN_RESERVED_PATHS.find((root) => overlaps(path, root));
+    if (reserved !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["writablePaths"],
+        message: `${path} overlaps ${reserved}, which wardby mounts in a toolchain`,
+      });
     }
   }
 }
 
-/** One run's snapshot of an entry: what dispatch stores on CodingRun.services and the launcher reads. */
-export const ResolvedCodingServiceSchema = z
-  .object({
-    ...serviceFields,
-    /** The catalog row's id and updatedAt (ISO 8601) when the snapshot was taken: identity and version for the warm fingerprint. */
-    catalogId: z.string().max(64).optional(),
-    catalogUpdatedAt: z.string().max(40).optional(),
-  })
-  .strict()
-  .superRefine(checkEntry);
+/** An entry without a kind (every snapshot and row from before toolchains) is a sidecar. */
+function defaultKind(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  return (value as { kind?: unknown }).kind === undefined ? { ...value, kind: "sidecar" } : value;
+}
 
-/** A catalog entry, as create_service takes it and the CodingService table holds it. */
-export const CodingServiceDefinitionSchema = z
-  .object({ ...serviceFields, kind: z.enum(CODING_SERVICE_KINDS).default("sidecar") })
-  .strict()
-  .superRefine(checkEntry);
+const snapshotFields = {
+  /** The catalog row's id and updatedAt (ISO 8601) when the snapshot was taken: identity and version for the warm fingerprint. */
+  catalogId: z.string().max(64).optional(),
+  catalogUpdatedAt: z.string().max(40).optional(),
+};
+
+/** One run's snapshot of an entry: what dispatch stores on CodingRun.services and the launcher reads. */
+export const ResolvedCodingServiceSchema = z.preprocess(
+  defaultKind,
+  z.discriminatedUnion("kind", [
+    z
+      .object({ ...sidecarFields, ...snapshotFields })
+      .strict()
+      .superRefine(checkSidecar),
+    z
+      .object({ ...toolchainFields, ...snapshotFields })
+      .strict()
+      .superRefine(checkToolchain),
+  ]),
+);
+
+/** A catalog entry, as create_service takes it and the CodingService table holds it (kind defaults to sidecar). */
+export const CodingServiceDefinitionSchema = z.preprocess(
+  defaultKind,
+  z.discriminatedUnion("kind", [
+    z.object(sidecarFields).strict().superRefine(checkSidecar),
+    z.object(toolchainFields).strict().superRefine(checkToolchain),
+  ]),
+);
 
 export type ResolvedCodingService = z.output<typeof ResolvedCodingServiceSchema>;
+export type ResolvedSidecarService = Extract<ResolvedCodingService, { kind: "sidecar" }>;
+export type ResolvedToolchainService = Extract<ResolvedCodingService, { kind: "toolchain" }>;
 export type CodingServiceDefinition = z.output<typeof CodingServiceDefinitionSchema>;
+export type CodingSidecarDefinition = Extract<CodingServiceDefinition, { kind: "sidecar" }>;
+export type CodingToolchainDefinition = Extract<CodingServiceDefinition, { kind: "toolchain" }>;
+
+export function isSidecarService(service: ResolvedCodingService): service is ResolvedSidecarService {
+  return service.kind === "sidecar";
+}
+
+export function isToolchainService(service: ResolvedCodingService): service is ResolvedToolchainService {
+  return service.kind === "toolchain";
+}
+
+/**
+ * A sidecar-only step's guard. Throws "coding_service_toolchain_unsupported" for a toolchain: a
+ * launcher path that has no toolchain handling must never quietly treat one as a sidecar or skip it.
+ */
+export function sidecarOnly(service: ResolvedCodingService): ResolvedSidecarService {
+  if (service.kind !== "sidecar") throw new Error("coding_service_toolchain_unsupported");
+  return service;
+}
+
+/** The run's toolchain, if it has one (resolution allows at most one). */
+export function runToolchain(services: readonly ResolvedCodingService[]): ResolvedToolchainService | undefined {
+  return services.find(isToolchainService);
+}
 
 export const StoredCodingServicesSchema = z.array(ResolvedCodingServiceSchema).max(MAX_CODING_SERVICES);
 
@@ -179,14 +304,24 @@ export interface CodingServiceRow {
   kind: string;
   image: string;
   substrateImage?: string | null;
-  port: number;
+  /** Null for a toolchain, as are readiness and dataPath. */
+  port?: number | null;
   serviceEnv: unknown;
   testEnv: unknown;
-  readiness: unknown;
+  readiness?: unknown;
   startCommand: unknown;
+  /** Toolchains only; null otherwise. Absent on reads from before toolchains. */
+  setupCommand?: unknown;
+  /** Toolchains only; null otherwise. Absent on reads from before host aliases. */
+  hostAliases?: unknown;
   resources: unknown;
-  dataPath: string;
+  dataPath?: string | null;
   writablePaths: unknown;
+}
+
+/** A row's nullable column, left out when null (a toolchain has no port, readiness or data path). */
+function column<Key extends string>(key: Key, value: unknown): Partial<Record<Key, unknown>> {
+  return value === null || value === undefined ? {} : ({ [key]: value } as Record<Key, unknown>);
 }
 
 /** A row as its definition. Throws when the row was edited out of shape (the operator log keeps the name). */
@@ -196,28 +331,41 @@ export function catalogEntryFromRow(row: CodingServiceRow): CodingServiceDefinit
     version: row.version,
     kind: row.kind,
     image: row.image,
-    ...(row.substrateImage === null || row.substrateImage === undefined ? {} : { substrateImage: row.substrateImage }),
-    port: row.port,
+    ...column("substrateImage", row.substrateImage),
+    ...column("port", row.port),
     serviceEnv: row.serviceEnv,
     testEnv: row.testEnv,
-    readiness: row.readiness,
-    ...(row.startCommand === null || row.startCommand === undefined ? {} : { startCommand: row.startCommand }),
+    ...column("readiness", row.readiness),
+    ...column("startCommand", row.startCommand),
+    ...column("setupCommand", row.setupCommand),
+    ...column("hostAliases", row.hostAliases),
     resources: row.resources,
-    dataPath: row.dataPath,
+    ...column("dataPath", row.dataPath),
     writablePaths: row.writablePaths,
   });
   if (!parsed.success) throw new Error(`coding_service_catalog_invalid:${row.name} ${row.version}`);
   return parsed.data;
 }
 
-/** The per-run snapshot of an entry. */
+/** The per-run snapshot of an entry, kind included. */
+export function resolvedFromDefinition(
+  definition: CodingSidecarDefinition,
+  catalog?: { id?: string; updatedAt?: Date },
+): ResolvedSidecarService;
+export function resolvedFromDefinition(
+  definition: CodingToolchainDefinition,
+  catalog?: { id?: string; updatedAt?: Date },
+): ResolvedToolchainService;
+export function resolvedFromDefinition(
+  definition: CodingServiceDefinition,
+  catalog?: { id?: string; updatedAt?: Date },
+): ResolvedCodingService;
 export function resolvedFromDefinition(
   definition: CodingServiceDefinition,
   catalog?: { id?: string; updatedAt?: Date },
 ): ResolvedCodingService {
-  const { kind: _kind, ...service } = definition;
   return {
-    ...service,
+    ...definition,
     ...(catalog?.id === undefined ? {} : { catalogId: catalog.id }),
     ...(catalog?.updatedAt === undefined ? {} : { catalogUpdatedAt: catalog.updatedAt.toISOString() }),
   };
@@ -269,7 +417,12 @@ export function parseAllowedServiceNames(value: unknown): string[] {
   return AllowedServiceNamesSchema.parse(value);
 }
 
-/** What the worker receives for each service (CodingTaskInput.services): never the image or the service's own environment. */
+/**
+ * What the worker receives for each service (CodingTaskInput.services): never the image or the
+ * service's own environment, and not its kind: the Claude tool runner learns of a toolchain from its
+ * own setup (claude-tool-setup.ts), so the worker input format, which the published Codex driver
+ * image must match exactly, is unchanged by toolchains (#599).
+ */
 export function workerServices(
   services: readonly ResolvedCodingService[],
 ): Array<{ name: string; version: string; testEnv: Record<string, string> }> {

@@ -16,6 +16,19 @@ import {
 
 const postgres16 = BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!;
 
+/** A team's dev image as a toolchain entry. */
+const PYTHON_DEV = {
+  name: "python-dev",
+  version: "3.13",
+  kind: "toolchain" as const,
+  image: `registry.example/team/python-dev@sha256:${"d".repeat(64)}`,
+  serviceEnv: { APP_CONFIG: "/home/wardby/app.ini" },
+  testEnv: { APP_ENV: "test" },
+  resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 1024 },
+  writablePaths: ["/tmp"],
+  setupCommand: ["/bin/sh", "-c", "render-config > /home/wardby/app.ini"],
+};
+
 describe("built-in coding services", () => {
   it("ships postgres 15, 16 and 17, redis 7 and mysql 8", () => {
     expect(BUILTIN_CODING_SERVICES.map((s) => `${s.name} ${s.version}`)).toEqual([
@@ -31,6 +44,7 @@ describe("built-in coding services", () => {
     for (const service of BUILTIN_CODING_SERVICES) {
       expect(CodingServiceDefinitionSchema.parse(service)).toEqual(service);
       expect(service.image).toMatch(/^docker\.io\/(library\/(postgres|mysql)|valkey\/valkey)@sha256:[a-f0-9]{64}$/);
+      expect(service.kind).toBe("sidecar");
       expect(service.readiness.command).toContain("127.0.0.1");
       expect(Object.values(service.testEnv).join(" ")).not.toContain("localhost");
     }
@@ -190,11 +204,83 @@ describe("CodingServiceDefinitionSchema", () => {
   });
 });
 
+describe("CodingServiceDefinitionSchema for a toolchain", () => {
+  it("accepts an image, environments, resources, writable paths and a setup command", () => {
+    expect(CodingServiceDefinitionSchema.parse(PYTHON_DEV)).toEqual(PYTHON_DEV);
+    const { setupCommand: _setupCommand, serviceEnv: _s, testEnv: _t, writablePaths: _w, ...minimal } = PYTHON_DEV;
+    expect(CodingServiceDefinitionSchema.parse(minimal)).toEqual({
+      ...minimal,
+      serviceEnv: {},
+      testEnv: {},
+      writablePaths: [],
+    });
+  });
+
+  it.each([
+    ["dataPath", { dataPath: "/data" }],
+    ["readiness", { readiness: postgres16.readiness }],
+    ["port", { port: 7071 }],
+    ["startCommand", { startCommand: ["serve"] }],
+  ])("refuses %s, naming the field", (field, patch) => {
+    const result = CodingServiceDefinitionSchema.safeParse({ ...PYTHON_DEV, ...patch });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toContainEqual(
+      expect.objectContaining({ path: [field], message: "is not used by a toolchain" }),
+    );
+  });
+
+  it("refuses a setup command on a sidecar, naming the field", () => {
+    const result = CodingServiceDefinitionSchema.safeParse({ ...postgres16, setupCommand: ["true"] });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toContainEqual(
+      expect.objectContaining({ path: ["setupCommand"], message: "is only for a toolchain" }),
+    );
+  });
+
+  it("still requires a sidecar's data path and readiness command", () => {
+    const { dataPath: _dataPath, ...noData } = postgres16;
+    const { readiness: _readiness, ...noReadiness } = postgres16;
+    expect(CodingServiceDefinitionSchema.safeParse(noData).error?.issues).toContainEqual(
+      expect.objectContaining({ path: ["dataPath"] }),
+    );
+    expect(CodingServiceDefinitionSchema.safeParse(noReadiness).error?.issues).toContainEqual(
+      expect.objectContaining({ path: ["readiness"] }),
+    );
+  });
+
+  it("accepts a setup-script argument of up to 4096 bytes", () => {
+    const setupCommand = ["/bin/sh", "-c", "x".repeat(4096)];
+    expect(CodingServiceDefinitionSchema.safeParse({ ...PYTHON_DEV, setupCommand }).success).toBe(true);
+  });
+
+  it.each([
+    ["empty", []],
+    ["17 arguments", Array.from({ length: 17 }, () => "a")],
+    ["an empty argument", [""]],
+    ["a multi-line argument", ["a\nb"]],
+    ["an argument over 4096 bytes", ["x".repeat(4097)]],
+    ["a string", "render-config"],
+  ])("refuses a setup command that is %s", (_label, setupCommand) => {
+    expect(CodingServiceDefinitionSchema.safeParse({ ...PYTHON_DEV, setupCommand }).success).toBe(false);
+  });
+
+  it.each([["/workspace"], ["/workspace/build"], ["/opt"], ["/opt/wardby-cmd"], ["/home/wardby"], ["/run/wardby/x"]])(
+    "refuses writable path %s, which wardby mounts in a toolchain",
+    (path) => {
+      expect(CodingServiceDefinitionSchema.safeParse({ ...PYTHON_DEV, writablePaths: [path] }).success).toBe(false);
+    },
+  );
+
+  it("refuses a tag instead of a digest", () => {
+    expect(CodingServiceDefinitionSchema.safeParse({ ...PYTHON_DEV, image: "python:3.13" }).success).toBe(false);
+  });
+});
+
 describe("stored services", () => {
   const resolved = resolvedFromDefinition(postgres16);
 
-  it("snapshots an entry without its kind and parses it back", () => {
-    expect(resolved).not.toHaveProperty("kind");
+  it("snapshots an entry with its kind and parses it back", () => {
+    expect(resolved.kind).toBe("sidecar");
     expect(parseStoredServices([resolved])).toEqual([resolved]);
     expect(parseStoredServices(null)).toEqual([]);
     expect(parseStoredServices([])).toEqual([]);
@@ -235,9 +321,82 @@ describe("stored services", () => {
     expect("substrateImage" in fromRow).toBe(false);
   });
 
+  it("reads a snapshot from before kinds were stored as a sidecar", () => {
+    const { kind: _kind, ...before } = resolved;
+    expect(parseStoredServices([before])).toEqual([resolved]);
+  });
+
+  it("snapshots a toolchain with its kind and setup command", () => {
+    const toolchain = resolvedFromDefinition(CodingServiceDefinitionSchema.parse(PYTHON_DEV), {
+      id: "svc_1",
+      updatedAt: new Date("2026-11-22T00:00:00.000Z"),
+    });
+    expect(toolchain).toMatchObject({ kind: "toolchain", setupCommand: PYTHON_DEV.setupCommand, catalogId: "svc_1" });
+    expect(parseStoredServices([toolchain])).toEqual([toolchain]);
+    expect(() => parseStoredServices([{ ...toolchain, dataPath: "/data" }])).toThrow();
+  });
+
   it("hands the worker only name, version and test variables", () => {
     expect(workerServices([resolved])).toEqual([{ name: "postgres", version: "16", testEnv: postgres16.testEnv }]);
     expect(JSON.stringify(workerServices([resolved]))).not.toContain("cloudnative-pg");
+  });
+
+  it("gives the worker a toolchain's name and test variables only: the input format is unchanged (#599)", () => {
+    const toolchain = resolvedFromDefinition(CodingServiceDefinitionSchema.parse(PYTHON_DEV));
+    expect(workerServices([toolchain, resolved])).toEqual([
+      { name: "python-dev", version: "3.13", testEnv: PYTHON_DEV.testEnv },
+      { name: "postgres", version: "16", testEnv: postgres16.testEnv },
+    ]);
+    const text = JSON.stringify(workerServices([toolchain]));
+    expect(text).not.toContain("registry.example");
+    expect(text).not.toContain("render-config");
+  });
+});
+
+describe("toolchain hostAliases (#599)", () => {
+  const base = {
+    name: "python-dev",
+    version: "3.13",
+    kind: "toolchain",
+    image: `registry.example/team@sha256:${"a".repeat(64)}`,
+    resources: { cpuMillicores: 500, memoryMib: 512, diskMib: 256 },
+  };
+  const parse = (extra: Record<string, unknown>) => CodingServiceDefinitionSchema.safeParse({ ...base, ...extra });
+
+  it("accepts lower-case host names and keeps them in the run's snapshot", () => {
+    const parsed = parse({ hostAliases: ["elastic", "mq.internal", "db-1"] });
+    expect(parsed.success).toBe(true);
+    const resolved = resolvedFromDefinition(CodingServiceDefinitionSchema.parse({ ...base, hostAliases: ["elastic"] }));
+    expect(resolved).toMatchObject({ kind: "toolchain", hostAliases: ["elastic"] });
+  });
+
+  it.each([
+    [["Elastic"]],
+    [["elastic search"]],
+    [["-elastic"]],
+    [["localhost"]],
+    [["elastic", "elastic"]],
+    [[]],
+    [Array.from({ length: 17 }, (_, i) => `h${i}`)],
+  ])("refuses %j", (hostAliases) => {
+    expect(parse({ hostAliases }).success).toBe(false);
+  });
+
+  it("is only for a toolchain", () => {
+    const sidecar = BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!;
+    expect(CodingServiceDefinitionSchema.safeParse({ ...sidecar, hostAliases: ["elastic"] }).success).toBe(false);
+  });
+
+  it("reads a row's hostAliases column, and a row without it", () => {
+    const row = {
+      ...base,
+      serviceEnv: {},
+      testEnv: {},
+      startCommand: null,
+      writablePaths: [],
+    };
+    expect(catalogEntryFromRow({ ...row, hostAliases: ["elastic"] })).toMatchObject({ hostAliases: ["elastic"] });
+    expect(catalogEntryFromRow({ ...row, hostAliases: null })).not.toHaveProperty("hostAliases");
   });
 });
 
@@ -255,6 +414,27 @@ describe("parseAllowedServiceNames", () => {
 describe("catalogEntryFromRow", () => {
   it("maps a row to its definition", () => {
     expect(catalogEntryFromRow({ startCommand: null, ...postgres16 })).toEqual(postgres16);
+    expect(catalogEntryFromRow({ startCommand: null, setupCommand: null, ...postgres16 })).toEqual(postgres16);
+  });
+
+  it("maps a toolchain row, whose sidecar-only columns are null", () => {
+    const row = {
+      ...PYTHON_DEV,
+      substrateImage: null,
+      port: null,
+      readiness: null,
+      startCommand: null,
+      dataPath: null,
+    };
+    expect(catalogEntryFromRow(row)).toEqual(CodingServiceDefinitionSchema.parse(PYTHON_DEV));
+    const { setupCommand: _setupCommand, ...withoutSetup } = row;
+    expect("setupCommand" in catalogEntryFromRow({ ...withoutSetup, setupCommand: null })).toBe(false);
+  });
+
+  it("refuses a toolchain row that has a sidecar's column", () => {
+    expect(() => catalogEntryFromRow({ ...PYTHON_DEV, startCommand: null, dataPath: "/data" })).toThrow(
+      "coding_service_catalog_invalid:python-dev 3.13",
+    );
   });
 
   it("refuses a row edited out of shape, naming only the entry", () => {

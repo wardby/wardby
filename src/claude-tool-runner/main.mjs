@@ -8,12 +8,14 @@ import { z } from "zod";
 import {
   MAX_COMMAND_BYTES,
   MIN_COMMAND_TIMEOUT_MS,
+  COMMAND_AGENT,
   TOOL_SETUP_ENV,
   commandEnvironment,
   commandTimeoutLimits,
   parseToolSetup,
   prepareCommandWorkspace,
   runCommand,
+  toolchainEnvironment,
 } from "./command.mjs";
 
 const SOCKET_PATH = "/run/wardby/tool/runner.sock";
@@ -124,6 +126,18 @@ function dependencyGate(initialSetup, workspacePath, loadDependencyCache, loadPy
   let commandStarted = false;
   const env = () => commandEnvironment(setup, workspacePath);
   /**
+   * The dependency cache's npm, as a command would run it: on a toolchain run (#599) forwarded to the
+   * toolchain (its own Node and npm, its PATH) with the toolchain's environment; else the shim here.
+   */
+  const npm = () =>
+    setup.toolchain
+      ? {
+          env: toolchainEnvironment(setup, workspacePath),
+          npmPath: COMMAND_AGENT,
+          npmArgs: ["run", setup.toolchain.address, setup.toolchain.tokenFile, "--", "npm"],
+        }
+      : { env: env() };
+  /**
    * Once, before the first command (or the dependency cache, whichever comes first): points the
    * workspace's uv.lock and poetry.lock files at the proxy, since the sandbox reaches nothing else, and
    * adds Poetry's source credentials to every later command. Best effort: any failure leaves the files as found.
@@ -191,7 +205,7 @@ function dependencyGate(initialSetup, workspacePath, loadDependencyCache, loadPy
           if (totalMs <= 0) return { projects: [], reason: "timeout" };
           return await module.prepareDependencies({
             workspace: workspacePath,
-            env: env(),
+            ...npm(),
             budgetBytes: budget.budgetBytes,
             usedBytes: budget.usedBytes,
             signal,

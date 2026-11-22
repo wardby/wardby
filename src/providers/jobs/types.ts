@@ -17,7 +17,12 @@ import type { CollectExclusions } from "../../coding/collect-exclude.js";
 import type { ResolvedCodingService } from "../../coding/services/catalog.js";
 
 /** Why a launcher cannot start one of a run's services (WorkspaceJobLauncher.unstartableServices). */
-export type UnstartableServiceReason = "start_command_missing" | "data_path_reserved" | "setup_too_large";
+export type UnstartableServiceReason =
+  | "start_command_missing"
+  | "data_path_reserved"
+  | "setup_too_large"
+  /** A toolchain, on a launcher that does not start toolchains yet. */
+  | "toolchain_unsupported";
 /** A service a launcher cannot start: its validated catalog name and why. */
 export interface UnstartableService {
   name: string;

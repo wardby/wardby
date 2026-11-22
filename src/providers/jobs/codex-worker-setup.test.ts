@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { collectExclusions } from "../../coding/collect-exclude.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
-import type { ResolvedCodingService } from "../../coding/services/catalog.js";
+import type { ResolvedSidecarService } from "../../coding/services/catalog.js";
 import {
   CODEX_WORKER_SETUP_LIMITS,
   codexWorkerSetup,
@@ -94,7 +94,8 @@ describe("codexWorkerSetup", () => {
   });
 });
 
-const FAKE_SERVICE: ResolvedCodingService = {
+const FAKE_SERVICE: ResolvedSidecarService = {
+  kind: "sidecar",
   name: "fakedb",
   version: "1",
   image: `registry.example/fakedb@sha256:${"b".repeat(64)}`,

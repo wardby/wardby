@@ -32,6 +32,7 @@ import { readRepoPackages } from "./repo-packages.js";
 import {
   STARTER_SERVICES_BRANCH,
   commitStarterServices,
+  declaredServicesLabel,
   inspectDeclaredServices,
   repoDefaultBranch,
   starterDeclaredServices,
@@ -374,7 +375,7 @@ async function prepareServices(
     return [];
   }
   if (declared.kind === "valid") {
-    const list = declared.services.map((service) => `${service.name} ${service.version}`).join(", ");
+    const list = declaredServicesLabel(declared);
     deps.log(`✓ .wardby/services.yaml on ${branch} declares: ${list || "no services"}`);
     await pullServiceImages(declared.services, deps);
     return declared.services.map((service) => service.name);

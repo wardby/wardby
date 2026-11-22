@@ -46,6 +46,7 @@ import {
   WORKER_PATHS,
 } from "./docker-isolation.js";
 import type { CodingProvider } from "../../coding/provider.js";
+import { isToolchainService, sidecarOnly, type ResolvedCodingService } from "../../coding/services/catalog.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   assertServiceContainerInspection,
@@ -70,6 +71,7 @@ import type {
   JobStatus,
   MaterializedWorkspace,
   MaterializeWorkspaceOptions,
+  UnstartableService,
   WorkspaceJobLauncher,
 } from "./types.js";
 import { replaceDirectoryFromStaging, takeResultBundle } from "./workspace-swap.js";
@@ -687,6 +689,16 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     return dockerSupportsServicesFor(provider);
   }
 
+  /**
+   * A toolchain (#599) is started only by the Kubernetes launcher so far, so dispatch refuses it here
+   * with `toolchain_unsupported` instead of the run failing at launch.
+   */
+  unstartableServices(services: readonly ResolvedCodingService[]): UnstartableService[] {
+    return services
+      .filter(isToolchainService)
+      .map((service) => ({ name: service.name, reason: "toolchain_unsupported" }));
+  }
+
   async launch(spec: JobSpec): Promise<JobHandle> {
     await this.ready;
     return this.withRun(spec.runId, async () => this.launchLocked(spec));
@@ -1124,7 +1136,8 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     failure: ServiceFailure,
     onProbeFailed: (attempts: number) => Promise<void>,
   ): Promise<number> {
-    const { command, periodSeconds, timeoutSeconds, failureThreshold } = planned.service.readiness;
+    // Type-only change for the toolchain kind (#599): only a sidecar has a catalog readiness command.
+    const { command, periodSeconds, timeoutSeconds, failureThreshold } = sidecarOnly(planned.service).readiness;
     const name = planned.service.name;
     let failures = 0;
     for (;;) {

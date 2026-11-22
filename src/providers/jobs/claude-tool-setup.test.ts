@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
-import { MAX_AGENT_SERVICES, MAX_SERVICE_ENV, resolvedFromDefinition } from "../../coding/services/catalog.js";
+import {
+  MAX_AGENT_SERVICES,
+  MAX_SERVICE_ENV,
+  resolvedFromDefinition,
+  type ResolvedToolchainService,
+} from "../../coding/services/catalog.js";
 import {
   MAX_ENV_ENTRIES,
   MAX_ENV_VALUE_BYTES,
@@ -15,7 +20,7 @@ import {
   parseToolSetup,
 } from "../../claude-tool-runner/command.mjs";
 import { MAX_CLAUDE_COMMAND_TIMEOUT_MS } from "../../coding/command-timeouts.js";
-import { CLAUDE_TOOL_SETUP_LIMITS, claudeToolSetup } from "./claude-tool-setup.js";
+import { CLAUDE_TOOL_SETUP_LIMITS, TOOLCHAIN_AGENT, claudeToolSetup } from "./claude-tool-setup.js";
 import { CLAUDE_TOOL_SETUP_ENV } from "./docker-isolation.js";
 import type { JobSpec } from "./types.js";
 
@@ -143,6 +148,20 @@ describe("claudeToolSetup", () => {
     expect(JSON.parse(claudeToolSetup({ ...spec, dependencyCache: true }, CAPABILITY))).toMatchObject({
       dependencyCache: true,
     });
+  });
+
+  it("names a toolchain's agent only when the run has a toolchain service, and the tool runner reads it back", () => {
+    const { port: _port, readiness: _readiness, dataPath: _dataPath, startCommand: _start, ...shared } = POSTGRES;
+    const toolchain: ResolvedToolchainService = { ...shared, name: "python-dev", kind: "toolchain" };
+    const raw = claudeToolSetup({ ...spec, services: [POSTGRES, toolchain] }, CAPABILITY);
+    expect(JSON.parse(raw).toolchain).toEqual({ address: "127.0.0.1:7071", tokenFile: "/opt/wardby-cmd/token" });
+    expect(TOOLCHAIN_AGENT).toEqual({ address: "127.0.0.1:7071", tokenFile: "/opt/wardby-cmd/token" });
+    expect(parseToolSetup(raw).toolchain).toEqual(TOOLCHAIN_AGENT);
+    for (const services of [undefined, [POSTGRES], [{ ...POSTGRES, kind: "sidecar" as const }]]) {
+      const plain = claudeToolSetup({ ...spec, services }, CAPABILITY);
+      expect(JSON.parse(plain)).not.toHaveProperty("toolchain");
+      expect(parseToolSetup(plain)).not.toHaveProperty("toolchain");
+    }
   });
 
   it("refuses a Codex spec", () => {
