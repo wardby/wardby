@@ -1,9 +1,9 @@
 ---
 id: errors/service-launcher-unsupported
 title: Services are not available to this run
-summary: Wardby refused the coding run because the repository declares services and this deployment cannot start them, or, on Substrate, one entry has no startCommand, a reserved data path, or a start script that is too large.
+summary: Wardby refused the coding run because the repository declares services and this deployment cannot start them, on Substrate one entry has no startCommand, a reserved data path, or a start script that is too large, or it declares a toolchain on a launcher or for an agent that can't use one.
 audience: operator
-tags: [error, coding-agents, services, kubernetes, docker, substrate, startCommand, refusal]
+tags: [error, coding-agents, services, kubernetes, docker, substrate, startCommand, toolchain, refusal]
 appliesTo: >=0.2.1
 ---
 
@@ -40,6 +40,17 @@ services need the Kubernetes, Docker or Substrate job launcher."
 | its service catalog entry's environment and commands are too large for the job launcher | The start script, with the entry's `serviceEnv`, is over 16 KiB for the service or 64 KiB for the run's services together (JSON-escaped). Trim the entry's `serviceEnv` or `startCommand`.                                 |
 
 Built-in entries have a start command and pass these checks.
+
+## A toolchain this launcher or agent can't use
+
+"This repository asks for the toolchain `<name>`, which this wardby deployment
+can't start: toolchains are not supported on this launcher yet." or "...which
+this agent can't use: toolchains are not supported for Codex agents yet."
+
+A [toolchain](../coding-toolchain.md) runs only for Claude Code agents on the
+Kubernetes job launcher. Run the repository with a Claude Code agent on a
+Kubernetes deployment, or remove the `toolchain:` key from
+`.wardby/services.yaml` on the base branch.
 
 This error only applies to an agent that already allows at least one service
 (`codingProfile.services` is non-empty): wardby reads a repository's
