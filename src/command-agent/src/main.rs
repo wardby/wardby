@@ -6,6 +6,7 @@
 //! wardby-cmd run ADDR TOKEN_FILE [-t] -- ARGV...
 //! wardby-cmd ready ADDR
 //! wardby-cmd --version
+//! bash ...            (started under the name `bash`: see shell.rs)
 //! ```
 #![deny(unsafe_code)]
 
@@ -15,6 +16,7 @@ mod frame;
 mod header;
 mod reaper;
 mod server;
+mod shell;
 #[allow(unsafe_code)] // the one module with system calls; see its SAFETY comments
 mod sys;
 
@@ -88,6 +90,11 @@ fn parse_run(args: &[String]) -> Option<(String, PathBuf, bool, Vec<String>)> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let argv0 = args.first().map(String::as_str).unwrap_or("");
+    let name = argv0.rsplit('/').next().unwrap_or("");
+    if name == "bash" || name == "-bash" {
+        shell::bash_main(name, &args[1..]);
+    }
     match args.get(1).map(String::as_str) {
         Some("--version") => {
             println!(

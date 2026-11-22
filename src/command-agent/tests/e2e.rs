@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -547,4 +548,80 @@ fn escaped_orphans_are_reaped() {
         assert!(Instant::now() < deadline, "orphan {pid} was not reaped");
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// The binary linked as `bash` with no client config: the real bash runs, arguments unchanged.
+fn bash_link() -> Option<(PathBuf, PathBuf)> {
+    if !std::path::Path::new("/bin/bash").exists() {
+        eprintln!("skipped: /bin/bash is not installed");
+        return None;
+    }
+    if std::path::Path::new("/run/wardby/toolchain/client").exists() {
+        eprintln!("skipped: a toolchain client config exists on this machine");
+        return None;
+    }
+    let dir = tempdir();
+    let link = dir.join("bash");
+    std::os::unix::fs::symlink(BIN, &link).unwrap();
+    Some((dir, link))
+}
+
+#[test]
+fn bash_passes_through_without_a_toolchain() {
+    let Some((dir, link)) = bash_link() else {
+        return;
+    };
+    let out = Command::new(&link)
+        .args(["-c", "echo $0 $1 $BASH_VERSION", "zero", "one"])
+        .output()
+        .unwrap();
+    let got = text(&out.stdout);
+    assert!(got.starts_with("zero one "), "{got:?}");
+    assert!(
+        got.trim_end().len() > "zero one ".len(),
+        "not run by bash: {got:?}"
+    );
+    assert_eq!(out.status.code(), Some(0));
+
+    let out = Command::new(&link)
+        .args(["-lc", "exit 7"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7));
+
+    let script = dir.join("script.sh");
+    std::fs::write(&script, "echo script $1\n").unwrap();
+    let out = Command::new(&link)
+        .arg(&script)
+        .arg("arg")
+        .output()
+        .unwrap();
+    assert_eq!(text(&out.stdout), "script arg\n");
+
+    let mut c = Command::new(&link)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin
+        .take()
+        .unwrap()
+        .write_all(b"echo from stdin\n")
+        .unwrap();
+    assert_eq!(text(&c.wait_with_output().unwrap().stdout), "from stdin\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bash_login_name_passes_through() {
+    let Some((dir, link)) = bash_link() else {
+        return;
+    };
+    let out = Command::new(&link)
+        .arg0("-bash")
+        .args(["-c", "shopt -q login_shell && echo login"])
+        .output()
+        .unwrap();
+    assert_eq!(text(&out.stdout), "login\n");
+    let _ = std::fs::remove_dir_all(&dir);
 }
