@@ -332,9 +332,9 @@ your image, unchanged, next to the run, sharing the run's `/workspace`, and
 every command the agent runs is sent there. Reading and editing files,
 collection and the pull request work as before.
 
-Toolchains work for **Claude Code agents on the Kubernetes job launcher**. On
-the Docker and Substrate launchers, and for Codex agents, dispatch refuses a run
-that declares one (see "Errors"). A toolchain is not the same thing as
+Toolchains work for **Claude Code agents on the Kubernetes and Docker job
+launchers**. On the Substrate launcher, and for Codex agents, dispatch refuses
+a run that declares one (see "Errors"). A toolchain is not the same thing as
 `codingProfile.toolchain` (`node` or `node-python`), which picks Wardby's own
 standard image.
 
@@ -481,7 +481,7 @@ Protected-path entries also accept a leading `!` for your own exceptions:
 | A service the agent isn't allowed               | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                               |
 | Services on a deployment that can't start them  | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes, Docker or Substrate job launcher."                                        |
 | A service this launcher can't start             | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for `<name>`, which this wardby deployment can't start: <reason>." (Substrate; reasons below)                                                                   |
-| A toolchain on the Docker or Substrate launcher | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for the toolchain `<name>`, which this wardby deployment can't start: toolchains are not supported on this launcher yet."                                       |
+| A toolchain on the Substrate launcher           | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for the toolchain `<name>`, which this wardby deployment can't start: toolchains are not supported on this launcher yet."                                       |
 | A toolchain for a Codex agent                   | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for the toolchain `<name>`, which this agent can't use: toolchains are not supported for Codex agents yet."                                                     |
 | An entry under the wrong key in `services.yaml` | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: `<name>` is a toolchain; declare it under `toolchain:`." (or the reverse for a service)                                                          |
 | A service never became ready                    | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |

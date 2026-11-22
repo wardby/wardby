@@ -1,9 +1,9 @@
 ---
 id: coding-toolchain
 title: Run a coding agent's commands in your own dev image (toolchain)
-summary: Register your team's dev or CI image as a toolchain catalog entry, declare it in .wardby/services.yaml, and a Claude Code agent on the Kubernetes launcher runs every command in that image, unchanged, sharing the run's workspace.
+summary: Register your team's dev or CI image as a toolchain catalog entry, declare it in .wardby/services.yaml, and a Claude Code agent on the Kubernetes or Docker launcher runs every command in that image, unchanged, sharing the run's workspace.
 audience: operator
-tags: [toolchain, dev image, custom environment, workerImageRef, setupCommand, kubernetes]
+tags: [toolchain, dev image, custom environment, workerImageRef, setupCommand, kubernetes, docker]
 appliesTo: ">=0.10.2"
 ---
 
@@ -16,8 +16,8 @@ your image, unchanged, next to the run, sharing `/workspace`, and every command
 the agent runs goes there. You don't rebuild the image on top of Wardby's tool
 runner, as a `workerImageRef` requires.
 
-Toolchains work for **Claude Code agents on the Kubernetes job launcher**. On the
-Docker and Substrate launchers, and for Codex agents, the run is refused with
+Toolchains work for **Claude Code agents on the Kubernetes and Docker job
+launchers**. On the Substrate launcher, and for Codex agents, the run is refused with
 [`service_launcher_unsupported`](errors/service-launcher-unsupported.md). Don't
 confuse it with `codingProfile.toolchain` (`node`/`node-python`), which picks
 Wardby's standard image.
