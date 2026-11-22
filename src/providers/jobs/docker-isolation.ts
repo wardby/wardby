@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { MCP_TOKEN_ENV } from "../../coding/mcp-token.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { jobRepositoriesValid, REPOSITORY_MOUNT_ROOT } from "./storage-init.js";
+import type { ResolvedCodingService } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 
 export const CODING_WORKER_UID = 10001;
@@ -52,6 +53,30 @@ export const WORKER_PATHS = {
   tool: "/run/wardby/tool",
   storage: "/run/wardby/storage",
 } as const;
+
+/**
+ * Where a toolchain container (#599, docs/coding-services.md) and the Claude tool runner see the
+ * command agent and the run's token: the storage volume's `cmd` subpath, read-only.
+ */
+export const TOOLCHAIN_AGENT_PATH = "/opt/wardby-cmd";
+
+/** The run's toolchain, read structurally (catalog.ts imports this file, so no runtime import back). */
+export function specToolchain(
+  spec: Pick<JobSpec, "services">,
+): Extract<ResolvedCodingService, { kind: "toolchain" }> | undefined {
+  return spec.services?.find(
+    (service): service is Extract<ResolvedCodingService, { kind: "toolchain" }> => service.kind === "toolchain",
+  );
+}
+
+/**
+ * The toolchain's hostAliases as the run's hosts entries, all on 127.0.0.1 where every service
+ * listens. They go on the network keeper: every other run container joins its network namespace,
+ * shares its /etc/hosts, and cannot take --add-host itself.
+ */
+export function toolchainHostEntries(spec: Pick<JobSpec, "services">): string[] {
+  return (specToolchain(spec)?.hostAliases ?? []).map((name) => `${name}:127.0.0.1`);
+}
 
 const LABEL_MANAGED = "io.wardby.managed=true";
 const LABEL_COMPONENT = "io.wardby.component=coding-worker";
@@ -246,6 +271,11 @@ function validateSpec(spec: JobSpec): void {
     // docker-services.ts re-validates every entry against the catalog schema. Both providers' shells
     // share the network keeper's namespace: Codex's worker, and Claude Code's tool runner.
     if (spec.services.length === 0) throw isolationError();
+    // A toolchain runs the commands only the Claude tool runner forwards today (#599); one per run,
+    // and an alias may never take over the name the worker reaches the coding proxy by.
+    const toolchains = spec.services.filter((service) => service.kind === "toolchain").length;
+    if (toolchains > 1 || (toolchains === 1 && spec.provider !== "claude-code")) throw isolationError();
+    if (specToolchain(spec)?.hostAliases?.includes(CODING_PROXY_ALIAS)) throw isolationError();
   }
   // Names, access and count only; the launcher checks each hostPath against its workspace root.
   if (!jobRepositoriesValid(spec)) throw isolationError();
@@ -459,6 +489,7 @@ export function buildNetworkKeeperCreateArgs(spec: JobSpec): string[] {
     "max-size=1m",
     "--log-opt",
     "max-file=2",
+    ...toolchainHostEntries(spec).flatMap((entry) => ["--add-host", entry]),
     ...labels(spec.runId),
     "--entrypoint",
     "node",
@@ -741,6 +772,13 @@ export function buildClaudeToolRunnerCreateArgs(spec: JobSpec): string[] {
     ...repositoryMountArgs(spec, names.storageVolume),
     "--mount",
     `type=volume,src=${names.storageVolume},dst=${WORKER_PATHS.tool},volume-subpath=tool,volume-nocopy`,
+    // The command agent's client runs here and reads the run's token (#599).
+    ...(specToolchain(spec)
+      ? [
+          "--mount",
+          `type=volume,src=${names.storageVolume},dst=${TOOLCHAIN_AGENT_PATH},volume-subpath=cmd,volume-nocopy,readonly`,
+        ]
+      : []),
     // By name only: the value (claude-tool-setup.ts) is in the docker CLI's environment, never argv.
     "--env",
     CLAUDE_TOOL_SETUP_ENV,
@@ -921,7 +959,7 @@ export function assertNetworkKeeperContainerInspection(container: DockerContaine
     (host.Dns?.length ?? 0) !== 0 ||
     (host.DnsOptions?.length ?? 0) !== 0 ||
     (host.DnsSearch?.length ?? 0) !== 0 ||
-    (host.ExtraHosts?.length ?? 0) !== 0 ||
+    !sameHostEntries(host.ExtraHosts, toolchainHostEntries(spec)) ||
     Object.keys(host.PortBindings ?? {}).length !== 0 ||
     host.PublishAllPorts !== false ||
     Object.keys(container.NetworkSettings?.Ports ?? {}).length !== 0 ||
@@ -1084,7 +1122,13 @@ export function assertWorkerContainerInspection(
   assertExactWorkerMounts(container, names, spec);
 }
 
-function assertExactMountSet(
+/** Docker reports an --add-host entry as `name:ip` (older) or `name=ip` (newer); same set, same order. */
+function sameHostEntries(actual: readonly string[] | null | undefined, expected: readonly string[]): boolean {
+  const reported = (actual ?? []).map((entry) => entry.replace("=", ":"));
+  return reported.length === expected.length && reported.every((entry, index) => entry === expected[index]);
+}
+
+export function assertExactMountSet(
   container: DockerContainerInspection,
   names: DockerIsolationNames,
   expected: ReadonlyArray<{ path: string; writable: boolean; subpath: string }>,
@@ -1202,5 +1246,6 @@ export function assertClaudeToolRunnerContainerInspection(
     { path: WORKER_PATHS.workspace, writable: true, subpath: "workspace" },
     ...expectedRepositoryMounts(spec),
     { path: WORKER_PATHS.tool, writable: true, subpath: "tool" },
+    ...(specToolchain(spec) ? [{ path: TOOLCHAIN_AGENT_PATH, writable: false, subpath: "cmd" }] : []),
   ]);
 }

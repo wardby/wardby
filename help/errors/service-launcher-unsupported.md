@@ -48,8 +48,8 @@ can't start: toolchains are not supported on this launcher yet." or "...which
 this agent can't use: toolchains are not supported for Codex agents yet."
 
 A [toolchain](../coding-toolchain.md) runs only for Claude Code agents on the
-Kubernetes job launcher. Run the repository with a Claude Code agent on a
-Kubernetes deployment, or remove the `toolchain:` key from
+Kubernetes and Docker job launchers. Run the repository with a Claude Code
+agent on a Kubernetes or Docker deployment, or remove the `toolchain:` key from
 `.wardby/services.yaml` on the base branch.
 
 This error only applies to an agent that already allows at least one service

@@ -44,9 +44,10 @@ import {
   type DockerContainerInspection,
   type DockerHostInfo,
   WORKER_PATHS,
+  specToolchain,
 } from "./docker-isolation.js";
 import type { CodingProvider } from "../../coding/provider.js";
-import { isToolchainService, sidecarOnly, type ResolvedCodingService } from "../../coding/services/catalog.js";
+import { isToolchainService, sidecarOnly } from "../../coding/services/catalog.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   assertServiceContainerInspection,
@@ -62,7 +63,13 @@ import {
   type ServiceStateReporter,
   type ServiceStateUpdate,
 } from "./service-state.js";
-import { expectedRepositoryHostPath, repositoryStorageDirectories, storageInitScript } from "./storage-init.js";
+import {
+  expectedRepositoryHostPath,
+  repositoryStorageDirectories,
+  storageInitScript,
+  TOOLCHAIN_AGENT_DIRECTORY,
+  toolchainAgentScript,
+} from "./storage-init.js";
 import type {
   JobHandle,
   JobRepositoryMount,
@@ -71,7 +78,6 @@ import type {
   JobStatus,
   MaterializedWorkspace,
   MaterializeWorkspaceOptions,
-  UnstartableService,
   WorkspaceJobLauncher,
 } from "./types.js";
 import { replaceDirectoryFromStaging, takeResultBundle } from "./workspace-swap.js";
@@ -467,6 +473,14 @@ export interface DockerJobLauncherOptions {
 
 type DockerJobPhase = "provisioning" | "active" | "succeeded" | "failed" | "stopped" | "lost" | "removed";
 
+/** A toolchain's readiness on Docker: its command agent accepts on the run's loopback (#599). */
+const TOOLCHAIN_READINESS = {
+  command: ["/opt/wardby-cmd/wardby-cmd", "ready", "127.0.0.1:7071"],
+  periodSeconds: 1,
+  timeoutSeconds: 5,
+  failureThreshold: 60,
+} as const;
+
 /** What waitForServiceReady learned before a failure, for the display-only state report. */
 interface ServiceFailure {
   reason: ServiceFailureReason;
@@ -687,16 +701,6 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   /** Starts JobSpec.services (a network keeper plus one hardened container per service) for Codex and Claude Code runs. */
   supportsServicesFor(provider: CodingProvider): boolean {
     return dockerSupportsServicesFor(provider);
-  }
-
-  /**
-   * A toolchain (#599) is started only by the Kubernetes launcher so far, so dispatch refuses it here
-   * with `toolchain_unsupported` instead of the run failing at launch.
-   */
-  unstartableServices(services: readonly ResolvedCodingService[]): UnstartableService[] {
-    return services
-      .filter(isToolchainService)
-      .map((service) => ({ name: service.name, reason: "toolchain_unsupported" }));
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {
@@ -1136,8 +1140,10 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     failure: ServiceFailure,
     onProbeFailed: (attempts: number) => Promise<void>,
   ): Promise<number> {
-    // Type-only change for the toolchain kind (#599): only a sidecar has a catalog readiness command.
-    const { command, periodSeconds, timeoutSeconds, failureThreshold } = sidecarOnly(planned.service).readiness;
+    // A toolchain (#599) is ready once its command agent listens, like its Kubernetes startup probe.
+    const { command, periodSeconds, timeoutSeconds, failureThreshold } = isToolchainService(planned.service)
+      ? TOOLCHAIN_READINESS
+      : sidecarOnly(planned.service).readiness;
     const name = planned.service.name;
     let failures = 0;
     for (;;) {
@@ -1341,6 +1347,21 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       hostPath: this.repositoryHostPath(record.runId, r),
     }));
     await this.transfer.seedDirectory(resolve(runRoot, "workspace"), keeper, "/run/wardby/storage/workspace");
+    if (specToolchain(record.spec)) {
+      // The command agent and the run's token for the toolchain (#599), before any service starts: the
+      // keeper runs Wardby's own worker image, which carries the agent. Nothing is printed.
+      await this.run([
+        "container",
+        "exec",
+        keeper,
+        "node",
+        "-e",
+        [
+          storageInitScript(WORKER_PATHS.storage, [TOOLCHAIN_AGENT_DIRECTORY]),
+          toolchainAgentScript(WORKER_PATHS.storage),
+        ].join("\n"),
+      ]);
+    }
     // The control plane's own git folder (<runRoot>/git) is never seeded: no worker or tool-runner
     // mount reads the keeper's storage/git, and Kubernetes never seeded it either. A history run's
     // worker gets its repository as <workspace>/.git, prepared by the control plane (#536).

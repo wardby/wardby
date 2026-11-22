@@ -26,7 +26,11 @@ import {
 } from "./docker-isolation.js";
 import type { JobSpec } from "./types.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
-import { resolvedFromDefinition } from "../../coding/services/catalog.js";
+import {
+  CodingServiceDefinitionSchema,
+  resolvedFromDefinition,
+  type ResolvedToolchainService,
+} from "../../coding/services/catalog.js";
 
 const image = `registry.example/wardby-worker@sha256:${"a".repeat(64)}`;
 const runHash = createHash("sha256").update("run-sensitive-name").digest("hex");
@@ -958,5 +962,68 @@ describe("Docker isolation with extra repositories (#537)", () => {
   ])("refuses a spec with %s", (_label, entries) => {
     const bad = { ...spec, repositories: entries } as unknown as JobSpec;
     expect(() => buildWorkerCreateArgs(bad)).toThrow("docker_isolation_unsupported");
+  });
+});
+
+describe("Docker isolation with a toolchain (#599)", () => {
+  const TOOLCHAIN = resolvedFromDefinition(
+    CodingServiceDefinitionSchema.parse({
+      name: "python-dev",
+      version: "3.13",
+      kind: "toolchain",
+      image: `registry.example/team-python@sha256:${"c".repeat(64)}`,
+      resources: { cpuMillicores: 500, memoryMib: 512, diskMib: 256 },
+      hostAliases: ["elastic", "mq.internal"],
+    }),
+  ) as ResolvedToolchainService;
+  const withToolchain: JobSpec = { ...claudeWithServices, services: [POSTGRES, TOOLCHAIN] };
+  const storage = isolationNames(withToolchain.runId).storageVolume;
+
+  it("puts the toolchain's host aliases on the network keeper, whose /etc/hosts every run container shares", () => {
+    expect(flagValues(buildNetworkKeeperCreateArgs(withToolchain), "--add-host")).toEqual([
+      "elastic:127.0.0.1",
+      "mq.internal:127.0.0.1",
+    ]);
+    expect(flagValues(buildNetworkKeeperCreateArgs(claudeWithServices), "--add-host")).toEqual([]);
+  });
+
+  it("attests exactly those host entries on the network keeper, in either Docker spelling", () => {
+    for (const extraHosts of [
+      ["elastic:127.0.0.1", "mq.internal:127.0.0.1"],
+      ["elastic=127.0.0.1", "mq.internal=127.0.0.1"],
+    ]) {
+      const inspection = validNetworkKeeperInspection();
+      inspection.HostConfig = { ...inspection.HostConfig, ExtraHosts: extraHosts };
+      expect(() => assertNetworkKeeperContainerInspection(inspection, withToolchain)).not.toThrow();
+    }
+    const missing = validNetworkKeeperInspection();
+    expect(() => assertNetworkKeeperContainerInspection(missing, withToolchain)).toThrow(
+      "docker_isolation_unsupported",
+    );
+    const extra = validNetworkKeeperInspection();
+    extra.HostConfig = { ...extra.HostConfig, ExtraHosts: ["evil:10.0.0.1"] };
+    expect(() => assertNetworkKeeperContainerInspection(extra, claudeWithServices)).toThrow(
+      "docker_isolation_unsupported",
+    );
+  });
+
+  it("mounts the agent directory read-only in the tool runner only on a toolchain run", () => {
+    expect(flagValues(buildClaudeToolRunnerCreateArgs(withToolchain), "--mount")).toContain(
+      `type=volume,src=${storage},dst=/opt/wardby-cmd,volume-subpath=cmd,volume-nocopy,readonly`,
+    );
+    expect(flagValues(buildClaudeToolRunnerCreateArgs(claudeWithServices), "--mount").join(" ")).not.toContain(
+      "volume-subpath=cmd",
+    );
+  });
+
+  it("refuses a toolchain for Codex, two toolchains, and an alias that takes the coding proxy's name", () => {
+    const second = { ...TOOLCHAIN, name: "node-dev" };
+    for (const bad of [
+      { ...withServices, services: [TOOLCHAIN] },
+      { ...withToolchain, services: [TOOLCHAIN, second] },
+      { ...withToolchain, services: [{ ...TOOLCHAIN, hostAliases: ["wardby-proxy"] }] },
+    ]) {
+      expect(() => buildNetworkKeeperCreateArgs(bad)).toThrow("docker_isolation_unsupported");
+    }
   });
 });

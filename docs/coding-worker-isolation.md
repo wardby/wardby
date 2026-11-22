@@ -442,6 +442,20 @@ start:
   memory (plus its tmpfs disk and shared memory), 512 PIDs, a bounded tmpfs at
   its data path and each writable path, its catalog `serviceEnv`, and no
   published ports, mounts, devices or restart policy.
+- For a Claude Code run whose repository declares a
+  [toolchain](coding-services.md#running-the-agents-commands-in-your-own-image-toolchain),
+  its container (`wardby-svc-<token>-<name>`) has the same controls, a tmpfs
+  `HOME` at `/home/wardby` instead of a data path, and exactly two mounts of
+  the run's storage volume: `/workspace` (shared with the tool runner) and
+  the `cmd` subpath read-only at `/opt/wardby-cmd`, which holds Wardby's
+  command agent and the run's token. The storage keeper copies the agent and
+  writes the token there while it seeds the run. The agent is the container's
+  entrypoint; the tool runner mounts `cmd` read-only too and forwards every
+  `run_command` to it over the namespace's loopback, and the token keeps other
+  services, which never mount `cmd`, from running commands there. The entry's
+  `hostAliases` are `--add-host <name>:127.0.0.1` entries on the network
+  keeper, whose hosts file every container in the namespace shares; an alias
+  may not be the coding proxy's name.
 
 A Codex run's worker and every service use `--network container:<network
 keeper>`, so a service answers the worker on `127.0.0.1` and the worker still
