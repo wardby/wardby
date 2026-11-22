@@ -13,6 +13,7 @@ import { configuredRegistryAdapters } from "../../coding/registry/adapters.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT } from "./docker-isolation.js";
+import { runToolchain } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 
 /** Where the tool runner mounts the repository; the registry's config files live under its .cache. */
@@ -109,7 +110,5 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
 }
 
 function hasToolchain(spec: JobSpec): boolean {
-  // `kind` is being added to ResolvedCodingService alongside this (#599); read it defensively until
-  // both land, so this compiles with and without it.
-  return (spec.services ?? []).some((service) => (service as { kind?: string }).kind === "toolchain");
+  return runToolchain(spec.services ?? []) !== undefined;
 }
