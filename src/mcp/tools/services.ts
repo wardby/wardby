@@ -43,6 +43,7 @@ const UpdateSchema = z
     readiness: z.unknown().optional(),
     startCommand: z.unknown().optional(),
     setupCommand: z.unknown().optional(),
+    hostAliases: z.unknown().optional(),
     resources: z.unknown().optional(),
     dataPath: z.unknown().optional(),
     writablePaths: z.unknown().optional(),
@@ -167,6 +168,14 @@ const definitionProperties = {
     description:
       'Toolchains only, optional: an argv run once in the toolchain container, in /workspace, before any of the run\'s commands (e.g. ["/bin/sh", "-c", "render-config > $HOME/app.ini"]). It gets the container\'s environment (the image\'s ENV plus serviceEnv), not the run\'s registry settings, so it can write configuration but not install packages; it must not write into /workspace. Its output is never kept; a non-zero exit fails the run with toolchain_setup_failed. Each argument is one line of at most 4096 bytes.',
   },
+  hostAliases: {
+    type: "array",
+    minItems: 1,
+    maxItems: 16,
+    items: { type: "string" },
+    description:
+      'Toolchains only, optional: host names the team\'s code hard-codes for its services, such as compose names (e.g. ["elastic", "mq"]). Each resolves to 127.0.0.1 in the run, where every service listens: lower-case host names, at most 16, not "localhost". Applied as hosts entries by the job launcher, since the image cannot edit /etc/hosts itself.',
+  },
   resources: {
     type: "object",
     additionalProperties: false,
@@ -237,7 +246,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "create_service",
     scope: "services:manage",
     description:
-      "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest. kind is sidecar (the default: a fresh instance next to each run, declared under services:, needing port, readiness and dataPath; set startCommand for deployments on the Substrate job launcher) or toolchain (a team's own dev image the run's commands run in, sharing its workspace, declared under toolchain:; no port, readiness, startCommand or dataPath; optional setupCommand). Packages already in a toolchain image did not pass the proxy's checks.",
+      "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest. kind is sidecar (the default: a fresh instance next to each run, declared under services:, needing port, readiness and dataPath; set startCommand for deployments on the Substrate job launcher) or toolchain (a team's own dev image the run's commands run in, sharing its workspace, declared under toolchain:; no port, readiness, startCommand or dataPath; optional setupCommand and hostAliases). Packages already in a toolchain image did not pass the proxy's checks.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -274,7 +283,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "update_service",
     scope: "services:manage",
     description:
-      "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it, and kind, never change). Runs already dispatched keep the entry they started with. Set startCommand on a sidecar for deployments on the Substrate job launcher, or setupCommand on a toolchain.",
+      "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it, and kind, never change). Runs already dispatched keep the entry they started with. Set startCommand on a sidecar for deployments on the Substrate job launcher, or setupCommand and hostAliases on a toolchain.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

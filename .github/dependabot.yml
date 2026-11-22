@@ -18,13 +18,10 @@
 #   images only pick it up after a new driver-vN image is published and its
 #   digest pinned in src/coding-worker/Dockerfile and Dockerfile.node-python.
 #
-# Cargo dependencies of the two Rust crates are listed in full (each has only a
-# few, all pinned by its Cargo.lock), with the same three-day wait:
-#
-# - src/command-agent: the toolchain command agent (libc only). It is built into
-#   the Claude Code images and the Codex driver, so the driver only carries an
-#   update after its next driver-vN image.
-# - apps/viewer/src-tauri: the desktop viewer.
+# The toolchain command agent (src/command-agent, a Rust crate whose only
+# dependency is libc, pinned by its Cargo.lock) is listed in full, with the same
+# three-day wait. It is built into the Claude Code images and the Codex driver,
+# so the driver only carries an update after its next driver-vN image.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -71,12 +68,3 @@ updates:
       default-days: 3
     commit-message:
       prefix: "chore(command-agent)"
-
-  - package-ecosystem: cargo
-    directory: /apps/viewer/src-tauri
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 3
-    commit-message:
-      prefix: "chore(viewer)"

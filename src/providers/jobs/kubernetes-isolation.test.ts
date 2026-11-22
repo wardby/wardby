@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
 import { ObjectSerializer } from "@kubernetes/client-node/dist/serializer.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
-import { CodingServiceDefinitionSchema, resolvedFromDefinition } from "../../coding/services/catalog.js";
+import {
+  CodingServiceDefinitionSchema,
+  resolvedFromDefinition,
+  type ResolvedToolchainService,
+} from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 import {
   CLAUDE_CONFIG_PATH,
@@ -1447,7 +1451,7 @@ describe("buildRunPod with a toolchain (#599)", () => {
       writablePaths: ["/tmp"],
       setupCommand: ["sh", "-c", "render-config"],
     }),
-  );
+  ) as ResolvedToolchainService;
   const POSTGRES = resolvedFromDefinition(
     BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
   );
@@ -1568,6 +1572,27 @@ describe("buildRunPod with a toolchain (#599)", () => {
   it("attests a read-back pod with a toolchain", () => {
     const built = p();
     expect(() => assertRunPodMatches(apiRoundTrip(built, "V1Pod"), built)).not.toThrow();
+  });
+
+  it("resolves the toolchain's host aliases to the pod's loopback, beside the proxy's own alias", () => {
+    const aliased = { ...TOOLCHAIN, hostAliases: ["elastic", "mq.internal"] };
+    const built = buildRunPod({ ...claude, services: [aliased] }, options);
+    expect(built.spec!.hostAliases).toEqual([
+      ...buildRunPod(claude, options).spec!.hostAliases!,
+      { ip: "127.0.0.1", hostnames: ["elastic", "mq.internal"] },
+    ]);
+    expect(() => assertRunPodMatches(apiRoundTrip(built, "V1Pod"), built)).not.toThrow();
+  });
+
+  it("adds no host entry for a toolchain without aliases", () => {
+    expect(p().spec!.hostAliases).toEqual(buildRunPod(claude, options).spec!.hostAliases);
+  });
+
+  it("refuses an alias that would take over the coding proxy's name", () => {
+    const proxyName = buildRunPod(claude, options).spec!.hostAliases![0].hostnames![0];
+    expect(() => validateKubernetesSpec({ ...claude, services: [{ ...TOOLCHAIN, hostAliases: [proxyName] }] })).toThrow(
+      KUBERNETES_ISOLATION_ERROR,
+    );
   });
 
   it("refuses a toolchain for a Codex run (its commands do not run in the tool runner yet)", () => {

@@ -274,6 +274,10 @@ export function validateKubernetesSpec(spec: JobSpec): void {
     if (toolchains > 1 || (toolchains === 1 && spec.provider !== "claude-code")) {
       throw isolationError("toolchain-invalid");
     }
+    // An alias may never take over the name the worker reaches the coding proxy by.
+    if (runToolchain(spec.services)?.hostAliases?.includes(CODING_PROXY_ALIAS)) {
+      throw isolationError("toolchain-host-alias-reserved");
+    }
   }
   // Names, access and count only; the launcher checks each hostPath against its workspace root.
   if (!jobRepositoriesValid(spec)) throw isolationError("repositories-invalid");
@@ -361,7 +365,7 @@ function serviceSidecar(
 }
 
 /**
- * A run's toolchain (#599, docs/toolchain-getting-started.md): the team's image, unchanged, as a
+ * A run's toolchain (#599, docs/coding-services.md): the team's image, unchanged, as a
  * native sidecar whose entrypoint is Wardby's command agent from storage `cmd`. It shares /workspace
  * with the tool runner, which forwards every run_command to it over the pod's loopback (the token in
  * `cmd` keeps other service containers out: they never mount it). The agent waits for the keeper's
@@ -467,6 +471,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   const sidecarMemoryMib = 128;
   const claude = spec.provider === "claude-code";
   const toolchain = runToolchain(services) !== undefined;
+  const toolchainAliases = [...(runToolchain(services)?.hostAliases ?? [])];
   const tool = claudeToolLimits(spec);
   const toolScratchMb = Math.max(16, Math.min(64, Math.floor(tool.memoryMb / 8)));
   // Each extra repository beside /workspace, in the containers that mount it (never Claude's agent).
@@ -625,7 +630,11 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
       terminationGracePeriodSeconds: WORKER_STOP_GRACE_SECONDS,
       dnsPolicy: "None",
       dnsConfig: { nameservers: ["127.0.0.1"] },
-      hostAliases: [{ ip: options.proxyIp, hostnames: [CODING_PROXY_ALIAS] }],
+      hostAliases: [
+        { ip: options.proxyIp, hostnames: [CODING_PROXY_ALIAS] },
+        // The toolchain's hard-coded service names (#599): every service listens on the pod's loopback.
+        ...(toolchainAliases.length > 0 ? [{ ip: "127.0.0.1", hostnames: toolchainAliases }] : []),
+      ],
       ...(options.runtimeClassName ? { runtimeClassName: options.runtimeClassName } : {}),
       // Part of the submitted spec, so attestation compares it like any other field; the
       // `priority` and `preemptionPolicy` the API server resolves from it are normalized away.

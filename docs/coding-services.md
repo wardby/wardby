@@ -407,8 +407,16 @@ role), pinned by digest:
 ```
 
 A toolchain takes `image`, `serviceEnv`, `testEnv`, `resources`,
-`writablePaths` and `setupCommand`. It refuses `dataPath`, `readiness`, `port`
-and `startCommand`. `setupCommand` runs once per run, after the workspace is
+`writablePaths`, `setupCommand` and `hostAliases`. It refuses `dataPath`,
+`readiness`, `port` and `startCommand`.
+
+`hostAliases` lists host names your code hard-codes for its services, such as
+compose service names: `"hostAliases": ["elastic", "mq"]`. In a run every
+service listens on `127.0.0.1`, so Wardby resolves each of these names to
+`127.0.0.1` with a real hosts entry (your image can't edit `/etc/hosts`
+itself, and resolver tricks such as `HOSTALIASES` don't reach every client).
+Use lower-case host names, at most 16, not `localhost`. Where you can, make
+the host configurable instead, as you would for a database or cache. `setupCommand` runs once per run, after the workspace is
 ready and before the agent's first command. It sees your image's `ENV`,
 `serviceEnv`, `HOME`, `USER` and `LOGNAME`, but not other services' `testEnv`
 or the package proxy's settings, so it can render configuration but not

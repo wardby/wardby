@@ -832,6 +832,9 @@ model CodingService {
   /// Toolchains only: the argv run once in the toolchain container before any forwarded command
   /// (output never captured, only its exit code); null: none, and always null for a sidecar.
   setupCommand   Json?
+  /// Toolchains only: host names (a JSON array of strings) resolved to 127.0.0.1 in the run, for
+  /// service names a team's code hard-codes; null: none, and always null for a sidecar.
+  hostAliases    Json?
   /// { cpuMillicores, memoryMib, diskMib }: requests equal limits.
   resources      Json
   /// Where the service writes its data: an emptyDir in the run pod. Null for a toolchain.
@@ -1884,20 +1887,20 @@ model CodingRunPlanFile {
 /// (provider, repository, prNumber, headSha, agentId): re-deferring the same
 /// head for the same agent is a no-op, not a duplicate row.
 model DeferredReview {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   provider   String
   repository String
   prNumber   Int
   headSha    String
   agentId    String
-  agent      Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agent      Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
   /// The agent's check name at defer time, so the delayed review starts
   /// against the same check even if the link's checkName changes later.
   checkName  String
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
   /// Why the review waits: "ci" (until CI finishes) or "request" (until the
   /// delegating lead run finishes, then CI if the link waits for it).
-  reason     String   @default("ci")
+  reason     String    @default("ci")
   /// The run-tree root a "request" row waits for.
   leadRunId  String?
   /// When a process claimed this row to start the review. The row is deleted only after the
@@ -2618,13 +2621,13 @@ model TeamMember {
 /// Append-only record of team changes. No FK to Team so entries survive a delete.
 /// `detail` never carries secret values.
 model TeamAudit {
-  id        String   @id @default(cuid())
-  at        DateTime @default(now())
+  id      String   @id @default(cuid())
+  at      DateTime @default(now())
   /// Principal that made the change (plain text, no FK, like ResourceGrant.grantedById).
-  actorId   String?
-  action    String
-  teamId    String?
-  detail    Json?
+  actorId String?
+  action  String
+  teamId  String?
+  detail  Json?
 
   @@index([teamId, at])
 }
@@ -2665,11 +2668,11 @@ model Document {
   planPath                 String?
   removedFromPlan          Boolean               @default(false)
 
+  /// One document per plan path in a set. Postgres treats NULLs as distinct, so documents outside a set are unaffected.
+  @@unique([planSetId, planPath])
   @@index([ownerId])
   @@index([agentId])
   @@index([planSetId])
-  /// One document per plan path in a set. Postgres treats NULLs as distinct, so documents outside a set are unaffected.
-  @@unique([planSetId, planPath])
 }
 
 /// A planner's plan for one repository and number (docs/private spec §4): its documents are Documents with planSetId.

@@ -122,6 +122,26 @@ const commonFields = {
 };
 
 const onlyForToolchain = z.undefined({ error: "is only for a toolchain" }).optional();
+
+/** How many host names one toolchain entry may alias to the run's loopback. */
+export const MAX_HOST_ALIASES = 16;
+/** A lower-case host name: one or more DNS labels, at most 253 characters. */
+const HOST_ALIAS = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+/**
+ * Host names a team's code hard-codes for its services (compose names such as `elastic`), resolved
+ * to 127.0.0.1 in the run, where every service listens. Applied as real hosts entries by the
+ * launcher: the team image's root filesystem is read-only, so it cannot add them itself.
+ */
+const hostAliasesSchema = z
+  .array(
+    z
+      .string()
+      .regex(HOST_ALIAS, "must be a lower-case host name")
+      .refine((name) => name !== "localhost", "is already 127.0.0.1"),
+  )
+  .min(1)
+  .max(MAX_HOST_ALIASES)
+  .refine((names) => new Set(names).size === names.length, "must not repeat a name");
 const notForToolchain = z.undefined({ error: "is not used by a toolchain" }).optional();
 
 const sidecarFields = {
@@ -138,6 +158,7 @@ const sidecarFields = {
   startCommand: commandSchema.optional(),
   dataPath: pathSchema,
   setupCommand: onlyForToolchain,
+  hostAliases: onlyForToolchain,
 };
 
 const toolchainFields = {
@@ -149,6 +170,7 @@ const toolchainFields = {
    * startCommand.
    */
   setupCommand: commandSchema.optional(),
+  hostAliases: hostAliasesSchema.optional(),
   port: notForToolchain,
   readiness: notForToolchain,
   startCommand: notForToolchain,
@@ -290,6 +312,8 @@ export interface CodingServiceRow {
   startCommand: unknown;
   /** Toolchains only; null otherwise. Absent on reads from before toolchains. */
   setupCommand?: unknown;
+  /** Toolchains only; null otherwise. Absent on reads from before host aliases. */
+  hostAliases?: unknown;
   resources: unknown;
   dataPath?: string | null;
   writablePaths: unknown;
@@ -314,6 +338,7 @@ export function catalogEntryFromRow(row: CodingServiceRow): CodingServiceDefinit
     ...column("readiness", row.readiness),
     ...column("startCommand", row.startCommand),
     ...column("setupCommand", row.setupCommand),
+    ...column("hostAliases", row.hostAliases),
     resources: row.resources,
     ...column("dataPath", row.dataPath),
     writablePaths: row.writablePaths,

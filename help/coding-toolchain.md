@@ -31,7 +31,9 @@ Wardby's standard image.
    with `serviceEnv`, `resources`, `writablePaths` and an optional
    `setupCommand` (runs once before the agent's first command; write its output
    to `HOME` or `/tmp`, never `/workspace`). Your image's own entrypoint does
-   not run.
+   not run. If your code hard-codes service host names (compose names such as
+   `elastic`), list them in `hostAliases`: each resolves to `127.0.0.1`, where
+   the run's services listen.
 3. **Declare it** in `.wardby/services.yaml`:
 
    ```yaml

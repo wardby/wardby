@@ -353,6 +353,53 @@ describe("stored services", () => {
   });
 });
 
+describe("toolchain hostAliases (#599)", () => {
+  const base = {
+    name: "python-dev",
+    version: "3.13",
+    kind: "toolchain",
+    image: `registry.example/team@sha256:${"a".repeat(64)}`,
+    resources: { cpuMillicores: 500, memoryMib: 512, diskMib: 256 },
+  };
+  const parse = (extra: Record<string, unknown>) => CodingServiceDefinitionSchema.safeParse({ ...base, ...extra });
+
+  it("accepts lower-case host names and keeps them in the run's snapshot", () => {
+    const parsed = parse({ hostAliases: ["elastic", "mq.internal", "db-1"] });
+    expect(parsed.success).toBe(true);
+    const resolved = resolvedFromDefinition(CodingServiceDefinitionSchema.parse({ ...base, hostAliases: ["elastic"] }));
+    expect(resolved).toMatchObject({ kind: "toolchain", hostAliases: ["elastic"] });
+  });
+
+  it.each([
+    [["Elastic"]],
+    [["elastic search"]],
+    [["-elastic"]],
+    [["localhost"]],
+    [["elastic", "elastic"]],
+    [[]],
+    [Array.from({ length: 17 }, (_, i) => `h${i}`)],
+  ])("refuses %j", (hostAliases) => {
+    expect(parse({ hostAliases }).success).toBe(false);
+  });
+
+  it("is only for a toolchain", () => {
+    const sidecar = BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!;
+    expect(CodingServiceDefinitionSchema.safeParse({ ...sidecar, hostAliases: ["elastic"] }).success).toBe(false);
+  });
+
+  it("reads a row's hostAliases column, and a row without it", () => {
+    const row = {
+      ...base,
+      serviceEnv: {},
+      testEnv: {},
+      startCommand: null,
+      writablePaths: [],
+    };
+    expect(catalogEntryFromRow({ ...row, hostAliases: ["elastic"] })).toMatchObject({ hostAliases: ["elastic"] });
+    expect(catalogEntryFromRow({ ...row, hostAliases: null })).not.toHaveProperty("hostAliases");
+  });
+});
+
 describe("parseAllowedServiceNames", () => {
   it("dedupes names and treats a missing value as none", () => {
     expect(parseAllowedServiceNames(["postgres", "redis", "postgres"])).toEqual(["postgres", "redis"]);
