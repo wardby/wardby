@@ -21,6 +21,32 @@ export function storageInitScript(root: string, directories: readonly string[]):
   ].join("\n");
 }
 
+/** Where every Wardby image that runs storage-init carries the toolchain command agent (#599). */
+export const TOOLCHAIN_AGENT_SOURCE = "/opt/wardby/bin/wardby-cmd";
+/** The storage folder holding the agent and the run's token; mounted read-only at /opt/wardby-cmd. */
+export const TOOLCHAIN_AGENT_DIRECTORY = "cmd";
+
+/**
+ * Appended to storageInitScript (it reuses its `fs`) on a run with a toolchain: copies the command
+ * agent into `<root>/cmd`, where the toolchain container (a team image) and the tool runner mount it,
+ * and writes the run's token there. The token is 32 random bytes, readable by the run uid only, never
+ * printed; a storage-init restart keeps it, since the toolchain read it when it started.
+ */
+export function toolchainAgentScript(root: string, source: string = TOOLCHAIN_AGENT_SOURCE): string {
+  return [
+    'const crypto = require("node:crypto");',
+    `const dir = ${JSON.stringify(root)} + "/${TOOLCHAIN_AGENT_DIRECTORY}";`,
+    "fs.mkdirSync(dir, { recursive: true, mode: 0o700 });",
+    "fs.chmodSync(dir, 0o700);",
+    'fs.rmSync(dir + "/wardby-cmd", { force: true });',
+    `fs.copyFileSync(${JSON.stringify(source)}, dir + "/wardby-cmd");`,
+    'fs.chmodSync(dir + "/wardby-cmd", 0o500);',
+    'if (!fs.existsSync(dir + "/token")) {',
+    '  fs.writeFileSync(dir + "/token", crypto.randomBytes(32).toString("hex"), { mode: 0o400, flag: "wx" });',
+    "}",
+  ].join("\n");
+}
+
 /** The storage folder of each extra repository, in spec order: `repos/<name>`. */
 export function repositoryStorageDirectories(spec: Pick<JobSpec, "repositories">): string[] {
   return (spec.repositories ?? []).map((r) => `repos/${r.name}`);

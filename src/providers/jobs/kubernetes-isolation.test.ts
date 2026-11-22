@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { V1NetworkPolicy, V1Pod } from "@kubernetes/client-node";
 import { ObjectSerializer } from "@kubernetes/client-node/dist/serializer.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
-import { resolvedFromDefinition } from "../../coding/services/catalog.js";
+import { CodingServiceDefinitionSchema, resolvedFromDefinition } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 import {
   CLAUDE_CONFIG_PATH,
@@ -1429,5 +1429,155 @@ describe("buildRunPod with extra repositories (#537)", () => {
   ])("refuses a spec with %s", (_label, entries) => {
     const bad = { ...spec, repositories: entries } as unknown as JobSpec;
     expect(() => validateKubernetesSpec(bad)).toThrow(`${KUBERNETES_ISOLATION_ERROR}:repositories-invalid`);
+  });
+});
+
+describe("buildRunPod with a toolchain (#599)", () => {
+  const TOOL_IMAGE = `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`;
+  const TEAM_IMAGE = `localhost:5001/team-python@sha256:${"c".repeat(64)}`;
+  const TOOLCHAIN = resolvedFromDefinition(
+    CodingServiceDefinitionSchema.parse({
+      name: "python-dev",
+      version: "3.13",
+      kind: "toolchain",
+      image: TEAM_IMAGE,
+      serviceEnv: { DB_HOST: "127.0.0.1", HOME: "/image-home" },
+      testEnv: {},
+      resources: { cpuMillicores: 500, memoryMib: 512, diskMib: 256 },
+      writablePaths: ["/tmp"],
+      setupCommand: ["sh", "-c", "render-config"],
+    }),
+  );
+  const POSTGRES = resolvedFromDefinition(
+    BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+  );
+  const claude: JobSpec = { ...spec, provider: "claude-code", toolImage: TOOL_IMAGE };
+  const withToolchain: JobSpec = { ...claude, services: [POSTGRES, TOOLCHAIN] };
+  const p = () => buildRunPod(withToolchain, options);
+  const init = (built: V1Pod, name: string) => built.spec!.initContainers!.find((c) => c.name === name)!;
+  const toolchain = (built: V1Pod) => init(built, "service-python-dev");
+
+  it("starts the toolchain as a native sidecar after the tool runner, with the agent as its entrypoint", () => {
+    const built = p();
+    expect(built.spec!.initContainers!.map((c) => c.name)).toEqual([
+      "storage-init",
+      "tool-runner",
+      "service-postgres",
+      "service-python-dev",
+    ]);
+    const c = toolchain(built);
+    expect(c.image).toBe(TEAM_IMAGE);
+    expect(c.restartPolicy).toBe("Always");
+    expect(c.command).toEqual([
+      "/opt/wardby-cmd/wardby-cmd",
+      "serve",
+      "--listen",
+      "127.0.0.1:7071",
+      "--token-file",
+      "/opt/wardby-cmd/token",
+      "--wait-file",
+      "/run/wardby/input/.seeded",
+      "--wait-timeout-sec",
+      String(withToolchain.timeoutSec),
+      "--",
+      "sh",
+      "-c",
+      "render-config",
+    ]);
+    expect(c.args).toBeUndefined();
+  });
+
+  it("omits the setup separator when the entry has no setupCommand", () => {
+    const { setupCommand: _setup, ...bare } = TOOLCHAIN;
+    const c = toolchain(buildRunPod({ ...claude, services: [bare] }, options));
+    expect(c.command!.at(-1)).toBe(String(claude.timeoutSec));
+    expect(c.command).not.toContain("--");
+  });
+
+  it("shares the workspace and mounts the agent directory and the seeded marker read-only", () => {
+    expect(toolchain(p()).volumeMounts).toEqual([
+      { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+      { name: "storage", mountPath: "/opt/wardby-cmd", subPath: "cmd", readOnly: true },
+      { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
+      { name: "service-1-home", mountPath: "/home/wardby" },
+      { name: "service-1-scratch-0", mountPath: "/tmp" },
+    ]);
+  });
+
+  it("gives the toolchain serviceEnv plus wardby's fixed values, which win", () => {
+    expect(toolchain(p()).env).toEqual([
+      { name: "DB_HOST", value: "127.0.0.1" },
+      { name: "GIT_CONFIG_COUNT", value: "1" },
+      { name: "GIT_CONFIG_KEY_0", value: "safe.directory" },
+      { name: "GIT_CONFIG_VALUE_0", value: "/workspace" },
+      { name: "HOME", value: "/home/wardby" },
+      { name: "LOGNAME", value: "wardby" },
+      { name: "USER", value: "wardby" },
+    ]);
+  });
+
+  it("is ready once the agent listens (never on setup: the keeper seeds only after every sidecar is ready)", () => {
+    expect(toolchain(p()).startupProbe).toEqual({
+      exec: { command: ["/opt/wardby-cmd/wardby-cmd", "ready", "127.0.0.1:7071"] },
+      periodSeconds: 1,
+      timeoutSeconds: 5,
+      failureThreshold: 60,
+      successThreshold: 1,
+    });
+  });
+
+  it("runs under the same locked-down security context as every container", () => {
+    expect(toolchain(p()).securityContext).toEqual(init(p(), "service-postgres").securityContext);
+  });
+
+  it("backs HOME with the entry's disk and each writable path with scratch", () => {
+    const volumes = p().spec!.volumes!;
+    expect(volumes.find((v) => v.name === "service-1-home")).toEqual({
+      name: "service-1-home",
+      emptyDir: { sizeLimit: "256Mi" },
+    });
+    expect(volumes.find((v) => v.name === "service-1-scratch-0")).toEqual({
+      name: "service-1-scratch-0",
+      emptyDir: { sizeLimit: "64Mi" },
+    });
+  });
+
+  it("has storage-init copy the agent and write the run token into storage/cmd", () => {
+    const script = init(p(), "storage-init").command![2];
+    expect(script).toContain('"workspace", "input", "output", "cmd"');
+    expect(script).toContain('"/opt/wardby/bin/wardby-cmd"');
+    expect(script).toContain('dir + "/token"');
+  });
+
+  it("mounts the agent directory read-only in the tool runner, which runs the client", () => {
+    expect(init(p(), "tool-runner").volumeMounts).toContainEqual({
+      name: "storage",
+      mountPath: "/opt/wardby-cmd",
+      subPath: "cmd",
+      readOnly: true,
+    });
+  });
+
+  it("leaves ordinary sidecars and a run without a toolchain exactly as they were", () => {
+    const plain = buildRunPod({ ...claude, services: [POSTGRES] }, options);
+    expect(init(p(), "service-postgres")).toEqual(init(plain, "service-postgres"));
+    expect(init(plain, "storage-init").command).toEqual(init(buildRunPod(claude, options), "storage-init").command);
+    expect(init(plain, "tool-runner").volumeMounts).not.toContainEqual(expect.objectContaining({ subPath: "cmd" }));
+  });
+
+  it("attests a read-back pod with a toolchain", () => {
+    const built = p();
+    expect(() => assertRunPodMatches(apiRoundTrip(built, "V1Pod"), built)).not.toThrow();
+  });
+
+  it("refuses a toolchain for a Codex run (its commands do not run in the tool runner yet)", () => {
+    expect(() => validateKubernetesSpec({ ...spec, services: [TOOLCHAIN] })).toThrow(KUBERNETES_ISOLATION_ERROR);
+  });
+
+  it("refuses two toolchains", () => {
+    const second = { ...TOOLCHAIN, name: "node-dev" };
+    expect(() => validateKubernetesSpec({ ...claude, services: [TOOLCHAIN, second] })).toThrow(
+      KUBERNETES_ISOLATION_ERROR,
+    );
   });
 });

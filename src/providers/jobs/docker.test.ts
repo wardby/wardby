@@ -5,7 +5,11 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { collectExclusions, type CollectExclusions } from "../../coding/collect-exclude.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
-import { resolvedFromDefinition, type ResolvedCodingService } from "../../coding/services/catalog.js";
+import {
+  CodingServiceDefinitionSchema,
+  resolvedFromDefinition,
+  type ResolvedCodingService,
+} from "../../coding/services/catalog.js";
 import { jobLauncherContract } from "./contract-suite.js";
 import {
   DockerCommandError,
@@ -1366,6 +1370,26 @@ describe("Docker launcher with services", () => {
     const { launcher } = await harness("docker-supports-services");
     expect(launcher.supportsServicesFor("codex")).toBe(true);
     expect(launcher.supportsServicesFor("claude-code")).toBe(true);
+  });
+
+  it("refuses a toolchain at dispatch: only the Kubernetes launcher starts one so far (#599)", async () => {
+    const { launcher } = await harness("docker-toolchain-unsupported");
+    const toolchain = resolvedFromDefinition(
+      CodingServiceDefinitionSchema.parse({
+        name: "python-dev",
+        version: "3.13",
+        kind: "toolchain",
+        image: `localhost:5001/team@sha256:${"c".repeat(64)}`,
+        resources: { cpuMillicores: 500, memoryMib: 512, diskMib: 256 },
+      }),
+    );
+    const postgres = resolvedFromDefinition(
+      BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+    );
+    expect(launcher.unstartableServices([postgres, toolchain])).toEqual([
+      { name: "python-dev", reason: "toolchain_unsupported" },
+    ]);
+    expect(launcher.unstartableServices([postgres])).toEqual([]);
   });
 
   it("starts the network keeper, then each service, then the worker in the keeper's namespace", async () => {

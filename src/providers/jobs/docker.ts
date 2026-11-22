@@ -46,7 +46,7 @@ import {
   WORKER_PATHS,
 } from "./docker-isolation.js";
 import type { CodingProvider } from "../../coding/provider.js";
-import { sidecarOnly } from "../../coding/services/catalog.js";
+import { isToolchainService, sidecarOnly, type ResolvedCodingService } from "../../coding/services/catalog.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   assertServiceContainerInspection,
@@ -71,6 +71,7 @@ import type {
   JobStatus,
   MaterializedWorkspace,
   MaterializeWorkspaceOptions,
+  UnstartableService,
   WorkspaceJobLauncher,
 } from "./types.js";
 import { replaceDirectoryFromStaging, takeResultBundle } from "./workspace-swap.js";
@@ -686,6 +687,16 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   /** Starts JobSpec.services (a network keeper plus one hardened container per service) for Codex and Claude Code runs. */
   supportsServicesFor(provider: CodingProvider): boolean {
     return dockerSupportsServicesFor(provider);
+  }
+
+  /**
+   * A toolchain (#599) is started only by the Kubernetes launcher so far, so dispatch refuses it here
+   * with `toolchain_unsupported` instead of the run failing at launch.
+   */
+  unstartableServices(services: readonly ResolvedCodingService[]): UnstartableService[] {
+    return services
+      .filter(isToolchainService)
+      .map((service) => ({ name: service.name, reason: "toolchain_unsupported" }));
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {

@@ -15,14 +15,24 @@ import type {
   V1Toleration,
   V1Volume,
 } from "@kubernetes/client-node";
-import { sidecarOnly, StoredCodingServicesSchema, type ResolvedCodingService } from "../../coding/services/catalog.js";
+import {
+  isToolchainService,
+  runToolchain,
+  sidecarOnly,
+  StoredCodingServicesSchema,
+  type ResolvedCodingService,
+  type ResolvedToolchainService,
+} from "../../coding/services/catalog.js";
 import { MCP_TOKEN_ENV } from "../../coding/mcp-token.js";
 import {
   jobRepositoriesValid,
   REPOSITORY_MOUNT_ROOT,
   repositoryStorageDirectories,
   storageInitScript,
+  TOOLCHAIN_AGENT_DIRECTORY,
+  toolchainAgentScript,
 } from "./storage-init.js";
+import { TOOLCHAIN_AGENT } from "./claude-tool-setup.js";
 import type { JobSpec } from "./types.js";
 import {
   CLAUDE_CONFIG_PATH,
@@ -72,6 +82,25 @@ const CLAUDE_ENTRYPOINT = "/opt/wardby/claude-coding-worker/main.js";
 export const SERVICE_CONTAINER_PREFIX = "service-";
 /** Disk-backed scratch for each of a service's writablePaths (a socket directory, /tmp). */
 export const SERVICE_SCRATCH_MIB = 64;
+/** A toolchain container's view of the command agent and its token (storage `cmd`, read-only). */
+export const TOOLCHAIN_AGENT_MOUNT = "/opt/wardby-cmd";
+/** A toolchain container's HOME: the run uid isn't in the team image's passwd file (#599). */
+export const TOOLCHAIN_HOME = "/home/wardby";
+/** The keeper's seeded marker as a toolchain container sees it (storage `input`, read-only). */
+const TOOLCHAIN_SEEDED_MARKER = "/run/wardby/input/.seeded";
+/**
+ * Wardby's fixed values on a toolchain container, over its serviceEnv, so setupCommand sees them too;
+ * the tool runner sends the same ones with every command (command.mjs toolchainEnvironment). Never a
+ * secret.
+ */
+const TOOLCHAIN_FIXED_ENV: Readonly<Record<string, string>> = {
+  HOME: TOOLCHAIN_HOME,
+  USER: "wardby",
+  LOGNAME: "wardby",
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "safe.directory",
+  GIT_CONFIG_VALUE_0: "/workspace",
+};
 
 export function serviceContainerName(name: string): string {
   return `${SERVICE_CONTAINER_PREFIX}${name}`;
@@ -240,6 +269,11 @@ export function validateKubernetesSpec(spec: JobSpec): void {
     ) {
       throw isolationError("services-invalid");
     }
+    // A toolchain runs the commands only the Claude tool runner forwards today (#599); one per run.
+    const toolchains = spec.services.filter(isToolchainService).length;
+    if (toolchains > 1 || (toolchains === 1 && spec.provider !== "claude-code")) {
+      throw isolationError("toolchain-invalid");
+    }
   }
   // Names, access and count only; the launcher checks each hostPath against its workspace root.
   if (!jobRepositoriesValid(spec)) throw isolationError("repositories-invalid");
@@ -269,15 +303,19 @@ function serviceStorage(
   entry: ResolvedCodingService,
   index: number,
 ): Array<{ name: string; mountPath: string; sizeMib: number }> {
-  // Type-only change for the toolchain kind (#599): only a sidecar has a data path.
+  const scratch = entry.writablePaths.map((path, n) => ({
+    name: `service-${index}-scratch-${n}`,
+    mountPath: path,
+    sizeMib: SERVICE_SCRATCH_MIB,
+  }));
+  // A toolchain has no data path: its disk backs HOME instead (pip, Poetry and git write there).
+  if (isToolchainService(entry)) {
+    return [{ name: `service-${index}-home`, mountPath: TOOLCHAIN_HOME, sizeMib: entry.resources.diskMib }, ...scratch];
+  }
   const service = sidecarOnly(entry);
   return [
     { name: `service-${index}-data`, mountPath: service.dataPath, sizeMib: service.resources.diskMib },
-    ...service.writablePaths.map((path, scratch) => ({
-      name: `service-${index}-scratch-${scratch}`,
-      mountPath: path,
-      sizeMib: SERVICE_SCRATCH_MIB,
-    })),
+    ...scratch,
   ];
 }
 
@@ -289,8 +327,13 @@ function serviceStorage(
  * data path and at each writable path. Same pod, same network namespace: the worker reaches it on
  * 127.0.0.1, and the run's NetworkPolicy needs no change.
  */
-function serviceSidecar(entry: ResolvedCodingService, index: number, profile: KubernetesPlatformProfile): V1Container {
-  // Type-only change for the toolchain kind (#599): only a sidecar has a readiness command.
+function serviceSidecar(
+  entry: ResolvedCodingService,
+  index: number,
+  profile: KubernetesPlatformProfile,
+  timeoutSec: number,
+): V1Container {
+  if (isToolchainService(entry)) return toolchainSidecar(entry, index, profile, timeoutSec);
   const service = sidecarOnly(entry);
   const env = Object.entries(service.serviceEnv)
     .sort(([left], [right]) => left.localeCompare(right))
@@ -314,6 +357,65 @@ function serviceSidecar(entry: ResolvedCodingService, index: number, profile: Ku
       successThreshold: 1,
     },
     volumeMounts: serviceStorage(service, index).map(({ name, mountPath }) => ({ name, mountPath })),
+  };
+}
+
+/**
+ * A run's toolchain (#599, docs/toolchain-getting-started.md): the team's image, unchanged, as a
+ * native sidecar whose entrypoint is Wardby's command agent from storage `cmd`. It shares /workspace
+ * with the tool runner, which forwards every run_command to it over the pod's loopback (the token in
+ * `cmd` keeps other service containers out: they never mount it). The agent waits for the keeper's
+ * seeded marker before setupCommand, so its startup probe only checks that it listens: the keeper seeds
+ * after every sidecar is ready, and a probe that waited for setup would deadlock the pod.
+ */
+function toolchainSidecar(
+  service: ResolvedToolchainService,
+  index: number,
+  profile: KubernetesPlatformProfile,
+  timeoutSec: number,
+): V1Container {
+  const agent = `${TOOLCHAIN_AGENT_MOUNT}/wardby-cmd`;
+  const env = Object.entries({ ...service.serviceEnv, ...TOOLCHAIN_FIXED_ENV })
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => ({ name, value }));
+  const setup = service.setupCommand ?? [];
+  return {
+    name: serviceContainerName(service.name),
+    image: service.image,
+    restartPolicy: "Always",
+    command: [
+      agent,
+      "serve",
+      "--listen",
+      TOOLCHAIN_AGENT.address,
+      "--token-file",
+      TOOLCHAIN_AGENT.tokenFile,
+      "--wait-file",
+      TOOLCHAIN_SEEDED_MARKER,
+      "--wait-timeout-sec",
+      String(timeoutSec),
+      ...(setup.length > 0 ? ["--", ...setup] : []),
+    ],
+    env,
+    securityContext: containerSecurity(),
+    resources: conformResources(profile, {
+      cpuMillicores: service.resources.cpuMillicores,
+      memoryMib: service.resources.memoryMib,
+      ephemeralStorageMib: serviceEphemeralStorageMib(service),
+    }),
+    startupProbe: {
+      exec: { command: [agent, "ready", TOOLCHAIN_AGENT.address] },
+      periodSeconds: 1,
+      timeoutSeconds: 5,
+      failureThreshold: 60,
+      successThreshold: 1,
+    },
+    volumeMounts: [
+      { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+      { name: "storage", mountPath: TOOLCHAIN_AGENT_MOUNT, subPath: TOOLCHAIN_AGENT_DIRECTORY, readOnly: true },
+      { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
+      ...serviceStorage(service, index).map(({ name, mountPath }) => ({ name, mountPath })),
+    ],
   };
 }
 
@@ -364,6 +466,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   const sidecarCpuMillicores = 250;
   const sidecarMemoryMib = 128;
   const claude = spec.provider === "claude-code";
+  const toolchain = runToolchain(services) !== undefined;
   const tool = claudeToolLimits(spec);
   const toolScratchMb = Math.max(16, Math.min(64, Math.floor(tool.memoryMb / 8)));
   // Each extra repository beside /workspace, in the containers that mount it (never Claude's agent).
@@ -379,7 +482,14 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
     command: [
       "node",
       "-e",
-      storageInitScript(STORAGE_ROOT, [...STORAGE_DIRECTORIES, ...repositoryStorageDirectories(spec)]),
+      [
+        storageInitScript(STORAGE_ROOT, [
+          ...STORAGE_DIRECTORIES,
+          ...repositoryStorageDirectories(spec),
+          ...(toolchain ? [TOOLCHAIN_AGENT_DIRECTORY] : []),
+        ]),
+        ...(toolchain ? [toolchainAgentScript(STORAGE_ROOT)] : []),
+      ].join("\n"),
     ],
     securityContext: containerSecurity(),
     resources: conformResources(profile, {
@@ -478,6 +588,17 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
           { name: TOOL_SOCKET_VOLUME, mountPath: "/run/wardby/tool" },
           { name: "tool-tmp", mountPath: "/tmp" },
           { name: "tool-home", mountPath: "/home/wardby" },
+          // The command agent's client runs here and reads the run's token (#599).
+          ...(toolchain
+            ? [
+                {
+                  name: "storage",
+                  mountPath: TOOLCHAIN_AGENT_MOUNT,
+                  subPath: TOOLCHAIN_AGENT_DIRECTORY,
+                  readOnly: true,
+                },
+              ]
+            : []),
         ],
       }
     : undefined;
@@ -542,7 +663,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
       initContainers: [
         storageInit,
         ...(toolRunner ? [toolRunner] : []),
-        ...services.map((service, index) => serviceSidecar(service, index, profile)),
+        ...services.map((service, index) => serviceSidecar(service, index, profile, spec.timeoutSec)),
       ],
       containers: [keeper, worker],
     },
