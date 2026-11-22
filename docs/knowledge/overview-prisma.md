@@ -7,9 +7,9 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:22:57.805Z }
 sources:
   - id: run
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/prisma/schema.prisma#L327-L379
+    url: https://github.com/wardby/wardby/blob/652e97f52f1f343b1bfa336f5acbbd6356e1c8c7/prisma/schema.prisma#L336-L389
   - id: proxy
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/prisma/schema.prisma#L807-L845
+    url: https://github.com/wardby/wardby/blob/652e97f52f1f343b1bfa336f5acbbd6356e1c8c7/prisma/schema.prisma#L904-L951
   - id: notify
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/prisma/migrations/20261003030000_viewer_notify_fixes/migration.sql#L1-L47
   - id: package
@@ -22,17 +22,17 @@ wardby:
     - id: run
       repo: github:wardby/wardby
       path: prisma/schema.prisma
-      lines: [327, 379]
+      lines: [336, 389]
       symbol: Run
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:52761459ccb0f62de1ca181d8c506ad51ebfc470b56440eabd80e23c01d0699a
+      sha: 652e97f52f1f343b1bfa336f5acbbd6356e1c8c7
+      spanHash: sha256:c7e3c11c4ef062bd4dcf880cc1d66fba0962a97b0bd89118c1ed7f6ec2718dca
     - id: proxy
       repo: github:wardby/wardby
       path: prisma/schema.prisma
-      lines: [807, 845]
+      lines: [904, 951]
       symbol: CodingProxySession
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:992812db47e0a461bab6f9527a8e0d8bb9708b0452bbeba1d23169293532d338
+      sha: 652e97f52f1f343b1bfa336f5acbbd6356e1c8c7
+      spanHash: sha256:4d0f06535ff3b5f0e6edc3020e3a8da727026603c8f9934ee1713fbd24a906da
     - id: notify
       repo: github:wardby/wardby
       path: prisma/migrations/20261003030000_viewer_notify_fixes/migration.sql
@@ -63,9 +63,9 @@ The database owns durable identity, accounting and recovery state; blob contents
 
 **What to do:** follow [CLAUDE.md, Database / Prisma](../../CLAUDE.md#database--prisma--strict) for schema work. Review [nullable tool uniqueness](nullable-tool-uniqueness.md) and [viewer notification isolation](viewer-notify-write-isolation.md) for database behavior that the declarative schema alone does not convey.
 
-[^run]: prisma/schema.prisma, lines 327-379.
+[^run]: prisma/schema.prisma, lines 336-389.
 
-[^proxy]: prisma/schema.prisma, lines 807-845.
+[^proxy]: prisma/schema.prisma, lines 904-951.
 
 [^notify]: prisma/migrations/20261003030000_viewer_notify_fixes/migration.sql, lines 1-47.
 

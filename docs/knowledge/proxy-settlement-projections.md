@@ -7,9 +7,9 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-16T18:34:00.557Z }
 sources:
   - id: settle
-    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/providers/coding-proxy/prisma-ledger.ts#L274-L309
+    url: https://github.com/wardby/wardby/blob/652e97f52f1f343b1bfa336f5acbbd6356e1c8c7/src/providers/coding-proxy/prisma-ledger.ts#L322-L370
   - id: totals
-    url: https://github.com/wardby/wardby/blob/744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be/src/providers/coding-proxy/prisma-ledger.ts#L316-L369
+    url: https://github.com/wardby/wardby/blob/652e97f52f1f343b1bfa336f5acbbd6356e1c8c7/src/providers/coding-proxy/prisma-ledger.ts#L372-L425
 wardby:
   schema: 1
   roles: [builder, reviewer]
@@ -18,16 +18,16 @@ wardby:
     - id: settle
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/prisma-ledger.ts
-      lines: [274, 309]
+      lines: [322, 370]
       symbol: complete
-      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
-      spanHash: sha256:1e1afa8d2b3ac5786e85308f314d76d5cb955b81a05320bad70d37ab398026d1
+      sha: 652e97f52f1f343b1bfa336f5acbbd6356e1c8c7
+      spanHash: sha256:071b17a63247d39c341a5a1b8f891112e5fd85f52a311a6132479c3e5941fbc1
     - id: totals
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/prisma-ledger.ts
-      lines: [316, 369]
+      lines: [372, 425]
       symbol: recomputeRunTotals
-      sha: 744d27eb926ccf7eafe52c98ac2af7f9bcd5c1be
+      sha: 652e97f52f1f343b1bfa336f5acbbd6356e1c8c7
       spanHash: sha256:f43cf2ec538c24cd65f4a454e6940007226750e06b3cb3ee6668f6ffe2b48a06
   confidence: high
 ---
@@ -36,6 +36,6 @@ Completion locks the session before changing the request. Totals are assigned fr
 
 **Why:** settling an uncertain request can replace an estimate with actual usage. Incrementing would count both, while allowing a reporting-table failure to abort the transaction would discard the authoritative settlement. Keep ledger and Run writes authoritative and the per-model projection best effort.
 
-[^settle]: src/providers/coding-proxy/prisma-ledger.ts, lines 274-309.
+[^settle]: src/providers/coding-proxy/prisma-ledger.ts, lines 322-370.
 
-[^totals]: src/providers/coding-proxy/prisma-ledger.ts, lines 316-369.
+[^totals]: src/providers/coding-proxy/prisma-ledger.ts, lines 372-425.
