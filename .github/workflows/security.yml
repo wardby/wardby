@@ -12,8 +12,8 @@ permissions:
   contents: read
 jobs:
   # verify used to run every check below in one job, one after another. They are
-  # independent, so they run as three parallel jobs, and `verify` (the check
-  # branch protection requires) passes only when all three do.
+  # independent, so they run as parallel jobs, and `verify` (the check branch
+  # protection requires) passes only when all of them do.
   checks:
     runs-on: ubuntu-latest
     steps:
@@ -136,16 +136,39 @@ jobs:
       - run: npm run test:package
       - run: node --expose-gc scripts/security-allocation-check.mjs
 
+  # The toolchain command agent (src/command-agent), a Rust crate pinned by its
+  # rust-toolchain.toml. Its tests need Linux (process groups, ptys, subreaping).
+  command-agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/command-agent
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup install
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: The release binary is static
+        run: |
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/wardby-cmd | grep -q 'statically linked'
+          target/x86_64-unknown-linux-musl/release/wardby-cmd --version | grep -q 'protocol 1'
+
   verify:
     if: always()
-    needs: [checks, tests, browser-tests, package]
+    needs: [checks, tests, browser-tests, package, command-agent]
     runs-on: ubuntu-latest
     steps:
       - name: All verify jobs passed
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          echo "checks, tests, browser-tests, package: $RESULTS"
+          echo "checks, tests, browser-tests, package, command-agent: $RESULTS"
           for result in $RESULTS; do [ "$result" = "success" ] || exit 1; done
 
   # The image jobs deliberately do not wait on verify. They use nothing it

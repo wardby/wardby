@@ -46,6 +46,18 @@ category run can pass without running them. The `unit` category also holds about
 they skip without it, so run `npm test` against Postgres before opening a pull
 request.
 
+The toolchain command agent, `wardby-cmd` (`src/command-agent`), is a Rust
+crate; its Rust version is pinned by `rust-toolchain.toml`. Its tests need Linux
+(process groups, pseudo-terminals, subreaping), so on macOS or Windows run its
+checks in a container from the `src/command-agent` folder:
+
+```sh
+docker run --rm -v "$PWD:/src" -w /src rust:1.99-alpine sh -c \
+  'apk add -q musl-dev bash && rustup component add rustfmt clippy &&
+   cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings &&
+   cargo test --locked'
+```
+
 Changes to coding workers, authentication, budgets, isolation, migrations, or
 release boundaries should include focused negative tests. Do not commit secrets,
 private keys, production data, prompts, repository contents, or generated

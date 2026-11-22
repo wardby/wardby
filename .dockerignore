@@ -7,6 +7,7 @@ dist
 .env
 .env.*
 docs/private
+src/command-agent/target
 *.log
 # The Substrate bridge images copy the built bridge (src/substrate-bridge/Dockerfile.*).
 !dist/substrate-bridge
