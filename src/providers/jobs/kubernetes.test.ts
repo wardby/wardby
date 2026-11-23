@@ -2318,6 +2318,84 @@ describe("coding-run services", () => {
       ]);
     });
 
+    describe("setup jobs (#589)", () => {
+      const MIGRATE = resolvedFromDefinition(
+        CodingServiceDefinitionSchema.parse({
+          name: "app-migrations",
+          version: "1",
+          kind: "setup",
+          image: `registry.example/team/migrate@sha256:${"e".repeat(64)}`,
+          command: ["migrate", "up"],
+          waitFor: ["postgres"],
+          serviceEnv: { DB_PASSWORD: "fake-throwaway-9f2c" },
+          resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 128 },
+        }),
+      );
+      /** Sets the setup container's status (and leaves keeper and worker as the harness has them). */
+      const setSetup = (h: Awaited<ReturnType<typeof harness>>, state: V1ContainerStatus["state"]) => {
+        const pod = structuredClone(h.api.objects.get(`pod/wardby-coding/${h.names.pod}`)) as V1Pod;
+        const others = (pod.status!.containerStatuses ?? []).filter((c) => c.name !== "setup-app-migrations");
+        pod.status = {
+          ...pod.status,
+          containerStatuses: [
+            ...others,
+            { name: "setup-app-migrations", ready: false, restartCount: 0, image: MIGRATE.image, imageID: "", state },
+          ],
+        };
+        h.api.put("pod", "wardby-coding", pod);
+      };
+
+      it("fails the run as coding_setup_failed:<name> when a setup job exits non-zero, and stops the pod", async () => {
+        const h = await harness("run-setup-fail");
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        setSetup(h, { terminated: { exitCode: 3, reason: "Error" } });
+        expect(await h.launcher.status(handle)).toMatchObject({ state: "failed" });
+        expect(await h.launcher.collect(handle)).toEqual({
+          exitCode: 3,
+          reason: "failed",
+          diagnostic: "coding_setup_failed:app-migrations",
+        });
+      });
+
+      it("keeps a run going when its setup job exited 0", async () => {
+        const h = await harness("run-setup-ok");
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        setSetup(h, { terminated: { exitCode: 0, reason: "Completed" } });
+        expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+      });
+
+      it("logs a failed job's output tail for operators, redacted by exact value", async () => {
+        const h = await harness("run-setup-tail");
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        h.api.logs.set(
+          `wardby-coding/${h.names.pod}/setup-app-migrations`,
+          "connecting with password fake-throwaway-9f2c\nERROR: relation missing",
+        );
+        setSetup(h, { terminated: { exitCode: 1, reason: "Error" } });
+        await h.launcher.status(handle);
+        const logged = h.warnings.join("\n");
+        expect(logged).toContain("coding_setup_failed:app-migrations");
+        expect(logged).toContain("ERROR: relation missing");
+        expect(logged).not.toContain("fake-throwaway-9f2c");
+        // Never on the run: the collected result carries the fixed code only.
+        expect(JSON.stringify(await h.launcher.collect(handle))).not.toContain("relation missing");
+      });
+
+      it("reports a setup job's progress: probing while it runs, ready once it exited 0, failed when it didn't", async () => {
+        const { updates, onServiceState } = reporting();
+        const h = await harness("run-setup-report", {}, { onServiceState });
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        setSetup(h, { running: { startedAt: new Date() } });
+        await h.launcher.status(handle);
+        setSetup(h, { terminated: { exitCode: 0, reason: "Completed" } });
+        await h.launcher.status(handle);
+        expect(updates.filter((u) => u.name === "app-migrations")).toEqual([
+          { runId: "run-setup-report", name: "app-migrations", state: "probing" },
+          { runId: "run-setup-report", name: "app-migrations", state: "ready" },
+        ]);
+      });
+    });
+
     it.each([
       ["probe_failed", { restartCount: 1 }],
       ["image_unavailable", { state: { waiting: { reason: "ImagePullBackOff" } } }],

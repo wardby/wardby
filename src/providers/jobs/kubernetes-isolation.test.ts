@@ -1080,7 +1080,7 @@ describe("buildRunPod with services", () => {
     built.spec!.initContainers!.find((c) => c.name === `service-${name}`)!;
   const autopilot = { ...options, platform: "gke-autopilot" as const, runtimeClassName: "gvisor" };
 
-  it("builds no sidecar, container or volume for a setup job (#589): it gets its own container later", () => {
+  it("never builds a setup job (#589) as a sidecar: the sidecars are exactly those of the run without it", () => {
     const job = resolvedFromDefinition(
       CodingServiceDefinitionSchema.parse({
         name: "app-migrations",
@@ -1094,10 +1094,11 @@ describe("buildRunPod with services", () => {
       }),
     );
     const withJob = buildRunPod({ ...withServices, services: [POSTGRES, REDIS, job] }, options);
-    expect(withJob.spec!.initContainers).toEqual(p().spec!.initContainers);
-    expect(withJob.spec!.containers).toEqual(p().spec!.containers);
-    expect(withJob.spec!.volumes).toEqual(p().spec!.volumes);
-    expect(JSON.stringify(withJob.spec)).not.toContain("app-migrations");
+    const sidecars = (built: V1Pod) => built.spec!.initContainers!.filter((c) => c.restartPolicy === "Always");
+    expect(sidecars(withJob)).toEqual(sidecars(p()));
+    expect(withJob.spec!.initContainers!.map((c) => c.name)).not.toContain("service-app-migrations");
+    // It is a main container of its own instead (see "buildRunPod with setup jobs").
+    expect(withJob.spec!.containers.map((c) => c.name)).toEqual(["keeper", "setup-app-migrations", "worker"]);
   });
 
   it("builds exactly the pod it always has when a run has no services", () => {
@@ -1624,5 +1625,125 @@ describe("buildRunPod with a toolchain (#599)", () => {
     expect(() => validateKubernetesSpec({ ...claude, services: [TOOLCHAIN, second] })).toThrow(
       KUBERNETES_ISOLATION_ERROR,
     );
+  });
+});
+
+describe("buildRunPod with setup jobs (#589)", () => {
+  const POSTGRES = resolvedFromDefinition(
+    BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+  );
+  const job = (name: string, extra: Record<string, unknown> = {}) =>
+    resolvedFromDefinition(
+      CodingServiceDefinitionSchema.parse({
+        name,
+        version: "1",
+        kind: "setup",
+        image: `localhost:5001/liquibase@sha256:${"d".repeat(64)}`,
+        command: ["liquibase", "update"],
+        waitFor: ["postgres"],
+        serviceEnv: { DB_PASSWORD: "throwaway" },
+        resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 64 },
+        writablePaths: ["/tmp"],
+        ...extra,
+      }),
+    );
+  const MIGRATE = job("app-migrations", { timeoutSeconds: 300 });
+  const SEED = job("seed-data", { command: ["sh", "-c", "seed"] });
+  const withJobs: JobSpec = { ...spec, services: [POSTGRES, MIGRATE, SEED] };
+  const p = () => buildRunPod(withJobs, options);
+  const main = (built: V1Pod, name: string) => built.spec!.containers.find((c) => c.name === name)!;
+
+  it("runs each job as a main container between the keeper and the worker, in declaration order", () => {
+    expect(p().spec!.containers.map((c) => c.name)).toEqual([
+      "keeper",
+      "setup-app-migrations",
+      "setup-seed-data",
+      "worker",
+    ]);
+    expect(p().spec!.initContainers!.map((c) => c.name)).toEqual(["storage-init", "service-postgres"]);
+  });
+
+  it("starts each job with wardby-cmd once, waiting for the checkout and for the job before it", () => {
+    expect(main(p(), "setup-app-migrations").command).toEqual([
+      "/opt/wardby-cmd/wardby-cmd",
+      "once",
+      "--result-file",
+      "/run/wardby/setup/app-migrations",
+      "--wait-file",
+      "/run/wardby/input/.seeded",
+      "--timeout-sec",
+      "300",
+      "--",
+      "liquibase",
+      "update",
+    ]);
+    expect(main(p(), "setup-seed-data").command).toEqual([
+      "/opt/wardby-cmd/wardby-cmd",
+      "once",
+      "--result-file",
+      "/run/wardby/setup/seed-data",
+      "--wait-file",
+      "/run/wardby/input/.seeded",
+      "--after-file",
+      "/run/wardby/setup/app-migrations",
+      "--timeout-sec",
+      "600",
+      "--",
+      "sh",
+      "-c",
+      "seed",
+    ]);
+  });
+
+  it("mounts the checkout read-only, the agent and seeded marker read-only, and only its own result folder writable", () => {
+    expect(main(p(), "setup-app-migrations").volumeMounts).toEqual([
+      { name: "storage", mountPath: "/workspace", subPath: "workspace", readOnly: true },
+      { name: "storage", mountPath: "/opt/wardby-cmd", subPath: "cmd", readOnly: true },
+      { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
+      { name: "storage", mountPath: "/run/wardby/setup", subPath: "setup" },
+      { name: "setup-1-scratch-0", mountPath: "/tmp" },
+    ]);
+    expect(main(p(), "setup-app-migrations").env).toEqual([{ name: "DB_PASSWORD", value: "throwaway" }]);
+    expect(main(p(), "setup-app-migrations").securityContext).toEqual(main(p(), "keeper").securityContext);
+  });
+
+  it("holds the worker until the last job's result is 0, and refuses to start otherwise", () => {
+    const worker = main(p(), "worker");
+    expect(worker.volumeMounts).toContainEqual({
+      name: "storage",
+      mountPath: "/run/wardby/setup",
+      subPath: "setup",
+      readOnly: true,
+    });
+    const gate = worker.command![2];
+    expect(gate).toContain('"/run/wardby/setup/seed-data"');
+    expect(gate).toContain("process.exit(3)");
+  });
+
+  it("has storage-init create the setup folder and copy the command agent", () => {
+    const script = p().spec!.initContainers![0].command![2];
+    expect(script).toContain('"setup"');
+    expect(script).toContain('"cmd"');
+    expect(script).toContain('"/opt/wardby/bin/wardby-cmd"');
+  });
+
+  it("gives each job's writable paths their own scratch volumes", () => {
+    expect(
+      p()
+        .spec!.volumes!.filter((v) => v.name.startsWith("setup-"))
+        .map((v) => v.name),
+    ).toEqual(["setup-1-scratch-0", "setup-2-scratch-0"]);
+  });
+
+  it("leaves a run without setup jobs exactly as it was", () => {
+    const plain = buildRunPod({ ...spec, services: [POSTGRES] }, options);
+    expect(plain.spec!.containers.map((c) => c.name)).toEqual(["keeper", "worker"]);
+    expect(main(plain, "worker").command![2]).not.toContain("/run/wardby/setup");
+    expect(plain.spec!.initContainers![0].command![2]).not.toContain('"setup"');
+  });
+
+  it("attests a read-back pod with setup jobs", () => {
+    const built = p();
+    expect(() => assertRunPodMatches(apiRoundTrip(built, "V1Pod"), built)).not.toThrow();
   });
 });

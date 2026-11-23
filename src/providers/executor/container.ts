@@ -43,6 +43,8 @@ import {
 import { MAX_SERVICE_DECLARATION_BYTES, SERVICE_DECLARATION_PATH } from "../../coding/services/declaration.js";
 import {
   SERVICE_UNREADY_CATEGORY,
+  SETUP_FAILED_CATEGORY,
+  SETUP_FAILED_ERROR,
   SERVICE_UNREADY_ERROR,
   serviceUnreadyName,
   serviceUnreadySentence,
@@ -5749,6 +5751,8 @@ export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, categor
   ["job_coding_turn_limit", "turn_limit"],
   // A service sidecar never became ready (src/providers/jobs/kubernetes.ts).
   [SERVICE_UNREADY_ERROR, SERVICE_UNREADY_CATEGORY],
+  // A setup job (#589) exited non-zero: the launcher's diagnostic arrives as job_<code>.
+  [`job_${SETUP_FAILED_ERROR}`, SETUP_FAILED_CATEGORY],
   // Services on a launcher that can't start them: refused at dispatch, failed here as a backstop.
   ["coding_services_unsupported", "preflight"],
   // An extra repository dispatch never resolved to a commit: refused before anything is cloned.

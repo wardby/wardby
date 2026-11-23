@@ -124,6 +124,24 @@ export function serviceUnreadyName(error: unknown): string | null {
   return CODING_SERVICE_NAME.test(name) ? name : null;
 }
 
+/** A setup job (#589) that exited non-zero: `coding_setup_failed:<name>` (job_ prefixed on the run). */
+export const SETUP_FAILED_ERROR = "coding_setup_failed";
+/** CodingRun.failureCategory for that failure. */
+export const SETUP_FAILED_CATEGORY = "service_setup";
+
+/** The setup job a `[job_]coding_setup_failed:<name>` error names, or null. */
+export function setupFailedName(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const match = /^(?:job_)?coding_setup_failed:(.+)$/.exec(message);
+  return match && CODING_SERVICE_NAME.test(match[1]) ? match[1] : null;
+}
+
+export function setupFailedSentence(name: string | null): string {
+  return name
+    ? `The \`${name}\` setup job failed, so the run didn't start.`
+    : "A setup job the run needs failed, so the run didn't start.";
+}
+
 export function serviceUnreadySentence(names: readonly string[]): string {
   if (names.length === 1) return `The \`${names[0]}\` service didn't become ready, so the run couldn't start.`;
   if (names.length > 1) {

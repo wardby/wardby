@@ -18,10 +18,12 @@ import type {
 import {
   isToolchainService,
   runningServices,
+  runSetupJobs,
   runToolchain,
   sidecarOnly,
   StoredCodingServicesSchema,
   type ResolvedCodingService,
+  type ResolvedSetupService,
   type ResolvedToolchainService,
 } from "../../coding/services/catalog.js";
 import { MCP_TOKEN_ENV } from "../../coding/mcp-token.js";
@@ -89,6 +91,13 @@ export const TOOLCHAIN_AGENT_MOUNT = "/opt/wardby-cmd";
 export const TOOLCHAIN_HOME = "/home/wardby";
 /** The keeper's seeded marker as a toolchain container sees it (storage `input`, read-only). */
 const TOOLCHAIN_SEEDED_MARKER = "/run/wardby/input/.seeded";
+/** Where a setup job (#589) writes its result file and the worker reads the last one (storage `setup`). */
+export const SETUP_RESULT_DIR = "/run/wardby/setup";
+const SETUP_STORAGE_DIRECTORY = "setup";
+/** A setup job's main container: `setup-<name>`. */
+export function setupContainerName(name: string): string {
+  return `setup-${name}`;
+}
 /**
  * Wardby's fixed values on a toolchain container, over its serviceEnv, so setupCommand sees them too;
  * the tool runner sends the same ones with every command (command.mjs toolchainEnvironment). Never a
@@ -139,13 +148,32 @@ export const ENFORCEMENT_PROBE_DENY_REFUSED = 5;
 const WORKER_SERVICE_ACCOUNT = "wardby-coding-worker";
 export const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/;
 
-/** The worker waits for the launcher's seeded marker, then runs its provider's entrypoint. */
-function workerGate(entrypoint: string): string {
+/**
+ * The worker waits for the launcher's seeded marker, then runs its provider's entrypoint. On a run
+ * with setup jobs (#589) it also waits for the last job's result file, and starts only when it reads
+ * 0: a failed job (its own code, or 125 passed down the chain) exits 3 without starting the agent.
+ */
+function workerGate(entrypoint: string, lastSetupJob?: string): string {
+  if (lastSetupJob === undefined) {
+    return [
+      'const fs = require("node:fs");',
+      'const marker = "/run/wardby/input/.seeded";',
+      "(function wait() {",
+      "  if (fs.existsSync(marker)) {",
+      `    import(${JSON.stringify(entrypoint)}).catch(() => { process.exitCode = 1; });`,
+      "  } else {",
+      "    setTimeout(wait, 250);",
+      "  }",
+      "})();",
+    ].join("\n");
+  }
   return [
     'const fs = require("node:fs");',
     'const marker = "/run/wardby/input/.seeded";',
+    `const setup = ${JSON.stringify(`${SETUP_RESULT_DIR}/${lastSetupJob}`)};`,
     "(function wait() {",
-    "  if (fs.existsSync(marker)) {",
+    "  if (fs.existsSync(marker) && fs.existsSync(setup)) {",
+    '    if (fs.readFileSync(setup, "utf8").trim() !== "0") process.exit(3);',
     `    import(${JSON.stringify(entrypoint)}).catch(() => { process.exitCode = 1; });`,
     "  } else {",
     "    setTimeout(wait, 250);",
@@ -424,6 +452,60 @@ function toolchainSidecar(
   };
 }
 
+/** A setup job's scratch emptyDirs, one per writable path: `setup-<i>-scratch-<n>` (i counts from 1). */
+function setupScratch(job: ResolvedSetupService, index: number): Array<{ name: string; mountPath: string }> {
+  return job.writablePaths.map((path, n) => ({ name: `setup-${index + 1}-scratch-${n}`, mountPath: path }));
+}
+
+/**
+ * One setup job (#589, docs/coding-services.md) as a main container: the catalog image with Wardby's
+ * `wardby-cmd once` as its entrypoint, so the image needs no shell. It waits for the keeper's seeded
+ * marker (the checkout is copied in only after every sidecar is ready, so a job can't be an init
+ * container) and for the job before it, runs the entry's command from the checkout mounted read-only,
+ * and writes its exit code to its result file. The launcher fails the run on a non-zero exit.
+ */
+function setupContainer(
+  job: ResolvedSetupService,
+  index: number,
+  previous: ResolvedSetupService | undefined,
+  profile: KubernetesPlatformProfile,
+): V1Container {
+  const env = Object.entries(job.serviceEnv)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => ({ name, value }));
+  return {
+    name: setupContainerName(job.name),
+    image: job.image,
+    command: [
+      `${TOOLCHAIN_AGENT_MOUNT}/wardby-cmd`,
+      "once",
+      "--result-file",
+      `${SETUP_RESULT_DIR}/${job.name}`,
+      "--wait-file",
+      TOOLCHAIN_SEEDED_MARKER,
+      ...(previous ? ["--after-file", `${SETUP_RESULT_DIR}/${previous.name}`] : []),
+      "--timeout-sec",
+      String(job.timeoutSeconds),
+      "--",
+      ...job.command,
+    ],
+    ...(env.length > 0 ? { env } : {}),
+    securityContext: containerSecurity(),
+    resources: conformResources(profile, {
+      cpuMillicores: job.resources.cpuMillicores,
+      memoryMib: job.resources.memoryMib,
+      ephemeralStorageMib: Math.max(SERVICE_SCRATCH_MIB, SERVICE_SCRATCH_MIB * job.writablePaths.length),
+    }),
+    volumeMounts: [
+      { name: "storage", mountPath: "/workspace", subPath: "workspace", readOnly: true },
+      { name: "storage", mountPath: TOOLCHAIN_AGENT_MOUNT, subPath: TOOLCHAIN_AGENT_DIRECTORY, readOnly: true },
+      { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
+      { name: "storage", mountPath: SETUP_RESULT_DIR, subPath: SETUP_STORAGE_DIRECTORY },
+      ...setupScratch(job, index),
+    ],
+  };
+}
+
 function serviceVolumes(services: readonly ResolvedCodingService[]): V1Volume[] {
   // Setup jobs (#589) are not sidecars: they get containers (and volumes) of their own.
   return runningServices(services).flatMap((service, index) =>
@@ -473,6 +555,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   const sidecarMemoryMib = 128;
   const claude = spec.provider === "claude-code";
   const toolchain = runToolchain(services) !== undefined;
+  const setupJobs = runSetupJobs(services);
   const toolchainAliases = [...(runToolchain(services)?.hostAliases ?? [])];
   const tool = claudeToolLimits(spec);
   const toolScratchMb = Math.max(16, Math.min(64, Math.floor(tool.memoryMb / 8)));
@@ -493,9 +576,11 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         storageInitScript(STORAGE_ROOT, [
           ...STORAGE_DIRECTORIES,
           ...repositoryStorageDirectories(spec),
-          ...(toolchain ? [TOOLCHAIN_AGENT_DIRECTORY] : []),
+          ...(toolchain || setupJobs.length > 0 ? [TOOLCHAIN_AGENT_DIRECTORY] : []),
+          ...(setupJobs.length > 0 ? [SETUP_STORAGE_DIRECTORY] : []),
         ]),
-        ...(toolchain ? [toolchainAgentScript(STORAGE_ROOT)] : []),
+        // The command agent: a toolchain's entrypoint and every setup job's (#589).
+        ...(toolchain || setupJobs.length > 0 ? [toolchainAgentScript(STORAGE_ROOT)] : []),
       ].join("\n"),
     ],
     securityContext: containerSecurity(),
@@ -523,7 +608,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   const worker: V1Container = {
     name: WORKER_CONTAINER,
     image: spec.image,
-    command: ["node", "-e", workerGate(claude ? CLAUDE_ENTRYPOINT : CODEX_ENTRYPOINT)],
+    command: ["node", "-e", workerGate(claude ? CLAUDE_ENTRYPOINT : CODEX_ENTRYPOINT, setupJobs.at(-1)?.name)],
     env: [
       { name: "WARDBY_PROXY_URL", value: `http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}` },
       { name: "WARDBY_RUN_CAPABILITY", valueFrom: { secretKeyRef: { name: names.secret, key: "capability" } } },
@@ -539,24 +624,30 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
       ephemeralStorageMib: claude ? WORKER_EPHEMERAL_MIB - TOOL_RUNNER_EPHEMERAL_MIB : WORKER_EPHEMERAL_MIB,
     }),
     // Claude's agent never sees the repository: the tool runner does, over the socket.
-    volumeMounts: claude
-      ? [
-          { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
-          { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
-          { name: TOOL_SOCKET_VOLUME, mountPath: "/run/wardby/tool" },
-          { name: "tmp", mountPath: "/tmp" },
-          { name: "home", mountPath: "/home/wardby" },
-          // Session resume: the SDK's config dir, where the session file grows, off /tmp's budget.
-          ...(spec.sessionResume ? [{ name: CLAUDE_CONFIG_VOLUME, mountPath: CLAUDE_CONFIG_PATH }] : []),
-        ]
-      : [
-          { name: "storage", mountPath: "/workspace", subPath: "workspace" },
-          ...repositoryMounts,
-          { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
-          { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
-          { name: "tmp", mountPath: "/tmp" },
-          { name: "home", mountPath: "/home/wardby" },
-        ],
+    volumeMounts: [
+      ...(claude
+        ? [
+            { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
+            { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
+            { name: TOOL_SOCKET_VOLUME, mountPath: "/run/wardby/tool" },
+            { name: "tmp", mountPath: "/tmp" },
+            { name: "home", mountPath: "/home/wardby" },
+            // Session resume: the SDK's config dir, where the session file grows, off /tmp's budget.
+            ...(spec.sessionResume ? [{ name: CLAUDE_CONFIG_VOLUME, mountPath: CLAUDE_CONFIG_PATH }] : []),
+          ]
+        : [
+            { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+            ...repositoryMounts,
+            { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
+            { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
+            { name: "tmp", mountPath: "/tmp" },
+            { name: "home", mountPath: "/home/wardby" },
+          ]),
+      // The setup jobs' result files (#589): the gate reads the last one before starting the agent.
+      ...(setupJobs.length > 0
+        ? [{ name: "storage", mountPath: SETUP_RESULT_DIR, subPath: SETUP_STORAGE_DIRECTORY, readOnly: true }]
+        : []),
+    ],
   };
   /**
    * Claude's tool runner (docs/coding-worker-isolation.md): a native sidecar, so the kubelet starts it
@@ -668,6 +759,9 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
             ]
           : []),
         ...serviceVolumes(services),
+        ...setupJobs.flatMap((job, index) =>
+          setupScratch(job, index).map(({ name }) => ({ name, emptyDir: { sizeLimit: `${SERVICE_SCRATCH_MIB}Mi` } })),
+        ),
       ],
       // storage-init first (it must finish before any subPath mount), then Claude's tool runner, then each
       // service sidecar in declaration order; the keeper and worker start only once every sidecar started.
@@ -677,7 +771,12 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         // Setup jobs (#589) are not sidecars: they get containers of their own, so none is built here.
         ...runningServices(services).map((service, index) => serviceSidecar(service, index, profile, spec.timeoutSec)),
       ],
-      containers: [keeper, worker],
+      // Setup jobs (#589) between the keeper and the worker: each waits for the checkout, then runs once.
+      containers: [
+        keeper,
+        ...setupJobs.map((job, index) => setupContainer(job, index, setupJobs[index - 1], profile)),
+        worker,
+      ],
     },
   };
 }

@@ -10,6 +10,8 @@ import {
   serviceUnreadyError,
   serviceUnreadyName,
   serviceUnreadySentence,
+  setupFailedName,
+  setupFailedSentence,
   unknownServiceSentence,
   unstartableServiceSentence,
   codexToolchainSentence,
@@ -157,5 +159,21 @@ describe("a service that never became ready", () => {
       "One of the run's services (`postgres`, `redis`) didn't become ready, so the run couldn't start.",
     );
     expect(serviceUnreadySentence([])).toBe("A service the run needs didn't become ready, so the run couldn't start.");
+  });
+});
+
+describe("setup job failures (#589)", () => {
+  it("names the job from the launcher's code and the run's job_ form, and nothing else", () => {
+    expect(setupFailedName("coding_setup_failed:app-migrations")).toBe("app-migrations");
+    expect(setupFailedName("job_coding_setup_failed:app-migrations")).toBe("app-migrations");
+    expect(setupFailedName("job_coding_setup_failed:Not Valid")).toBeNull();
+    expect(setupFailedName("coding_service_unready:postgres")).toBeNull();
+  });
+
+  it("says which job failed and that the run never started", () => {
+    expect(setupFailedSentence("app-migrations")).toBe(
+      "The `app-migrations` setup job failed, so the run didn't start.",
+    );
+    expect(setupFailedSentence(null)).toBe("A setup job the run needs failed, so the run didn't start.");
   });
 });
