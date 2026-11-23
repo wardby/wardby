@@ -77,6 +77,7 @@ import { projectTool, TOOL_GRANTS_INCLUDE } from "./tools.js";
 import { withZod3ToolWarnings } from "../../core/zod3-window.js";
 import { isOwnerAll, requireAnyScope, requireScope } from "../auth/resource-server.js";
 import { logger } from "../../core/logger.js";
+import { recordPromptVersion } from "../../core/agent-prompt-versions.js";
 import { removeRetainedRounds } from "./retained-rounds.js";
 import {
   authorizeRepositoryForSet,
@@ -136,7 +137,7 @@ interface WarmFingerprintSource {
 }
 
 /** Whether an update changed anything a retained round's fingerprint covers. */
-function warmFingerprintChanged(before: WarmFingerprintSource, after: WarmFingerprintSource): boolean {
+export function warmFingerprintChanged(before: WarmFingerprintSource, after: WarmFingerprintSource): boolean {
   if (before.kind !== "coding") return false;
   const a = before.codingProfile;
   const b = after.codingProfile;
@@ -391,6 +392,8 @@ const UpdateAgentSchema = z
     id: z.string().min(1).max(128),
     name: agentFields.name.optional(),
     systemPrompt: agentFields.systemPrompt.optional(),
+    /** Not stored on the agent: labels the prompt version this update records (when systemPrompt changes). */
+    promptSummary: z.string().min(1).max(200).optional(),
     model: agentFields.model.optional(),
     budgetUsd: agentFields.budgetUsd.optional(),
     maxTurns: agentFields.maxTurns.optional(),
@@ -843,29 +846,38 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           throw new McpError(400, err instanceof Error ? err.message : "plan_settings_invalid");
         }
       }
-      const agent = await ctx.db.agent.create({
-        data: {
-          ...agentData,
-          ...(await scheduleStartFields(ctx.db, null, {
-            schedule: agentData.schedule ?? null,
-            timezone: agentData.timezone ?? "UTC",
-            scheduleEnabled: agentData.scheduleEnabled ?? true,
-          })),
-          ownerId: ctx.principal.id,
-          ...(codingProfile && authorization
-            ? {
-                codingProfile: {
-                  create: {
-                    ...codingProfileColumns(
-                      planChecked ? { ...codingProfile, planDocument: planChecked } : codingProfile,
-                    ),
-                    ...profileStamp(authorization),
+      const agent = await ctx.db.$transaction(async (tx) => {
+        const created = await tx.agent.create({
+          data: {
+            ...agentData,
+            ...(await scheduleStartFields(ctx.db, null, {
+              schedule: agentData.schedule ?? null,
+              timezone: agentData.timezone ?? "UTC",
+              scheduleEnabled: agentData.scheduleEnabled ?? true,
+            })),
+            ownerId: ctx.principal.id,
+            ...(codingProfile && authorization
+              ? {
+                  codingProfile: {
+                    create: {
+                      ...codingProfileColumns(
+                        planChecked ? { ...codingProfile, planDocument: planChecked } : codingProfile,
+                      ),
+                      ...profileStamp(authorization),
+                    },
                   },
-                },
-              }
-            : {}),
-        },
-        include: { codingProfile: true },
+                }
+              : {}),
+          },
+          include: { codingProfile: true },
+        });
+        await recordPromptVersion(tx, {
+          agentId: created.id,
+          systemPrompt: created.systemPrompt,
+          via: "create",
+          createdById: ctx.principal.id,
+        });
+        return created;
       });
       return textResult(withRunStepsWarning(withProfileWarnings(withOperatorMode(agent))));
     },
@@ -881,6 +893,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         id: { type: "string" },
         name: { type: "string" },
         systemPrompt: { type: "string" },
+        promptSummary: {
+          type: "string",
+          minLength: 1,
+          maxLength: 200,
+          description:
+            "Optional label for the prompt version this update records when systemPrompt changes (see list_agent_prompt_versions).",
+        },
         model: { type: "string" },
         budgetUsd: { type: "number" },
         maxTurns: { type: "integer" },
@@ -1220,6 +1239,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             codingProfile: _profilePatch,
             repositoryAdminOverride: _override,
             nativeExecutionMode: modeArg,
+            promptSummary,
             ...fieldUpdates
           } = args;
           const updates = {
@@ -1245,7 +1265,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             timezone: nextTimezone,
             scheduleEnabled: nextScheduleEnabled,
           });
-          return tx.agent.update({
+          const updated = await tx.agent.update({
             where: { id },
             data: {
               ...updates,
@@ -1254,6 +1274,16 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             },
             include: { codingProfile: true },
           });
+          if (updates.systemPrompt !== undefined) {
+            await recordPromptVersion(tx, {
+              agentId: id,
+              systemPrompt: updated.systemPrompt,
+              via: "update",
+              createdById: ctx.principal.id,
+              summary: promptSummary,
+            });
+          }
+          return updated;
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );

@@ -111,7 +111,9 @@ yourself.`
    `access: "write"`, and `triggers: ["push"]`. Send no `checkName`.
 9. Offer the reviewer step: if the user has a code-review agent, offer to append
    the "Reviewer step" from the same article to its prompt with `update_agent`
-   (read it first with `get_agent`, and keep its existing prompt).
+   (read it first with `get_agent`, and keep its existing prompt). If the edit
+   goes wrong, roll it back with the steps in
+   [Agent prompt history and rollback](agent-prompt-history.md).
 
 ## Step 2B: builder
 

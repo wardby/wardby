@@ -43,6 +43,7 @@ function fakeDb() {
   const fake: any = {
     calls,
     $queryRaw: vi.fn(async () => [{ now: new Date() }]),
+    agentPromptVersion: { findFirst: async () => null, create: async () => ({}) },
     tool: {
       findFirst: vi.fn(async () => null),
       create: vi.fn(async (a: unknown) => {
@@ -53,7 +54,7 @@ function fakeDb() {
     agent: {
       upsert: vi.fn(async (a: unknown) => {
         calls.agent.push(a);
-        return { id: "a", name: "n" };
+        return { id: "a", name: "n", systemPrompt: "p" };
       }),
       update: vi.fn(async () => ({})),
     },
@@ -217,7 +218,7 @@ describe("createFromBundle", () => {
     const db = fakeDb();
     db.agent.upsert.mockImplementation(async (a: any) => {
       db.calls.agent.push(a);
-      return { id: "a", name: "public-agent", ownerId: a.create.ownerId };
+      return { id: "a", name: "public-agent", ownerId: a.create.ownerId, systemPrompt: "p" };
     });
     db.tool.create.mockImplementation(async (a: any) => {
       db.calls.tool.push(a);

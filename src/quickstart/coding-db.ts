@@ -3,6 +3,7 @@
  * and local-agent lookups behind CodingDeps / CodingDoctorDeps. Each opens its
  * own client on the quickstart database (like seedDemo) and closes it.
  */
+import { recordPromptVersion } from "../core/agent-prompt-versions.js";
 import type { Prisma, PrismaClient } from "#prisma";
 import { LOCAL_REPO_PREFIX } from "../coding/local-repo.js";
 import type { DeclaredService } from "../coding/services/declaration.js";
@@ -27,9 +28,14 @@ async function withDb<T>(
 export function seedDb(db: PrismaClient): SeedDb {
   return {
     findAgent: (name) => db.agent.findUnique({ where: { name }, select: { id: true, kind: true, systemPrompt: true } }),
-    createAgent: (data) => db.agent.create({ data, select: { id: true } }),
+    createAgent: async (data) => {
+      const created = await db.agent.create({ data, select: { id: true, systemPrompt: true } });
+      await recordPromptVersion(db, { agentId: created.id, systemPrompt: created.systemPrompt, via: "seed" });
+      return { id: created.id };
+    },
     updateAgent: async (id, data) => {
-      await db.agent.update({ where: { id }, data });
+      const updated = await db.agent.update({ where: { id }, data, select: { systemPrompt: true } });
+      await recordPromptVersion(db, { agentId: id, systemPrompt: updated.systemPrompt, via: "seed" });
     },
     upsertCodingProfile: async (agentId, profile) => {
       const fields = profile as Omit<Prisma.CodingAgentProfileUncheckedCreateInput, "agentId">;

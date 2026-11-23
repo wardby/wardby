@@ -753,6 +753,31 @@ defused. Each part is posted once; if one cannot be posted, the rest are
 skipped. Shorter replies, and runs that opened a pull request or had a failed
 sub-run, keep the status comment that quotes up to 2,000 characters.
 
+## Prompt history and rollback
+
+Every change to an agent's system prompt is kept as a numbered, unchangeable
+version; the newest always equals the live prompt. A version is added by
+`create_agent`, by `update_agent` with a changed `systemPrompt`, by a restore, by
+the CLI and by an import that creates the agent. Existing agents start with
+their current prompt as the first version. Saving identical text adds nothing.
+Only the prompt is versioned, not the model, budget or schedule.
+
+| Tool                           | Scope          | What it does                                                                     |
+| ------------------------------ | -------------- | -------------------------------------------------------------------------------- |
+| `list_agent_prompt_versions`   | `agents:read`  | Metadata per version, newest first (`limit` 50 by default, 200 at most), no text |
+| `get_agent_prompt_version`     | `agents:read`  | One version's text in `systemPromptText`, with the agent's secret values masked  |
+| `restore_agent_prompt_version` | `agents:write` | Makes an earlier prompt live as a new version "Restored v<N>"                    |
+
+Pass `promptSummary` (1 to 200 characters) to `update_agent` to label the version
+it records. `restore_agent_prompt_version` takes `versionNumber` and a required
+`baseNumber` (the latest version you saw); it answers
+`agent_prompt_version_conflict` if the prompt changed since,
+`agent_prompt_version_is_latest` if that text is already live, and
+`agent_prompt_version_not_found` for an unknown number. Stored text is raw, like
+the live prompt, so a restore puts back exactly what ran; text returned by
+`get_agent_prompt_version` is masked. History has no retention limit and is deleted
+with the agent. Runs do not record which version they used.
+
 ## Next steps
 
 - [Architecture knowledge bundles](knowledge.md)

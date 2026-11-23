@@ -129,6 +129,7 @@ import { everyoneGrantData } from "./core/grants.js";
 import { parseImportArgs } from "./import/cli-args.js";
 import { runImport } from "./import/index.js";
 import { CLI_USAGE } from "./cli-help.js";
+import { recordPromptVersion } from "./core/agent-prompt-versions.js";
 import { parseCliNativeExecutionMode } from "./cli-native-mode.js";
 import { helpCommand } from "./help/cli.js";
 
@@ -304,6 +305,7 @@ async function agentCreate(args: string[]): Promise<void> {
         ownerId: ownerId!,
       },
     });
+    await recordPromptVersion(tx, { agentId: created.id, systemPrompt: created.systemPrompt, via: "cli" });
     if (values.public) {
       await tx.resourceGrant.create({ data: everyoneGrantData("agent", created.id, "execute", "operator") });
     }

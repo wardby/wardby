@@ -15,6 +15,7 @@ import type { SecretCipher } from "../providers/secrets/types.js";
 import { scheduleStartFields } from "../core/schedule-start.js";
 import { createSecret, attachSecret } from "../core/secrets.js";
 import { createDatastore, attachDatastore } from "../core/datastores.js";
+import { recordPromptVersion } from "../core/agent-prompt-versions.js";
 import { guardDatastore } from "../core/secret-guarded-stores.js";
 import {
   SecretCheckUnavailableError,
@@ -186,6 +187,8 @@ export async function createFromBundle(
       },
       update: {},
     });
+    // The live prompt, not the bundle's: the update branch above is empty, so an existing agent keeps its own.
+    await recordPromptVersion(db, { agentId: agent.id, systemPrompt: agent.systemPrompt, via: "import" });
     if (a.nativeExecutionMode === "sandbox" && !nativeSandboxConfigured()) {
       warnings.push(
         `agent ${a.name}: nativeExecutionMode is "sandbox" but NATIVE_SANDBOX_LAUNCHER is not configured here; ` +
