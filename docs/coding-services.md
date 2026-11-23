@@ -448,6 +448,92 @@ as a command's output, with exit code 125:
 - `wardby-cmd: toolchain_unusable:agent`: the toolchain can't be reached;
   check that the agent uses this release's images.
 
+## Preparing services before the agent starts (setup jobs)
+
+Many test suites need their services prepared first: database migrations
+applied (Liquibase, Flyway, Alembic, Rails, Django), search indexes or
+message-queue topics created, seed data loaded. A **setup job** is a catalog
+entry for that one-off step. A run that declares one runs it after every
+service is ready and before the agent starts, from the run's own checkout, and
+fails before the agent starts if the job fails.
+
+Setup jobs work on the **Kubernetes and Docker job launchers**, for Claude
+Code and Codex agents. On the Substrate launcher, dispatch refuses a run that
+declares one (see "Errors").
+
+### Register a setup job
+
+Register it with `create_service` (`services:manage` plus the admin role),
+pinned by digest:
+
+```json
+{
+  "name": "app-migrations",
+  "version": "1",
+  "kind": "setup",
+  "image": "registry.example.com/team/liquibase@sha256:<digest>",
+  "command": ["liquibase", "--changelog-file=migrations/changelog.xml", "update"],
+  "waitFor": ["mysql"],
+  "serviceEnv": {
+    "DB_HOST": "127.0.0.1",
+    "DB_USER": "root",
+    "DB_PASSWORD": "<the mysql entry's throwaway root password>"
+  },
+  "resources": { "cpuMillicores": 1000, "memoryMib": 1024, "diskMib": 64 },
+  "writablePaths": ["/tmp"],
+  "timeoutSeconds": 600
+}
+```
+
+- **`image`**: any image: your migration tool's own, or your team's dev image.
+  It needs no shell: Wardby's command agent is its entrypoint and runs
+  `command`.
+- **`command`**: the argv to run, in `/workspace`, the run's checkout, mounted
+  **read-only**. Point your tool at the migrations in the repository, so each
+  branch runs its own.
+- **`waitFor`**: the services it needs. Each must be declared in the same
+  `services.yaml`; every declared service is ready before any job starts.
+- **`serviceEnv`**: its environment. Use throwaway values only, as for
+  services: the job runs against throwaway per-run services, so their
+  admin credentials (for example the `mysql` entry's root password) are fine
+  here. A job never gets the run's own secrets.
+- **`resources`**: give JVM-based tools such as Liquibase or Flyway at least
+  1 GiB of memory.
+- **`writablePaths`**: every directory the job writes, such as `/tmp`. On the
+  Docker launcher, include any directory the image declares as a `VOLUME`.
+- **`timeoutSeconds`**: 1 to 3600, default 600. A job that runs longer is
+  stopped and fails the run.
+
+A setup job runs as the run's user with a read-only root filesystem and no
+network beyond the run's services. **Setup tools must not call out**: anything
+that phones home (an update or version check, a telemetry ping) hangs until the
+timeout. Turn those checks off in the job's configuration; for example
+Percona Toolkit's `pt-online-schema-change` needs `--no-version-check`.
+
+### Declare and allow it
+
+```yaml
+services:
+  mysql: "8"
+setup:
+  app-migrations: "1"
+  search-mappings: "1"
+```
+
+`setup:` lists the jobs in the order they run: one at a time, each must exit 0
+before the next starts. At most 4 per run. Allow each job's name on the agent
+in `codingProfile.services`, the same list as its services.
+
+### When a job fails
+
+A job that exits non-zero, times out or can't start fails the run before the
+agent starts, with `coding_setup_failed:<name>` (failure category
+`service_setup`); see [`setup-failed`](../help/errors/setup-failed.md). The
+run's status says which job failed. The job's output never reaches the run, a
+pull request or the viewer; a short tail of it, redacted of every catalog
+value, goes to the control plane's operator log. `get_run`'s
+`serviceReadiness` shows each job's progress.
+
 ## Letting a coding agent change the declaration
 
 Wardby always protects `.wardby/` in coding runs, except
@@ -481,6 +567,9 @@ Protected-path entries also accept a leading `!` for your own exceptions:
 | A service the agent isn't allowed               | Dispatch | refused, `service_not_allowed`             | "This repository asks for `<name>`, which this agent isn't allowed to use. An admin or the agent's owner can allow it."                                                               |
 | Services on a deployment that can't start them  | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes, Docker or Substrate job launcher."                                        |
 | A service this launcher can't start             | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for `<name>`, which this wardby deployment can't start: <reason>." (Substrate; reasons below)                                                                   |
+| Setup jobs on the Substrate launcher            | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for the setup job `<name>`, which this wardby deployment can't start: setup jobs are not supported on this launcher yet."                                       |
+| A setup job's `waitFor` service isn't declared  | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: `<job>` needs `<service>`; declare it under `services:`."                                                                                        |
+| A setup job failed                              | Launch   | failed, category `service_setup`           | "The `<name>` setup job failed, so the run didn't start."                                                                                                                             |
 | A toolchain on the Substrate launcher           | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for the toolchain `<name>`, which this wardby deployment can't start: toolchains are not supported on this launcher yet."                                       |
 | A toolchain for a Codex agent                   | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for the toolchain `<name>`, which this agent can't use: toolchains are not supported for Codex agents yet."                                                     |
 | An entry under the wrong key in `services.yaml` | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: `<name>` is a toolchain; declare it under `toolchain:`." (or the reverse for a service)                                                          |
