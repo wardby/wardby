@@ -18,6 +18,9 @@ The CLI is the bootstrap and operations fallback. Scheduled work requires a
 running scheduler: `wardby serve` runs MCP, scheduler, and reconciliation in
 one process; `wardby mcp` alone does not execute schedules.
 
+Every change to an agent's system prompt is kept; see
+[Agent prompt history and rollback](agent-prompt-history.md) to read or restore an earlier one.
+
 Use [Choose a native or coding agent](creating-agents.md) to select the least
 powerful execution model that can safely produce the desired outcome.
 

@@ -25,6 +25,7 @@ import {
 import { codingStep, quickstartComposeFiles, type CodingDeps, type CodingStepOptions } from "./coding.js";
 import { prismaCatalogImages, prismaLocalAgents, prismaSeedCodingAgents } from "./coding-db.js";
 import { codingDoctorLines } from "./coding-doctor.js";
+import { recordPromptVersion } from "../core/agent-prompt-versions.js";
 import { baseImageLine, resolveQuickstartImages } from "./images.js";
 import { scenarioMenuLines } from "./scenarios.js";
 import { parseStarterChoice } from "./starter-services.js";
@@ -313,7 +314,7 @@ async function seedDemo(paths: QuickstartPaths, state: QuickstartState, budget: 
         },
       });
     } else {
-      await db.agent.create({
+      const created = await db.agent.create({
         data: {
           name: DEMO_AGENT,
           model: state.model,
@@ -323,6 +324,7 @@ async function seedDemo(paths: QuickstartPaths, state: QuickstartState, budget: 
           ownerId: owner.id,
         },
       });
+      await recordPromptVersion(db, { agentId: created.id, systemPrompt: created.systemPrompt, via: "seed" });
     }
   } finally {
     await db.$disconnect();

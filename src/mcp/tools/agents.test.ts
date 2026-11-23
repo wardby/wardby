@@ -130,6 +130,8 @@ function fakeDb(
   const groupsById = new Map(budgetGroups.map((g) => [g.id, g]));
   let counter = rows.size;
   const transactionDb = {
+    // The prompt history (core/agent-prompt-versions.ts): nothing recorded in these fakes.
+    agentPromptVersion: { findFirst: async () => null, create: async () => ({}) },
     // The database clock a schedule start records (core/schedule-start.ts).
     $queryRaw: async () => [{ now: new Date() }],
     // make_owner's SET LOCAL enable_seqscan = off (core/serializable-retry.ts preferIndexScans).

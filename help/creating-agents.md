@@ -68,6 +68,9 @@ separately; a missing one fails the run itself at dispatch, not
 `create_agent`/`update_agent`. See [Models and pricing](models.md) and
 [Model not available](errors/model-unavailable.md).
 
+A prompt change you regret can be rolled back: see
+[Agent prompt history and rollback](agent-prompt-history.md).
+
 ## Run it on a schedule
 
 Give an agent a cron schedule with `set_schedule` (`agentId`, `schedule` such
