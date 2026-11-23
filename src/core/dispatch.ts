@@ -15,6 +15,7 @@ import { isPackageAuditActive } from "../coding/registry/audit-mode.js";
 import { ModelUnavailableError, entryOf, type ResolvedCatalogEntry } from "../providers/llm/catalog-types.js";
 import {
   parseAllowedServiceNames,
+  runningServices,
   runToolchain,
   unsupportedKindService,
   workerServices,
@@ -1549,7 +1550,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             budgetUsd,
             deadlineAt: new Date(now.getTime() + agent.codingProfile.timeoutSec * 1000).toISOString(),
             continuationOf,
-            ...(services.length > 0 ? { services: workerServices(services) } : {}),
+            ...(runningServices(services).length > 0 ? { services: workerServices(services) } : {}),
           });
           const imageSelector = {
             provider: agent.codingProfile.provider,

@@ -52,6 +52,26 @@ describe("servicesInstructionNote", () => {
     expect(lines).toHaveLength(4);
   });
 
+  it("names the setup jobs as already run, never as services reachable on 127.0.0.1 (#589)", () => {
+    const note = servicesInstructionNote([
+      {
+        name: "mysql",
+        version: "8",
+        testEnv: { DATABASE_URL: "mysql://test:test@127.0.0.1:3306/test" },
+        kind: "sidecar",
+      },
+      { name: "app-migrations", version: "1", testEnv: {}, kind: "setup" },
+      { name: "search-mappings", version: "2", testEnv: {}, kind: "setup" },
+    ])!;
+    expect(note.split("\n")).toEqual([
+      "Services for this run: wardby started these next to your workspace, reachable on 127.0.0.1. Each one starts empty apart from what the setup jobs below did; create any other schema or data your tests need.",
+      "- mysql 8: DATABASE_URL=mysql://test:test@127.0.0.1:3306/test",
+      "Setup jobs for this run: before you started, wardby ran `app-migrations 1`, `search-mappings 2` against these services, in that order, and each succeeded.",
+      "These variables are already set in your shell environment; tests should read them instead of hard-coding connection details. Where two services set the same variable, the one listed first wins.",
+    ]);
+    expect(note).not.toContain("- app-migrations");
+  });
+
   it("adds DOCKER_HOST and how to use the daemon only for a run with a docker service", () => {
     const note = servicesInstructionNote([
       { name: "redis", version: "7", testEnv: {} },

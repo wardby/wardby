@@ -31,6 +31,7 @@ import { isIP } from "node:net";
 import type { V1ConfigMap, V1ContainerStatus, V1Pod, V1ResourceQuota } from "@kubernetes/client-node";
 import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
+import { redactExactSecretValues, withEscapedForms } from "../../core/secret-spans.js";
 import { CODING_MCP_GATEWAY_UNAVAILABLE, DISABLED_POWER, wakeTimeoutMs, type Power } from "../../core/power.js";
 import {
   MAX_CODING_ARTIFACT_BYTES,
@@ -82,7 +83,7 @@ import {
   type ServiceStateReporter,
 } from "./service-state.js";
 import type { CodingProvider } from "../../coding/provider.js";
-import type { CodingServiceKind } from "../../coding/services/catalog.js";
+import { runningServices, type CodingServiceKind } from "../../coding/services/catalog.js";
 import { GVISOR_RUNTIME_CLASS } from "./kubernetes-platform.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
@@ -464,6 +465,35 @@ function toolRunnerFailed(statuses: readonly V1ContainerStatus[] | undefined): b
 }
 
 /** Maps a pod read-back onto the next record state; `undefined` means "no change". Never called for terminal records. */
+/** A setup job's main container is `setup-<name>` (kubernetes-isolation.ts setupContainerName, #589). */
+const SETUP_CONTAINER_PREFIX = "setup-";
+/** How much of a failed setup job's output reaches the operator log (redacted), and nothing beyond it. */
+const SETUP_TAIL_LINES = 200;
+const SETUP_TAIL_BYTES = 8 * 1024;
+
+/** The pod's setup containers' statuses, in pod order. */
+function setupStatuses(pod: V1Pod | undefined): V1ContainerStatus[] {
+  return (pod?.status?.containerStatuses ?? []).filter((status) => status.name.startsWith(SETUP_CONTAINER_PREFIX));
+}
+
+/** A setup job's state for the run's readiness report: waiting, running, exited 0, exited otherwise. */
+function observedSetupState(status: V1ContainerStatus): { state: "pending" | "probing" | "ready" | "failed" } & {
+  reason?: "exited";
+} {
+  const terminated = status.state?.terminated;
+  if (terminated) return terminated.exitCode === 0 ? { state: "ready" } : { state: "failed", reason: "exited" };
+  return status.state?.running ? { state: "probing" } : { state: "pending" };
+}
+
+/**
+ * Every catalog value in the pod's container environments (the services', the toolchain's and the
+ * setup jobs' serviceEnv; never a Secret reference): what a setup job's output tail is redacted against.
+ */
+function podEnvironmentValues(pod: V1Pod | undefined): string[] {
+  const containers = [...(pod?.spec?.initContainers ?? []), ...(pod?.spec?.containers ?? [])];
+  return containers.flatMap((container) => (container.env ?? []).flatMap((env) => (env.value ? [env.value] : [])));
+}
+
 function observePod(
   pod: V1Pod | undefined,
   record: RunRecord,
@@ -484,6 +514,26 @@ function observePod(
   }
   if (now >= record.deadlineAt || pod.status?.reason === "DeadlineExceeded") {
     return { phase: "failed", result: { exitCode: 124, reason: "timed_out" }, deleteGraceSeconds: STOP_GRACE_SECONDS };
+  }
+  // A setup job (#589) that exited non-zero, or that can never start (its image can't be pulled or
+  // its container created): the agent must never start (its gate refuses too), so fail the run with
+  // the job's own code and stop the pod. Checked after the deadline, so a job the deadline or a pod
+  // deletion killed (143, 137) reads as timed_out, not as a failed job.
+  const failedSetup = setupStatuses(pod).find(
+    (status) =>
+      (status.state?.terminated !== undefined && status.state.terminated.exitCode !== 0) ||
+      FATAL_WAITING_REASONS.has(status.state?.waiting?.reason ?? ""),
+  );
+  if (failedSetup) {
+    return {
+      phase: "failed",
+      result: {
+        exitCode: Math.max(1, failedSetup.state?.terminated?.exitCode ?? 1),
+        reason: "failed",
+        diagnostic: `coding_setup_failed:${failedSetup.name.slice(SETUP_CONTAINER_PREFIX.length)}`,
+      },
+      deleteGraceSeconds: STOP_GRACE_SECONDS,
+    };
   }
   // Docker's worker_tool_runner_failed, for the same reason: without its tool runner a Claude worker
   // can only stall until the deadline. Checked only while the worker still runs, so a clean finish
@@ -736,6 +786,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   private readonly warnedOnce = new Set<string>();
+  /** The last setup-job state reported per `<runId>/<name>`, so each change is reported once (#589). */
+  private readonly setupReported = new Map<string, string>();
 
   private warnOnce(message: string): void {
     if (this.warnedOnce.has(message)) return;
@@ -1226,7 +1278,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     await this.waitForKeeper(
       names,
       spec.runId,
-      (spec.services ?? []).map((service) => service.name),
+      // The sidecars, toolchain and docker service: a setup job (#589) is not a sidecar, so there is none to wait for.
+      runningServices(spec.services ?? []).map((service) => service.name),
       spec.provider === "claude-code",
     );
 
@@ -1431,12 +1484,55 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     // A requeued run has no pod by design; observing it would record it lost.
     if (isTerminal(record.phase) || record.phase === "requeued") return record;
     const pod = await this.api.readPod(this.namespace, names.pod);
+    await this.reportSetupJobs(record.runId, pod);
     const observed = observePod(pod, record, this.now(), this.readyTimeoutMs);
     if (!observed) return record;
+    if (observed.result?.diagnostic?.startsWith("coding_setup_failed:")) {
+      // Before the pod is deleted: its log goes with it.
+      await this.logSetupFailure(names, pod, observed.result.diagnostic, observed.result.exitCode);
+    }
     if (observed.deleteGraceSeconds !== undefined) {
       await this.api.deletePod(this.namespace, names.pod, observed.deleteGraceSeconds);
     }
     return this.updateRecord(names, () => ({ phase: observed.phase, result: observed.result }));
+  }
+
+  /** Each setup job's progress (#589) through the service-state reporter, once per change. */
+  private async reportSetupJobs(runId: string, pod: V1Pod | undefined): Promise<void> {
+    for (const status of setupStatuses(pod)) {
+      const name = status.name.slice(SETUP_CONTAINER_PREFIX.length);
+      const observed = observedSetupState(status);
+      const key = `${runId}/${name}`;
+      const value = `${observed.state}:${observed.reason ?? ""}`;
+      if (this.setupReported.get(key) === value) continue;
+      this.setupReported.set(key, value);
+      if (observed.state === "pending") continue;
+      await reportServiceState(this.options.onServiceState, { runId, name, ...observed });
+    }
+  }
+
+  /**
+   * A failed setup job's bounded output tail, for operators only (the operator-diagnostics exception
+   * in CLAUDE.md's secrets rule): redacted by exact value against every catalog value in the pod's
+   * container environments, and never on the run, the result or anything published.
+   */
+  private async logSetupFailure(
+    names: RunNames,
+    pod: V1Pod | undefined,
+    diagnostic: string,
+    exitCode: number,
+  ): Promise<void> {
+    const container = `${SETUP_CONTAINER_PREFIX}${diagnostic.slice("coding_setup_failed:".length)}`;
+    let tail = "";
+    try {
+      // Read more than is kept, so a value straddling the start of what's kept is still redacted whole.
+      tail = await this.api.readLogTail(this.namespace, names.pod, container, SETUP_TAIL_LINES, SETUP_TAIL_BYTES * 4);
+    } catch {
+      // Optional: the container's log may already be gone.
+    }
+    const whole = redactExactSecretValues(tail, withEscapedForms(podEnvironmentValues(pod)));
+    const redacted = whole.length > SETUP_TAIL_BYTES ? whole.slice(-SETUP_TAIL_BYTES) : whole;
+    this.warn(`${diagnostic} (exit ${exitCode}); its output tail, redacted:\n${redacted}`);
   }
 
   /** Reads only a fixed diagnostic code from a failed worker's bounded log tail; never keeps anything else. */

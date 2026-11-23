@@ -5,6 +5,8 @@
 //!                  [--require-shell PATH] [-- SETUP_ARGV...]
 //! wardby-cmd run ADDR TOKEN_FILE [-t] -- ARGV...
 //! wardby-cmd ready ADDR
+//! wardby-cmd once --result-file PATH [--wait-file PATH] [--after-file PATH] --timeout-sec N
+//!                 -- ARGV...
 //! wardby-cmd --version
 //! bash ...            (started under the name `bash`: see shell.rs)
 //! ```
@@ -14,6 +16,7 @@ mod client;
 mod env;
 mod frame;
 mod header;
+mod once;
 mod reaper;
 mod server;
 mod shell;
@@ -28,6 +31,8 @@ const USAGE: &str = "usage: wardby-cmd serve --listen ADDR --token-file PATH [--
 [--wait-timeout-sec N] [--require-shell PATH] [-- SETUP_ARGV...]
        wardby-cmd run ADDR TOKEN_FILE [-t] -- ARGV...
        wardby-cmd ready ADDR
+       wardby-cmd once --result-file PATH [--wait-file PATH] [--after-file PATH] --timeout-sec N \
+-- ARGV...
        wardby-cmd --version";
 
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
@@ -110,6 +115,10 @@ fn main() {
         Some("run") => {
             let (addr, token_file, tty, argv) = parse_run(&args[2..]).unwrap_or_else(|| usage());
             exit(client::run(&addr, &token_file, argv, tty));
+        }
+        Some("once") => {
+            let cfg = once::parse(&args[2..]).unwrap_or_else(|| usage());
+            exit(once::once(cfg));
         }
         Some("ready") if args.len() == 3 => {
             exit(if client::connect(&args[2], READY_TIMEOUT).is_some() {

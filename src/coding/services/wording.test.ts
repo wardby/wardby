@@ -11,10 +11,13 @@ import {
   serviceUnreadyError,
   serviceUnreadyName,
   serviceUnreadySentence,
+  setupFailedName,
+  setupFailedSentence,
   unknownServiceSentence,
   unstartableServiceSentence,
   codexToolchainSentence,
   misplacedServiceSentence,
+  setupWaitForSentence,
 } from "./wording.js";
 import type { ResolvedSidecarService } from "./catalog.js";
 
@@ -74,6 +77,21 @@ describe("service refusals", () => {
     ]) {
       expect(text).not.toContain(value);
     }
+  });
+
+  it("words the setup refusals (#589) with only the job's name", () => {
+    expect(unstartableServiceSentence({ name: "app-migrations", reason: "setup_unsupported" })).toBe(
+      "This repository asks for the setup job `app-migrations`, which this wardby deployment can't start: setup jobs are not supported on this launcher yet.",
+    );
+    expect(misplacedServiceSentence("app-migrations", "setup", "services")).toBe(
+      "`.wardby/services.yaml` is invalid: `app-migrations` is a setup job; declare it under `setup:`.",
+    );
+    expect(misplacedServiceSentence("mysql", "sidecar", "setup")).toBe(
+      "`.wardby/services.yaml` is invalid: `mysql` is a service, not a setup job; declare it under `services:`.",
+    );
+    expect(setupWaitForSentence("app-migrations", "mysql")).toBe(
+      "`.wardby/services.yaml` is invalid: `app-migrations` needs `mysql`; declare it under `services:`.",
+    );
   });
 
   it("words the toolchain refusals with only the toolchain's name", () => {
@@ -153,5 +171,21 @@ describe("a service that never became ready", () => {
       "One of the run's services (`postgres`, `redis`) didn't become ready, so the run couldn't start.",
     );
     expect(serviceUnreadySentence([])).toBe("A service the run needs didn't become ready, so the run couldn't start.");
+  });
+});
+
+describe("setup job failures (#589)", () => {
+  it("names the job from the launcher's code and the run's job_ form, and nothing else", () => {
+    expect(setupFailedName("coding_setup_failed:app-migrations")).toBe("app-migrations");
+    expect(setupFailedName("job_coding_setup_failed:app-migrations")).toBe("app-migrations");
+    expect(setupFailedName("job_coding_setup_failed:Not Valid")).toBeNull();
+    expect(setupFailedName("coding_service_unready:postgres")).toBeNull();
+  });
+
+  it("says which job failed and that the run never started", () => {
+    expect(setupFailedSentence("app-migrations")).toBe(
+      "The `app-migrations` setup job failed, so the run didn't start.",
+    );
+    expect(setupFailedSentence(null)).toBe("A setup job the run needs failed, so the run didn't start.");
   });
 });

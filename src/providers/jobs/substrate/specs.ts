@@ -19,11 +19,7 @@
 
 import { createHash } from "node:crypto";
 import type { V1Secret } from "@kubernetes/client-node";
-import {
-  sidecarOnly,
-  substrateServiceImage,
-  type SidecarOrToolchainService,
-} from "../../../coding/services/catalog.js";
+import { sidecarOnly, substrateServiceImage, type NonDockerService } from "../../../coding/services/catalog.js";
 import { claudeToolLimits } from "../docker-isolation.js";
 import { SERVICE_SHM_MIB } from "../docker-services.js";
 import { SERVICE_SCRATCH_MIB } from "../kubernetes-isolation.js";
@@ -114,7 +110,7 @@ function add(a: Size, b: Size): Size {
 // SERVICE_SHM_MIB. Unlike Docker's serviceMemoryMib it leaves out the data disk: the data path is a
 // durableDir volume, whose writes do not count against the actor's memory under gVisor, while
 // rootfs writes (the writable paths, /tmp) do.
-export function substrateServiceMemoryMib(service: SidecarOrToolchainService): number {
+export function substrateServiceMemoryMib(service: NonDockerService): number {
   return service.resources.memoryMib + service.writablePaths.length * SERVICE_SCRATCH_MIB + SERVICE_SHM_MIB;
 }
 

@@ -5,6 +5,7 @@ import {
   CodingServiceDefinitionSchema,
   resolvedFromDefinition,
   type ResolvedCodingService,
+  type ResolvedSetupService,
   type ResolvedToolchainService,
 } from "../../coding/services/catalog.js";
 import { isolationNames, isolationToken, type DockerContainerInspection } from "./docker-isolation.js";
@@ -170,6 +171,31 @@ describe("Docker service containers", () => {
     expect(flagValues(args, "--env")).toEqual([]);
     expect(flagValues(args, "--tmpfs")).toEqual(["/data:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700"]);
     expect(flagValues(args, "--cpus")).toEqual(["0.25"]);
+  });
+
+  it("plans no service container for a setup job (#589): it gets its own container later", () => {
+    const job = resolvedFromDefinition(
+      CodingServiceDefinitionSchema.parse({
+        name: "app-migrations",
+        version: "1",
+        kind: "setup",
+        image: `registry.example/team/migrate@sha256:${"e".repeat(64)}`,
+        command: ["migrate", "up"],
+        waitFor: ["postgres"],
+        resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 128 },
+        writablePaths: ["/tmp"],
+      }),
+    );
+    const token = isolationToken(spec.runId);
+    expect(buildDockerServicePlan({ ...spec, services: [POSTGRES, job] })).toEqual(buildDockerServicePlan(spec));
+    expect(dockerServiceContainerNames({ ...spec, services: [POSTGRES, job] })).toEqual([
+      `wardby-svc-${token}-postgres`,
+    ]);
+    // Still re-validated with the rest: a malformed setup entry refuses the run.
+    const broken = { ...job, command: [] } as unknown as ResolvedCodingService;
+    expect(() => buildDockerServicePlan({ ...spec, services: [POSTGRES, broken] })).toThrow(
+      "docker_isolation_unsupported",
+    );
   });
 
   it("re-validates the services instead of trusting dispatch", () => {
@@ -391,5 +417,39 @@ describe("Docker toolchain container (#599)", () => {
       buildServiceCreateArgs({ ...claude, services: [POSTGRES] }, POSTGRES),
     );
     expect(flagValues(buildServiceCreateArgs(claude, POSTGRES), "--mount")).toEqual([]);
+  });
+});
+
+describe("Docker setup job container (#589)", () => {
+  const JOB = resolvedFromDefinition(
+    CodingServiceDefinitionSchema.parse({
+      name: "app-migrations",
+      version: "1",
+      kind: "setup",
+      image: `registry.example/migrate@sha256:${"e".repeat(64)}`,
+      command: ["migrate", "up"],
+      waitFor: ["postgres"],
+      resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 64 },
+      writablePaths: ["/tmp"],
+    }),
+  ) as ResolvedSetupService;
+  const withJob: JobSpec = { ...spec, services: [POSTGRES, JOB] };
+  const storage = isolationNames(withJob.runId).storageVolume;
+
+  it("mounts the checkout and the agent read-only and nothing else, under the services' hardening", () => {
+    const args = buildServiceCreateArgs(withJob, JOB);
+    expect(flagValues(args, "--name")).toEqual([`wardby-setup-${isolationToken(withJob.runId)}-app-migrations`]);
+    expect(flagValues(args, "--mount")).toEqual([
+      `type=volume,src=${storage},dst=/workspace,volume-subpath=workspace,volume-nocopy,readonly`,
+      // The agent alone: never `cmd`, which holds the toolchain's token.
+      `type=volume,src=${storage},dst=/opt/wardby-cmd,volume-subpath=cmd-bin,volume-nocopy,readonly`,
+    ]);
+    expect(Object.keys(serviceTmpfsOptions(JOB))).toEqual(["/run/wardby/setup", "/tmp"]);
+    expect(args).toContain("--read-only");
+    expect(flagValues(args, "--entrypoint")).toEqual(["/opt/wardby-cmd/wardby-cmd"]);
+  });
+
+  it("is never a service container", () => {
+    expect(buildDockerServicePlan(withJob).map((planned) => planned.service.name)).toEqual(["postgres"]);
   });
 });

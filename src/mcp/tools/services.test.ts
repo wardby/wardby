@@ -429,6 +429,111 @@ describe("coding service catalog tools", () => {
     await client.close();
   });
 
+  const SETUP = {
+    name: "app-migrations",
+    version: "1",
+    kind: "setup",
+    image: `registry.example/team/liquibase@sha256:${"e".repeat(64)}`,
+    command: ["liquibase", "--changelog-file=db/changelog.xml", "update"],
+    waitFor: ["mysql"],
+    serviceEnv: { LIQUIBASE_COMMAND_PASSWORD: "throwaway-admin" },
+    resources: { cpuMillicores: 1000, memoryMib: 1024, diskMib: 256 },
+    writablePaths: ["/tmp"],
+  };
+
+  it("creates a setup job (#589) with its default timeout, lists and shows it, and changes its fields", async () => {
+    const { client, rows } = await connect(ADMIN);
+    const created = await client.callTool({ name: "create_service", arguments: SETUP });
+    expect(created.isError).toBeFalsy();
+    expect(JSON.parse(text(created))).toMatchObject({
+      kind: "setup",
+      command: SETUP.command,
+      waitFor: ["mysql"],
+      timeoutSeconds: 600,
+      builtin: false,
+    });
+    expect(rows.get("app-migrations 1")).toMatchObject({ kind: "setup", timeoutSeconds: 600, testEnv: {} });
+    expect(rows.get("app-migrations 1")).not.toHaveProperty("port");
+
+    const listed = JSON.parse(text(await client.callTool({ name: "list_services", arguments: {} })));
+    expect(listed.find((candidate: { name: string }) => candidate.name === "app-migrations")).toEqual({
+      name: "app-migrations",
+      version: "1",
+      kind: "setup",
+      image: SETUP.image,
+      waitFor: ["mysql"],
+      builtin: false,
+    });
+    expect(listed.find((candidate: { name: string }) => candidate.name === "redis")).not.toHaveProperty("waitFor");
+    const shown = JSON.parse(
+      text(await client.callTool({ name: "get_service", arguments: { name: "app-migrations", version: "1" } })),
+    );
+    expect(shown).toMatchObject({ command: SETUP.command, waitFor: ["mysql"], timeoutSeconds: 600 });
+    expect(shown).not.toHaveProperty("note");
+
+    const updated = await client.callTool({
+      name: "update_service",
+      arguments: {
+        name: "app-migrations",
+        version: "1",
+        command: ["migrate"],
+        waitFor: ["mysql", "redis"],
+        timeoutSeconds: 1200,
+      },
+    });
+    expect(updated.isError).toBeFalsy();
+    expect(rows.get("app-migrations 1")).toMatchObject({
+      command: ["migrate"],
+      waitFor: ["mysql", "redis"],
+      timeoutSeconds: 1200,
+    });
+    const tooLong = await client.callTool({
+      name: "update_service",
+      arguments: { name: "app-migrations", version: "1", timeoutSeconds: 3601 },
+    });
+    expect(tooLong.isError).toBe(true);
+    expect(text(tooLong)).toContain("timeoutSeconds");
+    expect(rows.get("app-migrations 1")?.timeoutSeconds).toBe(1200);
+    await client.close();
+  });
+
+  it.each([
+    ["dataPath", { dataPath: "/data" }],
+    ["readiness", { readiness: CUSTOM.readiness }],
+    ["port", { port: 8000 }],
+    ["startCommand", { startCommand: ["serve"] }],
+    ["setupCommand", { setupCommand: ["true"] }],
+    ["hostAliases", { hostAliases: ["db"] }],
+    ["testEnv", { testEnv: { DATABASE_URL: "mysql://127.0.0.1/test" } }],
+  ])("refuses a setup job with %s, naming the field", async (field, patch) => {
+    const { client, rows } = await connect(ADMIN);
+    const refused = await client.callTool({ name: "create_service", arguments: { ...SETUP, ...patch } });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain(`${field}: is not used by a setup job`);
+    expect(rows.has("app-migrations 1")).toBe(false);
+    await client.close();
+  });
+
+  it("requires a setup job's command and waitFor, and refuses them on a sidecar", async () => {
+    const { client } = await connect(ADMIN);
+    const { command: _command, ...withoutCommand } = SETUP;
+    expect(text(await client.callTool({ name: "create_service", arguments: withoutCommand }))).toContain("command");
+    const { waitFor: _waitFor, ...withoutWaitFor } = SETUP;
+    expect(text(await client.callTool({ name: "create_service", arguments: withoutWaitFor }))).toContain("waitFor");
+    const onSidecar = await client.callTool({ name: "create_service", arguments: { ...CUSTOM, command: ["x"] } });
+    expect(onSidecar.isError).toBe(true);
+    expect(text(onSidecar)).toContain("command: is only for a setup job");
+    await client.close();
+  });
+
+  it("refuses setup fields from a member without services:manage", async () => {
+    const { client, rows } = await connect(MEMBER);
+    const refused = await client.callTool({ name: "create_service", arguments: SETUP });
+    expect(refused.isError).toBe(true);
+    expect(rows.has("app-migrations 1")).toBe(false);
+    await client.close();
+  });
+
   it("still requires a sidecar's port, readiness and data path", async () => {
     const { client } = await connect(ADMIN);
     const { dataPath: _dataPath, ...withoutData } = CUSTOM;

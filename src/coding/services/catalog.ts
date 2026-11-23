@@ -15,15 +15,18 @@ import {
   INVALID_SINGLE_LINE_CONTROL,
   MAX_CODING_SERVICES,
 } from "../protocol.js";
+import { MAX_SETUP_JOBS } from "./declaration.js";
 
 /**
  * CODING_SERVICE_KINDS: "sidecar", a fresh instance in each run's pod; "toolchain", a team's own dev
  * image that the run's commands are forwarded to (wardby-cmd), sharing the run's /workspace (a run
  * has at most one); "docker", a rootless Docker daemon in each run's pod (Kubernetes with gVisor
  * only), whose socket the agent's shells use, and wardby owns everything about it but the image and
- * resources. "external" is reserved for shared services reached through the proxy.
+ * resources; "setup", a one-off job (a database migration, seed data) run after the run's services
+ * are ready and before its agent starts, reading the checkout read-only (#589). "external" is
+ * reserved for shared services reached through the proxy.
  */
-export const CODING_SERVICE_KINDS = ["sidecar", "toolchain", "docker"] as const;
+export const CODING_SERVICE_KINDS = ["sidecar", "toolchain", "docker", "setup"] as const;
 export type CodingServiceKind = (typeof CODING_SERVICE_KINDS)[number];
 /**
  * Where a docker service's daemon listens: a directory outside /run and /etc (rootlesskit copies
@@ -135,6 +138,14 @@ const commonFields = {
 };
 
 const onlyForToolchain = z.undefined({ error: "is only for a toolchain" }).optional();
+const onlyForSetup = z.undefined({ error: "is only for a setup job" }).optional();
+const notForSetup = z.undefined({ error: "is not used by a setup job" }).optional();
+
+/** How many services one setup job may wait for. */
+export const MAX_SETUP_WAIT_FOR = 8;
+/** A setup job's timeoutSeconds bounds and default. */
+export const MAX_SETUP_TIMEOUT_SECONDS = 3600;
+export const DEFAULT_SETUP_TIMEOUT_SECONDS = 600;
 
 /** How many host names one toolchain entry may alias to the run's loopback. */
 export const MAX_HOST_ALIASES = 16;
@@ -172,6 +183,9 @@ const sidecarFields = {
   dataPath: pathSchema,
   setupCommand: onlyForToolchain,
   hostAliases: onlyForToolchain,
+  command: onlyForSetup,
+  waitFor: onlyForSetup,
+  timeoutSeconds: onlyForSetup,
 };
 
 const toolchainFields = {
@@ -188,6 +202,40 @@ const toolchainFields = {
   readiness: notForToolchain,
   startCommand: notForToolchain,
   dataPath: notForToolchain,
+  command: onlyForSetup,
+  waitFor: onlyForSetup,
+  timeoutSeconds: onlyForSetup,
+};
+
+const setupFields = {
+  ...commonFields,
+  kind: z.literal("setup"),
+  /**
+   * The argv the job runs (cwd /workspace, the checkout mounted read-only), through the command
+   * agent, so the image needs no shell; a non-zero exit fails the run before its agent starts. Same
+   * bounds as startCommand.
+   */
+  command: commandSchema,
+  /** The services the job needs: each must be declared in the run under `services:` (checked at dispatch). */
+  waitFor: z
+    .array(codingServiceNameSchema)
+    .min(1)
+    .max(MAX_SETUP_WAIT_FOR)
+    .refine((names) => new Set(names).size === names.length, "must not repeat a name"),
+  timeoutSeconds: z.number().int().min(1).max(MAX_SETUP_TIMEOUT_SECONDS).default(DEFAULT_SETUP_TIMEOUT_SECONDS),
+  /** A setup job hands the agent's shells nothing: only an empty object (a row's column default) is accepted. */
+  testEnv: z
+    .record(z.string(), z.string())
+    .refine((env) => Object.keys(env).length === 0, "is not used by a setup job")
+    .default({}),
+  // Substrate does not run setup jobs yet (setup_unsupported), so there is no Substrate image to name.
+  substrateImage: notForSetup,
+  port: notForSetup,
+  readiness: notForSetup,
+  startCommand: notForSetup,
+  setupCommand: notForSetup,
+  hostAliases: notForSetup,
+  dataPath: notForSetup,
 };
 
 /**
@@ -205,7 +253,8 @@ const dockerFields = {
 
 /**
  * Directories a toolchain container's launcher mounts itself (the shared workspace, the command
- * agent's directory, HOME, wardby's run inputs): a writable path may not be or nest with one.
+ * agent's directory, HOME, wardby's run inputs): a writable path may not be or nest with one. A
+ * setup job's container mounts the same directories, so the same paths are reserved there.
  */
 export const TOOLCHAIN_RESERVED_PATHS = ["/workspace", "/opt/wardby-cmd", "/home/wardby", "/run/wardby"] as const;
 
@@ -239,20 +288,27 @@ function checkSidecar(
   checkMounts([value.dataPath, ...value.writablePaths], ctx);
 }
 
-/** A toolchain's writable paths are emptyDirs too, and stay clear of the directories its launcher mounts. */
-function checkToolchain(value: { writablePaths: string[] }, ctx: z.RefinementCtx): void {
-  checkMounts(value.writablePaths, ctx);
-  for (const path of value.writablePaths) {
-    const reserved = TOOLCHAIN_RESERVED_PATHS.find((root) => overlaps(path, root));
-    if (reserved !== undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["writablePaths"],
-        message: `${path} overlaps ${reserved}, which wardby mounts in a toolchain`,
-      });
+/**
+ * A toolchain's or setup job's writable paths are emptyDirs too, and stay clear of the directories
+ * its launcher mounts.
+ */
+function checkReservedMounts(where: string) {
+  return (value: { writablePaths: string[] }, ctx: z.RefinementCtx): void => {
+    checkMounts(value.writablePaths, ctx);
+    for (const path of value.writablePaths) {
+      const reserved = TOOLCHAIN_RESERVED_PATHS.find((root) => overlaps(path, root));
+      if (reserved !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["writablePaths"],
+          message: `${path} overlaps ${reserved}, which wardby mounts in ${where}`,
+        });
+      }
     }
-  }
+  };
 }
+const checkToolchain = checkReservedMounts("a toolchain");
+const checkSetup = checkReservedMounts("a setup job");
 
 /** An entry without a kind (every snapshot and row from before toolchains) is a sidecar. */
 function defaultKind(value: unknown): unknown {
@@ -279,6 +335,10 @@ export const ResolvedCodingServiceSchema = z.preprocess(
       .strict()
       .superRefine(checkToolchain),
     z.object({ ...dockerFields, ...snapshotFields }).strict(),
+    z
+      .object({ ...setupFields, ...snapshotFields })
+      .strict()
+      .superRefine(checkSetup),
   ]),
 );
 
@@ -289,6 +349,7 @@ export const CodingServiceDefinitionSchema = z.preprocess(
     z.object(sidecarFields).strict().superRefine(checkSidecar),
     z.object(toolchainFields).strict().superRefine(checkToolchain),
     z.object(dockerFields).strict(),
+    z.object(setupFields).strict().superRefine(checkSetup),
   ]),
 );
 
@@ -296,12 +357,19 @@ export type ResolvedCodingService = z.output<typeof ResolvedCodingServiceSchema>
 export type ResolvedSidecarService = Extract<ResolvedCodingService, { kind: "sidecar" }>;
 export type ResolvedToolchainService = Extract<ResolvedCodingService, { kind: "toolchain" }>;
 export type ResolvedDockerService = Extract<ResolvedCodingService, { kind: "docker" }>;
+export type ResolvedSetupService = Extract<ResolvedCodingService, { kind: "setup" }>;
 /** What every launcher path that predates the docker kind handles: a sidecar or a toolchain. */
 export type SidecarOrToolchainService = ResolvedSidecarService | ResolvedToolchainService;
+/**
+ * An entry that runs beside the run for its whole length (a sidecar, the toolchain or the docker
+ * service): never a setup job.
+ */
+export type ResolvedRunningService = SidecarOrToolchainService | ResolvedDockerService;
 export type CodingServiceDefinition = z.output<typeof CodingServiceDefinitionSchema>;
 export type CodingSidecarDefinition = Extract<CodingServiceDefinition, { kind: "sidecar" }>;
 export type CodingToolchainDefinition = Extract<CodingServiceDefinition, { kind: "toolchain" }>;
 export type CodingDockerDefinition = Extract<CodingServiceDefinition, { kind: "docker" }>;
+export type CodingSetupDefinition = Extract<CodingServiceDefinition, { kind: "setup" }>;
 
 export function isSidecarService(service: ResolvedCodingService): service is ResolvedSidecarService {
   return service.kind === "sidecar";
@@ -315,13 +383,19 @@ export function isDockerService(service: ResolvedCodingService): service is Reso
   return service.kind === "docker";
 }
 
+export function isSetupService(service: ResolvedCodingService): service is ResolvedSetupService {
+  return service.kind === "setup";
+}
+
 /**
- * A sidecar-only step's guard. Throws "coding_service_toolchain_unsupported" for a toolchain, and
- * "coding_service_kind_unsupported" for a docker service: a launcher path that has no handling for a
- * kind must never quietly treat one as a sidecar or skip it.
+ * A sidecar-only step's guard. Throws "coding_service_toolchain_unsupported" for a toolchain,
+ * "coding_service_setup_unsupported" for a setup job, and "coding_service_kind_unsupported" for a
+ * docker service: a launcher path that has no handling for a kind must never quietly treat one as a
+ * sidecar or skip it.
  */
 export function sidecarOnly(service: ResolvedCodingService): ResolvedSidecarService {
   if (service.kind === "toolchain") throw new Error("coding_service_toolchain_unsupported");
+  if (service.kind === "setup") throw new Error("coding_service_setup_unsupported");
   if (service.kind !== "sidecar") throw new Error("coding_service_kind_unsupported");
   return service;
 }
@@ -331,15 +405,35 @@ export function runToolchain(services: readonly ResolvedCodingService[]): Resolv
   return services.find(isToolchainService);
 }
 
+/** The run's setup jobs, in declaration order: the order they run in, one at a time. */
+export function runSetupJobs(services: readonly ResolvedCodingService[]): ResolvedSetupService[] {
+  return services.filter(isSetupService);
+}
+
+/**
+ * The entries that run beside the run for its whole length (its sidecars, toolchain and docker
+ * service), in order: every entry but its setup jobs, which run once and get containers of their own.
+ * Keeps the input's narrower type, so a list that has been through withoutDockerServices comes back
+ * as sidecars and the toolchain only.
+ */
+export function runningServices<Service extends ResolvedCodingService>(
+  services: readonly Service[],
+): Array<Exclude<Service, ResolvedSetupService>> {
+  return services.filter((service): service is Exclude<Service, ResolvedSetupService> => service.kind !== "setup");
+}
+
+/** Every kind but docker: what a launcher path that never starts a docker service is handed. */
+export type NonDockerService = Exclude<ResolvedCodingService, ResolvedDockerService>;
+
 /**
  * A launcher path's guard where the docker kind is never started (Docker, Substrate): throws
  * `error` for a docker service, as the backstop to dispatch's service_kind_unsupported refusal.
+ * Setup jobs pass through untouched (never refused here, never treated as sidecars): the launcher
+ * runs them itself (runSetupJobs) or refuses them as setup_unsupported, and runningServices on the
+ * result gives the sidecars and toolchain alone.
  */
-export function withoutDockerServices(
-  services: readonly ResolvedCodingService[],
-  error: string,
-): SidecarOrToolchainService[] {
-  const started = services.filter((service): service is SidecarOrToolchainService => service.kind !== "docker");
+export function withoutDockerServices(services: readonly ResolvedCodingService[], error: string): NonDockerService[] {
+  const started = services.filter((service): service is NonDockerService => service.kind !== "docker");
   if (started.length !== services.length) throw new Error(error);
   return started;
 }
@@ -353,8 +447,8 @@ export function runDockerService(services: readonly ResolvedCodingService[]): Re
  * The first of a run's docker services a launcher does not start (`supportsKind` is its
  * supportsServiceKind hook, or an executor's), or undefined. A hook that is absent or answers
  * undefined starts no docker service, so a launcher that predates the kind never receives one.
- * Sidecars and toolchains are not asked here: whether a launcher starts those is its
- * supportsServicesFor and unstartableServices answer (service_launcher_unsupported).
+ * Sidecars, toolchains and setup jobs are not asked here: whether a launcher starts those is its
+ * supportsServicesFor and unstartableServices answer (service_launcher_unsupported, setup_unsupported).
  */
 export function unsupportedKindService(
   services: readonly ResolvedCodingService[],
@@ -371,9 +465,18 @@ export function serviceTestEnv(service: ResolvedCodingService): Record<string, s
 /** A run has at most one docker service: its daemon's socket and volumes have fixed paths and names. */
 export const MAX_DOCKER_SERVICES = 1;
 
+/**
+ * A run's snapshot: at most MAX_CODING_SERVICES running services (sidecars, toolchain and docker),
+ * plus at most MAX_SETUP_JOBS setup jobs, and at most MAX_DOCKER_SERVICES docker services.
+ */
 export const StoredCodingServicesSchema = z
   .array(ResolvedCodingServiceSchema)
-  .max(MAX_CODING_SERVICES)
+  .max(MAX_CODING_SERVICES + MAX_SETUP_JOBS)
+  .refine(
+    (services) =>
+      runSetupJobs(services).length <= MAX_SETUP_JOBS && runningServices(services).length <= MAX_CODING_SERVICES,
+    `must have at most ${MAX_CODING_SERVICES} services and ${MAX_SETUP_JOBS} setup jobs`,
+  )
   .refine(
     (services) => services.filter((service) => service.kind === "docker").length <= MAX_DOCKER_SERVICES,
     `must have at most ${MAX_DOCKER_SERVICES} docker service`,
@@ -388,7 +491,7 @@ export interface CodingServiceRow {
   kind: string;
   image: string;
   substrateImage?: string | null;
-  /** Null for a toolchain or a docker entry, as are readiness and dataPath. */
+  /** Null for a toolchain, a setup job or a docker entry, as are readiness and dataPath. */
   port?: number | null;
   serviceEnv: unknown;
   testEnv: unknown;
@@ -398,6 +501,10 @@ export interface CodingServiceRow {
   setupCommand?: unknown;
   /** Toolchains only; null otherwise. Absent on reads from before host aliases. */
   hostAliases?: unknown;
+  /** Setup jobs only (as are waitFor and timeoutSeconds); null otherwise. Absent on reads from before setup jobs. */
+  command?: unknown;
+  waitFor?: unknown;
+  timeoutSeconds?: number | null;
   resources: unknown;
   dataPath?: string | null;
   writablePaths: unknown;
@@ -438,6 +545,9 @@ export function catalogEntryFromRow(row: CodingServiceRow): CodingServiceDefinit
     ...column("startCommand", row.startCommand),
     ...column("setupCommand", row.setupCommand),
     ...column("hostAliases", row.hostAliases),
+    ...column("command", row.command),
+    ...column("waitFor", row.waitFor),
+    ...column("timeoutSeconds", row.timeoutSeconds),
     resources: row.resources,
     ...column("dataPath", row.dataPath),
     writablePaths: row.writablePaths,
@@ -459,6 +569,10 @@ export function resolvedFromDefinition(
   definition: CodingDockerDefinition,
   catalog?: { id?: string; updatedAt?: Date },
 ): ResolvedDockerService;
+export function resolvedFromDefinition(
+  definition: CodingSetupDefinition,
+  catalog?: { id?: string; updatedAt?: Date },
+): ResolvedSetupService;
 export function resolvedFromDefinition(
   definition: CodingServiceDefinition,
   catalog?: { id?: string; updatedAt?: Date },
@@ -525,12 +639,13 @@ export function parseAllowedServiceNames(value: unknown): string[] {
  * service's own environment, and not its kind: the Claude tool runner learns of a toolchain from its
  * own setup (claude-tool-setup.ts), so the worker input format, which the published Codex driver
  * image must match exactly, is unchanged by toolchains (#599). A docker service hands over its fixed
- * DOCKER_HOST.
+ * DOCKER_HOST. Setup jobs are left out: they hand the shells no variables and are finished before
+ * the worker starts (#589).
  */
 export function workerServices(
   services: readonly ResolvedCodingService[],
 ): Array<{ name: string; version: string; testEnv: Record<string, string> }> {
-  return services.map((service) => ({
+  return runningServices(services).map((service) => ({
     name: service.name,
     version: service.version,
     testEnv: serviceTestEnv(service),

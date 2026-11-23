@@ -8,7 +8,7 @@ import type { V1ContainerStatus, V1Pod } from "@kubernetes/client-node";
 import tar from "tar-stream";
 import { collectExclusions, tarExcludeArgs } from "../../coding/collect-exclude.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
-import { resolvedFromDefinition } from "../../coding/services/catalog.js";
+import { CodingServiceDefinitionSchema, resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { jobLauncherContract } from "./contract-suite.js";
@@ -2322,6 +2322,122 @@ describe("coding-run services", () => {
         { runId: "run-svc-report", name: "postgres", state: "pending" },
         { runId: "run-svc-report", name: "postgres", state: "ready" },
       ]);
+    });
+
+    it("never waits for, or reports, a setup job as a sidecar (#589)", async () => {
+      const { updates, onServiceState } = reporting();
+      const h = await harness("run-svc-setup", {}, { onServiceState });
+      const job = resolvedFromDefinition(
+        CodingServiceDefinitionSchema.parse({
+          name: "app-migrations",
+          version: "1",
+          kind: "setup",
+          image: `registry.example/team/migrate@sha256:${"e".repeat(64)}`,
+          command: ["migrate", "up"],
+          waitFor: ["postgres"],
+          resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 128 },
+        }),
+      );
+      await h.launcher.launch({ ...h.spec, services: [POSTGRES, job] });
+      expect(updates).toEqual([
+        { runId: "run-svc-setup", name: "postgres", state: "pending" },
+        { runId: "run-svc-setup", name: "postgres", state: "ready" },
+      ]);
+    });
+
+    describe("setup jobs (#589)", () => {
+      const MIGRATE = resolvedFromDefinition(
+        CodingServiceDefinitionSchema.parse({
+          name: "app-migrations",
+          version: "1",
+          kind: "setup",
+          image: `registry.example/team/migrate@sha256:${"e".repeat(64)}`,
+          command: ["migrate", "up"],
+          waitFor: ["postgres"],
+          serviceEnv: { DB_PASSWORD: "fake-throwaway-9f2c" },
+          resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 128 },
+        }),
+      );
+      /** Sets the setup container's status (and leaves keeper and worker as the harness has them). */
+      const setSetup = (h: Awaited<ReturnType<typeof harness>>, state: V1ContainerStatus["state"]) => {
+        const pod = structuredClone(h.api.objects.get(`pod/wardby-coding/${h.names.pod}`)) as V1Pod;
+        const others = (pod.status!.containerStatuses ?? []).filter((c) => c.name !== "setup-app-migrations");
+        pod.status = {
+          ...pod.status,
+          containerStatuses: [
+            ...others,
+            { name: "setup-app-migrations", ready: false, restartCount: 0, image: MIGRATE.image, imageID: "", state },
+          ],
+        };
+        h.api.put("pod", "wardby-coding", pod);
+      };
+
+      it("fails the run as coding_setup_failed:<name> when a setup job exits non-zero, and stops the pod", async () => {
+        const h = await harness("run-setup-fail");
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        setSetup(h, { terminated: { exitCode: 3, reason: "Error" } });
+        expect(await h.launcher.status(handle)).toMatchObject({ state: "failed" });
+        expect(await h.launcher.collect(handle)).toEqual({
+          exitCode: 3,
+          reason: "failed",
+          diagnostic: "coding_setup_failed:app-migrations",
+        });
+      });
+
+      it("fails the run when a setup job's image can never be pulled, instead of stalling to the deadline", async () => {
+        const h = await harness("run-setup-pull");
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        setSetup(h, { waiting: { reason: "ImagePullBackOff" } });
+        expect(await h.launcher.status(handle)).toMatchObject({ state: "failed" });
+        expect((await h.launcher.collect(handle)).diagnostic).toBe("coding_setup_failed:app-migrations");
+      });
+
+      it("reads a setup job killed at the deadline as timed_out, not as a failed job", async () => {
+        const h = await harness("run-setup-deadline");
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        h.advance(60 * 60 * 1000);
+        setSetup(h, { terminated: { exitCode: 143, reason: "Error" } });
+        expect(await h.launcher.status(handle)).toMatchObject({ state: "failed" });
+        expect(await h.launcher.collect(handle)).toMatchObject({ exitCode: 124, reason: "timed_out" });
+      });
+
+      it("keeps a run going when its setup job exited 0", async () => {
+        const h = await harness("run-setup-ok");
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        setSetup(h, { terminated: { exitCode: 0, reason: "Completed" } });
+        expect(await h.launcher.status(handle)).toEqual({ state: "running" });
+      });
+
+      it("logs a failed job's output tail for operators, redacted by exact value", async () => {
+        const h = await harness("run-setup-tail");
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        h.api.logs.set(
+          `wardby-coding/${h.names.pod}/setup-app-migrations`,
+          "connecting with password fake-throwaway-9f2c\nERROR: relation missing",
+        );
+        setSetup(h, { terminated: { exitCode: 1, reason: "Error" } });
+        await h.launcher.status(handle);
+        const logged = h.warnings.join("\n");
+        expect(logged).toContain("coding_setup_failed:app-migrations");
+        expect(logged).toContain("ERROR: relation missing");
+        expect(logged).not.toContain("fake-throwaway-9f2c");
+        // Never on the run: the collected result carries the fixed code only.
+        expect(JSON.stringify(await h.launcher.collect(handle))).not.toContain("relation missing");
+      });
+
+      it("reports a setup job's progress: probing while it runs, ready once it exited 0, failed when it didn't", async () => {
+        const { updates, onServiceState } = reporting();
+        const h = await harness("run-setup-report", {}, { onServiceState });
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        setSetup(h, { running: { startedAt: new Date() } });
+        await h.launcher.status(handle);
+        setSetup(h, { terminated: { exitCode: 0, reason: "Completed" } });
+        await h.launcher.status(handle);
+        expect(updates.filter((u) => u.name === "app-migrations")).toEqual([
+          { runId: "run-setup-report", name: "app-migrations", state: "probing" },
+          { runId: "run-setup-report", name: "app-migrations", state: "ready" },
+        ]);
+      });
     });
 
     it.each([

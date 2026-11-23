@@ -836,6 +836,13 @@ model CodingService {
   /// Toolchains only: host names (a JSON array of strings) resolved to 127.0.0.1 in the run, for
   /// service names a team's code hard-codes; null: none, and always null for a sidecar.
   hostAliases    Json?
+  /// Setup jobs only: the argv the job runs (cwd /workspace); null for a sidecar or toolchain.
+  command        Json?
+  /// Setup jobs only: the service names (a JSON array of strings) the job needs, each declared in the
+  /// run under `services:`; null for a sidecar or toolchain.
+  waitFor        Json?
+  /// Setup jobs only: how long the job may run, 1 to 3600 seconds; null for a sidecar or toolchain.
+  timeoutSeconds Int?
   /// { cpuMillicores, memoryMib, diskMib }: requests equal limits.
   resources      Json
   /// Where the service writes its data: an emptyDir in the run pod. Null for a toolchain.

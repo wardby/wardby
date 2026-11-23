@@ -90,6 +90,8 @@ const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 export function servicesFingerprint(services: readonly ResolvedCodingService[] | undefined): string | undefined {
   if (!services || services.length === 0) return undefined;
   const sorted = [...services].sort((a, b) => compare(a.name, b.name) || compare(a.version, b.version));
+  // Setup jobs run one at a time in declaration order, so their order is part of what the run does.
+  const setupOrder = new Map(services.filter((service) => service.kind === "setup").map((job, n) => [job, n]));
   return sha256(
     canonicalJson(
       sorted.map((service) =>
@@ -111,13 +113,22 @@ export function servicesFingerprint(services: readonly ResolvedCodingService[] |
               ...(service.substrateImage === undefined ? {} : { substrateImage: service.substrateImage }),
               // The start command (catalog, not secret: env goes in by name) changes what the holder runs.
               ...(service.startCommand === undefined ? {} : { startCommand: service.startCommand }),
-              // A sidecar keeps its fields (and so its fingerprint); a toolchain has kind and setupCommand instead.
+              // A sidecar keeps its fields (and so its fingerprint); a toolchain has kind and setupCommand
+              // instead, and a setup job (#589) kind, its command, what it waits for and its timeout.
               ...(service.kind === "toolchain"
                 ? {
                     kind: service.kind,
                     ...(service.setupCommand === undefined ? {} : { setupCommand: service.setupCommand }),
                   }
-                : { port: service.port, dataPath: service.dataPath }),
+                : service.kind === "setup"
+                  ? {
+                      kind: service.kind,
+                      command: service.command,
+                      waitFor: service.waitFor,
+                      timeoutSeconds: service.timeoutSeconds,
+                      order: setupOrder.get(service),
+                    }
+                  : { port: service.port, dataPath: service.dataPath }),
               serviceEnvKeys: Object.keys(service.serviceEnv).sort(),
               testEnvKeys: Object.keys(service.testEnv).sort(),
               catalogId: service.catalogId ?? null,

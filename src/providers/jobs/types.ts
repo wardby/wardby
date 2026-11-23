@@ -22,7 +22,9 @@ export type UnstartableServiceReason =
   | "data_path_reserved"
   | "setup_too_large"
   /** A toolchain, on a launcher that does not start toolchains yet. */
-  | "toolchain_unsupported";
+  | "toolchain_unsupported"
+  /** A setup job (#589), on a launcher that does not run setup jobs yet. */
+  | "setup_unsupported";
 /** A service a launcher cannot start: its validated catalog name and why. */
 export interface UnstartableService {
   name: string;

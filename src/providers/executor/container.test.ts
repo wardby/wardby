@@ -7909,6 +7909,12 @@ describe("overrun from available room", () => {
   });
 });
 
+describe("setup job failures (#589)", () => {
+  it("files a failed setup job under service_setup", () => {
+    expect(failureCategory("job_coding_setup_failed:app-migrations")).toBe("service_setup");
+  });
+});
+
 describe("CATEGORY_BY_PREFIX", () => {
   it("files every category under a coding_failure_<category> code a parent run can be told", () => {
     for (const [, category] of CATEGORY_BY_PREFIX) {

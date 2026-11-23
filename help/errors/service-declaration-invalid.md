@@ -20,6 +20,9 @@ line and reason. Wardby refuses the run before a coding worker starts.
    sit under the key of its catalog kind: "`<name>` is a toolchain; declare it
    under `toolchain:`" means a toolchain was listed under `services:` (see
    [toolchains](../coding-toolchain.md)).
+   A `setup:` key lists [setup jobs](../coding-setup-jobs.md); "`<job>` needs
+   `<service>`; declare it under `services:`" means a setup job's `waitFor`
+   service isn't declared in the same file.
 2. Keep it to at most five entries and under 8 KiB. Images, ports, commands
    and environment belong in the catalog, not in the repository.
 3. Merge the fix to the base branch; a fix on the run's own branch has no

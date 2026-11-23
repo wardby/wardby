@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { MAX_SERVICE_DECLARATION_BYTES, ServiceDeclarationError, parseServiceDeclaration } from "./declaration.js";
+import {
+  declaredEntries,
+  MAX_SERVICE_DECLARATION_BYTES,
+  ServiceDeclarationError,
+  parseServiceDeclaration,
+} from "./declaration.js";
 
 function reasonOf(text: string): string {
   try {
@@ -72,31 +77,31 @@ describe("parseServiceDeclaration", () => {
   });
 
   it.each([
-    ["no services key", "# nothing here\n", "it has no `services:` or `toolchain:` key"],
+    ["no services key", "# nothing here\n", "it has no `services:`, `toolchain:` or `setup:` key"],
     [
       "another top-level key",
       'services:\n  postgres: "16"\nimage: evil\n',
-      "line 3: the only top-level keys allowed are `services` and `toolchain`, each once",
+      "line 3: the only top-level keys allowed are `services`, `toolchain` and `setup`, each once",
     ],
     [
       "a second services key",
       "services:\nservices:\n",
-      "line 2: the only top-level keys allowed are `services` and `toolchain`, each once",
+      "line 2: the only top-level keys allowed are `services`, `toolchain` and `setup`, each once",
     ],
     [
       "a document marker",
       '---\nservices:\n  postgres: "16"\n',
-      "line 1: the only top-level keys allowed are `services` and `toolchain`, each once",
+      "line 1: the only top-level keys allowed are `services`, `toolchain` and `setup`, each once",
     ],
     [
       "a flow mapping",
       'services: {postgres: "16"}\n',
-      "line 1: the only top-level keys allowed are `services` and `toolchain`, each once",
+      "line 1: the only top-level keys allowed are `services`, `toolchain` and `setup`, each once",
     ],
     [
       "a second toolchain key",
       'toolchain:\n  dev: "1"\ntoolchain:\n  other: "1"\n',
-      "line 3: the only top-level keys allowed are `services` and `toolchain`, each once",
+      "line 3: the only top-level keys allowed are `services`, `toolchain` and `setup`, each once",
     ],
     ["two toolchains", 'toolchain:\n  dev: "1"\n  other: "1"\n', "line 3: `toolchain:` takes exactly one entry"],
     ["an empty toolchain", "toolchain:\n", "`toolchain:` takes exactly one entry"],
@@ -109,7 +114,7 @@ describe("parseServiceDeclaration", () => {
     [
       "an entry before services",
       '  postgres: "16"\nservices:\n',
-      "line 1: entries must sit under `services:` or `toolchain:`",
+      "line 1: entries must sit under `services:`, `toolchain:` or `setup:`",
     ],
     ["tabs", 'services:\n\tpostgres: "16"\n', "line 2: use spaces, not tabs"],
     [
@@ -149,6 +154,73 @@ describe("parseServiceDeclaration", () => {
       "it lists more than 5 services",
     ],
     ["a control character", 'services:\n  postgres: "16"\u0007\n', "line 2: control characters are not allowed"],
+  ])("refuses %s", (_label, text, reason) => {
+    expect(reasonOf(text)).toBe(reason);
+  });
+
+  it("reads setup jobs in declaration order, before or after services", () => {
+    const expected = {
+      services: [{ name: "mysql", version: "8" }],
+      setup: [
+        { name: "app-migrations", version: "1" },
+        { name: "search-mappings", version: "1" },
+      ],
+    };
+    expect(
+      parseServiceDeclaration('services:\n  mysql: "8"\nsetup:\n  app-migrations: "1"\n  search-mappings: "1"\n'),
+    ).toEqual(expected);
+    expect(
+      parseServiceDeclaration("setup:\n    app-migrations: 1\n    search-mappings: '1'\nservices:\n  mysql: 8\n"),
+    ).toEqual(expected);
+    expect(declaredEntries(expected)).toEqual([
+      { name: "mysql", version: "8" },
+      { name: "app-migrations", version: "1" },
+      { name: "search-mappings", version: "1" },
+    ]);
+  });
+
+  it("reads setup jobs alongside a toolchain, and without a services key", () => {
+    expect(parseServiceDeclaration('toolchain:\n  dev: "1"\nsetup:\n  seed: "1"\n')).toEqual({
+      toolchain: { name: "dev", version: "1" },
+      services: [],
+      setup: [{ name: "seed", version: "1" }],
+    });
+  });
+
+  it("leaves setup out when its key is empty", () => {
+    expect(parseServiceDeclaration('services:\n  mysql: "8"\nsetup:\n')).toEqual({
+      services: [{ name: "mysql", version: "8" }],
+    });
+  });
+
+  it("allows four setup jobs beside five services: the caps are separate", () => {
+    const text = `services:\n${["a", "b", "c", "d", "e"].map((n) => `  ${n}: "1"`).join("\n")}\nsetup:\n${["s1", "s2", "s3", "s4"].map((n) => `  ${n}: "1"`).join("\n")}\n`;
+    const declaration = parseServiceDeclaration(text);
+    expect(declaration.services).toHaveLength(5);
+    expect(declaration.setup?.map((job) => job.name)).toEqual(["s1", "s2", "s3", "s4"]);
+  });
+
+  it.each([
+    [
+      "five setup jobs",
+      `setup:\n${["s1", "s2", "s3", "s4", "s5"].map((n) => `  ${n}: "1"`).join("\n")}\n`,
+      "it lists more than 4 setup jobs",
+    ],
+    [
+      "a second setup key",
+      'setup:\n  a: "1"\nsetup:\n  b: "1"\n',
+      "line 3: the only top-level keys allowed are `services`, `toolchain` and `setup`, each once",
+    ],
+    [
+      "a setup job's name again under services",
+      'services:\n  db: "1"\nsetup:\n  db: "2"\n',
+      "line 4: `db` is listed twice",
+    ],
+    [
+      "a nested setup value",
+      "setup:\n  migrate:\n    command: x\n",
+      'line 2: expected `name: version`, like `postgres: "16"`',
+    ],
   ])("refuses %s", (_label, text, reason) => {
     expect(reasonOf(text)).toBe(reason);
   });

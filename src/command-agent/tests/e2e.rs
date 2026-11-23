@@ -625,3 +625,248 @@ fn bash_login_name_passes_through() {
     assert_eq!(text(&out.stdout), "login\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- `wardby-cmd once` (setup jobs) ----
+
+const FAKE_SECRET: &str = "sk-fake-setup-secret-0123456789";
+
+fn once_cmd(dir: &std::path::Path, extra: &[&str], timeout: &str, argv: &[&str]) -> Command {
+    let mut cmd = Command::new(BIN);
+    cmd.arg("once")
+        .arg("--result-file")
+        .arg(dir.join("result"))
+        .args(extra)
+        .args(["--timeout-sec", timeout, "--"])
+        .args(argv)
+        .current_dir(dir)
+        .stdin(Stdio::null());
+    cmd
+}
+
+fn once(dir: &std::path::Path, extra: &[&str], timeout: &str, argv: &[&str]) -> Output {
+    once_cmd(dir, extra, timeout, argv).output().unwrap()
+}
+
+/// The result file's exact content, and that nothing else (no temp file) is left beside it.
+fn result_of(dir: &std::path::Path) -> String {
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".result") || n == "result")
+        .collect();
+    assert_eq!(
+        names,
+        vec!["result".to_string()],
+        "leftover files: {names:?}"
+    );
+    std::fs::read_to_string(dir.join("result")).unwrap()
+}
+
+#[test]
+fn once_success_and_cwd() {
+    let dir = tempdir();
+    // As root (the test container), create /workspace so the /workspace branch is exercised;
+    // it is never removed, so concurrent tests never see it vanish.
+    let _ = std::fs::create_dir("/workspace");
+    let expected = if std::path::Path::new("/workspace").is_dir() {
+        PathBuf::from("/workspace")
+    } else {
+        std::fs::canonicalize(&dir).unwrap()
+    };
+    let out = once(&dir, &[], "10", &["/bin/sh", "-c", "pwd"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stdout).trim(), expected.to_string_lossy());
+    assert_eq!(result_of(&dir), "0");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn once_failure_code_and_signal() {
+    let dir = tempdir();
+    let out = once(&dir, &[], "10", &["/bin/sh", "-c", "exit 3"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(result_of(&dir), "3");
+    let out = once(&dir, &[], "10", &["/bin/sh", "-c", "kill -9 $$"]);
+    assert_eq!(out.status.code(), Some(137));
+    assert_eq!(result_of(&dir), "137");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn once_output_passes_through() {
+    let dir = tempdir();
+    let out = once(
+        &dir,
+        &[],
+        "10",
+        &["/bin/sh", "-c", "printf 'out\\n'; printf 'err\\n' >&2"],
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stdout), "out\n");
+    assert_eq!(text(&out.stderr), "err\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn once_after_a_failed_job_does_not_run() {
+    let dir = tempdir();
+    let after = dir.join("earlier");
+    std::fs::write(&after, "3").unwrap();
+    let marker = dir.join("ran");
+    let script = format!("touch {}", marker.display());
+    let out = once(
+        &dir,
+        &["--after-file", after.to_str().unwrap()],
+        "10",
+        &["/bin/sh", "-c", &script],
+    );
+    assert_eq!(out.status.code(), Some(125));
+    assert_eq!(result_of(&dir), "125");
+    assert!(!marker.exists(), "the command ran after a failed job");
+
+    // `0` (with surrounding whitespace) means the earlier job succeeded.
+    std::fs::write(&after, "0\n").unwrap();
+    let out = once(
+        &dir,
+        &["--after-file", after.to_str().unwrap()],
+        "10",
+        &["/bin/sh", "-c", &script],
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert!(marker.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn once_waits_for_files_beyond_its_timeout() {
+    // The waits are not bounded by --timeout-sec: a 1 s job still runs after a 1.5 s wait.
+    let dir = tempdir();
+    let seeded = dir.join(".seeded");
+    let after = dir.join("earlier");
+    let marker = dir.join("ran");
+    let script = format!("touch {}", marker.display());
+    let mut child = once_cmd(
+        &dir,
+        &[
+            "--wait-file",
+            seeded.to_str().unwrap(),
+            "--after-file",
+            after.to_str().unwrap(),
+        ],
+        "1",
+        &["/bin/sh", "-c", &script],
+    )
+    .spawn()
+    .unwrap();
+    thread::sleep(Duration::from_millis(800));
+    // The after-file alone does not release it: the wait-file comes first.
+    std::fs::write(&after, "0").unwrap();
+    thread::sleep(Duration::from_millis(700));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "ran before the wait-file"
+    );
+    assert!(!marker.exists());
+    std::fs::write(&seeded, "").unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(0));
+    assert!(marker.exists());
+    assert_eq!(result_of(&dir), "0");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn once_termination_while_waiting() {
+    let dir = tempdir();
+    let missing = dir.join("never");
+    let mut child = once_cmd(
+        &dir,
+        &["--wait-file", missing.to_str().unwrap()],
+        "10",
+        &["/bin/true"],
+    )
+    .spawn()
+    .unwrap();
+    thread::sleep(Duration::from_millis(300));
+    Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(143));
+    assert_eq!(result_of(&dir), "143");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn once_timeout_kills_the_group() {
+    let dir = tempdir();
+    let started = Instant::now();
+    let out = once(
+        &dir,
+        &[],
+        "1",
+        &["/bin/sh", "-c", "trap '' TERM; sleep 31 & sleep 31; wait"],
+    );
+    assert_eq!(out.status.code(), Some(124));
+    assert_eq!(result_of(&dir), "124");
+    let took = started.elapsed();
+    assert!(took >= Duration::from_secs(3), "no SIGKILL grace: {took:?}");
+    assert!(took < Duration::from_secs(10), "{took:?}");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !processes_with_cmdline("sleep 31").is_empty() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(processes_with_cmdline("sleep 31").is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn once_cannot_start() {
+    let dir = tempdir();
+    let missing = format!("/nonexistent/{FAKE_SECRET}");
+    let out = once_cmd(&dir, &[], "10", &[&missing, FAKE_SECRET])
+        .env("SETUP_TOKEN", FAKE_SECRET)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(127));
+    assert_eq!(result_of(&dir), "127");
+    assert_eq!(text(&out.stderr), "wardby-cmd: cannot start the command\n");
+    assert!(out.stdout.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn once_logs_nothing_of_its_own() {
+    let dir = tempdir();
+    let out = once_cmd(&dir, &[], "10", &["/bin/sh", "-c", "true", FAKE_SECRET])
+        .env("SETUP_TOKEN", FAKE_SECRET)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty() && out.stderr.is_empty());
+
+    // A result that cannot be written: a fixed line, exit 125, the path never echoed.
+    let missing_dir = dir.join(FAKE_SECRET).join("result");
+    let out = Command::new(BIN)
+        .arg("once")
+        .arg("--result-file")
+        .arg(&missing_dir)
+        .args(["--timeout-sec", "10", "--", "/bin/true", FAKE_SECRET])
+        .env("SETUP_TOKEN", FAKE_SECRET)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(125));
+    assert_eq!(text(&out.stderr), "wardby-cmd: cannot write the result\n");
+    assert!(!text(&out.stdout).contains(FAKE_SECRET));
+
+    // Bad arguments print only the usage text.
+    let out = Command::new(BIN)
+        .args(["once", "--timeout-sec", "10", "--", FAKE_SECRET])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!text(&out.stderr).contains(FAKE_SECRET));
+    let _ = std::fs::remove_dir_all(&dir);
+}

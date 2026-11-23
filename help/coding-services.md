@@ -65,6 +65,9 @@ For a repository on the wardby host (`local:/absolute/path`), the declaration is
 read from the committed file at the run's base ref, never the working tree; see
 [Use local git repositories](local-repositories.md).
 
+To run migrations or load seed data before the agent starts, declare a setup
+job; see [Run migrations or seed data before a coding agent starts](coding-setup-jobs.md).
+
 To run the agent's commands in your team's own dev image instead of next to it,
 declare a toolchain; see
 [Run a coding agent's commands in your own dev image](coding-toolchain.md).
@@ -78,6 +81,7 @@ If a run is refused or fails over its services, read the page for its code:
 - [`service_launcher_unsupported`](errors/service-launcher-unsupported.md)
 - [`service_kind_unsupported`](errors/service-kind-unsupported.md)
 - [`service_unready`](errors/service-unready.md)
+- [`coding_setup_failed`](errors/setup-failed.md)
 
 Read [`docs/coding-services.md`](../docs/coding-services.md) for the file
 format, catalog fields, built-in variables, custom entries, and capacity.

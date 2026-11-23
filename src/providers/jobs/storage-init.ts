@@ -48,6 +48,28 @@ export function toolchainAgentScript(root: string, source: string = TOOLCHAIN_AG
 }
 
 /**
+ * The storage folder holding only the command agent's binary, for setup jobs (#589); mounted
+ * read-only at /opt/wardby-cmd in their containers. Never the toolchain's token: a setup job shares
+ * the run's loopback, and with the token it could command the toolchain, whose /workspace is writable.
+ */
+export const SETUP_AGENT_DIRECTORY = "cmd-bin";
+
+/**
+ * Appended to storageInitScript (it reuses its `fs`) on a run with setup jobs: copies the command
+ * agent alone into `<root>/cmd-bin`. Writes no token.
+ */
+export function setupAgentScript(root: string, source: string = TOOLCHAIN_AGENT_SOURCE): string {
+  return [
+    `const binDir = ${JSON.stringify(root)} + "/${SETUP_AGENT_DIRECTORY}";`,
+    "fs.mkdirSync(binDir, { recursive: true, mode: 0o700 });",
+    "fs.chmodSync(binDir, 0o700);",
+    'fs.rmSync(binDir + "/wardby-cmd", { force: true });',
+    `fs.copyFileSync(${JSON.stringify(source)}, binDir + "/wardby-cmd");`,
+    'fs.chmodSync(binDir + "/wardby-cmd", 0o500);',
+  ].join("\n");
+}
+
+/**
  * Where the Claude Code agent image (which runs storage-init) carries the docker CLI and its compose
  * plugin, off its PATH: `docker` and `cli-plugins/docker-compose` beneath it.
  */

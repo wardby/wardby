@@ -16,7 +16,7 @@ import {
   sidecarOnly,
   withoutDockerServices,
   type ResolvedCodingService,
-  type SidecarOrToolchainService,
+  type NonDockerService,
 } from "../../../coding/services/catalog.js";
 import type { UnstartableService } from "../types.js";
 
@@ -62,7 +62,7 @@ const quoteArgs = (args: readonly string[]): string => args.map(shellQuote).join
  * never starts a docker service (Kubernetes with gVisor only): dispatch refuses it
  * (service_kind_unsupported), and it throws "substrate_feature_unsupported:services" here as the backstop.
  */
-export function servicesInOrder(services: readonly ResolvedCodingService[]): SidecarOrToolchainService[] {
+export function servicesInOrder(services: readonly ResolvedCodingService[]): NonDockerService[] {
   return withoutDockerServices(services, "substrate_feature_unsupported:services").sort((a, b) =>
     a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
   );
@@ -128,6 +128,11 @@ export function substrateServiceProblems(services: readonly ResolvedCodingServic
     // Until the Substrate launcher starts toolchains: refused at dispatch, never treated as a sidecar.
     if (service.kind === "toolchain") {
       problems.push({ name: service.name, reason: "toolchain_unsupported" });
+      continue;
+    }
+    // Until the Substrate launcher runs setup jobs (#589): refused at dispatch, never run as a sidecar.
+    if (service.kind === "setup") {
+      problems.push({ name: service.name, reason: "setup_unsupported" });
       continue;
     }
     if (service.startCommand === undefined) {

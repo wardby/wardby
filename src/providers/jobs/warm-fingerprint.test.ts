@@ -175,6 +175,31 @@ describe("warmFingerprint services", () => {
     expect(servicesFingerprint([toolchain, postgres16])).not.toBe(servicesFingerprint([postgres16]));
   });
 
+  it("tells a setup job from a sidecar and changes with its command, waitFor, timeout and order (#589)", () => {
+    const job = {
+      kind: "setup" as const,
+      name: "app-migrations",
+      version: "1",
+      image: `registry.example/team/migrate@sha256:${"e".repeat(64)}`,
+      command: ["migrate", "up"],
+      waitFor: ["postgres"],
+      timeoutSeconds: 600,
+      serviceEnv: {},
+      testEnv: {},
+      resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 128 },
+      writablePaths: [],
+    };
+    const seed = { ...job, name: "seed-data" };
+    const hash = servicesFingerprint([postgres16, job]);
+    expect(hash).toMatch(WARM_FINGERPRINT);
+    expect(hash).not.toBe(servicesFingerprint([postgres16]));
+    for (const changed of [{ command: ["migrate"] }, { waitFor: ["redis"] }, { timeoutSeconds: 601 }]) {
+      expect(servicesFingerprint([postgres16, { ...job, ...changed }])).not.toBe(hash);
+    }
+    expect(servicesFingerprint([postgres16, job, seed])).not.toBe(servicesFingerprint([postgres16, seed, job]));
+    expect(servicesFingerprint([job, postgres16])).toBe(hash);
+  });
+
   it("pins the hash", () => {
     const hash = servicesFingerprint([postgres16]);
     expect(hash).toBe("b41a35708596d2ebcffeb8483d705f560320a773652babd0d914417537f62d0b");

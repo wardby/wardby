@@ -456,6 +456,16 @@ start:
   `hostAliases` are `--add-host <name>:127.0.0.1` entries on the network
   keeper, whose hosts file every container in the namespace shares; an alias
   may not be the coding proxy's name.
+- For a run whose repository declares
+  [setup jobs](coding-services.md#preparing-services-before-the-agent-starts-setup-jobs),
+  one container per job (`wardby-setup-<token>-<name>`), created one at a time
+  after every service is ready and before the tool runner or worker: the same
+  controls as a service, the checkout and the `cmd-bin` subpath (the command
+  agent alone, never a toolchain's token) mounted read-only, a small tmpfs for
+  its result file and its writable paths, and Wardby's command agent
+  (`wardby-cmd once`) as its entrypoint. The launcher
+  waits for it to exit and removes it; a non-zero exit fails the launch, so
+  nothing that runs the agent is created.
 
 A Codex run's worker and every service use `--network container:<network
 keeper>`, so a service answers the worker on `127.0.0.1` and the worker still
@@ -935,6 +945,18 @@ One pod per run, built by the canonical, deny-by-default policy in
   `DOCKER_HOST` and `DOCKER_CONFIG=/opt/wardby-cmd/docker` among Wardby's
   fixed values, and `storage-init` copies the docker CLI and its compose
   plugin from the agent image into `cmd/docker`.
+- **Setup jobs** (only for a run whose repository declares
+  [setup jobs](coding-services.md#preparing-services-before-the-agent-starts-setup-jobs)):
+  one main container per job, `setup-<name>`, between `keeper` and `worker`,
+  under the same security context. Each runs Wardby's command agent
+  (`wardby-cmd once`, copied by `storage-init` into the `cmd-bin` subpath,
+  which holds the agent alone: a setup job never mounts `cmd` and so can't
+  read a toolchain's token or command the toolchain) as its entrypoint, waits for the keeper's seeded marker (the checkout is copied in
+  only after every sidecar is ready, so a job can't be an init container) and
+  for the job before it, and runs from the `workspace` subPath mounted
+  read-only. It writes its exit code to the `setup` subPath, which the worker
+  mounts read-only: the worker's gate starts the agent only when the last
+  job's result is `0`. The launcher fails the run when a job exits non-zero.
 - **`keeper`**: trusted, holds the one `storage` volume (an `emptyDir` sized
   `spec.limits.diskMb` MiB, **disk-backed**, not `medium: Memory`) open for
   the pod's life; the seam streams the workspace and input artifact in and

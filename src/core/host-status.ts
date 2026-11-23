@@ -23,6 +23,9 @@ import { codeProviderOf } from "../coding/code-host.js";
 import { storedServiceNames } from "../coding/services/catalog.js";
 import {
   SERVICE_UNREADY_CATEGORY,
+  SETUP_FAILED_CATEGORY,
+  setupFailedName,
+  setupFailedSentence,
   serviceRefusalSentence,
   serviceUnreadySentence,
 } from "../coding/services/wording.js";
@@ -370,7 +373,9 @@ export function outcomeBody(
         ? serviceRefusalSentence(c.error)
         : c.status === "failed" && c.failureCategory === SERVICE_UNREADY_CATEGORY
           ? serviceUnreadySentence(c.services ?? [])
-          : null;
+          : c.status === "failed" && c.failureCategory === SETUP_FAILED_CATEGORY
+            ? setupFailedSentence(setupFailedName(c.error))
+            : null;
     // No path reaches this comment (see coding/protected-path-wording.ts), only the category.
     const protectedPathOf = (c: FailedChild): boolean =>
       c.status === "failed" && c.failureCategory === PROTECTED_PATH_CATEGORY;

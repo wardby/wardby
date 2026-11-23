@@ -23,6 +23,16 @@ pub fn kill_group(pgid: i32) {
     }
 }
 
+/// SIGTERMs every process in group `pgid`, asking it to stop. Groups 0 and 1 are never targeted.
+pub fn term_group(pgid: i32) {
+    if pgid > 1 {
+        // SAFETY: as in `kill_group`: integers only, no memory effects.
+        unsafe {
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+    }
+}
+
 fn winsize(w: Window) -> libc::winsize {
     libc::winsize {
         ws_row: w.rows,
@@ -207,6 +217,16 @@ pub fn wait_exited_nowait(pid: i32) -> io::Result<()> {
     .map(|_| ())
 }
 
+/// Whether child `pid` has exited, without blocking and without reaping it.
+pub fn has_exited(pid: i32) -> io::Result<bool> {
+    siginfo_pid(
+        libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+        libc::P_PID,
+        pid as libc::id_t,
+    )
+    .map(|p| p.is_some())
+}
+
 /// Reaps child `pid` if it has exited.
 pub fn reap(pid: i32) {
     let mut status = 0;
@@ -265,6 +285,33 @@ pub fn on_termination(socket_fd: RawFd) {
             libc::sigaction(sig, &sa, std::ptr::null_mut());
         }
     }
+}
+
+static TERMINATION_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn record_signal(sig: libc::c_int) {
+    TERMINATION_SIGNAL.store(sig, Ordering::SeqCst);
+}
+
+/// On SIGTERM, SIGINT or SIGHUP: only record the signal, for [`termination_signal`]. As PID 1
+/// a process without a handler would ignore SIGTERM entirely.
+pub fn record_termination() {
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: a zeroed sigaction with an `extern "C" fn(c_int)` handler and an empty mask
+        // is a valid argument; the handler only stores to an atomic, which is signal-safe.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = record_signal as *const () as libc::sighandler_t;
+            libc::sigemptyset(&mut sa.sa_mask);
+            libc::sigaction(sig, &sa, std::ptr::null_mut());
+        }
+    }
+}
+
+/// The termination signal received since [`record_termination`], if any.
+pub fn termination_signal() -> Option<i32> {
+    let sig = TERMINATION_SIGNAL.load(Ordering::SeqCst);
+    (sig != 0).then_some(sig)
 }
 
 #[cfg(all(test, target_os = "linux"))]
