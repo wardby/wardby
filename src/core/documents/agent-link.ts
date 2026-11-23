@@ -90,3 +90,38 @@ export function assertAgentRepository(agent: AgentRepositoryScope, repository: s
   };
   if (!allowed.some(same)) throw new Error("document_repo_link_invalid");
 }
+
+/** A plan set, as far as the link rule needs it. */
+type PlanLinkSet = { store: string; agentId: string };
+
+/**
+ * The set a document is linked through when it belongs to a "wardby" plan set: such a document is
+ * linked to the set's planner only, by its file in the plan folder (spec §5). Null otherwise.
+ */
+export function wardbyPlanLink<S extends PlanLinkSet>(doc: { planPath: string | null }, set: S | null): S | null {
+  return set?.store === "wardby" && doc.planPath ? set : null;
+}
+
+/**
+ * Whether a document's stored link lets it be sent to an agent: a "wardby" plan document linked to
+ * its set's planner, or a repository-linked document (a design also needs its base ref). A document
+ * removed from its plan never is. The send path (agent-loop.ts sendableLink) applies the same rule,
+ * then checks the agent itself; the page uses this to offer "Send to agent".
+ */
+export function documentLinkSendable(
+  doc: {
+    kind: string;
+    agentId: string | null;
+    repository: string | null;
+    path: string | null;
+    baseRef: string | null;
+    planPath: string | null;
+    removedFromPlan: boolean;
+  },
+  set: PlanLinkSet | null,
+): boolean {
+  if (doc.removedFromPlan) return false;
+  const plan = wardbyPlanLink(doc, set);
+  if (plan) return doc.agentId === plan.agentId;
+  return !!doc.repository && !!doc.path && (doc.kind !== "design" || !!doc.baseRef);
+}

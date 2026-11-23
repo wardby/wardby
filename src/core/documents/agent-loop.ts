@@ -54,7 +54,12 @@ import {
   type AgentEditFormat,
   type EarlierEditForm,
 } from "./agent-formats.js";
-import { assertAgentRepository, assertDocumentAgentOverride, validDocumentBaseRef } from "./agent-link.js";
+import {
+  assertAgentRepository,
+  assertDocumentAgentOverride,
+  validDocumentBaseRef,
+  wardbyPlanLink,
+} from "./agent-link.js";
 import { authorLabel, listThreads, postAgentReply } from "./comments.js";
 import { contentHash, type VersionContent } from "./content.js";
 import { notifyDocumentChange } from "./events.js";
@@ -255,7 +260,7 @@ async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer
         select: { id: true, store: true, repository: true, number: true, agentId: true },
       })
     : null;
-  const plan = set?.store === "wardby" && doc.planPath ? set : null;
+  const plan = wardbyPlanLink(doc, set);
   const repository = plan ? plan.repository : doc.repository;
   if (!doc.agentId || !repository || (!plan && !doc.path)) throw new Error("document_not_agent_linked");
   // A revision is the set's planner's run: a document linked to any other agent is not sendable.

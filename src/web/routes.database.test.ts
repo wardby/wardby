@@ -1703,6 +1703,53 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect([back.state, back.currentVersion]).toEqual(["in_review", 2]);
     });
 
+    it("offers send on a wardby plan document and design, but not when removed, locked or to a commenter", async () => {
+      const planner = await db.agent.create({
+        data: {
+          name: `rv-web-planner-${s}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const set = await db.planSet.create({
+        data: { agentId: planner.id, repository: `acme/plan-${s}`, number: 7, store: "wardby", createdByRunId: "run" },
+      });
+      try {
+        const doc = await newDoc();
+        const design = (
+          await createDocument(db, cipher, { kind: "design", ownerId: owner.id, title: "Board", files: coffee() })
+        ).id;
+        const removed = await newDoc();
+        for (const [id, planPath] of [
+          [doc, "plan.md"],
+          [design, "boards"],
+          [removed, "old.md"],
+        ] as const) {
+          await db.document.update({ where: { id }, data: { planSetId: set.id, planPath, agentId: planner.id } });
+        }
+        await db.document.update({ where: { id: removed }, data: { removedFromPlan: true } });
+        const o = await session(owner.id);
+        const canSend = async (id: string, jar = o.jar) =>
+          ((await (await call(`/d/api/${id}`, { jar })).json()) as any).document.canSend;
+        expect(await canSend(doc)).toBe(true);
+        expect(await canSend(design)).toBe(true);
+        expect(await canSend(removed)).toBe(false);
+        // A commenter (named as a reviewer) is not offered send.
+        const m = await session(member.id);
+        await submitAs(doc, o, member.id);
+        expect(await canSend(doc, m.jar)).toBe(false);
+        // Approved: locked, so not offered to the owner either.
+        await post(doc, m, { action: "verdict", verdict: "approve", versionNumber: 1 });
+        expect(await canSend(doc)).toBe(false);
+      } finally {
+        await db.document.deleteMany({ where: { planSetId: set.id } });
+        await db.planSet.delete({ where: { id: set.id } });
+        await db.agent.delete({ where: { id: planner.id } });
+      }
+    });
+
     it("shows an anonymous share-link reader a review with no actions and no reviewer refs", async () => {
       const id = await newDoc();
       const o = await session(owner.id);
