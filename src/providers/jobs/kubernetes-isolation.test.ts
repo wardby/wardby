@@ -1080,6 +1080,26 @@ describe("buildRunPod with services", () => {
     built.spec!.initContainers!.find((c) => c.name === `service-${name}`)!;
   const autopilot = { ...options, platform: "gke-autopilot" as const, runtimeClassName: "gvisor" };
 
+  it("builds no sidecar, container or volume for a setup job (#589): it gets its own container later", () => {
+    const job = resolvedFromDefinition(
+      CodingServiceDefinitionSchema.parse({
+        name: "app-migrations",
+        version: "1",
+        kind: "setup",
+        image: `registry.example/team/migrate@sha256:${"e".repeat(64)}`,
+        command: ["migrate", "up"],
+        waitFor: ["postgres"],
+        resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 128 },
+        writablePaths: ["/tmp"],
+      }),
+    );
+    const withJob = buildRunPod({ ...withServices, services: [POSTGRES, REDIS, job] }, options);
+    expect(withJob.spec!.initContainers).toEqual(p().spec!.initContainers);
+    expect(withJob.spec!.containers).toEqual(p().spec!.containers);
+    expect(withJob.spec!.volumes).toEqual(p().spec!.volumes);
+    expect(JSON.stringify(withJob.spec)).not.toContain("app-migrations");
+  });
+
   it("builds exactly the pod it always has when a run has no services", () => {
     expect(buildRunPod({ ...spec, services: undefined }, options)).toEqual(pod());
   });

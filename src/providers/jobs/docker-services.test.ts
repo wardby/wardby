@@ -172,6 +172,31 @@ describe("Docker service containers", () => {
     expect(flagValues(args, "--cpus")).toEqual(["0.25"]);
   });
 
+  it("plans no service container for a setup job (#589): it gets its own container later", () => {
+    const job = resolvedFromDefinition(
+      CodingServiceDefinitionSchema.parse({
+        name: "app-migrations",
+        version: "1",
+        kind: "setup",
+        image: `registry.example/team/migrate@sha256:${"e".repeat(64)}`,
+        command: ["migrate", "up"],
+        waitFor: ["postgres"],
+        resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 128 },
+        writablePaths: ["/tmp"],
+      }),
+    );
+    const token = isolationToken(spec.runId);
+    expect(buildDockerServicePlan({ ...spec, services: [POSTGRES, job] })).toEqual(buildDockerServicePlan(spec));
+    expect(dockerServiceContainerNames({ ...spec, services: [POSTGRES, job] })).toEqual([
+      `wardby-svc-${token}-postgres`,
+    ]);
+    // Still re-validated with the rest: a malformed setup entry refuses the run.
+    const broken = { ...job, command: [] } as unknown as ResolvedCodingService;
+    expect(() => buildDockerServicePlan({ ...spec, services: [POSTGRES, broken] })).toThrow(
+      "docker_isolation_unsupported",
+    );
+  });
+
   it("re-validates the services instead of trusting dispatch", () => {
     expect(buildDockerServicePlan({ ...spec, services: undefined })).toEqual([]);
     expect(buildDockerServicePlan(spec)).toEqual([

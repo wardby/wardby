@@ -8,7 +8,7 @@ import type { V1ContainerStatus, V1Pod } from "@kubernetes/client-node";
 import tar from "tar-stream";
 import { collectExclusions, tarExcludeArgs } from "../../coding/collect-exclude.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
-import { resolvedFromDefinition } from "../../coding/services/catalog.js";
+import { CodingServiceDefinitionSchema, resolvedFromDefinition } from "../../coding/services/catalog.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DISABLED_POWER, type Power } from "../../core/power.js";
 import { jobLauncherContract } from "./contract-suite.js";
@@ -2294,6 +2294,27 @@ describe("coding-run services", () => {
       expect(updates).toEqual([
         { runId: "run-svc-report", name: "postgres", state: "pending" },
         { runId: "run-svc-report", name: "postgres", state: "ready" },
+      ]);
+    });
+
+    it("never waits for, or reports, a setup job as a sidecar (#589)", async () => {
+      const { updates, onServiceState } = reporting();
+      const h = await harness("run-svc-setup", {}, { onServiceState });
+      const job = resolvedFromDefinition(
+        CodingServiceDefinitionSchema.parse({
+          name: "app-migrations",
+          version: "1",
+          kind: "setup",
+          image: `registry.example/team/migrate@sha256:${"e".repeat(64)}`,
+          command: ["migrate", "up"],
+          waitFor: ["postgres"],
+          resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 128 },
+        }),
+      );
+      await h.launcher.launch({ ...h.spec, services: [POSTGRES, job] });
+      expect(updates).toEqual([
+        { runId: "run-svc-setup", name: "postgres", state: "pending" },
+        { runId: "run-svc-setup", name: "postgres", state: "ready" },
       ]);
     });
 

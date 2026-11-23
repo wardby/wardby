@@ -17,6 +17,7 @@ import type {
 } from "@kubernetes/client-node";
 import {
   isToolchainService,
+  runningServices,
   runToolchain,
   sidecarOnly,
   StoredCodingServicesSchema,
@@ -424,7 +425,8 @@ function toolchainSidecar(
 }
 
 function serviceVolumes(services: readonly ResolvedCodingService[]): V1Volume[] {
-  return services.flatMap((service, index) =>
+  // Setup jobs (#589) are not sidecars: they get containers (and volumes) of their own.
+  return runningServices(services).flatMap((service, index) =>
     serviceStorage(service, index).map(({ name, sizeMib }) => ({ name, emptyDir: { sizeLimit: `${sizeMib}Mi` } })),
   );
 }
@@ -672,7 +674,8 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
       initContainers: [
         storageInit,
         ...(toolRunner ? [toolRunner] : []),
-        ...services.map((service, index) => serviceSidecar(service, index, profile, spec.timeoutSec)),
+        // Setup jobs (#589) are not sidecars: they get containers of their own, so none is built here.
+        ...runningServices(services).map((service, index) => serviceSidecar(service, index, profile, spec.timeoutSec)),
       ],
       containers: [keeper, worker],
     },

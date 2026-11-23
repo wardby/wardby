@@ -82,6 +82,7 @@ import {
   type ServiceStateReporter,
 } from "./service-state.js";
 import type { CodingProvider } from "../../coding/provider.js";
+import { runningServices } from "../../coding/services/catalog.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   JobCapacityError,
@@ -1214,7 +1215,8 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     await this.waitForKeeper(
       names,
       spec.runId,
-      (spec.services ?? []).map((service) => service.name),
+      // Only the sidecars and toolchain: a setup job (#589) is not a sidecar, so there is none to wait for.
+      runningServices(spec.services ?? []).map((service) => service.name),
       spec.provider === "claude-code",
     );
 

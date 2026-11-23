@@ -8,6 +8,7 @@
 import { CODING_SERVICE_NAME } from "../../coding/protocol.js";
 import {
   isToolchainService,
+  runningServices,
   sidecarOnly,
   StoredCodingServicesSchema,
   type ResolvedCodingService,
@@ -57,8 +58,9 @@ export function dockerServiceContainerName(runId: string, serviceName: string): 
 
 /** The container names of a spec's services, for stop and cleanup: names only, never launch input. */
 export function dockerServiceContainerNames(spec: JobSpec): string[] {
+  // A setup job (#589) is not a service container (its own container is named differently).
   return (spec.services ?? [])
-    .filter((service) => CODING_SERVICE_NAME.test(service.name))
+    .filter((service) => service.kind !== "setup" && CODING_SERVICE_NAME.test(service.name))
     .map((service) => dockerServiceContainerName(spec.runId, service.name));
 }
 
@@ -197,7 +199,8 @@ export function buildServiceCreateArgs(spec: JobSpec, service: ResolvedCodingSer
 }
 
 export function buildDockerServicePlan(spec: JobSpec): DockerServiceContainer[] {
-  return validateDockerServices(spec).map((service) => ({
+  // Setup jobs (#589) are not service containers: they run once, in containers of their own.
+  return runningServices(validateDockerServices(spec)).map((service) => ({
     service,
     container: dockerServiceContainerName(spec.runId, service.name),
     createArgs: buildServiceCreateArgs(spec, service),
