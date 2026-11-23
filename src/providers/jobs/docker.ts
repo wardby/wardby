@@ -54,7 +54,7 @@ import {
   type CodingServiceKind,
 } from "../../coding/services/catalog.js";
 import { serviceUnreadyError, SETUP_FAILED_ERROR } from "../../coding/services/wording.js";
-import { redactExactSecretValues } from "../../core/secret-spans.js";
+import { redactExactSecretValues, withEscapedForms } from "../../core/secret-spans.js";
 import {
   assertServiceContainerInspection,
   buildDockerServicePlan,
@@ -77,6 +77,8 @@ import {
   expectedRepositoryHostPath,
   repositoryStorageDirectories,
   storageInitScript,
+  SETUP_AGENT_DIRECTORY,
+  setupAgentScript,
   TOOLCHAIN_AGENT_DIRECTORY,
   toolchainAgentScript,
 } from "./storage-init.js";
@@ -649,8 +651,10 @@ export function redactedSetupTail(output: string, spec: Pick<JobSpec, "services"
   const values = (spec.services ?? []).flatMap((service) =>
     service.kind === "docker" ? [] : Object.values(service.serviceEnv),
   );
-  const bounded = output.length > SETUP_TAIL_BYTES ? output.slice(-SETUP_TAIL_BYTES) : output;
-  return redactExactSecretValues(bounded, values);
+  // Redact the whole read first, then keep the end: cutting first could leave the end of a value
+  // that straddles the cut unredacted. Escaped forms too (a tool may print a value JSON-escaped).
+  const redacted = redactExactSecretValues(output, withEscapedForms(values));
+  return redacted.length > SETUP_TAIL_BYTES ? redacted.slice(-SETUP_TAIL_BYTES) : redacted;
 }
 
 /** `coding_setup_failed:<name>` (the executor's service_setup): a setup job exited non-zero or timed out. */
@@ -1187,9 +1191,15 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       await this.startContainer(container);
       await report(job.name, { state: "probing" });
       let exitCode: number;
+      // Never past the run's own deadline: setup counts inside the run's timeout.
+      const untilDeadline = record.deadlineAt - this.now();
+      if (untilDeadline <= 0) {
+        await report(job.name, { state: "failed", reason: "timed_out" });
+        throw setupFailed(job.name);
+      }
       try {
         const waited = await this.run(["container", "wait", container], {
-          timeoutMs: (job.timeoutSeconds + SETUP_WAIT_GRACE_SECONDS) * 1_000,
+          timeoutMs: Math.min((job.timeoutSeconds + SETUP_WAIT_GRACE_SECONDS) * 1_000, untilDeadline),
         });
         exitCode = Number.parseInt(waited.stdout.trim(), 10);
       } catch {
@@ -1474,7 +1484,9 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       hostPath: this.repositoryHostPath(record.runId, r),
     }));
     await this.transfer.seedDirectory(resolve(runRoot, "workspace"), keeper, "/run/wardby/storage/workspace");
-    if (specToolchain(record.spec) || runSetupJobs(record.spec.services ?? []).length > 0) {
+    const toolchain = specToolchain(record.spec) !== undefined;
+    const setupJobs = runSetupJobs(record.spec.services ?? []).length > 0;
+    if (toolchain || setupJobs) {
       // The command agent and the run's token for the toolchain (#599), before any service starts: the
       // keeper runs Wardby's own worker image, which carries the agent. Nothing is printed.
       await this.run([
@@ -1484,8 +1496,13 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
         "node",
         "-e",
         [
-          storageInitScript(WORKER_PATHS.storage, [TOOLCHAIN_AGENT_DIRECTORY]),
-          toolchainAgentScript(WORKER_PATHS.storage),
+          storageInitScript(WORKER_PATHS.storage, [
+            ...(toolchain ? [TOOLCHAIN_AGENT_DIRECTORY] : []),
+            ...(setupJobs ? [SETUP_AGENT_DIRECTORY] : []),
+          ]),
+          // The token only into `cmd`, for the toolchain; setup jobs get the agent alone in `cmd-bin` (#589).
+          ...(toolchain ? [toolchainAgentScript(WORKER_PATHS.storage)] : []),
+          ...(setupJobs ? [setupAgentScript(WORKER_PATHS.storage)] : []),
         ].join("\n"),
       ]);
     }

@@ -167,7 +167,8 @@ function setupCommand(service: ResolvedSetupService): string[] {
 function setupMounts(): Array<{ path: string; writable: boolean; subpath: string }> {
   return [
     { path: WORKER_PATHS.workspace, writable: false, subpath: "workspace" },
-    { path: TOOLCHAIN_AGENT_PATH, writable: false, subpath: "cmd" },
+    // The agent alone (`cmd-bin`), never `cmd` and the toolchain's token.
+    { path: TOOLCHAIN_AGENT_PATH, writable: false, subpath: "cmd-bin" },
   ];
 }
 

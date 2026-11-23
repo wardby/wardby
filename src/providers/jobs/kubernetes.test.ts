@@ -2384,6 +2384,23 @@ describe("coding-run services", () => {
         });
       });
 
+      it("fails the run when a setup job's image can never be pulled, instead of stalling to the deadline", async () => {
+        const h = await harness("run-setup-pull");
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        setSetup(h, { waiting: { reason: "ImagePullBackOff" } });
+        expect(await h.launcher.status(handle)).toMatchObject({ state: "failed" });
+        expect((await h.launcher.collect(handle)).diagnostic).toBe("coding_setup_failed:app-migrations");
+      });
+
+      it("reads a setup job killed at the deadline as timed_out, not as a failed job", async () => {
+        const h = await harness("run-setup-deadline");
+        const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });
+        h.advance(60 * 60 * 1000);
+        setSetup(h, { terminated: { exitCode: 143, reason: "Error" } });
+        expect(await h.launcher.status(handle)).toMatchObject({ state: "failed" });
+        expect(await h.launcher.collect(handle)).toMatchObject({ exitCode: 124, reason: "timed_out" });
+      });
+
       it("keeps a run going when its setup job exited 0", async () => {
         const h = await harness("run-setup-ok");
         const handle = await h.launcher.launch({ ...h.spec, services: [POSTGRES, MIGRATE] });

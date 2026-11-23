@@ -1946,7 +1946,7 @@ describe("buildRunPod with setup jobs (#589)", () => {
   it("mounts the checkout read-only, the agent and seeded marker read-only, and only its own result folder writable", () => {
     expect(main(p(), "setup-app-migrations").volumeMounts).toEqual([
       { name: "storage", mountPath: "/workspace", subPath: "workspace", readOnly: true },
-      { name: "storage", mountPath: "/opt/wardby-cmd", subPath: "cmd", readOnly: true },
+      { name: "storage", mountPath: "/opt/wardby-cmd", subPath: "cmd-bin", readOnly: true },
       { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
       { name: "storage", mountPath: "/run/wardby/setup", subPath: "setup" },
       { name: "setup-1-scratch-0", mountPath: "/tmp" },
@@ -1968,11 +1968,41 @@ describe("buildRunPod with setup jobs (#589)", () => {
     expect(gate).toContain("process.exit(3)");
   });
 
-  it("has storage-init create the setup folder and copy the command agent", () => {
+  it("has storage-init create the setup folder and copy the agent alone into cmd-bin, with no token", () => {
     const script = p().spec!.initContainers![0].command![2];
     expect(script).toContain('"setup"');
-    expect(script).toContain('"cmd"');
+    expect(script).toContain('"cmd-bin"');
     expect(script).toContain('"/opt/wardby/bin/wardby-cmd"');
+    // A setup-only run has no toolchain: no token is ever written.
+    expect(script).not.toContain("token");
+  });
+
+  it("never lets a setup job reach the toolchain's token: it mounts cmd-bin, and only the toolchain and tool runner mount cmd", () => {
+    const TOOLCHAIN = resolvedFromDefinition(
+      CodingServiceDefinitionSchema.parse({
+        name: "python-dev",
+        version: "3.13",
+        kind: "toolchain",
+        image: `localhost:5001/team@sha256:${"c".repeat(64)}`,
+        resources: { cpuMillicores: 500, memoryMib: 512, diskMib: 256 },
+      }),
+    );
+    const claude: JobSpec = {
+      ...spec,
+      provider: "claude-code",
+      toolImage: `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`,
+      services: [POSTGRES, TOOLCHAIN, MIGRATE],
+    };
+    const built = buildRunPod(claude, options);
+    const all = [...built.spec!.initContainers!, ...built.spec!.containers];
+    const mountsCmd = all.filter((c) => (c.volumeMounts ?? []).some((m) => m.subPath === "cmd")).map((c) => c.name);
+    expect(mountsCmd.sort()).toEqual(["service-python-dev", "tool-runner"]);
+    expect(main(built, "setup-app-migrations").volumeMounts).not.toContainEqual(
+      expect.objectContaining({ subPath: "cmd" }),
+    );
+    const script = built.spec!.initContainers![0].command![2];
+    expect(script).toContain('dir + "/token"');
+    expect(script).not.toContain('binDir + "/token"');
   });
 
   it("gives each job's writable paths their own scratch volumes", () => {

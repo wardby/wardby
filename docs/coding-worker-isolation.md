@@ -460,9 +460,10 @@ start:
   [setup jobs](coding-services.md#preparing-services-before-the-agent-starts-setup-jobs),
   one container per job (`wardby-setup-<token>-<name>`), created one at a time
   after every service is ready and before the tool runner or worker: the same
-  controls as a service, the checkout and the `cmd` subpath mounted
-  read-only, a small tmpfs for its result file and its writable paths, and
-  Wardby's command agent (`wardby-cmd once`) as its entrypoint. The launcher
+  controls as a service, the checkout and the `cmd-bin` subpath (the command
+  agent alone, never a toolchain's token) mounted read-only, a small tmpfs for
+  its result file and its writable paths, and Wardby's command agent
+  (`wardby-cmd once`) as its entrypoint. The launcher
   waits for it to exit and removes it; a non-zero exit fails the launch, so
   nothing that runs the agent is created.
 
@@ -948,8 +949,9 @@ One pod per run, built by the canonical, deny-by-default policy in
   [setup jobs](coding-services.md#preparing-services-before-the-agent-starts-setup-jobs)):
   one main container per job, `setup-<name>`, between `keeper` and `worker`,
   under the same security context. Each runs Wardby's command agent
-  (`wardby-cmd once`, copied into the `cmd` subpath by `storage-init`) as its
-  entrypoint, waits for the keeper's seeded marker (the checkout is copied in
+  (`wardby-cmd once`, copied by `storage-init` into the `cmd-bin` subpath,
+  which holds the agent alone: a setup job never mounts `cmd` and so can't
+  read a toolchain's token or command the toolchain) as its entrypoint, waits for the keeper's seeded marker (the checkout is copied in
   only after every sidecar is ready, so a job can't be an init container) and
   for the job before it, and runs from the `workspace` subPath mounted
   read-only. It writes its exit code to the `setup` subPath, which the worker

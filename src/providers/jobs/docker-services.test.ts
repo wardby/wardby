@@ -441,7 +441,8 @@ describe("Docker setup job container (#589)", () => {
     expect(flagValues(args, "--name")).toEqual([`wardby-setup-${isolationToken(withJob.runId)}-app-migrations`]);
     expect(flagValues(args, "--mount")).toEqual([
       `type=volume,src=${storage},dst=/workspace,volume-subpath=workspace,volume-nocopy,readonly`,
-      `type=volume,src=${storage},dst=/opt/wardby-cmd,volume-subpath=cmd,volume-nocopy,readonly`,
+      // The agent alone: never `cmd`, which holds the toolchain's token.
+      `type=volume,src=${storage},dst=/opt/wardby-cmd,volume-subpath=cmd-bin,volume-nocopy,readonly`,
     ]);
     expect(Object.keys(serviceTmpfsOptions(JOB))).toEqual(["/run/wardby/setup", "/tmp"]);
     expect(args).toContain("--read-only");

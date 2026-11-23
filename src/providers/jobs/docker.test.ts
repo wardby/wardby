@@ -1734,6 +1734,9 @@ describe("Docker launcher with services", () => {
       const waited = at((a) => a[1] === "wait" && a[2] === setup);
       const toolCreated = at((a) => a[1] === "create" && a.includes(names.toolContainer));
       expect(copied).toBeGreaterThanOrEqual(0);
+      // The agent alone into cmd-bin: a run without a toolchain never writes a token (#589 review).
+      expect(sequence[copied].join(" ")).toContain('"cmd-bin"');
+      expect(sequence[copied].join(" ")).not.toContain("token");
       expect(serviceReady).toBeGreaterThan(copied);
       expect(waited).toBeGreaterThan(serviceReady);
       expect(toolCreated).toBeGreaterThan(waited);
@@ -1762,6 +1765,16 @@ describe("Docker launcher with services", () => {
       expect(creates.some((a) => a.includes(names.toolContainer))).toBe(false);
       expect(creates.some((a) => a.includes(names.workerContainer))).toBe(false);
     });
+  });
+
+  it("redacts a value that straddles where the tail is cut (#589 review)", () => {
+    const secret = "fake-throwaway-9f2c";
+    const spec = { services: [{ ...POSTGRES, serviceEnv: { DB_PASSWORD: secret } }] };
+    // The secret sits across the 8 KiB cut: its first half falls outside what is kept.
+    const output = `${secret}${"y".repeat(8 * 1024 - 8)}`;
+    const tail = redactedSetupTail(output, spec);
+    expect(tail).not.toContain(secret.slice(secret.length / 2));
+    expect(tail.length).toBeLessThanOrEqual(8 * 1024);
   });
 
   it("redacts a failed setup job's output tail by exact catalog value, and bounds it (#589)", () => {

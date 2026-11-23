@@ -35,6 +35,8 @@ import {
   jobRepositoriesValid,
   REPOSITORY_MOUNT_ROOT,
   repositoryStorageDirectories,
+  setupAgentScript,
+  SETUP_AGENT_DIRECTORY,
   storageInitScript,
   TOOLCHAIN_AGENT_DIRECTORY,
   TOOLCHAIN_DOCKER_DIRECTORY,
@@ -638,7 +640,8 @@ function setupContainer(
     }),
     volumeMounts: [
       { name: "storage", mountPath: "/workspace", subPath: "workspace", readOnly: true },
-      { name: "storage", mountPath: TOOLCHAIN_AGENT_MOUNT, subPath: TOOLCHAIN_AGENT_DIRECTORY, readOnly: true },
+      // The agent alone (`cmd-bin`), never `cmd` and its token.
+      { name: "storage", mountPath: TOOLCHAIN_AGENT_MOUNT, subPath: SETUP_AGENT_DIRECTORY, readOnly: true },
       { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
       { name: "storage", mountPath: SETUP_RESULT_DIR, subPath: SETUP_STORAGE_DIRECTORY },
       ...setupScratch(job, index),
@@ -725,11 +728,14 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         storageInitScript(STORAGE_ROOT, [
           ...STORAGE_DIRECTORIES,
           ...repositoryStorageDirectories(spec),
-          ...(toolchain || setupJobs.length > 0 ? [TOOLCHAIN_AGENT_DIRECTORY] : []),
-          ...(setupJobs.length > 0 ? [SETUP_STORAGE_DIRECTORY] : []),
+          ...(toolchain ? [TOOLCHAIN_AGENT_DIRECTORY] : []),
+          ...(setupJobs.length > 0 ? [SETUP_AGENT_DIRECTORY, SETUP_STORAGE_DIRECTORY] : []),
         ]),
-        // The command agent: a toolchain's entrypoint and every setup job's (#589).
-        ...(toolchain || setupJobs.length > 0 ? [toolchainAgentScript(STORAGE_ROOT)] : []),
+        // The command agent and the run's token for a toolchain (#599), in `cmd`.
+        ...(toolchain ? [toolchainAgentScript(STORAGE_ROOT)] : []),
+        // The agent alone for setup jobs (#589), in `cmd-bin`: never the token, which would let a job
+        // command the toolchain (writable /workspace) over the shared loopback.
+        ...(setupJobs.length > 0 ? [setupAgentScript(STORAGE_ROOT)] : []),
         // With a docker service too, the toolchain gets the docker CLI the same way.
         ...(toolchain && dockerSocket.length > 0 ? [toolchainDockerScript(STORAGE_ROOT)] : []),
       ].join("\n"),

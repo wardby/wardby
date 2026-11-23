@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { storageInitScript, toolchainAgentScript, toolchainDockerScript } from "./storage-init.js";
+import { setupAgentScript, storageInitScript, toolchainAgentScript, toolchainDockerScript } from "./storage-init.js";
 
 /** Runs a storage-init script the way the pod does (`node -e`), against a temporary storage root. */
 function runScript(script: string): void {
@@ -105,5 +105,21 @@ describe("toolchainDockerScript", () => {
     runScript(script);
     runScript(script);
     expect(readFileSync(join(root, "cmd", "docker", "docker"), "utf8")).toBe("docker-cli");
+  });
+});
+
+describe("setupAgentScript (#589)", () => {
+  it("copies the agent alone into cmd-bin and never writes a token", () => {
+    const root = mkdtempSync(join(tmpdir(), "wardby-storage-"));
+    try {
+      const source = join(root, "source-wardby-cmd");
+      writeFileSync(source, "#!/bin/sh\necho agent\n");
+      runScript([storageInitScript(root, ["cmd-bin"]), setupAgentScript(root, source)].join("\n"));
+      expect(readFileSync(join(root, "cmd-bin", "wardby-cmd"), "utf8")).toBe(readFileSync(source, "utf8"));
+      expect(statSync(join(root, "cmd-bin", "wardby-cmd")).mode & 0o777).toBe(0o500);
+      expect(() => statSync(join(root, "cmd-bin", "token"))).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

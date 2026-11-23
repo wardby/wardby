@@ -31,7 +31,7 @@ import { isIP } from "node:net";
 import type { V1ConfigMap, V1ContainerStatus, V1Pod, V1ResourceQuota } from "@kubernetes/client-node";
 import type { KubernetesJobConfig } from "../../config/providers.js";
 import { logger } from "../../core/logger.js";
-import { redactExactSecretValues } from "../../core/secret-spans.js";
+import { redactExactSecretValues, withEscapedForms } from "../../core/secret-spans.js";
 import { CODING_MCP_GATEWAY_UNAVAILABLE, DISABLED_POWER, wakeTimeoutMs, type Power } from "../../core/power.js";
 import {
   MAX_CODING_ARTIFACT_BYTES,
@@ -504,22 +504,6 @@ function observePod(
     if (record.phase === "provisioning" && now - record.createdAt < readyTimeoutMs) return undefined;
     return { phase: "lost", result: resultFor("lost") };
   }
-  // A setup job (#589) that exited non-zero: the agent must never start (its gate refuses too), so fail
-  // the run now with the job's own code, and stop the pod.
-  const failedSetup = setupStatuses(pod).find(
-    (status) => status.state?.terminated !== undefined && status.state.terminated.exitCode !== 0,
-  );
-  if (failedSetup) {
-    return {
-      phase: "failed",
-      result: {
-        exitCode: Math.max(1, failedSetup.state!.terminated!.exitCode ?? 1),
-        reason: "failed",
-        diagnostic: `coding_setup_failed:${failedSetup.name.slice(SETUP_CONTAINER_PREFIX.length)}`,
-      },
-      deleteGraceSeconds: STOP_GRACE_SECONDS,
-    };
-  }
   const worker = pod.status?.containerStatuses?.find((status) => status.name === WORKER_CONTAINER);
   const terminated = worker?.state?.terminated;
   // Exit 0 counts as success only if the worker finished on its own, before the deadline, on a live pod:
@@ -530,6 +514,26 @@ function observePod(
   }
   if (now >= record.deadlineAt || pod.status?.reason === "DeadlineExceeded") {
     return { phase: "failed", result: { exitCode: 124, reason: "timed_out" }, deleteGraceSeconds: STOP_GRACE_SECONDS };
+  }
+  // A setup job (#589) that exited non-zero, or that can never start (its image can't be pulled or
+  // its container created): the agent must never start (its gate refuses too), so fail the run with
+  // the job's own code and stop the pod. Checked after the deadline, so a job the deadline or a pod
+  // deletion killed (143, 137) reads as timed_out, not as a failed job.
+  const failedSetup = setupStatuses(pod).find(
+    (status) =>
+      (status.state?.terminated !== undefined && status.state.terminated.exitCode !== 0) ||
+      FATAL_WAITING_REASONS.has(status.state?.waiting?.reason ?? ""),
+  );
+  if (failedSetup) {
+    return {
+      phase: "failed",
+      result: {
+        exitCode: Math.max(1, failedSetup.state?.terminated?.exitCode ?? 1),
+        reason: "failed",
+        diagnostic: `coding_setup_failed:${failedSetup.name.slice(SETUP_CONTAINER_PREFIX.length)}`,
+      },
+      deleteGraceSeconds: STOP_GRACE_SECONDS,
+    };
   }
   // Docker's worker_tool_runner_failed, for the same reason: without its tool runner a Claude worker
   // can only stall until the deadline. Checked only while the worker still runs, so a clean finish
@@ -1521,11 +1525,13 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     const container = `${SETUP_CONTAINER_PREFIX}${diagnostic.slice("coding_setup_failed:".length)}`;
     let tail = "";
     try {
-      tail = await this.api.readLogTail(this.namespace, names.pod, container, SETUP_TAIL_LINES, SETUP_TAIL_BYTES);
+      // Read more than is kept, so a value straddling the start of what's kept is still redacted whole.
+      tail = await this.api.readLogTail(this.namespace, names.pod, container, SETUP_TAIL_LINES, SETUP_TAIL_BYTES * 4);
     } catch {
       // Optional: the container's log may already be gone.
     }
-    const redacted = redactExactSecretValues(tail, podEnvironmentValues(pod));
+    const whole = redactExactSecretValues(tail, withEscapedForms(podEnvironmentValues(pod)));
+    const redacted = whole.length > SETUP_TAIL_BYTES ? whole.slice(-SETUP_TAIL_BYTES) : whole;
     this.warn(`${diagnostic} (exit ${exitCode}); its output tail, redacted:\n${redacted}`);
   }
 
