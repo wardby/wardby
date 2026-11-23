@@ -1,9 +1,11 @@
 /**
  * The paragraph dispatch adds to a coding agent's standing instructions when
  * its run has services (docs/coding-services.md): which services, the
- * variables each sets, and that they start empty; and, for a toolchain, that
- * the run's commands run in that image. The worker sees only its task text, so
- * this is how the builder learns the contract.
+ * variables each sets, and that they start empty; for a toolchain, that the
+ * run's commands run in that image; and, for setup jobs, which ones already ran
+ * (never as something the run can reach: a setup job has finished before the
+ * agent starts). The worker sees only its task text, so this is how the builder
+ * learns the contract.
  */
 import type { ResolvedCodingService } from "./catalog.js";
 
@@ -17,7 +19,8 @@ const variablesOf = (entry: NoteEntry): string =>
 export function servicesInstructionNote(services: readonly NoteEntry[]): string | undefined {
   if (services.length === 0) return undefined;
   const toolchain = services.find((service) => service.kind === "toolchain");
-  const sidecars = services.filter((service) => service.kind !== "toolchain");
+  const setupJobs = services.filter((service) => service.kind === "setup");
+  const sidecars = services.filter((service) => service.kind !== "toolchain" && service.kind !== "setup");
   const lines: string[] = [];
   if (toolchain) {
     const variables = variablesOf(toolchain);
@@ -27,11 +30,18 @@ export function servicesInstructionNote(services: readonly NoteEntry[]): string 
   }
   if (sidecars.length > 0) {
     lines.push(
-      "Services for this run: wardby started these next to your workspace, reachable on 127.0.0.1. Each one starts empty; create any schema or data your tests need.",
+      setupJobs.length > 0
+        ? "Services for this run: wardby started these next to your workspace, reachable on 127.0.0.1. Each one starts empty apart from what the setup jobs below did; create any other schema or data your tests need."
+        : "Services for this run: wardby started these next to your workspace, reachable on 127.0.0.1. Each one starts empty; create any schema or data your tests need.",
       ...sidecars.map((service) => {
         const variables = variablesOf(service);
         return `- ${service.name} ${service.version}${variables ? `: ${variables}` : ""}`;
       }),
+    );
+  }
+  if (setupJobs.length > 0) {
+    lines.push(
+      `Setup jobs for this run: before you started, wardby ran ${setupJobs.map((job) => `\`${job.name} ${job.version}\``).join(", ")} against these services, in that order, and each succeeded.`,
     );
   }
   if (sidecars.length > 0 || (toolchain && variablesOf(toolchain))) {

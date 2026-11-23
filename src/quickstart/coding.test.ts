@@ -551,7 +551,7 @@ describe("codingStep (non-interactive)", () => {
     writeQuickstartEnv(paths(), { OPENAI_API_KEY: "sk-test" });
     const { deps, logs, seeds } = harness();
     await codingStep(paths(), state, { nonInteractive: true, coding: true, trust: [repoA] }, deps);
-    expect(logs.join("\n")).toMatch(/only top-level keys allowed are `services` and `toolchain`/);
+    expect(logs.join("\n")).toMatch(/only top-level keys allowed are `services`, `toolchain` and `setup`/);
     expect(seeds).toHaveLength(1);
     expect(seeds[0].services).toEqual([]);
   });

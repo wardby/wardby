@@ -480,6 +480,29 @@ describe("substrateServiceProblems", () => {
     ]);
   });
 
+  it("refuses a setup job until the Substrate launcher runs them (#589), and checks the rest", () => {
+    const job: ResolvedCodingService = {
+      kind: "setup",
+      name: "app-migrations",
+      version: "1",
+      image: `registry.example/team/migrate@sha256:${"e".repeat(64)}`,
+      command: ["migrate", "up"],
+      waitFor: ["fakedb"],
+      timeoutSeconds: 600,
+      serviceEnv: {},
+      testEnv: {},
+      resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 128 },
+      writablePaths: [],
+    };
+    expect(substrateServiceProblems([FAKE_SERVICE, job])).toEqual([
+      { name: "app-migrations", reason: "setup_unsupported" },
+    ]);
+    expect(substrateServiceProblems([WITHOUT_START, job])).toEqual([
+      { name: "app-migrations", reason: "setup_unsupported" },
+      { name: "fakedb", reason: "start_command_missing" },
+    ]);
+  });
+
   it("flags a missing start command", () => {
     expect(substrateServiceProblems([WITHOUT_START])).toEqual([{ name: "fakedb", reason: "start_command_missing" }]);
   });

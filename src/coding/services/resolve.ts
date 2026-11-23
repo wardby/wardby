@@ -2,9 +2,12 @@
  * Dispatch-time resolution (docs/coding-services.md): each service the
  * repository declares must exist in the catalog, as that exact version, be
  * declared under the key its kind belongs to (a toolchain under `toolchain:`, a
- * sidecar under `services:`), and the agent must be allowed its name. The first
+ * sidecar under `services:`, a setup job under `setup:`), and the agent must be
+ * allowed its name (one list, codingProfile.services, for every kind); and every
+ * service a setup job waits for must be declared under `services:`. The first
  * failure refuses the whole run with its host sentence; otherwise every entry is
- * snapshotted for the run, the toolchain first.
+ * snapshotted for the run in declaration order: the toolchain first, then the
+ * services, then the setup jobs in the order they run.
  *
  * The task text is also checked here: the agent's instructions plus the note
  * these services would add (servicesInstructionNote) plus the request must
@@ -25,6 +28,7 @@ import {
   notAllowedServiceSentence,
   serviceRefusal,
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
+  setupWaitForSentence,
   unknownServiceSentence,
 } from "./wording.js";
 
@@ -60,12 +64,18 @@ export async function resolveRunServices(
       return { refusal: serviceRefusal("service_unknown", unknownServiceSentence(service.name, service.version)) };
     }
   }
+  const setupJobs = new Set(declaration.setup ?? []);
   for (const service of declared) {
     const kind = entries.get(keyOf(service))!.kind;
-    const underToolchain = service === declaration.toolchain;
-    if ((kind === "toolchain") !== underToolchain) {
+    const declaredUnder =
+      service === declaration.toolchain ? "toolchain" : setupJobs.has(service) ? "setup" : "services";
+    const belongsUnder = kind === "sidecar" ? "services" : kind;
+    if (belongsUnder !== declaredUnder) {
       return {
-        refusal: serviceRefusal("service_declaration_invalid", misplacedServiceSentence(service.name, kind)),
+        refusal: serviceRefusal(
+          "service_declaration_invalid",
+          misplacedServiceSentence(service.name, kind, declaredUnder),
+        ),
       };
     }
   }
@@ -73,6 +83,15 @@ export async function resolveRunServices(
   for (const service of declared) {
     if (!allowedNames.has(service.name)) {
       return { refusal: serviceRefusal("service_not_allowed", notAllowedServiceSentence(service.name)) };
+    }
+  }
+  // After the allow check, so a host sentence names a catalog entry's dependencies only for jobs this agent may run.
+  const declaredServices = new Set(declaration.services.map((service) => service.name));
+  for (const job of declaration.setup ?? []) {
+    const entry = entries.get(keyOf(job))!;
+    const missing = entry.kind === "setup" ? entry.waitFor.find((name) => !declaredServices.has(name)) : undefined;
+    if (missing !== undefined) {
+      return { refusal: serviceRefusal("service_declaration_invalid", setupWaitForSentence(job.name, missing)) };
     }
   }
   const services = declared.map((service) => {

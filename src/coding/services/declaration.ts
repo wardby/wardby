@@ -5,8 +5,9 @@
  *
  * Repository content is untrusted, so this is a deliberately tiny YAML subset
  * rather than a general loader: comments, blank lines, the top-level mappings
- * `services:` (sidecars) and `toolchain:` (exactly one entry: the team image the
- * run's commands run in), each at most once and in either order, and under each
+ * `services:` (sidecars), `toolchain:` (exactly one entry: the team image the
+ * run's commands run in) and `setup:` (at most MAX_SETUP_JOBS one-off jobs, run in
+ * the order listed), each at most once and in any order, and under each
  * one `name: version` pair per line with the version bare, "double-quoted" or
  * 'single-quoted'. Anything else — anchors, tags, flow collections, document
  * markers, tabs, nested values, other keys — is refused, and every version stays
@@ -20,6 +21,7 @@ import {
   CODING_SERVICE_VERSION,
   INVALID_SINGLE_LINE_CONTROL,
   MAX_CODING_SERVICES,
+  MAX_SETUP_JOBS,
 } from "../protocol.js";
 
 export const SERVICE_DECLARATION_PATH = ".wardby/services.yaml";
@@ -30,15 +32,21 @@ export interface DeclaredService {
   version: string;
 }
 
-/** What `.wardby/services.yaml` declares: the sidecars, and at most one toolchain. */
+/** What `.wardby/services.yaml` declares: the sidecars, at most one toolchain, and the setup jobs in order. */
 export interface ServiceDeclaration {
   toolchain?: DeclaredService;
   services: DeclaredService[];
+  /** Present only when `setup:` lists some: the jobs in declaration order, the order they run in. */
+  setup?: DeclaredService[];
 }
 
-/** Every entry a declaration names, the toolchain first: what a run would start. */
+/** Every entry a declaration names, the toolchain first and the setup jobs last: what a run would start. */
 export function declaredEntries(declaration: ServiceDeclaration): DeclaredService[] {
-  return [...(declaration.toolchain ? [declaration.toolchain] : []), ...declaration.services];
+  return [
+    ...(declaration.toolchain ? [declaration.toolchain] : []),
+    ...declaration.services,
+    ...(declaration.setup ?? []),
+  ];
 }
 
 export class ServiceDeclarationError extends Error {
@@ -74,16 +82,16 @@ function scalar(raw: string): string | null {
   return BARE_VERSION.test(raw) ? raw : null;
 }
 
-type Section = "services" | "toolchain";
+type Section = "services" | "toolchain" | "setup";
 
-const TOP_LEVEL = /^(services|toolchain):(?:\s+\{\s*\})?$/;
+const TOP_LEVEL = /^(services|toolchain|setup):(?:\s+\{\s*\})?$/;
 
 export function parseServiceDeclaration(text: string): ServiceDeclaration {
   if (byteLength(text) > MAX_SERVICE_DECLARATION_BYTES) {
     throw new ServiceDeclarationError(`it is larger than ${MAX_SERVICE_DECLARATION_BYTES} bytes`);
   }
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
-  const entries: Record<Section, DeclaredService[]> = { services: [], toolchain: [] };
+  const entries: Record<Section, DeclaredService[]> = { services: [], toolchain: [], setup: [] };
   const seen = new Set<string>();
   const sections = new Set<Section>();
   let section: Section | undefined;
@@ -102,7 +110,7 @@ export function parseServiceDeclaration(text: string): ServiceDeclaration {
       const top = TOP_LEVEL.exec(content);
       if (!top || sections.has(top[1] as Section)) {
         throw new ServiceDeclarationError(
-          `line ${line}: the only top-level keys allowed are \`services\` and \`toolchain\`, each once`,
+          `line ${line}: the only top-level keys allowed are \`services\`, \`toolchain\` and \`setup\`, each once`,
         );
       }
       section = top[1] as Section;
@@ -112,7 +120,9 @@ export function parseServiceDeclaration(text: string): ServiceDeclaration {
       continue;
     }
     if (section === undefined || emptyFlow) {
-      throw new ServiceDeclarationError(`line ${line}: entries must sit under \`services:\` or \`toolchain:\``);
+      throw new ServiceDeclarationError(
+        `line ${line}: entries must sit under \`services:\`, \`toolchain:\` or \`setup:\``,
+      );
     }
     if (indent === undefined) indent = leading;
     else if (leading !== indent) {
@@ -136,14 +146,21 @@ export function parseServiceDeclaration(text: string): ServiceDeclaration {
       throw new ServiceDeclarationError(`line ${line}: \`toolchain:\` takes exactly one entry`);
     }
     entries[section].push({ name, version });
-    if (seen.size > MAX_CODING_SERVICES) {
+    if (entries.setup.length > MAX_SETUP_JOBS) {
+      throw new ServiceDeclarationError(`it lists more than ${MAX_SETUP_JOBS} setup jobs`);
+    }
+    if (entries.services.length + entries.toolchain.length > MAX_CODING_SERVICES) {
       throw new ServiceDeclarationError(`it lists more than ${MAX_CODING_SERVICES} services`);
     }
   }
-  if (sections.size === 0) throw new ServiceDeclarationError("it has no `services:` or `toolchain:` key");
+  if (sections.size === 0) throw new ServiceDeclarationError("it has no `services:`, `toolchain:` or `setup:` key");
   if (sections.has("toolchain") && entries.toolchain.length === 0) {
     throw new ServiceDeclarationError("`toolchain:` takes exactly one entry");
   }
   const [toolchain] = entries.toolchain;
-  return { ...(toolchain ? { toolchain } : {}), services: entries.services };
+  return {
+    ...(toolchain ? { toolchain } : {}),
+    services: entries.services,
+    ...(entries.setup.length > 0 ? { setup: entries.setup } : {}),
+  };
 }

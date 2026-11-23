@@ -14,6 +14,7 @@ import {
   unstartableServiceSentence,
   codexToolchainSentence,
   misplacedServiceSentence,
+  setupWaitForSentence,
 } from "./wording.js";
 import type { ResolvedSidecarService } from "./catalog.js";
 
@@ -73,6 +74,21 @@ describe("service refusals", () => {
     ]) {
       expect(text).not.toContain(value);
     }
+  });
+
+  it("words the setup refusals (#589) with only the job's name", () => {
+    expect(unstartableServiceSentence({ name: "app-migrations", reason: "setup_unsupported" })).toBe(
+      "This repository asks for the setup job `app-migrations`, which this wardby deployment can't start: setup jobs are not supported on this launcher yet.",
+    );
+    expect(misplacedServiceSentence("app-migrations", "setup", "services")).toBe(
+      "`.wardby/services.yaml` is invalid: `app-migrations` is a setup job; declare it under `setup:`.",
+    );
+    expect(misplacedServiceSentence("mysql", "sidecar", "setup")).toBe(
+      "`.wardby/services.yaml` is invalid: `mysql` is a service, not a setup job; declare it under `services:`.",
+    );
+    expect(setupWaitForSentence("app-migrations", "mysql")).toBe(
+      "`.wardby/services.yaml` is invalid: `app-migrations` needs `mysql`; declare it under `services:`.",
+    );
   });
 
   it("words the toolchain refusals with only the toolchain's name", () => {

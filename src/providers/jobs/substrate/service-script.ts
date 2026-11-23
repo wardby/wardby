@@ -118,6 +118,11 @@ export function substrateServiceProblems(services: readonly ResolvedCodingServic
       problems.push({ name: service.name, reason: "toolchain_unsupported" });
       continue;
     }
+    // Until the Substrate launcher runs setup jobs (#589): refused at dispatch, never run as a sidecar.
+    if (service.kind === "setup") {
+      problems.push({ name: service.name, reason: "setup_unsupported" });
+      continue;
+    }
     if (service.startCommand === undefined) {
       problems.push({ name: service.name, reason: "start_command_missing" });
       continue;

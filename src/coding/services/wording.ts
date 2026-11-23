@@ -43,13 +43,25 @@ export function notAllowedServiceSentence(name: string): string {
   return `This repository asks for \`${name}\`, which this agent isn't allowed to use. An admin or the agent's owner can allow it.`;
 }
 
-/** A catalog entry declared under the other key: a toolchain under `services:`, or a sidecar under `toolchain:`. */
-export function misplacedServiceSentence(name: string, kind: "sidecar" | "toolchain"): string {
-  return invalidDeclarationSentence(
-    kind === "toolchain"
-      ? `\`${name}\` is a toolchain; declare it under \`toolchain:\``
-      : `\`${name}\` is a service, not a toolchain; declare it under \`services:\``,
-  );
+/**
+ * A catalog entry declared under a key its kind doesn't belong to: a toolchain outside `toolchain:`,
+ * a setup job outside `setup:`, or a sidecar outside `services:` (`declaredUnder` names where it was).
+ */
+export function misplacedServiceSentence(
+  name: string,
+  kind: "sidecar" | "toolchain" | "setup",
+  declaredUnder: "services" | "toolchain" | "setup" = "toolchain",
+): string {
+  if (kind === "toolchain")
+    return invalidDeclarationSentence(`\`${name}\` is a toolchain; declare it under \`toolchain:\``);
+  if (kind === "setup") return invalidDeclarationSentence(`\`${name}\` is a setup job; declare it under \`setup:\``);
+  const not = declaredUnder === "setup" ? "a setup job" : "a toolchain";
+  return invalidDeclarationSentence(`\`${name}\` is a service, not ${not}; declare it under \`services:\``);
+}
+
+/** A setup job whose catalog entry waits for a service the run doesn't declare under `services:`. */
+export function setupWaitForSentence(name: string, service: string): string {
+  return invalidDeclarationSentence(`\`${name}\` needs \`${service}\`; declare it under \`services:\``);
 }
 
 /**
@@ -72,13 +84,19 @@ const UNSTARTABLE_REASON_CLAUSES: Record<UnstartableServiceReason, string> = {
   data_path_reserved: "its service catalog entry's data path overlaps a directory the job launcher reserves",
   setup_too_large: "its service catalog entry's environment and commands are too large for the job launcher",
   toolchain_unsupported: "toolchains are not supported on this launcher yet",
+  setup_unsupported: "setup jobs are not supported on this launcher yet",
 };
 
 /** A per-service service_launcher_unsupported sentence (the launcher can run services, but not this one). */
 export function unstartableServiceSentence(service: UnstartableService): string {
   // Only the validated catalog name and a fixed clause: nothing else of the entry reaches a host.
   if (!CODING_SERVICE_NAME.test(service.name)) return LAUNCHER_UNSUPPORTED_SENTENCE;
-  const what = service.reason === "toolchain_unsupported" ? "the toolchain " : "";
+  const what =
+    service.reason === "toolchain_unsupported"
+      ? "the toolchain "
+      : service.reason === "setup_unsupported"
+        ? "the setup job "
+        : "";
   return `This repository asks for ${what}\`${service.name}\`, which this wardby deployment can't start: ${UNSTARTABLE_REASON_CLAUSES[service.reason]}.`;
 }
 

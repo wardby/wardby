@@ -3,8 +3,14 @@ import { spawnSync } from "node:child_process";
 import { BUILTIN_CODING_SERVICES, MYSQL_SUBSTRATE_SCRIPT, POSTGRES_SUBSTRATE_SCRIPT } from "./builtins.js";
 import {
   CodingServiceDefinitionSchema,
+  DEFAULT_SETUP_TIMEOUT_SECONDS,
   StoredCodingServicesSchema,
   catalogEntryFromRow,
+  isSetupService,
+  runSetupJobs,
+  runToolchain,
+  runningServices,
+  sidecarOnly,
   parseAllowedServiceNames,
   parseStoredServices,
   resolvedFromDefinition,
@@ -441,5 +447,178 @@ describe("catalogEntryFromRow", () => {
     expect(() =>
       catalogEntryFromRow({ startCommand: null, ...postgres16, readiness: { command: "pg_isready" } }),
     ).toThrow("coding_service_catalog_invalid:postgres 16");
+  });
+});
+
+/** A migration tool's image as a setup job (#589). */
+const APP_MIGRATIONS = {
+  name: "app-migrations",
+  version: "1",
+  kind: "setup" as const,
+  image: `registry.example/team/liquibase@sha256:${"e".repeat(64)}`,
+  command: ["liquibase", "--changelog-file=db/changelog.xml", "update"],
+  waitFor: ["mysql"],
+  timeoutSeconds: 900,
+  serviceEnv: { LIQUIBASE_COMMAND_PASSWORD: "throwaway-admin" },
+  resources: { cpuMillicores: 1000, memoryMib: 1024, diskMib: 256 },
+  writablePaths: ["/tmp", "/liquibase/data"],
+};
+
+describe("CodingServiceDefinitionSchema for a setup job (#589)", () => {
+  it("accepts an image, command, waitFor, timeout, environment, resources and writable paths", () => {
+    expect(CodingServiceDefinitionSchema.parse(APP_MIGRATIONS)).toEqual({ ...APP_MIGRATIONS, testEnv: {} });
+  });
+
+  it("defaults the timeout to 600 seconds and the environment, test variables and writable paths to empty", () => {
+    const { timeoutSeconds: _t, serviceEnv: _s, writablePaths: _w, ...minimal } = APP_MIGRATIONS;
+    expect(DEFAULT_SETUP_TIMEOUT_SECONDS).toBe(600);
+    expect(CodingServiceDefinitionSchema.parse(minimal)).toEqual({
+      ...minimal,
+      timeoutSeconds: 600,
+      serviceEnv: {},
+      testEnv: {},
+      writablePaths: [],
+    });
+  });
+
+  it.each([
+    ["dataPath", { dataPath: "/data" }],
+    ["readiness", { readiness: postgres16.readiness }],
+    ["port", { port: 3306 }],
+    ["startCommand", { startCommand: ["serve"] }],
+    ["setupCommand", { setupCommand: ["true"] }],
+    ["hostAliases", { hostAliases: ["db"] }],
+    ["substrateImage", { substrateImage: APP_MIGRATIONS.image }],
+    ["testEnv", { testEnv: { DATABASE_URL: "mysql://127.0.0.1/test" } }],
+  ])("refuses %s, naming the field", (field, patch) => {
+    const result = CodingServiceDefinitionSchema.safeParse({ ...APP_MIGRATIONS, ...patch });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toContainEqual(
+      expect.objectContaining({ path: [field], message: "is not used by a setup job" }),
+    );
+  });
+
+  it.each([
+    ["no command", { command: undefined }, "command"],
+    ["an empty command", { command: [] }, "command"],
+    ["17 command arguments", { command: Array.from({ length: 17 }, () => "x") }, "command"],
+    ["an empty command argument", { command: ["liquibase", ""] }, "command"],
+    ["a multi-line command argument", { command: ["sh", "-c", "a\nb"] }, "command"],
+    ["a 4097-byte command argument", { command: ["x".repeat(4097)] }, "command"],
+    ["no waitFor", { waitFor: undefined }, "waitFor"],
+    ["an empty waitFor", { waitFor: [] }, "waitFor"],
+    ["nine waitFor names", { waitFor: Array.from({ length: 9 }, (_, n) => `db${n}`) }, "waitFor"],
+    ["a repeated waitFor name", { waitFor: ["mysql", "mysql"] }, "waitFor"],
+    ["a malformed waitFor name", { waitFor: ["MySQL"] }, "waitFor"],
+    ["a zero timeout", { timeoutSeconds: 0 }, "timeoutSeconds"],
+    ["a 3601-second timeout", { timeoutSeconds: 3601 }, "timeoutSeconds"],
+    ["a fractional timeout", { timeoutSeconds: 1.5 }, "timeoutSeconds"],
+    ["a writable path over the workspace", { writablePaths: ["/workspace/tmp"] }, "writablePaths"],
+    ["a writable path over wardby's run inputs", { writablePaths: ["/run/wardby"] }, "writablePaths"],
+    ["overlapping writable paths", { writablePaths: ["/tmp", "/tmp/a"] }, "writablePaths"],
+  ])("refuses %s", (_label, patch, field) => {
+    const result = CodingServiceDefinitionSchema.safeParse({ ...APP_MIGRATIONS, ...patch });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.path[0])).toContain(field);
+  });
+
+  it("accepts the bounds: 16 arguments of 4096 bytes, 8 waitFor names, 1 and 3600 seconds", () => {
+    for (const patch of [
+      { command: Array.from({ length: 16 }, () => "x".repeat(4096)) },
+      { waitFor: Array.from({ length: 8 }, (_, n) => `db${n}`) },
+      { timeoutSeconds: 1 },
+      { timeoutSeconds: 3600 },
+    ]) {
+      expect(CodingServiceDefinitionSchema.safeParse({ ...APP_MIGRATIONS, ...patch }).success).toBe(true);
+    }
+  });
+
+  it.each([
+    ["a sidecar", postgres16],
+    ["a toolchain", PYTHON_DEV],
+  ])("refuses command, waitFor and timeoutSeconds on %s", (_label, entry) => {
+    for (const field of ["command", "waitFor", "timeoutSeconds"] as const) {
+      const result = CodingServiceDefinitionSchema.safeParse({ ...entry, [field]: APP_MIGRATIONS[field] });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues).toContainEqual(
+        expect.objectContaining({ path: [field], message: "is only for a setup job" }),
+      );
+    }
+  });
+});
+
+describe("stored setup jobs (#589)", () => {
+  const mysql8 = BUILTIN_CODING_SERVICES.find((s) => s.name === "mysql")!;
+  const migrations = resolvedFromDefinition(CodingServiceDefinitionSchema.parse(APP_MIGRATIONS));
+  const seed = resolvedFromDefinition(
+    CodingServiceDefinitionSchema.parse({ ...APP_MIGRATIONS, name: "seed-data", command: ["seed"] }),
+  );
+  const toolchain = resolvedFromDefinition(CodingServiceDefinitionSchema.parse(PYTHON_DEV));
+  const run = [toolchain, resolvedFromDefinition(mysql8), migrations, seed];
+
+  it("snapshots a setup job with its kind, command, waitFor and timeout, and parses it back", () => {
+    expect(parseStoredServices(JSON.parse(JSON.stringify(run)))).toEqual(run);
+    expect(migrations).toMatchObject({
+      kind: "setup",
+      command: APP_MIGRATIONS.command,
+      waitFor: ["mysql"],
+      timeoutSeconds: 900,
+    });
+  });
+
+  it("finds the setup jobs in declaration order, and the running services without them", () => {
+    expect(runSetupJobs(run).map((job) => job.name)).toEqual(["app-migrations", "seed-data"]);
+    expect(runSetupJobs([seed, migrations]).map((job) => job.name)).toEqual(["seed-data", "app-migrations"]);
+    expect(runningServices(run).map((service) => service.name)).toEqual(["python-dev", "mysql"]);
+    expect(run.filter(isSetupService)).toEqual([migrations, seed]);
+    expect(runToolchain(run)).toEqual(toolchain);
+  });
+
+  it("is refused by the sidecar-only guard, never treated as a sidecar", () => {
+    expect(() => sidecarOnly(migrations)).toThrow("coding_service_setup_unsupported");
+    expect(() => sidecarOnly(toolchain)).toThrow("coding_service_toolchain_unsupported");
+  });
+
+  it("never reaches the worker: setup jobs hand the shells nothing", () => {
+    expect(workerServices(run).map((service) => service.name)).toEqual(["python-dev", "mysql"]);
+  });
+
+  it("allows four setup jobs beside five services, and no more", () => {
+    const sidecars = ["a", "b", "c", "d", "e"].map((name) => ({ ...resolvedFromDefinition(mysql8), name }));
+    const jobs = ["s1", "s2", "s3", "s4", "s5"].map((name) => ({ ...migrations, name }));
+    expect(StoredCodingServicesSchema.safeParse([...sidecars, ...jobs.slice(0, 4)]).success).toBe(true);
+    expect(StoredCodingServicesSchema.safeParse([...sidecars.slice(0, 4), ...jobs]).success).toBe(false);
+    expect(
+      StoredCodingServicesSchema.safeParse([...sidecars, ...sidecars.slice(0, 1), ...jobs.slice(0, 3)]).success,
+    ).toBe(false);
+  });
+});
+
+describe("catalogEntryFromRow for a setup job (#589)", () => {
+  it("maps a setup row, whose other kinds' columns are null", () => {
+    const row = {
+      ...APP_MIGRATIONS,
+      testEnv: {},
+      substrateImage: null,
+      port: null,
+      readiness: null,
+      startCommand: null,
+      setupCommand: null,
+      hostAliases: null,
+      dataPath: null,
+    };
+    expect(catalogEntryFromRow(row)).toEqual(CodingServiceDefinitionSchema.parse(APP_MIGRATIONS));
+  });
+
+  it("refuses a setup row without its command", () => {
+    expect(() => catalogEntryFromRow({ ...APP_MIGRATIONS, testEnv: {}, startCommand: null, command: null })).toThrow(
+      "coding_service_catalog_invalid:app-migrations 1",
+    );
+  });
+
+  it("maps a sidecar row whose setup columns are null", () => {
+    expect(
+      catalogEntryFromRow({ startCommand: null, command: null, waitFor: null, timeoutSeconds: null, ...postgres16 }),
+    ).toEqual(postgres16);
   });
 });

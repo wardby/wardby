@@ -35,6 +35,7 @@ import { codingProviderForModelProvider, type CodingProvider } from "../../codin
 import { CodingProfileSchema } from "../../coding/profile.js";
 import {
   parseStoredServices,
+  runningServices,
   storedServiceNames,
   workerServices,
   type ResolvedCodingService,
@@ -5235,7 +5236,7 @@ export class ContainerExecutor implements Executor {
             }
           : {}),
         // Only when there are some: every other run's input stays exactly what older workers expect.
-        ...(services.length > 0 ? { services: workerServices(services) } : {}),
+        ...(runningServices(services).length > 0 ? { services: workerServices(services) } : {}),
         // Only when there is something to load: every other run's input stays exactly what older workers expect.
         ...(contextFiles.length > 0 ? { claudeContext: { files: contextFiles } } : {}),
         // Only on a run with input plan files (a revision, a builder): every other run's input stays exactly what older workers expect.

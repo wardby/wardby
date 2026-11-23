@@ -184,3 +184,120 @@ describe("resolveRunServices", () => {
     });
   });
 });
+
+describe("resolveRunServices with setup jobs (#589)", () => {
+  const job = (name: string, waitFor: string[]) => ({
+    name,
+    version: "1",
+    kind: "setup",
+    image: `registry.example/team/migrate@sha256:${"e".repeat(64)}`,
+    command: ["migrate", "up"],
+    waitFor,
+    timeoutSeconds: 600,
+    serviceEnv: {},
+    testEnv: {},
+    resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 128 },
+    writablePaths: ["/tmp"],
+    startCommand: null,
+  });
+  const setupRows = [...rows, job("app-migrations", ["mysql"]), job("search-mappings", ["mysql", "redis"])];
+  const mysql = { name: "mysql", version: "8" };
+  const redis = { name: "redis", version: "7" };
+  const migrations = { name: "app-migrations", version: "1" };
+  const mappings = { name: "search-mappings", version: "1" };
+  const everything = ["mysql", "redis", "app-migrations", "search-mappings"];
+
+  it("snapshots the services, then the setup jobs in declaration order", async () => {
+    const result = await resolveRunServices(
+      catalog(setupRows),
+      { services: [mysql, redis], setup: [mappings, migrations] },
+      everything,
+      "Add a joke.",
+    );
+    expect("services" in result && result.services.map((s) => `${s.kind} ${s.name}`)).toEqual([
+      "sidecar mysql",
+      "sidecar redis",
+      "setup search-mappings",
+      "setup app-migrations",
+    ]);
+    expect("services" in result && result.services[2]).toMatchObject({
+      command: ["migrate", "up"],
+      waitFor: ["mysql", "redis"],
+      timeoutSeconds: 600,
+    });
+  });
+
+  it("refuses a setup job waiting for a service the run doesn't declare under services:", async () => {
+    expect(
+      await resolveRunServices(
+        catalog(setupRows),
+        { services: [mysql], setup: [migrations, mappings] },
+        everything,
+        "Add a joke.",
+      ),
+    ).toEqual({
+      refusal:
+        "service_declaration_invalid: `.wardby/services.yaml` is invalid: `search-mappings` needs `redis`; declare it under `services:`.",
+    });
+  });
+
+  it("refuses a setup job declared under services:, naming the right key", async () => {
+    expect(
+      await resolveRunServices(catalog(setupRows), { services: [mysql, migrations] }, everything, "Add a joke."),
+    ).toEqual({
+      refusal:
+        "service_declaration_invalid: `.wardby/services.yaml` is invalid: `app-migrations` is a setup job; declare it under `setup:`.",
+    });
+  });
+
+  it("refuses a setup job declared under toolchain:, naming the right key", async () => {
+    expect(
+      await resolveRunServices(
+        catalog(setupRows),
+        { toolchain: migrations, services: [mysql] },
+        everything,
+        "Add a joke.",
+      ),
+    ).toEqual({
+      refusal:
+        "service_declaration_invalid: `.wardby/services.yaml` is invalid: `app-migrations` is a setup job; declare it under `setup:`.",
+    });
+  });
+
+  it("refuses a sidecar declared under setup:, naming the right key", async () => {
+    expect(
+      await resolveRunServices(catalog(setupRows), { services: [], setup: [mysql] }, everything, "Add a joke."),
+    ).toEqual({
+      refusal:
+        "service_declaration_invalid: `.wardby/services.yaml` is invalid: `mysql` is a service, not a setup job; declare it under `services:`.",
+    });
+  });
+
+  it("refuses a setup job the agent isn't allowed, through the same codingProfile.services list", async () => {
+    expect(
+      await resolveRunServices(
+        catalog(setupRows),
+        { services: [mysql], setup: [migrations] },
+        ["mysql"],
+        "Add a joke.",
+      ),
+    ).toEqual({
+      refusal:
+        "service_not_allowed: This repository asks for `app-migrations`, which this agent isn't allowed to use. An admin or the agent's owner can allow it.",
+    });
+  });
+
+  it("refuses a setup job the catalog doesn't have", async () => {
+    expect(
+      await resolveRunServices(
+        catalog(setupRows),
+        { services: [mysql], setup: [{ name: "app-migrations", version: "2" }] },
+        everything,
+        "Add a joke.",
+      ),
+    ).toEqual({
+      refusal:
+        "service_unknown: This repository asks for `app-migrations 2`, which wardby's service catalog doesn't have.",
+    });
+  });
+});
