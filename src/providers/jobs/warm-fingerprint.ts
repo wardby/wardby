@@ -90,6 +90,8 @@ const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 export function servicesFingerprint(services: readonly ResolvedCodingService[] | undefined): string | undefined {
   if (!services || services.length === 0) return undefined;
   const sorted = [...services].sort((a, b) => compare(a.name, b.name) || compare(a.version, b.version));
+  // Setup jobs run one at a time in declaration order, so their order is part of what the run does.
+  const setupOrder = new Map(services.filter((service) => service.kind === "setup").map((job, n) => [job, n]));
   return sha256(
     canonicalJson(
       sorted.map((service) => ({
@@ -113,6 +115,7 @@ export function servicesFingerprint(services: readonly ResolvedCodingService[] |
                 command: service.command,
                 waitFor: service.waitFor,
                 timeoutSeconds: service.timeoutSeconds,
+                order: setupOrder.get(service),
               }
             : { port: service.port, dataPath: service.dataPath }),
         serviceEnvKeys: Object.keys(service.serviceEnv).sort(),
