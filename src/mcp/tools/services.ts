@@ -9,9 +9,11 @@
  * what. Each change is audit-logged (event coding.service_catalog.<action>).
  * Built-in entries ship with wardby and change only with a release.
  *
- * An entry is a sidecar (a fresh service next to each run) or a toolchain (a
- * team image the run's commands are forwarded to, sharing its workspace); the
- * zod schema enforces each kind's fields, so a refusal names the field.
+ * An entry is a sidecar (a fresh service next to each run), a toolchain (a
+ * team image the run's commands are forwarded to, sharing its workspace) or a
+ * docker service (a rootless Docker daemon for each run, of which wardby sets
+ * everything but the image and resources); the zod schema enforces each kind's
+ * fields, so a refusal names the field.
  */
 import { z } from "zod";
 import {
@@ -19,6 +21,7 @@ import {
   catalogEntryFromRow,
   codingServiceNameSchema,
   codingServiceVersionSchema,
+  DOCKER_TEST_ENV,
   type CodingServiceRow,
 } from "../../coding/services/catalog.js";
 import { logger } from "../../core/logger.js";
@@ -98,11 +101,16 @@ function refuseBuiltin(key: Key): McpError {
 /** What list_services and get_service say of every toolchain: its image's own packages were never checked. */
 export const TOOLCHAIN_PACKAGES_NOTE = "Packages already in this image did not pass the proxy's checks.";
 
+/**
+ * One entry in full. A docker entry also shows the testEnv wardby gives it (DOCKER_HOST): the
+ * contract a repository's tests rely on.
+ */
 function view(row: CatalogRow) {
   const entry = catalogEntryFromRow(row);
   return {
     ...entry,
     ...(entry.kind === "toolchain" ? { note: TOOLCHAIN_PACKAGES_NOTE } : {}),
+    ...(entry.kind === "docker" ? { testEnv: { ...DOCKER_TEST_ENV } } : {}),
     builtin: row.builtin,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -206,7 +214,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "list_services",
     scope: "agents:read",
     description:
-      "The coding-run service catalog (name, version, kind, image, substrateImage when set, built in or not): the names a coding agent's codingProfile.services can allow. kind is sidecar (a service started next to each run) or toolchain (the image a run's commands run in).",
+      "The coding-run service catalog (name, version, kind, image, substrateImage when set, built in or not): the names a coding agent's codingProfile.services can allow. kind is sidecar (a service started next to each run), toolchain (the image a run's commands run in) or docker (a rootless Docker daemon for each run).",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
       const rows = await ctx.db.codingService.findMany({ orderBy: [{ name: "asc" }, { version: "asc" }] });
@@ -217,7 +225,8 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
           kind: row.kind,
           image: row.image,
           ...(row.substrateImage ? { substrateImage: row.substrateImage } : {}),
-          ...(row.port === null ? {} : { port: row.port }),
+          // A toolchain or docker entry has no port.
+          ...(row.port === null || row.kind === "docker" ? {} : { port: row.port }),
           ...(row.kind === "toolchain" ? { note: TOOLCHAIN_PACKAGES_NOTE } : {}),
           builtin: row.builtin,
         })),
@@ -246,19 +255,19 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "create_service",
     scope: "services:manage",
     description:
-      "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest. kind is sidecar (the default: a fresh instance next to each run, declared under services:, needing port, readiness and dataPath; set startCommand for deployments on the Substrate job launcher) or toolchain (a team's own dev image the run's commands run in, sharing its workspace, declared under toolchain:; no port, readiness, startCommand or dataPath; optional setupCommand and hostAliases). Packages already in a toolchain image did not pass the proxy's checks.",
+      "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest. kind is sidecar (the default: a fresh instance next to each run, declared under services:, needing port, readiness and dataPath; set startCommand for deployments on the Substrate job launcher), toolchain (a team's own dev image the run's commands run in, sharing its workspace, declared under toolchain:; no port, readiness, startCommand or dataPath; optional setupCommand and hostAliases) or docker (a rootless Docker daemon in each run's pod whose socket the agent's shells use, declared under services:; Kubernetes job launcher with the gVisor runtime class only; takes only name, version, kind, image and resources, as wardby sets the rest). Packages already in a toolchain image did not pass the proxy's checks.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      // The per-kind fields (port, readiness, dataPath for a sidecar) are checked by the zod schema, so a refusal names the field.
+      // The per-kind fields (port, readiness, dataPath for a sidecar; none for docker) are checked by the zod schema, so a refusal names the field.
       required: ["name", "version", "image", "resources"],
       properties: {
         ...definitionProperties,
         kind: {
           type: "string",
-          enum: ["sidecar", "toolchain"],
+          enum: ["sidecar", "toolchain", "docker"],
           description:
-            '"sidecar" (default): a service started next to each run. "toolchain": the image a run\'s commands run in. It cannot be changed later.',
+            '"sidecar" (default): a service started next to each run. "toolchain": the image a run\'s commands run in. "docker": a rootless Docker daemon for each run; its image is a rootless dockerd image prepared for wardby (help article coding-services), and it takes no port, serviceEnv, testEnv, readiness, startCommand, setupCommand, hostAliases, substrateImage, dataPath or writablePaths. It cannot be changed later.',
         },
       },
     },
@@ -283,7 +292,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "update_service",
     scope: "services:manage",
     description:
-      "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it, and kind, never change). Runs already dispatched keep the entry they started with. Set startCommand on a sidecar for deployments on the Substrate job launcher, or setupCommand and hostAliases on a toolchain.",
+      "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it, and kind, never change). Runs already dispatched keep the entry they started with. Set startCommand on a sidecar for deployments on the Substrate job launcher, or setupCommand and hostAliases on a toolchain. A docker entry takes only image and resources.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

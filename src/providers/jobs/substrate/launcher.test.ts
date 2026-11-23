@@ -3676,6 +3676,9 @@ describe("coding services", () => {
     const h = await makeHarness();
     expect(h.launcher.supportsServicesFor("claude-code")).toBe(true);
     expect(h.launcher.supportsServicesFor("codex")).toBe(true);
+    // Never a docker service: that kind needs Kubernetes with gVisor.
+    expect(h.launcher.supportsServiceKind("sidecar")).toBe(true);
+    expect(h.launcher.supportsServiceKind("docker")).toBe(false);
   });
 
   it("says which services it cannot start", async () => {

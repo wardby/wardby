@@ -31,6 +31,7 @@ import {
   resolvedFromDefinition,
   type ResolvedToolchainService,
 } from "../../coding/services/catalog.js";
+import { validateDockerServices } from "./docker-services.js";
 
 const image = `registry.example/wardby-worker@sha256:${"a".repeat(64)}`;
 const runHash = createHash("sha256").update("run-sensitive-name").digest("hex");
@@ -617,6 +618,24 @@ describe("Docker isolation with services", () => {
     expect(() => buildNetworkKeeperCreateArgs(spec)).toThrow("docker_isolation_unsupported");
   });
 
+  it("refuses a docker service for either provider, alone or next to a sidecar", () => {
+    const docker = {
+      kind: "docker" as const,
+      name: "docker",
+      version: "29",
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 2048 },
+    };
+    for (const base of [spec, claudeWithServices]) {
+      for (const services of [[docker], [POSTGRES, docker]]) {
+        expect(() => buildDockerIsolationPlan({ ...base, services }, "trusted-proxy")).toThrow(
+          "docker_isolation_unsupported",
+        );
+        expect(() => validateDockerServices({ ...base, services })).toThrow("docker_isolation_unsupported");
+      }
+    }
+  });
+
   it("refuses an empty service list for either provider", () => {
     expect(() => buildDockerIsolationPlan({ ...spec, services: [] }, "trusted-proxy")).toThrow(
       "docker_isolation_unsupported",
@@ -978,6 +997,21 @@ describe("Docker isolation with a toolchain (#599)", () => {
   ) as ResolvedToolchainService;
   const withToolchain: JobSpec = { ...claudeWithServices, services: [POSTGRES, TOOLCHAIN] };
   const storage = isolationNames(withToolchain.runId).storageVolume;
+
+  it("still refuses a docker service next to a toolchain (Kubernetes with gVisor only)", () => {
+    const docker = {
+      kind: "docker" as const,
+      name: "docker",
+      version: "29",
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 2048 },
+    };
+    const services = [TOOLCHAIN, docker];
+    expect(() => buildDockerIsolationPlan({ ...withToolchain, services }, "trusted-proxy")).toThrow(
+      "docker_isolation_unsupported",
+    );
+    expect(() => validateDockerServices({ ...withToolchain, services })).toThrow("docker_isolation_unsupported");
+  });
 
   it("puts the toolchain's host aliases on the network keeper, whose /etc/hosts every run container shares", () => {
     expect(flagValues(buildNetworkKeeperCreateArgs(withToolchain), "--add-host")).toEqual([

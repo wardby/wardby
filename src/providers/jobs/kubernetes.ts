@@ -82,6 +82,8 @@ import {
   type ServiceStateReporter,
 } from "./service-state.js";
 import type { CodingProvider } from "../../coding/provider.js";
+import type { CodingServiceKind } from "../../coding/services/catalog.js";
+import { GVISOR_RUNTIME_CLASS } from "./kubernetes-platform.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   JobCapacityError,
@@ -668,6 +670,16 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
    */
   supportsServicesFor(provider: CodingProvider): boolean {
     return provider === "codex" || provider === "claude-code";
+  }
+
+  /**
+   * Sidecars and a toolchain on any runtime class. A docker service (a rootless dockerd sidecar, kubernetes-isolation.ts
+   * dockerServiceSidecar) only with the gVisor runtime class: its security context adds SETUID and
+   * SETGID for newuidmap and keeps privilege escalation possible, and only gVisor keeps the node
+   * outside what that daemon can reach. buildRunPod refuses it without gVisor too.
+   */
+  supportsServiceKind(kind: CodingServiceKind): boolean {
+    return kind !== "docker" || this.options.config.runtimeClassName === GVISOR_RUNTIME_CLASS;
   }
 
   /**

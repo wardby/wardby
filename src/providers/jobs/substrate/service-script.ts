@@ -10,9 +10,14 @@
  * never in an actor template, a log or an error. The state file holds the fixed SERVICE_STATE_LINE
  * tokens only, never a value. The script never restarts the service and never exits.
  *
- * Pure: it imports only the ResolvedCodingService and UnstartableService types.
+ * Pure: it imports only the catalog's service types and guards, and the UnstartableService type.
  */
-import { sidecarOnly, type ResolvedCodingService } from "../../../coding/services/catalog.js";
+import {
+  sidecarOnly,
+  withoutDockerServices,
+  type ResolvedCodingService,
+  type SidecarOrToolchainService,
+} from "../../../coding/services/catalog.js";
 import type { UnstartableService } from "../types.js";
 
 /** Where a service container sees its own script volume (start.sh, state). Never a catalog path. */
@@ -52,16 +57,23 @@ export function shellQuote(value: string): string {
 
 const quoteArgs = (args: readonly string[]): string => args.map(shellQuote).join(" ");
 
-/** The run's services in the order of their template containers and volume indexes: by name. */
-export function servicesInOrder(services: readonly ResolvedCodingService[]): ResolvedCodingService[] {
-  return [...services].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+/**
+ * The run's services in the order of their template containers and volume indexes: by name. Substrate
+ * never starts a docker service (Kubernetes with gVisor only): dispatch refuses it
+ * (service_kind_unsupported), and it throws "substrate_feature_unsupported:services" here as the backstop.
+ */
+export function servicesInOrder(services: readonly ResolvedCodingService[]): SidecarOrToolchainService[] {
+  return withoutDockerServices(services, "substrate_feature_unsupported:services").sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+  );
 }
 
 /**
  * The service's start script (spec section 5.3), from the validated snapshot only. Throws
  * "substrate_service_start_command_missing" for an entry without startCommand.
  */
-export function serviceStartScript(service: ResolvedCodingService, options: { stateDir?: string } = {}): string {
+export function serviceStartScript(entry: ResolvedCodingService, options: { stateDir?: string } = {}): string {
+  const [service] = withoutDockerServices([entry], "substrate_feature_unsupported:services");
   const { startCommand, readiness, serviceEnv } = service;
   if (startCommand === undefined) throw new Error("substrate_service_start_command_missing");
   const gated = service.substrateImage !== undefined;

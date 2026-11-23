@@ -27,6 +27,11 @@ services need the Kubernetes, Docker or Substrate job launcher."
 2. remove `.wardby/services.yaml` from the base branch if the repository's
    tests do not need the services.
 
+A launcher that starts services but not a `docker` service (a rootless Docker
+daemon, which needs the Kubernetes job launcher with the gVisor runtime class)
+refuses with [`service_kind_unsupported`](service-kind-unsupported.md)
+instead.
+
 ## The Substrate launcher cannot start one service
 
 "This repository asks for `<name>`, which this wardby deployment can't start:

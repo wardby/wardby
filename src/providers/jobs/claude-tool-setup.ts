@@ -13,7 +13,7 @@ import { configuredRegistryAdapters } from "../../coding/registry/adapters.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT } from "./docker-isolation.js";
-import { runToolchain } from "../../coding/services/catalog.js";
+import { runDockerService, runToolchain, workerServices } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 
 /** Where the tool runner mounts the repository; the registry's config files live under its .cache. */
@@ -54,8 +54,12 @@ export interface ClaudeToolSetup {
    * rounds), so the tool runner skips the cache (`reused_workspace`). The proxy refuses it anyway.
    */
   workspaceReused?: true;
-  /** The run's toolchain (#599): the tool runner forwards every command to its agent. */
-  toolchain?: { address: string; tokenFile: string };
+  /**
+   * The run's toolchain (#599): the tool runner forwards every command to its agent. `docker` only
+   * when the run also has a `docker` service: the forwarded commands then get the docker CLI that
+   * storage-init put in the agent folder (on PATH, with DOCKER_HOST and DOCKER_CONFIG; command.mjs).
+   */
+  toolchain?: { address: string; tokenFile: string; docker?: true };
 }
 
 export interface ClaudeToolSetupOptions {
@@ -82,7 +86,7 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
   const setup: ClaudeToolSetup = {
     schemaVersion: 1,
     // Same precedence as the Codex driver: the registry's own settings win over a service's.
-    env: { ...serviceEnvironment(spec.services), ...registry.env },
+    env: { ...serviceEnvironment(spec.services && workerServices(spec.services)), ...registry.env },
     files: registry.files,
     ...(spec.dependencyCache
       ? {
@@ -92,7 +96,14 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
         }
       : {}),
     ...(spec.commandTimeouts ? { commandTimeouts: { ...spec.commandTimeouts } } : {}),
-    ...(hasToolchain(spec) ? { toolchain: { ...TOOLCHAIN_AGENT } } : {}),
+    ...(hasToolchain(spec)
+      ? {
+          toolchain: {
+            ...TOOLCHAIN_AGENT,
+            ...(runDockerService(spec.services ?? []) ? { docker: true as const } : {}),
+          },
+        }
+      : {}),
   };
   const raw = JSON.stringify(setup);
   const limits = CLAUDE_TOOL_SETUP_LIMITS;

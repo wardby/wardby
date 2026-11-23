@@ -4,6 +4,7 @@ import type { RunDetail } from "./api-schema.js";
 import { loadGraphRuns, type IssueSites } from "./graph.js";
 import { RUN_REPOSITORY_SELECT, publicRunRepository } from "../coding/run-repositories.js";
 import { requestForReader } from "../core/run-request.js";
+import { DOCKER_TEST_ENV } from "../coding/services/catalog.js";
 import { RUN_TEXT_FIRST_PAGE_CHARS, textPiece } from "../mcp/tools/run-pages.js";
 
 type CodingDetail = NonNullable<RunDetail["coding"]>;
@@ -18,7 +19,13 @@ function serviceDetails(snapshot: unknown): CodingDetail["services"] {
     name: String(s.name),
     version: String(s.version),
     image: String(s.image),
-    envNames: isRecord(s.testEnv) ? Object.keys(s.testEnv).sort() : [],
+    // A docker service carries no testEnv: wardby gives it DOCKER_TEST_ENV.
+    envNames:
+      s.kind === "docker"
+        ? Object.keys(DOCKER_TEST_ENV).sort()
+        : isRecord(s.testEnv)
+          ? Object.keys(s.testEnv).sort()
+          : [],
   }));
 }
 

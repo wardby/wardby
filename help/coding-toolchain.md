@@ -3,7 +3,7 @@ id: coding-toolchain
 title: Run a coding agent's commands in your own dev image (toolchain)
 summary: Register your team's dev or CI image as a toolchain catalog entry, declare it in .wardby/services.yaml, and a Claude Code agent on the Kubernetes or Docker launcher runs every command in that image, unchanged, sharing the run's workspace.
 audience: operator
-tags: [toolchain, dev image, custom environment, workerImageRef, setupCommand, kubernetes, docker]
+tags: [toolchain, dev image, custom environment, workerImageRef, setupCommand, kubernetes, docker, docker service]
 appliesTo: ">=0.10.2"
 ---
 
@@ -49,6 +49,12 @@ Commands get your image's `ENV` and `PATH`, then `serviceEnv`, then Wardby's
 settings, including `HOME=/home/wardby` and `USER`/`LOGNAME=wardby`. Packages already
 in the image did not pass the package proxy's checks; packages a run installs
 still do.
+
+A toolchain run can also declare a `docker` service (Kubernetes with gVisor):
+Wardby then mounts the daemon's socket in the toolchain and supplies the
+`docker` CLI and compose plugin, added at the end of `PATH` with `DOCKER_HOST`
+and `DOCKER_CONFIG` set, so your image needs no Docker CLI. See
+[Docker in coding runs](coding-services.md#docker-in-coding-runs-docker-kind).
 
 If the agent sees `wardby-cmd: toolchain_setup_failed`,
 `wardby-cmd: toolchain_unusable:shell` or `wardby-cmd: toolchain_unusable:agent`

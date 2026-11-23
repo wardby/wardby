@@ -3,14 +3,25 @@
  * its run has services (docs/coding-services.md): which services, the
  * variables each sets, and that they start empty; and, for a toolchain, that
  * the run's commands run in that image. The worker sees only its task text, so
- * this is how the builder learns the contract.
+ * this is how the builder learns the contract. A docker service adds how its
+ * daemon must be used (host networking, no image pulls).
  */
-import type { ResolvedCodingService } from "./catalog.js";
+import { DOCKER_TEST_ENV, type ResolvedDockerService, type ResolvedSidecarService } from "./catalog.js";
 
-type NoteEntry = Pick<ResolvedCodingService, "name" | "version" | "testEnv"> & { kind?: ResolvedCodingService["kind"] };
+type NoteEntry =
+  | (Pick<ResolvedSidecarService, "name" | "version" | "testEnv"> & { kind?: "sidecar" | "toolchain" })
+  | Pick<ResolvedDockerService, "name" | "version" | "kind">;
+
+/** How the agent must use a docker service's daemon: fixed text, no catalog value. */
+export const DOCKER_SERVICE_NOTE = [
+  "Docker: the `docker` CLI in your shell reaches a rootless Docker daemon for this run (DOCKER_HOST is set).",
+  "Use host networking only: `docker build --network=host`, `docker run --network=host`, and `network_mode: host` in compose files; the default network has no DNS.",
+  "Containers you start cannot reach the run's other services on 127.0.0.1.",
+  "Images cannot be pulled from any registry, so build only images that need no base image pulled. Pushing images is not possible.",
+].join(" ");
 
 const variablesOf = (entry: NoteEntry): string =>
-  Object.entries(entry.testEnv)
+  Object.entries(entry.kind === "docker" ? DOCKER_TEST_ENV : entry.testEnv)
     .map(([name, value]) => `${name}=${value}`)
     .join(", ");
 
@@ -39,5 +50,6 @@ export function servicesInstructionNote(services: readonly NoteEntry[]): string 
       "These variables are already set in your shell environment; tests should read them instead of hard-coding connection details. Where two services set the same variable, the one listed first wins.",
     );
   }
+  if (services.some((service) => service.kind === "docker")) lines.push(DOCKER_SERVICE_NOTE);
   return lines.join("\n");
 }

@@ -92,26 +92,38 @@ export function servicesFingerprint(services: readonly ResolvedCodingService[] |
   const sorted = [...services].sort((a, b) => compare(a.name, b.name) || compare(a.version, b.version));
   return sha256(
     canonicalJson(
-      sorted.map((service) => ({
-        name: service.name,
-        version: service.version,
-        image: service.image,
-        // Only when set, so an entry without one keeps its fingerprint.
-        ...(service.substrateImage === undefined ? {} : { substrateImage: service.substrateImage }),
-        // The start command (catalog, not secret: env goes in by name) changes what the holder runs.
-        ...(service.startCommand === undefined ? {} : { startCommand: service.startCommand }),
-        // A sidecar keeps its fields (and so its fingerprint); a toolchain has kind and setupCommand instead.
-        ...(service.kind === "toolchain"
+      sorted.map((service) =>
+        // A docker service (never on a launcher with warm rounds today): its kind marks it, and wardby sets the rest.
+        service.kind === "docker"
           ? {
               kind: service.kind,
-              ...(service.setupCommand === undefined ? {} : { setupCommand: service.setupCommand }),
+              name: service.name,
+              version: service.version,
+              image: service.image,
+              catalogId: service.catalogId ?? null,
+              catalogUpdatedAt: service.catalogUpdatedAt ?? null,
             }
-          : { port: service.port, dataPath: service.dataPath }),
-        serviceEnvKeys: Object.keys(service.serviceEnv).sort(),
-        testEnvKeys: Object.keys(service.testEnv).sort(),
-        catalogId: service.catalogId ?? null,
-        catalogUpdatedAt: service.catalogUpdatedAt ?? null,
-      })),
+          : {
+              name: service.name,
+              version: service.version,
+              image: service.image,
+              // Only when set, so an entry without one keeps its fingerprint.
+              ...(service.substrateImage === undefined ? {} : { substrateImage: service.substrateImage }),
+              // The start command (catalog, not secret: env goes in by name) changes what the holder runs.
+              ...(service.startCommand === undefined ? {} : { startCommand: service.startCommand }),
+              // A sidecar keeps its fields (and so its fingerprint); a toolchain has kind and setupCommand instead.
+              ...(service.kind === "toolchain"
+                ? {
+                    kind: service.kind,
+                    ...(service.setupCommand === undefined ? {} : { setupCommand: service.setupCommand }),
+                  }
+                : { port: service.port, dataPath: service.dataPath }),
+              serviceEnvKeys: Object.keys(service.serviceEnv).sort(),
+              testEnvKeys: Object.keys(service.testEnv).sort(),
+              catalogId: service.catalogId ?? null,
+              catalogUpdatedAt: service.catalogUpdatedAt ?? null,
+            },
+      ),
     ),
   );
 }

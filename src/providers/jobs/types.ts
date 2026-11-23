@@ -14,7 +14,7 @@ export interface JobResourceLimits {
 }
 
 import type { CollectExclusions } from "../../coding/collect-exclude.js";
-import type { ResolvedCodingService } from "../../coding/services/catalog.js";
+import type { CodingServiceKind, ResolvedCodingService } from "../../coding/services/catalog.js";
 
 /** Why a launcher cannot start one of a run's services (WorkspaceJobLauncher.unstartableServices). */
 export type UnstartableServiceReason =
@@ -273,6 +273,13 @@ export interface WorkspaceJobLauncher extends JobLauncher {
    * Substrate, for Codex and Claude Code. Absent means no services at all.
    */
   supportsServicesFor?(provider: CodingProvider): boolean;
+  /**
+   * Whether this launcher starts services of `kind` (catalog.ts CODING_SERVICE_KINDS), asked only when
+   * it starts services at all. Kubernetes starts "docker" only with the gVisor runtime class; Docker
+   * and Substrate start sidecars only. Absent: "sidecar" only. Dispatch refuses a run with a service
+   * of another kind with service_kind_unsupported, before unstartableServices is asked.
+   */
+  supportsServiceKind?(kind: CodingServiceKind): boolean;
   /**
    * The services of a run this launcher cannot start, with why (each at most once, in name order);
    * [] when it can start them all. Dispatch refuses the run with service_launcher_unsupported and the

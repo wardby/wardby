@@ -23,6 +23,11 @@ COPY src/command-agent/Cargo.toml src/command-agent/Cargo.lock src/command-agent
 COPY src/command-agent/src ./src
 RUN cargo build --release --locked && install -m 0555 target/release/wardby-cmd /wardby-cmd
 
+# The docker CLI and compose plugin, copied from the official CLI image (the digest pins the release,
+# the same major as the rootless daemon in src/docker-service/Dockerfile). They talk to the daemon a
+# `docker` coding service starts, through the DOCKER_HOST the run's shells receive (docs/coding-services.md).
+FROM docker:29.10.0-cli@sha256:34507eb5069d8be82c95dd3b6987d4250fd5fee49b82e2509b7d7a7030740d6d AS docker-cli
+
 FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4
 LABEL org.opencontainers.image.source="https://github.com/wardby/wardby"
 RUN apt-get update \
@@ -31,6 +36,9 @@ RUN apt-get update \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+RUN docker --version && docker compose version
 WORKDIR /opt/wardby
 COPY --from=worker-dependencies /worker/node_modules ./node_modules
 COPY --from=build /build/dist/coding-worker ./coding-worker

@@ -31,6 +31,17 @@ export const SHIM_DIRECTORY = "/opt/wardby/bin";
 export const COMMAND_AGENT = "/opt/wardby/bin/wardby-cmd";
 /** Where the launcher puts the agent's binary and the run's token, in every container that mounts it. */
 const COMMAND_AGENT_DIR = "/opt/wardby-cmd/";
+/**
+ * A toolchain run with a `docker` service (setup.toolchain.docker): the folder in the agent's
+ * directory where storage-init put the docker CLI and its compose plugin, appended to the
+ * toolchain's PATH for each command, and the variables the CLI needs. The same values as
+ * kubernetes-isolation.ts TOOLCHAIN_DOCKER_ENV (a test keeps them equal). Never a secret.
+ */
+export const TOOLCHAIN_DOCKER_DIR = `${COMMAND_AGENT_DIR}docker`;
+export const TOOLCHAIN_DOCKER_ENV = Object.freeze({
+  DOCKER_HOST: "unix:///wardby/docker/docker.sock",
+  DOCKER_CONFIG: TOOLCHAIN_DOCKER_DIR,
+});
 /** The client's own failures: exit 125 and a last stderr line `wardby-cmd: <one of these>`. */
 const COMMAND_AGENT_EXIT = 125;
 export const TOOLCHAIN_FAILURES = Object.freeze(
@@ -132,7 +143,9 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
   if (value.toolchain !== undefined) {
     const given = value.toolchain;
     if (!given || typeof given !== "object" || Array.isArray(given)) throw invalid();
-    if (Object.keys(given).some((key) => key !== "address" && key !== "tokenFile")) throw invalid();
+    if (Object.keys(given).some((key) => key !== "address" && key !== "tokenFile" && key !== "docker")) throw invalid();
+    // Only with a docker service in the run (claude-tool-setup.ts); the flag is never false.
+    if (given.docker !== undefined && given.docker !== true) throw invalid();
     const address = typeof given.address === "string" ? /^127\.0\.0\.1:([0-9]{1,5})$/.exec(given.address) : null;
     const port = address ? Number(address[1]) : 0;
     if (port < 1 || port > 65_535) throw invalid();
@@ -145,7 +158,7 @@ export function parseToolSetup(raw, workspacePath = "/workspace") {
       tokenFile.split("/").some((segment) => segment === "..")
     )
       throw invalid();
-    toolchain = Object.freeze({ address: given.address, tokenFile });
+    toolchain = Object.freeze({ address: given.address, tokenFile, ...(given.docker ? { docker: true } : {}) });
   }
   if (!Array.isArray(value.files) || value.files.length > MAX_FILES) throw invalid();
   const cacheRoot = `${cacheRootFor(workspacePath)}/`;
@@ -178,8 +191,10 @@ export function commandEnvironment(setup = EMPTY_SETUP, workspacePath = "/worksp
 
 /**
  * What a toolchain command gets (spec section 3, last wins): the setup's variables (service test
- * variables, registry settings), then Wardby's fixed values. Never PATH or LANG: the toolchain image
- * keeps its own. The agent adds these on top of the container's environment.
+ * variables, registry settings), then Wardby's fixed values, with TOOLCHAIN_DOCKER_ENV on a run with a
+ * docker service. Never PATH or LANG: the toolchain image keeps its own (the agent drops both), so
+ * runCommand appends the docker folder to PATH in the forwarded shell instead. The agent adds these
+ * on top of the container's environment.
  */
 export function toolchainEnvironment(setup = EMPTY_SETUP, workspacePath = "/workspace") {
   return {
@@ -192,7 +207,24 @@ export function toolchainEnvironment(setup = EMPTY_SETUP, workspacePath = "/work
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: "safe.directory",
     GIT_CONFIG_VALUE_0: workspacePath,
+    ...(setup.toolchain?.docker ? TOOLCHAIN_DOCKER_ENV : {}),
   };
+}
+
+/**
+ * The argv forwarded to a toolchain for one command: `/bin/sh -c <command>`, or on a run with a docker
+ * service a shell that first appends TOOLCHAIN_DOCKER_DIR to the image's own PATH and then execs
+ * exactly that (the command stays one argument, never spliced into the script).
+ */
+export function toolchainArgv(command, setup = EMPTY_SETUP) {
+  if (!setup.toolchain?.docker) return ["/bin/sh", "-c", command];
+  return [
+    "/bin/sh",
+    "-c",
+    `PATH="\${PATH:+\$PATH:}${TOOLCHAIN_DOCKER_DIR}"; export PATH; exec /bin/sh -c "\$1"`,
+    "sh",
+    command,
+  ];
 }
 
 /** The client's fixed failure (e.g. `toolchain_setup_failed`) when a toolchain command exits 125 with it. */
@@ -273,7 +305,7 @@ export async function runCommand(
   const { toolchain } = setup;
   const env = toolchain ? toolchainEnvironment(setup, workspacePath) : commandEnvironment(setup, workspacePath);
   const [file, args] = toolchain
-    ? [COMMAND_AGENT, ["run", toolchain.address, toolchain.tokenFile, "--", "/bin/sh", "-c", command]]
+    ? [COMMAND_AGENT, ["run", toolchain.address, toolchain.tokenFile, "--", ...toolchainArgv(command, setup)]]
     : ["/bin/sh", ["-lc", command]];
   const startedAt = Date.now();
   const result = await new Promise((resolve) => {

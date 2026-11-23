@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { storageInitScript, toolchainAgentScript } from "./storage-init.js";
+import { storageInitScript, toolchainAgentScript, toolchainDockerScript } from "./storage-init.js";
 
 /** Runs a storage-init script the way the pod does (`node -e`), against a temporary storage root. */
 function runScript(script: string): void {
@@ -64,5 +64,46 @@ describe("toolchainAgentScript (#599)", () => {
     const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
+  });
+});
+
+describe("toolchainDockerScript", () => {
+  const roots: string[] = [];
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  function setup() {
+    const root = mkdtempSync(join(tmpdir(), "wardby-storage-"));
+    roots.push(root);
+    const agent = join(root, "source-wardby-cmd");
+    writeFileSync(agent, "#!/bin/sh\necho agent\n");
+    const docker = join(root, "source-docker");
+    mkdirSync(join(docker, "cli-plugins"), { recursive: true });
+    writeFileSync(join(docker, "docker"), "docker-cli");
+    writeFileSync(join(docker, "cli-plugins", "docker-compose"), "compose-plugin");
+    const script = [
+      storageInitScript(root, ["workspace", "input", "output", "cmd"]),
+      toolchainAgentScript(root, agent),
+      toolchainDockerScript(root, docker),
+    ].join("\n");
+    return { root, script };
+  }
+
+  it("copies the docker CLI and compose plugin into storage/cmd/docker, executable by the run uid only", () => {
+    const { root, script } = setup();
+    runScript(script);
+    expect(readFileSync(join(root, "cmd", "docker", "docker"), "utf8")).toBe("docker-cli");
+    expect(readFileSync(join(root, "cmd", "docker", "cli-plugins", "docker-compose"), "utf8")).toBe("compose-plugin");
+    expect(statSync(join(root, "cmd", "docker", "docker")).mode & 0o777).toBe(0o500);
+    expect(statSync(join(root, "cmd", "docker", "cli-plugins", "docker-compose")).mode & 0o777).toBe(0o500);
+    expect(statSync(join(root, "cmd", "docker")).mode & 0o777).toBe(0o700);
+  });
+
+  it("survives a storage-init restart and prints nothing", () => {
+    const { root, script } = setup();
+    runScript(script);
+    runScript(script);
+    expect(readFileSync(join(root, "cmd", "docker", "docker"), "utf8")).toBe("docker-cli");
   });
 });

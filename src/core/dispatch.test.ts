@@ -8,11 +8,14 @@ import { LocalRemote } from "../providers/vcs/local-remote.js";
 import type { Executor } from "../providers/executor/types.js";
 import { MAX_CODING_TASK_BYTES } from "../coding/protocol.js";
 import { BUILTIN_CODING_SERVICES } from "../coding/services/builtins.js";
-import { resolvedFromDefinition } from "../coding/services/catalog.js";
+import { resolvedFromDefinition, type CodingServiceKind } from "../coding/services/catalog.js";
+import { DOCKER_SERVICE_NOTE } from "../coding/services/note.js";
 import {
   DECLARATION_UNAVAILABLE_SENTENCE,
   LAUNCHER_UNSUPPORTED_SENTENCE,
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
+  TOO_MANY_DOCKER_SERVICES_SENTENCE,
+  kindUnsupportedSentence,
   unstartableServiceSentence,
 } from "../coding/services/wording.js";
 import type { UnstartableService } from "../providers/jobs/types.js";
@@ -2572,6 +2575,156 @@ describe("coding-run services", () => {
     expect(result?.run.status).toBe("pending");
     expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, CATALOG[0])]);
     expect(start).toHaveBeenCalledWith(result?.run.id);
+  });
+
+  describe("a docker service", () => {
+    const DOCKER_29 = {
+      name: "docker",
+      version: "29",
+      kind: "docker" as const,
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 4096 },
+    };
+    // A docker row's other columns hold the table's defaults, never read.
+    const dockerRow = (entry: typeof DOCKER_29) => ({
+      ...entry,
+      port: null,
+      serviceEnv: {},
+      testEnv: {},
+      readiness: null,
+      startCommand: null,
+      dataPath: null,
+      writablePaths: [],
+    });
+    const DOCKER_CATALOG = [
+      ...CATALOG,
+      { id: "docker-29", builtin: false, createdById: null, ...dockerRow(DOCKER_29) },
+      {
+        id: "docker-28",
+        builtin: false,
+        createdById: null,
+        ...dockerRow({ ...DOCKER_29, name: "docker-old", version: "28" }),
+      },
+    ];
+    const WITH_DOCKER = 'services:\n  postgres: "16"\n  docker: "29"\n';
+    const kubernetesWithGvisor = () => true;
+    const sidecarsOnly = (kind: string) => kind === "sidecar";
+
+    function dockerRun(supportsKind: ((kind: CodingServiceKind) => boolean) | undefined, declaration = WITH_DOCKER) {
+      const agent = servicesAgent(["postgres", "docker", "docker-old"]);
+      const state = fakeDb(agent, [], {}, DOCKER_CATALOG);
+      const { executor, start, unstartableCodingServices } = servicesExecutor(declaration);
+      if (supportsKind) executor.supportsCodingServiceKind = supportsKind;
+      return { agent, state, executor, start, unstartableCodingServices };
+    }
+
+    it("dispatches on a launcher that starts docker services, with the daemon's note and DOCKER_HOST", async () => {
+      const { agent, state, executor, start } = dockerRun(kubernetesWithGvisor);
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run.status).toBe("pending");
+      expect(state.codingRuns[0].services).toEqual([
+        resolvedFromDefinition(POSTGRES_16, DOCKER_CATALOG[0]),
+        { ...DOCKER_29, catalogId: "docker-29" },
+      ]);
+      expect(state.codingRuns[0].task).toContain("- docker 29: DOCKER_HOST=unix:///wardby/docker/docker.sock");
+      expect(state.codingRuns[0].task).toContain(DOCKER_SERVICE_NOTE);
+      expect(start).toHaveBeenCalledWith(result?.run.id);
+    });
+
+    it.each([
+      ["a launcher that starts sidecars only (Docker, Kubernetes without gVisor)", sidecarsOnly],
+      ["an executor that predates service kinds", undefined],
+    ] as const)("is refused, naming it, on %s", async (_label, supportsKind) => {
+      const { agent, state, executor, start, unstartableCodingServices } = dockerRun(supportsKind);
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run).toMatchObject({
+        status: "refused",
+        error: `service_kind_unsupported: ${kindUnsupportedSentence("docker", "docker")}`,
+      });
+      expect(result?.run.error).toContain("Kubernetes job launcher with the gVisor runtime class");
+      expect(state.codingRuns).toEqual([]);
+      expect(unstartableCodingServices).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+    });
+
+    it("leaves a sidecar-only run unchanged on a launcher that starts sidecars only", async () => {
+      const { agent, state, executor } = dockerRun(sidecarsOnly, DECLARATION);
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run.status).toBe("pending");
+      expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, DOCKER_CATALOG[0])]);
+    });
+
+    describe("beside a toolchain (Claude Code)", () => {
+      const TOOLCHAIN_ROW = {
+        id: "svc-python-dev",
+        builtin: false,
+        createdById: null,
+        name: "python-dev",
+        version: "3.13",
+        kind: "toolchain",
+        image: `registry.example/team/python-dev@sha256:${"e".repeat(64)}`,
+        substrateImage: null,
+        port: null,
+        serviceEnv: {},
+        testEnv: {},
+        readiness: null,
+        startCommand: null,
+        setupCommand: null,
+        resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 1024 },
+        dataPath: null,
+        writablePaths: [],
+      };
+      const BOTH = 'toolchain:\n  python-dev: "3.13"\nservices:\n  docker: "29"\n';
+
+      function bothRun(supportsKind: (kind: CodingServiceKind) => boolean) {
+        const base = servicesAgent(["python-dev", "docker"]);
+        const agent = {
+          ...base,
+          model: "claude-sonnet-5",
+          codingProfile: { ...base.codingProfile, provider: "claude-code" },
+        };
+        const state = fakeDb(agent, [], {}, [...DOCKER_CATALOG, TOOLCHAIN_ROW]);
+        const { executor, start } = servicesExecutor(BOTH);
+        executor.supportsCodingServiceKind = supportsKind;
+        return { agent, state, executor, start };
+      }
+
+      it("dispatches with both, the toolchain first, and the note says how to use the daemon", async () => {
+        const { agent, state, executor, start } = bothRun(kubernetesWithGvisor);
+        const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+        expect(result?.run.status).toBe("pending");
+        expect(state.codingRuns[0].services).toMatchObject([
+          { kind: "toolchain", name: "python-dev" },
+          { kind: "docker", name: "docker" },
+        ]);
+        expect(state.codingRuns[0].task).toContain("Toolchain for this run:");
+        expect(state.codingRuns[0].task).toContain(DOCKER_SERVICE_NOTE);
+        expect(start).toHaveBeenCalledWith(result?.run.id);
+      });
+
+      it("is refused with service_kind_unsupported where a toolchain starts but a docker service doesn't", async () => {
+        const { agent, state, executor, start } = bothRun((kind) => kind !== "docker");
+        const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+        expect(result?.run).toMatchObject({
+          status: "refused",
+          error: `service_kind_unsupported: ${kindUnsupportedSentence("docker", "docker")}`,
+        });
+        expect(start).not.toHaveBeenCalled();
+      });
+    });
+
+    it("refuses a declaration with two docker services", async () => {
+      const { agent, state, executor, start } = dockerRun(
+        kubernetesWithGvisor,
+        'services:\n  docker: "29"\n  docker-old: "28"\n',
+      );
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run).toMatchObject({
+        status: "refused",
+        error: `service_declaration_invalid: ${TOO_MANY_DOCKER_SERVICES_SENTENCE}`,
+      });
+      expect(start).not.toHaveBeenCalled();
+    });
   });
 
   it.each([

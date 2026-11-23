@@ -912,7 +912,9 @@ One pod per run, built by the canonical, deny-by-default policy in
   reaches it on `127.0.0.1` too, and gets the same catalog `testEnv` the worker
   would. The worker never receives a service's own
   environment, only the catalog's `testEnv`. Attestation compares sidecars like
-  every other container.
+  every other container. A `docker` service is the one exception to the shared
+  security context; see
+  [The docker service container](#the-docker-service-container).
 - **A toolchain sidecar** (only for a Claude Code run whose repository
   declares a toolchain, see
   [coding-services.md](coding-services.md#running-the-agents-commands-in-your-own-image-toolchain)):
@@ -928,7 +930,11 @@ One pod per run, built by the canonical, deny-by-default policy in
   mount `cmd`, from running commands there. Its startup probe only checks that
   the agent listens. The entry's `hostAliases` become a second pod
   `hostAliases` entry pointing at `127.0.0.1`; an alias may not be the coding
-  proxy's name.
+  proxy's name. When the run also has a `docker` service, the toolchain
+  mounts the daemon's socket volume too (the commands run there), gets
+  `DOCKER_HOST` and `DOCKER_CONFIG=/opt/wardby-cmd/docker` among Wardby's
+  fixed values, and `storage-init` copies the docker CLI and its compose
+  plugin from the agent image into `cmd/docker`.
 - **`keeper`**: trusted, holds the one `storage` volume (an `emptyDir` sized
   `spec.limits.diskMb` MiB, **disk-backed**, not `medium: Memory`) open for
   the pod's life; the seam streams the workspace and input artifact in and
@@ -980,6 +986,53 @@ One pod per run, built by the canonical, deny-by-default policy in
 false`, seccomp `RuntimeDefault`, read-only root filesystem, no host
   network/PID/IPC, `automountServiceAccountToken: false`, a dedicated
   no-RBAC service account (`wardby-coding-worker`).
+
+#### The docker service container
+
+A run with a `docker` service (see
+[coding-services.md](coding-services.md#docker-in-coding-runs-docker-kind))
+has one container whose security context differs from every other
+container's: `service-<name>`, which runs a rootless Docker daemon. Its
+context is:
+
+```yaml
+securityContext:
+  privileged: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities: { drop: [ALL], add: [SETUID, SETGID] }
+```
+
+- **`SETUID` and `SETGID`** let `newuidmap` and `newgidmap` set up the
+  daemon's user namespace. No other capability is added.
+- **`allowPrivilegeEscalation` is left unset.** Setting it to `false` stops
+  `newuidmap` from working, and some platforms' admission refuses `true`.
+- **No `runAsUser` or `runAsGroup`**: the daemon runs as the pod's uid and gid
+  10001, so root inside its user namespace maps to that unprivileged user
+  outside, and its socket is owned by the same user the worker and tool
+  runner run as.
+- The pod-level `runAsNonRoot`, `RuntimeDefault` seccomp profile and
+  read-only root filesystem still apply.
+
+wardby fixes everything else about it: the daemon's arguments (`dockerd`
+listening only on a Unix socket, no iptables, no bridge network, the coding
+proxy as its registry mirror), its environment, its volumes (memory-backed
+socket, runtime and `/tmp` volumes, and a disk-backed home sized by the
+entry's `diskMib`), and a startup probe that waits for its socket. It gets no
+secret value: no capability, no `WARDBY_*` variable, no Secret reference. The
+socket volume is mounted only where the agent's shell commands run: the
+Codex `worker`, or Claude Code's `tool-runner`, and a toolchain container when
+the run has one.
+
+The launcher builds this pod only with `KUBERNETES_RUNTIME_CLASS=gvisor`, and
+dispatch refuses a `docker` service on any other configuration
+(`service_kind_unsupported`). The socket gives the agent's shell control of a
+rootless daemon that can run containers as user-namespace root inside the
+run's sandbox; gVisor is what keeps them from the node. Attestation compares
+this container exactly like every other one, so a read-back pod whose daemon
+gained a capability, privilege escalation or a different argument fails the
+check. Nested containers share the pod's network namespace, so the run's
+NetworkPolicy covers them too.
 
 Per-run objects, all labeled `app.kubernetes.io/managed-by: wardby`,
 `wardby.io/component: coding-run`, `wardby.io/run-sha256: <sha256(runId)
@@ -1424,7 +1477,7 @@ values. The list is kept only when every entry matches
 | `kubernetes_tool_runner_failed`                                              | (Claude Code only) The tool runner sidecar restarted, exited, or its image could not be pulled before the keeper started. A malformed `WARDBY_TOOL_SETUP` makes the tool runner exit before it is ready (`tool_setup_invalid` in its log), which surfaces as this code on Kubernetes and as `docker_tool_runner_not_ready` on Docker.                                                                                                                                                                                                                                                                                                                                                        |
 | `kubernetes_tool_runner_unready`                                             | (Claude Code only) The tool runner sidecar never started (its socket startup probe never passed) by the pod-start bound (`readyTimeoutMs`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `worker_tool_runner_failed`                                                  | (Claude Code only; also seen on the Docker launcher) The tool runner died mid-run, after the pod/containers started successfully.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `worker_tool_runner_unreachable`                                             | (Claude Code only; both launchers) The Claude worker could not connect to the tool runner's socket before calling the model, or Claude Code reported its command tool as not connected. On Kubernetes, check that the pod has the `tool-socket` volume mounted in both the `worker` and `tool-runner` containers.                                                                                                                                                                                                                                                                                                                                                                            |
+| `worker_tool_runner_unreachable`                                             | (Claude Code only; both launchers) The Claude worker could not connect to the tool runner's socket before calling the model, or Claude Code reported its command tool as not connected. On Kubernetes, check that the pod has the `tool-socket` volume mounted in both the `worker` and `tool-runner` containers. Under a gVisor you run yourself (not a managed sandbox such as GKE Sandbox), also allow Unix sockets on shared volumes (`host-uds = "all"`; see [Docker in coding runs](coding-services.md#docker-in-coding-runs-docker-kind)).                                                                                                                                            |
 | `claude_tool_setup_too_large`                                                | (Claude Code only) The run's tool-runner setup (registry settings plus every service test variable) would exceed the tool runner's bounds (1024 variables, 4096 bytes per value, 96 KiB in total), so the launch fails before the tool runner is created.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `kubernetes_isolation_unsupported:tool-image-not-registry-digest`            | (Claude Code only) `CODING_CLAUDE_TOOL_RUNNER_IMAGE` isn't a registry digest. Checked on every launch, not only preflight.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `kubernetes_isolation_unsupported:claude-limits-too-small`                   | (Claude Code only) The run's `cpus`/`memoryMb` are too small to leave the tool runner its fixed floor: Claude Code needs `cpus ≥ 0.35` and `memoryMb ≥ 256`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |

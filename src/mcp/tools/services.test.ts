@@ -263,6 +263,69 @@ describe("coding service catalog tools", () => {
     await client.close();
   });
 
+  it("creates a docker entry from its image and resources alone, and refuses a sidecar's fields on it", async () => {
+    const DOCKER = {
+      name: "docker",
+      version: "29",
+      kind: "docker",
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 4096 },
+    };
+    const { client, rows } = await connect(ADMIN);
+    const refused = await client.callTool({ name: "create_service", arguments: { ...DOCKER, port: 2375 } });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain("port");
+
+    const created = await client.callTool({ name: "create_service", arguments: DOCKER });
+    expect(created.isError).toBeFalsy();
+    expect(JSON.parse(text(created))).toMatchObject({
+      ...DOCKER,
+      testEnv: { DOCKER_HOST: "unix:///wardby/docker/docker.sock" },
+      builtin: false,
+    });
+    // Only the entry's own fields are written: the other columns keep the table's defaults.
+    expect(Object.keys(rows.get("docker 29")!).sort()).toEqual(
+      [
+        "builtin",
+        "createdAt",
+        "createdById",
+        "id",
+        "image",
+        "kind",
+        "name",
+        "resources",
+        "updatedAt",
+        "version",
+      ].sort(),
+    );
+
+    const got = JSON.parse(
+      text(await client.callTool({ name: "get_service", arguments: { name: "docker", version: "29" } })),
+    );
+    expect(got).not.toHaveProperty("port");
+    expect(got).not.toHaveProperty("readiness");
+    const listed = JSON.parse(text(await client.callTool({ name: "list_services", arguments: {} }))) as Array<
+      Record<string, unknown>
+    >;
+    const entry = listed.find((row) => row.name === "docker")!;
+    expect(entry).toMatchObject({ kind: "docker", image: DOCKER.image });
+    expect(entry).not.toHaveProperty("port");
+
+    const resized = await client.callTool({
+      name: "update_service",
+      arguments: { name: "docker", version: "29", resources: { cpuMillicores: 2000, memoryMib: 4096, diskMib: 8192 } },
+    });
+    expect(resized.isError).toBeFalsy();
+    expect(rows.get("docker 29")).toMatchObject({ resources: { cpuMillicores: 2000, memoryMib: 4096, diskMib: 8192 } });
+    const withEnv = await client.callTool({
+      name: "update_service",
+      arguments: { name: "docker", version: "29", serviceEnv: { DOCKER_TLS_CERTDIR: "" } },
+    });
+    expect(withEnv.isError).toBe(true);
+    expect(rows.get("docker 29")).not.toHaveProperty("serviceEnv");
+    await client.close();
+  });
+
   it("sets and changes a start command with update_service, and validates it", async () => {
     const { client, rows } = await connect(ADMIN);
     const created = await client.callTool({ name: "create_service", arguments: CUSTOM });

@@ -8,7 +8,7 @@ import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import {
   CodingServiceDefinitionSchema,
   resolvedFromDefinition,
-  type ResolvedCodingService,
+  type SidecarOrToolchainService,
 } from "../../coding/services/catalog.js";
 import { jobLauncherContract } from "./contract-suite.js";
 import {
@@ -1140,13 +1140,15 @@ class ServicesFakeDocker extends FakeDocker {
   readonly running = new Set<string>();
   readonly removed = new Set<string>();
   readonly netns: string;
-  readonly serviceContainers: Map<string, ResolvedCodingService>;
+  readonly serviceContainers: Map<string, SidecarOrToolchainService>;
 
   constructor(job: JobSpec) {
     super(job);
     this.netns = this.plan.names.networkKeeperContainer;
     this.serviceContainers = new Map(
-      (job.services ?? []).map((service) => [dockerServiceContainerName(job.runId, service.name), service]),
+      (job.services ?? [])
+        .filter((service): service is SidecarOrToolchainService => service.kind !== "docker")
+        .map((service) => [dockerServiceContainerName(job.runId, service.name), service]),
     );
   }
 
@@ -1406,6 +1408,13 @@ describe("Docker launcher with services", () => {
     const { launcher } = await harness("docker-supports-services");
     expect(launcher.supportsServicesFor("codex")).toBe(true);
     expect(launcher.supportsServicesFor("claude-code")).toBe(true);
+  });
+
+  it("starts sidecars and a toolchain, never a docker service: that is refused at dispatch (Kubernetes with gVisor only)", async () => {
+    const { launcher } = await harness("docker-service-kinds");
+    expect(launcher.supportsServiceKind("sidecar")).toBe(true);
+    expect(launcher.supportsServiceKind("toolchain")).toBe(true);
+    expect(launcher.supportsServiceKind("docker")).toBe(false);
   });
 
   it("starts the network keeper, then each service, then the worker in the keeper's namespace", async () => {
