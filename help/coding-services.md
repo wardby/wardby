@@ -166,6 +166,11 @@ images it builds. Its shells receive
 - **CLI.** The Claude Code tool runner image and the Codex worker driver
   image ship the `docker` CLI and `docker compose` plugin. A bring-your-own
   image built on an older base needs them installed.
+- **With a toolchain.** A Claude Code run may declare a toolchain and a
+  `docker` service together. Its commands run in the toolchain, so Wardby
+  mounts the socket there and supplies the CLI (`DOCKER_HOST`,
+  `DOCKER_CONFIG=/opt/wardby-cmd/docker`, appended to `PATH`); the team image
+  needs no Docker CLI.
 - **Pulls.** None yet: the daemon points its registry mirror at the coding
   proxy, which does not serve container images in this release, and the run's
   network policy blocks every registry. `docker build` and `docker run` of an

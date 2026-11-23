@@ -18,6 +18,7 @@ import {
   KUBERNETES_ISOLATION_ERROR,
   STORAGE_INIT_CONTAINER,
   STORAGE_ROOT,
+  TOOLCHAIN_DOCKER_ENV,
   assertRunNetworkPolicyMatches,
   assertRunPodMatches,
   buildCapabilitySecret,
@@ -1749,6 +1750,63 @@ describe("buildRunPod with a toolchain (#599)", () => {
       mountPath: "/opt/wardby-cmd",
       subPath: "cmd",
       readOnly: true,
+    });
+  });
+
+  describe("beside a docker service", () => {
+    const DOCKER: ResolvedDockerService = {
+      kind: "docker",
+      name: "docker",
+      version: "29",
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 4096 },
+    };
+    const gvisor = { ...options, runtimeClassName: "gvisor" };
+    const both: JobSpec = { ...claude, services: [TOOLCHAIN, POSTGRES, DOCKER] };
+    const SOCKET_MOUNT = { name: "docker-socket", mountPath: "/wardby/docker" };
+
+    it("mounts the daemon's socket in the toolchain, where the commands run, and keeps it in the tool runner", () => {
+      const built = buildRunPod(both, gvisor);
+      expect(init(built, "service-python-dev").volumeMounts).toContainEqual(SOCKET_MOUNT);
+      expect(init(built, "tool-runner").volumeMounts).toContainEqual(SOCKET_MOUNT);
+      // Only those two (and the daemon itself): never the agent, keeper or another sidecar.
+      const holders = [...built.spec!.initContainers!, ...built.spec!.containers]
+        .filter((c) => c.volumeMounts?.some((m) => m.name === "docker-socket"))
+        .map((c) => c.name);
+      expect(holders.sort()).toEqual(["service-docker", "service-python-dev", "tool-runner"]);
+    });
+
+    it("adds DOCKER_HOST and DOCKER_CONFIG to the toolchain's fixed values, which win over serviceEnv", () => {
+      const withOwn = {
+        ...TOOLCHAIN,
+        serviceEnv: { ...TOOLCHAIN.serviceEnv, DOCKER_HOST: "tcp://elsewhere:2375", DOCKER_CONFIG: "/x" },
+      };
+      const env = toolchain(buildRunPod({ ...both, services: [withOwn, POSTGRES, DOCKER] }, gvisor)).env!;
+      expect(env).toContainEqual({ name: "DOCKER_HOST", value: "unix:///wardby/docker/docker.sock" });
+      expect(env).toContainEqual({ name: "DOCKER_CONFIG", value: "/opt/wardby-cmd/docker" });
+      expect(env.filter((e) => e.name.startsWith("DOCKER_"))).toHaveLength(2);
+      expect(TOOLCHAIN_DOCKER_ENV).toEqual({
+        DOCKER_HOST: "unix:///wardby/docker/docker.sock",
+        DOCKER_CONFIG: "/opt/wardby-cmd/docker",
+      });
+      // No PATH: the image keeps its own; the tool runner appends the folder per command.
+      expect(env.map((e) => e.name)).not.toContain("PATH");
+    });
+
+    it("has storage-init copy the docker CLI into storage/cmd after the agent", () => {
+      const script = init(buildRunPod(both, gvisor), "storage-init").command![2];
+      expect(script).toContain('"/opt/wardby/docker"');
+      expect(script).toContain('"cli-plugins/docker-compose"');
+      expect(script.indexOf('"/opt/wardby/docker"')).toBeGreaterThan(script.indexOf('"/opt/wardby/bin/wardby-cmd"'));
+    });
+
+    it("leaves a toolchain run without a docker service, and a docker run without a toolchain, as they were", () => {
+      const plain = toolchain(p());
+      expect(plain.volumeMounts).not.toContainEqual(SOCKET_MOUNT);
+      expect(plain.env!.map((e) => e.name)).not.toContain("DOCKER_HOST");
+      expect(init(p(), "storage-init").command![2]).not.toContain("/opt/wardby/docker");
+      const dockerOnly = buildRunPod({ ...claude, services: [POSTGRES, DOCKER] }, gvisor);
+      expect(init(dockerOnly, "storage-init").command![2]).not.toContain("/opt/wardby/docker");
     });
   });
 

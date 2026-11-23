@@ -6,6 +6,7 @@ import {
   MAX_AGENT_SERVICES,
   MAX_SERVICE_ENV,
   resolvedFromDefinition,
+  type ResolvedDockerService,
   type ResolvedToolchainService,
 } from "../../coding/services/catalog.js";
 import {
@@ -16,9 +17,12 @@ import {
   MAX_SETUP_BYTES,
   MAX_COMMAND_TIMEOUT_MS,
   TOOL_SETUP_ENV,
+  TOOLCHAIN_DOCKER_ENV as TOOL_RUNNER_TOOLCHAIN_DOCKER_ENV,
   commandTimeoutLimits,
   parseToolSetup,
+  toolchainEnvironment,
 } from "../../claude-tool-runner/command.mjs";
+import { TOOLCHAIN_DOCKER_ENV } from "./kubernetes-isolation.js";
 import { MAX_CLAUDE_COMMAND_TIMEOUT_MS } from "../../coding/command-timeouts.js";
 import { CLAUDE_TOOL_SETUP_LIMITS, TOOLCHAIN_AGENT, claudeToolSetup } from "./claude-tool-setup.js";
 import { CLAUDE_TOOL_SETUP_ENV } from "./docker-isolation.js";
@@ -162,6 +166,34 @@ describe("claudeToolSetup", () => {
       expect(JSON.parse(plain)).not.toHaveProperty("toolchain");
       expect(parseToolSetup(plain)).not.toHaveProperty("toolchain");
     }
+  });
+
+  it("flags a toolchain run that also has a docker service, so its commands get the docker CLI", () => {
+    const { port: _port, readiness: _readiness, dataPath: _dataPath, startCommand: _start, ...shared } = POSTGRES;
+    const toolchain: ResolvedToolchainService = { ...shared, name: "python-dev", kind: "toolchain" };
+    const docker: ResolvedDockerService = {
+      kind: "docker",
+      name: "docker",
+      version: "29",
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 2048 },
+    };
+    const raw = claudeToolSetup({ ...spec, services: [toolchain, POSTGRES, docker] }, CAPABILITY);
+    expect(JSON.parse(raw).toolchain).toEqual({ ...TOOLCHAIN_AGENT, docker: true });
+    const parsed = parseToolSetup(raw);
+    expect(parsed.toolchain).toEqual({ ...TOOLCHAIN_AGENT, docker: true });
+    // The docker service's DOCKER_HOST reaches every command, and the toolchain's fixed values match the pod's.
+    expect(parsed.env.DOCKER_HOST).toBe("unix:///wardby/docker/docker.sock");
+    expect(toolchainEnvironment(parsed)).toMatchObject(TOOLCHAIN_DOCKER_ENV);
+    expect(TOOL_RUNNER_TOOLCHAIN_DOCKER_ENV).toEqual(TOOLCHAIN_DOCKER_ENV);
+    // A docker service without a toolchain: the tool runner runs the commands itself, no flag.
+    const plain = JSON.parse(claudeToolSetup({ ...spec, services: [docker] }, CAPABILITY));
+    expect(plain).not.toHaveProperty("toolchain");
+    expect(plain.env.DOCKER_HOST).toBe("unix:///wardby/docker/docker.sock");
+    // A toolchain without a docker service: no flag.
+    expect(JSON.parse(claudeToolSetup({ ...spec, services: [toolchain] }, CAPABILITY)).toolchain).toEqual(
+      TOOLCHAIN_AGENT,
+    );
   });
 
   it("refuses a Codex spec", () => {

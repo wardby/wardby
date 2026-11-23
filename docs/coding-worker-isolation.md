@@ -930,7 +930,11 @@ One pod per run, built by the canonical, deny-by-default policy in
   mount `cmd`, from running commands there. Its startup probe only checks that
   the agent listens. The entry's `hostAliases` become a second pod
   `hostAliases` entry pointing at `127.0.0.1`; an alias may not be the coding
-  proxy's name.
+  proxy's name. When the run also has a `docker` service, the toolchain
+  mounts the daemon's socket volume too (the commands run there), gets
+  `DOCKER_HOST` and `DOCKER_CONFIG=/opt/wardby-cmd/docker` among Wardby's
+  fixed values, and `storage-init` copies the docker CLI and its compose
+  plugin from the agent image into `cmd/docker`.
 - **`keeper`**: trusted, holds the one `storage` volume (an `emptyDir` sized
   `spec.limits.diskMb` MiB, **disk-backed**, not `medium: Memory`) open for
   the pod's life; the seam streams the workspace and input artifact in and
@@ -1017,7 +1021,8 @@ socket, runtime and `/tmp` volumes, and a disk-backed home sized by the
 entry's `diskMib`), and a startup probe that waits for its socket. It gets no
 secret value: no capability, no `WARDBY_*` variable, no Secret reference. The
 socket volume is mounted only where the agent's shell commands run: the
-Codex `worker`, or Claude Code's `tool-runner`.
+Codex `worker`, or Claude Code's `tool-runner`, and a toolchain container when
+the run has one.
 
 The launcher builds this pod only with `KUBERNETES_RUNTIME_CLASS=gvisor`, and
 dispatch refuses a `docker` service on any other configuration

@@ -26,6 +26,11 @@ COPY src/command-agent/Cargo.toml src/command-agent/Cargo.lock src/command-agent
 COPY src/command-agent/src ./src
 RUN cargo build --release --locked && install -m 0555 target/release/wardby-cmd /wardby-cmd
 
+# The docker CLI and compose plugin (the same digest-pinned release as the tool runner and driver
+# images): storage-init copies them into a toolchain run that also has a `docker` coding service, so
+# the team's image needs no Docker CLI. Not on this image's PATH: the agent never runs commands.
+FROM docker:29.10.0-cli@sha256:34507eb5069d8be82c95dd3b6987d4250fd5fee49b82e2509b7d7a7030740d6d AS docker-cli
+
 FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS runtime
 # perl-base: the pinned base image ships an older build; take Debian's security fixes.
 RUN apt-get update \
@@ -71,6 +76,12 @@ RUN node --input-type=module -e 'await Promise.all(["claude-coding-worker/driver
 # wardby-cmd (the command-agent stage above): the launchers copy it into a toolchain container.
 COPY --from=command-agent /wardby-cmd /opt/wardby/bin/wardby-cmd
 RUN /opt/wardby/bin/wardby-cmd --version | grep -q "protocol 1"
+# The docker CLI (the docker-cli stage above): copied into a toolchain container beside wardby-cmd.
+COPY --from=docker-cli /usr/local/bin/docker /opt/wardby/docker/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /opt/wardby/docker/cli-plugins/docker-compose
+RUN /opt/wardby/docker/docker --version \
+    && DOCKER_CONFIG=/opt/wardby/docker /opt/wardby/docker/docker compose version \
+    && ! command -v docker
 RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \

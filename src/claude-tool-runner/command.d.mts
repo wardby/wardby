@@ -9,6 +9,8 @@ export declare const KILL_GRACE_MS: number;
 export declare const TOOL_SETUP_ENV: string;
 export declare const SHIM_DIRECTORY: string;
 export declare const COMMAND_AGENT: string;
+export declare const TOOLCHAIN_DOCKER_DIR: string;
+export declare const TOOLCHAIN_DOCKER_ENV: Readonly<{ DOCKER_HOST: string; DOCKER_CONFIG: string }>;
 export declare const TOOLCHAIN_FAILURES: ReadonlySet<string>;
 export declare const MAX_ENV_ENTRIES: number;
 export declare const MAX_ENV_VALUE_BYTES: number;
@@ -28,13 +30,14 @@ export interface ToolSetup {
   /** The run's run_command time limits, from the launcher; absent from an older one. */
   readonly commandTimeouts?: Readonly<{ defaultMs: number; maxMs: number }>;
   /** The run's toolchain (#599): every command is forwarded to its command agent. */
-  readonly toolchain?: Readonly<{ address: string; tokenFile: string }>;
+  readonly toolchain?: Readonly<{ address: string; tokenFile: string; docker?: true }>;
 }
 
 export declare function commandTimeoutLimits(setup?: ToolSetup): { defaultMs: number; maxMs: number };
 
 export declare function toolEnvironment(workspacePath?: string): Record<string, string>;
 export declare function toolchainEnvironment(setup?: ToolSetup, workspacePath?: string): Record<string, string>;
+export declare function toolchainArgv(command: string, setup?: ToolSetup): string[];
 export declare function commandEnvironment(setup?: ToolSetup, workspacePath?: string): Record<string, string>;
 export declare function prepareCommandWorkspace(setup?: ToolSetup, workspacePath?: string): Promise<void>;
 export declare function parseToolSetup(raw: string | undefined, workspacePath?: string): ToolSetup;

@@ -2654,6 +2654,65 @@ describe("coding-run services", () => {
       expect(state.codingRuns[0].services).toEqual([resolvedFromDefinition(POSTGRES_16, DOCKER_CATALOG[0])]);
     });
 
+    describe("beside a toolchain (Claude Code)", () => {
+      const TOOLCHAIN_ROW = {
+        id: "svc-python-dev",
+        builtin: false,
+        createdById: null,
+        name: "python-dev",
+        version: "3.13",
+        kind: "toolchain",
+        image: `registry.example/team/python-dev@sha256:${"e".repeat(64)}`,
+        substrateImage: null,
+        port: null,
+        serviceEnv: {},
+        testEnv: {},
+        readiness: null,
+        startCommand: null,
+        setupCommand: null,
+        resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 1024 },
+        dataPath: null,
+        writablePaths: [],
+      };
+      const BOTH = 'toolchain:\n  python-dev: "3.13"\nservices:\n  docker: "29"\n';
+
+      function bothRun(supportsKind: (kind: CodingServiceKind) => boolean) {
+        const base = servicesAgent(["python-dev", "docker"]);
+        const agent = {
+          ...base,
+          model: "claude-sonnet-5",
+          codingProfile: { ...base.codingProfile, provider: "claude-code" },
+        };
+        const state = fakeDb(agent, [], {}, [...DOCKER_CATALOG, TOOLCHAIN_ROW]);
+        const { executor, start } = servicesExecutor(BOTH);
+        executor.supportsCodingServiceKind = supportsKind;
+        return { agent, state, executor, start };
+      }
+
+      it("dispatches with both, the toolchain first, and the note says how to use the daemon", async () => {
+        const { agent, state, executor, start } = bothRun(kubernetesWithGvisor);
+        const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+        expect(result?.run.status).toBe("pending");
+        expect(state.codingRuns[0].services).toMatchObject([
+          { kind: "toolchain", name: "python-dev" },
+          { kind: "docker", name: "docker" },
+        ]);
+        expect(state.codingRuns[0].task).toContain("Toolchain for this run:");
+        expect(state.codingRuns[0].task).toContain(DOCKER_SERVICE_NOTE);
+        expect(start).toHaveBeenCalledWith(result?.run.id);
+      });
+
+      it("is refused with service_kind_unsupported where a toolchain starts but a docker service doesn't", async () => {
+        const { agent, state, executor, start } = bothRun((kind) => kind !== "docker");
+        const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+        expect(result?.run).toMatchObject({
+          status: "refused",
+          error: `service_kind_unsupported: ${kindUnsupportedSentence("docker", "docker")}`,
+        });
+        expect(start).not.toHaveBeenCalled();
+      });
+    });
+
     it("refuses a declaration with two docker services", async () => {
       const { agent, state, executor, start } = dockerRun(
         kubernetesWithGvisor,

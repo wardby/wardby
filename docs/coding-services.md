@@ -194,6 +194,19 @@ An entry has:
 | `startCommand`    | The argv that starts the service, its image's ENTRYPOINT + CMD, or for an entry with `substrateImage` a setup script (see [Custom entries on Substrate](#custom-entries-on-substrate)). At most 16 arguments, each one line of at most 4096 bytes. Required on the Substrate launcher; ignored by Docker and Kubernetes.                                                                                                                                                                                    |
 | `substrateImage`  | Optional. An image pinned by registry digest (`repo@sha256:<64 hex>`) that the Substrate launcher runs instead of `image`. Requires `startCommand`. Docker and Kubernetes ignore it.                                                                                                                                                                                                                                                                                                                        |
 
+### Where each kind runs
+
+| Kind        | Job launchers                            | Coding agents      |
+| ----------- | ---------------------------------------- | ------------------ |
+| `sidecar`   | Kubernetes, Docker, Substrate            | Codex, Claude Code |
+| `toolchain` | Kubernetes, Docker                       | Claude Code        |
+| `docker`    | Kubernetes with the gVisor runtime class | Codex, Claude Code |
+
+A run may declare a toolchain and a `docker` service together (on
+Kubernetes with gVisor, for a Claude Code agent). Docker then works from the
+toolchain, where the agent's commands run: see
+[With a toolchain](#with-a-toolchain).
+
 ### Built-in services
 
 wardby ships these entries, pinned to the official images by digest. They
@@ -335,7 +348,8 @@ Docker daemon in the run's pod. The agent's shells can then `docker build`,
   with the GKE reference images.)
 
 - The `docker` CLI and the `docker compose` plugin in the image that runs the
-  agent's shell commands. The Claude Code tool runner image and the Codex
+  agent's shell commands (with a toolchain, Wardby supplies them; see
+  [With a toolchain](#with-a-toolchain)). The Claude Code tool runner image and the Codex
   worker driver image ship both, so no custom image is needed. The daemon
   image does not provide them. A
   [bring-your-own worker image](coding-worker-byo-images.md) built on an
@@ -371,6 +385,27 @@ services:
 
 The agent's shells receive `DOCKER_HOST=unix:///wardby/docker/docker.sock`,
 and its instructions gain a short note on how to use the daemon.
+
+### With a toolchain
+
+A Claude Code run that declares a toolchain and a `docker` service runs its
+commands in the toolchain, so Wardby makes the daemon usable there without
+any change to your image:
+
+- the toolchain mounts the daemon's socket, as the tool runner does;
+- `storage-init` copies the `docker` CLI and its compose plugin from Wardby's
+  Claude Code agent image into the run's `/opt/wardby-cmd/docker`, read-only
+  in the toolchain;
+- each command gets `DOCKER_HOST` and `DOCKER_CONFIG=/opt/wardby-cmd/docker`
+  (so `docker compose` finds the plugin), and `/opt/wardby-cmd/docker` is
+  added at the end of your image's `PATH`, so a `docker` your image already
+  has comes first. `setupCommand` sees `DOCKER_HOST` and `DOCKER_CONFIG` but
+  not the `PATH` change.
+
+Because `DOCKER_CONFIG` is read-only, `docker login` and other commands that
+write the CLI's configuration fail; pulls and pushes aren't possible anyway.
+The agent image from an earlier release doesn't carry the CLI, so use the
+Claude Code agent and tool runner images from this release.
 
 ### Limitations
 
@@ -484,7 +519,9 @@ Try it locally under the same rules first:
 - Commands run in your image's environment: its `ENV` (including its `PATH`),
   then the entry's `serviceEnv`, then Wardby's own settings for the run (the
   package proxy's `PIP_*`, `UV_*` and `NPM_CONFIG_*` values, other services'
-  `testEnv`, `HOME`, `USER`, `LOGNAME`, `TMPDIR`). Later values win.
+  `testEnv`, `HOME`, `USER`, `LOGNAME`, `TMPDIR`). Later values win. With a
+  `docker` service in the run, Docker works here too (see
+  [With a toolchain](#with-a-toolchain)).
 - Commands run in a plain shell, not a login shell, so `/etc/profile` doesn't
   reset `PATH`.
 - Commands start in `/workspace`. If your image ships its own copy of your

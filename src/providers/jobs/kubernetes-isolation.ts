@@ -34,7 +34,9 @@ import {
   repositoryStorageDirectories,
   storageInitScript,
   TOOLCHAIN_AGENT_DIRECTORY,
+  TOOLCHAIN_DOCKER_DIRECTORY,
   toolchainAgentScript,
+  toolchainDockerScript,
 } from "./storage-init.js";
 import { TOOLCHAIN_AGENT } from "./claude-tool-setup.js";
 import type { JobSpec } from "./types.js";
@@ -104,6 +106,17 @@ export const TOOLCHAIN_FIXED_ENV: Readonly<Record<string, string>> = {
   GIT_CONFIG_COUNT: "1",
   GIT_CONFIG_KEY_0: "safe.directory",
   GIT_CONFIG_VALUE_0: "/workspace",
+};
+/**
+ * Wardby's further fixed values on a toolchain container when the run also has a `docker` service:
+ * DOCKER_HOST (the same socket the tool runner's commands use) and DOCKER_CONFIG, the folder in `cmd`
+ * where storage-init put the docker CLI and its compose plugin (toolchainDockerScript). The tool
+ * runner sends the same ones with every command, and puts that folder at the end of PATH
+ * (command.mjs). Never a secret.
+ */
+export const TOOLCHAIN_DOCKER_ENV: Readonly<Record<string, string>> = {
+  DOCKER_HOST: `unix://${DOCKER_SOCKET_PATH}`,
+  DOCKER_CONFIG: `${TOOLCHAIN_AGENT_MOUNT}/${TOOLCHAIN_DOCKER_DIRECTORY}`,
 };
 
 export function serviceContainerName(name: string): string {
@@ -452,8 +465,9 @@ function serviceSidecar(
   index: number,
   profile: KubernetesPlatformProfile,
   timeoutSec: number,
+  withDocker: boolean,
 ): V1Container {
-  if (isToolchainService(entry)) return toolchainSidecar(entry, index, profile, timeoutSec);
+  if (isToolchainService(entry)) return toolchainSidecar(entry, index, profile, timeoutSec, withDocker);
   if (isDockerService(entry)) return dockerServiceSidecar(entry, profile);
   const service = sidecarOnly(entry);
   const env = Object.entries(service.serviceEnv)
@@ -488,15 +502,22 @@ function serviceSidecar(
  * `cmd` keeps other service containers out: they never mount it). The agent waits for the keeper's
  * seeded marker before setupCommand, so its startup probe only checks that it listens: the keeper seeds
  * after every sidecar is ready, and a probe that waited for setup would deadlock the pod.
+ * With a `docker` service in the run (`withDocker`), the run's commands run here, so it mounts the
+ * daemon's socket volume like the tool runner and gets TOOLCHAIN_DOCKER_ENV.
  */
 function toolchainSidecar(
   service: ResolvedToolchainService,
   index: number,
   profile: KubernetesPlatformProfile,
   timeoutSec: number,
+  withDocker: boolean,
 ): V1Container {
   const agent = `${TOOLCHAIN_AGENT_MOUNT}/wardby-cmd`;
-  const env = Object.entries({ ...service.serviceEnv, ...TOOLCHAIN_FIXED_ENV })
+  const env = Object.entries({
+    ...service.serviceEnv,
+    ...TOOLCHAIN_FIXED_ENV,
+    ...(withDocker ? TOOLCHAIN_DOCKER_ENV : {}),
+  })
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, value]) => ({ name, value }));
   const setup = service.setupCommand ?? [];
@@ -536,6 +557,8 @@ function toolchainSidecar(
       { name: "storage", mountPath: TOOLCHAIN_AGENT_MOUNT, subPath: TOOLCHAIN_AGENT_DIRECTORY, readOnly: true },
       { name: "storage", mountPath: "/run/wardby/input", subPath: "input", readOnly: true },
       ...serviceStorage(service, index).map(({ name, mountPath }) => ({ name, mountPath })),
+      // The run's commands run here, so it holds the docker service's socket too (none without one).
+      ...(withDocker ? [{ name: DOCKER_SOCKET_VOLUME, mountPath: DOCKER_SOCKET_DIR }] : []),
     ],
   };
 }
@@ -620,6 +643,8 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
           ...(toolchain ? [TOOLCHAIN_AGENT_DIRECTORY] : []),
         ]),
         ...(toolchain ? [toolchainAgentScript(STORAGE_ROOT)] : []),
+        // With a docker service too, the toolchain gets the docker CLI the same way.
+        ...(toolchain && dockerSocket.length > 0 ? [toolchainDockerScript(STORAGE_ROOT)] : []),
       ].join("\n"),
     ],
     securityContext: containerSecurity(),
@@ -802,7 +827,9 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
       initContainers: [
         storageInit,
         ...(toolRunner ? [toolRunner] : []),
-        ...services.map((service, index) => serviceSidecar(service, index, profile, spec.timeoutSec)),
+        ...services.map((service, index) =>
+          serviceSidecar(service, index, profile, spec.timeoutSec, dockerSocket.length > 0),
+        ),
       ],
       containers: [keeper, worker],
     },
