@@ -330,6 +330,13 @@ Docker daemon in the run's pod. The agent's shells can then `docker build`,
   `docker` service anywhere else, including the Docker and Substrate job
   launchers and Kubernetes without gVisor, with `service_kind_unsupported`
   (see [Errors](#errors)).
+- If you run gVisor yourself rather than through a managed sandbox such as
+  GKE Sandbox, let it share Unix sockets between a pod's containers: set
+  `host-uds = "all"` in runsc's configuration (for containerd, a
+  `[runsc_config]` table in the file the runtime's `ConfigPath` option names).
+  A run's containers talk to each other through Unix sockets on shared
+  volumes (the agent to its tool runner, the shells to the Docker daemon), and
+  without it the run fails with `job_worker_tool_runner_unreachable`.
 - At most one `docker` service per run.
 - The `wardby-docker-service` image, pinned by digest. It is built from
   `src/docker-service/Dockerfile`: Docker's own rootless image
