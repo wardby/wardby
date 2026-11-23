@@ -21,8 +21,14 @@ import {
   CODING_SERVICE_VERSION,
   INVALID_SINGLE_LINE_CONTROL,
   MAX_CODING_SERVICES,
-  MAX_SETUP_JOBS,
 } from "../protocol.js";
+
+/**
+ * How many setup jobs (`setup:` in .wardby/services.yaml) one run may declare, beside its services.
+ * Kept out of protocol.ts: the worker never receives setup jobs, and the published Codex driver image
+ * must match protocol.ts exactly.
+ */
+export const MAX_SETUP_JOBS = 4;
 
 export const SERVICE_DECLARATION_PATH = ".wardby/services.yaml";
 export const MAX_SERVICE_DECLARATION_BYTES = 8 * 1024;

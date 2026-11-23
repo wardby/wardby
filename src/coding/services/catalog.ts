@@ -14,8 +14,8 @@ import {
   CodingServiceTestEnvSchema,
   INVALID_SINGLE_LINE_CONTROL,
   MAX_CODING_SERVICES,
-  MAX_SETUP_JOBS,
 } from "../protocol.js";
+import { MAX_SETUP_JOBS } from "./declaration.js";
 
 /**
  * CODING_SERVICE_KINDS: "sidecar", a fresh instance in each run's pod; "toolchain", a team's own dev

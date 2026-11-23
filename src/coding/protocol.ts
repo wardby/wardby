@@ -63,8 +63,6 @@ export const MAX_CODING_DISK_MB = 32_768;
 export const CODING_SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 export const CODING_SERVICE_VERSION = /^[0-9A-Za-z][0-9A-Za-z._-]{0,19}$/;
 export const MAX_CODING_SERVICES = 5;
-/** How many setup jobs (`setup:` in .wardby/services.yaml) one run may declare, beside its services. */
-export const MAX_SETUP_JOBS = 4;
 /** A variable a service hands the agent's shells (DATABASE_URL, PGHOST, REDIS_URL, ...). */
 export const CODING_SERVICE_ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 export const MAX_CODING_SERVICE_ENV = 16;
