@@ -5,6 +5,7 @@
  * service names and versions, and the declaration's line numbers.
  */
 import type { UnstartableService, UnstartableServiceReason } from "../../providers/jobs/types.js";
+import type { CodingServiceKind } from "./catalog.js";
 import { CODING_SERVICE_NAME } from "../protocol.js";
 
 export const SERVICE_REFUSAL_CODES = [
@@ -13,6 +14,7 @@ export const SERVICE_REFUSAL_CODES = [
   "service_unknown",
   "service_not_allowed",
   "service_launcher_unsupported",
+  "service_kind_unsupported",
 ] as const;
 export type ServiceRefusalCode = (typeof SERVICE_REFUSAL_CODES)[number];
 
@@ -73,11 +75,35 @@ export const SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE = invalidDeclarationSentenc
   "the declared services' instructions exceed the task size limit",
 );
 
+/** A `service_declaration_invalid` refusal for the resolver: the declared services include more than one docker service. */
+export const TOO_MANY_DOCKER_SERVICES_SENTENCE = invalidDeclarationSentence(
+  "it names more than one Docker service, and a run can have only one",
+);
+
 export const DECLARATION_UNAVAILABLE_SENTENCE =
   "wardby couldn't read `.wardby/services.yaml` from the base branch, so the run was not started. Try again.";
 
 export const LAUNCHER_UNSUPPORTED_SENTENCE =
   "This repository asks for services, which this wardby deployment can't start: services need the Kubernetes, Docker or Substrate job launcher.";
+
+/**
+ * What each kind refused with service_kind_unsupported needs: fixed text. Only the docker kind is
+ * refused this way; a toolchain a launcher can't start is service_launcher_unsupported.
+ */
+const KIND_REQUIREMENTS: Partial<Record<CodingServiceKind, string>> = {
+  docker: "Docker services need the Kubernetes job launcher with the gVisor runtime class",
+};
+
+/**
+ * The service_kind_unsupported sentence: the launcher starts services, but not this kind. Shared by
+ * every launcher that refuses a kind (dispatch asks each through supportsServiceKind).
+ */
+export function kindUnsupportedSentence(name: string, kind: CodingServiceKind): string {
+  // Only the validated catalog name and fixed text: nothing else of the entry reaches a host.
+  const requirement = KIND_REQUIREMENTS[kind];
+  if (!CODING_SERVICE_NAME.test(name) || requirement === undefined) return LAUNCHER_UNSUPPORTED_SENTENCE;
+  return `This repository asks for \`${name}\`, which this wardby deployment can't start: ${requirement}.`;
+}
 
 const UNSTARTABLE_REASON_CLAUSES: Record<UnstartableServiceReason, string> = {
   start_command_missing: "its service catalog entry has no start command",

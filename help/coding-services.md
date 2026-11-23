@@ -1,9 +1,9 @@
 ---
 id: coding-services
 title: Give coding runs the services their tests need
-summary: Let coding runs on the Kubernetes, Docker or Substrate launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml; startCommand and substrateImage for Substrate.
+summary: Let coding runs on the Kubernetes, Docker or Substrate launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml; startCommand and substrateImage for Substrate; a rootless Docker daemon (docker kind) on Kubernetes with gVisor.
 audience: operator
-tags: [coding-agents, services, postgres, redis, valkey, mysql, substrate, startCommand, substrateImage]
+tags: [coding-agents, services, postgres, redis, valkey, mysql, substrate, startCommand, substrateImage, docker]
 appliesTo: >=0.2.1
 ---
 
@@ -79,6 +79,7 @@ If a run is refused or fails over its services, read the page for its code:
 - [`service_unknown`](errors/service-unknown.md)
 - [`service_not_allowed`](errors/service-not-allowed.md)
 - [`service_launcher_unsupported`](errors/service-launcher-unsupported.md)
+- [`service_kind_unsupported`](errors/service-kind-unsupported.md)
 - [`service_unready`](errors/service-unready.md)
 - [`coding_setup_failed`](errors/setup-failed.md)
 
@@ -142,3 +143,50 @@ launchers.
 
 See [On the Substrate job launcher](../docs/coding-services.md#on-the-substrate-job-launcher)
 and the `job-launcher-substrate` help article.
+
+## Docker in coding runs (`docker` kind)
+
+A catalog entry of kind `docker` gives each run a rootless Docker daemon, so
+the agent can `docker build`, `docker run`, run `docker compose` and scan the
+images it builds. Its shells receive
+`DOCKER_HOST=unix:///wardby/docker/docker.sock`.
+
+- **Where.** Only the Kubernetes job launcher with
+  `KUBERNETES_RUNTIME_CLASS=gvisor`. Everywhere else (the Docker and Substrate
+  launchers, Kubernetes without gVisor) dispatch refuses the run with
+  [`service_kind_unsupported`](errors/service-kind-unsupported.md). At most
+  one `docker` service per run.
+- **Image.** `wardby-docker-service`, pinned by digest: build it from
+  `src/docker-service/Dockerfile` (Docker's rootless image plus a user and
+  subordinate id range for uid 10001) and push it to a registry your cluster
+  pulls from.
+
+- **Entry.** `create_service` with `kind: "docker"` takes only `name`,
+  `version`, `image` and `resources` (`diskMib` sizes images and build
+  cache); wardby sets the daemon's arguments, environment, security context,
+  volumes and readiness, and refuses `port`, `serviceEnv`, `testEnv`,
+  `readiness`, `startCommand`, `substrateImage`, `dataPath` and
+  `writablePaths`. No `docker` entry is built in.
+- **CLI.** The Claude Code tool runner image and the Codex worker driver
+  image ship the `docker` CLI and `docker compose` plugin. A bring-your-own
+  image built on an older base needs them installed.
+- **With a toolchain.** A Claude Code run may declare a toolchain and a
+  `docker` service together. Its commands run in the toolchain, so Wardby
+  mounts the socket there and supplies the CLI (`DOCKER_HOST`,
+  `DOCKER_CONFIG=/opt/wardby-cmd/docker`, appended to `PATH`); the team image
+  needs no Docker CLI.
+- **Pulls.** None yet: the daemon points its registry mirror at the coding
+  proxy, which does not serve container images in this release, and the run's
+  network policy blocks every registry. `docker build` and `docker run` of an
+  image the run has not built itself fail to pull. No pushes.
+- **Networking.** Host networking only: `docker build --network=host`,
+  `docker run --network=host`, `network_mode: host` in compose. The default
+  network has no DNS. Containers it starts cannot reach the run's other
+  services on `127.0.0.1`.
+- **Security.** The daemon is rootless (root inside its containers is the
+  run's unprivileged user outside) and gets no secret value. Its socket gives
+  the agent's shell control of that daemon inside the run's gVisor sandbox;
+  gVisor stays the boundary to the node.
+
+See [Docker in coding runs](../docs/coding-services.md#docker-in-coding-runs-docker-kind)
+and [The docker service container](../docs/coding-worker-isolation.md#the-docker-service-container).

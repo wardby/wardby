@@ -8,7 +8,7 @@ import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import {
   CodingServiceDefinitionSchema,
   resolvedFromDefinition,
-  type ResolvedCodingService,
+  type NonDockerService,
 } from "../../coding/services/catalog.js";
 import { jobLauncherContract } from "./contract-suite.js";
 import {
@@ -1142,7 +1142,7 @@ class ServicesFakeDocker extends FakeDocker {
   readonly running = new Set<string>();
   readonly removed = new Set<string>();
   readonly netns: string;
-  readonly serviceContainers: Map<string, ResolvedCodingService>;
+  readonly serviceContainers: Map<string, NonDockerService>;
   /** What `docker container wait` reports for a setup job's container (#589). */
   setupExitCode = 0;
   /** What `docker container logs` prints for a setup job's container. */
@@ -1152,12 +1152,14 @@ class ServicesFakeDocker extends FakeDocker {
     super(job);
     this.netns = this.plan.names.networkKeeperContainer;
     this.serviceContainers = new Map(
-      (job.services ?? []).map((service) => [
-        service.kind === "setup"
-          ? dockerSetupContainerName(job.runId, service.name)
-          : dockerServiceContainerName(job.runId, service.name),
-        service,
-      ]),
+      (job.services ?? [])
+        .filter((service): service is NonDockerService => service.kind !== "docker")
+        .map((service) => [
+          service.kind === "setup"
+            ? dockerSetupContainerName(job.runId, service.name)
+            : dockerServiceContainerName(job.runId, service.name),
+          service,
+        ]),
     );
   }
 
@@ -1420,6 +1422,13 @@ describe("Docker launcher with services", () => {
     const { launcher } = await harness("docker-supports-services");
     expect(launcher.supportsServicesFor("codex")).toBe(true);
     expect(launcher.supportsServicesFor("claude-code")).toBe(true);
+  });
+
+  it("starts sidecars and a toolchain, never a docker service: that is refused at dispatch (Kubernetes with gVisor only)", async () => {
+    const { launcher } = await harness("docker-service-kinds");
+    expect(launcher.supportsServiceKind("sidecar")).toBe(true);
+    expect(launcher.supportsServiceKind("toolchain")).toBe(true);
+    expect(launcher.supportsServiceKind("docker")).toBe(false);
   });
 
   it("starts the network keeper, then each service, then the worker in the keeper's namespace", async () => {

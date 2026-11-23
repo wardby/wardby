@@ -603,4 +603,15 @@ describe("servicesInOrder", () => {
     expect(servicesInOrder(input).map((s) => s.name)).toEqual(["mysql", "postgres", "redis"]);
     expect(input.map((s) => s.name)).toEqual(["redis", "mysql", "postgres"]);
   });
+
+  it("refuses a docker service, which Substrate never starts (dispatch refuses it first)", () => {
+    const docker = {
+      kind: "docker" as const,
+      name: "docker",
+      version: "29",
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 2048 },
+    };
+    expect(() => servicesInOrder([builtin("redis", "7"), docker])).toThrow("substrate_feature_unsupported:services");
+  });
 });

@@ -5,6 +5,7 @@ import {
   CodingServiceDefinitionSchema,
   resolvedFromDefinition,
   type ResolvedCodingService,
+  type ResolvedSetupService,
   type ResolvedToolchainService,
 } from "../../coding/services/catalog.js";
 import { isolationNames, isolationToken, type DockerContainerInspection } from "./docker-isolation.js";
@@ -431,7 +432,7 @@ describe("Docker setup job container (#589)", () => {
       resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 64 },
       writablePaths: ["/tmp"],
     }),
-  );
+  ) as ResolvedSetupService;
   const withJob: JobSpec = { ...spec, services: [POSTGRES, JOB] };
   const storage = isolationNames(withJob.runId).storageVolume;
 

@@ -12,7 +12,8 @@ import {
   runningServices,
   sidecarOnly,
   StoredCodingServicesSchema,
-  type ResolvedCodingService,
+  withoutDockerServices,
+  type NonDockerService,
   type ResolvedSetupService,
   type ResolvedToolchainService,
 } from "../../coding/services/catalog.js";
@@ -44,7 +45,7 @@ export const SERVICE_PIDS_LIMIT = 512;
 export const SERVICE_SHM_MIB = 64;
 
 export interface DockerServiceContainer {
-  service: ResolvedCodingService;
+  service: NonDockerService;
   container: string;
   createArgs: string[];
 }
@@ -89,7 +90,7 @@ export function dockerServiceContainerNames(spec: JobSpec): string[] {
  * spec, so a caller never has to guard against a missing default field, and any shape the schema
  * rejects throws the isolation error rather than surfacing as a TypeError further down.
  */
-export function validateDockerServices(spec: JobSpec): ResolvedCodingService[] {
+export function validateDockerServices(spec: JobSpec): NonDockerService[] {
   if (spec.services === undefined) return [];
   const names = spec.services.map((service) => service.name);
   if (spec.services.length === 0 || new Set(names).size !== names.length) {
@@ -97,11 +98,13 @@ export function validateDockerServices(spec: JobSpec): ResolvedCodingService[] {
   }
   const parsed = StoredCodingServicesSchema.safeParse(spec.services);
   if (!parsed.success) throw isolationError();
-  return parsed.data;
+  // Dispatch refuses a docker service on this launcher (supportsServiceKind), so one here is a
+  // bypassed check: throw the isolation error rather than start anything.
+  return withoutDockerServices(parsed.data, DOCKER_ISOLATION_ERROR);
 }
 
 /** Its data path at its disk size, then SERVICE_SCRATCH_MIB for each writable path: the Kubernetes sizes. */
-export function serviceTmpfsOptions(entry: ResolvedCodingService): Record<string, string> {
+export function serviceTmpfsOptions(entry: NonDockerService): Record<string, string> {
   // A toolchain has no data path: its disk backs HOME instead (pip, Poetry and git write there). A
   // setup job (#589) has none either: only its result file's tmpfs and its writable paths.
   const mounts = [
@@ -121,12 +124,12 @@ export function serviceTmpfsOptions(entry: ResolvedCodingService): Record<string
 }
 
 /** tmpfs pages count against the container's memory cgroup: catalog memory, its disk, and /dev/shm. */
-export function serviceMemoryMib(service: ResolvedCodingService): number {
+export function serviceMemoryMib(service: NonDockerService): number {
   return service.resources.memoryMib + serviceEphemeralStorageMib(service) + SERVICE_SHM_MIB;
 }
 
 /** The container's environment: serviceEnv, and for a toolchain Wardby's fixed values over it. */
-function containerEnvironment(service: ResolvedCodingService): Record<string, string> {
+function containerEnvironment(service: NonDockerService): Record<string, string> {
   return isToolchainService(service) ? { ...service.serviceEnv, ...TOOLCHAIN_FIXED_ENV } : service.serviceEnv;
 }
 
@@ -176,7 +179,7 @@ function toolchainMounts(): Array<{ path: string; writable: boolean; subpath: st
   ];
 }
 
-export function buildServiceCreateArgs(spec: JobSpec, service: ResolvedCodingService): string[] {
+export function buildServiceCreateArgs(spec: JobSpec, service: NonDockerService): string[] {
   const names = isolationNames(spec.runId);
   const memoryMib = serviceMemoryMib(service);
   const toolchain = isToolchainService(service) ? service : undefined;
@@ -260,7 +263,7 @@ export function buildDockerServicePlan(spec: JobSpec): DockerServiceContainer[] 
 export function assertServiceContainerInspection(
   container: DockerContainerInspection,
   spec: JobSpec,
-  service: ResolvedCodingService,
+  service: NonDockerService,
   networkKeeperId?: string,
 ): void {
   const validated = validateDockerServices(spec);

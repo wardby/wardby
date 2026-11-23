@@ -83,7 +83,8 @@ import {
   type ServiceStateReporter,
 } from "./service-state.js";
 import type { CodingProvider } from "../../coding/provider.js";
-import { runningServices } from "../../coding/services/catalog.js";
+import { runningServices, type CodingServiceKind } from "../../coding/services/catalog.js";
+import { GVISOR_RUNTIME_CLASS } from "./kubernetes-platform.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   JobCapacityError,
@@ -718,6 +719,16 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
+   * Sidecars and a toolchain on any runtime class. A docker service (a rootless dockerd sidecar, kubernetes-isolation.ts
+   * dockerServiceSidecar) only with the gVisor runtime class: its security context adds SETUID and
+   * SETGID for newuidmap and keeps privilege escalation possible, and only gVisor keeps the node
+   * outside what that daemon can reach. buildRunPod refuses it without gVisor too.
+   */
+  supportsServiceKind(kind: CodingServiceKind): boolean {
+    return kind !== "docker" || this.options.config.runtimeClassName === GVISOR_RUNTIME_CLASS;
+  }
+
+  /**
    * Every per-run object name derives from the run id, so the handle is known before any cluster call.
    * The executor persists it first; a crash mid-launch then still has a handle to clean up with (the
    * launcher itself has no `list` permission and so can never rediscover stray objects).
@@ -1263,7 +1274,7 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
     await this.waitForKeeper(
       names,
       spec.runId,
-      // Only the sidecars and toolchain: a setup job (#589) is not a sidecar, so there is none to wait for.
+      // The sidecars, toolchain and docker service: a setup job (#589) is not a sidecar, so there is none to wait for.
       runningServices(spec.services ?? []).map((service) => service.name),
       spec.provider === "claude-code",
     );

@@ -37,7 +37,9 @@ import {
   parseStoredServices,
   runningServices,
   storedServiceNames,
+  unsupportedKindService,
   workerServices,
+  type CodingServiceKind,
   type ResolvedCodingService,
 } from "../../coding/services/catalog.js";
 import { MAX_SERVICE_DECLARATION_BYTES, SERVICE_DECLARATION_PATH } from "../../coding/services/declaration.js";
@@ -4720,6 +4722,11 @@ export class ContainerExecutor implements Executor {
     return this.options.jobs.supportsServicesFor?.(provider) === true;
   }
 
+  /** The job launcher decides (Kubernetes with gVisor starts docker services); one without the hook starts sidecars only. */
+  supportsCodingServiceKind(kind: CodingServiceKind): boolean {
+    return this.options.jobs.supportsServiceKind?.(kind) ?? kind === "sidecar";
+  }
+
   /** The job launcher decides; a launcher without the hook (Docker, Kubernetes) can start them all. */
   unstartableCodingServices(services: readonly ResolvedCodingService[]): UnstartableService[] {
     return this.options.jobs.unstartableServices?.(services) ?? [];
@@ -5040,8 +5047,13 @@ export class ContainerExecutor implements Executor {
       throw new Error("coding_workspace_disk_exceeds_limit");
     }
     const services = parseStoredServices(run.services);
-    // Dispatch refuses services this deployment can't start; this is the backstop.
-    if (services.length > 0 && !this.supportsCodingServices(provider)) {
+    // Dispatch refuses services this deployment can't start (service_launcher_unsupported, or
+    // service_kind_unsupported for a kind the launcher doesn't start); this is the backstop for both.
+    if (
+      services.length > 0 &&
+      (!this.supportsCodingServices(provider) ||
+        unsupportedKindService(services, (kind) => this.supportsCodingServiceKind(kind)) !== undefined)
+    ) {
       throw new Error("coding_services_unsupported_launcher");
     }
     return {

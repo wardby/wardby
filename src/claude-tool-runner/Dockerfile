@@ -24,6 +24,11 @@ COPY src/command-agent/Cargo.toml src/command-agent/Cargo.lock src/command-agent
 COPY src/command-agent/src ./src
 RUN cargo build --release --locked && install -m 0555 target/release/wardby-cmd /wardby-cmd
 
+# The docker CLI and compose plugin, copied from the official CLI image (the digest pins the release,
+# the same major as the rootless daemon in src/docker-service/Dockerfile). They talk to the daemon a
+# `docker` coding service starts, through the DOCKER_HOST the run's shells receive (docs/coding-services.md).
+FROM docker:29.10.0-cli@sha256:34507eb5069d8be82c95dd3b6987d4250fd5fee49b82e2509b7d7a7030740d6d AS docker-cli
+
 # The tool runner every Claude Code run uses; the two targets below add only their toolchain.
 FROM node:24.22.0-bookworm-slim@sha256:91acba91b842bec0bf7ea6f5e09c644c7ccad72c4996ed9616d861d1c7cd60d4 AS base
 # perl-base: the pinned base image ships an older build; take Debian's security fixes.
@@ -37,6 +42,8 @@ RUN apt-get update \
     && npm install --global --omit=dev npm@12.0.2 \
     && npm cache clean --force \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 WORKDIR /opt/wardby/claude-tool-runner
 COPY --from=dependencies /runner/node_modules ./node_modules
 COPY src/claude-tool-runner/main.mjs ./main.mjs
@@ -86,7 +93,8 @@ RUN chmod 0755 /opt/wardby/coding-worker/wardby-packages.mjs /opt/wardby/coding-
 # wardby-cmd (the command-agent stage above): the launchers copy it into a toolchain container.
 COPY --from=command-agent /wardby-cmd /opt/wardby/bin/wardby-cmd
 RUN /opt/wardby/bin/wardby-cmd --version | grep -q "protocol 1"
-RUN test ! -e /usr/bin/docker \
+RUN docker --version \
+    && docker compose version \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \
     && test ! -e /usr/bin/wget \
@@ -151,7 +159,8 @@ RUN apt-get update \
         'export UV_PYTHON_INSTALL_DIR=/opt/uv-python' \
         'export UV_PYTHON_DOWNLOADS=never' \
         > /etc/profile.d/wardby-uv.sh
-RUN test ! -e /usr/bin/docker \
+RUN docker --version \
+    && docker compose version \
     && test ! -e /usr/bin/ssh \
     && test ! -e /usr/bin/curl \
     && test ! -e /usr/bin/wget \

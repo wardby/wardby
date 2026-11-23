@@ -47,6 +47,32 @@ export function toolchainAgentScript(root: string, source: string = TOOLCHAIN_AG
   ].join("\n");
 }
 
+/**
+ * Where the Claude Code agent image (which runs storage-init) carries the docker CLI and its compose
+ * plugin, off its PATH: `docker` and `cli-plugins/docker-compose` beneath it.
+ */
+export const TOOLCHAIN_DOCKER_SOURCE = "/opt/wardby/docker";
+/** The folder inside `cmd` that holds them in a run: the toolchain's DOCKER_CONFIG, and on its PATH. */
+export const TOOLCHAIN_DOCKER_DIRECTORY = "docker";
+
+/**
+ * Appended after toolchainAgentScript on a run with a toolchain and a `docker` service: copies the
+ * docker CLI and compose plugin into `<root>/cmd/docker`, so the team's image needs no Docker CLI.
+ * The plugin sits in `cli-plugins` there, where the CLI finds it with DOCKER_CONFIG pointing at that
+ * folder. Binaries only; nothing secret. Idempotent, like the agent copy.
+ */
+export function toolchainDockerScript(root: string, source: string = TOOLCHAIN_DOCKER_SOURCE): string {
+  return [
+    `const dockerDir = ${JSON.stringify(root)} + "/${TOOLCHAIN_AGENT_DIRECTORY}/${TOOLCHAIN_DOCKER_DIRECTORY}";`,
+    'fs.mkdirSync(dockerDir + "/cli-plugins", { recursive: true, mode: 0o700 });',
+    'for (const file of ["docker", "cli-plugins/docker-compose"]) {',
+    '  fs.rmSync(dockerDir + "/" + file, { force: true });',
+    `  fs.copyFileSync(${JSON.stringify(source)} + "/" + file, dockerDir + "/" + file);`,
+    '  fs.chmodSync(dockerDir + "/" + file, 0o500);',
+    "}",
+  ].join("\n");
+}
+
 /** The storage folder of each extra repository, in spec order: `repos/<name>`. */
 export function repositoryStorageDirectories(spec: Pick<JobSpec, "repositories">): string[] {
   return (spec.repositories ?? []).map((r) => `repos/${r.name}`);

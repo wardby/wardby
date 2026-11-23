@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { MAX_CODING_TASK_BYTES } from "../protocol.js";
-import { SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE } from "./wording.js";
+import { SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE, TOO_MANY_DOCKER_SERVICES_SENTENCE } from "./wording.js";
 import { BUILTIN_CODING_SERVICES } from "./builtins.js";
 import { resolvedFromDefinition } from "./catalog.js";
 import { resolveRunServices } from "./resolve.js";
@@ -87,6 +87,49 @@ describe("resolveRunServices", () => {
         "Add a joke.",
       ),
     ).rejects.toThrow("coding_service_catalog_invalid:postgres 16");
+  });
+
+  it("snapshots a docker row with its kind, and refuses a second docker service", async () => {
+    const docker = {
+      name: "docker",
+      version: "29",
+      kind: "docker" as const,
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 4096 },
+    };
+    // A docker row's other columns hold the table's defaults, never read.
+    const dockerRow = { ...docker, startCommand: null, serviceEnv: {}, testEnv: {}, writablePaths: [] };
+    const dockerRows = [...rows, dockerRow, { ...dockerRow, name: "docker-old", version: "28" }];
+    expect(
+      await resolveRunServices(
+        catalog(dockerRows),
+        { services: [{ name: "docker", version: "29" }] },
+        ["docker"],
+        "Build it.",
+      ),
+    ).toEqual({ services: [docker] });
+    expect(
+      await resolveRunServices(
+        catalog(dockerRows),
+        {
+          services: [
+            { name: "docker", version: "29" },
+            { name: "docker-old", version: "28" },
+          ],
+        },
+        ["docker", "docker-old"],
+        "Build it.",
+      ),
+    ).toEqual({ refusal: `service_declaration_invalid: ${TOO_MANY_DOCKER_SERVICES_SENTENCE}` });
+    // A docker service is declared under services:, never as the toolchain.
+    expect(
+      await resolveRunServices(
+        catalog(dockerRows),
+        { services: [], toolchain: { name: "docker", version: "29" } },
+        ["docker"],
+        "Build it.",
+      ),
+    ).toEqual({ refusal: expect.stringMatching(/^service_declaration_invalid: .*declare it under `services:`/) });
   });
 
   it("refuses when the task text plus the services note would exceed the coding task size limit", async () => {

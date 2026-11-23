@@ -101,7 +101,11 @@ import { BlobStoreError, type BlobStore } from "../../storage/types.js";
 import { claudeToolSetup } from "../claude-tool-setup.js";
 import { codexWorkerSetup, holderSetupRepositories } from "../codex-worker-setup.js";
 import { MAX_CODING_SERVICES } from "../../../coding/protocol.js";
-import { StoredCodingServicesSchema, type ResolvedCodingService } from "../../../coding/services/catalog.js";
+import {
+  StoredCodingServicesSchema,
+  type CodingServiceKind,
+  type ResolvedCodingService,
+} from "../../../coding/services/catalog.js";
 import { serviceUnreadyError } from "../../../coding/services/wording.js";
 import { isRepositoryDigest } from "../docker-isolation.js";
 import { KubernetesAlreadyExistsError, KubernetesNotFoundError, type KubernetesApi } from "../kubernetes-api.js";
@@ -652,6 +656,14 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
   /** Kubernetes, Docker and Substrate start services for Codex and Claude Code. */
   supportsServicesFor(_provider: CodingProvider): boolean {
     return true;
+  }
+
+  /**
+   * Never a docker service (rootless dockerd), which is Kubernetes-with-gVisor only; servicesInOrder is
+   * the backstop. A toolchain is answered by unstartableServices (service_launcher_unsupported).
+   */
+  supportsServiceKind(kind: CodingServiceKind): boolean {
+    return kind !== "docker";
   }
 
   /**

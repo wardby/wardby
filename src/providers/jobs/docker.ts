@@ -47,7 +47,12 @@ import {
   specToolchain,
 } from "./docker-isolation.js";
 import type { CodingProvider } from "../../coding/provider.js";
-import { isToolchainService, runSetupJobs, sidecarOnly } from "../../coding/services/catalog.js";
+import {
+  isToolchainService,
+  runSetupJobs,
+  sidecarOnly,
+  type CodingServiceKind,
+} from "../../coding/services/catalog.js";
 import { serviceUnreadyError, SETUP_FAILED_ERROR } from "../../coding/services/wording.js";
 import { redactExactSecretValues } from "../../core/secret-spans.js";
 import {
@@ -640,7 +645,10 @@ const SETUP_TAIL_BYTES = 8 * 1024;
  * catalog value in the run's services' and setup jobs' environments, and bounded. Never on the run.
  */
 export function redactedSetupTail(output: string, spec: Pick<JobSpec, "services">): string {
-  const values = (spec.services ?? []).flatMap((service) => Object.values(service.serviceEnv));
+  // A docker service (never started here) has no catalog environment.
+  const values = (spec.services ?? []).flatMap((service) =>
+    service.kind === "docker" ? [] : Object.values(service.serviceEnv),
+  );
   const bounded = output.length > SETUP_TAIL_BYTES ? output.slice(-SETUP_TAIL_BYTES) : output;
   return redactExactSecretValues(bounded, values);
 }
@@ -727,6 +735,15 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   /** Starts JobSpec.services (a network keeper plus one hardened container per service) for Codex and Claude Code runs. */
   supportsServicesFor(provider: CodingProvider): boolean {
     return dockerSupportsServicesFor(provider);
+  }
+
+  /**
+   * Sidecars, a toolchain and setup jobs, never a docker service (a rootless dockerd next to the run): that kind
+   * is Kubernetes-with-gVisor only, so dispatch refuses it here with service_kind_unsupported, and
+   * docker-services.ts refuses one that reaches a launch anyway.
+   */
+  supportsServiceKind(kind: CodingServiceKind): boolean {
+    return kind !== "docker";
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {

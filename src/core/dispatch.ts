@@ -17,6 +17,7 @@ import {
   parseAllowedServiceNames,
   runningServices,
   runToolchain,
+  unsupportedKindService,
   workerServices,
   type ResolvedCodingService,
 } from "../coding/services/catalog.js";
@@ -35,6 +36,7 @@ import {
   codexToolchainSentence,
   invalidDeclarationSentence,
   serviceRefusal,
+  kindUnsupportedSentence,
   unstartableServiceSentence,
 } from "../coding/services/wording.js";
 import { attributeRun, type AttributionIntent } from "./attribution.js";
@@ -939,6 +941,13 @@ export async function resolveDispatchServices(
     }
     // Unknown and disallowed services were refused above with their own codes; the launcher is
     // asked only about the validated catalog snapshot, and only a validated name reaches a sentence.
+    // A kind the launcher doesn't start first (docker needs Kubernetes with gVisor), then its own checks.
+    const wrongKind = unsupportedKindService(resolution.services, (kind) => executor.supportsCodingServiceKind?.(kind));
+    if (wrongKind) {
+      return {
+        refusal: serviceRefusal("service_kind_unsupported", kindUnsupportedSentence(wrongKind.name, wrongKind.kind)),
+      };
+    }
     const unstartable = executor.unstartableCodingServices?.(resolution.services) ?? [];
     if (unstartable.length > 0) {
       return { refusal: serviceRefusal("service_launcher_unsupported", unstartableServiceSentence(unstartable[0])) };

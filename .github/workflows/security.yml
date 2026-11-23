@@ -254,6 +254,33 @@ jobs:
           name: native-worker-sbom
           path: native-worker.spdx.json
 
+  # The rootless Docker daemon a `docker` coding service runs in each run that declares one: the same
+  # SBOM and critical-CVE gate as the other run images.
+  docker-service-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build -f src/docker-service/Dockerfile -t wardby-docker-service:${{ github.sha }} .
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: wardby-docker-service:${{ github.sha }}
+          format: spdx-json
+          output-file: docker-service.spdx.json
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: wardby-docker-service:${{ github.sha }}
+          version: v0.70.0
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: docker-service-sbom
+          path: docker-service.spdx.json
+
   claude-worker-images:
     runs-on: ubuntu-latest
     steps:

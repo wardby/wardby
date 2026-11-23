@@ -137,6 +137,11 @@ export interface Executor {
    * says so (Kubernetes, Docker and Substrate, for Codex and Claude Code).
    */
   supportsCodingServices?(provider: CodingProvider): boolean;
+  /**
+   * Whether this executor's job launcher starts services of `kind` (WorkspaceJobLauncher.supportsServiceKind):
+   * Kubernetes starts "docker" only with the gVisor runtime class. Absent: "sidecar" only.
+   */
+  supportsCodingServiceKind?(kind: CodingServiceKind): boolean;
   /** The run's services this executor's job launcher cannot start (Substrate: see unstartableServices); [] or absent: none. */
   unstartableCodingServices?(services: readonly ResolvedCodingService[]): UnstartableService[];
   /**
@@ -152,6 +157,6 @@ export interface Executor {
 }
 import type { RunFollowUpHandlers } from "../../core/run-follow-ups.js";
 import type { CodingProvider } from "../../coding/provider.js";
-import type { ResolvedCodingService } from "../../coding/services/catalog.js";
+import type { CodingServiceKind, ResolvedCodingService } from "../../coding/services/catalog.js";
 import type { UnstartableService } from "../jobs/types.js";
 import type { AuthorizeUseInput, RepoAccessDecision } from "../../core/repo-access.js";

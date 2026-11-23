@@ -270,7 +270,10 @@ function validateSpec(spec: JobSpec): void {
   if (spec.services !== undefined) {
     // docker-services.ts re-validates every entry against the catalog schema. Both providers' shells
     // share the network keeper's namespace: Codex's worker, and Claude Code's tool runner.
-    if (spec.services.length === 0) throw isolationError();
+    // A docker service (rootless dockerd) is Kubernetes-with-gVisor only: dispatch refuses it here.
+    if (spec.services.length === 0 || spec.services.some((service) => service.kind === "docker")) {
+      throw isolationError();
+    }
     // A toolchain runs the commands only the Claude tool runner forwards today (#599); one per run,
     // and an alias may never take over the name the worker reaches the coding proxy by.
     const toolchains = spec.services.filter((service) => service.kind === "toolchain").length;

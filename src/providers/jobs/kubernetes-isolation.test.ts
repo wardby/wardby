@@ -8,6 +8,7 @@ import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import {
   CodingServiceDefinitionSchema,
   resolvedFromDefinition,
+  type ResolvedDockerService,
   type ResolvedToolchainService,
 } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
@@ -17,6 +18,7 @@ import {
   KUBERNETES_ISOLATION_ERROR,
   STORAGE_INIT_CONTAINER,
   STORAGE_ROOT,
+  TOOLCHAIN_DOCKER_ENV,
   assertRunNetworkPolicyMatches,
   assertRunPodMatches,
   buildCapabilitySecret,
@@ -1224,6 +1226,195 @@ describe("buildRunPod with services", () => {
   });
 });
 
+describe("buildRunPod with a docker service", () => {
+  const TOOL_IMAGE = `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`;
+  const DOCKER: ResolvedDockerService = {
+    kind: "docker",
+    name: "docker",
+    version: "29",
+    image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+    resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 4096 },
+  };
+  const POSTGRES = resolvedFromDefinition(
+    BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
+  );
+  const gvisor = { ...options, runtimeClassName: "gvisor" };
+  const codex: JobSpec = { ...spec, services: [POSTGRES, DOCKER] };
+  const claude: JobSpec = { ...codex, provider: "claude-code", toolImage: TOOL_IMAGE, mcpTools: true };
+  const container = (built: V1Pod, name: string) =>
+    [...built.spec!.initContainers!, ...built.spec!.containers].find((c) => c.name === name)!;
+  const SOCKET_MOUNT = { name: "docker-socket", mountPath: "/wardby/docker" };
+
+  it("runs rootless dockerd as a native sidecar with exactly the container wardby owns", () => {
+    expect(container(buildRunPod(codex, gvisor), "service-docker")).toEqual({
+      name: "service-docker",
+      image: DOCKER.image,
+      restartPolicy: "Always",
+      args: [
+        "dockerd",
+        "--iptables=false",
+        "--ip6tables=false",
+        "--bridge=none",
+        "--host=unix:///wardby/docker/docker.sock",
+        "--registry-mirror=http://wardby-proxy:8787",
+        "--insecure-registry=wardby-proxy:8787",
+      ],
+      env: [
+        { name: "DOCKER_IPTABLES_LEGACY", value: "1" },
+        { name: "HOME", value: "/home/wardby" },
+        { name: "XDG_RUNTIME_DIR", value: "/wardby/xdg" },
+      ],
+      securityContext: {
+        privileged: false,
+        readOnlyRootFilesystem: true,
+        runAsNonRoot: true,
+        capabilities: { drop: ["ALL"], add: ["SETUID", "SETGID"] },
+      },
+      // Its entry's memory plus its memory-backed volumes (1 + 16 + 64 MiB).
+      resources: { requests: { cpu: "1000m", memory: "2129Mi" }, limits: { cpu: "1000m", memory: "2129Mi" } },
+      startupProbe: {
+        exec: { command: ["test", "-S", "/wardby/docker/docker.sock"] },
+        periodSeconds: 2,
+        timeoutSeconds: 1,
+        failureThreshold: 60,
+        successThreshold: 1,
+      },
+      volumeMounts: [
+        SOCKET_MOUNT,
+        { name: "docker-xdg", mountPath: "/wardby/xdg" },
+        { name: "docker-home", mountPath: "/home/wardby" },
+        { name: "docker-tmp", mountPath: "/tmp" },
+      ],
+    });
+  });
+
+  it("leaves allowPrivilegeEscalation unset and never overrides the pod's run uid and gid", () => {
+    const security = container(buildRunPod(codex, gvisor), "service-docker").securityContext!;
+    expect("allowPrivilegeEscalation" in security).toBe(false);
+    expect(security.runAsUser).toBeUndefined();
+    expect(security.runAsGroup).toBeUndefined();
+    expect(buildRunPod(codex, gvisor).spec!.securityContext).toEqual(buildRunPod(spec, gvisor).spec!.securityContext);
+  });
+
+  it("backs the socket, XDG runtime and /tmp with memory, and home (the data root) with the entry's disk", () => {
+    const volumes = buildRunPod(codex, gvisor).spec!.volumes!;
+    expect(volumes.filter((v) => v.name.startsWith("docker-"))).toEqual([
+      { name: "docker-socket", emptyDir: { medium: "Memory", sizeLimit: "1Mi" } },
+      { name: "docker-xdg", emptyDir: { medium: "Memory", sizeLimit: "16Mi" } },
+      { name: "docker-home", emptyDir: { sizeLimit: "4096Mi" } },
+      { name: "docker-tmp", emptyDir: { medium: "Memory", sizeLimit: "64Mi" } },
+    ]);
+    // The sidecar before it keeps its own volumes, unchanged.
+    expect(volumes.some((v) => v.name === "service-0-data")).toBe(true);
+  });
+
+  it("gives every container but the docker sidecar the shared security context, Codex and Claude alike", () => {
+    for (const built of [buildRunPod(codex, gvisor), buildRunPod(claude, gvisor)]) {
+      const all = [...built.spec!.containers, ...built.spec!.initContainers!];
+      const different = all.filter(
+        (c) =>
+          JSON.stringify(c.securityContext) !==
+          JSON.stringify({
+            allowPrivilegeEscalation: false,
+            privileged: false,
+            readOnlyRootFilesystem: true,
+            runAsNonRoot: true,
+            capabilities: { drop: ["ALL"] },
+          }),
+      );
+      expect(different.map((c) => c.name)).toEqual(["service-docker"]);
+      expect(different[0].image).toBe(DOCKER.image);
+    }
+  });
+
+  it("mounts the socket where the agent's shell commands run: Codex's worker, Claude's tool runner", () => {
+    const codexPod = buildRunPod(codex, gvisor);
+    expect(worker(codexPod).volumeMounts).toContainEqual(SOCKET_MOUNT);
+    expect(keeper(codexPod).volumeMounts).not.toContainEqual(SOCKET_MOUNT);
+    const claudePod = buildRunPod(claude, gvisor);
+    expect(container(claudePod, "tool-runner").volumeMounts).toContainEqual(SOCKET_MOUNT);
+    expect(worker(claudePod).volumeMounts).not.toContainEqual(SOCKET_MOUNT);
+    expect(container(claudePod, "service-postgres").volumeMounts).not.toContainEqual(SOCKET_MOUNT);
+    // A run without a docker service mounts no socket anywhere.
+    expect(JSON.stringify(buildRunPod({ ...spec, services: [POSTGRES] }, gvisor))).not.toContain("docker-socket");
+  });
+
+  it("gives the daemon no secret value: no capability, no WARDBY_* variable, no Secret reference", () => {
+    const names = kubernetesRunNames(claude.runId);
+    for (const built of [buildRunPod(codex, gvisor), buildRunPod(claude, gvisor)]) {
+      const daemon = container(built, "service-docker");
+      expect(daemon.envFrom).toBeUndefined();
+      expect(daemon.env!.every((e) => e.value !== undefined && e.valueFrom === undefined)).toBe(true);
+      expect(daemon.env!.map((e) => e.name).filter((name) => name.startsWith("WARDBY_"))).toEqual([]);
+      const text = JSON.stringify(daemon);
+      for (const secretish of [names.secret, "secretKeyRef", "capability", "mcp-token", "tool-setup", "storage"]) {
+        expect(text).not.toContain(secretish);
+      }
+    }
+    // Its output has no path but the container's own log: no command, no lifecycle hook, no log volume.
+    const daemon = container(buildRunPod(codex, gvisor), "service-docker");
+    expect(daemon.command).toBeUndefined();
+    expect(daemon.lifecycle).toBeUndefined();
+  });
+
+  it("is built only with the gVisor runtime class", () => {
+    for (const runtimeClassName of [undefined, "runc", "kata"]) {
+      expect(() => buildRunPod(codex, { ...options, runtimeClassName })).toThrow(
+        `${KUBERNETES_ISOLATION_ERROR}:docker-service-needs-gvisor`,
+      );
+    }
+    // Sidecars alone are unaffected by the runtime class.
+    expect(() => buildRunPod({ ...spec, services: [POSTGRES] }, options)).not.toThrow();
+  });
+
+  it("refuses a second docker service, and a docker snapshot carrying sidecar fields", () => {
+    const another = { ...DOCKER, name: "docker-old", version: "28" };
+    expect(() => validateKubernetesSpec({ ...spec, services: [DOCKER, another] })).toThrow(KUBERNETES_ISOLATION_ERROR);
+    for (const extra of [{ port: 2375 }, { serviceEnv: { A: "b" } }, { dataPath: "/var/lib/docker" }]) {
+      const services = [{ ...DOCKER, ...extra }] as unknown as JobSpec["services"];
+      expect(() => validateKubernetesSpec({ ...spec, services })).toThrow(KUBERNETES_ISOLATION_ERROR);
+    }
+  });
+
+  it("conforms the daemon to Autopilot, counting its home in the pod's ephemeral storage", () => {
+    const autopilot = { ...options, platform: "gke-autopilot" as const, runtimeClassName: "gvisor" };
+    expect(container(buildRunPod({ ...spec, services: [DOCKER] }, autopilot), "service-docker").resources).toEqual({
+      requests: { cpu: "1000m", memory: "2129Mi", "ephemeral-storage": "4096Mi" },
+      limits: { cpu: "1000m", memory: "2129Mi", "ephemeral-storage": "4096Mi" },
+    });
+    // 6144 (workspace) + 1024 (worker) + 4096 (docker home) = 11264 MiB > 10240.
+    expect(() =>
+      buildRunPod({ ...spec, services: [DOCKER], limits: { ...spec.limits, diskMb: 6144 } }, autopilot),
+    ).toThrow(/6144 MiB workspace and its services need 11264 MiB of pod ephemeral storage/);
+  });
+
+  it("leaves the run's NetworkPolicy unchanged: nested containers share the pod's network", () => {
+    expect(buildRunNetworkPolicy(codex, options.namespace)).toEqual(buildRunNetworkPolicy(spec, options.namespace));
+  });
+
+  it("attests a read-back pod, and catches a drifted docker sidecar", () => {
+    const built = buildRunPod(claude, gvisor);
+    expect(() => assertRunPodMatches(apiRoundTrip(built, "V1Pod"), built)).not.toThrow();
+    const index = built.spec!.initContainers!.findIndex((c) => c.name === "service-docker");
+    const drifts: Array<(c: V1Pod["spec"] & object) => void> = [
+      (s) => (s.initContainers![index].securityContext!.allowPrivilegeEscalation = true),
+      (s) => (s.initContainers![index].securityContext!.allowPrivilegeEscalation = false),
+      (s) => s.initContainers![index].securityContext!.capabilities!.add!.push("SYS_ADMIN"),
+      (s) => (s.initContainers![index].securityContext!.privileged = true),
+      (s) => (s.initContainers![index].securityContext!.runAsUser = 0),
+      (s) => s.initContainers![index].args!.push("--host=tcp://0.0.0.0:2375"),
+      (s) => (s.initContainers![index].args![0] = "--debug"),
+      (s) => s.initContainers![index].env!.push({ name: "DOCKER_TLS_CERTDIR", value: "/certs" }),
+      (s) => (s.volumes!.find((v) => v.name === "docker-socket")!.emptyDir = { sizeLimit: "1Mi" }),
+    ];
+    for (const drift of drifts) {
+      const drifted = structuredClone(built);
+      drift(drifted.spec!);
+      expect(() => assertRunPodMatches(drifted, built)).toThrow(KUBERNETES_ISOLATION_ERROR);
+    }
+  });
+});
+
 describe("buildRunPod for Claude Code", () => {
   const TOOL_IMAGE = `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`;
   const claude: JobSpec = { ...spec, provider: "claude-code", toolImage: TOOL_IMAGE };
@@ -1583,6 +1774,63 @@ describe("buildRunPod with a toolchain (#599)", () => {
     });
   });
 
+  describe("beside a docker service", () => {
+    const DOCKER: ResolvedDockerService = {
+      kind: "docker",
+      name: "docker",
+      version: "29",
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 4096 },
+    };
+    const gvisor = { ...options, runtimeClassName: "gvisor" };
+    const both: JobSpec = { ...claude, services: [TOOLCHAIN, POSTGRES, DOCKER] };
+    const SOCKET_MOUNT = { name: "docker-socket", mountPath: "/wardby/docker" };
+
+    it("mounts the daemon's socket in the toolchain, where the commands run, and keeps it in the tool runner", () => {
+      const built = buildRunPod(both, gvisor);
+      expect(init(built, "service-python-dev").volumeMounts).toContainEqual(SOCKET_MOUNT);
+      expect(init(built, "tool-runner").volumeMounts).toContainEqual(SOCKET_MOUNT);
+      // Only those two (and the daemon itself): never the agent, keeper or another sidecar.
+      const holders = [...built.spec!.initContainers!, ...built.spec!.containers]
+        .filter((c) => c.volumeMounts?.some((m) => m.name === "docker-socket"))
+        .map((c) => c.name);
+      expect(holders.sort()).toEqual(["service-docker", "service-python-dev", "tool-runner"]);
+    });
+
+    it("adds DOCKER_HOST and DOCKER_CONFIG to the toolchain's fixed values, which win over serviceEnv", () => {
+      const withOwn = {
+        ...TOOLCHAIN,
+        serviceEnv: { ...TOOLCHAIN.serviceEnv, DOCKER_HOST: "tcp://elsewhere:2375", DOCKER_CONFIG: "/x" },
+      };
+      const env = toolchain(buildRunPod({ ...both, services: [withOwn, POSTGRES, DOCKER] }, gvisor)).env!;
+      expect(env).toContainEqual({ name: "DOCKER_HOST", value: "unix:///wardby/docker/docker.sock" });
+      expect(env).toContainEqual({ name: "DOCKER_CONFIG", value: "/opt/wardby-cmd/docker" });
+      expect(env.filter((e) => e.name.startsWith("DOCKER_"))).toHaveLength(2);
+      expect(TOOLCHAIN_DOCKER_ENV).toEqual({
+        DOCKER_HOST: "unix:///wardby/docker/docker.sock",
+        DOCKER_CONFIG: "/opt/wardby-cmd/docker",
+      });
+      // No PATH: the image keeps its own; the tool runner appends the folder per command.
+      expect(env.map((e) => e.name)).not.toContain("PATH");
+    });
+
+    it("has storage-init copy the docker CLI into storage/cmd after the agent", () => {
+      const script = init(buildRunPod(both, gvisor), "storage-init").command![2];
+      expect(script).toContain('"/opt/wardby/docker"');
+      expect(script).toContain('"cli-plugins/docker-compose"');
+      expect(script.indexOf('"/opt/wardby/docker"')).toBeGreaterThan(script.indexOf('"/opt/wardby/bin/wardby-cmd"'));
+    });
+
+    it("leaves a toolchain run without a docker service, and a docker run without a toolchain, as they were", () => {
+      const plain = toolchain(p());
+      expect(plain.volumeMounts).not.toContainEqual(SOCKET_MOUNT);
+      expect(plain.env!.map((e) => e.name)).not.toContain("DOCKER_HOST");
+      expect(init(p(), "storage-init").command![2]).not.toContain("/opt/wardby/docker");
+      const dockerOnly = buildRunPod({ ...claude, services: [POSTGRES, DOCKER] }, gvisor);
+      expect(init(dockerOnly, "storage-init").command![2]).not.toContain("/opt/wardby/docker");
+    });
+  });
+
   it("leaves ordinary sidecars and a run without a toolchain exactly as they were", () => {
     const plain = buildRunPod({ ...claude, services: [POSTGRES] }, options);
     expect(init(p(), "service-postgres")).toEqual(init(plain, "service-postgres"));
@@ -1745,5 +1993,53 @@ describe("buildRunPod with setup jobs (#589)", () => {
   it("attests a read-back pod with setup jobs", () => {
     const built = p();
     expect(() => assertRunPodMatches(apiRoundTrip(built, "V1Pod"), built)).not.toThrow();
+  });
+
+  describe("beside a docker service (#610)", () => {
+    const DOCKER: ResolvedDockerService = {
+      kind: "docker",
+      name: "docker",
+      version: "29",
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 4096 },
+    };
+    const gvisor = { ...options, runtimeClassName: "gvisor" };
+    const both: JobSpec = { ...spec, services: [POSTGRES, DOCKER, MIGRATE, SEED] };
+    const built = () => buildRunPod(both, gvisor);
+
+    it("starts the daemon as a sidecar and the jobs between the keeper and the worker", () => {
+      expect(built().spec!.initContainers!.map((c) => c.name)).toEqual([
+        "storage-init",
+        "service-postgres",
+        "service-docker",
+      ]);
+      expect(built().spec!.containers.map((c) => c.name)).toEqual([
+        "keeper",
+        "setup-app-migrations",
+        "setup-seed-data",
+        "worker",
+      ]);
+    });
+
+    it("keeps the daemon's volumes and the jobs' scratch volumes, and the socket only where docker runs", () => {
+      const names = built().spec!.volumes!.map((v) => v.name);
+      for (const name of ["docker-socket", "docker-xdg", "docker-home", "docker-tmp"]) expect(names).toContain(name);
+      expect(names.filter((name) => name.startsWith("setup-"))).toEqual(["setup-1-scratch-0", "setup-2-scratch-0"]);
+      const holders = [...built().spec!.initContainers!, ...built().spec!.containers]
+        .filter((c) => c.volumeMounts?.some((m) => m.name === "docker-socket"))
+        .map((c) => c.name);
+      expect(holders.sort()).toEqual(["service-docker", "worker"]);
+      expect(main(built(), "worker").volumeMounts).toContainEqual({
+        name: "storage",
+        mountPath: "/run/wardby/setup",
+        subPath: "setup",
+        readOnly: true,
+      });
+    });
+
+    it("attests the read-back pod", () => {
+      const pod = built();
+      expect(() => assertRunPodMatches(apiRoundTrip(pod, "V1Pod"), pod)).not.toThrow();
+    });
   });
 });

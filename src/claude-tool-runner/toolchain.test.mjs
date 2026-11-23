@@ -12,9 +12,12 @@ import {
   COMMAND_AGENT,
   KILL_GRACE_MS,
   MAX_OUTPUT_BYTES,
+  TOOLCHAIN_DOCKER_DIR,
+  TOOLCHAIN_DOCKER_ENV,
   TOOLCHAIN_FAILURES,
   parseToolSetup,
   runCommand,
+  toolchainArgv,
   toolchainEnvironment,
 } from "./command.mjs";
 
@@ -313,4 +316,76 @@ test("secrets: the token and a registry password never reach the spawn's argumen
   assert.ok(!haystack.includes(FAKE_PIP_PASSWORD), "registry password leaked");
   // The token's content never travels in the environment either (only the setup's own registry value does).
   for (const call of allCalls) assert.ok(!JSON.stringify(call.env).includes(FAKE_TOKEN));
+});
+
+// A toolchain run that also has a `docker` service: the launcher sets toolchain.docker, and every
+// forwarded command gets the docker CLI storage-init copied into the agent folder.
+test("parses the docker flag on a toolchain: true only", () => {
+  assert.deepEqual(parseToolSetup(withToolchain({ toolchain: { ...TOOLCHAIN, docker: true } })).toolchain, {
+    ...TOOLCHAIN,
+    docker: true,
+  });
+  for (const docker of [false, "true", 1, null, {}])
+    assert.throws(
+      () => parseToolSetup(withToolchain({ toolchain: { ...TOOLCHAIN, docker } })),
+      /tool_setup_invalid/,
+      JSON.stringify(docker),
+    );
+});
+
+test("toolchainEnvironment adds DOCKER_HOST and DOCKER_CONFIG only with the docker flag, over the setup's values", () => {
+  const without = parseToolSetup(withToolchain({ toolchain: TOOLCHAIN }));
+  assert.equal(toolchainEnvironment(without).DOCKER_HOST, undefined);
+  assert.equal(toolchainEnvironment(without).DOCKER_CONFIG, undefined);
+  const setup = parseToolSetup(
+    withToolchain({
+      toolchain: { ...TOOLCHAIN, docker: true },
+      env: { DOCKER_HOST: "unix:///wardby/docker/docker.sock", DOCKER_CONFIG: "/elsewhere" },
+    }),
+  );
+  const env = toolchainEnvironment(setup);
+  assert.equal(env.DOCKER_HOST, "unix:///wardby/docker/docker.sock");
+  assert.equal(env.DOCKER_CONFIG, "/opt/wardby-cmd/docker");
+  assert.deepEqual(TOOLCHAIN_DOCKER_ENV, {
+    DOCKER_HOST: "unix:///wardby/docker/docker.sock",
+    DOCKER_CONFIG: TOOLCHAIN_DOCKER_DIR,
+  });
+  assert.equal(env.PATH, undefined);
+});
+
+test("toolchainArgv: the plain command without the flag; with it, the image's PATH plus the docker folder", () => {
+  assert.deepEqual(toolchainArgv("make test"), ["/bin/sh", "-c", "make test"]);
+  const setup = parseToolSetup(withToolchain({ toolchain: { ...TOOLCHAIN, docker: true } }));
+  const argv = toolchainArgv("make test", setup);
+  assert.deepEqual(argv.slice(0, 2), ["/bin/sh", "-c"]);
+  // The command stays its own argument, never spliced into the wrapper script.
+  assert.deepEqual(argv.slice(3), ["sh", "make test"]);
+  assert.ok(!argv[2].includes("make test"));
+});
+
+test("forwards a docker run's command with the docker folder last on PATH, keeping its output and exit code", async () => {
+  const f = await fixture("forward");
+  try {
+    const setup = Object.freeze({ ...f.setup, toolchain: Object.freeze({ ...f.setup.toolchain, docker: true }) });
+    const result = await runCommand(
+      `printf '%s|%s|%s' "$PATH" "$DOCKER_HOST" "$0"; exit 7`,
+      5_000,
+      f.workspace,
+      setup,
+      {
+        spawn: f.spawn,
+        lookup: async () => [],
+      },
+    );
+    assert.deepEqual(result, {
+      code: 7,
+      output: `/usr/local/bin:/usr/bin:/bin:${TOOLCHAIN_DOCKER_DIR}|unix:///wardby/docker/docker.sock|/bin/sh`,
+    });
+    assert.deepEqual(
+      f.calls[0].args.slice(4),
+      toolchainArgv(`printf '%s|%s|%s' "$PATH" "$DOCKER_HOST" "$0"; exit 7`, setup),
+    );
+  } finally {
+    await f.cleanup();
+  }
 });

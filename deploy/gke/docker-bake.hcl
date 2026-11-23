@@ -121,3 +121,12 @@ target "renderer" {
   target     = "renderer"
   tags       = ["${REGISTRY}/renderer:latest"]
 }
+
+# The rootless Docker daemon for `docker` coding services (docs/coding-services.md, "Docker services").
+# Not in the default group, since only a service catalog entry uses it:
+# `docker buildx bake -f deploy/gke/docker-bake.hcl docker-service` builds it.
+target "docker-service" {
+  inherits   = ["_gke"]
+  dockerfile = "src/docker-service/Dockerfile"
+  tags       = ["${REGISTRY}/docker-service:latest"]
+}

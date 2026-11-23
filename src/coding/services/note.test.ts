@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { servicesInstructionNote } from "./note.js";
+import { DOCKER_SERVICE_NOTE, servicesInstructionNote } from "./note.js";
 
 describe("servicesInstructionNote", () => {
   it("says nothing for a run without services", () => {
@@ -70,5 +70,31 @@ describe("servicesInstructionNote", () => {
       "These variables are already set in your shell environment; tests should read them instead of hard-coding connection details. Where two services set the same variable, the one listed first wins.",
     ]);
     expect(note).not.toContain("- app-migrations");
+  });
+
+  it("adds DOCKER_HOST and how to use the daemon only for a run with a docker service", () => {
+    const note = servicesInstructionNote([
+      { name: "redis", version: "7", testEnv: {} },
+      { kind: "docker", name: "docker", version: "29" },
+    ])!;
+    expect(note).toContain("- docker 29: DOCKER_HOST=unix:///wardby/docker/docker.sock");
+    expect(note.endsWith(DOCKER_SERVICE_NOTE)).toBe(true);
+    for (const rule of ["--network=host", "network_mode: host", "127.0.0.1", "cannot be pulled", "Pushing"]) {
+      expect(DOCKER_SERVICE_NOTE).toContain(rule);
+    }
+    expect(servicesInstructionNote([{ name: "redis", version: "7", testEnv: {} }])).not.toContain("Docker");
+  });
+
+  it("with a toolchain, lists the docker service under the run's services and still says how to use it", () => {
+    const lines = servicesInstructionNote([
+      { name: "python-dev", version: "3.13", testEnv: {}, kind: "toolchain" },
+      { kind: "docker", name: "docker", version: "29" },
+    ])!.split("\n");
+    expect(lines[0]).toMatch(/^Toolchain for this run:/);
+    expect(lines[1]).toMatch(/^Services for this run:/);
+    expect(lines[2]).toBe("- docker 29: DOCKER_HOST=unix:///wardby/docker/docker.sock");
+    expect(lines[3]).toMatch(/^These variables are already set/);
+    expect(lines[4]).toBe(DOCKER_SERVICE_NOTE);
+    expect(lines).toHaveLength(5);
   });
 });
