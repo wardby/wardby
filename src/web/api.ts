@@ -26,6 +26,7 @@ import {
   setThreadStatus,
 } from "../core/documents/comments.js";
 import { MAX_THREADS_PER_SEND } from "../core/documents/agent-loop.js";
+import { documentLinkSendable } from "../core/documents/agent-link.js";
 import { BOARD_ID } from "../core/documents/boards/ids.js";
 import { versionFrames } from "../core/documents/boards/frames.js";
 import { MANIFEST_PATH, parseManifest } from "../core/documents/boards/format.js";
@@ -108,7 +109,10 @@ export async function getDocumentJson(
   const member = viewer.kind === "principal";
   const design = document.kind === "design";
   const review = await getReviewView(deps.db, documentId, viewer);
-  const linked = !!document.repository && !!document.path && (!design || !!document.baseRef);
+  const planSet = document.planSetId
+    ? await deps.db.planSet.findUnique({ where: { id: document.planSetId }, select: { store: true, agentId: true } })
+    : null;
+  const linked = documentLinkSendable(document, planSet);
   const plan = document.planSetId
     ? await planPayload(
         deps,
