@@ -217,6 +217,14 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
     expect(createdAgent?.tools).toHaveLength(1);
     expect(createdAgent?.budgetGroup?.name).toBe(budgetName);
 
+    // The import left the prompt's first history row.
+    expect(
+      await db.agentPromptVersion.findMany({
+        where: { agentId: createdAgent!.id },
+        select: { number: true, via: true, systemPrompt: true },
+      }),
+    ).toEqual([{ number: 1, via: "import", systemPrompt: "Test agent" }]);
+
     const createdTool = await db.tool.findFirst({ where: { ownerId: owner.id, name: toolName } });
     expect(createdTool).toBeTruthy();
     expect(createdTool?.description).toBe("Test tool");

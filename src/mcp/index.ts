@@ -77,6 +77,7 @@ import { createViewerApi } from "../viewer/http.js";
 import { createViewerEventBus } from "../viewer/event-bus.js";
 import { buildInfraInfo } from "../viewer/infra.js";
 import { registerAgentTools } from "./tools/agents.js";
+import { registerAgentPromptVersionTools } from "./tools/agent-prompt-versions.js";
 import { registerServiceTools } from "./tools/services.js";
 import { registerBudgetGroupTools } from "./tools/budget-groups.js";
 import { registerModelCatalogTools } from "./tools/model-catalog.js";
@@ -186,6 +187,7 @@ export function registerAllTools(
   },
 ): void {
   registerAgentTools(mcp);
+  registerAgentPromptVersionTools(mcp);
   registerServiceTools(mcp);
   registerBudgetGroupTools(mcp);
   registerModelCatalogTools(mcp, { refresh: opts.refreshModelCatalog });

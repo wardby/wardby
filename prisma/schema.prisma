@@ -34,6 +34,7 @@ model Agent {
   codingProfile         CodingAgentProfile?
   planSets              PlanSet[]           @relation("PlanSetPlanner")
   accessPlanSets        PlanSet[]           @relation("PlanSetAccess")
+  promptVersions        AgentPromptVersion[]
 
   // Phase 2: scheduling. `schedule` is a cron expression; null = manual-only.
   schedule        String?
@@ -2710,6 +2711,25 @@ model PlanSet {
 
   @@unique([agentId, repository, number])
   @@index([accessAgentId])
+}
+
+/// Append-only history of an agent's system prompt; the highest number equals Agent.systemPrompt.
+model AgentPromptVersion {
+  id           String   @id @default(cuid())
+  agentId      String
+  agent        Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  number       Int
+  /// Raw text, like Agent.systemPrompt; redacted by exact secret value wherever it is output.
+  systemPrompt String
+  /// sha256 hex of the UTF-8 text
+  contentHash  String
+  /// "create" | "update" | "restore" | "import" | "cli" | "seed" | "backfill"
+  via          String
+  createdById  String?
+  summary      String?
+  createdAt    DateTime @default(now())
+
+  @@unique([agentId, number])
 }
 
 model DocumentVersion {

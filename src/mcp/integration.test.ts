@@ -158,6 +158,7 @@ function buildFakeDb() {
 
   const db = {
     resourceGrant: fakeResourceGrants(),
+    agentPromptVersion: { findFirst: async () => null, create: async () => ({}) },
     agent: {
       create: async ({ data }: { data: Partial<FakeAgentRow> & { name: string } }) => {
         const row: FakeAgentRow = {
