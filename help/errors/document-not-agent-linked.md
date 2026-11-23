@@ -11,6 +11,8 @@ appliesTo: ">=0.10.0"
 
 `document_not_agent_linked` (HTTP 400). Sending comment threads to an agent works only on a document linked to a file in a repository and to a coding agent: `create_document` with `agentId`, `repository` and `path` together. A document without those, or linked to a native agent, returns this. The same code is returned by `create_document` when you pass `repository` but not an agent, or the other way round.
 
+A document of a plan set stored in Wardby (`store: "wardby"`) needs no repository or path of its own: it is linked to its plan's planner, and sending it to any other agent returns this.
+
 Link it with `link_document` (the document's owner), or edit the document yourself. A repository the agent cannot choose for this run (not linked, no longer authorized for the agent, or refused by its policy) also returns this, and so does a design linked without a `baseRef`.
 
 See [Documents](../documents.md).
