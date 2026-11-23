@@ -13,7 +13,7 @@ import { configuredRegistryAdapters } from "../../coding/registry/adapters.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT } from "./docker-isolation.js";
-import { runToolchain } from "../../coding/services/catalog.js";
+import { runToolchain, workerServices } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
 
 /** Where the tool runner mounts the repository; the registry's config files live under its .cache. */
@@ -82,7 +82,7 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
   const setup: ClaudeToolSetup = {
     schemaVersion: 1,
     // Same precedence as the Codex driver: the registry's own settings win over a service's.
-    env: { ...serviceEnvironment(spec.services), ...registry.env },
+    env: { ...serviceEnvironment(spec.services && workerServices(spec.services)), ...registry.env },
     files: registry.files,
     ...(spec.dependencyCache
       ? {

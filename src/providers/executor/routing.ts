@@ -1,6 +1,6 @@
 import type { RunFollowUpHandlers } from "../../core/run-follow-ups.js";
 import type { CodingProvider } from "../../coding/provider.js";
-import type { ResolvedCodingService } from "../../coding/services/catalog.js";
+import type { CodingServiceKind, ResolvedCodingService } from "../../coding/services/catalog.js";
 import type { UnstartableService } from "../jobs/types.js";
 import type { CodingImageSelector, Executor, ExecutionRecoveryResult, PersistedExecutionHandle } from "./types.js";
 import type { AuthorizeUseInput, RepoAccessDecision } from "../../core/repo-access.js";
@@ -164,6 +164,10 @@ export class RoutingExecutor implements Executor {
 
   supportsCodingServices(provider: CodingProvider): boolean {
     return this.coding.supportsCodingServices?.(provider) === true;
+  }
+
+  supportsCodingServiceKind(kind: CodingServiceKind): boolean {
+    return this.coding.supportsCodingServiceKind?.(kind) ?? kind === "sidecar";
   }
 
   unstartableCodingServices(services: readonly ResolvedCodingService[]): UnstartableService[] {

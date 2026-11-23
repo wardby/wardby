@@ -1581,8 +1581,12 @@ describe("ContainerExecutor", () => {
       BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!,
     );
 
-    async function launched(overrides: Partial<ContainerRunSnapshot>) {
+    async function launched(
+      overrides: Partial<ContainerRunSnapshot>,
+      configure?: (jobs: Awaited<ReturnType<typeof harness>>["jobs"]) => void,
+    ) {
       const created = await harness(overrides);
+      configure?.(created.jobs);
       let input: Record<string, unknown> | undefined;
       created.jobs.onLaunch = () => {
         input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
@@ -1860,6 +1864,42 @@ describe("ContainerExecutor", () => {
       expect(created.jobs.launches).toBe(0);
       expect(created.store.terminations).toEqual([
         expect.objectContaining({ status: "failed", audit: expect.objectContaining({ failureCategory: "preflight" }) }),
+      ]);
+    });
+
+    const DOCKER_SERVICE = {
+      kind: "docker" as const,
+      name: "docker",
+      version: "29",
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 2048 },
+    };
+
+    it("asks the job launcher which service kinds it starts; one without the hook starts sidecars only", async () => {
+      const created = await harness();
+      expect(created.executor.supportsCodingServiceKind("sidecar")).toBe(true);
+      expect(created.executor.supportsCodingServiceKind("docker")).toBe(false);
+      (created.jobs as { supportsServiceKind?: unknown }).supportsServiceKind = (kind: string) => kind === "docker";
+      expect(created.executor.supportsCodingServiceKind("docker")).toBe(true);
+    });
+
+    it("fails a run with a docker service on a launcher that doesn't start that kind (the backstop)", async () => {
+      const created = await harness({ services: [POSTGRES, DOCKER_SERVICE] });
+      await created.executor.start("run-1");
+      expect(created.jobs.launches).toBe(0);
+      expect(created.store.terminations).toEqual([
+        expect.objectContaining({ status: "failed", audit: expect.objectContaining({ failureCategory: "preflight" }) }),
+      ]);
+    });
+
+    it("launches a docker service where the launcher starts it, handing the worker DOCKER_HOST only", async () => {
+      const { created, input } = await launched({ services: [POSTGRES, DOCKER_SERVICE] }, (jobs) => {
+        (jobs as { supportsServiceKind?: unknown }).supportsServiceKind = () => true;
+      });
+      expect(created.jobs.specs[0]?.services).toEqual([POSTGRES, DOCKER_SERVICE]);
+      expect(input.services).toEqual([
+        { name: "postgres", version: "16", testEnv: POSTGRES.testEnv },
+        { name: "docker", version: "29", testEnv: { DOCKER_HOST: "unix:///wardby/docker/docker.sock" } },
       ]);
     });
 

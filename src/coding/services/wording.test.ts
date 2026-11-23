@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DECLARATION_UNAVAILABLE_SENTENCE,
   invalidDeclarationSentence,
+  kindUnsupportedSentence,
   LAUNCHER_UNSUPPORTED_SENTENCE,
   notAllowedServiceSentence,
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
@@ -123,6 +124,17 @@ describe("service refusals", () => {
     expect(serviceRefusalSentence("run_tree_exhausted: the run tree's shared budget is spent")).toBeNull();
     expect(serviceRefusalSentence(null)).toBeNull();
     expect(serviceRefusalSentence("service_unknown")).toBeNull();
+  });
+
+  it("names a service whose kind the launcher doesn't start, and what that kind needs", () => {
+    const error = serviceRefusal("service_kind_unsupported", kindUnsupportedSentence("docker", "docker"));
+    expect(error).toBe(
+      "service_kind_unsupported: This repository asks for `docker`, which this wardby deployment can't start: Docker services need the Kubernetes job launcher with the gVisor runtime class.",
+    );
+    expect(serviceRefusalSentence(error)).toBe(kindUnsupportedSentence("docker", "docker"));
+    // Only a validated name reaches a host; anything else gets the generic sentence.
+    expect(kindUnsupportedSentence("Bad Name`", "docker")).toBe(LAUNCHER_UNSUPPORTED_SENTENCE);
+    expect(kindUnsupportedSentence("postgres", "sidecar")).toBe(LAUNCHER_UNSUPPORTED_SENTENCE);
   });
 });
 

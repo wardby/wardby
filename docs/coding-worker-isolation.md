@@ -912,7 +912,9 @@ One pod per run, built by the canonical, deny-by-default policy in
   reaches it on `127.0.0.1` too, and gets the same catalog `testEnv` the worker
   would. The worker never receives a service's own
   environment, only the catalog's `testEnv`. Attestation compares sidecars like
-  every other container.
+  every other container. A `docker` service is the one exception to the shared
+  security context; see
+  [The docker service container](#the-docker-service-container).
 - **A toolchain sidecar** (only for a Claude Code run whose repository
   declares a toolchain, see
   [coding-services.md](coding-services.md#running-the-agents-commands-in-your-own-image-toolchain)):
@@ -980,6 +982,52 @@ One pod per run, built by the canonical, deny-by-default policy in
 false`, seccomp `RuntimeDefault`, read-only root filesystem, no host
   network/PID/IPC, `automountServiceAccountToken: false`, a dedicated
   no-RBAC service account (`wardby-coding-worker`).
+
+#### The docker service container
+
+A run with a `docker` service (see
+[coding-services.md](coding-services.md#docker-in-coding-runs-docker-kind))
+has one container whose security context differs from every other
+container's: `service-<name>`, which runs a rootless Docker daemon. Its
+context is:
+
+```yaml
+securityContext:
+  privileged: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities: { drop: [ALL], add: [SETUID, SETGID] }
+```
+
+- **`SETUID` and `SETGID`** let `newuidmap` and `newgidmap` set up the
+  daemon's user namespace. No other capability is added.
+- **`allowPrivilegeEscalation` is left unset.** Setting it to `false` stops
+  `newuidmap` from working, and some platforms' admission refuses `true`.
+- **No `runAsUser` or `runAsGroup`**: the daemon runs as the pod's uid and gid
+  10001, so root inside its user namespace maps to that unprivileged user
+  outside, and its socket is owned by the same user the worker and tool
+  runner run as.
+- The pod-level `runAsNonRoot`, `RuntimeDefault` seccomp profile and
+  read-only root filesystem still apply.
+
+wardby fixes everything else about it: the daemon's arguments (`dockerd`
+listening only on a Unix socket, no iptables, no bridge network, the coding
+proxy as its registry mirror), its environment, its volumes (memory-backed
+socket, runtime and `/tmp` volumes, and a disk-backed home sized by the
+entry's `diskMib`), and a startup probe that waits for its socket. It gets no
+secret value: no capability, no `WARDBY_*` variable, no Secret reference. The
+socket volume is mounted only where the agent's shell commands run: the
+Codex `worker`, or Claude Code's `tool-runner`.
+
+The launcher builds this pod only with `KUBERNETES_RUNTIME_CLASS=gvisor`, and
+dispatch refuses a `docker` service on any other configuration
+(`service_kind_unsupported`). The socket gives the agent's shell control of a
+rootless daemon that can run containers as user-namespace root inside the
+run's sandbox; gVisor is what keeps them from the node. Attestation compares
+this container exactly like every other one, so a read-back pod whose daemon
+gained a capability, privilege escalation or a different argument fails the
+check. Nested containers share the pod's network namespace, so the run's
+NetworkPolicy covers them too.
 
 Per-run objects, all labeled `app.kubernetes.io/managed-by: wardby`,
 `wardby.io/component: coding-run`, `wardby.io/run-sha256: <sha256(runId)

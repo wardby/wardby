@@ -2233,6 +2233,33 @@ describe("coding-run services", () => {
     expect(submitted.spec!.initContainers!.map((c) => c.name)).toEqual(["storage-init", "service-postgres"]);
   });
 
+  it("starts docker services only with the gVisor runtime class, and sidecars and a toolchain on any", async () => {
+    const plain = await harness("run-svc-kind-plain");
+    expect(plain.launcher.supportsServiceKind("sidecar")).toBe(true);
+    expect(plain.launcher.supportsServiceKind("toolchain")).toBe(true);
+    expect(plain.launcher.supportsServiceKind("docker")).toBe(false);
+    const runc = await harness("run-svc-kind-runc", { runtimeClassName: "runc" });
+    expect(runc.launcher.supportsServiceKind("docker")).toBe(false);
+    const gvisor = await harness("run-svc-kind-gvisor", { runtimeClassName: "gvisor" });
+    expect(gvisor.launcher.supportsServiceKind("sidecar")).toBe(true);
+    expect(gvisor.launcher.supportsServiceKind("docker")).toBe(true);
+  });
+
+  it("never submits a docker service's pod without gVisor, even if dispatch were bypassed", async () => {
+    const h = await harness("run-svc-docker-plain");
+    const docker = {
+      kind: "docker" as const,
+      name: "docker",
+      version: "29",
+      image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+      resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 2048 },
+    };
+    await expect(h.launcher.launch({ ...h.spec, services: [docker] })).rejects.toThrow(
+      "kubernetes_isolation_unsupported",
+    );
+    expect(h.api.objects.has(`pod/wardby-coding/${h.names.pod}`)).toBe(false);
+  });
+
   it.each([
     ["its startup probe gave up and it restarted", { restartCount: 1 }],
     ["its image can't be pulled", { state: { waiting: { reason: "ImagePullBackOff" } } }],

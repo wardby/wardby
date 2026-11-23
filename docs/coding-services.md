@@ -18,6 +18,11 @@ one and the deployment can't start services (for example
 in the first place (see "Allowing services for an agent" below), so its runs
 are unaffected by this and start normally on any launcher.
 
+A service can also be a rootless Docker daemon, so the agent can build, run
+and scan container images: see
+[Docker in coding runs](#docker-in-coding-runs-docker-kind). That kind needs
+the Kubernetes job launcher with the gVisor runtime class.
+
 For a local repository (`local:/abs/path`), the declaration is read from the
 committed `.wardby/services.yaml` at the base ref, never from the working tree.
 
@@ -177,7 +182,7 @@ An entry has:
 | Field             | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `name`, `version` | What a repository declares. Unique together.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `kind`            | `sidecar`: a fresh instance next to each run.                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `kind`            | `sidecar` (the default): a fresh instance next to each run. `toolchain`: the image the run's commands run in (see [Running the agent's commands in your own image](#running-the-agents-commands-in-your-own-image-toolchain)). `docker`: a rootless Docker daemon in each run (see [Docker in coding runs](#docker-in-coding-runs-docker-kind)); it takes only `name`, `version`, `image` and `resources`.                                                                                                  |
 | `image`           | The image, pinned by digest.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `port`            | The port it listens on.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `serviceEnv`      | Environment for the service container. Per-run throwaway values only; never put a secret here.                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -297,6 +302,113 @@ for Substrate (shortened):
 
 Give a database enough memory for its idle size on top of its data: MySQL, for
 example, needs about 730 MiB idle.
+
+## Docker in coding runs (`docker` kind)
+
+A catalog entry of kind `docker` gives each run that declares it a rootless
+Docker daemon in the run's pod. The agent's shells can then `docker build`,
+`docker run`, run `docker compose` and scan the images they build, with
+`DOCKER_HOST` already pointing the `docker` CLI at the daemon.
+
+### Requirements
+
+- The Kubernetes job launcher (`JOB_LAUNCHER=kubernetes`) with
+  `KUBERNETES_RUNTIME_CLASS=gvisor`. Dispatch refuses a run that declares a
+  `docker` service anywhere else, including the Docker and Substrate job
+  launchers and Kubernetes without gVisor, with `service_kind_unsupported`
+  (see [Errors](#errors)).
+- At most one `docker` service per run.
+- The `wardby-docker-service` image, pinned by digest. It is built from
+  `src/docker-service/Dockerfile`: Docker's own rootless image
+  (`docker:29.x-dind-rootless`, pinned by digest) plus a user entry and a
+  subordinate id range for the run's user (uid and gid 10001), which the
+  daemon runs as. Build it for your nodes' platform and push it to a registry
+  your cluster pulls from, then use its digest:
+
+  ```bash
+  docker buildx build --platform linux/amd64 -f src/docker-service/Dockerfile \
+    -t registry.example.com/your-org/wardby-docker-service:29 --push .
+  ```
+
+  (`npm run docker-service:image:local` builds it locally, and
+  `docker buildx bake -f deploy/gke/docker-bake.hcl docker-service` builds it
+  with the GKE reference images.)
+
+- The `docker` CLI and the `docker compose` plugin in the image that runs the
+  agent's shell commands. The Claude Code tool runner image and the Codex
+  worker driver image ship both, so no custom image is needed. The daemon
+  image does not provide them. A
+  [bring-your-own worker image](coding-worker-byo-images.md) built on an
+  older base lacks them: install them in it, and drop the example
+  Dockerfile's `/usr/bin/docker` check from an image meant for `docker` runs.
+
+### Adding the entry
+
+A `docker` entry takes only a name, version, image and resources: wardby sets
+everything else (the daemon's arguments, environment, security context,
+socket, volumes and readiness check), and refuses `port`, `serviceEnv`,
+`testEnv`, `readiness`, `startCommand`, `substrateImage`, `dataPath` and
+`writablePaths` on it.
+
+```json
+{
+  "name": "docker",
+  "version": "29",
+  "kind": "docker",
+  "image": "registry.example.com/your-org/wardby-docker-service@sha256:<64 hex digits>",
+  "resources": { "cpuMillicores": 2000, "memoryMib": 4096, "diskMib": 8192 }
+}
+```
+
+`diskMib` sizes the daemon's data directory (images, layers and build cache).
+Allow it for an agent like any other service (`codingProfile.services`), and
+declare it in the repository:
+
+```yaml
+services:
+  docker: "29"
+```
+
+The agent's shells receive `DOCKER_HOST=unix:///wardby/docker/docker.sock`,
+and its instructions gain a short note on how to use the daemon.
+
+### Limitations
+
+- **Host networking only.** Use `docker build --network=host`,
+  `docker run --network=host`, and `network_mode: host` in compose files.
+  Docker's default bridge network is not available under gVisor, and a
+  container on it has no DNS.
+- **No `127.0.0.1` to the run's other services.** Containers the agent starts
+  cannot reach the run's other services (such as `postgres`) on `127.0.0.1`:
+  the daemon's loopback is its own. Run tests that need those services in the
+  agent's shell instead.
+- **No image pulls yet.** The daemon is started with
+  `--registry-mirror=http://wardby-proxy:8787`, but the coding proxy does not
+  serve container images in this release, and the run's network policy (which
+  applies to the daemon and every container it starts) blocks every registry.
+  `docker build` and `docker run` of any image the run has not built itself
+  fail to pull.
+- **No pushes.** Images stay inside the run and are discarded with it.
+- Everything the daemon stores is deleted with the run's pod: no image or
+  build cache carries over to the next run.
+
+### Security
+
+The daemon is rootless: it runs as the run's non-root user, and the root user
+inside its containers is root only within its own user namespace, which maps
+to that same unprivileged user outside. Its container keeps the pod's
+read-only root filesystem and seccomp profile, drops every Linux capability
+except `SETUID` and `SETGID` (which its user-namespace setup needs), and is
+not privileged. See
+[coding-worker-isolation.md](coding-worker-isolation.md#the-docker-service-container)
+for why it is the one container with a different security context.
+
+The daemon's socket gives the agent's shell full control of that daemon: it
+can run any container the daemon can, as user-namespace root inside the run's
+gVisor sandbox. gVisor remains the boundary between the run and the node,
+which is why the `docker` kind requires it. The daemon receives no secret
+value: not the run's capability, no `WARDBY_*` variable and no Kubernetes
+Secret. Its output goes only to its container's log.
 
 ## Allowing services for an agent
 
@@ -484,6 +596,8 @@ Protected-path entries also accept a leading `!` for your own exceptions:
 | A toolchain on the Substrate launcher           | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for the toolchain `<name>`, which this wardby deployment can't start: toolchains are not supported on this launcher yet."                                       |
 | A toolchain for a Codex agent                   | Dispatch | refused, `service_launcher_unsupported`    | "This repository asks for the toolchain `<name>`, which this agent can't use: toolchains are not supported for Codex agents yet."                                                     |
 | An entry under the wrong key in `services.yaml` | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: `<name>` is a toolchain; declare it under `toolchain:`." (or the reverse for a service)                                                          |
+| A `docker` service where it can't start         | Dispatch | refused, `service_kind_unsupported`        | "This repository asks for `<name>`, which this wardby deployment can't start: Docker services need the Kubernetes job launcher with the gVisor runtime class."                        |
+| Two `docker` services in one run                | Dispatch | refused, `service_declaration_invalid`     | "`.wardby/services.yaml` is invalid: it names more than one Docker service, and a run can have only one."                                                                             |
 | A service never became ready                    | Launch   | failed, category `service_unready`         | "The `<name>` service didn't become ready, so the run couldn't start."                                                                                                                |
 | The run's changes touched a protected path      | Collect  | failed, category `protected_path`          | "its changes include `<path>`, which this agent may not edit, so none of its changes were kept. Ask again without changing that file, or have the repository owner make that change." |
 
@@ -551,6 +665,11 @@ billed for the run's pod and its 10 GiB pod ephemeral-storage ceiling. A run
 whose workspace and services together exceed that ceiling fails before its pod
 is created.
 
+A `docker` service reserves its catalog CPU, its catalog memory plus 81 MiB
+for its memory-backed socket, runtime and `/tmp` volumes, and ephemeral
+storage of its `diskMib` for its data directory. Image layers and build cache
+count toward that `diskMib`; a build that needs more fails with a full disk.
+
 On the Docker launcher everything a service stores is in memory: its data
 path and each writable path are tmpfs mounts, so its memory limit is its
 catalog memory plus its disk (its data volume and 64 MiB for each writable
@@ -599,6 +718,15 @@ Docker and Kubernetes runs are unchanged. A custom entry needs a
 its image's entrypoint changes ownership or switches user, before Substrate
 runs can use it; until then dispatch refuses them with
 `service_launcher_unsupported`.
+
+### The `docker` kind
+
+The `docker` service kind needs no migration and no built-in entry: create
+one with `create_service` once you have built its image (see
+[Docker in coding runs](#docker-in-coding-runs-docker-kind)). Runs recorded
+before this release keep working: a service recorded without a kind is a
+sidecar. A deployment that rolls back to an older release cannot read a run
+recorded with a `docker` service, so let such runs finish first.
 
 ### From 0.7.0: `YARN_*`, `PNPM_*` and `COREPACK_*` are reserved
 

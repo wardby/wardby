@@ -12,8 +12,15 @@ import {
   storedServiceNames,
   substrateServiceImage,
   workerServices,
+  runDockerService,
+  serviceTestEnv,
+  sidecarOnly,
+  unsupportedKindService,
+  type CodingSidecarDefinition,
+  type ResolvedSidecarService,
 } from "./catalog.js";
 
+const parseSidecar = (value: unknown) => CodingServiceDefinitionSchema.parse(value) as CodingSidecarDefinition;
 const postgres16 = BUILTIN_CODING_SERVICES.find((s) => s.name === "postgres" && s.version === "16")!;
 
 /** A team's dev image as a toolchain entry. */
@@ -138,7 +145,7 @@ describe("CodingServiceDefinitionSchema", () => {
 
   it("accepts a start command and leaves it out when absent", () => {
     const { startCommand: _startCommand, substrateImage: _substrateImage, ...withoutStart } = postgres16;
-    const withStart = CodingServiceDefinitionSchema.parse({
+    const withStart = parseSidecar({
       ...withoutStart,
       startCommand: ["docker-entrypoint.sh", "postgres"],
     });
@@ -149,7 +156,7 @@ describe("CodingServiceDefinitionSchema", () => {
 
   it("accepts a Substrate image with a start command, and refuses one without", () => {
     const substrateImage = `registry.example/fakedb-nonroot@sha256:${"c".repeat(64)}`;
-    expect(CodingServiceDefinitionSchema.parse({ ...postgres16, substrateImage }).substrateImage).toBe(substrateImage);
+    expect(parseSidecar({ ...postgres16, substrateImage }).substrateImage).toBe(substrateImage);
     const { startCommand: _startCommand, ...withoutStart } = postgres16;
     const refused = CodingServiceDefinitionSchema.safeParse({ ...withoutStart, substrateImage });
     expect(refused.success).toBe(false);
@@ -305,7 +312,9 @@ describe("stored services", () => {
 
   it("carries the Substrate image into the snapshot, and the Substrate launcher runs it", () => {
     expect(resolved.substrateImage).toBe(postgres16.substrateImage);
-    expect(parseStoredServices([resolved])[0]?.substrateImage).toBe(postgres16.substrateImage);
+    expect((parseStoredServices([resolved]) as ResolvedSidecarService[])[0]?.substrateImage).toBe(
+      postgres16.substrateImage,
+    );
     expect(substrateServiceImage(resolved)).toBe(postgres16.substrateImage);
     const redis = resolvedFromDefinition(BUILTIN_CODING_SERVICES.find((s) => s.name === "redis")!);
     expect(substrateServiceImage(redis)).toBe(redis.image);
@@ -313,7 +322,7 @@ describe("stored services", () => {
 
   it("parses a snapshot from before substrateImage existed", () => {
     const { substrateImage: _substrateImage, ...before } = resolved;
-    const [parsed] = StoredCodingServicesSchema.parse([before]);
+    const [parsed] = StoredCodingServicesSchema.parse([before]) as ResolvedSidecarService[];
     expect(parsed).toBeDefined();
     expect("substrateImage" in parsed).toBe(false);
     expect(substrateServiceImage(parsed)).toBe(postgres16.image);
@@ -441,5 +450,108 @@ describe("catalogEntryFromRow", () => {
     expect(() =>
       catalogEntryFromRow({ startCommand: null, ...postgres16, readiness: { command: "pg_isready" } }),
     ).toThrow("coding_service_catalog_invalid:postgres 16");
+  });
+});
+
+describe("the docker kind", () => {
+  const docker = {
+    name: "docker",
+    version: "29",
+    kind: "docker" as const,
+    image: `registry.example/wardby-docker-service@sha256:${"d".repeat(64)}`,
+    resources: { cpuMillicores: 1000, memoryMib: 2048, diskMib: 4096 },
+  };
+
+  it("takes only a name, version, image and resources: wardby owns the rest", () => {
+    expect(CodingServiceDefinitionSchema.parse(docker)).toEqual(docker);
+    for (const extra of [
+      { port: 2375 },
+      { serviceEnv: { DOCKER_TLS_CERTDIR: "" } },
+      { testEnv: { DOCKER_HOST: "tcp://0.0.0.0:2375" } },
+      { readiness: { command: ["true"], periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 1 } },
+      { startCommand: ["dockerd"] },
+      { substrateImage: docker.image },
+      { dataPath: "/var/lib/docker" },
+      { writablePaths: ["/tmp"] },
+    ]) {
+      expect(CodingServiceDefinitionSchema.safeParse({ ...docker, ...extra }).success).toBe(false);
+    }
+    const { resources: _resources, ...withoutResources } = docker;
+    expect(CodingServiceDefinitionSchema.safeParse(withoutResources).success).toBe(false);
+    expect(CodingServiceDefinitionSchema.safeParse({ ...docker, image: "docker:29-dind-rootless" }).success).toBe(
+      false,
+    );
+  });
+
+  it("keeps its kind in the snapshot, and hands the worker the fixed DOCKER_HOST", () => {
+    const resolved = resolvedFromDefinition(docker, { id: "c1", updatedAt: new Date("2026-01-02T03:04:05Z") });
+    expect(resolved).toEqual({ ...docker, catalogId: "c1", catalogUpdatedAt: "2026-01-02T03:04:05.000Z" });
+    expect(parseStoredServices([resolved])).toEqual([resolved]);
+    expect(runDockerService([resolvedFromDefinition(postgres16), resolved])).toBe(resolved);
+    expect(serviceTestEnv(resolved)).toEqual({ DOCKER_HOST: "unix:///wardby/docker/docker.sock" });
+    expect(workerServices([resolved])).toEqual([
+      { name: "docker", version: "29", testEnv: { DOCKER_HOST: "unix:///wardby/docker/docker.sock" } },
+    ]);
+    expect(() => sidecarOnly(resolved)).toThrow("coding_service_kind_unsupported");
+  });
+
+  it("fails closed on an unknown kind, or a docker snapshot carrying another kind's fields", () => {
+    const sidecar = resolvedFromDefinition(postgres16);
+    expect(() => parseStoredServices([{ ...sidecar, kind: "external" }])).toThrow();
+    expect(() => parseStoredServices([{ ...docker, kind: "external" }])).toThrow();
+    // A docker snapshot carrying a sidecar's or toolchain's fields fails rather than reaching the daemon.
+    expect(() => parseStoredServices([{ ...docker, serviceEnv: { A: "b" } }])).toThrow();
+    expect(() => parseStoredServices([{ ...docker, setupCommand: ["true"] }])).toThrow();
+  });
+
+  it("allows at most one docker service in a run", () => {
+    const one = resolvedFromDefinition(docker);
+    const two = { ...one, name: "docker-old", version: "28" };
+    expect(StoredCodingServicesSchema.safeParse([one, resolvedFromDefinition(postgres16)]).success).toBe(true);
+    expect(StoredCodingServicesSchema.safeParse([one, two]).success).toBe(false);
+  });
+
+  it("reads a docker row from its key, image and resources only, never its other columns", () => {
+    const row = {
+      ...docker,
+      port: null,
+      serviceEnv: {},
+      testEnv: {},
+      readiness: null,
+      startCommand: null,
+      dataPath: null,
+      writablePaths: [],
+    };
+    expect(catalogEntryFromRow(row)).toEqual(docker);
+    // Edited columns (or a row written with placeholders) change nothing.
+    expect(
+      catalogEntryFromRow({
+        ...row,
+        port: 0,
+        serviceEnv: { A: "b" },
+        readiness: {},
+        dataPath: "",
+        setupCommand: ["x"],
+      }),
+    ).toEqual(docker);
+    expect(() => catalogEntryFromRow({ ...row, resources: {} })).toThrow("coding_service_catalog_invalid:docker 29");
+  });
+
+  it("finds the first docker service a launcher doesn't start; no hook means none, and other kinds are not asked", () => {
+    const services = [resolvedFromDefinition(postgres16), resolvedFromDefinition(docker)];
+    expect(unsupportedKindService(services, () => undefined)?.name).toBe("docker");
+    expect(unsupportedKindService(services, (kind) => kind === "sidecar")?.name).toBe("docker");
+    expect(unsupportedKindService(services, () => true)).toBeUndefined();
+    expect(unsupportedKindService([services[0]], () => undefined)).toBeUndefined();
+    expect(unsupportedKindService([services[0]], () => false)).toBeUndefined();
+    const toolchain = resolvedFromDefinition(CodingServiceDefinitionSchema.parse(PYTHON_DEV));
+    expect(unsupportedKindService([toolchain], () => undefined)).toBeUndefined();
+    expect(unsupportedKindService([toolchain, services[1]], () => undefined)?.name).toBe("docker");
+  });
+
+  it("is declared alongside a toolchain: one of each in a run", () => {
+    const toolchain = resolvedFromDefinition(CodingServiceDefinitionSchema.parse(PYTHON_DEV));
+    const one = resolvedFromDefinition(docker);
+    expect(StoredCodingServicesSchema.safeParse([toolchain, one]).success).toBe(true);
   });
 });

@@ -19,10 +19,23 @@ import {
 /**
  * CODING_SERVICE_KINDS: "sidecar", a fresh instance in each run's pod; "toolchain", a team's own dev
  * image that the run's commands are forwarded to (wardby-cmd), sharing the run's /workspace (a run
- * has at most one). "external" is reserved for shared services reached through the proxy.
+ * has at most one); "docker", a rootless Docker daemon in each run's pod (Kubernetes with gVisor
+ * only), whose socket the agent's shells use, and wardby owns everything about it but the image and
+ * resources. "external" is reserved for shared services reached through the proxy.
  */
-export const CODING_SERVICE_KINDS = ["sidecar", "toolchain"] as const;
+export const CODING_SERVICE_KINDS = ["sidecar", "toolchain", "docker"] as const;
 export type CodingServiceKind = (typeof CODING_SERVICE_KINDS)[number];
+/**
+ * Where a docker service's daemon listens: a directory outside /run and /etc (rootlesskit copies
+ * those up into its own namespace, which would hide a socket there from other containers), on a
+ * memory-backed volume the agent's shells (and a toolchain, when the run has one) mount too.
+ */
+export const DOCKER_SOCKET_DIR = "/wardby/docker";
+export const DOCKER_SOCKET_PATH = `${DOCKER_SOCKET_DIR}/docker.sock`;
+/** A docker service's testEnv, fixed by wardby: the docker CLI in the agent's shells reaches the daemon through it. */
+export const DOCKER_TEST_ENV: Readonly<Record<string, string>> = Object.freeze({
+  DOCKER_HOST: `unix://${DOCKER_SOCKET_PATH}`,
+});
 /** How many service names one agent may be allowed. */
 export const MAX_AGENT_SERVICES = 16;
 export const MAX_SERVICE_ENV = 32;
@@ -178,6 +191,19 @@ const toolchainFields = {
 };
 
 /**
+ * A docker entry's fields: only its key, image and resources come from the catalog. Strict where it
+ * is used, so a port, environment, probe or path from anywhere fails closed rather than reaching the
+ * daemon.
+ */
+const dockerFields = {
+  name: codingServiceNameSchema,
+  version: codingServiceVersionSchema,
+  image: imageDigestSchema,
+  resources: CodingServiceResourcesSchema,
+  kind: z.literal("docker"),
+};
+
+/**
  * Directories a toolchain container's launcher mounts itself (the shared workspace, the command
  * agent's directory, HOME, wardby's run inputs): a writable path may not be or nest with one.
  */
@@ -252,6 +278,7 @@ export const ResolvedCodingServiceSchema = z.preprocess(
       .object({ ...toolchainFields, ...snapshotFields })
       .strict()
       .superRefine(checkToolchain),
+    z.object({ ...dockerFields, ...snapshotFields }).strict(),
   ]),
 );
 
@@ -261,15 +288,20 @@ export const CodingServiceDefinitionSchema = z.preprocess(
   z.discriminatedUnion("kind", [
     z.object(sidecarFields).strict().superRefine(checkSidecar),
     z.object(toolchainFields).strict().superRefine(checkToolchain),
+    z.object(dockerFields).strict(),
   ]),
 );
 
 export type ResolvedCodingService = z.output<typeof ResolvedCodingServiceSchema>;
 export type ResolvedSidecarService = Extract<ResolvedCodingService, { kind: "sidecar" }>;
 export type ResolvedToolchainService = Extract<ResolvedCodingService, { kind: "toolchain" }>;
+export type ResolvedDockerService = Extract<ResolvedCodingService, { kind: "docker" }>;
+/** What every launcher path that predates the docker kind handles: a sidecar or a toolchain. */
+export type SidecarOrToolchainService = ResolvedSidecarService | ResolvedToolchainService;
 export type CodingServiceDefinition = z.output<typeof CodingServiceDefinitionSchema>;
 export type CodingSidecarDefinition = Extract<CodingServiceDefinition, { kind: "sidecar" }>;
 export type CodingToolchainDefinition = Extract<CodingServiceDefinition, { kind: "toolchain" }>;
+export type CodingDockerDefinition = Extract<CodingServiceDefinition, { kind: "docker" }>;
 
 export function isSidecarService(service: ResolvedCodingService): service is ResolvedSidecarService {
   return service.kind === "sidecar";
@@ -279,12 +311,18 @@ export function isToolchainService(service: ResolvedCodingService): service is R
   return service.kind === "toolchain";
 }
 
+export function isDockerService(service: ResolvedCodingService): service is ResolvedDockerService {
+  return service.kind === "docker";
+}
+
 /**
- * A sidecar-only step's guard. Throws "coding_service_toolchain_unsupported" for a toolchain: a
- * launcher path that has no toolchain handling must never quietly treat one as a sidecar or skip it.
+ * A sidecar-only step's guard. Throws "coding_service_toolchain_unsupported" for a toolchain, and
+ * "coding_service_kind_unsupported" for a docker service: a launcher path that has no handling for a
+ * kind must never quietly treat one as a sidecar or skip it.
  */
 export function sidecarOnly(service: ResolvedCodingService): ResolvedSidecarService {
-  if (service.kind !== "sidecar") throw new Error("coding_service_toolchain_unsupported");
+  if (service.kind === "toolchain") throw new Error("coding_service_toolchain_unsupported");
+  if (service.kind !== "sidecar") throw new Error("coding_service_kind_unsupported");
   return service;
 }
 
@@ -293,7 +331,53 @@ export function runToolchain(services: readonly ResolvedCodingService[]): Resolv
   return services.find(isToolchainService);
 }
 
-export const StoredCodingServicesSchema = z.array(ResolvedCodingServiceSchema).max(MAX_CODING_SERVICES);
+/**
+ * A launcher path's guard where the docker kind is never started (Docker, Substrate): throws
+ * `error` for a docker service, as the backstop to dispatch's service_kind_unsupported refusal.
+ */
+export function withoutDockerServices(
+  services: readonly ResolvedCodingService[],
+  error: string,
+): SidecarOrToolchainService[] {
+  const started = services.filter((service): service is SidecarOrToolchainService => service.kind !== "docker");
+  if (started.length !== services.length) throw new Error(error);
+  return started;
+}
+
+/** The run's docker service, if it has one (a run has at most one). */
+export function runDockerService(services: readonly ResolvedCodingService[]): ResolvedDockerService | undefined {
+  return services.find(isDockerService);
+}
+
+/**
+ * The first of a run's docker services a launcher does not start (`supportsKind` is its
+ * supportsServiceKind hook, or an executor's), or undefined. A hook that is absent or answers
+ * undefined starts no docker service, so a launcher that predates the kind never receives one.
+ * Sidecars and toolchains are not asked here: whether a launcher starts those is its
+ * supportsServicesFor and unstartableServices answer (service_launcher_unsupported).
+ */
+export function unsupportedKindService(
+  services: readonly ResolvedCodingService[],
+  supportsKind: (kind: CodingServiceKind) => boolean | undefined,
+): ResolvedCodingService | undefined {
+  return services.find((service) => service.kind === "docker" && supportsKind(service.kind) !== true);
+}
+
+/** The variables a service hands the agent's shells: its catalog testEnv, or a docker service's fixed DOCKER_HOST. */
+export function serviceTestEnv(service: ResolvedCodingService): Record<string, string> {
+  return service.kind === "docker" ? { ...DOCKER_TEST_ENV } : service.testEnv;
+}
+
+/** A run has at most one docker service: its daemon's socket and volumes have fixed paths and names. */
+export const MAX_DOCKER_SERVICES = 1;
+
+export const StoredCodingServicesSchema = z
+  .array(ResolvedCodingServiceSchema)
+  .max(MAX_CODING_SERVICES)
+  .refine(
+    (services) => services.filter((service) => service.kind === "docker").length <= MAX_DOCKER_SERVICES,
+    `must have at most ${MAX_DOCKER_SERVICES} docker service`,
+  );
 
 /** The columns of a CodingService row the definition is read from. */
 export interface CodingServiceRow {
@@ -304,7 +388,7 @@ export interface CodingServiceRow {
   kind: string;
   image: string;
   substrateImage?: string | null;
-  /** Null for a toolchain, as are readiness and dataPath. */
+  /** Null for a toolchain or a docker entry, as are readiness and dataPath. */
   port?: number | null;
   serviceEnv: unknown;
   testEnv: unknown;
@@ -324,8 +408,23 @@ function column<Key extends string>(key: Key, value: unknown): Partial<Record<Ke
   return value === null || value === undefined ? {} : ({ [key]: value } as Record<Key, unknown>);
 }
 
-/** A row as its definition. Throws when the row was edited out of shape (the operator log keeps the name). */
+/**
+ * A row as its definition. Throws when the row was edited out of shape (the operator log keeps the name).
+ * A docker row is read from its key, image and resources only: its other columns are never read, so
+ * nothing in them reaches the daemon.
+ */
 export function catalogEntryFromRow(row: CodingServiceRow): CodingServiceDefinition {
+  if (row.kind === "docker") {
+    const parsed = CodingServiceDefinitionSchema.safeParse({
+      name: row.name,
+      version: row.version,
+      kind: row.kind,
+      image: row.image,
+      resources: row.resources,
+    });
+    if (!parsed.success) throw new Error(`coding_service_catalog_invalid:${row.name} ${row.version}`);
+    return parsed.data;
+  }
   const parsed = CodingServiceDefinitionSchema.safeParse({
     name: row.name,
     version: row.version,
@@ -357,6 +456,10 @@ export function resolvedFromDefinition(
   catalog?: { id?: string; updatedAt?: Date },
 ): ResolvedToolchainService;
 export function resolvedFromDefinition(
+  definition: CodingDockerDefinition,
+  catalog?: { id?: string; updatedAt?: Date },
+): ResolvedDockerService;
+export function resolvedFromDefinition(
   definition: CodingServiceDefinition,
   catalog?: { id?: string; updatedAt?: Date },
 ): ResolvedCodingService;
@@ -372,7 +475,7 @@ export function resolvedFromDefinition(
 }
 
 /** The image the Substrate launcher runs for a service: its substrateImage when set, else its image. */
-export function substrateServiceImage(service: ResolvedCodingService): string {
+export function substrateServiceImage(service: SidecarOrToolchainService): string {
   return service.substrateImage ?? service.image;
 }
 
@@ -421,10 +524,15 @@ export function parseAllowedServiceNames(value: unknown): string[] {
  * What the worker receives for each service (CodingTaskInput.services): never the image or the
  * service's own environment, and not its kind: the Claude tool runner learns of a toolchain from its
  * own setup (claude-tool-setup.ts), so the worker input format, which the published Codex driver
- * image must match exactly, is unchanged by toolchains (#599).
+ * image must match exactly, is unchanged by toolchains (#599). A docker service hands over its fixed
+ * DOCKER_HOST.
  */
 export function workerServices(
   services: readonly ResolvedCodingService[],
 ): Array<{ name: string; version: string; testEnv: Record<string, string> }> {
-  return services.map(({ name, version, testEnv }) => ({ name, version, testEnv }));
+  return services.map((service) => ({
+    name: service.name,
+    version: service.version,
+    testEnv: serviceTestEnv(service),
+  }));
 }

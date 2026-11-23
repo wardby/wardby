@@ -47,7 +47,7 @@ import {
   specToolchain,
 } from "./docker-isolation.js";
 import type { CodingProvider } from "../../coding/provider.js";
-import { isToolchainService, sidecarOnly } from "../../coding/services/catalog.js";
+import { isToolchainService, sidecarOnly, type CodingServiceKind } from "../../coding/services/catalog.js";
 import { serviceUnreadyError } from "../../coding/services/wording.js";
 import {
   assertServiceContainerInspection,
@@ -701,6 +701,15 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
   /** Starts JobSpec.services (a network keeper plus one hardened container per service) for Codex and Claude Code runs. */
   supportsServicesFor(provider: CodingProvider): boolean {
     return dockerSupportsServicesFor(provider);
+  }
+
+  /**
+   * Sidecars and a toolchain, never a docker service (a rootless dockerd next to the run): that kind
+   * is Kubernetes-with-gVisor only, so dispatch refuses it here with service_kind_unsupported, and
+   * docker-services.ts refuses one that reaches a launch anyway.
+   */
+  supportsServiceKind(kind: CodingServiceKind): boolean {
+    return kind !== "docker";
   }
 
   async launch(spec: JobSpec): Promise<JobHandle> {

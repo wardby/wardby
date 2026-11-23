@@ -16,11 +16,15 @@ import type {
   V1Volume,
 } from "@kubernetes/client-node";
 import {
+  DOCKER_SOCKET_DIR,
+  DOCKER_SOCKET_PATH,
+  isDockerService,
   isToolchainService,
   runToolchain,
   sidecarOnly,
   StoredCodingServicesSchema,
   type ResolvedCodingService,
+  type ResolvedDockerService,
   type ResolvedToolchainService,
 } from "../../coding/services/catalog.js";
 import { MCP_TOKEN_ENV } from "../../coding/mcp-token.js";
@@ -106,10 +110,50 @@ export function serviceContainerName(name: string): string {
   return `${SERVICE_CONTAINER_PREFIX}${name}`;
 }
 
-/** What a service sidecar reserves of the pod's ephemeral storage: its data volume plus its scratch volumes. */
+/**
+ * What a service sidecar reserves of the pod's ephemeral storage: its data volume plus its scratch
+ * volumes. A docker service's only disk-backed volume is its home (images, layers, build cache).
+ */
 export function serviceEphemeralStorageMib(service: ResolvedCodingService): number {
+  if (isDockerService(service)) return service.resources.diskMib;
   return service.resources.diskMib + SERVICE_SCRATCH_MIB * service.writablePaths.length;
 }
+
+/**
+ * A docker service's volumes (dockerServiceSidecar). A run has at most one docker service
+ * (StoredCodingServicesSchema), so the names are fixed. The socket, XDG runtime and /tmp volumes are
+ * memory-backed: under gVisor a Unix socket is shared across containers only on a memory-backed
+ * emptyDir (as TOOL_SOCKET_VOLUME), and rootlesskit keeps its runtime state there. Home is
+ * disk-backed at the entry's diskMib: dockerd's data root (~/.local/share/docker) lives in it.
+ */
+const DOCKER_SOCKET_VOLUME = "docker-socket";
+const DOCKER_XDG_VOLUME = "docker-xdg";
+const DOCKER_HOME_VOLUME = "docker-home";
+const DOCKER_TMP_VOLUME = "docker-tmp";
+const DOCKER_XDG_PATH = "/wardby/xdg";
+const DOCKER_HOME_PATH = "/home/wardby";
+const DOCKER_SOCKET_VOLUME_MIB = 1;
+const DOCKER_XDG_VOLUME_MIB = 16;
+const DOCKER_TMP_VOLUME_MIB = 64;
+/** Memory-backed volume pages count against memory, so the daemon's memory request carries them on top of its entry's. */
+export const DOCKER_MEMORY_VOLUMES_MIB = DOCKER_SOCKET_VOLUME_MIB + DOCKER_XDG_VOLUME_MIB + DOCKER_TMP_VOLUME_MIB;
+/**
+ * dockerd's arguments. The leading `dockerd` makes the dind-rootless image's entrypoint exec
+ * rootlesskit with exactly these (anything else and it adds a TLS TCP API on 0.0.0.0:2376).
+ * gVisor has no nftables and dockerd cannot set ip_forward there, so no iptables and no bridge:
+ * host networking only (Docker's bridge network is also very slow under gVisor). The socket is the
+ * only API. Pulls go through the coding proxy's registry route: Docker Hub names via the mirror,
+ * other images named wardby-proxy:8787/<path>; it serves plain HTTP inside the cluster.
+ */
+export const DOCKERD_ARGS: readonly string[] = Object.freeze([
+  "dockerd",
+  "--iptables=false",
+  "--ip6tables=false",
+  "--bridge=none",
+  `--host=unix://${DOCKER_SOCKET_PATH}`,
+  `--registry-mirror=http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+  `--insecure-registry=${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
+]);
 
 export const STORAGE_ROOT = "/run/wardby/storage";
 export const KEEPER_SEEDED_MARKER = `${STORAGE_ROOT}/input/.seeded`;
@@ -300,13 +344,42 @@ function containerSecurity() {
 }
 
 /**
- * The emptyDirs behind one service's mounts: its data path, then each writable path. The only place
+ * The docker service's container security context, and only its (dockerServiceSidecar): every other
+ * container keeps containerSecurity(). rootlesskit runs newuidmap/newgidmap to map the daemon's user
+ * namespace, which needs SETUID and SETGID, and they only work while privilege escalation is
+ * possible: allowPrivilegeEscalation is left out (explicitly false breaks newuidmap; explicitly true
+ * is refused by some platforms' admission). No runAsUser/runAsGroup: it runs as the pod's run uid
+ * and gid, so root in its user namespace maps to the run uid outside, and the socket it creates is
+ * owned by the run uid the worker and tool runner use. Not privileged, read-only root filesystem,
+ * every other capability dropped, the pod's RuntimeDefault seccomp profile. gVisor remains the
+ * boundary to the node (buildRunPod requires it with a docker service).
+ */
+function dockerServiceSecurity() {
+  return {
+    privileged: false,
+    readOnlyRootFilesystem: true,
+    runAsNonRoot: true,
+    capabilities: { drop: ["ALL"], add: ["SETUID", "SETGID"] },
+  };
+}
+
+/**
+ * The emptyDirs behind one service's mounts. A sidecar's: its data path, then each writable path,
+ * disk-backed. A docker service's: its socket, XDG runtime, home and /tmp volumes. The only place
  * their names are built, so the sidecar's volumeMounts and the pod's volumes can never disagree.
  */
 function serviceStorage(
   entry: ResolvedCodingService,
   index: number,
-): Array<{ name: string; mountPath: string; sizeMib: number }> {
+): Array<{ name: string; mountPath: string; sizeMib: number; memory?: true }> {
+  if (isDockerService(entry)) {
+    return [
+      { name: DOCKER_SOCKET_VOLUME, mountPath: DOCKER_SOCKET_DIR, sizeMib: DOCKER_SOCKET_VOLUME_MIB, memory: true },
+      { name: DOCKER_XDG_VOLUME, mountPath: DOCKER_XDG_PATH, sizeMib: DOCKER_XDG_VOLUME_MIB, memory: true },
+      { name: DOCKER_HOME_VOLUME, mountPath: DOCKER_HOME_PATH, sizeMib: entry.resources.diskMib },
+      { name: DOCKER_TMP_VOLUME, mountPath: "/tmp", sizeMib: DOCKER_TMP_VOLUME_MIB, memory: true },
+    ];
+  }
   const scratch = entry.writablePaths.map((path, n) => ({
     name: `service-${index}-scratch-${n}`,
     mountPath: path,
@@ -324,12 +397,55 @@ function serviceStorage(
 }
 
 /**
+ * A docker service as a native sidecar (docs/coding-services.md): rootless dockerd from the
+ * catalog's image (wardby-docker-service, src/docker-service/Dockerfile: docker:*-dind-rootless with a
+ * subuid/subgid range for the run uid). wardby sets everything but the image and resources: DOCKERD_ARGS, the
+ * environment (iptables-legacy for gVisor; HOME and XDG_RUNTIME_DIR on its writable volumes),
+ * dockerServiceSecurity(), and a startup probe that holds the keeper and worker until the socket
+ * exists. It gets no secret value: no capability, no WARDBY_* variable, no Secret reference. Its
+ * output goes to the container's log only. The worker (Codex) or tool runner (Claude Code) mounts
+ * the socket volume, and DOCKER_HOST (its testEnv) points the agent's docker CLI at it.
+ */
+function dockerServiceSidecar(service: ResolvedDockerService, profile: KubernetesPlatformProfile): V1Container {
+  return {
+    name: serviceContainerName(service.name),
+    image: service.image,
+    restartPolicy: "Always",
+    args: [...DOCKERD_ARGS],
+    env: [
+      { name: "DOCKER_IPTABLES_LEGACY", value: "1" },
+      { name: "HOME", value: DOCKER_HOME_PATH },
+      { name: "XDG_RUNTIME_DIR", value: DOCKER_XDG_PATH },
+    ],
+    securityContext: dockerServiceSecurity(),
+    resources: conformResources(profile, {
+      cpuMillicores: service.resources.cpuMillicores,
+      memoryMib: service.resources.memoryMib + DOCKER_MEMORY_VOLUMES_MIB,
+      ephemeralStorageMib: serviceEphemeralStorageMib(service),
+    }),
+    startupProbe: {
+      exec: { command: ["test", "-S", DOCKER_SOCKET_PATH] },
+      periodSeconds: 2,
+      timeoutSeconds: 1,
+      failureThreshold: 60,
+      successThreshold: 1,
+    },
+    volumeMounts: serviceStorage(service, 0).map(({ name, mountPath }) => ({ name, mountPath })),
+  };
+}
+
+/** The docker service's socket volume, for the container that runs the agent's shell commands; none without one. */
+function dockerSocketMounts(services: readonly ResolvedCodingService[]): Array<{ name: string; mountPath: string }> {
+  return services.some(isDockerService) ? [{ name: DOCKER_SOCKET_VOLUME, mountPath: DOCKER_SOCKET_DIR }] : [];
+}
+
+/**
  * One coding-run service as a native sidecar (docs/coding-services.md): an init container with
  * restartPolicy Always, so the kubelet starts it before the keeper and worker and holds them until
  * its startup probe (the catalog's readiness command) passes. It runs the catalog's image with its
  * own entrypoint, under the same security context as every other container, with an emptyDir at its
  * data path and at each writable path. Same pod, same network namespace: the worker reaches it on
- * 127.0.0.1, and the run's NetworkPolicy needs no change.
+ * 127.0.0.1, and the run's NetworkPolicy needs no change. A docker service is dockerServiceSidecar.
  */
 function serviceSidecar(
   entry: ResolvedCodingService,
@@ -338,6 +454,7 @@ function serviceSidecar(
   timeoutSec: number,
 ): V1Container {
   if (isToolchainService(entry)) return toolchainSidecar(entry, index, profile, timeoutSec);
+  if (isDockerService(entry)) return dockerServiceSidecar(entry, profile);
   const service = sidecarOnly(entry);
   const env = Object.entries(service.serviceEnv)
     .sort(([left], [right]) => left.localeCompare(right))
@@ -425,7 +542,10 @@ function toolchainSidecar(
 
 function serviceVolumes(services: readonly ResolvedCodingService[]): V1Volume[] {
   return services.flatMap((service, index) =>
-    serviceStorage(service, index).map(({ name, sizeMib }) => ({ name, emptyDir: { sizeLimit: `${sizeMib}Mi` } })),
+    serviceStorage(service, index).map(({ name, sizeMib, memory }) => ({
+      name,
+      emptyDir: { ...(memory ? { medium: "Memory" } : {}), sizeLimit: `${sizeMib}Mi` },
+    })),
   );
 }
 
@@ -455,6 +575,12 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
   // so the SUMMED pod total is checked here — before submission, so an over-large workspace fails
   // closed rather than being rewritten by the platform (which attestation would then reject anyway).
   const services = spec.services ?? [];
+  // A docker service's daemon is kept from the node by gVisor alone (dockerServiceSecurity), so it is
+  // never built without it, whatever the launcher's own check (supportsServiceKind) said.
+  if (services.some(isDockerService) && options.runtimeClassName !== GVISOR_RUNTIME_CLASS) {
+    throw isolationError("docker-service-needs-gvisor");
+  }
+  const dockerSocket = dockerSocketMounts(services);
   const ceiling = profile.resources.ephemeralStorageCeilingMib;
   const podEphemeral = podEphemeralStorageMib(
     spec.limits.diskMb,
@@ -554,6 +680,8 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
           { name: "storage", mountPath: "/run/wardby/output", subPath: "output" },
           { name: "tmp", mountPath: "/tmp" },
           { name: "home", mountPath: "/home/wardby" },
+          // Codex runs the agent's shell commands itself, so it holds the docker service's socket.
+          ...dockerSocket,
         ],
   };
   /**
@@ -604,6 +732,8 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
                 },
               ]
             : []),
+          // Claude's shell commands run here, never in its agent, so only the tool runner holds the docker socket.
+          ...dockerSocket,
         ],
       }
     : undefined;

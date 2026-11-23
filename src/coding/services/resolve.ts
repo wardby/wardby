@@ -2,9 +2,10 @@
  * Dispatch-time resolution (docs/coding-services.md): each service the
  * repository declares must exist in the catalog, as that exact version, be
  * declared under the key its kind belongs to (a toolchain under `toolchain:`, a
- * sidecar under `services:`), and the agent must be allowed its name. The first
- * failure refuses the whole run with its host sentence; otherwise every entry is
- * snapshotted for the run, the toolchain first.
+ * sidecar or docker service under `services:`), and the agent must be allowed
+ * its name; a run has at most one docker service. The first failure refuses the
+ * whole run with its host sentence; otherwise every entry is snapshotted for the
+ * run, the toolchain first.
  *
  * The task text is also checked here: the agent's instructions plus the note
  * these services would add (servicesInstructionNote) plus the request must
@@ -14,6 +15,7 @@
 import { composeCodingTask } from "../protocol.js";
 import {
   catalogEntryFromRow,
+  MAX_DOCKER_SERVICES,
   resolvedFromDefinition,
   type CodingServiceRow,
   type ResolvedCodingService,
@@ -25,6 +27,7 @@ import {
   notAllowedServiceSentence,
   serviceRefusal,
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
+  TOO_MANY_DOCKER_SERVICES_SENTENCE,
   unknownServiceSentence,
 } from "./wording.js";
 
@@ -65,7 +68,10 @@ export async function resolveRunServices(
     const underToolchain = service === declaration.toolchain;
     if ((kind === "toolchain") !== underToolchain) {
       return {
-        refusal: serviceRefusal("service_declaration_invalid", misplacedServiceSentence(service.name, kind)),
+        refusal: serviceRefusal(
+          "service_declaration_invalid",
+          misplacedServiceSentence(service.name, kind === "toolchain" ? "toolchain" : "sidecar"),
+        ),
       };
     }
   }
@@ -79,6 +85,9 @@ export async function resolveRunServices(
     const row = rowsByKey.get(keyOf(service))!;
     return resolvedFromDefinition(entries.get(keyOf(service))!, { id: row.id, updatedAt: row.updatedAt });
   });
+  if (services.filter((service) => service.kind === "docker").length > MAX_DOCKER_SERVICES) {
+    return { refusal: serviceRefusal("service_declaration_invalid", TOO_MANY_DOCKER_SERVICES_SENTENCE) };
+  }
   const note = servicesInstructionNote(services);
   if (note !== undefined) {
     try {
