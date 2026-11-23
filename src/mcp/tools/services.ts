@@ -9,9 +9,11 @@
  * what. Each change is audit-logged (event coding.service_catalog.<action>).
  * Built-in entries ship with wardby and change only with a release.
  *
- * An entry is a sidecar (a fresh service next to each run) or a toolchain (a
- * team image the run's commands are forwarded to, sharing its workspace); the
- * zod schema enforces each kind's fields, so a refusal names the field.
+ * An entry is a sidecar (a fresh service next to each run), a toolchain (a
+ * team image the run's commands are forwarded to, sharing its workspace) or a
+ * setup job (a one-off command, such as database migrations, run after the
+ * run's services are ready and before its agent starts); the zod schema
+ * enforces each kind's fields, so a refusal names the field.
  */
 import { z } from "zod";
 import {
@@ -44,6 +46,9 @@ const UpdateSchema = z
     startCommand: z.unknown().optional(),
     setupCommand: z.unknown().optional(),
     hostAliases: z.unknown().optional(),
+    command: z.unknown().optional(),
+    waitFor: z.unknown().optional(),
+    timeoutSeconds: z.unknown().optional(),
     resources: z.unknown().optional(),
     dataPath: z.unknown().optional(),
     writablePaths: z.unknown().optional(),
@@ -131,13 +136,37 @@ const definitionProperties = {
   serviceEnv: {
     type: "object",
     additionalProperties: { type: "string" },
-    description: "Environment for the service container. Throwaway per-run values only, never secrets.",
+    description:
+      "Environment for the service or setup job container. Throwaway per-run values only, never secrets (for a setup job, e.g. the database entry's throwaway admin password).",
   },
   testEnv: {
     type: "object",
     additionalProperties: { type: "string" },
     description:
-      "Variables the agent's shells receive (e.g. DATABASE_URL). Upper-case names; wardby's own names (PATH, HOME, PIP_*, WARDBY_*, ...) are refused.",
+      "Variables the agent's shells receive (e.g. DATABASE_URL). Upper-case names; wardby's own names (PATH, HOME, PIP_*, WARDBY_*, ...) are refused. Not used by a setup job.",
+  },
+  command: {
+    type: "array",
+    minItems: 1,
+    maxItems: 16,
+    items: { type: "string" },
+    description:
+      'Setup jobs only (required): the argv the job runs, in /workspace (the run\'s checkout, read-only), e.g. ["liquibase", "--changelog-file=db/changelog.xml", "update"]. The image needs no shell. A non-zero exit fails the run before its agent starts; the job\'s output is never published. Each argument is one line of at most 4096 bytes.',
+  },
+  waitFor: {
+    type: "array",
+    minItems: 1,
+    maxItems: 8,
+    items: { type: "string" },
+    description:
+      'Setup jobs only (required): the catalog names of the services the job needs (e.g. ["mysql"]). A repository declaring the job must declare each of them under services:, or the run is refused.',
+  },
+  timeoutSeconds: {
+    type: "integer",
+    minimum: 1,
+    maximum: 3600,
+    description:
+      "Setup jobs only: how long the job may run before it is stopped and the run fails, 1 to 3600 seconds (default 600).",
   },
   readiness: {
     type: "object",
@@ -197,7 +226,7 @@ const definitionProperties = {
     maxItems: 4,
     items: { type: "string" },
     description:
-      "Further directories the image writes to (a socket directory, /tmp); its root filesystem is read-only.",
+      "Further directories the image writes to (a socket directory, /tmp, a VOLUME the image declares); its root filesystem is read-only.",
   },
 };
 
@@ -206,7 +235,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "list_services",
     scope: "agents:read",
     description:
-      "The coding-run service catalog (name, version, kind, image, substrateImage when set, built in or not): the names a coding agent's codingProfile.services can allow. kind is sidecar (a service started next to each run) or toolchain (the image a run's commands run in).",
+      "The coding-run service catalog (name, version, kind, image, substrateImage when set, waitFor for a setup job, built in or not): the names a coding agent's codingProfile.services can allow. kind is sidecar (a service started next to each run), toolchain (the image a run's commands run in) or setup (a one-off job, such as migrations, run after the services are ready and before the agent starts).",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
       const rows = await ctx.db.codingService.findMany({ orderBy: [{ name: "asc" }, { version: "asc" }] });
@@ -218,6 +247,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
           image: row.image,
           ...(row.substrateImage ? { substrateImage: row.substrateImage } : {}),
           ...(row.port === null ? {} : { port: row.port }),
+          ...(row.kind === "setup" && row.waitFor !== null ? { waitFor: row.waitFor } : {}),
           ...(row.kind === "toolchain" ? { note: TOOLCHAIN_PACKAGES_NOTE } : {}),
           builtin: row.builtin,
         })),
@@ -229,7 +259,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "get_service",
     scope: "agents:read",
     description:
-      "One catalog entry in full, including the variables (testEnv) a run's shells receive — the contract a repository's tests rely on — and its startCommand and substrateImage, if set (used only on the Substrate job launcher).",
+      "One catalog entry in full, including the variables (testEnv) a run's shells receive — the contract a repository's tests rely on — its startCommand and substrateImage, if set (used only on the Substrate job launcher), and for a setup job its command, waitFor and timeoutSeconds.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -246,7 +276,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "create_service",
     scope: "services:manage",
     description:
-      "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest. kind is sidecar (the default: a fresh instance next to each run, declared under services:, needing port, readiness and dataPath; set startCommand for deployments on the Substrate job launcher) or toolchain (a team's own dev image the run's commands run in, sharing its workspace, declared under toolchain:; no port, readiness, startCommand or dataPath; optional setupCommand and hostAliases). Packages already in a toolchain image did not pass the proxy's checks.",
+      "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest. kind is sidecar (the default: a fresh instance next to each run, declared under services:, needing port, readiness and dataPath; set startCommand for deployments on the Substrate job launcher) or toolchain (a team's own dev image the run's commands run in, sharing its workspace, declared under toolchain:; no port, readiness, startCommand or dataPath; optional setupCommand and hostAliases) or setup (a one-off job run after the run's services are ready and before its agent starts, declared under setup:; needing command and waitFor, optional timeoutSeconds (default 600); no port, readiness, startCommand, setupCommand, hostAliases, dataPath, testEnv or substrateImage). Packages already in a toolchain image did not pass the proxy's checks.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -256,9 +286,9 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
         ...definitionProperties,
         kind: {
           type: "string",
-          enum: ["sidecar", "toolchain"],
+          enum: ["sidecar", "toolchain", "setup"],
           description:
-            '"sidecar" (default): a service started next to each run. "toolchain": the image a run\'s commands run in. It cannot be changed later.',
+            '"sidecar" (default): a service started next to each run. "toolchain": the image a run\'s commands run in. "setup": a one-off job (such as database migrations) run once the run\'s services are ready, before its agent starts. It cannot be changed later.',
         },
       },
     },
@@ -283,7 +313,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
     name: "update_service",
     scope: "services:manage",
     description:
-      "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it, and kind, never change). Runs already dispatched keep the entry they started with. Set startCommand on a sidecar for deployments on the Substrate job launcher, or setupCommand and hostAliases on a toolchain.",
+      "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it, and kind, never change). Runs already dispatched keep the entry they started with. Set startCommand on a sidecar for deployments on the Substrate job launcher, setupCommand and hostAliases on a toolchain, or command, waitFor and timeoutSeconds on a setup job.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
