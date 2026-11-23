@@ -9,9 +9,9 @@ sources:
   - id: deny
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/datastore/scoped.ts#L33-L52
   - id: wiring
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/runner.ts#L1368-L1388
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/core/runner.ts#L1953-L1971
   - id: shared
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/datastores.ts#L119-L151
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/core/datastores.ts#L123-L155
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -27,16 +27,16 @@ wardby:
     - id: wiring
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [1368, 1388]
+      lines: [1953, 1971]
       symbol: createNativeRunTools.scopedHost
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:61bb446c6ed2a1fde4c53951680588ac75de28d6b3219eebb8ae801cd4438816
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:5f44d8f3307b0b697c26f3c426454d39b644f766941f7edba5c70f3d3dd9bc42
     - id: shared
       repo: github:wardby/wardby
       path: src/core/datastores.ts
-      lines: [119, 151]
+      lines: [123, 155]
       symbol: scopeSharedDatastoreAccessor
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
       spanHash: sha256:508ad8dbaa811b4528d626431b84eda9dd6fe5a2929ffc6005106c9b2eb23703
   confidence: high
 ---
@@ -49,6 +49,6 @@ The private wrapper therefore rejects every shared method, including reads, even
 
 [^deny]: src/providers/datastore/scoped.ts, lines 33-52.
 
-[^wiring]: src/core/runner.ts, lines 1368-1388.
+[^wiring]: src/core/runner.ts, lines 1953-1971.
 
-[^shared]: src/core/datastores.ts, lines 119-151.
+[^shared]: src/core/datastores.ts, lines 123-155.

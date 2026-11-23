@@ -7,11 +7,11 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-15T11:18:44.473Z }
 sources:
   - id: key
-    url: https://github.com/wardby/wardby/blob/0cd83fece6e5dafbb229aee4c293953e354cb42d/src/mcp/server.ts#L139-L155
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/mcp/server.ts#L174-L188
   - id: codec
-    url: https://github.com/wardby/wardby/blob/0cd83fece6e5dafbb229aee4c293953e354cb42d/src/mcp/server.ts#L191-L202
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/mcp/server.ts#L224-L235
   - id: outcome
-    url: https://github.com/wardby/wardby/blob/0cd83fece6e5dafbb229aee4c293953e354cb42d/src/mcp/tools/secret-elicitation.ts#L79-L104
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/mcp/tools/secret-elicitation.ts#L224-L237
 wardby:
   schema: 1
   roles: [builder, reviewer]
@@ -20,24 +20,24 @@ wardby:
     - id: key
       repo: github:wardby/wardby
       path: src/mcp/server.ts
-      lines: [139, 155]
+      lines: [174, 188]
       symbol: loadRequestStateKey
-      sha: 0cd83fece6e5dafbb229aee4c293953e354cb42d
-      spanHash: sha256:09a8e266ca81faa6a3af750f87ab4b7892dba80a2fde187a3af16df22e3e8aa9
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:6502ef82e2be065bb64899c2862879a27be05b55dba5212fc8423d1ee32315ae
     - id: codec
       repo: github:wardby/wardby
       path: src/mcp/server.ts
-      lines: [191, 202]
+      lines: [224, 235]
       symbol: buildMcpServer
-      sha: 0cd83fece6e5dafbb229aee4c293953e354cb42d
-      spanHash: sha256:32779f2edf44c96fb4b295df8feceecaf9f9034c67513ac7074ad6423abf766b
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:4d15153dd94120580b21d2d03e016d18349985a8d9a0d8f0f9c01bbf20e5c142
     - id: outcome
       repo: github:wardby/wardby
       path: src/mcp/tools/secret-elicitation.ts
-      lines: [79, 104]
+      lines: [224, 237]
       symbol: recordOutcome
-      sha: 0cd83fece6e5dafbb229aee4c293953e354cb42d
-      spanHash: sha256:1733171e7240fc8f206a4c0b3a4e45a4e587c252a9f72e0a2d8fc25f2ceae9fd
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:689f7d95af7c2d0e45c0685656a21dd949e25bb9d463606cc2962a7c31abddae
   confidence: high
 ---
 
@@ -45,8 +45,8 @@ Secret entry can mint a link, accept the browser submission, and poll the result
 
 **What to do:** preserve both shared verification and shared outcome storage when scaling this flow. Database sharing alone leaves browser links unverifiable on another replica. [Secrets and tools](../tool-secrets.md) already describes browser entry; this concept records the replica contract.
 
-[^key]: src/mcp/server.ts, lines 139-155.
+[^key]: src/mcp/server.ts, lines 174-188.
 
-[^codec]: src/mcp/server.ts, lines 191-202.
+[^codec]: src/mcp/server.ts, lines 224-235.
 
-[^outcome]: src/mcp/tools/secret-elicitation.ts, lines 79-104.
+[^outcome]: src/mcp/tools/secret-elicitation.ts, lines 224-237.

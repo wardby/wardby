@@ -16,6 +16,8 @@
 
 ## Invariants
 
+- [Secret entry generations must survive result consumption](secret-entry-generation-retention.md) — Consumed outcomes retain replay protection, and minting a new link extends the generation record’s lifetime.
+
 - [HTTP compatibility depends on bootstrap order](http-dispatcher-bootstrap.md) — A Kubernetes client import can change built-in fetch behavior even when jobs use Docker.
 - [Pricing races must use the persisted winner](run-pricing-first-writer.md) — Concurrent native attempts must reuse the catalog terms that won the conditional pricing write.
 - [Private datastore wrappers must reject shared methods](private-datastore-shared-boundary.md) — Prefix restrictions on private keys cannot authorize the provider shared-store methods.
@@ -27,7 +29,7 @@
 - [Proxy usage projections must not govern settlement](proxy-settlement-projections.md) — Run totals are rebuilt from settled requests while per-model reporting failures are isolated by a savepoint.
 - [Untrusted file bounds belong to the open descriptor](bounded-file-descriptor.md) — Checking a path before reading it leaves file substitution and growth races across worker boundaries.
 - [Agent authorization must share the mutation transaction](transactional-agent-authorization.md) — Using the default access client inside a transaction disconnects grant reads from mutation isolation.
-- [Budget-waiting delegations retain admission slots](delegation-admission-slots.md) — Releasing the delegation gate during a budget wait must preserve duplicate-child and delegation-limit accounting.
+- [Budget-waiting delegations retain admission slots](delegation-admission-slots.md) — Releasing the delegation gate during a budget wait must preserve checks for duplicate child/repository slots and delegation limits.
 - [Schedule deduplication belongs to the transaction](schedule-claim-transaction.md) — A scheduler lease cannot replace the atomic schedule-window claim and run creation.
 - [Terminal run state belongs to the first writer](terminal-run-first-writer.md) — Run completion must conditionally write pending or running rows and read back the persisted winner.
 - [Task cancellation takes precedence over run status](mcp-cancelled-task-precedence.md) — A cancelled task remains cancelled even if its underlying run finishes with a different terminal outcome.
@@ -44,14 +46,14 @@
 
 ## Coverage
 
-1. src/mcp/ (tools, auth, access, grants): covered 2026-10-17 (6 concepts)
+1. src/mcp/ (tools, auth, access, grants): covered 2026-11-23 (7 concepts)
 2. src/config/ and env handling: covered 2026-10-17 (2 concepts)
-3. src/core/ runner, scheduler, dispatch, budgets, delegation: covered 2026-10-17 (7 concepts)
-4. src/coding/ and src/coding-worker/, src/claude-*/ (coding runs, workers): covered 2026-10-17 (2 concepts)
+3. src/core/ runner, scheduler, dispatch, budgets, delegation: covered 2026-11-23 (7 concepts)
+4. src/coding/ and src/coding-worker/, src/claude-*/ (coding runs, workers): covered 2026-11-23 (2 concepts)
 5. src/providers/coding-proxy/ (proxy, package registry): covered 2026-10-17 (3 concepts)
-6. src/sandbox/ and src/native-worker/ (native sandbox, isolation): covered 2026-10-17 (3 concepts)
-7. src/providers/ other seams (LLM, auth, storage, VCS, executors): covered 2026-10-17 (7 concepts)
+6. src/sandbox/ and src/native-worker/ (native sandbox, isolation): covered 2026-11-23 (3 concepts)
+7. src/providers/ other seams (LLM, auth, storage, VCS, executors): covered 2026-11-23 (7 concepts)
 8. prisma/ (schema, migrations): covered 2026-10-17 (3 concepts)
 9. deploy/ (Terraform, Kubernetes, scripts): covered 2026-10-17 (2 concepts)
 10. src/quickstart/, src/import/, the CLI files in src/: covered 2026-10-17 (4 concepts)
-11. src/viewer/, src/observability/, src/knowledge/, src/tools/: covered 2026-10-17 (2 concepts)
+11. src/viewer/, src/observability/, src/knowledge/, src/tools/: covered 2026-11-23 (2 concepts)

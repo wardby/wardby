@@ -7,13 +7,13 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:22:32.722Z }
 sources:
   - id: runtime
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/runtime.ts#L83-L159
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/providers/coding-proxy/runtime.ts#L314-L410
   - id: session
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/proxy.ts#L978-L1020
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/providers/coding-proxy/proxy.ts#L1262-L1318
   - id: model
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/proxy.ts#L1041-L1094
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/providers/coding-proxy/proxy.ts#L1346-L1420
   - id: plan
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/coding-proxy/registry/service.ts#L585-L632
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/providers/coding-proxy/registry/service.ts#L854-L915
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -22,31 +22,31 @@ wardby:
     - id: runtime
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/runtime.ts
-      lines: [83, 159]
+      lines: [314, 410]
       symbol: startConfiguredCodingProxy
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:e0c409bf7f5d1198dc24c3e98979f711519b4b3c0630ad841d87b27db4d11206
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:c2bc812a6127fbc0bc55a5f8d57b9d3049cb41e648fe152316f7de7c5a0476b1
     - id: session
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/proxy.ts
-      lines: [978, 1020]
+      lines: [1262, 1318]
       symbol: CodingProxy.createSession
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:976389493738ea51632f2dfbcf503b96f2506aa5105f82942efce825e075fb9e
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:5d3b103d1a0010764e3be1887dd0cae01871a81f703628ac1484f5e6a58f08fd
     - id: model
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/proxy.ts
-      lines: [1041, 1094]
+      lines: [1346, 1420]
       symbol: CodingProxy.execute
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:b439b84431007b244f246836807cbae4b4a075c4bf1a1f618c11877e7d0082b7
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:d5db5febc7e859426a007a1720d9fd725de31e2a9ab79cd84debf21181bb9b11
     - id: plan
       repo: github:wardby/wardby
       path: src/providers/coding-proxy/registry/service.ts
-      lines: [585, 632]
+      lines: [854, 915]
       symbol: RegistryService.planLockfile / runPlan
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:f3a6b41a918c6c88275abf0f72536341483cdcd1d3aceaf8e3b7e4821513413d
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:098cdc3bfad87513727db318bf648ef802ba19a35f20a81e534e35d74e6129f4
   confidence: high
 ---
 
@@ -63,10 +63,10 @@ The area owns model-session and request accounting, registry facts and approvals
 
 **What to do:** preserve [settlement versus reporting isolation](proxy-settlement-projections.md) and [blob absence semantics](blob-not-found-semantics.md). See [package policy](../coding-packages.md) and [worker isolation](../coding-worker-isolation.md) for operator guidance.
 
-[^runtime]: src/providers/coding-proxy/runtime.ts, lines 83-159.
+[^runtime]: src/providers/coding-proxy/runtime.ts, lines 314-410.
 
-[^session]: src/providers/coding-proxy/proxy.ts, lines 978-1020.
+[^session]: src/providers/coding-proxy/proxy.ts, lines 1262-1318.
 
-[^model]: src/providers/coding-proxy/proxy.ts, lines 1041-1094.
+[^model]: src/providers/coding-proxy/proxy.ts, lines 1346-1420.
 
-[^plan]: src/providers/coding-proxy/registry/service.ts, lines 585-632.
+[^plan]: src/providers/coding-proxy/registry/service.ts, lines 854-915.
