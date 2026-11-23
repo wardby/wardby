@@ -5753,6 +5753,8 @@ export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, categor
   [SERVICE_UNREADY_ERROR, SERVICE_UNREADY_CATEGORY],
   // A setup job (#589) exited non-zero: the launcher's diagnostic arrives as job_<code>.
   [`job_${SETUP_FAILED_ERROR}`, SETUP_FAILED_CATEGORY],
+  // The Docker launcher fails the launch itself with the plain code.
+  [SETUP_FAILED_ERROR, SETUP_FAILED_CATEGORY],
   // Services on a launcher that can't start them: refused at dispatch, failed here as a backstop.
   ["coding_services_unsupported", "preflight"],
   // An extra repository dispatch never resolved to a commit: refused before anything is cloned.

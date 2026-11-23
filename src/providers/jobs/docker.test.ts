@@ -25,6 +25,7 @@ import {
   type DockerCommandRunner,
   type DockerJobLauncherOptions,
   parseWorkerDiagnosticLine,
+  redactedSetupTail,
 } from "./docker.js";
 import {
   buildDockerIsolationPlan,
@@ -38,6 +39,7 @@ import { storageInitScript } from "./storage-init.js";
 import {
   buildServiceCreateArgs,
   dockerServiceContainerName,
+  dockerSetupContainerName,
   serviceMemoryMib,
   serviceTmpfsOptions,
 } from "./docker-services.js";
@@ -1141,12 +1143,21 @@ class ServicesFakeDocker extends FakeDocker {
   readonly removed = new Set<string>();
   readonly netns: string;
   readonly serviceContainers: Map<string, ResolvedCodingService>;
+  /** What `docker container wait` reports for a setup job's container (#589). */
+  setupExitCode = 0;
+  /** What `docker container logs` prints for a setup job's container. */
+  setupLog = "";
 
   constructor(job: JobSpec) {
     super(job);
     this.netns = this.plan.names.networkKeeperContainer;
     this.serviceContainers = new Map(
-      (job.services ?? []).map((service) => [dockerServiceContainerName(job.runId, service.name), service]),
+      (job.services ?? []).map((service) => [
+        service.kind === "setup"
+          ? dockerSetupContainerName(job.runId, service.name)
+          : dockerServiceContainerName(job.runId, service.name),
+        service,
+      ]),
     );
   }
 
@@ -1200,6 +1211,8 @@ class ServicesFakeDocker extends FakeDocker {
           this.removed.add(name);
           return this.ok();
         }
+        if (action === "wait") return { stdout: `${this.setupExitCode}\n`, stderr: "" };
+        if (action === "logs") return { stdout: this.setupLog, stderr: "" };
         if (action === "exec") {
           if (this.serviceVanishesOnProbe) {
             this.removed.add(name);
@@ -1290,7 +1303,8 @@ class ServicesFakeDocker extends FakeDocker {
     // What Docker reports for the create arguments the launcher built: env, entrypoint and mounts.
     const created = buildServiceCreateArgs(this.job, service);
     const flag = (f: string) => created.flatMap((v, i) => (v === f ? [created[i + 1]] : []));
-    const toolchain = service.kind === "toolchain";
+    // A toolchain and a setup job (#589) both run the command agent from their mounts.
+    const toolchain = service.kind === "toolchain" || service.kind === "setup";
     const storage = this.plan.names.storageVolume;
     const mounts = flag("--mount").map((spec) => {
       const target = /dst=([^,]+)/.exec(spec)![1];
@@ -1675,6 +1689,79 @@ describe("Docker launcher with services", () => {
   });
 
   const claudeRun = { provider: "claude-code", toolImage, limits: claudeLimits } as const;
+
+  describe("setup jobs (#589)", () => {
+    const MIGRATE = resolvedFromDefinition(
+      CodingServiceDefinitionSchema.parse({
+        name: "app-migrations",
+        version: "1",
+        kind: "setup",
+        image: `localhost:5001/migrate@sha256:${"e".repeat(64)}`,
+        command: ["migrate", "up"],
+        waitFor: ["postgres"],
+        serviceEnv: { DB_PASSWORD: "fake-throwaway-9f2c" },
+        resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 64 },
+      }),
+    );
+
+    async function setupRun(runId: string) {
+      const created = await servicesHarness(runId, { ...claudeRun, services: [POSTGRES, MIGRATE] });
+      created.docker.present.add(POSTGRES.image);
+      created.docker.present.add(MIGRATE.image);
+      return created;
+    }
+
+    it("copies the agent, then runs the job after the services and before the tool runner and agent", async () => {
+      const created = await setupRun("docker-setup-ok");
+      await created.launcher.launch(created.spec);
+      const names = created.docker.plan.names;
+      const setup = dockerSetupContainerName(created.spec.runId, "app-migrations");
+      const sequence = created.docker.calls.map((call) => call.args);
+      const at = (match: (args: readonly string[]) => boolean) => sequence.findIndex(match);
+      const copied = at((a) => a[1] === "exec" && a[2] === names.keeperContainer && a.join(" ").includes("wardby-cmd"));
+      const serviceReady = at(
+        (a) => a[1] === "exec" && a[2] === dockerServiceContainerName(created.spec.runId, "postgres"),
+      );
+      const waited = at((a) => a[1] === "wait" && a[2] === setup);
+      const toolCreated = at((a) => a[1] === "create" && a.includes(names.toolContainer));
+      expect(copied).toBeGreaterThanOrEqual(0);
+      expect(serviceReady).toBeGreaterThan(copied);
+      expect(waited).toBeGreaterThan(serviceReady);
+      expect(toolCreated).toBeGreaterThan(waited);
+      const create = sequence.find((a) => a[1] === "create" && a.includes(setup))!;
+      expect(create.slice(create.indexOf(MIGRATE.image) + 1)).toEqual([
+        "once",
+        "--result-file",
+        "/run/wardby/setup/result",
+        "--timeout-sec",
+        "600",
+        "--",
+        "migrate",
+        "up",
+      ]);
+      // A job that succeeded is removed straight away.
+      expect(sequence.some((a) => a[1] === "rm" && a.includes(setup))).toBe(true);
+    });
+
+    it("fails the launch as coding_setup_failed:<name> and never starts the tool runner or agent", async () => {
+      const created = await setupRun("docker-setup-fail");
+      created.docker.setupExitCode = 3;
+      created.docker.setupLog = "using password fake-throwaway-9f2c\nERROR: migration 7 failed\n";
+      await expect(created.launcher.launch(created.spec)).rejects.toThrow("coding_setup_failed:app-migrations");
+      const names = created.docker.plan.names;
+      const creates = commands(created.docker, "container", "create");
+      expect(creates.some((a) => a.includes(names.toolContainer))).toBe(false);
+      expect(creates.some((a) => a.includes(names.workerContainer))).toBe(false);
+    });
+  });
+
+  it("redacts a failed setup job's output tail by exact catalog value, and bounds it (#589)", () => {
+    const spec = { services: [{ ...POSTGRES, serviceEnv: { DB_PASSWORD: "fake-throwaway-9f2c" } }] };
+    const tail = redactedSetupTail(`${"x".repeat(20_000)}password fake-throwaway-9f2c done`, spec);
+    expect(tail).not.toContain("fake-throwaway-9f2c");
+    expect(tail).toContain("done");
+    expect(tail.length).toBeLessThanOrEqual(8 * 1024);
+  });
 
   it("on a toolchain run, copies the agent before any service and waits for it like a probe (#599)", async () => {
     const toolchain = resolvedFromDefinition(

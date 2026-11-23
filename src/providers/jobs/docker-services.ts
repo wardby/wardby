@@ -7,11 +7,13 @@
  */
 import { CODING_SERVICE_NAME } from "../../coding/protocol.js";
 import {
+  isSetupService,
   isToolchainService,
   runningServices,
   sidecarOnly,
   StoredCodingServicesSchema,
   type ResolvedCodingService,
+  type ResolvedSetupService,
   type ResolvedToolchainService,
 } from "../../coding/services/catalog.js";
 import { TOOLCHAIN_AGENT } from "./claude-tool-setup.js";
@@ -56,6 +58,23 @@ export function dockerServiceContainerName(runId: string, serviceName: string): 
   return `wardby-svc-${isolationToken(runId)}-${serviceName}`;
 }
 
+/** A setup job's container (#589): `wardby-setup-<token>-<name>`, apart from the service containers. */
+export function dockerSetupContainerName(runId: string, jobName: string): string {
+  if (!CODING_SERVICE_NAME.test(jobName)) throw isolationError();
+  return `wardby-setup-${isolationToken(runId)}-${jobName}`;
+}
+
+/** The container names of a spec's setup jobs, for stop and cleanup: names only, never launch input. */
+export function dockerSetupContainerNames(spec: JobSpec): string[] {
+  return (spec.services ?? [])
+    .filter((service) => service.kind === "setup" && CODING_SERVICE_NAME.test(service.name))
+    .map((service) => dockerSetupContainerName(spec.runId, service.name));
+}
+
+/** Where a Docker setup job writes its result file: a small tmpfs of its own (the launcher reads its exit code). */
+const SETUP_RESULT_DIR = "/run/wardby/setup";
+const SETUP_RESULT_TMPFS_MIB = 1;
+
 /** The container names of a spec's services, for stop and cleanup: names only, never launch input. */
 export function dockerServiceContainerNames(spec: JobSpec): string[] {
   // A setup job (#589) is not a service container (its own container is named differently).
@@ -83,11 +102,14 @@ export function validateDockerServices(spec: JobSpec): ResolvedCodingService[] {
 
 /** Its data path at its disk size, then SERVICE_SCRATCH_MIB for each writable path: the Kubernetes sizes. */
 export function serviceTmpfsOptions(entry: ResolvedCodingService): Record<string, string> {
-  // A toolchain has no data path: its disk backs HOME instead (pip, Poetry and git write there).
+  // A toolchain has no data path: its disk backs HOME instead (pip, Poetry and git write there). A
+  // setup job (#589) has none either: only its result file's tmpfs and its writable paths.
   const mounts = [
-    isToolchainService(entry)
-      ? { path: TOOLCHAIN_HOME, sizeMib: entry.resources.diskMib }
-      : { path: sidecarOnly(entry).dataPath, sizeMib: entry.resources.diskMib },
+    isSetupService(entry)
+      ? { path: SETUP_RESULT_DIR, sizeMib: SETUP_RESULT_TMPFS_MIB }
+      : isToolchainService(entry)
+        ? { path: TOOLCHAIN_HOME, sizeMib: entry.resources.diskMib }
+        : { path: sidecarOnly(entry).dataPath, sizeMib: entry.resources.diskMib },
     ...entry.writablePaths.map((path) => ({ path, sizeMib: SERVICE_SCRATCH_MIB })),
   ];
   return Object.fromEntries(
@@ -125,6 +147,27 @@ function toolchainCommand(spec: JobSpec, service: ResolvedToolchainService): str
   ];
 }
 
+/** A setup job's command (#589): run once from the read-only checkout, its exit code its container's. */
+function setupCommand(service: ResolvedSetupService): string[] {
+  return [
+    "once",
+    "--result-file",
+    `${SETUP_RESULT_DIR}/result`,
+    "--timeout-sec",
+    String(service.timeoutSeconds),
+    "--",
+    ...service.command,
+  ];
+}
+
+/** What a setup job mounts of the run's storage volume: the checkout and the agent's directory, both read-only. */
+function setupMounts(): Array<{ path: string; writable: boolean; subpath: string }> {
+  return [
+    { path: WORKER_PATHS.workspace, writable: false, subpath: "workspace" },
+    { path: TOOLCHAIN_AGENT_PATH, writable: false, subpath: "cmd" },
+  ];
+}
+
 /** What a toolchain mounts of the run's storage volume: the shared workspace and the agent's directory. */
 function toolchainMounts(): Array<{ path: string; writable: boolean; subpath: string }> {
   return [
@@ -137,6 +180,8 @@ export function buildServiceCreateArgs(spec: JobSpec, service: ResolvedCodingSer
   const names = isolationNames(spec.runId);
   const memoryMib = serviceMemoryMib(service);
   const toolchain = isToolchainService(service) ? service : undefined;
+  const setup = isSetupService(service) ? service : undefined;
+  const mounts = toolchain ? toolchainMounts() : setup ? setupMounts() : [];
   const env = Object.entries(containerEnvironment(service))
     .sort(([left], [right]) => left.localeCompare(right))
     .flatMap(([name, value]) => ["--env", `${name}=${value}`]);
@@ -144,7 +189,7 @@ export function buildServiceCreateArgs(spec: JobSpec, service: ResolvedCodingSer
     "container",
     "create",
     "--name",
-    dockerServiceContainerName(spec.runId, service.name),
+    setup ? dockerSetupContainerName(spec.runId, service.name) : dockerServiceContainerName(spec.runId, service.name),
     "--pull",
     "never",
     "--user",
@@ -175,13 +220,12 @@ export function buildServiceCreateArgs(spec: JobSpec, service: ResolvedCodingSer
     "--pids-limit",
     String(SERVICE_PIDS_LIMIT),
     ...Object.entries(serviceTmpfsOptions(service)).flatMap(([path, options]) => ["--tmpfs", `${path}:${options}`]),
-    // A toolchain (#599) shares the run's workspace and reads the agent from `cmd`; a sidecar mounts nothing.
-    ...(toolchain
-      ? toolchainMounts().flatMap(({ path, writable, subpath }) => [
-          "--mount",
-          `type=volume,src=${names.storageVolume},dst=${path},volume-subpath=${subpath},volume-nocopy${writable ? "" : ",readonly"}`,
-        ])
-      : []),
+    // A toolchain (#599) shares the run's workspace and reads the agent from `cmd`; a setup job (#589)
+    // reads both read-only; a sidecar mounts nothing.
+    ...mounts.flatMap(({ path, writable, subpath }) => [
+      "--mount",
+      `type=volume,src=${names.storageVolume},dst=${path},volume-subpath=${subpath},volume-nocopy${writable ? "" : ",readonly"}`,
+    ]),
     ...env,
     "--restart",
     "no",
@@ -192,9 +236,9 @@ export function buildServiceCreateArgs(spec: JobSpec, service: ResolvedCodingSer
     "--log-opt",
     "max-file=2",
     ...isolationLabelArgs(spec.runId),
-    ...(toolchain ? ["--entrypoint", TOOLCHAIN_ENTRYPOINT] : []),
+    ...(toolchain || setup ? ["--entrypoint", TOOLCHAIN_ENTRYPOINT] : []),
     service.image,
-    ...(toolchain ? toolchainCommand(spec, toolchain) : []),
+    ...(toolchain ? toolchainCommand(spec, toolchain) : setup ? setupCommand(setup) : []),
   ];
 }
 
@@ -270,7 +314,9 @@ export function assertServiceContainerInspection(
     (host.GroupAdd?.length ?? 0) !== 0 ||
     Object.keys(host.PortBindings ?? {}).length !== 0 ||
     host.PublishAllPorts !== false ||
-    (!isToolchainService(service) && ((host.Mounts?.length ?? 0) !== 0 || (container.Mounts?.length ?? 0) !== 0)) ||
+    (!isToolchainService(service) &&
+      !isSetupService(service) &&
+      ((host.Mounts?.length ?? 0) !== 0 || (container.Mounts?.length ?? 0) !== 0)) ||
     Object.keys(container.NetworkSettings?.Networks ?? {}).length !== 0 ||
     Object.keys(container.NetworkSettings?.Ports ?? {}).length !== 0 ||
     Object.keys(actualTmpfs).length !== Object.keys(expectedTmpfs).length ||
@@ -279,6 +325,16 @@ export function assertServiceContainerInspection(
     Object.entries(containerEnvironment(service)).some(([name, value]) => !env.includes(`${name}=${value}`))
   ) {
     throw isolationError();
+  }
+  if (isSetupService(service)) {
+    // Exactly the read-only checkout and agent directory, and `wardby-cmd once` as its entrypoint.
+    assertExactMountSet(container, names, setupMounts());
+    if (
+      JSON.stringify(container.Config?.Entrypoint ?? null) !== JSON.stringify([TOOLCHAIN_ENTRYPOINT]) ||
+      JSON.stringify(container.Config?.Cmd ?? null) !== JSON.stringify(setupCommand(service))
+    ) {
+      throw isolationError();
+    }
   }
   if (isToolchainService(service)) {
     // Exactly the workspace and the read-only agent directory, and the agent as its entrypoint.

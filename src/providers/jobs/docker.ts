@@ -47,12 +47,17 @@ import {
   specToolchain,
 } from "./docker-isolation.js";
 import type { CodingProvider } from "../../coding/provider.js";
-import { isToolchainService, sidecarOnly } from "../../coding/services/catalog.js";
-import { serviceUnreadyError } from "../../coding/services/wording.js";
+import { isToolchainService, runSetupJobs, sidecarOnly } from "../../coding/services/catalog.js";
+import { serviceUnreadyError, SETUP_FAILED_ERROR } from "../../coding/services/wording.js";
+import { redactExactSecretValues } from "../../core/secret-spans.js";
 import {
   assertServiceContainerInspection,
   buildDockerServicePlan,
+  buildServiceCreateArgs,
   dockerServiceContainerNames,
+  dockerSetupContainerName,
+  dockerSetupContainerNames,
+  validateDockerServices,
   type DockerServiceContainer,
 } from "./docker-services.js";
 import { claudeToolSetup } from "./claude-tool-setup.js";
@@ -624,6 +629,27 @@ class ServiceStartBudget {
   }
 }
 
+/** How long past a setup job's own timeout the launcher waits for its container to exit. */
+const SETUP_WAIT_GRACE_SECONDS = 30;
+/** How much of a failed setup job's output reaches the operator log (redacted), and nothing beyond it. */
+const SETUP_TAIL_LINES = 200;
+const SETUP_TAIL_BYTES = 8 * 1024;
+
+/**
+ * A failed setup job's output tail for the operator log (#589): redacted by exact value against every
+ * catalog value in the run's services' and setup jobs' environments, and bounded. Never on the run.
+ */
+export function redactedSetupTail(output: string, spec: Pick<JobSpec, "services">): string {
+  const values = (spec.services ?? []).flatMap((service) => Object.values(service.serviceEnv));
+  const bounded = output.length > SETUP_TAIL_BYTES ? output.slice(-SETUP_TAIL_BYTES) : output;
+  return redactExactSecretValues(bounded, values);
+}
+
+/** `coding_setup_failed:<name>` (the executor's service_setup): a setup job exited non-zero or timed out. */
+function setupFailed(name: string): Error {
+  return new Error(`${SETUP_FAILED_ERROR}:${name}`);
+}
+
 /** `coding_service_unready:<name>` (the executor's service_unready), keeping the Docker failure as the operator's cause. */
 function serviceUnready(name: string, cause?: unknown): Error {
   const error = serviceUnreadyError(name);
@@ -972,6 +998,9 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
           labels,
         )
       : undefined;
+    // Setup jobs (#589): one at a time, once every service is ready, before anything that runs the
+    // agent or its commands starts. A failure fails the launch, so the agent never starts.
+    if (networkKeeperId !== undefined) await this.runSetupJobs(record, labels, networkKeeperId);
     if (plan.toolCreateArgs) {
       await this.createAndAssert(
         appendLabels(plan.toolCreateArgs, labels),
@@ -1105,6 +1134,84 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
    * A local copy of the digest-pinned image is used as is; otherwise it is pulled, bounded by its
    * own limit and the run's deadline. Pull time does not count toward the start-up budget.
    */
+  /**
+   * Each setup job in declaration order: create and attest its container (the services' hardening, the
+   * checkout and the agent read-only, `wardby-cmd once` as its entrypoint), start it, wait for it to
+   * exit, and remove it. A non-zero exit (or no exit within its timeout) logs its redacted output tail
+   * for operators and fails the launch with coding_setup_failed:<name>.
+   */
+  private async runSetupJobs(record: DockerJobRecord, labels: Record<string, string>, keeperId: string): Promise<void> {
+    const jobs = runSetupJobs(validateDockerServices(record.spec));
+    const report = (name: string, update: Omit<ServiceStateUpdate, "runId" | "name">) =>
+      reportServiceState(this.options.onServiceState, { runId: record.runId, name, ...update });
+    for (const job of jobs) {
+      const container = dockerSetupContainerName(record.runId, job.name);
+      const planned: DockerServiceContainer = {
+        service: job,
+        container,
+        createArgs: buildServiceCreateArgs(record.spec, job),
+      };
+      const budget = new ServiceStartBudget(this.now, this.serviceReadyTimeoutMs, record.deadlineAt);
+      try {
+        await this.ensureServiceImage(planned, budget);
+      } catch {
+        await report(job.name, { state: "failed", reason: "image_unavailable" });
+        throw setupFailed(job.name);
+      }
+      await this.createAndAssert(
+        appendLabels(planned.createArgs, labels),
+        ["container", "inspect", container],
+        (value) => {
+          const inspected = value as DockerContainerInspection;
+          assertServiceContainerInspection(inspected, record.spec, job, keeperId);
+          if (!labelsMatch(inspected.Config?.Labels, labels)) throw new Error("docker_resource_attestation_failed");
+        },
+      );
+      await this.startContainer(container);
+      await report(job.name, { state: "probing" });
+      let exitCode: number;
+      try {
+        const waited = await this.run(["container", "wait", container], {
+          timeoutMs: (job.timeoutSeconds + SETUP_WAIT_GRACE_SECONDS) * 1_000,
+        });
+        exitCode = Number.parseInt(waited.stdout.trim(), 10);
+      } catch {
+        await this.stopContainer(container);
+        exitCode = 124;
+      }
+      if (exitCode !== 0) {
+        await report(job.name, { state: "failed", reason: "exited" });
+        await this.logSetupFailure(record, container, job.name, Number.isFinite(exitCode) ? exitCode : 1);
+        throw setupFailed(job.name);
+      }
+      await report(job.name, { state: "ready" });
+      await this.removeContainerIfAttested(container, labels, true);
+    }
+  }
+
+  /** A failed setup job's output tail, for operators only (CLAUDE.md's operator-diagnostics exception). */
+  private async logSetupFailure(record: DockerJobRecord, container: string, job: string, exitCode: number) {
+    let output = "";
+    try {
+      const logs = await this.run(["container", "logs", "--tail", String(SETUP_TAIL_LINES), container], {
+        maxOutputBytes: SETUP_TAIL_BYTES * 4,
+      });
+      output = `${logs.stdout}${logs.stderr}`;
+    } catch {
+      // Optional: the container's log may be gone or too large.
+    }
+    dockerLog.warn(
+      {
+        event: "coding.setup_failed",
+        runId: record.runId,
+        job,
+        exitCode,
+        tail: redactedSetupTail(output, record.spec),
+      },
+      "a setup job failed; the run did not start",
+    );
+  }
+
   private async ensureServiceImage(planned: DockerServiceContainer, budget: ServiceStartBudget): Promise<void> {
     try {
       await this.run(["image", "inspect", "--format", "{{.Id}}", planned.service.image]);
@@ -1257,6 +1364,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     }
     // Services stop with the run; they (and the network keeper) are removed with its other resources.
     for (const service of dockerServiceContainerNames(record.spec)) await this.stopContainer(service);
+    for (const job of dockerSetupContainerNames(record.spec)) await this.stopContainer(job);
     record.phase = timedOut ? "failed" : "stopped";
     record.result = timedOut ? { exitCode: 124, reason: "timed_out" } : resultFor("stopped");
     await this.writeRecord(record);
@@ -1295,6 +1403,8 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
     for (const service of dockerServiceContainerNames(record.spec)) {
       await this.removeContainerIfAttested(service, labels, true);
     }
+    // A setup job's container is removed once it succeeds; one that failed (or a launch cut short) here.
+    for (const job of dockerSetupContainerNames(record.spec)) await this.removeContainerIfAttested(job, labels, true);
     if (plan.networkKeeperCreateArgs) {
       await this.removeContainerIfAttested(plan.names.networkKeeperContainer, labels);
     }
@@ -1347,7 +1457,7 @@ export class DockerJobLauncher implements WorkspaceJobLauncher {
       hostPath: this.repositoryHostPath(record.runId, r),
     }));
     await this.transfer.seedDirectory(resolve(runRoot, "workspace"), keeper, "/run/wardby/storage/workspace");
-    if (specToolchain(record.spec)) {
+    if (specToolchain(record.spec) || runSetupJobs(record.spec.services ?? []).length > 0) {
       // The command agent and the run's token for the toolchain (#599), before any service starts: the
       // keeper runs Wardby's own worker image, which carries the agent. Nothing is printed.
       await this.run([

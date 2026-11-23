@@ -418,3 +418,36 @@ describe("Docker toolchain container (#599)", () => {
     expect(flagValues(buildServiceCreateArgs(claude, POSTGRES), "--mount")).toEqual([]);
   });
 });
+
+describe("Docker setup job container (#589)", () => {
+  const JOB = resolvedFromDefinition(
+    CodingServiceDefinitionSchema.parse({
+      name: "app-migrations",
+      version: "1",
+      kind: "setup",
+      image: `registry.example/migrate@sha256:${"e".repeat(64)}`,
+      command: ["migrate", "up"],
+      waitFor: ["postgres"],
+      resources: { cpuMillicores: 500, memoryMib: 1024, diskMib: 64 },
+      writablePaths: ["/tmp"],
+    }),
+  );
+  const withJob: JobSpec = { ...spec, services: [POSTGRES, JOB] };
+  const storage = isolationNames(withJob.runId).storageVolume;
+
+  it("mounts the checkout and the agent read-only and nothing else, under the services' hardening", () => {
+    const args = buildServiceCreateArgs(withJob, JOB);
+    expect(flagValues(args, "--name")).toEqual([`wardby-setup-${isolationToken(withJob.runId)}-app-migrations`]);
+    expect(flagValues(args, "--mount")).toEqual([
+      `type=volume,src=${storage},dst=/workspace,volume-subpath=workspace,volume-nocopy,readonly`,
+      `type=volume,src=${storage},dst=/opt/wardby-cmd,volume-subpath=cmd,volume-nocopy,readonly`,
+    ]);
+    expect(Object.keys(serviceTmpfsOptions(JOB))).toEqual(["/run/wardby/setup", "/tmp"]);
+    expect(args).toContain("--read-only");
+    expect(flagValues(args, "--entrypoint")).toEqual(["/opt/wardby-cmd/wardby-cmd"]);
+  });
+
+  it("is never a service container", () => {
+    expect(buildDockerServicePlan(withJob).map((planned) => planned.service.name)).toEqual(["postgres"]);
+  });
+});
