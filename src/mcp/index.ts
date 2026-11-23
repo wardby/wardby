@@ -653,6 +653,8 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
             clientId: webOidc.clientId,
             clientSecret: webOidc.clientSecret,
             scopes: webOidc.scopes,
+            subjectClaim: webOidc.subjectClaim,
+            subjectEmailDomain: webOidc.subjectEmailDomain,
             canonicalUri: canonicalHref,
             appKey: loadSecretConfig().appKey,
             fetchOptions: providers.sandboxFetchOptions,

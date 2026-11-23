@@ -206,10 +206,11 @@ describe("loadWebOidcConfig", () => {
       clientId: "c",
       clientSecret: undefined,
       scopes: "openid profile email",
+      subjectClaim: "sub",
     });
     expect(
       loadWebOidcConfig({ WEB_OIDC_CLIENT_ID: " c ", WEB_OIDC_CLIENT_SECRET: "s", WEB_OIDC_SCOPES: "openid email" }),
-    ).toEqual({ clientId: "c", clientSecret: "s", scopes: "openid email" });
+    ).toEqual({ clientId: "c", clientSecret: "s", scopes: "openid email", subjectClaim: "sub" });
     expect(loadWebOidcConfig({}).clientId).toBeUndefined();
   });
 });
@@ -326,6 +327,50 @@ describe.skipIf(!process.env.DATABASE_URL)("finishLogin (database)", () => {
     expect(form.get("redirect_uri")).toBe("https://wardby.example.com/web/callback");
     expect(form.get("client_secret")).toBeNull();
     expect(authorization).toBe(`Basic ${Buffer.from(`${CLIENT_ID}:${FAKE_SECRET}`).toString("base64")}`);
+  });
+
+  it("with WEB_OIDC_SUBJECT_CLAIM, lands on the principal the access token's sub maps to", async () => {
+    // Okta-style: the ID token's sub is the provider's opaque id; the access token's sub travels in a custom claim.
+    const mcpPrincipal = await resolvePrincipal(`${subject}-claim`, db);
+    const login = createOidcLogin(options({ subjectClaim: "wardby_sub" }));
+    const { cookieHeader, state } = await begin(login);
+    idOverrides = { subject: "00u-opaque-id", claims: { wardby_sub: `${subject}-claim` } };
+    await withMintedReply();
+    const result = await login.finishLogin(db, { url: callback(state), cookieHeader });
+    expect(result.principalId).toBe(mcpPrincipal.id);
+    expect(await db.principal.findUnique({ where: { subject: "00u-opaque-id" } })).toBeNull();
+    await db.principalProfile.deleteMany({ where: { principalId: mcpPrincipal.id } });
+  });
+
+  it("with WEB_OIDC_SUBJECT_CLAIM, fails when the claim is missing instead of falling back to sub", async () => {
+    const login = createOidcLogin(options({ subjectClaim: "wardby_sub" }));
+    const { cookieHeader, state } = await begin(login);
+    idOverrides = { subject: `${subject}-fallback` };
+    await withMintedReply();
+    expect(await codeOf(login.finishLogin(db, { url: callback(state), cookieHeader }))).toBe("web_login_failed");
+    expect(await db.principal.findUnique({ where: { subject: `${subject}-fallback` } })).toBeNull();
+  });
+
+  it("with WEB_OIDC_SUBJECT_EMAIL_DOMAIN, uses a verified email's local part at that domain only", async () => {
+    const local = `${subject}-mail`;
+    const mcpPrincipal = await resolvePrincipal(local, db);
+    const login = createOidcLogin(options({ subjectEmailDomain: "example.com" }));
+    let { cookieHeader, state } = await begin(login);
+    idOverrides = { subject: "00u-opaque-id", claims: { email: `${local}@Example.COM`, email_verified: true } };
+    await withMintedReply();
+    expect((await login.finishLogin(db, { url: callback(state), cookieHeader })).principalId).toBe(mcpPrincipal.id);
+    await db.principalProfile.deleteMany({ where: { principalId: mcpPrincipal.id } });
+    // Unverified, or another domain: the sign-in fails and no principal is made.
+    for (const claims of [
+      { email: `${local}-x@example.com`, email_verified: false },
+      { email: `${local}-x@example.com.evil.test`, email_verified: true },
+    ]) {
+      ({ cookieHeader, state } = await begin(login));
+      idOverrides = { subject: "00u-opaque-id", claims };
+      await withMintedReply();
+      expect(await codeOf(login.finishLogin(db, { url: callback(state), cookieHeader }))).toBe("web_login_failed");
+    }
+    expect(await db.principal.findUnique({ where: { subject: `${local}-x` } })).toBeNull();
   });
 
   it("uses preferred_username when the ID token has no name, and a public client sends only client_id", async () => {
