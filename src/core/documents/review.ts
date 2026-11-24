@@ -22,7 +22,7 @@ import { Prisma, type PrismaClient } from "#prisma";
 import { atLeast, principalGranteeKey } from "../grants.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
-import { documentAccess, requireDocumentAccess, type Viewer } from "./access.js";
+import { documentAccess, refuseAgentViewer, requireDocumentAccess, type Viewer } from "./access.js";
 import { mentionCandidates, principalNames } from "./comments.js";
 import { notifyDocumentChange } from "./events.js";
 import { planReviewHook } from "../plans/approval.js";
@@ -333,14 +333,15 @@ export async function reviewDocument(
     note?: string;
   },
 ): Promise<ReviewView> {
-  const doc = await requireDocumentAccess(db, input.documentId, input.viewer, "comment");
+  const viewer = input.viewer;
+  refuseAgentViewer(viewer);
+  const doc = await requireDocumentAccess(db, input.documentId, viewer, "comment");
   const note = await storedNote(db, cipher, doc.agentId, input.note);
   const verdict: Verdict = input.verdict === "approve" ? "approved" : "changes_requested";
   const changed = await inReviewTx(db, async (tx) => {
     // Live access decides inside the transaction: a grant or link revoked since the early check is seen here.
     await requireDocumentAccess(tx, input.documentId, input.viewer, "comment");
     const { doc: row, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
-    const viewer = input.viewer;
     const mine = reviewers.find((r) =>
       viewer.kind === "principal" ? r.principalId === viewer.principalId : r.guestId === viewer.guestId,
     );
@@ -566,6 +567,7 @@ export async function documentReviewState(
 }
 
 export async function getReviewView(db: PrismaClient, documentId: string, viewer: Viewer): Promise<ReviewView> {
+  refuseAgentViewer(viewer);
   await requireDocumentAccess(db, documentId, viewer, "read");
   const access = await documentAccess(db, documentId, viewer);
   // One snapshot: state, reviewers, the force banner and the events agree with each other.

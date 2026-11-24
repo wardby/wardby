@@ -49,6 +49,13 @@ export function principalGranteeKey(principalId: string): string {
   return `principal:${principalId}`;
 }
 
+export function agentGranteeKey(agentId: string): string {
+  return `agent:${agentId}`;
+}
+
+/** Agents never hold write on a document through a grant: write comes from Document.agentId (#625). */
+export const AGENT_DOCUMENT_GRANT_MAX = "comment";
+
 export function isResourceType(value: string): value is ResourceType {
   return Object.hasOwn(LEVELS, value);
 }

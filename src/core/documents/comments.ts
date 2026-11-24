@@ -5,7 +5,7 @@ import { atLeast } from "../grants.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { cutUntrustedText } from "../untrusted-content.js";
-import { documentAccess, requireDocumentAccess } from "./access.js";
+import { documentAccess, refuseAgentViewer, requireDocumentAccess } from "./access.js";
 import type { Viewer } from "./access.js";
 import { DOCUMENT_WRITE_ATTEMPTS, MAX_COMMENT_CHARS } from "./limits.js";
 import { parseGuestMentions, parseMentionRefs } from "./mentions.js";
@@ -102,6 +102,7 @@ async function mentionsWithoutAccess(db: CommentDb, documentId: string, body: st
 }
 
 function authorFields(viewer: Viewer): { authorId: string | null; guestId: string | null } {
+  refuseAgentViewer(viewer);
   return viewer.kind === "principal"
     ? { authorId: viewer.principalId, guestId: null }
     : { authorId: null, guestId: viewer.guestId };
@@ -183,6 +184,7 @@ export async function commentByOthersSince(
   viewer: Viewer,
   since: Date,
 ): Promise<boolean> {
+  refuseAgentViewer(viewer);
   const others: Prisma.CommentWhereInput =
     viewer.kind === "principal"
       ? { OR: [{ authorId: null }, { authorId: { not: viewer.principalId } }, { runId: { not: null } }] }
@@ -198,6 +200,7 @@ export async function setThreadStatus(
   db: CommentDb,
   input: { threadId: string; viewer: Viewer; status: "open" | "resolved" },
 ): Promise<void> {
+  refuseAgentViewer(input.viewer);
   const thread = await db.commentThread.findUnique({
     where: { id: input.threadId },
     include: { comments: { orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 1 } },
@@ -225,6 +228,7 @@ export async function setThreadStatus(
 }
 
 async function ownComment(db: CommentDb, commentId: string, viewer: Viewer) {
+  refuseAgentViewer(viewer);
   const c = await db.comment.findUnique({ where: { id: commentId }, include: { thread: true } });
   if (!c || c.deletedAt) throw new Error("comment_not_found");
   const doc = await requireDocumentAccess(db, c.thread.documentId, viewer, "comment");
@@ -257,7 +261,9 @@ export async function listThreads(
   db: CommentDb,
   input: { documentId: string; viewer: Viewer; filter: ThreadFilter },
 ): Promise<ThreadView[]> {
-  const doc = await requireDocumentAccess(db, input.documentId, input.viewer, "read");
+  const viewer = input.viewer;
+  refuseAgentViewer(viewer);
+  const doc = await requireDocumentAccess(db, input.documentId, viewer, "read");
   const threads = await db.commentThread.findMany({
     where: {
       documentId: input.documentId,
@@ -286,7 +292,7 @@ export async function listThreads(
   const guestName = new Map(guests.map((g) => [g.id, g.name]));
   const isMine = (c: { authorId: string | null; guestId: string | null; runId: string | null }) =>
     c.runId === null &&
-    (input.viewer.kind === "principal" ? c.authorId === input.viewer.principalId : c.guestId === input.viewer.guestId);
+    (viewer.kind === "principal" ? c.authorId === viewer.principalId : c.guestId === viewer.guestId);
 
   const fmt = formatFor(doc.kind);
   const views: ThreadView[] = threads.flatMap((t) => {

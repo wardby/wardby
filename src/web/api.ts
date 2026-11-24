@@ -12,7 +12,7 @@
  */
 import type { ServerResponse } from "node:http";
 import { atLeast } from "../core/grants.js";
-import { documentAccess, requireDocumentAccess, type Viewer } from "../core/documents/access.js";
+import { documentAccess, refuseAgentViewer, requireDocumentAccess, type Viewer } from "../core/documents/access.js";
 import {
   createThread,
   deleteComment,
@@ -79,6 +79,7 @@ export async function describeViewer(
   viewer: Viewer,
   anonymous = false,
 ): Promise<PageViewer> {
+  refuseAgentViewer(viewer);
   const access = await documentAccess(deps.db, documentId, viewer);
   if (viewer.kind === "principal") {
     const names = await principalNames(deps.db, [viewer.principalId]);

@@ -1,5 +1,6 @@
 import type { PrismaClient, Document } from "#prisma";
-import { accessRank, atLeast, effectiveAccess } from "../grants.js";
+import { AGENT_DOCUMENT_GRANT_MAX, accessRank, agentGranteeKey, atLeast, effectiveAccess, isLevel } from "../grants.js";
+import { parseStoredDocumentTools } from "./tools-setting.js";
 
 /**
  * Who is asking. A principal who opened the document through a share link
@@ -8,10 +9,19 @@ import { accessRank, atLeast, effectiveAccess } from "../grants.js";
  */
 export type Viewer =
   | { kind: "principal"; principalId: string; operator?: boolean; shareLinkId?: string }
-  | { kind: "guest"; guestId: string; shareLinkId: string; permission: "view" | "comment" };
+  | { kind: "guest"; guestId: string; shareLinkId: string; permission: "view" | "comment" }
+  | { kind: "agent"; agentId: string; runId: string };
+
+/**
+ * Agent viewers get their document actions in the agent tools (#625); every person-only path refuses them here,
+ * so none can act as a person or a guest by accident.
+ */
+export function refuseAgentViewer(viewer: Viewer): asserts viewer is Exclude<Viewer, { kind: "agent" }> {
+  if (viewer.kind === "agent") throw new Error("document_access_denied");
+}
 
 export type DocumentAccess = "none" | "read" | "comment" | "write" | "owner";
-export type DocumentDb = Pick<PrismaClient, "document" | "documentShareLink" | "resourceGrant">;
+export type DocumentDb = Pick<PrismaClient, "agent" | "document" | "documentShareLink" | "resourceGrant">;
 
 export async function documentAccess(db: DocumentDb, documentId: string, viewer: Viewer): Promise<DocumentAccess> {
   const doc = await db.document.findUnique({
@@ -58,7 +68,46 @@ async function planAccess(db: DocumentDb, doc: AccessDoc, principalId: string): 
   return atLeast("agent", await effectiveAccess(db, "agent", agent, principalId), "read") ? "comment" : "none";
 }
 
+/**
+ * What a native agent may do with a document (#625). Never derived from its owner's reach: only the document
+ * it is linked to (write; comment inside a plan set), agent grants (capped at comment), and the planners named
+ * in its documentTools.plans (comment). No setting, or a non-native agent, means none; access "read" caps at read.
+ */
+export async function agentDocumentAccess(db: DocumentDb, doc: AccessDoc, agentId: string): Promise<DocumentAccess> {
+  const agent = await db.agent.findUnique({ where: { id: agentId }, select: { kind: true, documentTools: true } });
+  const setting = agent?.kind === "native" ? parseStoredDocumentTools(agent.documentTools) : null;
+  if (!setting) return "none";
+  const full = await db.document.findUnique({
+    where: { id: doc.id },
+    select: { agentId: true, planSet: { select: { agentId: true } } },
+  });
+  if (!full) return "none";
+  let best: DocumentAccess = "none";
+  if (full.agentId === agentId) best = full.planSet ? "comment" : "write";
+  const grant = await db.resourceGrant.findUnique({
+    where: {
+      resourceType_resourceId_granteeKey: {
+        resourceType: "document",
+        resourceId: doc.id,
+        granteeKey: agentGranteeKey(agentId),
+      },
+    },
+    select: { level: true },
+  });
+  if (grant && isLevel("document", grant.level)) {
+    const capped =
+      accessRank("document", grant.level) > accessRank("document", AGENT_DOCUMENT_GRANT_MAX)
+        ? AGENT_DOCUMENT_GRANT_MAX
+        : grant.level;
+    best = higher(best, capped);
+  }
+  if (full.planSet && setting.plans.includes(full.planSet.agentId)) best = higher(best, "comment");
+  if (setting.access === "read" && accessRank("document", best) > accessRank("document", "read")) best = "read";
+  return best;
+}
+
 async function accessTo(db: DocumentDb, doc: AccessDoc, viewer: Viewer): Promise<DocumentAccess> {
+  if (viewer.kind === "agent") return agentDocumentAccess(db, doc, viewer.agentId);
   if (viewer.kind !== "principal") return linkAccess(db, doc, viewer.shareLinkId);
   let best: DocumentAccess = await effectiveAccess(db, "document", doc, viewer.principalId, {
     operator: viewer.operator,
