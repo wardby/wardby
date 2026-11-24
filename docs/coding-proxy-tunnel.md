@@ -271,8 +271,10 @@ Things to know when you set a run up yourself or debug one:
   environment prints the token. Run steps and debug traces redact it, as they
   do the registry token, but it is still a credential for the tunnel: it lets
   the run reach the allowlisted hosts and nothing else.
-- Docker takes its proxy settings from its own configuration, not from these
-  variables.
+- A `docker` service's daemon gets the same proxy settings, and the
+  interception CA, from the run's Secret (see
+  [Pulling and pushing images](coding-services.md#pulling-and-pushing-images)).
+  `docker build` passes them to `RUN` steps only with `--build-arg`.
 - The network must stop a run reaching the internet except through the proxy.
   The tunnel only controls traffic that is sent to it. Both launchers already
   enforce this for the run network.

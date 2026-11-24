@@ -6,7 +6,7 @@
  */
 
 /** Hosts that never go through the tunnel: the machine itself, and the proxy's own address. */
-function noProxyList(proxyHost: string): string {
+export function tunnelNoProxy(proxyHost: string): string {
   return ["localhost", "127.0.0.1", "::1", proxyHost].join(",");
 }
 
@@ -17,7 +17,7 @@ function noProxyList(proxyHost: string): string {
  */
 export function tunnelProxyEnv(input: { proxyHost: string; port: number; token: string }): Record<string, string> {
   const url = `http://run:${input.token}@${input.proxyHost}:${input.port}`;
-  const noProxy = noProxyList(input.proxyHost);
+  const noProxy = tunnelNoProxy(input.proxyHost);
   return {
     HTTPS_PROXY: url,
     https_proxy: url,

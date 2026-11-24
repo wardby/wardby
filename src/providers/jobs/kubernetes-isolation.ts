@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import type {
   V1Container,
+  V1EnvVar,
   V1NetworkPolicy,
   V1Pod,
   V1PodSpec,
@@ -44,6 +45,8 @@ import {
   toolchainDockerScript,
 } from "./storage-init.js";
 import { TOOLCHAIN_AGENT } from "./claude-tool-setup.js";
+import { tunnelNoProxy, tunnelProxyEnv } from "../../coding/tunnel-env.js";
+import { deriveTunnelToken } from "../../coding/tunnel-token.js";
 import type { JobSpec } from "./types.js";
 import {
   CLAUDE_CONFIG_PATH,
@@ -85,6 +88,14 @@ export const TOOL_RUNNER_CONTAINER = "tool-runner";
 export const TOOL_SETUP_SECRET_KEY = "tool-setup";
 /** The run Secret's key for the MCP token (a run with MCP tools only); the agent container alone reads it. */
 export const MCP_TOKEN_SECRET_KEY = "mcp-token";
+/**
+ * The run Secret's key for the docker daemon's proxy URL: the run's CONNECT tunnel with its tunnel-only
+ * token (tunnelProxyEnv), the same value the agent's shells get. Only on a run with a docker service and
+ * the tunnel on (dockerDaemonTunnel); the daemon alone reads it.
+ */
+export const DOCKER_TUNNEL_PROXY_SECRET_KEY = "docker-tunnel-proxy";
+/** The run Secret's key for the tunnel's interception CA certificate (public), mounted for the docker daemon. */
+export const DOCKER_TUNNEL_CA_SECRET_KEY = "docker-tunnel-ca";
 /** Where the tool runner listens and the agent's relay connects (claude-tool-runner/main.mjs). */
 export const TOOL_SOCKET_PATH = "/run/wardby/tool/runner.sock";
 const CODEX_ENTRYPOINT = "/opt/wardby/coding-worker/main.js";
@@ -155,6 +166,12 @@ const DOCKER_SOCKET_VOLUME = "docker-socket";
 const DOCKER_XDG_VOLUME = "docker-xdg";
 const DOCKER_HOME_VOLUME = "docker-home";
 const DOCKER_TMP_VOLUME = "docker-tmp";
+/** The run Secret's CA key alone, as a file, for the daemon: a directory added to its SSL_CERT_DIR. */
+const DOCKER_TUNNEL_CA_VOLUME = "docker-tunnel-ca";
+const DOCKER_TUNNEL_CA_DIR = "/wardby/tunnel-ca";
+const DOCKER_TUNNEL_CA_FILE = "tunnel-ca.crt";
+/** Where the dind-rootless image (Alpine) keeps its system roots; SSL_CERT_DIR replaces the default list, so it is named too. */
+const DOCKER_SYSTEM_CERT_DIR = "/etc/ssl/certs";
 const DOCKER_XDG_PATH = "/wardby/xdg";
 const DOCKER_HOME_PATH = "/home/wardby";
 const DOCKER_SOCKET_VOLUME_MIB = 1;
@@ -167,8 +184,10 @@ export const DOCKER_MEMORY_VOLUMES_MIB = DOCKER_SOCKET_VOLUME_MIB + DOCKER_XDG_V
  * rootlesskit with exactly these (anything else and it adds a TLS TCP API on 0.0.0.0:2376).
  * gVisor has no nftables and dockerd cannot set ip_forward there, so no iptables and no bridge:
  * host networking only (Docker's bridge network is also very slow under gVisor). The socket is the
- * only API. Pulls go through the coding proxy's registry route: Docker Hub names via the mirror,
- * other images named wardby-proxy:8787/<path>; it serves plain HTTP inside the cluster.
+ * only API. No registry mirror and no insecure registry: the daemon pulls (and pushes) like any other
+ * HTTPS client in the run, through the run's CONNECT tunnel (dockerDaemonEnv), so only the tunnel's
+ * allowlisted hosts are reachable, and an intercepted host gets its credential from the proxy. With the
+ * tunnel off, the run's network policy leaves the daemon no way out, and nothing can be pulled.
  */
 export const DOCKERD_ARGS: readonly string[] = Object.freeze([
   "dockerd",
@@ -176,9 +195,24 @@ export const DOCKERD_ARGS: readonly string[] = Object.freeze([
   "--ip6tables=false",
   "--bridge=none",
   `--host=unix://${DOCKER_SOCKET_PATH}`,
-  `--registry-mirror=http://${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
-  `--insecure-registry=${CODING_PROXY_ALIAS}:${CODING_PROXY_PORT}`,
 ]);
+
+/** How a run's docker daemon reaches registries: the run's tunnel, and whether it trusts the interception CA. */
+export interface DockerDaemonTunnel {
+  /** The run Secret holding DOCKER_TUNNEL_PROXY_SECRET_KEY (and DOCKER_TUNNEL_CA_SECRET_KEY with trustCa). */
+  secretName: string;
+  trustCa: boolean;
+}
+
+/**
+ * Whether a run's docker daemon uses the run's tunnel: only with a docker service and the tunnel on, and
+ * the interception CA only when the deployment set one. buildRunPod and buildCapabilitySecret both ask
+ * this, so the daemon never references a Secret key the Secret lacks.
+ */
+export function dockerDaemonTunnel(spec: JobSpec): Omit<DockerDaemonTunnel, "secretName"> | undefined {
+  if (!spec.tunnelPort || !(spec.services ?? []).some(isDockerService)) return undefined;
+  return { trustCa: spec.tunnelCaCert !== undefined };
+}
 
 export const STORAGE_ROOT = "/run/wardby/storage";
 export const KEEPER_SEEDED_MARKER = `${STORAGE_ROOT}/input/.seeded`;
@@ -444,23 +478,26 @@ function serviceStorage(
  * A docker service as a native sidecar (docs/coding-services.md): rootless dockerd from the
  * catalog's image (wardby-docker-service, src/docker-service/Dockerfile: docker:*-dind-rootless with a
  * subuid/subgid range for the run uid). wardby sets everything but the image and resources: DOCKERD_ARGS, the
- * environment (iptables-legacy for gVisor; HOME and XDG_RUNTIME_DIR on its writable volumes),
- * dockerServiceSecurity(), and a startup probe that holds the keeper and worker until the socket
- * exists. It gets no secret value: no capability, no WARDBY_* variable, no Secret reference. Its
- * output goes to the container's log only. The worker (Codex) or tool runner (Claude Code) mounts
- * the socket volume, and DOCKER_HOST (its testEnv) points the agent's docker CLI at it.
+ * environment (iptables-legacy for gVisor; HOME and XDG_RUNTIME_DIR on its writable volumes; the
+ * run's tunnel, dockerDaemonEnv), dockerServiceSecurity(), and a startup probe that holds the keeper
+ * and worker until the socket exists. Its one secret value, only with the tunnel on, is the run's
+ * tunnel-only token inside its proxy URL: never the capability, no WARDBY_* variable. The agent's
+ * shells hold the same token and drive this daemon through its socket, so the daemon can reach nothing
+ * the agent can't. Its output goes to the container's log only. The worker (Codex) or tool runner
+ * (Claude Code) mounts the socket volume, and DOCKER_HOST (its testEnv) points the agent's docker CLI
+ * at it.
  */
-function dockerServiceSidecar(service: ResolvedDockerService, profile: KubernetesPlatformProfile): V1Container {
+function dockerServiceSidecar(
+  service: ResolvedDockerService,
+  profile: KubernetesPlatformProfile,
+  tunnel?: DockerDaemonTunnel,
+): V1Container {
   return {
     name: serviceContainerName(service.name),
     image: service.image,
     restartPolicy: "Always",
     args: [...DOCKERD_ARGS],
-    env: [
-      { name: "DOCKER_IPTABLES_LEGACY", value: "1" },
-      { name: "HOME", value: DOCKER_HOME_PATH },
-      { name: "XDG_RUNTIME_DIR", value: DOCKER_XDG_PATH },
-    ],
+    env: dockerDaemonEnv(tunnel),
     securityContext: dockerServiceSecurity(),
     resources: conformResources(profile, {
       cpuMillicores: service.resources.cpuMillicores,
@@ -474,8 +511,39 @@ function dockerServiceSidecar(service: ResolvedDockerService, profile: Kubernete
       failureThreshold: 60,
       successThreshold: 1,
     },
-    volumeMounts: serviceStorage(service, 0).map(({ name, mountPath }) => ({ name, mountPath })),
+    volumeMounts: [
+      ...serviceStorage(service, 0).map(({ name, mountPath }) => ({ name, mountPath })),
+      ...(tunnel?.trustCa ? [{ name: DOCKER_TUNNEL_CA_VOLUME, mountPath: DOCKER_TUNNEL_CA_DIR, readOnly: true }] : []),
+    ],
   };
+}
+
+/**
+ * The daemon's environment. With the tunnel: HTTP(S)_PROXY in both cases from the run Secret (the
+ * value carries the tunnel token, so it never sits in the pod spec), and NO_PROXY as the agent's
+ * shells have it. With the interception CA: SSL_CERT_DIR adds it beside the image's system roots, so a
+ * blind tunnelled host still verifies against those. Go reads SSL_CERT_DIR for the daemon's registry
+ * client; rootlesskit passes the environment through.
+ */
+function dockerDaemonEnv(tunnel?: DockerDaemonTunnel): V1EnvVar[] {
+  const env: V1EnvVar[] = [
+    { name: "DOCKER_IPTABLES_LEGACY", value: "1" },
+    { name: "HOME", value: DOCKER_HOME_PATH },
+    { name: "XDG_RUNTIME_DIR", value: DOCKER_XDG_PATH },
+  ];
+  if (!tunnel) return env;
+  const proxy = { secretKeyRef: { name: tunnel.secretName, key: DOCKER_TUNNEL_PROXY_SECRET_KEY } };
+  const noProxy = tunnelNoProxy(CODING_PROXY_ALIAS);
+  return [
+    ...env,
+    { name: "HTTPS_PROXY", valueFrom: proxy },
+    { name: "https_proxy", valueFrom: proxy },
+    { name: "HTTP_PROXY", valueFrom: proxy },
+    { name: "http_proxy", valueFrom: proxy },
+    { name: "NO_PROXY", value: noProxy },
+    { name: "no_proxy", value: noProxy },
+    ...(tunnel.trustCa ? [{ name: "SSL_CERT_DIR", value: `${DOCKER_SYSTEM_CERT_DIR}:${DOCKER_TUNNEL_CA_DIR}` }] : []),
+  ];
 }
 
 /** The docker service's socket volume, for the container that runs the agent's shell commands; none without one. */
@@ -497,9 +565,10 @@ function serviceSidecar(
   profile: KubernetesPlatformProfile,
   timeoutSec: number,
   withDocker: boolean,
+  dockerTunnel?: DockerDaemonTunnel,
 ): V1Container {
   if (isToolchainService(entry)) return toolchainSidecar(entry, index, profile, timeoutSec, withDocker);
-  if (isDockerService(entry)) return dockerServiceSidecar(entry, profile);
+  if (isDockerService(entry)) return dockerServiceSidecar(entry, profile, dockerTunnel);
   const service = sidecarOnly(entry);
   const env = Object.entries(service.serviceEnv)
     .sort(([left], [right]) => left.localeCompare(right))
@@ -702,6 +771,8 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
     );
   }
   const names = kubernetesRunNames(spec.runId);
+  const daemonTunnel = dockerDaemonTunnel(spec);
+  const dockerTunnel = daemonTunnel && { ...daemonTunnel, secretName: names.secret };
   const scratchMb = Math.max(16, Math.min(64, Math.floor(spec.limits.memoryMb / 8)));
   const sidecarCpuMillicores = 250;
   const sidecarMemoryMib = 128;
@@ -920,6 +991,19 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
             ]
           : []),
         ...serviceVolumes(services),
+        ...(dockerTunnel?.trustCa
+          ? [
+              {
+                name: DOCKER_TUNNEL_CA_VOLUME,
+                // defaultMode is set so the API server has nothing to default on read-back (attestation).
+                secret: {
+                  secretName: names.secret,
+                  items: [{ key: DOCKER_TUNNEL_CA_SECRET_KEY, path: DOCKER_TUNNEL_CA_FILE }],
+                  defaultMode: 0o444,
+                },
+              },
+            ]
+          : []),
         ...setupJobs.flatMap((job, index) =>
           setupScratch(job, index).map(({ name }) => ({ name, emptyDir: { sizeLimit: `${SERVICE_SCRATCH_MIB}Mi` } })),
         ),
@@ -931,7 +1015,7 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         ...(toolRunner ? [toolRunner] : []),
         // Setup jobs (#589) are not sidecars: they get containers of their own, so none is built here.
         ...runningServices(services).map((service, index) =>
-          serviceSidecar(service, index, profile, spec.timeoutSec, dockerSocket.length > 0),
+          serviceSidecar(service, index, profile, spec.timeoutSec, dockerSocket.length > 0, dockerTunnel),
         ),
       ],
       // Setup jobs (#589) between the keeper and the worker: each waits for the checkout, then runs once.
@@ -976,6 +1060,7 @@ export function buildCapabilitySecret(
   mcpToken?: string,
 ): V1Secret {
   const names = kubernetesRunNames(spec.runId);
+  const dockerTunnel = dockerDaemonTunnel(spec);
   return {
     apiVersion: "v1",
     kind: "Secret",
@@ -985,6 +1070,18 @@ export function buildCapabilitySecret(
       capability,
       ...(toolSetup !== undefined ? { [TOOL_SETUP_SECRET_KEY]: toolSetup } : {}),
       ...(mcpToken !== undefined ? { [MCP_TOKEN_SECRET_KEY]: mcpToken } : {}),
+      ...(dockerTunnel && spec.tunnelPort
+        ? {
+            [DOCKER_TUNNEL_PROXY_SECRET_KEY]: tunnelProxyEnv({
+              proxyHost: CODING_PROXY_ALIAS,
+              port: spec.tunnelPort,
+              token: deriveTunnelToken(capability),
+            }).HTTPS_PROXY,
+          }
+        : {}),
+      ...(dockerTunnel?.trustCa && spec.tunnelCaCert !== undefined
+        ? { [DOCKER_TUNNEL_CA_SECRET_KEY]: spec.tunnelCaCert }
+        : {}),
     },
   };
 }

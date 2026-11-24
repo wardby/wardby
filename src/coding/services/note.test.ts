@@ -79,7 +79,14 @@ describe("servicesInstructionNote", () => {
     ])!;
     expect(note).toContain("- docker 29: DOCKER_HOST=unix:///wardby/docker/docker.sock");
     expect(note.endsWith(DOCKER_SERVICE_NOTE)).toBe(true);
-    for (const rule of ["--network=host", "network_mode: host", "127.0.0.1", "cannot be pulled", "Pushing"]) {
+    for (const rule of [
+      "--network=host",
+      "network_mode: host",
+      "127.0.0.1",
+      "HTTPS proxy",
+      "Docker Hub",
+      "--build-arg HTTPS_PROXY",
+    ]) {
       expect(DOCKER_SERVICE_NOTE).toContain(rule);
     }
     expect(servicesInstructionNote([{ name: "redis", version: "7", testEnv: {} }])).not.toContain("Docker");
