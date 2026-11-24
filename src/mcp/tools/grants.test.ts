@@ -46,6 +46,7 @@ function fakeDb(
     codingAgentProfile: { count: async () => bindings.codingAgentProfile ?? 0 },
     agentMcpServer: { count: async () => bindings.agentMcpServer ?? 0 },
     agent: {
+      count: async () => 0,
       findMany: async () => [],
       findUnique: async ({ where }: { where: { id: string } }) => {
         const row = byId.get(where.id);

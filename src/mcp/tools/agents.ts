@@ -1108,11 +1108,12 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         args.codingProfile !== undefined ||
         (args.kind !== undefined && args.kind !== existingKind) ||
         args.budgetGroupId !== undefined ||
-        args.runSteps !== undefined;
+        args.runSteps !== undefined ||
+        args.documentTools !== undefined;
       const refuseOwnerOnly = () => {
         throw new McpError(
           403,
-          `Agent "${args.id}": only its owner can change its coding profile, kind, budget group or run steps level.`,
+          `Agent "${args.id}": only its owner can change its coding profile, kind, budget group, run steps level or document tools.`,
         );
       };
       if (!adminEdit && !isOwner && ownerOnlyChange(before.kind)) refuseOwnerOnly();
@@ -1185,6 +1186,13 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             throw new McpError(
               409,
               `Agent "${args.id}" is writable by everyone, so it can't become a coding agent or get a repository; revoke or lower the everyone grant first.`,
+            );
+          }
+          // The document tools setting is an owner binding too (agentOwnerBindings).
+          if (args.documentTools && (await isPublicWritable(tx, existing.id))) {
+            throw new McpError(
+              409,
+              `Agent "${args.id}" is writable by everyone, so it can't get document tools; revoke or lower the everyone grant first.`,
             );
           }
           if (nextKind === "native" && args.codingProfile) {

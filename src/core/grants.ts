@@ -9,7 +9,7 @@
  * owner is above every level. Owner-less rows (ownerId null) are a
  * transition state: nobody is their owner, so access comes from grants only.
  */
-import type { PrismaClient } from "#prisma";
+import { Prisma, type PrismaClient } from "#prisma";
 
 export const LEVELS = {
   agent: ["read", "execute", "write"],
@@ -243,6 +243,7 @@ type BindingDb = Pick<
   | "agentTool"
   | "codingAgentProfile"
   | "agentMcpServer"
+  | "agent"
 >;
 
 /**
@@ -254,8 +255,8 @@ type BindingDb = Pick<
  * coding task.
  */
 export async function agentOwnerBindings(db: BindingDb, agentId: string): Promise<string[]> {
-  const [secrets, datastores, repositories, subagents, capabilityTools, codingProfiles, mcpServers] = await Promise.all(
-    [
+  const [secrets, datastores, repositories, subagents, capabilityTools, codingProfiles, mcpServers, documentTools] =
+    await Promise.all([
       db.agentSecret.count({ where: { agentId } }),
       db.agentDatastore.count({ where: { agentId } }),
       db.agentRepository.count({ where: { agentId } }),
@@ -277,8 +278,9 @@ export async function agentOwnerBindings(db: BindingDb, agentId: string): Promis
       db.codingAgentProfile.count({ where: { agentId } }),
       // A server's brokered secrets act for its owner on every call.
       db.agentMcpServer.count({ where: { agentId } }),
-    ],
-  );
+      // The built-in document tools act with the owner's reach on documents.
+      db.agent.count({ where: { id: agentId, documentTools: { not: Prisma.DbNull } } }),
+    ]);
   return Object.entries({
     secrets,
     datastores,
@@ -287,6 +289,7 @@ export async function agentOwnerBindings(db: BindingDb, agentId: string): Promis
     "tool capabilities": capabilityTools,
     "a coding repository": codingProfiles,
     "MCP servers": mcpServers,
+    "document tools": documentTools,
   })
     .filter(([, count]) => count > 0)
     .map(([kind]) => kind);
