@@ -318,7 +318,13 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         token: "",
         clientId: ctx.principal.subject,
         scopes: [...ctx.scopes],
-        extra: { principal: ctx.principal, roles: ctx.roles, actsFor: ctx.actsFor, teamIds: ctx.teamIds },
+        extra: {
+          principal: ctx.principal,
+          tokenIdentity: ctx.tokenIdentity,
+          roles: ctx.roles,
+          actsFor: ctx.actsFor,
+          teamIds: ctx.teamIds,
+        },
       };
       await nodeHandler(req, res, body);
       return;

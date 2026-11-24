@@ -9,7 +9,7 @@
  */
 import { createRemoteJWKSet, jwtVerify, errors as joseErrors, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import type { AuthProfile, AuthProvider, AuthTokens, VerifiedToken } from "./types.js";
-import { AudienceError, NotSupportedError } from "./types.js";
+import { AudienceError, identityClaimsOf, NotSupportedError } from "./types.js";
 import { requireSubject } from "./subject.js";
 import { ROLE_NAMES, isRoleName } from "../../mcp/auth/resource-server.js";
 
@@ -190,6 +190,7 @@ export class DelegatingAuthProvider implements AuthProvider {
           this.config.roleClaim && this.roleMap
             ? rolesFromClaim(resolveClaim(payload, this.config.roleClaim), this.roleMap)
             : [],
+        identityClaims: identityClaimsOf(payload),
       };
     } catch (err) {
       if (err instanceof joseErrors.JWTClaimValidationFailed && err.claim === "aud") {

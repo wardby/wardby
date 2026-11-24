@@ -59,6 +59,31 @@ describe("DelegatingAuthProvider.verifyBearer", () => {
     expect(profile.scopes.sort()).toEqual(["agents:read", "agents:write"]);
     expect(profile.roles).toEqual([]);
   });
+  it("copies only the allowlisted string identity claims for whoami", async () => {
+    const provider = new DelegatingAuthProvider({ issuer: ISSUER, audience: AUDIENCE }, jwks);
+    const token = await new SignJWT({
+      scope: "agents:read",
+      uid: "00u-fake-user-id",
+      cid: "https://client.example/metadata",
+      azp: 42,
+      email: "ada@example.com",
+      groups: ["wardby-users"],
+    })
+      .setProtectedHeader({ alg: "RS256", kid: KID })
+      .setIssuer(ISSUER)
+      .setAudience(AUDIENCE)
+      .setExpirationTime("1h")
+      .setSubject("ada")
+      .sign(privateKey);
+    const verified = await provider.verifyBearer(token);
+    // Non-string azp is dropped; email, groups, iss, aud, exp and the token itself never appear.
+    expect(verified.identityClaims).toEqual({
+      sub: "ada",
+      uid: "00u-fake-user-id",
+      cid: "https://client.example/metadata",
+    });
+    expect(JSON.stringify(verified.identityClaims)).not.toContain(token);
+  });
 
   it("throws AudienceError on wrong audience", async () => {
     const provider = new DelegatingAuthProvider({ issuer: ISSUER, audience: AUDIENCE }, jwks);

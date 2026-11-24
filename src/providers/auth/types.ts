@@ -40,6 +40,25 @@ export interface VerifiedToken {
    * maps the configured signed claim through AUTH_ROLE_MAP. Absent = none.
    */
   wardbyRoles?: string[];
+  /**
+   * The token's identity claims that `whoami` reports, copied from the verified
+   * token and limited to IDENTITY_CLAIMS (string values only): never the token
+   * itself, never any other claim.
+   */
+  identityClaims?: Readonly<Record<string, string>>;
+}
+
+/** The token claims `whoami` may show its caller: who the token says they are, and which client asked. */
+export const IDENTITY_CLAIMS = ["sub", "uid", "cid", "client_id", "azp"] as const;
+
+/** IDENTITY_CLAIMS from a verified token's payload, string values only. */
+export function identityClaimsOf(payload: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of IDENTITY_CLAIMS) {
+    const value = payload[name];
+    if (typeof value === "string") out[name] = value;
+  }
+  return out;
 }
 
 export interface AuthTokens {

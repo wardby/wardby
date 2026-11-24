@@ -151,6 +151,7 @@ export interface WardbyMcpServer {
 
 interface AuthInfoExtra {
   principal?: Principal;
+  tokenIdentity?: McpRequestContext["tokenIdentity"];
   roles?: McpRequestContext["roles"];
   actsFor?: McpRequestContext["actsFor"];
   teamIds?: McpRequestContext["teamIds"];
@@ -248,6 +249,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
     if (extra?.principal) {
       return {
         principal: extra.principal,
+        tokenIdentity: extra.tokenIdentity,
         // AUTH_OWNER_ALL_ROLE_ONLY: the role alone stands in for the owner:all scope.
         scopes: effectiveScopes(authInfo!.scopes, extra.roles, ownerAllRoleOnly),
         roles: extra.roles ?? [],

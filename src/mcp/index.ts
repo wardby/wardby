@@ -84,6 +84,7 @@ import { registerModelCatalogTools } from "./tools/model-catalog.js";
 import { registerTeamTools } from "./tools/teams.js";
 import { registerPowerTools } from "./tools/power.js";
 import { registerVersionTool } from "./tools/version.js";
+import { registerWhoamiTool } from "./tools/whoami.js";
 import { registerHelpTools } from "./tools/help.js";
 import { registerTriggerTool } from "./tools/trigger.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
@@ -195,6 +196,7 @@ export function registerAllTools(
   registerTeamTools(mcp);
   registerHelpTools(mcp);
   registerVersionTool(mcp);
+  registerWhoamiTool(mcp);
   registerTriggerTool(mcp);
   registerToolAuthoringTools(mcp);
   registerSchedulingTools(mcp);
