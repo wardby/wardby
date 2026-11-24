@@ -163,13 +163,21 @@ AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-service
 WEB_OIDC_CLIENT_ID=your-web-client-id
 # WEB_OIDC_CLIENT_SECRET=...  (confidential clients only; omit for a public client)
 # WEB_OIDC_SCOPES=openid profile email  (the default)
+# WEB_OIDC_SUBJECT_CLAIM=sub  (the default; see below)
 ```
 
 For browser sign-in, register a web client at the provider with the redirect
 URI `https://wardby.example.com/web/callback` (the origin of
 `MCP_CANONICAL_URI`), and make sure its ID tokens carry the same `sub` as the
 access tokens MCP clients receive, so both sign-ins map to the same Wardby
-principal.
+principal. Some providers cannot do this: their ID token `sub` is always the
+provider's own user id (Okta's `00u…`), while the access token's `sub` can be a
+username. Then set `WEB_OIDC_SUBJECT_CLAIM` to an ID token claim you add at the
+provider carrying the access token's `sub` value. If the access token's `sub`
+is the local part of the user's email address, you can instead set
+`WEB_OIDC_SUBJECT_EMAIL_DOMAIN` to that email domain: Wardby then uses the local
+part of a verified email at exactly that domain. A sign-in without a usable
+value fails with `web_login_failed` and never falls back to `sub`.
 
 Wardby looks up `AUTH_ROLE_CLAIM` in two steps:
 
@@ -295,13 +303,21 @@ AUTH_ROLE_MAP=wardby-admin=admin,wardby-packages=package-approver,wardby-service
 WEB_OIDC_CLIENT_ID=your-web-client-id
 # WEB_OIDC_CLIENT_SECRET=...  (confidential clients only; omit for a public client)
 # WEB_OIDC_SCOPES=openid profile email  (the default)
+# WEB_OIDC_SUBJECT_CLAIM=sub  (the default; see below)
 ```
 
 For browser sign-in, register a web client at the provider with the redirect
 URI `https://wardby.example.com/web/callback` (the origin of
 `MCP_CANONICAL_URI`), and make sure its ID tokens carry the same `sub` as the
 access tokens MCP clients receive, so both sign-ins map to the same Wardby
-principal.
+principal. Some providers cannot do this: their ID token `sub` is always the
+provider's own user id (Okta's `00u…`), while the access token's `sub` can be a
+username. Then set `WEB_OIDC_SUBJECT_CLAIM` to an ID token claim you add at the
+provider carrying the access token's `sub` value. If the access token's `sub`
+is the local part of the user's email address, you can instead set
+`WEB_OIDC_SUBJECT_EMAIL_DOMAIN` to that email domain: Wardby then uses the local
+part of a verified email at exactly that domain. A sign-in without a usable
+value fails with `web_login_failed` and never falls back to `sub`.
 
 Copy `AUTH_ISSUER` exactly from the token's `iss` claim or the provider's
 metadata. Copy `AUTH_JWKS_URI` from the provider's metadata rather than
@@ -396,6 +412,7 @@ test procedure and cleanup.
 | Mobile sign-in fails with a redirect error    | The IdP client doesn't list the mobile redirect URI.                                 |
 | Wardby cannot validate any newly issued token | The control plane cannot reach the JWKS URI, or provider key rotation is incomplete. |
 | One person appears as multiple principals     | The provider is emitting different or pairwise `sub` values for different clients.   |
+| Document pages show `document_not_found`      | The browser sign-in's `sub` differs from MCP's; set `WEB_OIDC_SUBJECT_CLAIM`.        |
 
 Keep JWKS access on the deployment egress allowlist, use short-lived access
 tokens, map Wardby roles only to trusted administrators, and monitor

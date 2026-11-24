@@ -1063,16 +1063,43 @@ export interface WebOidcConfig {
   clientSecret?: string;
   /** WEB_OIDC_SCOPES: space-separated; `openid` is always requested. */
   scopes: string;
+  /**
+   * WEB_OIDC_SUBJECT_CLAIM: the ID token claim a browser sign-in's principal subject is read from
+   * (default `sub`). For providers whose ID token `sub` differs from the access token's.
+   */
+  subjectClaim: string;
+  /**
+   * WEB_OIDC_SUBJECT_EMAIL_DOMAIN: read the subject from the local part of the ID token's `email`
+   * instead, only when `email_verified` is true and the domain is exactly this one (lowercase).
+   */
+  subjectEmailDomain?: string;
 }
 
 export const DEFAULT_WEB_OIDC_SCOPES = "openid profile email";
+export const DEFAULT_WEB_OIDC_SUBJECT_CLAIM = "sub";
+
+const CLAIM_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,127}$/;
+const EMAIL_DOMAIN = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 
 /** Browser sign-in (OIDC authorization code + PKCE) against the delegating-mode issuer, AUTH_ISSUER. */
 export function loadWebOidcConfig(env: NodeJS.ProcessEnv = process.env): WebOidcConfig {
+  const claim = env.WEB_OIDC_SUBJECT_CLAIM?.trim() || undefined;
+  const domain = env.WEB_OIDC_SUBJECT_EMAIL_DOMAIN?.trim().toLowerCase() || undefined;
+  if (claim !== undefined && !CLAIM_NAME.test(claim)) {
+    throw new Error(`WEB_OIDC_SUBJECT_CLAIM must be a claim name (got "${claim}").`);
+  }
+  if (domain !== undefined && !EMAIL_DOMAIN.test(domain)) {
+    throw new Error(`WEB_OIDC_SUBJECT_EMAIL_DOMAIN must be a domain name such as example.com (got "${domain}").`);
+  }
+  if (claim !== undefined && domain !== undefined) {
+    throw new Error("Set WEB_OIDC_SUBJECT_CLAIM or WEB_OIDC_SUBJECT_EMAIL_DOMAIN, not both.");
+  }
   return {
     clientId: env.WEB_OIDC_CLIENT_ID?.trim() || undefined,
     clientSecret: env.WEB_OIDC_CLIENT_SECRET || undefined,
     scopes: env.WEB_OIDC_SCOPES?.trim() || DEFAULT_WEB_OIDC_SCOPES,
+    subjectClaim: claim ?? DEFAULT_WEB_OIDC_SUBJECT_CLAIM,
+    ...(domain ? { subjectEmailDomain: domain } : {}),
   };
 }
 

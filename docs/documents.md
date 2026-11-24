@@ -118,16 +118,22 @@ plan revision.
 | `AUTH_PROVIDER=self-hosted` | Open the document link; the page reuses the Wardby login.                                             |
 | `AUTH_PROVIDER=delegating`  | Sign in through your identity provider with a separate browser (web) client. Set the variables below. |
 
-| Variable                 | Default                | Meaning                                                                             |
-| ------------------------ | ---------------------- | ----------------------------------------------------------------------------------- |
-| `WEB_OIDC_CLIENT_ID`     | unset (sign-in off)    | The identity provider client for the document pages (authorization code with PKCE). |
-| `WEB_OIDC_CLIENT_SECRET` | unset                  | Only for a confidential client; omit for a public client.                           |
-| `WEB_OIDC_SCOPES`        | `openid profile email` | Scopes requested at sign-in; `openid` is always included.                           |
+| Variable                        | Default                | Meaning                                                                                                            |
+| ------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `WEB_OIDC_CLIENT_ID`            | unset (sign-in off)    | The identity provider client for the document pages (authorization code with PKCE).                                |
+| `WEB_OIDC_CLIENT_SECRET`        | unset                  | Only for a confidential client; omit for a public client.                                                          |
+| `WEB_OIDC_SCOPES`               | `openid profile email` | Scopes requested at sign-in; `openid` is always included.                                                          |
+| `WEB_OIDC_SUBJECT_CLAIM`        | `sub`                  | The ID token claim a sign-in's Wardby person is read from.                                                         |
+| `WEB_OIDC_SUBJECT_EMAIL_DOMAIN` | unset                  | Read it from the local part of a verified email at exactly this domain instead. Not with `WEB_OIDC_SUBJECT_CLAIM`. |
 
 At the provider, register a web client with the redirect URI
 `https://<your-host>/web/callback` (the origin of `MCP_CANONICAL_URI`), and make
 sure its ID tokens carry the same `sub` as the access tokens MCP clients get, so
-both sign-ins are the same Wardby person. The issuer is the existing
+both sign-ins are the same Wardby person. If the provider cannot (its ID token
+`sub` is always its own user id), set `WEB_OIDC_SUBJECT_CLAIM` to a claim you
+add carrying the access token's `sub`, or `WEB_OIDC_SUBJECT_EMAIL_DOMAIN` when
+that `sub` is the local part of the user's email. A sign-in without a usable
+value fails with `web_login_failed`; it never falls back to `sub`. The issuer is the existing
 `AUTH_ISSUER`. A sign-in must finish within 10 minutes in the browser that
 started it. A browser session ends after 12 hours idle or 7 days. Without
 `WEB_OIDC_CLIENT_ID`, member pages answer `web_login_not_configured`; share
