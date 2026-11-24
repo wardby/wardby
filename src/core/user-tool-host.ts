@@ -57,6 +57,12 @@ export interface UserToolHostOptions {
   /** The tool's name, prefixed onto its console lines. */
   name: string;
   tool: UserToolGrants & { timeoutMs?: number };
+  /**
+   * The limit this call actually runs under, when the caller caps it below the tool's own (a coding
+   * run's call never runs past its session deadline): each fetch times out just after it. Absent = the
+   * tool's limit under the current ceiling.
+   */
+  limitMs?: number;
   signal: AbortSignal;
   /** Secret values to redact from console lines even if this host never fetched them. */
   redactSecretValues?: readonly string[];
@@ -77,7 +83,7 @@ export function userToolHost(options: UserToolHostOptions): PrivilegedHost {
   const { tool } = options;
   return createPrivilegedHost({
     redactSecretValues: options.redactSecretValues,
-    fetchTimeoutMs: fetchTimeoutFor(userToolLimitMs(tool)),
+    fetchTimeoutMs: fetchTimeoutFor(options.limitMs ?? userToolLimitMs(tool)),
     agentId: options.agentId,
     datastore: scopeDatastore(options.datastore, tool.allowedDatastorePrefixes),
     sharedDatastore: scopeSharedDatastoreAccessor(options.sharedDatastore, tool.allowedSharedDatastorePrefixes),
