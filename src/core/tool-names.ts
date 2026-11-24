@@ -18,6 +18,7 @@ import { SUBAGENT_MEMORY_TOOL_NAMES } from "./subagent-memory-tools.js";
 import { ISSUE_TRACKER_TOOL_NAMES } from "./issue-tracker-tools.js";
 import { exposedNames } from "./mcp-servers.js";
 import { isCodexCoding } from "./mcp-tools.js";
+import { DOCUMENT_TOOL_PREFIX } from "./documents/tools-setting.js";
 import { MAX_TOOL_TEXT_BYTES } from "../providers/coding-proxy/types.js";
 
 /** The runner's synthesized sub-agent tools are `delegate_to_<boundName>`. */
@@ -34,6 +35,9 @@ export function reservedToolNameReason(name: string): string | undefined {
     return `Tool name "${name}" is reserved for the built-in sub-agent memory tools.`;
   }
   if (ISSUE_TRACKER_TOOL_NAMES.has(name)) return `Tool name "${name}" is reserved for the built-in Jira tools.`;
+  if (name.startsWith(DOCUMENT_TOOL_PREFIX)) {
+    return `Tool names starting with "${DOCUMENT_TOOL_PREFIX}" are reserved for the built-in document tools.`;
+  }
   if (name.startsWith(DELEGATE_TOOL_PREFIX)) {
     return `Tool names starting with "${DELEGATE_TOOL_PREFIX}" are reserved for sub-agent delegation tools.`;
   }

@@ -89,6 +89,7 @@ import {
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import { checkPlanDocumentSetting } from "../../core/plans/settings.js";
+import { checkDocumentToolsSetting, DocumentToolsSchema } from "../../core/documents/tools-setting.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
@@ -301,6 +302,7 @@ const agentFields = {
   kind: z.enum(["native", "coding"]),
   budgetGroupId: z.string().min(1).max(128),
   memoryEnabled: z.boolean(),
+  documentTools: DocumentToolsSchema,
   effort: z.enum(LLM_EFFORT_LEVELS),
   runSteps: z.enum(RUN_STEPS_LEVELS as [RunStepsLevel, ...RunStepsLevel[]]),
   nativeExecutionMode: z.enum(NATIVE_EXECUTION_MODES),
@@ -344,6 +346,7 @@ const CreateAgentSchema = z
     kind: agentFields.kind.default("native"),
     budgetGroupId: agentFields.budgetGroupId.optional(),
     memoryEnabled: agentFields.memoryEnabled.default(false),
+    documentTools: agentFields.documentTools.nullable().optional(),
     effort: agentFields.effort.optional(),
     runSteps: agentFields.runSteps.optional(),
     nativeExecutionMode: agentFields.nativeExecutionMode.optional(),
@@ -408,6 +411,7 @@ const UpdateAgentSchema = z
     kind: agentFields.kind.optional(),
     budgetGroupId: agentFields.budgetGroupId.nullable().optional(),
     memoryEnabled: agentFields.memoryEnabled.optional(),
+    documentTools: agentFields.documentTools.nullable().optional(),
     effort: agentFields.effort.nullable().optional(),
     runSteps: agentFields.runSteps.nullable().optional(),
     nativeExecutionMode: agentFields.nativeExecutionMode.optional(),
@@ -598,6 +602,26 @@ function invalidArguments(label: string, error: z.ZodError): McpError {
   return new McpError(400, `Invalid ${label}: ${details}`);
 }
 
+/** checkDocumentToolsSetting with its error mapped to a fixed-text 400. */
+async function checkDocumentTools(
+  db: Parameters<typeof checkDocumentToolsSetting>[0],
+  agent: Parameters<typeof checkDocumentToolsSetting>[1],
+  savedBy: string,
+  input: Parameters<typeof checkDocumentToolsSetting>[3],
+) {
+  try {
+    return (await checkDocumentToolsSetting(db, agent, savedBy, input)) as unknown as Prisma.InputJsonObject;
+  } catch (err) {
+    if (!(err instanceof Error) || err.message !== "document_tools_invalid") throw err;
+    const text: Record<string, string> = {
+      kind: "only native agents take documentTools",
+      reviewers: "every reviewer and the final approver must exist and be able to read this agent",
+      plans: "every plan must name a planner agent you can run",
+    };
+    throw new McpError(400, `documentTools is invalid: ${text[String(err.cause)] ?? "check the setting"}.`);
+  }
+}
+
 function parseCreateAgent(args: unknown): CreateAgentArgs {
   const result = CreateAgentSchema.safeParse(args);
   if (!result.success) throw invalidArguments("create_agent arguments", result.error);
@@ -780,6 +804,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         kind: { type: "string", enum: ["native", "coding"] },
         budgetGroupId: { type: "string" },
         memoryEnabled: { type: "boolean" },
+        documentTools: {
+          type: "object",
+          description:
+            "Native agents only: built-in doc_* tools to create, read and revise Wardby documents and designs in a run (see help article native-agent-documents). access read|write; reviewers: 1-50 principal ids who can read this agent (default: the owner); finalApproverId; maxNewPerRun 1-20 (default 5); plans: planner agent ids whose plan documents this agent may read and comment on. null turns it off.",
+        },
         effort: {
           type: "string",
           enum: [...LLM_EFFORT_LEVELS],
@@ -818,9 +847,18 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       if (args.budgetGroupId) {
         await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id, isOwnerAll(ctx));
       }
-      const { codingProfile, repositoryAdminOverride, nativeExecutionMode, ...agentFieldsData } = args;
+      const { codingProfile, repositoryAdminOverride, nativeExecutionMode, documentTools, ...agentFieldsData } = args;
+      const documentToolsChecked = documentTools
+        ? await checkDocumentTools(
+            ctx.db,
+            { id: "", ownerId: ctx.principal.id, kind: args.kind },
+            ctx.principal.id,
+            documentTools,
+          )
+        : undefined;
       const agentData = {
         ...agentFieldsData,
+        ...(documentToolsChecked ? { documentTools: documentToolsChecked } : {}),
         ...(nativeExecutionMode ? { nativeExecutionMode: toStoredMode(nativeExecutionMode) } : {}),
       };
       if (repositoryAdminOverride === true && !codingProfile) {
@@ -927,6 +965,11 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         kind: { type: "string", enum: ["native", "coding"] },
         budgetGroupId: { type: ["string", "null"] },
         memoryEnabled: { type: "boolean" },
+        documentTools: {
+          type: ["object", "null"],
+          description:
+            "Native agents only: built-in doc_* tools to create, read and revise Wardby documents and designs in a run (see help article native-agent-documents). access read|write; reviewers: 1-50 principal ids who can read this agent (default: the owner); finalApproverId; maxNewPerRun 1-20 (default 5); plans: planner agent ids whose plan documents this agent may read and comment on. null turns it off.",
+        },
         effort: {
           type: ["string", "null"],
           enum: [...LLM_EFFORT_LEVELS, null],
@@ -1240,10 +1283,34 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             repositoryAdminOverride: _override,
             nativeExecutionMode: modeArg,
             promptSummary,
+            documentTools: documentToolsArg,
             ...fieldUpdates
           } = args;
+          // The setting is judged against the kind the agent has after this update; a coding agent
+          // keeps no setting, so becoming coding clears it.
+          const nextDocumentTools =
+            nextKind === "coding" && documentToolsArg === undefined
+              ? existing.documentTools === null
+                ? undefined
+                : null
+              : documentToolsArg;
+          const documentToolsData =
+            nextDocumentTools === undefined
+              ? {}
+              : {
+                  documentTools:
+                    nextDocumentTools === null
+                      ? Prisma.DbNull
+                      : await checkDocumentTools(
+                          tx,
+                          { id: existing.id, ownerId: existing.ownerId, kind: nextKind },
+                          ctx.principal.id,
+                          nextDocumentTools,
+                        ),
+                };
           const updates = {
             ...fieldUpdates,
+            ...documentToolsData,
             ...(modeArg ? { nativeExecutionMode: toStoredMode(modeArg) } : {}),
           };
           const stamp = authorization ? profileStamp(authorization) : {};
