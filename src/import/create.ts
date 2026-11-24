@@ -28,7 +28,12 @@ import {
 import { createWebhook } from "../core/webhooks.js";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
 import { toolSubject, zod3ToolWarnings } from "../core/zod3-window.js";
-import { findSameNamedAttachedTool, findSameNamedMcpTool, reservedToolNameReason } from "../core/tool-names.js";
+import {
+  codingAgentAttachProblem,
+  findSameNamedAttachedTool,
+  findSameNamedMcpTool,
+  reservedToolNameReason,
+} from "../core/tool-names.js";
 import { ToolCapabilitiesPatchSchema, FETCH_WILDCARD } from "../sandbox/tool-capabilities.js";
 import { PostgresDatastore } from "../providers/datastore/postgres.js";
 import type { DatastoreValue } from "../providers/datastore/types.js";
@@ -261,6 +266,14 @@ export async function createFromBundle(
       warnings.push(
         `agent-tool ${at.agentName}/${at.toolName}: skipped — the agent already has a tool with this name from MCP server "${mcpClash.serverName}"`,
       );
+      continue;
+    }
+    // Same rule as MCP attach_tool: a coding agent takes native tools only when it runs Claude Code,
+    // and only a tool its runs can be offered.
+    const attaching = await db.tool.findUnique({ where: { id: toolId }, select: { name: true, description: true } });
+    const codingProblem = attaching ? await codingAgentAttachProblem(db, agentId, attaching) : undefined;
+    if (codingProblem) {
+      warnings.push(`agent-tool ${at.agentName}/${at.toolName}: skipped — ${codingProblem}`);
       continue;
     }
 

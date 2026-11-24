@@ -597,6 +597,67 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
       }
     });
 
+    it("warns when an agent with tools Claude Code can't be offered becomes a Claude Code agent", async () => {
+      const p = await principal();
+      const call = await connect(p, { scopes: [...ADMIN_SCOPES], roles: ["admin"] });
+      const make = (name: string, description = "x") =>
+        db.tool.create({
+          data: {
+            name,
+            description,
+            paramsZod: "z.object({})",
+            jsonSchema: { type: "object" },
+            code: "return 1;",
+            ownerId: p.id,
+          },
+        });
+      const good = await make("kb_ok");
+      const badName = await make("kb lookup!");
+      const longDescription = await make("kb_long", "x".repeat(256 * 1024 + 1));
+      const native = await agent(p);
+      const codex = await agent(p, "coding", "codex");
+      await db.codingAgentProfile.update({ where: { agentId: codex.id }, data: { protectedPaths: [".github/**"] } });
+      try {
+        for (const a of [native, codex]) {
+          for (const t of [good, badName, longDescription]) {
+            await db.agentTool.create({ data: { agentId: a.id, toolId: t.id, capabilitiesGrantedById: p.id } });
+          }
+        }
+        const expected = [
+          'These native tools won\'t be available to Claude Code runs (a name with characters other than letters, digits, "_" and "-" or over 64 characters, or a description over 262144 characters): kb lookup!, kb_long.',
+        ];
+        // A native agent becoming Claude Code.
+        const becameClaude = ok(
+          await call("update_agent", {
+            id: native.id,
+            kind: "coding",
+            model: "claude-sonnet-5",
+            codingProfile: {
+              provider: "claude-code",
+              repository: "your-org/your-repo",
+              protectedPaths: [".github/**"],
+            },
+            repositoryAdminOverride: true,
+          }),
+        );
+        expect(becameClaude.warnings).toEqual(expected);
+        // Already Claude Code: no repeat.
+        expect(ok(await call("update_agent", { id: native.id, systemPrompt: "y" })).warnings).toBeUndefined();
+        // A Codex agent switching to Claude Code.
+        const switched = ok(
+          await call("update_agent", {
+            id: codex.id,
+            model: "claude-sonnet-5",
+            codingProfile: { provider: "claude-code" },
+          }),
+        );
+        expect(switched.codingProfile.provider).toBe("claude-code");
+        expect(switched.warnings).toEqual(expected);
+      } finally {
+        await db.agentTool.deleteMany({ where: { toolId: { in: [good.id, badName.id, longDescription.id] } } });
+      }
+    });
+
     it("warns when a native agent with tools becomes a Codex coding agent", async () => {
       const p = await principal();
       const call = await connect(p, { scopes: [...ADMIN_SCOPES], roles: ["admin"] });

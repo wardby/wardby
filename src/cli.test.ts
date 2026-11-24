@@ -44,3 +44,13 @@ describe("cli.ts warm-up wiring", () => {
     expect(coding).not.toContain("warmUpExecutor");
   });
 });
+
+describe("cli.ts wardby tool attach", () => {
+  it("refuses a coding agent's native tool with the same shared check MCP attach_tool and the importer use, before attaching", () => {
+    const body = functionBody("toolAttach");
+    expect(SOURCE).toMatch(/import\s*\{[^}]*\bcodingAgentAttachProblem\b[^}]*\}\s*from\s*"\.\/core\/tool-names\.js"/);
+    expect(body).toContain("const codingProblem = await codingAgentAttachProblem(prisma, agent.id, tool);");
+    expect(body).toContain("if (codingProblem) fail(codingProblem);");
+    expect(body.indexOf("codingAgentAttachProblem(")).toBeLessThan(body.indexOf("prisma.agentTool.upsert("));
+  });
+});

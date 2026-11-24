@@ -10,8 +10,6 @@
  * convention as every other tool in this codebase.
  */
 import { Prisma, type PrismaClient, type Tool } from "#prisma";
-import { NATIVE_TOOL_NAME, nativeToolNameMessage } from "../../core/coding-native-tools.js";
-import { isCodexCoding } from "../../core/mcp-tools.js";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import {
   cachedZod4Compatibility,
@@ -27,6 +25,8 @@ import { loadToolMaxTimeoutMs } from "../../config/tool-timeout.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import { buildSharedDatastoreAccessor } from "../../core/datastores.js";
 import {
+  NATIVE_TOOL_DESCRIPTION_MAX_CHARS,
+  codingAgentAttachProblem,
   findSameNamedAttachedTool,
   findSameNamedMcpTool,
   reservedToolNameReason,
@@ -135,13 +135,20 @@ async function brokeredSecretWarnings(
   return brokerCompatibilityWarnings([{ ...tool, allowedSecrets }], brokered);
 }
 
-/** attach_tool's refusal for a Codex coding agent (Codex support is #623). */
-export const CODEX_NATIVE_TOOLS_MESSAGE =
-  "Native tools work only on Claude Code coding agents for now; Codex support is tracked separately.";
+export { CODEX_NATIVE_TOOLS_MESSAGE } from "../../core/tool-names.js";
 
 /** The update_agent warning when an agent becomes Codex with native tools attached (#622). */
 export function codexNativeToolsWarning(names: readonly string[]): string {
   return `These native tools won't be available to Codex runs: ${names.join(", ")}.`;
+}
+
+/**
+ * The update_agent warning when an agent becomes Claude Code with attached tools its runs can't be
+ * offered (a name Claude Code can't take, or a description over the coding proxy's limit): each run
+ * leaves them out.
+ */
+export function claudeCodeUnofferedToolsWarning(names: readonly string[]): string {
+  return `These native tools won't be available to Claude Code runs (a name with characters other than letters, digits, "_" and "-" or over 64 characters, or a description over ${NATIVE_TOOL_DESCRIPTION_MAX_CHARS} characters): ${names.map((name) => name.slice(0, 80)).join(", ")}.`;
 }
 
 /** The names of the native tools attached to `agentId`, sorted: a Codex run never gets them. */
@@ -437,15 +444,13 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       let attachedTool: { name: string; code: string } | undefined;
       await ctx.db.$transaction(
         async (tx) => {
-          const found = await tx.agent.findUnique({
-            where: { id: args.agentId },
-            include: { codingProfile: { select: { provider: true } } },
-          });
-          const { agent } = await assertAgentAccess(ctx, found, args.agentId, "write", tx);
-          // A coding agent's native tools run through its MCP token (#622): Claude Code only, judged
-          // as for MCP tools (a coding agent with no profile counts as Codex).
-          const claudeCode = agent.kind === "coding" && !isCodexCoding(found?.codingProfile?.provider);
-          if (agent.kind === "coding" && !claudeCode) throw new McpError(400, CODEX_NATIVE_TOOLS_MESSAGE);
+          const { agent } = await assertAgentAccess(
+            ctx,
+            await tx.agent.findUnique({ where: { id: args.agentId } }),
+            args.agentId,
+            "write",
+            tx,
+          );
           // Capabilities carry the owner's consent (resource-sharing grants
           // spec §3.4.2). Strict ownership: neither a write-grantee nor the
           // stdio operator may hand the owner's secrets, datastores or
@@ -478,10 +483,10 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           // owner: a second same-named tool on one agent would be a
           // duplicate tool name to the model and silently shadow one of them.
           attachedTool = { name: tool.name, code: tool.code };
-          // Claude Code is offered the tool as mcp__wardby_mcp__<name>: only a name that fits.
-          if (claudeCode && !NATIVE_TOOL_NAME.test(tool.name)) {
-            throw new McpError(400, nativeToolNameMessage(tool.name));
-          }
+          // A coding agent's native tools run through its MCP token (#622): Claude Code only, and only
+          // a tool its runs can be offered (name and description). Shared with every attach path.
+          const codingProblem = await codingAgentAttachProblem(tx, args.agentId, tool);
+          if (codingProblem) throw new McpError(400, codingProblem);
           const clash = await findSameNamedAttachedTool(tx, args.agentId, tool);
           if (clash) {
             // The clashing tool may be another principal's private one (a

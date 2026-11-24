@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  CODEX_NATIVE_TOOLS_MESSAGE,
+  codingAgentAttachProblem,
+  NATIVE_TOOL_DESCRIPTION_MAX_CHARS,
+  nativeToolDescriptionMessage,
+  nativeToolNameMessage,
   duplicateToolNames,
   findSameNamedAttachedTool,
   findSameNamedMcpTool,
@@ -133,5 +138,43 @@ describe("findSameNamedMcpTool", () => {
     expect(await findSameNamedMcpTool(db, "a2", "datadog__search")).toBeNull();
     expect(await findSameNamedMcpTool(db, "a1", "datadog__other")).toBeNull();
     expect(await findSameNamedMcpTool(db, "a1", "search")).toBeNull();
+  });
+});
+
+describe("codingAgentAttachProblem (every attach path: attach_tool, wardby tool attach, the importer)", () => {
+  const fakeDb = (agent: { kind: string; codingProfile: { provider: string } | null } | null) =>
+    ({ agent: { findUnique: async () => agent } }) as unknown as Parameters<typeof codingAgentAttachProblem>[0];
+  const tool = { name: "code_search", description: "Searches code." };
+
+  it("has nothing to say about a native agent, or an agent that doesn't exist", async () => {
+    expect(await codingAgentAttachProblem(fakeDb({ kind: "native", codingProfile: null }), "a1", tool)).toBeUndefined();
+    expect(await codingAgentAttachProblem(fakeDb(null), "a1", tool)).toBeUndefined();
+  });
+
+  it("refuses a Codex coding agent, and a coding agent with no profile", async () => {
+    for (const codingProfile of [{ provider: "codex" }, null]) {
+      expect(await codingAgentAttachProblem(fakeDb({ kind: "coding", codingProfile }), "a1", tool)).toBe(
+        CODEX_NATIVE_TOOLS_MESSAGE,
+      );
+    }
+  });
+
+  it("takes a tool a Claude Code agent's runs can be offered, and refuses a bad name or an over-long description", async () => {
+    const claude = fakeDb({ kind: "coding", codingProfile: { provider: "claude-code" } });
+    expect(await codingAgentAttachProblem(claude, "a1", tool)).toBeUndefined();
+    expect(await codingAgentAttachProblem(claude, "a1", { ...tool, name: "code search" })).toBe(
+      nativeToolNameMessage("code search"),
+    );
+    expect(await codingAgentAttachProblem(claude, "a1", { ...tool, name: "x".repeat(65) })).toBe(
+      nativeToolNameMessage("x".repeat(65)),
+    );
+    const long = { ...tool, description: "x".repeat(NATIVE_TOOL_DESCRIPTION_MAX_CHARS + 1) };
+    expect(await codingAgentAttachProblem(claude, "a1", long)).toBe(nativeToolDescriptionMessage("code_search"));
+    expect(
+      await codingAgentAttachProblem(claude, "a1", {
+        ...tool,
+        description: "x".repeat(NATIVE_TOOL_DESCRIPTION_MAX_CHARS),
+      }),
+    ).toBeUndefined();
   });
 });

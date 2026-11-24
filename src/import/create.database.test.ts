@@ -1188,6 +1188,132 @@ describe.skipIf(!process.env.DATABASE_URL)("createFromBundle (database)", () => 
     }
   });
 
+  it.each([
+    {
+      label: "a Codex coding agent",
+      provider: "codex",
+      description: "imported",
+      warning: "Native tools work only on Claude Code coding agents for now",
+    },
+    {
+      label: "a Claude Code agent, for a description over the coding proxy's limit",
+      provider: "claude-code",
+      description: "x".repeat(256 * 1024 + 1),
+      warning: "can't be offered to a Claude Code agent: its description is over 262144 characters",
+    },
+  ])("skips attaching a tool to $label, with a warning", async ({ provider, description, warning }) => {
+    const id = randomUUID().slice(0, 8);
+    const agentName8 = `test-agent-coding-${id}`;
+    const ownerSubject8 = `test-owner-coding-${id}`;
+    const toolName8 = `coding_tool_${id}`;
+    const manifest: Manifest = {
+      bundleVersion: 1,
+      source: { product: "test", exporterVersion: "1.0", exportedAt: new Date().toISOString() },
+      secretMode: "references",
+      transferKeyId: null,
+      contentWindowDays: null,
+      contentSince: null,
+      toolCallDetail: "metadata",
+      runAuditWindowDays: null,
+      runAuditSince: null,
+      capabilities: [],
+      counts: { agents: 1, tools: 1 },
+    };
+    const agent: NeutralAgent = {
+      name: agentName8,
+      systemPrompt: "Test agent",
+      provider: "bedrock",
+      model: "claude-opus-4",
+      region: null,
+      schedule: null,
+      timezone: "UTC",
+      scheduleEnabled: false,
+      maxTurns: 10,
+      budgetUsd: "5.00",
+      ownerEmail: null,
+      kind: "native",
+      memoryEnabled: false,
+      unmodeled: {},
+    };
+    const tool: NeutralTool = {
+      name: toolName8,
+      description,
+      paramsZod: "z.object({})",
+      jsonSchema: null,
+      code: "return 1;",
+      secretSchema: "",
+    };
+    const agentTool: NeutralAgentTool = {
+      agentName: agentName8,
+      toolName: toolName8,
+      allowedSecrets: [],
+      allowedDatastorePrefixes: [],
+      allowedHosts: [],
+      allowedSharedDatastorePrefixes: {},
+    };
+    const bundle: Bundle = {
+      manifest,
+      readAgents: () => [agent],
+      readTools: () => [tool],
+      readAgentTools: () => [agentTool],
+      readSecrets: () => [],
+      readAgentSecrets: () => [],
+      readSingleDatastores: () => [],
+      readSharedDatastores: () => [],
+      readWebhooks: () => [],
+      readBudgets: () => [],
+    };
+    const owner = await resolvePrincipal(ownerSubject8, db);
+    try {
+      // An existing coding agent the import reuses by name.
+      const existing = await db.agent.create({
+        data: {
+          name: agentName8,
+          systemPrompt: "x",
+          model: "claude-opus-4",
+          budgetUsd: 1,
+          ownerId: owner.id,
+          kind: "coding",
+          codingProfile: { create: { provider, repository: "your-org/your-repo", protectedPaths: [] } },
+        },
+      });
+      const plan = preflight({
+        bundle,
+        routableModels: new Set(["claude-opus-4"]),
+        supportedGlobals: new Set(),
+        existingAgentNames: new Set(),
+        existingToolNames: new Set(),
+        capabilitiesSupported: new Set([]),
+        onConflict: "fail",
+        prefix: "",
+        allowOpenFetch: false,
+      });
+      const result = await createFromBundle(bundle, plan, {
+        db,
+        cipher: buildSecretCipher(loadProviderConfig()),
+        ownerId: owner.id,
+        defaultBudget: "5.00",
+        secretMode: "references" as const,
+        allowOpenFetch: false,
+      });
+      expect(
+        result.warnings.some(
+          (w) => w.includes(`agent-tool ${agentName8}/${toolName8}: skipped`) && w.includes(warning),
+        ),
+      ).toBe(true);
+      expect(await db.agentTool.count({ where: { agentId: existing.id } })).toBe(0);
+    } finally {
+      const agentRow = await db.agent.findUnique({ where: { name: agentName8 } });
+      if (agentRow) {
+        await db.agentTool.deleteMany({ where: { agentId: agentRow.id } });
+        await db.codingAgentProfile.deleteMany({ where: { agentId: agentRow.id } });
+        await db.agent.deleteMany({ where: { id: agentRow.id } });
+      }
+      await db.tool.deleteMany({ where: { ownerId: owner.id } });
+      await db.principal.deleteMany({ where: { subject: ownerSubject8 } });
+    }
+  });
+
   describe("nativeExecutionMode", () => {
     const run = async (mode: "control-plane" | "sandbox" | undefined, env: Record<string, string>) => {
       const id = randomUUID().slice(0, 8);

@@ -758,17 +758,17 @@ describe("tool authoring tools", () => {
   });
 
   describe("attach_tool on coding agents", () => {
-    const tool = (name: string): FakeToolRow => ({
+    const tool = (name: string, description = "x"): FakeToolRow => ({
       id: "t1",
       name,
-      description: "x",
+      description,
       paramsZod: "z.object({})",
       jsonSchema: {},
       code: "",
       ownerId: "p1",
     });
-    async function attach(agent: FakeAgentRow, name = "greet") {
-      const db = fakeDb([tool(name)], [agent]);
+    async function attach(agent: FakeAgentRow, name = "greet", description?: string) {
+      const db = fakeDb([tool(name, description)], [agent]);
       const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
       mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
       registerToolAuthoringTools(mcp);
@@ -811,6 +811,20 @@ describe("tool authoring tools", () => {
       );
       // A native agent is unchanged.
       expect((await attach({ id: "a1", ownerId: "p1", kind: "native" }, "greet people")).isError).toBeFalsy();
+    });
+
+    it("refuses a tool whose description is over the coding proxy's limit, on a Claude Code agent only", async () => {
+      const long = "x".repeat(256 * 1024 + 1);
+      const claude = await attach(
+        { id: "a1", ownerId: "p1", kind: "coding", codingProfile: { provider: "claude-code" } },
+        "greet",
+        long,
+      );
+      expect(claude.isError).toBe(true);
+      expect(claude.content[0].text).toContain(
+        'The tool "greet" can\'t be offered to a Claude Code agent: its description is over 262144 characters.',
+      );
+      expect((await attach({ id: "a1", ownerId: "p1", kind: "native" }, "greet", long)).isError).toBeFalsy();
     });
   });
 
