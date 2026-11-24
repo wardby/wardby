@@ -2132,6 +2132,78 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
     });
   });
 
+  describe("whoami", () => {
+    it("needs a live session", async () => {
+      const res = await call(`/web/whoami`);
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "web_session_required" });
+      const stale = await call(`/web/whoami`, { jar: new Jar({ "wardby-dev-web": "not-a-session" }) });
+      expect(stale.status).toBe(401);
+    });
+
+    it("shows a member their principal and where the subject came from, never the session values", async () => {
+      await db.principalProfile.upsert({
+        where: { principalId: member.id },
+        create: { principalId: member.id, displayName: "Mel Member", email: "mel@example.com", source: "oidc" },
+        update: { displayName: "Mel Member", email: "mel@example.com" },
+      });
+      const { jar, csrf, token } = await session(member.id);
+      const res = await call(`/web/whoami`, { jar });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const text = await res.text();
+      expect(JSON.parse(text)).toMatchObject({
+        kind: "member",
+        principal: { id: member.id, subject: member.subject, name: "Mel Member", email: "mel@example.com" },
+        // The test double carries no subjectSource: whoami reports the default, the ID token's sub.
+        signIn: { mode: "delegating", subjectFrom: { claim: "sub" } },
+      });
+      expect(JSON.parse(text).session.expiresAt).toEqual(expect.any(String));
+      for (const value of [token, csrf]) expect(text).not.toContain(value);
+      await db.principalProfile.delete({ where: { principalId: member.id } });
+    });
+
+    it("reports a configured subject source", async () => {
+      const p = await freePort();
+      const h = await startServerAt(p, { oidc: { ...fakeOidc, subjectSource: { emailDomain: "example.com" } } });
+      try {
+        const { jar } = await session(member.id);
+        const res = await callAt(`http://127.0.0.1:${p}`, `/web/whoami`, { jar });
+        expect(((await res.json()) as { signIn: unknown }).signIn).toEqual({
+          mode: "delegating",
+          subjectFrom: { emailDomain: "example.com" },
+        });
+      } finally {
+        await h.close();
+      }
+    });
+
+    it("shows a guest only their own name and link scope", async () => {
+      const link = await createShareLink(db, {
+        documentId: docId,
+        viewer: { kind: "principal", principalId: owner.id },
+        permission: "comment",
+      });
+      const jar = new Jar();
+      const page = await call(`/s/${link.token}`, { jar });
+      jar.take(page);
+      const preCsrf = bootstrapOf(await page.text()).csrf as string;
+      const reg = await call(`/s/${link.token}/guest`, {
+        method: "POST",
+        jar,
+        csrf: preCsrf,
+        body: { name: "Gwen", email: GUEST_EMAIL },
+      });
+      expect(reg.status).toBe(200);
+      jar.take(reg);
+      const res = await call(`/web/whoami`, { jar });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(JSON.parse(text)).toMatchObject({ kind: "guest", name: "Gwen", documentId: docId, permission: "comment" });
+      for (const value of [link.token, GUEST_EMAIL, owner.subject]) expect(text).not.toContain(value);
+    });
+  });
+
   describe("sign-in routes (self-hosted)", () => {
     it("sends /web/login to the self-hosted /login with the return path, then bridges the session", async () => {
       const sport = await freePort();
