@@ -30,6 +30,7 @@ export const CLI_USAGE = `usage:
   wardby runs [--agent <name>] [--limit N] [--status <s>]
   wardby coding preflight   (JOB_LAUNCHER=docker or kubernetes)
   wardby coding cleanup --run-id <id>
+  wardby coding intercept-ca --host <host> [--host <host> ...] --out <dir> [--days <n>]   Create the CA for the coding proxy's TLS interception (offline)
   wardby scheduler [--scope default]
   wardby native-gateway   (the native sandbox gateway only; NATIVE_GATEWAY_LISTEN, default 0.0.0.0:8790)
   wardby mcp   (MCP_TRANSPORT=stdio|http selects the transport)

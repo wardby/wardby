@@ -60,6 +60,23 @@
 {{- $_ := set $env $k $v }}
 {{- end }}
 {{- end }}
+{{- /* The launcher tells each run where the proxy's CONNECT tunnel is; the proxy's own settings are in
+wardby.codingProxy.env, from the same codingProxy.tunnel values. The hosts are validated here, not used. */ -}}
+{{- with .Values.codingProxy.tunnel }}
+{{- if .enabled }}
+{{- if not .allowedHosts }}
+{{- fail "codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true" }}
+{{- end }}
+{{- $_ := set $env "CODING_TUNNEL_PORT" (int .port | toString) }}
+{{- $_ := set $env "CODING_TUNNEL_ALLOWED_HOSTS" (join "," .allowedHosts) }}
+{{- /* To have runs trust the interception CA, give the control plane the public certificate alone: from
+intercept.caSecret (mounted in control_plane.yaml), or as CODING_TUNNEL_TRUST_CA_CERT (controlPlane.extraEnv).
+The key is the proxy's and never goes here. */ -}}
+{{- if and .intercept.rules .intercept.caSecret }}
+{{- $_ := set $env "CODING_TUNNEL_TRUST_CA_CERT_FILE" "/etc/wardby/tunnel-trust-ca/ca.crt" }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if $cp.metrics.enabled }}
 {{- $_ := set $env "METRICS_BIND" (printf "0.0.0.0:%d" (int $cp.metrics.port)) }}
 {{- $_ := set $env "METRICS_ALLOW_NON_LOOPBACK" "true" }}

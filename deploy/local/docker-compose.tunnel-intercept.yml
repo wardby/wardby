@@ -1,0 +1,15 @@
+# Opt-in override for the local coding proxy (the Tiltfile adds it when WARDBY_TUNNEL_INTERCEPT_HOST is set):
+# turns on the CONNECT tunnel for one host and has the proxy decrypt that host's traffic to attach the
+# Artifactory user and token it already holds, so a run never sees them. The CA files come from
+# .tilt/tunnel-intercept-ca (git-ignored); a local test CA, never a deployment one.
+services:
+  coding-proxy:
+    environment:
+      CODING_TUNNEL_PORT: "8789"
+      # storage.googleapis.com is a blind pass-through (no rule): Artifactory redirects downloads there. Keep in step with the Tiltfile.
+      CODING_TUNNEL_ALLOWED_HOSTS: ${WARDBY_TUNNEL_INTERCEPT_HOST:?set WARDBY_TUNNEL_INTERCEPT_HOST},storage.googleapis.com
+      CODING_TUNNEL_INTERCEPT_RULES: '[{"host":"${WARDBY_TUNNEL_INTERCEPT_HOST}","scheme":"basic","usernameCredential":"env:ARTIFACTORY_USER","credential":"env:ARTIFACTORY_TOKEN"}]'
+      CODING_TUNNEL_INTERCEPT_CA_CERT_FILE: /etc/wardby/tunnel-intercept-ca/ca.crt
+      CODING_TUNNEL_INTERCEPT_CA_KEY_FILE: /etc/wardby/tunnel-intercept-ca/ca.key
+    volumes:
+      - ../../.tilt/tunnel-intercept-ca:/etc/wardby/tunnel-intercept-ca:ro

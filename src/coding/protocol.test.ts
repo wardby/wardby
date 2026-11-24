@@ -144,6 +144,24 @@ describe("CodingTaskInputSchema", () => {
     expect(() => CodingTaskInputSchema.parse({ ...input, dependencyCache: false })).toThrow();
   });
 
+  it("accepts a tunnel CA certificate within the tool runner's per-file limit", () => {
+    const caCert = "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n";
+    expect(CodingTaskInputSchema.parse({ ...input, tunnel: { port: 8789, caCert } })).toMatchObject({
+      tunnel: { port: 8789, caCert },
+    });
+    for (const bad of ["", "x".repeat(16 * 1024 + 1)]) {
+      expect(() => CodingTaskInputSchema.parse({ ...input, tunnel: { port: 8789, caCert: bad } })).toThrow();
+    }
+  });
+
+  it("accepts an optional tunnel with a port and nothing else", () => {
+    expect(CodingTaskInputSchema.parse(input)).not.toHaveProperty("tunnel");
+    expect(CodingTaskInputSchema.parse({ ...input, tunnel: { port: 8789 } })).toMatchObject({ tunnel: { port: 8789 } });
+    for (const tunnel of [{ port: 0 }, { port: 65536 }, { port: 1.5 }, { port: 8789, host: "x" }, {}]) {
+      expect(() => CodingTaskInputSchema.parse({ ...input, tunnel })).toThrow();
+    }
+  });
+
   it("accepts an optional sessionResume that is only ever true", () => {
     expect(CodingTaskInputSchema.parse(input)).not.toHaveProperty("sessionResume");
     expect(CodingTaskInputSchema.parse({ ...input, sessionResume: true })).toMatchObject({ sessionResume: true });

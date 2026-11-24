@@ -555,6 +555,56 @@ describe("MemoryProxyLedger MCP sessions", () => {
     expect((await ledger.findSessionByMcpTokenHash("mcp-hash"))?.mcpTools?.[0]?.exposedName).toBe("docs__search");
   });
 
+  it("finds a session by its tunnel token hash, as a copy, and not by any other hash", async () => {
+    const ledger = new MemoryProxyLedger();
+    await ledger.createSession({
+      ...base,
+      id: "t1",
+      runId: "rt1",
+      capabilityHash: "cap-t1",
+      registryTokenHash: "registry-t1",
+      tunnelTokenHash: "tunnel-t1",
+    });
+    const found = await ledger.findSessionByTunnelTokenHash("tunnel-t1");
+    expect(found).toMatchObject({ id: "t1", runId: "rt1", status: "active", tunnelTokenHash: "tunnel-t1" });
+    expect(await ledger.findSessionByTunnelTokenHash("registry-t1")).toBeUndefined();
+    expect(await ledger.findSessionByTunnelTokenHash("cap-t1")).toBeUndefined();
+    found!.runId = "changed";
+    expect((await ledger.findSessionByTunnelTokenHash("tunnel-t1"))?.runId).toBe("rt1");
+  });
+
+  it("refuses a second session with the same tunnel token hash, and allows sessions without one", async () => {
+    const ledger = new MemoryProxyLedger();
+    const session = { ...base, tunnelTokenHash: "same-tunnel" };
+    await ledger.createSession({ ...session, id: "a", runId: "ra", capabilityHash: "ha", registryTokenHash: "ga" });
+    await expect(
+      ledger.createSession({ ...session, id: "b", runId: "rb", capabilityHash: "hb", registryTokenHash: "gb" }),
+    ).rejects.toThrow("proxy_tunnel_token_collision");
+    await ledger.createSession({ ...base, id: "c", runId: "rc", capabilityHash: "hc", registryTokenHash: "gc" });
+    await ledger.createSession({ ...base, id: "d", runId: "rd", capabilityHash: "hd", registryTokenHash: "gd" });
+  });
+
+  it("reports a run's session active until it is cancelled or its deadline passes, on the ledger's clock", async () => {
+    let now = new Date("2026-01-01T00:00:00Z");
+    const ledger = new MemoryProxyLedger({ now: () => now });
+    await ledger.createSession({
+      ...base,
+      id: "act",
+      runId: "run-act",
+      capabilityHash: "cap-act",
+      registryTokenHash: "registry-act",
+      deadlineAt: new Date("2026-01-01T00:10:00Z"),
+    });
+    expect(await ledger.sessionActiveForRun("run-act")).toBe(true);
+    expect(await ledger.sessionActiveForRun("missing")).toBe(false);
+    now = new Date("2026-01-01T00:10:00Z");
+    expect(await ledger.sessionActiveForRun("run-act")).toBe(false);
+    now = new Date("2026-01-01T00:05:00Z");
+    expect(await ledger.sessionActiveForRun("run-act")).toBe(true);
+    await ledger.cancelSession("act");
+    expect(await ledger.sessionActiveForRun("run-act")).toBe(false);
+  });
+
   it("gives a session without MCP tools no pins, no hash and no calls", async () => {
     const ledger = new MemoryProxyLedger();
     await ledger.createSession({

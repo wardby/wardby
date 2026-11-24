@@ -104,8 +104,27 @@ spec:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           volumeMounts:
             {{- include "wardby.tmpVolumeMount" . | nindent 12 }}
+            {{- with .Values.codingProxy.tunnel }}
+            {{- if and .enabled .intercept.rules .intercept.caSecret }}
+            # A directory mount, never subPath: the kubelet updates it when the Secret is renewed.
+            - name: tunnel-trust-ca
+              mountPath: /etc/wardby/tunnel-trust-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
       volumes:
         {{- include "wardby.tmpVolume" $cp | nindent 8 }}
+        {{- with .Values.codingProxy.tunnel }}
+        {{- if and .enabled .intercept.rules .intercept.caSecret }}
+        # Only the public certificate: the Secret's key is not projected here, and stays on the proxy.
+        - name: tunnel-trust-ca
+          secret:
+            secretName: {{ .intercept.caSecret }}
+            items:
+              - key: tls.crt
+                path: ca.crt
+        {{- end }}
+        {{- end }}
 ---
 # Egress only: nothing in the namespace may reach the control plane. The load
 # balancer's ingress hole is in gateway.yaml. The one exception is the metrics

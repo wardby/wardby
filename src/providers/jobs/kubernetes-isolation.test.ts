@@ -489,6 +489,22 @@ describe("buildRunNetworkPolicy", () => {
   });
 });
 
+describe("buildRunNetworkPolicy with the tunnel on", () => {
+  it("admits the tunnel port on the proxy pods in the same single egress rule, and nothing else", () => {
+    const policy = buildRunNetworkPolicy({ ...spec, tunnelPort: 8789 }, "wardby-coding");
+    expect(policy.spec?.egress).toEqual([
+      {
+        to: [{ podSelector: { matchLabels: { "app.kubernetes.io/name": "wardby-coding-proxy" } } }],
+        ports: [
+          { protocol: "TCP", port: 8787 },
+          { protocol: "TCP", port: 8789 },
+        ],
+      },
+    ]);
+    expect(policy.spec?.ingress).toEqual([]);
+  });
+});
+
 describe("MCP token delivery", () => {
   const TOOL_IMAGE = `localhost:5001/wardby-claude-tool-runner@sha256:${"b".repeat(64)}`;
   const names = kubernetesRunNames(spec.runId);

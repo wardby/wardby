@@ -362,6 +362,42 @@ codingProxy:
     # -- NetworkPolicy peers allowed to scrape the metrics port, e.g. `[{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}]`.
     # Empty admits no one: the default-deny policy keeps the port closed.
     ingressFrom: []
+  tunnel:
+    # -- Serve a CONNECT tunnel on `port` (sets `CODING_TUNNEL_PORT` and `CODING_TUNNEL_ALLOWED_HOSTS` on the proxy), add the
+    # port to the container and the Service, and to the NetworkPolicy rule that admits coding-run pods, and give the control
+    # plane the port and hosts so it points each run at the tunnel. Needs `allowedHosts`.
+    enabled: false
+    # -- Port of the tunnel. It must differ from the proxy port (8787) and the deny port (8788).
+    port: 8789
+    # -- Hostnames a run may tunnel to, on port 443 only. No IP addresses, wildcards or ports.
+    allowedHosts: []
+    # -- Open tunnels per run (`CODING_TUNNEL_MAX_CONNECTIONS`). Unset uses the proxy's default.
+    maxConnections: null
+    # -- Bytes per run, both directions (`CODING_TUNNEL_MAX_BYTES`). Unset uses the proxy's default.
+    maxBytes: null
+    # -- Milliseconds a tunnel may sit idle (`CODING_TUNNEL_IDLE_MS`). Unset uses the proxy's default.
+    idleMs: null
+    # -- Milliseconds a tunnel may stay open (`CODING_TUNNEL_MAX_DURATION_MS`). Unset uses the proxy's default.
+    maxDurationMs: null
+    # TLS interception for the few allowed hosts that need a credential the run must not hold: the proxy decrypts their
+    # traffic, drops the run's own `Authorization` and attaches the credential. Every other host stays a blind tunnel.
+    intercept:
+      # -- One entry per intercepted host: `{host, scheme: bearer|basic, credential: env:NAME}`, and for basic exactly one of
+      # `username` or `usernameCredential: env:NAME`.
+      # Each `host` must also be in `allowedHosts`. `NAME` is an environment variable on the proxy, normally from
+      # `codingProxy.envFromSecret` or `extraEnv`. Empty leaves every tunnel blind.
+      # The proxy also needs the CA: set `CODING_TUNNEL_INTERCEPT_CA_CERT` and `CODING_TUNNEL_INTERCEPT_CA_KEY` (PEM text, for
+      # example from `secretKeyRef`s in `extraEnv`; `wardby coding intercept-ca` writes the files to copy). Without them the proxy refuses to start. A name constraint on the
+      # certificate must be critical and permit the `rules` hosts; a certificate with none is accepted, with a warning in the
+      # proxy's log (a leaked key could then sign for any host). To make runs trust the CA, set
+      # `CODING_TUNNEL_TRUST_CA_CERT` (the certificate alone, never the key) in `controlPlane.extraEnv`.
+      # Or set `caSecret` instead.
+      rules: []
+      # -- The name of a `kubernetes.io/tls` Secret holding the CA (`tls.crt`, `tls.key`), normally a cert-manager
+      # `Certificate`'s. Set, the chart mounts it on the proxy (certificate and key) and on the control plane (the
+      # certificate alone) and sets the `_FILE` variables; leave the PEM variables out of `extraEnv`. Mounted files follow
+      # the Secret, so a renewed CA reaches the proxy and new runs without a restart. Empty uses the `extraEnv` variables.
+      caSecret: ""
   # -- Annotations added to this workload's pods, over `podAnnotations`. Changing them restarts the pods.
   podAnnotations: {}
   nodeSelector: {}

@@ -291,3 +291,85 @@ tests:
           path: spec.template.spec.containers[0].env
           content: { name: METRICS_BIND, value: 127.0.0.1:9464 }
         documentIndex: 1
+  - it: gives the launcher no tunnel settings by default
+    documentIndex: 1
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_PORT, value: "8789" }
+  - it: tells the launcher the tunnel port and hosts when the tunnel is enabled
+    documentIndex: 1
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.port: 8800
+      codingProxy.tunnel.allowedHosts: [ghcr.io, registry.example.com]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_PORT, value: "8800" }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_ALLOWED_HOSTS, value: "ghcr.io,registry.example.com" }
+  - it: leaves the trust CA to the control plane's extraEnv when interception is on
+    documentIndex: 1
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [registry.example.com]
+      codingProxy.tunnel.intercept.rules:
+        - { host: registry.example.com, scheme: bearer, credential: "env:REGISTRY_TOKEN" }
+      controlPlane.extraEnv:
+        - name: CODING_TUNNEL_TRUST_CA_CERT
+          valueFrom: { secretKeyRef: { name: wardby-ca-crt, key: ca-crt } }
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_TUNNEL_TRUST_CA_CERT
+            valueFrom: { secretKeyRef: { name: wardby-ca-crt, key: ca-crt } }
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 1
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_INTERCEPT_CA_KEY_FILE, value: /etc/wardby/tunnel-intercept-ca/ca.key }
+  - it: mounts only the certificate from caSecret for the launcher
+    documentIndex: 1
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [registry.example.com]
+      codingProxy.tunnel.intercept.rules:
+        - { host: registry.example.com, scheme: bearer, credential: "env:REGISTRY_TOKEN" }
+      codingProxy.tunnel.intercept.caSecret: wardby-tunnel-ca
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_TRUST_CA_CERT_FILE, value: /etc/wardby/tunnel-trust-ca/ca.crt }
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: tunnel-trust-ca, mountPath: /etc/wardby/tunnel-trust-ca, readOnly: true }
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: tunnel-trust-ca
+            secret:
+              secretName: wardby-tunnel-ca
+              items:
+                - { key: tls.crt, path: ca.crt }
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_INTERCEPT_CA_KEY_FILE, value: /etc/wardby/tunnel-intercept-ca/ca.key }
+  - it: gives the launcher no trust CA without interception rules
+    documentIndex: 1
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [registry.example.com]
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_TRUST_CA_CERT_FILE, value: /etc/wardby/tunnel-trust-ca/ca.crt }
+  - it: fails the tunnel without hosts
+    set:
+      codingProxy.tunnel.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true

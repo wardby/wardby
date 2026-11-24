@@ -957,7 +957,11 @@ export function buildRunNetworkPolicy(spec: JobSpec, namespace: string): V1Netwo
       egress: [
         {
           to: [{ podSelector: { matchLabels: { ...PROXY_POD_LABEL } } }],
-          ports: [{ protocol: "TCP", port: CODING_PROXY_PORT }],
+          // The tunnel port too, only when the tunnel is on. Still the one egress rule, still only the proxy pod.
+          ports: [
+            { protocol: "TCP", port: CODING_PROXY_PORT },
+            ...(spec.tunnelPort ? [{ protocol: "TCP", port: spec.tunnelPort }] : []),
+          ],
         },
       ],
     },

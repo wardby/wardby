@@ -294,8 +294,38 @@ podSelector:
 {{/* The coding proxy's chart-derived environment, as a map; codingProxy.env overrides it. */}}
 {{- define "wardby.codingProxy.env" -}}
 {{- $m := .Values.codingProxy.metrics -}}
+{{- $t := .Values.codingProxy.tunnel -}}
 {{- if $m.enabled }}
 METRICS_BIND: {{ printf "0.0.0.0:%d" (int $m.port) | quote }}
 METRICS_ALLOW_NON_LOOPBACK: "true"
+{{- end }}
+{{- if $t.enabled }}
+{{- if not $t.allowedHosts }}
+{{- fail "codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true" }}
+{{- end }}
+CODING_TUNNEL_PORT: {{ int $t.port | quote }}
+CODING_TUNNEL_ALLOWED_HOSTS: {{ join "," $t.allowedHosts | quote }}
+{{- if not (kindIs "invalid" $t.maxConnections) }}
+CODING_TUNNEL_MAX_CONNECTIONS: {{ int $t.maxConnections | quote }}
+{{- end }}
+{{- if not (kindIs "invalid" $t.maxBytes) }}
+CODING_TUNNEL_MAX_BYTES: {{ int64 $t.maxBytes | quote }}
+{{- end }}
+{{- if not (kindIs "invalid" $t.idleMs) }}
+CODING_TUNNEL_IDLE_MS: {{ int $t.idleMs | quote }}
+{{- end }}
+{{- if not (kindIs "invalid" $t.maxDurationMs) }}
+CODING_TUNNEL_MAX_DURATION_MS: {{ int $t.maxDurationMs | quote }}
+{{- end }}
+{{- /* The CA certificate and key reach the proxy as files from intercept.caSecret (mounted in coding_proxy.yaml),
+or as CODING_TUNNEL_INTERCEPT_CA_CERT and _CA_KEY from secretKeyRefs in codingProxy.extraEnv; the proxy refuses
+to start with rules and no CA. */ -}}
+{{- if $t.intercept.rules }}
+CODING_TUNNEL_INTERCEPT_RULES: {{ toJson $t.intercept.rules | quote }}
+{{- if $t.intercept.caSecret }}
+CODING_TUNNEL_INTERCEPT_CA_CERT_FILE: /etc/wardby/tunnel-intercept-ca/ca.crt
+CODING_TUNNEL_INTERCEPT_CA_KEY_FILE: /etc/wardby/tunnel-intercept-ca/ca.key
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end -}}

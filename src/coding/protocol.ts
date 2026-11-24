@@ -769,6 +769,24 @@ export const CodingTaskInputSchema = z
      */
     sessionResume: z.literal(true).optional(),
     /**
+     * The coding proxy's CONNECT tunnel port, written only when the tunnel is on and the launcher is
+     * Docker or Kubernetes (docs/coding-proxy-tunnel.md). The Codex worker points its shells' proxy
+     * variables at it. Absent on every other input, which is unchanged for workers that predate it.
+     * caCert: the public CA certificate the proxy intercepts TLS with, when the operator set one
+     * (CODING_TUNNEL_TRUST_CA_CERT_FILE), for the worker to place and point its shells' trust variables at.
+     */
+    tunnel: z
+      .object({
+        port: z.number().int().min(1).max(65535),
+        caCert: z
+          .string()
+          .min(1)
+          .max(16 * 1024)
+          .optional(),
+      })
+      .strict()
+      .optional(),
+    /**
      * Claude Code only, never written by the control plane: the Substrate agent bridge sets it on a warm
      * follow-up round (SUBSTRATE_WARM_ROUNDS) to the previous round's session id, so the worker resumes
      * that session. Absent on every other input, which is unchanged.

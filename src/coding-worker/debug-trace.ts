@@ -1,6 +1,7 @@
 import { DEFAULT_DEBUG_TRACE_MAX_MB, MAX_DEBUG_TRACE_LINE_BYTES, MAX_REDACTED_SPAN } from "../coding/protocol.js";
 import { redactSecrets } from "../coding/redact.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
+import { deriveTunnelToken } from "../coding/tunnel-token.js";
 import type { WorkerCredentials } from "./credentials.js";
 
 /**
@@ -126,7 +127,8 @@ export function workerDebugTracer(
   if (input.debugTrace !== true) return undefined;
   return createDebugTracer({
     runId: input.runId,
-    secrets: [capability, registryToken, ...otherSecrets],
+    // The tunnel token is derived the same way: a traced shell's proxy variable must not reach the log.
+    secrets: [capability, registryToken, deriveTunnelToken(capability), ...otherSecrets],
     write,
     ...(input.debugTraceMaxMb ? { maxTotalBytes: input.debugTraceMaxMb * 1024 * 1024 } : {}),
   });
