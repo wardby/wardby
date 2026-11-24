@@ -1163,34 +1163,6 @@ describe("agent CRUD tools", () => {
     await client.close();
   });
 
-  it("update_agent rejects a coding transition while native tools remain attached", async () => {
-    const db = fakeDb([
-      {
-        id: "a1",
-        name: "agent",
-        systemPrompt: "x",
-        model: "gpt-5.6-luna",
-        budgetUsd: 1,
-        maxTurns: 10,
-        schedule: null,
-        timezone: "UTC",
-        ownerId: "p1",
-        tools: [{}],
-      },
-    ]);
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write"]));
-    registerAgentTools(mcp);
-    const client = await connectClient(mcp);
-    const result = await client.callTool({
-      name: "update_agent",
-      arguments: { id: "a1", kind: "coding", codingProfile: { repository: "openai/example" } },
-    });
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result)).toMatch(/attached|tool/i);
-    await client.close();
-  });
-
   it("records when a schedule starts on create and on a change, so no past window is backfilled", async () => {
     const fired = new Date("2026-10-12T06:00:00.000Z");
     const db = fakeDb([

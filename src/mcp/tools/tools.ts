@@ -10,6 +10,8 @@
  * convention as every other tool in this codebase.
  */
 import { Prisma, type PrismaClient, type Tool } from "#prisma";
+import { NATIVE_TOOL_NAME, nativeToolNameMessage } from "../../core/coding-native-tools.js";
+import { isCodexCoding } from "../../core/mcp-tools.js";
 import { deriveJsonSchema, validateParams } from "../../sandbox/zod-params.js";
 import {
   cachedZod4Compatibility,
@@ -134,6 +136,24 @@ async function brokeredSecretWarnings(
 }
 
 /** Refuses a name one of the runner's built-ins would shadow (see core/tool-names.ts). */
+/** attach_tool's refusal for a Codex coding agent (Codex support is #623). */
+export const CODEX_NATIVE_TOOLS_MESSAGE =
+  "Native tools work only on Claude Code coding agents for now; Codex support is tracked separately.";
+
+/** The update_agent warning when an agent becomes Codex with native tools attached (#622). */
+export function codexNativeToolsWarning(names: readonly string[]): string {
+  return `These native tools won't be available to Codex runs: ${names.join(", ")}.`;
+}
+
+/** The names of the native tools attached to `agentId`, sorted: a Codex run never gets them. */
+export async function codexUnavailableNativeTools(
+  db: Pick<PrismaClient, "agentTool">,
+  agentId: string,
+): Promise<string[]> {
+  const rows = await db.agentTool.findMany({ where: { agentId }, select: { tool: { select: { name: true } } } });
+  return [...new Set(rows.map((row) => row.tool.name))].sort();
+}
+
 function assertToolNameAllowed(name: string): void {
   const reason = reservedToolNameReason(name);
   if (reason) throw new McpError(400, reason);
@@ -373,7 +393,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "attach_tool",
     scope: "tools:write",
     description:
-      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant. Granting a brokered secret lets the tool send it only via fetch(url, { secrets: [name] }), never read it; the result includes warnings when the tool calls secrets.get() on one.",
+      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant. Granting a brokered secret lets the tool send it only via fetch(url, { secrets: [name] }), never read it; the result includes warnings when the tool calls secrets.get() on one. A coding agent can take native tools only when it runs Claude Code: its runs call the tool as mcp__wardby_mcp__<tool name>, through the same gateway and per-run call limit as its MCP tools (Codex agents are refused for now).",
     inputSchema: {
       type: "object",
       properties: {
@@ -417,16 +437,15 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
       let attachedTool: { name: string; code: string } | undefined;
       await ctx.db.$transaction(
         async (tx) => {
-          const { agent } = await assertAgentAccess(
-            ctx,
-            await tx.agent.findUnique({ where: { id: args.agentId } }),
-            args.agentId,
-            "write",
-            tx,
-          );
-          if (agent.kind === "coding") {
-            throw new McpError(400, "Native sandbox tools cannot be attached to coding agents.");
-          }
+          const found = await tx.agent.findUnique({
+            where: { id: args.agentId },
+            include: { codingProfile: { select: { provider: true } } },
+          });
+          const { agent } = await assertAgentAccess(ctx, found, args.agentId, "write", tx);
+          // A coding agent's native tools run through its MCP token (#622): Claude Code only, judged
+          // as for MCP tools (a coding agent with no profile counts as Codex).
+          const claudeCode = agent.kind === "coding" && !isCodexCoding(found?.codingProfile?.provider);
+          if (agent.kind === "coding" && !claudeCode) throw new McpError(400, CODEX_NATIVE_TOOLS_MESSAGE);
           // Capabilities carry the owner's consent (resource-sharing grants
           // spec §3.4.2). Strict ownership: neither a write-grantee nor the
           // stdio operator may hand the owner's secrets, datastores or
@@ -459,6 +478,10 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           // owner: a second same-named tool on one agent would be a
           // duplicate tool name to the model and silently shadow one of them.
           attachedTool = { name: tool.name, code: tool.code };
+          // Claude Code is offered the tool as mcp__wardby_mcp__<name>: only a name that fits.
+          if (claudeCode && !NATIVE_TOOL_NAME.test(tool.name)) {
+            throw new McpError(400, nativeToolNameMessage(tool.name));
+          }
           const clash = await findSameNamedAttachedTool(tx, args.agentId, tool);
           if (clash) {
             // The clashing tool may be another principal's private one (a

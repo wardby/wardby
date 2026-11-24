@@ -155,6 +155,9 @@ async function register(call: Call, name = "acme", secretNames = ["MCP_TOKEN"]) 
   return JSON.parse(result.text) as { id: string; tools: { name: string; description: string }[] };
 }
 
+/** A wardby admin's scopes, for update_agent's repositoryAdminOverride (no GitHub App in these tests). */
+const ADMIN_SCOPES = ["tools:write", "agents:read", "agents:write", "agents:admin", "hosts:admin"] as const;
+
 const ok = (r: { isError: boolean; text: string }) => {
   expect(r.isError, r.text).toBe(false);
   return JSON.parse(r.text);
@@ -543,6 +546,86 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
         }),
       );
       expect(back.warnings).toBeUndefined();
+    });
+
+    it("warns when update_agent switches an agent with native tools to Codex, and lets the change go ahead", async () => {
+      const p = await principal();
+      const call = await connect(p, { scopes: [...ADMIN_SCOPES], roles: ["admin"] });
+      const tool = await db.tool.create({
+        data: {
+          name: "code_search",
+          description: "x",
+          paramsZod: "z.object({})",
+          jsonSchema: { type: "object" },
+          code: "return 1;",
+          ownerId: p.id,
+        },
+      });
+      const coding = await agent(p, "coding", "claude-code");
+      const native = await agent(p);
+      await db.codingAgentProfile.update({ where: { agentId: coding.id }, data: { protectedPaths: [".github/**"] } });
+      try {
+        for (const a of [coding, native]) {
+          await db.agentTool.create({ data: { agentId: a.id, toolId: tool.id, capabilitiesGrantedById: p.id } });
+        }
+        // An unrelated edit of a Claude Code agent with native tools is no longer refused.
+        expect(ok(await call("update_agent", { id: coding.id, systemPrompt: "y" })).warnings).toBeUndefined();
+        const switched = ok(await call("update_agent", { id: coding.id, codingProfile: { provider: "codex" } }));
+        expect(switched.codingProfile.provider).toBe("codex");
+        expect(switched.warnings).toEqual(["These native tools won't be available to Codex runs: code_search."]);
+        // Already Codex: no repeat.
+        expect(ok(await call("update_agent", { id: coding.id, systemPrompt: "z" })).warnings).toBeUndefined();
+
+        // A native agent with tools may become a coding agent: Claude Code keeps them, quietly.
+        const becameClaude = ok(
+          await call("update_agent", {
+            id: native.id,
+            kind: "coding",
+            model: "claude-sonnet-5",
+            codingProfile: {
+              provider: "claude-code",
+              repository: "your-org/your-repo",
+              protectedPaths: [".github/**"],
+            },
+            repositoryAdminOverride: true,
+          }),
+        );
+        expect(becameClaude.kind).toBe("coding");
+        expect(becameClaude.warnings).toBeUndefined();
+      } finally {
+        await db.agentTool.deleteMany({ where: { toolId: tool.id } });
+      }
+    });
+
+    it("warns when a native agent with tools becomes a Codex coding agent", async () => {
+      const p = await principal();
+      const call = await connect(p, { scopes: [...ADMIN_SCOPES], roles: ["admin"] });
+      const tool = await db.tool.create({
+        data: {
+          name: "kb_lookup",
+          description: "x",
+          paramsZod: "z.object({})",
+          jsonSchema: { type: "object" },
+          code: "return 1;",
+          ownerId: p.id,
+        },
+      });
+      const native = await agent(p);
+      try {
+        await db.agentTool.create({ data: { agentId: native.id, toolId: tool.id, capabilitiesGrantedById: p.id } });
+        const switched = ok(
+          await call("update_agent", {
+            id: native.id,
+            kind: "coding",
+            codingProfile: { provider: "codex", repository: "your-org/your-repo", protectedPaths: [".github/**"] },
+            repositoryAdminOverride: true,
+          }),
+        );
+        expect(switched.kind).toBe("coding");
+        expect(switched.warnings).toEqual(["These native tools won't be available to Codex runs: kb_lookup."]);
+      } finally {
+        await db.agentTool.deleteMany({ where: { toolId: tool.id } });
+      }
     });
 
     it("gives no warning on a switch to Codex when every attached tool is read-only", async () => {
