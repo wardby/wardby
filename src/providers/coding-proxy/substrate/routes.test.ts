@@ -38,6 +38,13 @@ const PIN = {
   serverName: "docs",
   definition: { description: "d", inputSchema: { type: "object" } },
 };
+const NATIVE_PIN = {
+  kind: "native",
+  exposedName: "code_search",
+  toolId: "tool-1",
+  toolName: "code_search",
+  definition: { description: "d", inputSchema: { type: "object" } },
+};
 /** A session with `mcpTools` set as given (`undefined`: the field left out). */
 const sessionWithPins = (runId: string, mcpTools: unknown): ProxySession =>
   (mcpTools === undefined ? sessionFor(runId) : { ...sessionFor(runId), mcpTools }) as ProxySession;
@@ -1386,6 +1393,8 @@ describe("substrate routes", () => {
       await blobs.put(BLOB.input(TOKEN), Buffer.from('{"task":"x"}'));
       for (const [mcpTools, expected] of [
         [[PIN], "1"],
+        // A Claude Code run with only native tools (#622) gets the same token path.
+        [[NATIVE_PIN], "1"],
         [undefined, null],
         [[], null],
         [null, null],

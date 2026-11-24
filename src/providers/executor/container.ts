@@ -17,6 +17,7 @@ import { loadPlanFiles, type PlanFile } from "../../coding/plan-files/store.js";
 import { withBaseCommit, withExtraRepositories, type GitHistoryWording } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
+import { withoutClashingNativePins, type CodingToolPin, type NativeToolPin } from "../../core/coding-native-tools.js";
 import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
 import { codeProviderOf } from "../../coding/code-host.js";
 import { withPullRequestDescription } from "../../coding/pr-description-note.js";
@@ -1883,8 +1884,8 @@ export interface CodingSessionController {
     budgetUsd: number;
     /** The run's catalog entry; the proxy prices and shapes the run's requests from it. */
     terms?: ProxyModelTerms;
-    /** The run's pinned MCP tools; set with mcpTokenHash, only when the agent has at least one. */
-    mcpTools?: McpToolPin[];
+    /** The run's pinned MCP and native tools; set with mcpTokenHash, only when the agent has at least one. */
+    mcpTools?: CodingToolPin[];
     /** The hash of the run's MCP token (src/coding/mcp-token.ts); the token itself stays in the vault. */
     mcpTokenHash?: string;
     /** The run's run-steps level (Run.runStepsLevel); the proxy reads tool output only at detail. */
@@ -1961,6 +1962,12 @@ export interface ContainerExecutorOptions {
    * provider (isCodexCoding(run.provider)), never the agent's current profile.
    */
   mcpToolPins?: (agentId: string, options: { readOnlyOnly: boolean }) => Promise<McpToolPin[]>;
+  /**
+   * The agent's attached native tools as pins (composition wires loadNativeToolPins), asked for a
+   * Claude Code run only (by its dispatched provider): served through the same MCP token and gateway
+   * route as its MCP tools (#622). Absent = no coding run gets native tools.
+   */
+  nativeToolPins?: (agentId: string) => Promise<NativeToolPin[]>;
   artifactRoot: string;
   /**
    * The Codex worker for the "node" toolchain (CODING_WORKER_IMAGE). Optional on a Claude-only
@@ -2386,10 +2393,21 @@ export class ContainerExecutor implements Executor {
         // A Codex run's shell commands can read the token, so it gets read-only tools only; decided by
         // the provider the run was dispatched with, which is what jobSpec launches. A failed read fails
         // the run with a fixed code (the cause goes to the operator log only, redacted).
-        let mcpTools: McpToolPin[];
+        // A Claude Code run also gets the agent's native tools, after its MCP tools; a Codex run never
+        // does (its shell commands can read the token, and a native tool has no read-only mark).
+        let mcpTools: CodingToolPin[];
         try {
-          mcpTools =
+          const mcp =
             (await this.options.mcpToolPins?.(run.agentId, { readOnlyOnly: isCodexCoding(run.provider) })) ?? [];
+          const native = isCodexCoding(run.provider) ? [] : ((await this.options.nativeToolPins?.(run.agentId)) ?? []);
+          mcpTools = [
+            ...mcp,
+            ...withoutClashingNativePins(
+              native,
+              mcp.map((pin) => pin.exposedName),
+              containerLog,
+            ),
+          ];
         } catch (error) {
           throw new Error(MCP_PINS_UNAVAILABLE_ERROR, { cause: error });
         }
@@ -4857,7 +4875,7 @@ export class ContainerExecutor implements Executor {
    * (then nothing is retained or resumed), and for a run with git history or extra repositories
    * (never warm: see retentionFor).
    */
-  private warmFingerprintOf(run: ContainerRunSnapshot, pins: readonly McpToolPin[]): string | undefined {
+  private warmFingerprintOf(run: ContainerRunSnapshot, pins: readonly CodingToolPin[]): string | undefined {
     if (!this.warmRounds || run.provider !== "claude-code" || !run.systemPromptSha256) return undefined;
     if (gitHistoryOf(run) || !run.secretVersions) return undefined;
     // A run with extra repositories (#537) is never kept: a kept read copy would hold the previous

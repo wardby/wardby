@@ -1435,5 +1435,60 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         mcpCallCount: 0,
       });
     });
+
+    it("reads a session holding native tool pins next to MCP pins", async () => {
+      const kRun = `mcp-native-run-${suffix}`;
+      await db.run.create({ data: { id: kRun, agentId: mAgent, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId: kRun,
+          task: "test",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${kRun}`,
+          provider: "claude-code",
+          model: "claude-sonnet-4-6",
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 1,
+        },
+      });
+      const native = {
+        kind: "native" as const,
+        exposedName: "code_search",
+        toolId: "tool-1",
+        toolName: "code_search",
+        definition: { description: "Search code", inputSchema: { type: "object" } },
+      };
+      const ledger = new PrismaProxyLedger(db);
+      try {
+        await ledger.createSession({
+          credentialRef: "anthropic/test",
+          protocol: "anthropic-messages",
+          allowedModels: ["claude-sonnet-4-6"],
+          deadlineAt: new Date(Date.now() + 60_000),
+          budgetUsd: 1,
+          id: `mcp-native-session-${suffix}`,
+          runId: kRun,
+          capabilityHash: `mcp-native-cap-${suffix}`,
+          registryTokenHash: `mcp-native-registry-${suffix}`,
+          mcpTools: [pin, native],
+          mcpTokenHash: `mcp-native-token-hash-${suffix}`,
+        });
+        expect(await ledger.findSessionByMcpTokenHash(`mcp-native-token-hash-${suffix}`)).toMatchObject({
+          mcpTools: [pin, native],
+        });
+        // A pin of neither shape still refuses the session.
+        await db.$executeRaw`UPDATE "CodingProxySession" SET "mcpTools" = ${JSON.stringify([{ kind: "native", exposedName: "x" }])}::jsonb WHERE "runId" = ${kRun}`;
+        await expect(ledger.findSessionByMcpTokenHash(`mcp-native-token-hash-${suffix}`)).rejects.toThrow(
+          "invalid_proxy_session_mcp_tools",
+        );
+      } finally {
+        await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "runId" = ${kRun}`;
+        await db.codingRun.deleteMany({ where: { runId: kRun } });
+        await db.run.deleteMany({ where: { id: kRun } });
+      }
+    });
   });
 });

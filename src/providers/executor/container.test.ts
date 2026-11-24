@@ -22,6 +22,7 @@ import type { PlanFile } from "../../coding/plan-files/store.js";
 import { mentionTaskText } from "../../core/host-events.js";
 import { mcpTokenHash } from "../../coding/mcp-token.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
+import type { NativeToolPin } from "../../core/coding-native-tools.js";
 import type { CodingProvider } from "../../coding/provider.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import { resolvedFromDefinition } from "../../coding/services/catalog.js";
@@ -2638,6 +2639,86 @@ describe("ContainerExecutor", () => {
         }),
       ]);
       expect(await created.capabilities.mcpToken("run-1")).toBeUndefined();
+    });
+
+    describe("native tools (Claude Code only)", () => {
+      const native = (name: string): NativeToolPin => ({
+        kind: "native",
+        exposedName: name,
+        toolId: `tool-${name}`,
+        toolName: name,
+        definition: { description: name, inputSchema: { type: "object" } },
+      });
+      const CLAUDE = { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const;
+      const claudeHarness = (extra: Partial<ContainerExecutorOptions>) =>
+        harness(
+          CLAUDE,
+          IMAGE,
+          new InMemoryCodingRunObserver(),
+          { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE },
+          extra,
+        );
+
+      it("pins the agent's native tools after its MCP tools, leaving out one whose name an MCP tool has", async () => {
+        const asked: string[] = [];
+        const created = await claudeHarness({
+          mcpToolPins: async () => [pin],
+          nativeToolPins: async (agentId) => {
+            asked.push(agentId);
+            return [native("code_search"), native("docs__search")];
+          },
+        });
+        await created.executor.start("run-1");
+        expect(asked).toEqual(["agent-1"]);
+        expect(created.sessions.lastInput?.mcpTools).toEqual([pin, native("code_search")]);
+        expect(created.jobs.lastSpec?.mcpTools).toBe(true);
+        expect(logged).toContainEqual(
+          expect.objectContaining({
+            level: "warn",
+            payload: { toolId: "tool-docs__search", exposedName: "docs__search" },
+          }),
+        );
+        expect(created.store.run.status).toBe("succeeded");
+      });
+
+      it("mints a token and flags the spec (so the gateway wakes) when the agent has only native tools", async () => {
+        const created = await claudeHarness({ nativeToolPins: async () => [native("code_search")] });
+        let atLaunch: Promise<string | undefined> | undefined;
+        created.jobs.onLaunch = () => {
+          atLaunch = created.capabilities.mcpToken("run-1");
+        };
+        await created.executor.start("run-1");
+        const token = await atLaunch;
+        expect(token).toMatch(/^rmt_/);
+        expect(created.sessions.lastInput?.mcpTools).toEqual([native("code_search")]);
+        expect(created.sessions.lastInput?.mcpTokenHash).toBe(mcpTokenHash(token!));
+        expect(created.jobs.lastSpec?.mcpTools).toBe(true);
+      });
+
+      it("never asks for native pins for a Codex run", async () => {
+        const nativeToolPins = vi.fn(async () => [native("code_search")]);
+        const created = await harness({}, IMAGE, undefined, undefined, { nativeToolPins });
+        await created.executor.start("run-1");
+        expect(nativeToolPins).not.toHaveBeenCalled();
+        expect(created.sessions.lastInput).not.toHaveProperty("mcpTools");
+        expect(created.jobs.lastSpec).not.toHaveProperty("mcpTools");
+      });
+
+      it("fails the run with coding_failure_mcp_pins_unavailable when the native pins can't be read", async () => {
+        const created = await claudeHarness({
+          nativeToolPins: async () => {
+            throw new Error("Invalid `prisma.agentTool.findMany()` invocation");
+          },
+        });
+        await created.executor.start("run-1");
+        expect(created.jobs.launches).toBe(0);
+        expect(created.store.terminations).toEqual([
+          expect.objectContaining({
+            status: "failed",
+            error: expect.stringMatching(/^coding_failure_mcp_pins_unavailable:coding_diag_[0-9a-f-]+$/),
+          }),
+        ]);
+      });
     });
 
     it("clears the token with the capability when the launch fails", async () => {

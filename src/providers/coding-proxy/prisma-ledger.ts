@@ -130,21 +130,19 @@ function sessionFromRow(row: SessionRow): ProxySession {
   };
 }
 
-/** The session's pinned MCP tools; null when it has none. Anything but a list of pins refuses the session. */
+/** An MCP server's pin (no kind: serverId) or a native tool's (kind "native": toolId), by its identifying fields. */
+function isStoredPin(pin: unknown): boolean {
+  if (typeof pin !== "object" || pin === null) return false;
+  const p = pin as { kind?: unknown; exposedName?: unknown; toolName?: unknown; serverId?: unknown; toolId?: unknown };
+  if (typeof p.exposedName !== "string" || typeof p.toolName !== "string") return false;
+  return p.kind === "native" ? typeof p.toolId === "string" : p.kind === undefined && typeof p.serverId === "string";
+}
+
+/** The session's pinned tools (MCP and native); null when it has none. Anything but a list of pins refuses the session. */
 function sessionMcpTools(row: SessionRow): ProxySession["mcpTools"] {
   const stored = row.mcpTools ?? null;
   if (stored === null) return null;
-  if (
-    !Array.isArray(stored) ||
-    !stored.every(
-      (pin) =>
-        typeof pin === "object" &&
-        pin !== null &&
-        typeof (pin as { exposedName?: unknown }).exposedName === "string" &&
-        typeof (pin as { toolName?: unknown }).toolName === "string" &&
-        typeof (pin as { serverId?: unknown }).serverId === "string",
-    )
-  ) {
+  if (!Array.isArray(stored) || !stored.every(isStoredPin)) {
     throw new Error("invalid_proxy_session_mcp_tools");
   }
   return stored as NonNullable<ProxySession["mcpTools"]>;
