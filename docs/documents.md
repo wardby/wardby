@@ -140,6 +140,16 @@ started it. A browser session ends after 12 hours idle or 7 days. Without
 links keep working. With `AUTH_PROVIDER=self-hosted`, the `WEB_OIDC_*`
 variables are ignored.
 
+To see who a browser session is, open `/web/whoami` in that browser. It
+returns the session's Wardby person (id, subject, shown name, profile email),
+where a browser sign-in's subject comes from (`signIn.subjectFrom`), and when
+the session expires; a share-link guest sees only their own name and the link's
+document and permission. Compare `principal.subject` with the subject the same
+person's MCP client resolves to: when they differ, the two sign-ins are
+different people. It never returns the session cookie, the CSRF value or any
+identity-provider token, and answers `web_session_required` (401) without a
+session.
+
 If you run Wardby behind a proxy, it must forward `Origin` and the `Cookie`
 headers and serve the pages on the same origin as `MCP_CANONICAL_URI`. It must
 also pass the live-updates stream (next section) through unbuffered.

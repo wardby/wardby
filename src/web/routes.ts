@@ -38,6 +38,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { documentAccess, type Viewer } from "../core/documents/access.js";
 import { notifyDocumentChange } from "../core/documents/events.js";
+import { principalNames } from "../core/documents/comments.js";
 import { registerGuest, resolveShareToken } from "../core/documents/share-links.js";
 import { readCookie } from "../mcp/auth/self-hosted/cookies.js";
 import {
@@ -104,6 +105,7 @@ const API_EXPORT = new RegExp(`^/d/api/exports/(${ID})(/file)?$`);
 const API_EVENTS = new RegExp(`^/d/api/(${ID})/events$`);
 const WEB_PREFIXES = /^\/(?:d|s|web)\//;
 const LOGOUT_URL = "/web/logout";
+const WHOAMI_URL = "/web/whoami";
 const PRE_MAX_AGE_SECONDS = 60 * 60;
 const PRE_VALUE = /^[A-Za-z0-9_-]{43}$/;
 
@@ -190,6 +192,10 @@ export async function handleWebRequest(
   }
   if (method === "POST" && path === LOGOUT_URL) {
     await guardJson(res, () => logout(req, res, deps));
+    return true;
+  }
+  if (method === "GET" && path === WHOAMI_URL) {
+    await guardJson(res, () => whoami(req, res, deps));
     return true;
   }
   sendWebJson(res, 404, { error: "not_found" });
@@ -406,6 +412,54 @@ async function logout(req: IncomingMessage, res: ServerResponse, deps: WebDeps):
   if (session) assertCsrf(req, session);
   addCookie(res, await endWebSession(deps.db, req.headers.cookie, options));
   sendWebJson(res, 200, { ok: true });
+}
+
+/**
+ * GET /web/whoami: who this browser session is, for the person it belongs to. A member sees the principal
+ * (id, subject, the name they are shown as, the profile email) and where a browser sign-in's subject comes
+ * from, so they can compare it with the subject their MCP client resolves to. A guest sees their own name
+ * and share link scope. Never the session token, the CSRF value, or any identity-provider token (none is
+ * kept: the ID token is discarded at sign-in). Without a live session it answers web_session_required.
+ */
+async function whoami(req: IncomingMessage, res: ServerResponse, deps: WebDeps): Promise<void> {
+  const ctx = await resolveContext(req, deps, { touch: false });
+  if (ctx.kind === "none") throw new Error("web_session_required");
+  const times = await deps.db.webSession.findUnique({
+    where: { id: ctx.session.id },
+    select: { expiresAt: true, lastSeenAt: true },
+  });
+  const session = { expiresAt: times?.expiresAt ?? null, lastSeenAt: times?.lastSeenAt ?? null };
+  if (ctx.kind === "guest") {
+    const guest = await deps.db.documentGuest.findUnique({ where: { id: ctx.guestId }, select: { name: true } });
+    sendWebJson(res, 200, {
+      kind: "guest",
+      name: guest?.name ?? null,
+      documentId: ctx.documentId,
+      permission: ctx.viewer.permission,
+      session,
+    });
+    return;
+  }
+  const [principal, profile, names] = await Promise.all([
+    deps.db.principal.findUnique({ where: { id: ctx.principalId }, select: { id: true, subject: true } }),
+    deps.db.principalProfile.findUnique({ where: { principalId: ctx.principalId }, select: { email: true } }),
+    principalNames(deps.db, [ctx.principalId]),
+  ]);
+  if (!principal) throw new Error("web_session_required");
+  sendWebJson(res, 200, {
+    kind: "member",
+    principal: {
+      id: principal.id,
+      subject: principal.subject,
+      name: names.get(principal.id) ?? null,
+      email: profile?.email ?? null,
+    },
+    signIn:
+      deps.authMode === "delegating"
+        ? { mode: "delegating", subjectFrom: deps.oidc?.subjectSource ?? { claim: "sub" } }
+        : { mode: "self-hosted" },
+    session,
+  });
 }
 
 // ---- JSON API -------------------------------------------------------------
