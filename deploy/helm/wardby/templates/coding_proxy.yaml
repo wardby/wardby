@@ -105,7 +105,7 @@ spec:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           volumeMounts:
             {{- include "wardby.tmpVolumeMount" . | nindent 12 }}
-            {{- if and $w.tunnel.enabled $w.tunnel.intercept.rules $w.tunnel.intercept.caSecret }}
+            {{- if include "wardby.codingProxy.interceptCaSecret" . }}
             # A directory mount, never subPath: the kubelet updates it when the Secret is renewed.
             - name: tunnel-intercept-ca
               mountPath: /etc/wardby/tunnel-intercept-ca
@@ -113,10 +113,10 @@ spec:
             {{- end }}
       volumes:
         {{- include "wardby.tmpVolume" $w | nindent 8 }}
-        {{- if and $w.tunnel.enabled $w.tunnel.intercept.rules $w.tunnel.intercept.caSecret }}
+        {{- with include "wardby.codingProxy.interceptCaSecret" . }}
         - name: tunnel-intercept-ca
           secret:
-            secretName: {{ $w.tunnel.intercept.caSecret }}
+            secretName: {{ . }}
             items:
               - key: tls.crt
                 path: ca.crt

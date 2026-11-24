@@ -70,9 +70,9 @@ wardby.codingProxy.env, from the same codingProxy.tunnel values. The hosts are v
 {{- $_ := set $env "CODING_TUNNEL_PORT" (int .port | toString) }}
 {{- $_ := set $env "CODING_TUNNEL_ALLOWED_HOSTS" (join "," .allowedHosts) }}
 {{- /* To have runs trust the interception CA, give the control plane the public certificate alone: from
-intercept.caSecret (mounted in control_plane.yaml), or as CODING_TUNNEL_TRUST_CA_CERT (controlPlane.extraEnv).
+the CA Secret (mounted in control_plane.yaml), or as CODING_TUNNEL_TRUST_CA_CERT (controlPlane.extraEnv).
 The key is the proxy's and never goes here. */ -}}
-{{- if and .intercept.rules .intercept.caSecret }}
+{{- if include "wardby.codingProxy.interceptCaSecret" $ }}
 {{- $_ := set $env "CODING_TUNNEL_TRUST_CA_CERT_FILE" "/etc/wardby/tunnel-trust-ca/ca.crt" }}
 {{- end }}
 {{- end }}

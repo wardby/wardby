@@ -1,0 +1,26 @@
+{{- /* The coding proxy's interception CA, issued by cert-manager when codingProxy.tunnel.intercept.certManager is
+enabled. The Certificate keeps its name; its secretName (from wardby.codingProxy.interceptCaSecret) changes with its
+spec, and cert-manager issues into a Secret that does not exist yet, so the CA always matches the rule hosts. */ -}}
+{{- $t := .Values.codingProxy.tunnel }}
+{{- if and $t.enabled $t.intercept.rules $t.intercept.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: wardby-coding-proxy-intercept-ca-selfsigned
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wardby-coding-proxy-intercept-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "wardby.codingProxy.interceptCaSecret" . }}
+  {{- include "wardby.codingProxy.interceptCaSpec" . | nindent 2 }}
+{{- end }}

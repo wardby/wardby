@@ -232,6 +232,13 @@ because the name constraint also binds any CA signed beneath it. Without
 `nameConstraints` the proxy still accepts the CA, with the `intercept.ca_unconstrained`
 warning, and nothing limits what a leaked key, or a CA signed beneath it, can sign for.
 
+cert-manager does not reissue a `Certificate` whose `nameConstraints` changed: until the
+next renewal its Secret keeps the old constraint, and the proxy refuses to start once a
+rule names a host that constraint does not permit. After changing the hosts of a
+Certificate you manage yourself, force a new one with `cmctl renew`. The Helm chart can
+issue the CA itself and avoid this (`codingProxy.tunnel.intercept.certManager`, see
+"Helm" below).
+
 When the key rotates (`privateKey.rotationPolicy: Always`, cert-manager's default),
 a run already going loses its intercepted connections once the proxy switches,
 because that run trusts only the old certificate. With `rotationPolicy: Never`, the
@@ -345,6 +352,18 @@ and give the control plane the certificate alone as `CODING_TUNNEL_TRUST_CA_CERT
 not check for them: the proxy refuses to start when rules are set without a CA. Supply
 each rule's credential variable through
 `codingProxy.envFromSecret` or `codingProxy.extraEnv`.
+
+To have the chart issue the CA, set `codingProxy.tunnel.intercept.certManager.enabled`
+instead of `caSecret` (cert-manager must be installed). The chart renders a self-signed
+`Issuer` and a `Certificate` named `wardby-coding-proxy-intercept-ca`, with a critical
+name constraint that permits exactly the rule hosts, and mounts its Secret as it would
+`caSecret`. The Secret's name ends in a hash of the Certificate's spec. Adding or
+removing a rule host therefore names a new Secret, cert-manager issues a fresh CA into it,
+and the proxy and control plane roll to it in the same upgrade. Until the new Secret
+exists the new pods wait in `ContainerCreating` and the old ones keep serving. A run
+already going trusts only the old CA and loses its intercepted connections. cert-manager
+does not delete the old Secret, which still holds the old CA's key, so delete it once
+the rollout is done.
 
 ## Upgrading
 

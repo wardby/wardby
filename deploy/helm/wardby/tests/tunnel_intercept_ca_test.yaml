@@ -1,0 +1,127 @@
+suite: tunnel intercept CA
+templates:
+  - tunnel_intercept_ca.yaml
+  - coding_proxy.yaml
+  - control_plane.yaml
+values:
+  - ../ci/default-values.yaml
+set:
+  codingProxy.tunnel.enabled: true
+  codingProxy.tunnel.allowedHosts: [registry.example.com, ghcr.io, storage.googleapis.com]
+  codingProxy.tunnel.intercept.certManager.enabled: true
+  codingProxy.tunnel.intercept.rules:
+    - { host: registry.example.com, scheme: gcp }
+tests:
+  - it: renders nothing without certManager
+    set:
+      codingProxy.tunnel.intercept.certManager.enabled: false
+      codingProxy.tunnel.intercept.caSecret: wardby-tunnel-ca
+    template: tunnel_intercept_ca.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: renders nothing without rules
+    set:
+      codingProxy.tunnel.intercept.rules: []
+    template: tunnel_intercept_ca.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: issues a self-signed CA the proxy accepts
+    template: tunnel_intercept_ca.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: Issuer
+        documentIndex: 0
+      - equal:
+          path: spec
+          value: { selfSigned: {} }
+        documentIndex: 0
+      - isKind:
+          of: Certificate
+        documentIndex: 1
+      - equal:
+          path: spec.isCA
+          value: true
+        documentIndex: 1
+      - equal:
+          path: spec.privateKey
+          value: { algorithm: ECDSA, size: 256, encoding: PKCS8, rotationPolicy: Always }
+        documentIndex: 1
+      - equal:
+          path: spec.issuerRef
+          value: { group: cert-manager.io, kind: Issuer, name: wardby-coding-proxy-intercept-ca-selfsigned }
+        documentIndex: 1
+  - it: constrains the CA to the rule hosts alone, lower-cased, sorted and once each
+    set:
+      codingProxy.tunnel.intercept.rules:
+        - { host: Registry.Example.com, scheme: gcp }
+        - { host: ghcr.io, scheme: bearer, credential: "env:GHCR_TOKEN" }
+        - { host: registry.example.com, scheme: gcp }
+    template: tunnel_intercept_ca.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.nameConstraints
+          value:
+            critical: true
+            permitted:
+              dnsDomains: [ghcr.io, registry.example.com]
+  - it: names the Secret by the spec
+    template: tunnel_intercept_ca.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.secretName
+          value: wardby-coding-proxy-intercept-ca-a71c5f93bd
+  - it: names the Secret anew when a rule host is added, so cert-manager issues a CA that permits it
+    set:
+      codingProxy.tunnel.intercept.rules:
+        - { host: registry.example.com, scheme: gcp }
+        - { host: ghcr.io, scheme: gcp }
+    template: tunnel_intercept_ca.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.secretName
+          value: wardby-coding-proxy-intercept-ca-057244cfe6
+  - it: mounts the issued CA on the proxy, certificate and key
+    template: coding_proxy.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: tunnel-intercept-ca
+            secret:
+              secretName: wardby-coding-proxy-intercept-ca-a71c5f93bd
+              items:
+                - { key: tls.crt, path: ca.crt }
+                - { key: tls.key, path: ca.key }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_INTERCEPT_CA_KEY_FILE, value: /etc/wardby/tunnel-intercept-ca/ca.key }
+  - it: mounts the issued CA's certificate alone on the control plane
+    template: control_plane.yaml
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: tunnel-trust-ca
+            secret:
+              secretName: wardby-coding-proxy-intercept-ca-a71c5f93bd
+              items:
+                - { key: tls.crt, path: ca.crt }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_TRUST_CA_CERT_FILE, value: /etc/wardby/tunnel-trust-ca/ca.crt }
+  - it: refuses caSecret alongside certManager
+    set:
+      codingProxy.tunnel.intercept.caSecret: wardby-tunnel-ca
+    template: tunnel_intercept_ca.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: codingProxy.tunnel.intercept.caSecret and intercept.certManager.enabled cannot both be set

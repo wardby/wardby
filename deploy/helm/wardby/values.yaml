@@ -400,6 +400,23 @@ codingProxy:
       # certificate alone) and sets the `_FILE` variables; leave the PEM variables out of `extraEnv`. Mounted files follow
       # the Secret, so a renewed CA reaches the proxy and new runs without a restart. Empty uses the `extraEnv` variables.
       caSecret: ""
+      # Or have the chart issue the CA from cert-manager (which must be installed, with name constraints supported):
+      # a self-signed ECDSA P-256 CA whose critical name constraint permits exactly the `rules` hosts, mounted as
+      # `caSecret` would be. The Secret's name ends in a hash of the Certificate's spec, so adding or removing a rule
+      # host (or changing the settings below) issues a new CA under a new name and the proxy and control plane roll to
+      # it; cert-manager does not reissue an existing Certificate for a changed name constraint. A run already going
+      # trusts only the old CA, so it loses its intercepted connections when that happens. The old Secret is left
+      # behind: delete it once the rollout is done.
+      certManager:
+        # -- Issue the CA with cert-manager. Cannot be combined with `caSecret`.
+        enabled: false
+        # -- Lifetime of the CA.
+        duration: 2160h
+        # -- How long before expiry cert-manager renews it.
+        renewBefore: 720h
+        # -- `Always` gives each renewal a new key (a run already going then loses its intercepted connections);
+        # `Never` keeps the key, so runs are unaffected by a renewal but the key never rotates.
+        rotationPolicy: Always
   # -- Annotations added to this workload's pods, over `podAnnotations`. Changing them restarts the pods.
   podAnnotations: {}
   nodeSelector: {}
