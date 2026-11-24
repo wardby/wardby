@@ -356,14 +356,17 @@ each rule's credential variable through
 To have the chart issue the CA, set `codingProxy.tunnel.intercept.certManager.enabled`
 instead of `caSecret` (cert-manager must be installed). The chart renders a self-signed
 `Issuer` and a `Certificate` named `wardby-coding-proxy-intercept-ca`, with a critical
-name constraint that permits exactly the rule hosts, and mounts its Secret as it would
-`caSecret`. The Secret's name ends in a hash of the Certificate's spec. Adding or
-removing a rule host therefore names a new Secret, cert-manager issues a fresh CA into it,
-and the proxy and control plane roll to it in the same upgrade. Until the new Secret
-exists the new pods wait in `ContainerCreating` and the old ones keep serving. A run
-already going trusts only the old CA and loses its intercepted connections. cert-manager
-does not delete the old Secret, which still holds the old CA's key, so delete it once
-the rollout is done.
+name constraint that permits exactly the rule hosts, and mounts its Secret (of the same
+name) as it would `caSecret`. cert-manager reissues a Certificate when its common name
+changes, but not when only its name constraint does, so the chart ends the common name
+in a hash of the rest of the spec. Adding or removing a rule host therefore changes the
+common name, and cert-manager reissues the CA into the same Secret, replacing the old
+key. The proxy rolls because its rules changed. Its new pod may start before the
+reissued CA reaches its mount (cert-manager takes seconds, the kubelet's Secret sync up
+to a minute or two). Until then the pod fails the CA check and restarts, while the old
+pod keeps serving. The old pod and the control
+plane follow the new CA without a restart. A run already going trusts only the old CA
+and loses its intercepted connections.
 
 ## Upgrading
 

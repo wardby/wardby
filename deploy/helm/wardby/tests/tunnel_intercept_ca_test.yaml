@@ -69,14 +69,17 @@ tests:
             critical: true
             permitted:
               dnsDomains: [ghcr.io, registry.example.com]
-  - it: names the Secret by the spec
+  - it: keeps one Secret and ends the common name in a hash of the rest of the spec
     template: tunnel_intercept_ca.yaml
     documentIndex: 1
     asserts:
       - equal:
           path: spec.secretName
-          value: wardby-coding-proxy-intercept-ca-a71c5f93bd
-  - it: names the Secret anew when a rule host is added, so cert-manager issues a CA that permits it
+          value: wardby-coding-proxy-intercept-ca
+      - equal:
+          path: spec.commonName
+          value: wardby coding proxy intercept CA 4561df4edf
+  - it: changes the common name when a rule host is added, so cert-manager reissues a CA that permits it
     set:
       codingProxy.tunnel.intercept.rules:
         - { host: registry.example.com, scheme: gcp }
@@ -86,7 +89,10 @@ tests:
     asserts:
       - equal:
           path: spec.secretName
-          value: wardby-coding-proxy-intercept-ca-057244cfe6
+          value: wardby-coding-proxy-intercept-ca
+      - equal:
+          path: spec.commonName
+          value: wardby coding proxy intercept CA 09e1fa3644
   - it: mounts the issued CA on the proxy, certificate and key
     template: coding_proxy.yaml
     documentIndex: 1
@@ -96,7 +102,7 @@ tests:
           content:
             name: tunnel-intercept-ca
             secret:
-              secretName: wardby-coding-proxy-intercept-ca-a71c5f93bd
+              secretName: wardby-coding-proxy-intercept-ca
               items:
                 - { key: tls.crt, path: ca.crt }
                 - { key: tls.key, path: ca.key }
@@ -112,7 +118,7 @@ tests:
           content:
             name: tunnel-trust-ca
             secret:
-              secretName: wardby-coding-proxy-intercept-ca-a71c5f93bd
+              secretName: wardby-coding-proxy-intercept-ca
               items:
                 - { key: tls.crt, path: ca.crt }
       - contains:

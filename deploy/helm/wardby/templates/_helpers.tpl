@@ -331,14 +331,13 @@ CODING_TUNNEL_INTERCEPT_CA_KEY_FILE: /etc/wardby/tunnel-intercept-ca/ca.key
 {{- end -}}
 
 {{/* The interception CA's Certificate spec when the chart issues it (intercept.certManager), without its
-secretName: a self-signed CA whose critical name constraint permits exactly the rule hosts. */}}
+secretName and commonName: a self-signed CA whose critical name constraint permits exactly the rule hosts. */}}
 {{- define "wardby.codingProxy.interceptCaSpec" -}}
 {{- $t := .Values.codingProxy.tunnel -}}
 {{- $c := $t.intercept.certManager -}}
 {{- $hosts := list -}}
 {{- range $t.intercept.rules }}{{ $hosts = append $hosts (lower .host) }}{{ end -}}
 isCA: true
-commonName: wardby coding proxy intercept CA
 duration: {{ $c.duration }}
 renewBefore: {{ $c.renewBefore }}
 privateKey:
@@ -358,9 +357,7 @@ issuerRef:
 {{- end -}}
 
 {{/* The Secret the interception CA is mounted from, or empty when the chart mounts none: intercept.caSecret, or
-the Certificate's Secret with intercept.certManager. That name ends in a hash of the Certificate's spec, so a change
-to the rule hosts gets a new Secret, which cert-manager issues a fresh CA into (it does not reissue an existing one
-for a changed name constraint), and the pods that mount it roll. */}}
+the Certificate's Secret with intercept.certManager. */}}
 {{- define "wardby.codingProxy.interceptCaSecret" -}}
 {{- $t := .Values.codingProxy.tunnel -}}
 {{- if and $t.enabled $t.intercept.rules -}}
@@ -368,7 +365,7 @@ for a changed name constraint), and the pods that mount it roll. */}}
 {{- if $t.intercept.caSecret }}
 {{- fail "codingProxy.tunnel.intercept.caSecret and intercept.certManager.enabled cannot both be set" }}
 {{- end -}}
-wardby-coding-proxy-intercept-ca-{{ include "wardby.codingProxy.interceptCaSpec" . | sha256sum | trunc 10 }}
+wardby-coding-proxy-intercept-ca
 {{- else -}}
 {{- $t.intercept.caSecret -}}
 {{- end -}}
