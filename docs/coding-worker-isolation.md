@@ -277,9 +277,12 @@ run's own MCP tools as plain client tools named
 
 A Claude Code run's attached native Wardby tools
 ([Native tools on Claude Code agents](mcp-servers.md#native-tools-on-claude-code-agents)) use the
-same token and route, named `mcp__wardby_mcp__<tool>`. They run in the gateway's sandbox with the
-attachment's grants, never in the worker, and their results have the tool's secret values removed
-before they leave the gateway. A Codex run never gets them, because its shell commands can read
+same token and route, named `mcp__wardby_mcp__<tool>`. They run in the native gateway process, in
+the same sandbox and under the same time limits as a native agent's control-plane run, with the
+grants fixed when the run was launched; never in the worker. The proxy and the worker see only each
+tool's name, description and schema, never its code or grants, and results have the tool's secret
+values removed before they leave the gateway. A slow tool can hold up the gateway for up to its
+time limit, so keep those limits short. A Codex run never gets them, because its shell commands can read
 the token and a native tool has no read-only mark.
 
 Where the token is exposed:
