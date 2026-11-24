@@ -135,7 +135,6 @@ async function brokeredSecretWarnings(
   return brokerCompatibilityWarnings([{ ...tool, allowedSecrets }], brokered);
 }
 
-/** Refuses a name one of the runner's built-ins would shadow (see core/tool-names.ts). */
 /** attach_tool's refusal for a Codex coding agent (Codex support is #623). */
 export const CODEX_NATIVE_TOOLS_MESSAGE =
   "Native tools work only on Claude Code coding agents for now; Codex support is tracked separately.";
@@ -154,6 +153,7 @@ export async function codexUnavailableNativeTools(
   return [...new Set(rows.map((row) => row.tool.name))].sort();
 }
 
+/** Refuses a name one of the runner's built-ins would shadow (see core/tool-names.ts). */
 function assertToolNameAllowed(name: string): void {
   const reason = reservedToolNameReason(name);
   if (reason) throw new McpError(400, reason);
