@@ -64,8 +64,13 @@ export interface OidcLoginOptions {
   now?: () => number;
 }
 
+/** Where a browser sign-in's principal subject comes from (WEB_OIDC_SUBJECT_*), as /web/whoami reports it. */
+export type WebSubjectSource = { claim: string } | { emailDomain: string };
+
 export interface OidcLogin {
   readonly configured: boolean;
+  /** Optional so test doubles may leave it out; whoami then reports the default, the `sub` claim. */
+  readonly subjectSource?: WebSubjectSource;
   startLogin(input: { returnTo: string }): Promise<{ redirectUrl: string; stateCookie: string }>;
   /** Verifies the callback and returns the principal; the caller creates the web session. */
   finishLogin(
@@ -284,6 +289,10 @@ export function createOidcLogin(options: OidcLoginOptions): OidcLogin {
 
   return {
     configured,
+    subjectSource:
+      options.subjectEmailDomain !== undefined
+        ? { emailDomain: options.subjectEmailDomain }
+        : { claim: options.subjectClaim ?? "sub" },
 
     async startLogin({ returnTo }) {
       const { issuer, clientId, key: k } = requireConfigured();

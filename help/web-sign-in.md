@@ -15,6 +15,8 @@ tags:
     WEB_OIDC_SUBJECT_EMAIL_DOMAIN,
     document_not_found,
     two principals,
+    whoami,
+    /web/whoami,
     delegating,
   ]
 appliesTo: ">=0.10.0"
@@ -43,6 +45,10 @@ If `/d/<id>` answers `document_not_found` for your own documents, or a reviewer 
 - `WEB_OIDC_SUBJECT_EMAIL_DOMAIN`: when the access token's `sub` is the local part of the user's email, set the email domain. Only a verified email (`email_verified: true`) at exactly that domain is used.
 
 Set one, not both. A sign-in without a usable value fails with `web_login_failed`; it never falls back to `sub`. The MCP sign-in is unchanged. A second person an earlier browser sign-in made stays in the users list, owning nothing.
+
+## Check who the browser signed you in as
+
+Open `https://<your-host>/web/whoami` in the signed-in browser. It returns your Wardby person (`principal.id`, `principal.subject`, the name you are shown as, the email from your profile), where the subject came from (`signIn.subjectFrom`: `{ "claim": "sub" }` by default, the claim `WEB_OIDC_SUBJECT_CLAIM` names, or `{ "emailDomain": … }`), and when the session expires. Compare `principal.subject` with the subject your MCP client resolves to: if they differ, the two sign-ins are different people. A share-link guest sees only their own name and the link's document and permission. It never returns the session cookie, the CSRF value, or an identity-provider token (none is kept after sign-in). Without a session it answers `web_session_required` (401).
 
 A sign-in must finish in 10 minutes in the same browser. Sessions end after 12 hours idle or 7 days. Errors: `web_login_not_configured`, `web_login_failed`, `web_login_state_invalid`, `web_csrf_failed`, `web_origin_rejected`. See [Documents](documents.md).
 
