@@ -12,6 +12,7 @@ import { fakeMcpServer, textResult } from "./mcp-tools.test-support.js";
 import { createSecret } from "./secrets.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
 import { AppKeySecretCipher } from "../providers/secrets/app-key.js";
+import { PostgresDatastore } from "../providers/datastore/index.js";
 
 // Fake values only.
 const SECRET = "sk-fake-coding-mcp-ZYXW98765432";
@@ -30,9 +31,11 @@ describe.skipIf(!process.env.DATABASE_URL)("/coding-mcp (database)", () => {
   const info = vi.fn();
   const log = { info, warn: vi.fn(), error: vi.fn() } as unknown as Logger;
 
+  const datastore = new PostgresDatastore(db, cipher);
   const deps = (fetchImpl: typeof safeFetch, extra: Partial<CodingMcpDeps> = {}): CodingMcpDeps => ({
     db,
     cipher,
+    datastore,
     log,
     fetchImpl,
     stopPollMs: 25,

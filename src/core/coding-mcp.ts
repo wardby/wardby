@@ -11,17 +11,28 @@
  * tools/list serves the session's pins (no URLs or secrets); tools/call counts the call against the
  * run's limit (WARDBY_MCP_MAX_CALLS_PER_RUN) and runs it through phase 1's handleMcpTool, which
  * re-checks the live attachment and redacts the result against the server's secrets before it gets
- * here. Secrets: this route's own log line carries the method, status and session id only (never the
- * body, arguments, results or token), and every body it sends is either fixed text, the pins, or
- * handleMcpTool's already-redacted string.
+ * here. A Claude Code run's pins may also name the agent's attached native tools (#622,
+ * coding-native-tools.ts): the same count, stop watch and limits apply, and handleNativeTool re-reads
+ * the attachment and redacts the result against the tool's secrets. A native pin on any other run is
+ * refused. Secrets: this route's own log line carries the method, status and session id only (never
+ * the body, arguments, results or token), and every body it sends is either fixed text, the pins, or
+ * handleMcpTool's or handleNativeTool's already-redacted string.
  */
 import { readFileSync } from "node:fs";
 import type { PrismaClient } from "#prisma";
 import { loadMcpMaxCallsPerRun } from "../config/mcp-call-limit.js";
 import { MCP_TOKEN_REQUIRED_MESSAGE, mcpTokenHash, isMcpToken } from "../coding/mcp-token.js";
 import { HTTP_LIMITS } from "../mcp/transport/http-limits.js";
+import type { Datastore } from "../providers/datastore/types.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
+import {
+  handleNativeTool,
+  isNativeToolPin,
+  nativeToolDefs,
+  type CodingToolPin,
+  type NativeToolPin,
+} from "./coding-native-tools.js";
 import type { Logger } from "./logger.js";
 import { handleMcpTool, isCodexCoding, mcpToolDefs, type McpToolPin } from "./mcp-tools.js";
 import { runDrivability, TOOL_STOP_POLL_MS, watchRunStop } from "./runner.js";
@@ -38,8 +49,13 @@ const SERVER_VERSION = (
 
 export interface CodingMcpDeps {
   db: PrismaClient;
+  /** Reads MCP servers' secrets and native tools' secrets. */
   cipher: SecretCipher;
+  /** The datastore provider native tools use (the agent's private store and shared datastores). */
+  datastore: Datastore;
   fetchImpl?: typeof safeFetch;
+  /** Overrides a native tool's outbound network call — tests only. */
+  sandboxFetch?: typeof safeFetch;
   log: Logger;
   now?: () => Date;
   /** How often a call in flight checks for stop_run; tests shorten it. */
@@ -103,12 +119,13 @@ export function isMcpErrorText(text: string): boolean {
   }
 }
 
-/** One stored pin, checked field by field: a malformed entry is left out, never served. */
+/** One stored MCP pin (no `kind`), checked field by field: a malformed entry is left out, never served. */
 export function isMcpToolPin(value: unknown): value is McpToolPin {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const p = value as Record<string, unknown>;
   const definition = p.definition as Record<string, unknown> | null | undefined;
   return (
+    (p.kind === undefined || p.kind === "mcp") &&
     typeof p.exposedName === "string" &&
     p.exposedName !== "" &&
     typeof p.toolName === "string" &&
@@ -128,13 +145,13 @@ export function isMcpToolPin(value: unknown): value is McpToolPin {
   );
 }
 
-/** The session's well-formed pins, first of each exposed name only. */
-export function storedPins(stored: unknown): McpToolPin[] {
+/** The session's well-formed pins of either kind, first of each exposed name only. */
+export function storedPins(stored: unknown): CodingToolPin[] {
   if (!Array.isArray(stored)) return [];
   const seen = new Set<string>();
-  const pins: McpToolPin[] = [];
+  const pins: CodingToolPin[] = [];
   for (const entry of stored) {
-    if (!isMcpToolPin(entry) || seen.has(entry.exposedName)) continue;
+    if (!(isMcpToolPin(entry) || isNativeToolPin(entry)) || seen.has(entry.exposedName)) continue;
     seen.add(entry.exposedName);
     pins.push(entry);
   }
@@ -218,7 +235,7 @@ async function handle(
       return rpcResult(id, {});
     case "tools/list":
       return rpcResult(id, {
-        tools: mcpToolDefs(storedPins(session.mcpTools)).map((def) => ({
+        tools: toolDefs(storedPins(session.mcpTools)).map((def) => ({
           name: def.name,
           description: def.description,
           inputSchema: def.jsonSchema,
@@ -229,6 +246,11 @@ async function handle(
     default:
       return rpcError(200, id, -32601, "Method not found.");
   }
+}
+
+/** Each pin's definition in pin order: an MCP tool's as a native run sees it, a native tool's own. */
+function toolDefs(pins: readonly CodingToolPin[]) {
+  return pins.flatMap((pin) => (isNativeToolPin(pin) ? nativeToolDefs([pin]) : mcpToolDefs([pin])));
 }
 
 function protocolVersionOf(params: unknown): string {
@@ -283,6 +305,7 @@ async function callTool(session: Session, params: unknown, deps: CodingMcpDeps, 
   const stop = watchRunStop(deps.db, session.runId, deps.stopPollMs ?? TOOL_STOP_POLL_MS);
   const signal = requestSignal ? AbortSignal.any([stop.signal, requestSignal]) : stop.signal;
   try {
+    if (isNativeToolPin(pin)) return await callNativeTool(pin, session, p.arguments, run.agentId, signal, deps);
     const text = await handleMcpTool(pin, p.arguments === undefined ? "" : JSON.stringify(p.arguments), {
       db: deps.db,
       cipher: deps.cipher,
@@ -298,4 +321,37 @@ async function callTool(session: Session, params: unknown, deps: CodingMcpDeps, 
   } finally {
     stop.done();
   }
+}
+
+/**
+ * A native tool's call (#622): Claude Code runs only, judged by the run's dispatched provider (fails
+ * closed, as isCodexCoding does); a Codex run's shell commands can read the token, and a native tool
+ * has no read-only mark.
+ */
+async function callNativeTool(
+  pin: NativeToolPin,
+  session: Session,
+  args: unknown,
+  agentId: string,
+  signal: AbortSignal,
+  deps: CodingMcpDeps,
+) {
+  if (isCodexCoding(session.run.provider)) {
+    return toolError(
+      "mcp_tool_not_allowed",
+      `The tool "${pin.exposedName}" is not allowed for this run: native tools work only in Claude Code runs.`,
+    );
+  }
+  const text = await handleNativeTool(pin, args === undefined ? "" : JSON.stringify(args), {
+    db: deps.db,
+    secrets: deps.cipher,
+    datastore: deps.datastore,
+    agentId,
+    runId: session.runId,
+    signal,
+    deadlineAt: session.deadlineAt,
+    sandboxFetch: deps.sandboxFetch,
+    log: deps.log,
+  });
+  return toolResult(text, isMcpErrorText(text));
 }

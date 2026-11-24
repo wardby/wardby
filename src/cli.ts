@@ -1159,7 +1159,13 @@ async function nativeGateway(): Promise<void> {
     db: prisma,
     providers,
     // Coding runs' MCP calls, forwarded by the coding proxy's /mcp route (its own token auth).
-    codingMcp: { db: prisma, cipher: secrets, log: logger.child({ module: "coding-mcp" }) },
+    // A Claude Code run's native tools run here too, with the same datastore and secrets a native run uses.
+    codingMcp: {
+      db: prisma,
+      cipher: secrets,
+      datastore: providers.datastore,
+      log: logger.child({ module: "coding-mcp" }),
+    },
     // Substrate startup canaries' verdicts (NATIVE_SANDBOX_LAUNCHER=substrate), each with its own capability.
     canaries: new PrismaNativeCanaryStore(prisma),
   });

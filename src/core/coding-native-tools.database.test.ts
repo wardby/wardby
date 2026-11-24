@@ -7,7 +7,9 @@ import {
   type NativeToolContext,
   type NativeToolPin,
 } from "./coding-native-tools.js";
+import { handleCodingMcpRequest } from "./coding-mcp.js";
 import { createPrismaClient } from "./db.js";
+import { mcpTokenHash, mintMcpToken } from "../coding/mcp-token.js";
 import type { Logger } from "./logger.js";
 import { PostgresDatastore } from "../providers/datastore/index.js";
 
@@ -151,6 +153,9 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
     consoleLines.length = 0;
   });
   afterAll(async () => {
+    await db.codingProxySession.deleteMany({ where: { runId } });
+    await db.codingRun.deleteMany({ where: { runId } });
+    await db.run.deleteMany({ where: { id: runId } });
     await db.agentTool.deleteMany({ where: { agentId } });
     await db.tool.deleteMany({ where: { id: { in: Object.values(tools) } } });
     await db.agentDatastore.deleteMany({ where: { agentId } });
@@ -294,6 +299,89 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
     expect(JSON.parse(text)).toMatchObject({
       error: expect.any(String),
       message: expect.stringContaining("plain failure"),
+    });
+  });
+
+  describe("through /coding-mcp", () => {
+    const token = mintMcpToken();
+    const callBody = (name: string, args: Record<string, unknown> = {}) =>
+      JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+    const resultOf = (body: string) =>
+      (JSON.parse(body) as { result: { content: { text: string }[]; isError?: boolean } }).result;
+    const gateway = (body: string) =>
+      handleCodingMcpRequest(`Bearer ${token}`, body, { db, cipher, datastore, log, stopPollMs: 25 });
+
+    beforeAll(async () => {
+      await db.run.create({ data: { id: runId, agentId, status: "running", executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId,
+          task: "test",
+          repository: "your-org/your-repo",
+          baseRef: "main",
+          headRef: `wardby/run-${runId}`,
+          provider: "claude-code",
+          model: "claude-sonnet-4-6",
+          timeoutSec: 60,
+          allowedEgress: [],
+          protectedPaths: [],
+          budgetReservedUsd: 0.01,
+          budgetLimitedBy: "week",
+        },
+      });
+      await db.codingProxySession.create({
+        data: {
+          runId,
+          capabilityHash: `cap-${tag}`,
+          credentialRef: "anthropic/test",
+          protocol: "anthropic-messages",
+          allowedModels: ["claude-sonnet-4-6"],
+          deadlineAt: new Date(Date.now() + 10 * 60_000),
+          budgetUsd: 1,
+          mcpTools: JSON.parse(JSON.stringify(await loadNativeToolPins(db, agentId, log))),
+          mcpTokenHash: mcpTokenHash(token),
+        },
+      });
+    });
+
+    it("lists the native tools and runs one with its grants, the secret value redacted", async () => {
+      const list = await gateway(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }));
+      const names = (JSON.parse(list.body) as { result: { tools: { name: string }[] } }).result.tools.map(
+        (t) => t.name,
+      );
+      expect(names).toEqual(["echo_secret", "leak_brokered", "slow", "stores", "thrower"]);
+      const res = await gateway(callBody("echo_secret", { q: "hi" }));
+      expect(res.status).toBe(200);
+      expect(res.body).not.toContain(SECRET);
+      expect(JSON.parse(resultOf(res.body).content[0].text)).toMatchObject({ q: "hi" });
+      const stores = await gateway(callBody("stores"));
+      expect(JSON.parse(resultOf(stores.body).content[0].text)).toMatchObject({
+        privateOk: "private-x",
+        sharedOk: "shared-a",
+      });
+      // Neither the route's log line nor the call's carries the arguments or the result.
+      expect(JSON.stringify(info.mock.calls)).not.toContain(SECRET);
+      expect(JSON.stringify(info.mock.calls)).not.toContain('"hi"');
+    });
+
+    it("stops a native call in flight when the run is stopped", async () => {
+      const pending = gateway(callBody("slow"));
+      await new Promise((r) => setTimeout(r, 150));
+      await db.run.update({ where: { id: runId }, data: { status: "cancelled" } });
+      try {
+        const result = resultOf((await pending).body);
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).not.toContain("late");
+      } finally {
+        await db.run.update({ where: { id: runId }, data: { status: "running" } });
+      }
+    });
+
+    it("refuses a native tool after it is detached", async () => {
+      await db.agentTool.delete({ where: { agentId_toolId: { agentId, toolId: tools.thrower } } });
+      const result = resultOf((await gateway(callBody("thrower"))).body);
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text)).toMatchObject({ error: "mcp_tool_not_allowed" });
     });
   });
 });
