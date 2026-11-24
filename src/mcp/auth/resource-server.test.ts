@@ -66,6 +66,25 @@ describe("authenticate", () => {
     expect(ctx.scopes.has("agents:write")).toBe(true);
   });
 
+  it("carries the verified token's identity claims to the context, for whoami", async () => {
+    const verified: VerifiedToken = {
+      subject: "user-1",
+      roles: [],
+      scopes: ["agents:read"],
+      identityClaims: { sub: "user-1", uid: "00u-fake" },
+    };
+    const ctx = await authenticate(
+      { authorization: "Bearer good-token" },
+      {
+        authProvider: fakeAuthProvider(async () => verified),
+        db: fakeDb(),
+        providers: fakeProviders,
+        canonicalUri: CANONICAL_URI,
+      },
+    );
+    expect(ctx.tokenIdentity).toEqual({ sub: "user-1", uid: "00u-fake" });
+  });
+
   it("missing Authorization header -> 401 challenge", async () => {
     const authProvider = fakeAuthProvider(async () => {
       throw new Error("should not be called");

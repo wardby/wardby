@@ -6,7 +6,6 @@ import type { McpRequestContext } from "../context.js";
 import { registerWhoamiTool } from "./whoami.js";
 
 const CANONICAL_URI = "https://host/mcp";
-const FAKE_TOKEN = "fake-bearer-token-DO-NOT-LEAK-7c1e";
 
 function fakeDb(profileName: string | null) {
   return {
@@ -60,7 +59,6 @@ describe("whoami", () => {
       teamIds: ["team-1"],
       operator: false,
     });
-    expect(text).not.toContain(FAKE_TOKEN);
   });
 
   it("reports no token claims for the stdio operator", async () => {

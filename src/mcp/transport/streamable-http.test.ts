@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
+import { registerWhoamiTool } from "../tools/whoami.js";
 import {
   startHttpServer as realStartHttpServer,
   type HttpServerHandle,
@@ -184,6 +185,51 @@ describe("startHttpServer (delegating mode)", () => {
     await plainClient.callTool({ name: "report_tasks_capability", arguments: {} });
     expect(seenClientSupportsTasks).toBe(false);
     await plainClient.close();
+  });
+
+  it("whoami over HTTP reports the verified token's identity claims, and never the bearer token", async () => {
+    // The whole hand-off real callers use: verifyBearer -> authenticate() -> AuthInfo.extra -> resolveCtx.
+    const bearer = "fake-bearer-token-DO-NOT-LEAK-7c1e";
+    const db = {
+      ...(fakeDb() as unknown as Record<string, unknown>),
+      principal: {
+        upsert: async ({ where }: { where: { subject: string } }) => ({
+          id: `principal-${where.subject}`,
+          subject: where.subject,
+          createdAt: new Date(),
+        }),
+        findMany: async () => [{ id: "principal-user-1", subject: "user-1" }],
+      },
+      principalProfile: { findMany: async () => [] },
+      hostIdentity: { findMany: async () => [] },
+    } as unknown as import("#prisma").PrismaClient;
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    registerWhoamiTool(mcp);
+    const authProvider = fakeAuthProvider(async (token) => {
+      expect(token).toBe(bearer);
+      return {
+        subject: "user-1",
+        roles: [],
+        scopes: ["agents:read"],
+        identityClaims: { sub: "user-1", uid: "00u-fake", cid: "client-1" },
+      };
+    });
+    handle = await startHttpServer({
+      mcp,
+      config: { canonicalUri: CANONICAL_URI, httpBind: { host: "127.0.0.1", port: 0 }, authProviderKind: "delegating" },
+      auth: { authProvider, db, providers: fakeProviders },
+    });
+    const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${handle.port}/mcp`), {
+        requestInit: { headers: { host: "host", authorization: `Bearer ${bearer}` } },
+      }),
+    );
+    const result = await client.callTool({ name: "whoami", arguments: {} });
+    await client.close();
+    const text = (result.content as { text: string }[])[0].text;
+    expect(JSON.parse(text).token).toEqual({ sub: "user-1", uid: "00u-fake", cid: "client-1" });
+    expect(text).not.toContain(bearer);
   });
 
   it("bad Origin is rejected with 403", async () => {

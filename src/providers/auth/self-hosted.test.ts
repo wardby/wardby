@@ -102,10 +102,18 @@ describe.skipIf(!process.env.DATABASE_URL)("secure self-hosted OAuth (PostgreSQL
     await expect(provider.handleAuthorize({ ...f.params, subject: "victim" } as typeof f.params)).rejects.toThrow();
     await expect(provider.consentPage("", (await provider.handleAuthorize(f.params)).interactionId)).rejects.toThrow();
     const token = await provider.handleToken(await f.code());
-    expect(await provider.verifyBearer(token.accessToken)).toMatchObject({
+    const verified = await provider.verifyBearer(token.accessToken);
+    expect(verified).toMatchObject({
       subject: f.subject,
       scopes: ["agents:read", "secrets:write"],
     });
+    // whoami's token identity: the allowlisted claims only (sub, uid, client_id here), never the token.
+    expect(verified.identityClaims).toEqual({
+      sub: f.subject,
+      uid: decodeJwt(token.accessToken).uid,
+      client_id: f.client.clientId,
+    });
+    expect(JSON.stringify(verified.identityClaims)).not.toContain(token.accessToken);
     expect(decodeJwt(token.accessToken)).toMatchObject({
       iss: uri,
       aud: uri,

@@ -32,7 +32,8 @@ is running. It returns `{ "version": "<semver>" }`, the same value as
 
 Call `whoami` (also `agents:read`) to see who your connection is: your Wardby
 principal (`id`, `subject`, shown `name`), the identity claims of your token
-(`sub`, and `uid`, `cid`, `client_id` or `azp` when the token has them), your
+(`sub`, and `uid`, `cid`, `client_id` or `azp` when the token has them; with
+Wardby's own sign-in, `uid` is Wardby's internal user id), your
 Wardby roles for this request, the scopes your token grants, and your teams. It
 never returns the token. Use it after a group or role change to check it has
 reached Wardby (roles are read from the token, so a new group needs a new
