@@ -82,6 +82,7 @@ export const CHILD_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
   "coding_failure_cancelled",
   "coding_failure_executor",
   "coding_failure_mcp_pins_unavailable",
+  "coding_failure_native_tool_duplicate_names",
   "coding_failure_mcp_gateway_unavailable",
   "coding_failure_workflow_unavailable",
   "coding_failure_workflow_failed",
