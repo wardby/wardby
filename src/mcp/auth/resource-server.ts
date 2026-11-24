@@ -238,6 +238,7 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
   return {
     principal,
     scopes: new Set(verified.scopes),
+    tokenIdentity: verified.identityClaims,
     roles: [...standing.roles],
     actsFor: standing.actsFor,
     teamIds: standing.teamIds,

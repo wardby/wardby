@@ -52,6 +52,11 @@ export interface McpRequestContext {
   principal: Principal;
   scopes: Set<string>;
   /**
+   * The bearer token's identity claims (providers/auth/types.ts IDENTITY_CLAIMS), for `whoami`.
+   * Absent for the stdio operator and for test contexts. Never the token.
+   */
+  tokenIdentity?: Readonly<Record<string, string>>;
+  /**
    * The caller's wardby roles (resource-server.ts ROLE_PERMISSIONS), resolved
    * per request, never cached: a privileged scope is honoured only when one
    * of these grants it (see requireScope). Absent/empty = member.

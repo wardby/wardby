@@ -3,7 +3,7 @@ id: mcp-access
 title: Connect a client to Wardby
 summary: Use Wardby's local stdio or protected HTTP MCP transport safely.
 audience: developer
-tags: [mcp, oauth, codex, claude-code]
+tags: [mcp, oauth, codex, claude-code, whoami, roles, scopes]
 appliesTo: >=0.2.1
 ---
 
@@ -29,6 +29,15 @@ offline catalog as `wardby help`; they expose no instance data or credentials.
 Call `get_version` (also `agents:read`) to see which Wardby version the server
 is running. It returns `{ "version": "<semver>" }`, the same value as
 `wardby --version`.
+
+Call `whoami` (also `agents:read`) to see who your connection is: your Wardby
+principal (`id`, `subject`, shown `name`), the identity claims of your token
+(`sub`, and `uid`, `cid`, `client_id` or `azp` when the token has them), your
+Wardby roles for this request, the scopes your token grants, and your teams. It
+never returns the token. Use it after a group or role change to check it has
+reached Wardby (roles are read from the token, so a new group needs a new
+token), and compare `principal.subject` with the browser's `/web/whoami` to
+check that your MCP and browser sign-ins are the same Wardby person.
 
 See [`docs/getting-started-identity-provider.md`](../docs/getting-started-identity-provider.md)
 for the supported self-hosted and delegated identity-provider setup.

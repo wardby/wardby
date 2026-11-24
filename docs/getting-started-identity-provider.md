@@ -54,27 +54,27 @@ access tokens for that audience.
 
 Create these scopes in the provider:
 
-| Scope                 | Capability                                                                                             |
-| --------------------- | ------------------------------------------------------------------------------------------------------ |
-| `agents:read`         | Inspect agents, models, runs, memory, and attached resources; read the server version (`get_version`). |
-| `agents:write`        | Create and modify agents, schedules, and sub-agent relationships.                                      |
-| `runs:trigger`        | Start agent runs.                                                                                      |
-| `tools:write`         | Create, attach, and manage tools.                                                                      |
-| `datastore:write`     | Create, attach, query, and modify datastores.                                                          |
-| `secrets:write`       | Create, attach, rotate, and remove secret bindings.                                                    |
-| `webhooks:write`      | Create and manage webhook triggers.                                                                    |
-| `budget_groups:write` | Create and manage shared budget groups.                                                                |
-| `packages:approve`    | Approve coding agents' package allowlists.                                                             |
-| `services:manage`     | Create, update and delete coding-run service catalog entries.                                          |
-| `agents:admin`        | Reassign agent ownership, BYO worker images, system tools; admins only.                                |
-| `memory:write`        | Set and delete agent memory entries.                                                                   |
-| `admin:view`          | Read every owner's runs through the admin viewer API; admins and viewers only.                         |
-| `models:admin`        | Add, override, disable and reset model catalog entries.                                                |
-| `power:manage`        | Read low-power state and sleep the proxy/gateway now; admins only.                                     |
-| `hosts:admin`         | Register host providers and approve their tools; admins and host managers only.                        |
-| `teams:manage`        | Create, rename and delete teams and edit their members; admins and team managers only.                 |
-| `documents:read`      | Read and list documents and comment threads, and list share links.                                     |
-| `documents:write`     | Create documents, publish versions, reply, resolve, share and send to an agent.                        |
+| Scope                 | Capability                                                                                                                                                |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agents:read`         | Inspect agents, models, runs, memory, and attached resources; read the server version (`get_version`) and your own identity, roles and scopes (`whoami`). |
+| `agents:write`        | Create and modify agents, schedules, and sub-agent relationships.                                                                                         |
+| `runs:trigger`        | Start agent runs.                                                                                                                                         |
+| `tools:write`         | Create, attach, and manage tools.                                                                                                                         |
+| `datastore:write`     | Create, attach, query, and modify datastores.                                                                                                             |
+| `secrets:write`       | Create, attach, rotate, and remove secret bindings.                                                                                                       |
+| `webhooks:write`      | Create and manage webhook triggers.                                                                                                                       |
+| `budget_groups:write` | Create and manage shared budget groups.                                                                                                                   |
+| `packages:approve`    | Approve coding agents' package allowlists.                                                                                                                |
+| `services:manage`     | Create, update and delete coding-run service catalog entries.                                                                                             |
+| `agents:admin`        | Reassign agent ownership, BYO worker images, system tools; admins only.                                                                                   |
+| `memory:write`        | Set and delete agent memory entries.                                                                                                                      |
+| `admin:view`          | Read every owner's runs through the admin viewer API; admins and viewers only.                                                                            |
+| `models:admin`        | Add, override, disable and reset model catalog entries.                                                                                                   |
+| `power:manage`        | Read low-power state and sleep the proxy/gateway now; admins only.                                                                                        |
+| `hosts:admin`         | Register host providers and approve their tools; admins and host managers only.                                                                           |
+| `teams:manage`        | Create, rename and delete teams and edit their members; admins and team managers only.                                                                    |
+| `documents:read`      | Read and list documents and comment threads, and list share links.                                                                                        |
+| `documents:write`     | Create documents, publish versions, reply, resolve, share and send to an agent.                                                                           |
 
 MCP clients discover this list from Wardby's protected-resource metadata and
 may request every advertised scope. Define all nineteen in the provider even when

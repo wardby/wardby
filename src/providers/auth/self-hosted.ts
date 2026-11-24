@@ -3,7 +3,7 @@ import { SignJWT, jwtVerify } from "jose";
 import { z } from "zod";
 import type { OAuthFamily, PrismaClient } from "#prisma";
 import type { AuthProfile, AuthProvider, AuthTokens, VerifiedToken } from "./types.js";
-import { NotSupportedError } from "./types.js";
+import { identityClaimsOf, NotSupportedError } from "./types.js";
 import { requireSubject } from "./subject.js";
 import { SCOPES_SUPPORTED, limitScope } from "../../mcp/auth/resource-server.js";
 import { canonicalUrl } from "../../mcp/transport/http-limits.js";
@@ -445,6 +445,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
       scopes: family.scope.split(/\s+/).filter(Boolean),
       roles: [],
       wardbyRoles: family.user.roles ?? [],
+      identityClaims: identityClaimsOf(payload),
     };
   }
   async cleanup() {
