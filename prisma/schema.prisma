@@ -35,6 +35,10 @@ model Agent {
   planSets              PlanSet[]           @relation("PlanSetPlanner")
   accessPlanSets        PlanSet[]           @relation("PlanSetAccess")
   promptVersions        AgentPromptVersion[]
+  /// Built-in doc_* tools for native agents (#625): { access, reviewers, finalApproverId, maxNewPerRun, plans }.
+  /// Null = off. Validated at save (src/core/documents/tools-setting.ts).
+  documentTools         Json?
+  documentGrants        ResourceGrant[]     @relation("AgentResourceGrants")
 
   // Phase 2: scheduling. `schedule` is a cron expression; null = manual-only.
   schedule        String?
@@ -1441,11 +1445,14 @@ model ResourceGrant {
   /// "agent" | "tool" | "budget_group" | "mcp_server" | "document" (later "secret" | "datastore").
   resourceType       String
   resourceId         String
-  /// "principal" | "everyone" (later "group").
+  /// "principal" | "everyone" | "agent" (documents only; later "group").
   granteeKind        String
   granteePrincipalId String?
   granteePrincipal   Principal? @relation(fields: [granteePrincipalId], references: [id], onDelete: Cascade)
-  /// Normalised grantee identity for uniqueness: "principal:<id>", "everyone"
+  /// Set when granteeKind is "agent": a native agent's read/comment on a document (#625).
+  granteeAgentId     String?
+  granteeAgent       Agent?     @relation("AgentResourceGrants", fields: [granteeAgentId], references: [id], onDelete: Cascade)
+  /// Normalised grantee identity for uniqueness: "principal:<id>", "agent:<id>", "everyone"
   /// (later "group:<id>"). Needed because NULL granteePrincipalId values are
   /// distinct in a unique index. Shape enforced by a hand-written CHECK
   /// (ResourceGrant_grantee_shape, not representable here).
@@ -1464,6 +1471,7 @@ model ResourceGrant {
   @@unique([resourceType, resourceId, granteeKey])
   @@index([granteeKey, resourceType])
   @@index([granteePrincipalId])
+  @@index([granteeAgentId])
 }
 
 /// Phase 4: durable handle backing both a triggered run and (reserved,
@@ -2932,6 +2940,8 @@ model DocumentReviewEvent {
   document         Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   actorPrincipalId String?
   actorGuestId     String?
+  /// The run when an agent acted (doc_submit_for_review); actorPrincipalId is then null.
+  actorRunId       String?
   /// submitted | reviewers_changed | approved | changes_requested | force_approved | reopened | archived | unarchived
   kind             String
   fromState        String
