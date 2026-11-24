@@ -275,6 +275,13 @@ and each route authenticates separately. The Anthropic allowlist accepts the
 run's own MCP tools as plain client tools named
 `mcp__wardby_mcp__<server>__<tool>`, and only those the run pinned.
 
+A Claude Code run's attached native Wardby tools
+([Native tools on Claude Code agents](mcp-servers.md#native-tools-on-claude-code-agents)) use the
+same token and route, named `mcp__wardby_mcp__<tool>`. They run in the gateway's sandbox with the
+attachment's grants, never in the worker, and their results have the tool's secret values removed
+before they leave the gateway. A Codex run never gets them, because its shell commands can read
+the token and a native tool has no read-only mark.
+
 Where the token is exposed:
 
 - **Claude Code.** The agent container receives the MCP configuration, its

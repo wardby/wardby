@@ -57,6 +57,10 @@ Secret values are also kept out of other output:
 - If the secrets cannot be read when a posting tool or a `delegate_to_*` call
   runs, the tool returns `secret_check_unavailable` and posts nothing or creates
   no sub-agent run.
+- A native tool called from a Claude Code coding run has the values of the
+  secrets its attachment grants replaced with `[REDACTED]` in its result and
+  errors. If those secrets cannot be read, the tool does not run and the call
+  returns `secret_check_unavailable`.
 
 ## Limits
 

@@ -14,7 +14,7 @@ appliesTo: ">=0.8.0"
 The run's error starts with `coding_failure_mcp_gateway_unavailable`, followed
 by a diagnostic id. It happens only in [low-power mode](../low-power-mode.md).
 
-A coding run with MCP tools sends every MCP call through the coding proxy to
+A coding run with MCP tools (or, for Claude Code, attached native tools) sends every MCP call through the coding proxy to
 the native gateway (`wardby-native-gateway`). In low-power mode the gateway
 may be scaled to zero, so before such a run launches, wardby wakes the gateway
 together with the proxy and waits for a ready endpoint. The gateway did not

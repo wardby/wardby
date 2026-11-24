@@ -11,7 +11,7 @@ appliesTo: ">=0.8.0"
 
 ## What happened
 
-A call to a remote MCP tool returned `mcp_call_limit`. Each coding run (Claude Code or Codex) may make a fixed number of remote MCP tool calls, `100` by default. Every call counts, including calls that failed or timed out. Once the run reaches the limit, further calls are refused; the agent sees the refusal as the tool's result and the run goes on.
+A call to a remote MCP tool returned `mcp_call_limit`. Each coding run (Claude Code or Codex) may make a fixed number of remote MCP tool calls, `100` by default. Every call counts, including calls that failed or timed out, and a Claude Code run's calls to its attached native tools count too. Once the run reaches the limit, further calls are refused; the agent sees the refusal as the tool's result and the run goes on.
 
 ## What to do
 
@@ -19,4 +19,4 @@ A call to a remote MCP tool returned `mcp_call_limit`. Each coding run (Claude C
 2. If the run really needs more calls, ask the operator to raise `WARDBY_MCP_MAX_CALLS_PER_RUN` on the native gateway, which counts the calls, and on the server so both agree (a positive whole number; any other value stops start-up). Restart them to apply it.
 3. Native agents are not limited by this setting.
 
-See [Remote MCP servers](../mcp-servers.md) and [Remote MCP servers for coding agents](../../docs/mcp-servers.md#coding-agents).
+See [Remote MCP servers](../mcp-servers.md), [Native tools on Claude Code coding agents](../coding-agent-native-tools.md) and [Remote MCP servers for coding agents](../../docs/mcp-servers.md#coding-agents).

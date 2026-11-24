@@ -203,6 +203,45 @@ deadline, and only its hash is stored.
 Time limits and the other rules in this guide apply to coding agents too. See
 [Coding worker isolation](coding-worker-isolation.md#remote-mcp-tools) for the security notes.
 
+### Native tools on Claude Code agents
+
+A Claude Code coding agent can also use native Wardby tools. Attach a tool with `attach_tool`, the
+same way as for a native agent, with the same capability fields (`allowedSecrets`,
+`allowedDatastorePrefixes`, `allowedHosts`, `allowedSharedDatastorePrefixes`). Its runs reach the
+tool over the same path as their MCP tools: worker → coding proxy `/mcp` → native gateway
+`/coding-mcp`. The tool runs in the gateway's sandbox, never in the worker.
+
+- **Naming.** Claude Code sees the tool as `mcp__wardby_mcp__<tool name>`, with the tool's own
+  description and schema. A Claude Code agent can take a tool only when its name uses letters,
+  digits, `_` and `-` (up to 64 characters); `attach_tool` refuses any other name. A tool name
+  can't be the same as one of the agent's MCP tools (`<server name>__<tool name>`): both
+  `attach_tool` and `attach_mcp_server` refuse the clash.
+- **Grants.** A call runs with exactly what the attachment grants, as in a native run: brokered
+  and readable secrets, the agent's private datastore (`datastore.*`) and its attached shared
+  datastores (`sharedDatastore.*`) under the granted prefixes, the allowed hosts and the tool's
+  time limit (never past the run's deadline). Capabilities still need the agent owner's consent.
+- **Live checks.** Every call re-reads the attachment: a tool detached during a run is refused with
+  [`mcp_tool_not_allowed`](../help/errors/mcp-tool-not-allowed.md), and a changed grant or tool
+  code applies to the next call.
+- **Secrets.** The result, and any error, has every value of the attachment's secrets removed
+  before it leaves the gateway, in plain, encoded and JSON-escaped forms. If those values can't be
+  read, the tool does not run and the call returns
+  [`secret_check_unavailable`](../help/errors/secret-in-value.md#secret_check_unavailable). A tool's
+  `console.log` lines go to the gateway's log with the same values removed.
+- **Call limit.** Native tool calls count against `WARDBY_MCP_MAX_CALLS_PER_RUN` together with the
+  run's MCP tool calls, and `stop_run` stops a call in flight.
+- **Codex.** Not yet supported. `attach_tool` refuses a Codex coding agent (or one with no coding
+  profile): "Native tools work only on Claude Code coding agents for now; Codex support is tracked
+  separately." A Codex run never gets native tools. When `update_agent` makes an agent a Codex
+  agent while tools are attached, the change goes ahead and the result's `warnings` says "These
+  native tools won't be available to Codex runs: …". Making a native agent with tools a Claude
+  Code agent keeps them, with no warning.
+- **Deployment.** Native tools use the same settings as MCP tools: the proxy needs
+  `WARDBY_MCP_GATEWAY_URL`, and in low-power mode a Claude Code run with native tools wakes the
+  native gateway the same way. They work on the Substrate launcher too. Upgrade the coding proxy
+  and the native gateway together with the server: an older coding proxy can't read a run's native
+  tool list and refuses its requests. No new worker image is needed.
+
 ## Time limits
 
 Each call has `callTimeoutMs` (default `30000`, set on `attach_mcp_server`).

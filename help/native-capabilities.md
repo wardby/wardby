@@ -80,5 +80,8 @@ requires the matching MCP scope.
 Native agents can also call tools from remote MCP servers; see
 [Remote MCP servers](../docs/mcp-servers.md) (0.8.0+).
 
+Claude Code coding agents can use attached tools too, with the same grants; see
+[Native tools on Claude Code coding agents](coding-agent-native-tools.md).
+
 See [Operate agents](operating-agents.md) for run and budget management, and
 [`README.md`](../README.md) for the feature overview and MCP operations.
