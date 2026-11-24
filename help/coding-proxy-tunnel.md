@@ -37,7 +37,9 @@ For a host that needs a credential the run must not hold, the proxy can decrypt
 that host's traffic and attach the credential. Set all of these on the proxy only:
 `CODING_TUNNEL_INTERCEPT_RULES` (a JSON array of `{host, scheme, credential}`,
 with `username` or `usernameCredential` (an `env:NAME` reference) for `basic`;
-`credential` is an `env:NAME` reference and each host must also be allowlisted), and the CA
+`credential` is an `env:NAME` reference and each host must also be allowlisted;
+or `{host, scheme: "gcp"}`, which sends an access token for the proxy's own Google
+service account, fetched from the metadata server and refreshed before it expires), and the CA
 certificate and key, each as PEM text (`CODING_TUNNEL_INTERCEPT_CA_CERT`,
 `CODING_TUNNEL_INTERCEPT_CA_KEY`) or as a file path (`..._CERT_FILE`, `..._KEY_FILE`), one form each. Create the CA with
 `wardby coding intercept-ca --host <host> --out <dir>`: it is limited to the hosts

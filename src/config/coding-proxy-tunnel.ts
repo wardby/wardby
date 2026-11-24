@@ -23,16 +23,20 @@ import { isIP } from "node:net";
 import { normalizeHost } from "../sandbox/fetch-policy.js";
 import { CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../providers/jobs/docker-isolation.js";
 
-/** How the credential for an intercepted host goes into its `Authorization` header. */
+/**
+ * How the credential for an intercepted host goes into its `Authorization` header: `bearer` or `basic` with a
+ * credential from the proxy's environment, or `gcp`, an access token for the proxy's own Google service
+ * account (Workload Identity), fetched from the metadata server and refreshed as it expires.
+ */
 export interface CodingTunnelInterceptRule {
   host: string;
-  scheme: "bearer" | "basic";
+  scheme: "bearer" | "basic" | "gcp";
   /** Basic only: the user name, written out; the credential is the password. */
   username?: string;
   /** Basic only, instead of `username`: an `env:NAME` reference to the user name, resolved at start-up. */
   usernameCredential?: string;
-  /** An `env:NAME` reference, resolved from the proxy's environment at start-up. */
-  credential: string;
+  /** Bearer and basic: an `env:NAME` reference, resolved from the proxy's environment at start-up. Never with gcp. */
+  credential?: string;
 }
 
 export interface CodingTunnelInterceptConfig {
@@ -106,7 +110,7 @@ const RULE_KEYS = new Set(["host", "scheme", "credential", "username", "username
 const ENV_REFERENCE = /^env:[A-Z][A-Z0-9_]{0,127}$/;
 
 function loadInterceptRules(raw: string, allowedHosts: readonly string[]): CodingTunnelInterceptRule[] {
-  const shape = `${RULES} must be a JSON array of {host, scheme, credential} objects (basic also takes username or usernameCredential).`;
+  const shape = `${RULES} must be a JSON array of {host, scheme, credential} objects (basic also takes username or usernameCredential; gcp takes no credential).`;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -132,7 +136,13 @@ function loadInterceptRules(raw: string, allowedHosts: readonly string[]): Codin
       throw new Error(`${RULES} must name only hosts listed in CODING_TUNNEL_ALLOWED_HOSTS.`);
     if (seen.has(host)) throw new Error(`${RULES} must name each host once.`);
     seen.add(host);
-    if (scheme !== "bearer" && scheme !== "basic") throw new Error(`${RULES} scheme must be "bearer" or "basic".`);
+    if (scheme !== "bearer" && scheme !== "basic" && scheme !== "gcp")
+      throw new Error(`${RULES} scheme must be "bearer", "basic" or "gcp".`);
+    if (scheme === "gcp") {
+      if (credential !== undefined || username !== undefined || usernameCredential !== undefined)
+        throw new Error(`${RULES} gcp uses the proxy's own service account and takes no credential or username.`);
+      return { host, scheme };
+    }
     if (typeof credential !== "string" || !ENV_REFERENCE.test(credential))
       throw new Error(`${RULES} credential must be an env:NAME reference.`);
     if (scheme === "bearer") {

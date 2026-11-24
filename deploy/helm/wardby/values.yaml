@@ -383,7 +383,9 @@ codingProxy:
     # traffic, drops the run's own `Authorization` and attaches the credential. Every other host stays a blind tunnel.
     intercept:
       # -- One entry per intercepted host: `{host, scheme: bearer|basic, credential: env:NAME}`, and for basic exactly one of
-      # `username` or `usernameCredential: env:NAME`.
+      # `username` or `usernameCredential: env:NAME`; or `{host, scheme: gcp}`, which attaches an access token for the proxy's
+      # own Google service account (Workload Identity, from the metadata server, refreshed before it expires) and admits the
+      # metadata server (`database.cloudSqlProxy.metadataServer`) in the proxy's NetworkPolicy.
       # Each `host` must also be in `allowedHosts`. `NAME` is an environment variable on the proxy, normally from
       # `codingProxy.envFromSecret` or `extraEnv`. Empty leaves every tunnel blind.
       # The proxy also needs the CA: set `CODING_TUNNEL_INTERCEPT_CA_CERT` and `CODING_TUNNEL_INTERCEPT_CA_KEY` (PEM text, for

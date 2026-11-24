@@ -57,6 +57,11 @@ coding proxy only, all three together:
   `Authorization: Bearer <credential>`; `basic` sends the user name and credential as
   HTTP Basic, which is what an Artifactory user and token pair needs. Each host
   must also be in `CODING_TUNNEL_ALLOWED_HOSTS`, and may appear once.
+  `scheme: "gcp"` takes no `credential` or user name: the proxy sends
+  `Authorization: Bearer <access token>` for its own Google service account
+  (its Workload Identity on GKE), so a Google Artifact Registry host such as
+  `us-docker.pkg.dev` gets exactly the access that service account has been
+  granted. See [A Google service account's token](#a-google-service-accounts-token).
 - The CA certificate and its private key, each in one of two forms: `CODING_TUNNEL_INTERCEPT_CA_CERT`
   and `CODING_TUNNEL_INTERCEPT_CA_KEY` hold the PEM text itself (a multi-line value, as a Kubernetes
   `secretKeyRef` delivers it), or `CODING_TUNNEL_INTERCEPT_CA_CERT_FILE` and
@@ -233,6 +238,27 @@ because that run trusts only the old certificate. With `rotationPolicy: Never`, 
 renewed certificate keeps the same key and subject, and the leaves it signs still
 verify against the old certificate. Running runs are then unaffected, but the key
 itself never rotates.
+
+## A Google service account's token
+
+A `gcp` rule needs no secret. The proxy asks the metadata server
+(`metadata.google.internal`) for an access token for the service account its
+pod runs as, the first time an intercepted request to that host needs one.
+Access tokens expire after about an hour and the proxy runs far longer, so it:
+
+- reuses the token until five minutes before it expires, then fetches a fresh
+  one on the next request (the metadata server hands out a new token by then);
+- shares one fetch between requests that arrive together;
+- never caches a failure: if the metadata server can't be reached or refuses,
+  that request is answered `502` (`intercept_upstream_failed`), the proxy logs
+  `intercept.credential_unavailable` with a fixed reason (never the token), and
+  the next request tries again.
+
+The proxy's pod must reach the metadata server. The Helm chart admits it in the
+proxy's NetworkPolicy whenever a rule uses `gcp`. Grant the service account
+only what runs should get through the tunnel (for example
+`roles/artifactregistry.reader` on one repository): every run that reaches the
+host acts with it.
 
 ## Configuring a run
 

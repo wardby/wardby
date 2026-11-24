@@ -36,6 +36,7 @@ import { logger } from "../../core/logger.js";
 import { HTTP_LIMITS } from "../../mcp/transport/http-limits.js";
 import { FetchPolicyError, normalizeHost, resolveDestination, type Resolver } from "../../sandbox/fetch-policy.js";
 import { connectPinned } from "../../sandbox/safe-fetch.js";
+import { GcpTokenError, gcpAccessTokenSource } from "./gcp-access-token.js";
 import { loadInterceptCa, reloadingInterceptCa, type InterceptCa, type InterceptLeaf } from "./tunnel-ca.js";
 
 const interceptLog = logger.child({ module: "coding-proxy-tunnel-intercept" });
@@ -79,10 +80,13 @@ const DROPPED_RESPONSE_HEADERS = new Set([
   "upgrade",
 ]);
 
-/** One credentialed host: the `Authorization` value is built once at start-up and never leaves this module. */
+/**
+ * One credentialed host. Its `Authorization` value is built once at start-up, or for a `gcp` rule asked of a
+ * token source per request (gcp-access-token.ts); either way it never leaves this module.
+ */
 export interface InterceptRule {
   host: string;
-  authorization: string;
+  authorization: string | (() => Promise<string>);
 }
 
 export interface InterceptorOptions {
@@ -274,12 +278,30 @@ export function createInterceptor(options: InterceptorOptions): Interceptor {
         upstream.once("close", () => upstreams.delete(upstream));
         upstream.on("error", () => undefined);
 
+        // A gcp rule's token comes from the metadata server, cached; a failure refuses this request only.
+        let credential: string;
+        try {
+          credential = typeof authorization === "string" ? authorization : await authorization();
+        } catch (error) {
+          interceptLog.warn(
+            {
+              event: "intercept.credential_unavailable",
+              host,
+              reason: error instanceof GcpTokenError ? error.code : "unknown",
+            },
+            "intercepted host's credential unavailable",
+          );
+          incoming.resume();
+          upstream.destroy();
+          return refuse(response, "intercept_upstream_failed");
+        }
+
         const outgoing = httpRequest({
           // No agent: with one, Node ignores createConnection and would dial the host itself, unpinned.
           createConnection: () => upstream,
           method: incoming.method,
           path,
-          headers: forwardedHeaders(incoming.headers, host, authorization),
+          headers: forwardedHeaders(incoming.headers, host, credential),
         });
         outgoing.on("error", () => {
           incoming.unpipe(outgoing);
@@ -337,7 +359,13 @@ export function buildAuthorization(scheme: "bearer" | "basic", username: string 
  * One rule's host and its `Authorization` value, from the proxy's environment. Throws naming the variable,
  * never a value.
  */
-export function resolveInterceptRule(rule: CodingTunnelInterceptRule, env: NodeJS.ProcessEnv): InterceptRule {
+export function resolveInterceptRule(
+  rule: CodingTunnelInterceptRule,
+  env: NodeJS.ProcessEnv,
+  gcpToken: () => Promise<string> = gcpAccessTokenSource(),
+): InterceptRule {
+  if (rule.scheme === "gcp") return { host: rule.host, authorization: gcpToken };
+  if (rule.credential === undefined) throw new Error("CODING_TUNNEL_INTERCEPT_RULES credential is required.");
   const name = rule.credential.slice("env:".length);
   const value = env[name];
   if (!value) throw new Error(`CODING_TUNNEL_INTERCEPT_RULES refers to ${name}, which is not set.`);
@@ -368,11 +396,14 @@ export async function loadInterceptor(
   overrides: Pick<InterceptorOptions, "resolve" | "connect" | "upstreamTls"> & {
     read?: typeof readFile;
     reloadMs?: number;
+    gcpToken?: () => Promise<string>;
   } = {},
 ): Promise<Interceptor | undefined> {
   const intercept = config.intercept;
   if (!intercept) return undefined;
-  const rules = intercept.rules.map((rule) => resolveInterceptRule(rule, env));
+  // One token source for every gcp rule: they all speak for the same service account.
+  const gcpToken = overrides.gcpToken ?? gcpAccessTokenSource();
+  const rules = intercept.rules.map((rule) => resolveInterceptRule(rule, env, gcpToken));
   const read = overrides.read ?? readFile;
   // Each of the two is the PEM text from the environment or a file the config named, never both.
   const readPair = async () => {

@@ -167,6 +167,27 @@ spec:
   egress:
     {{- include "wardby.kubeDnsEgress" . | nindent 4 }}
     {{- include "wardby.publicHttpsEgress" . | nindent 4 }}
+    {{- /* A gcp intercept rule's token comes from the metadata server (the proxy's own Workload Identity): admit it
+    here, not only through the Cloud SQL proxy's rule, which is there only while that proxy is enabled. */}}
+    {{- $gcpRule := false }}
+    {{- if .Values.codingProxy.tunnel.enabled }}
+    {{- range .Values.codingProxy.tunnel.intercept.rules }}
+    {{- if eq (toString .scheme) "gcp" }}{{ $gcpRule = true }}{{ end }}
+    {{- end }}
+    {{- end }}
+    {{- if $gcpRule }}
+    {{- $md := .Values.database.cloudSqlProxy.metadataServer }}
+    - to:
+        {{- range $md.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range $md.ports }}
+        - port: {{ int . }}
+          protocol: TCP
+        {{- end }}
+    {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

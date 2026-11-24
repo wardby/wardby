@@ -162,6 +162,44 @@ tests:
           path: spec.ingress
           count: 1
         documentIndex: 2
+  - it: admits the metadata server for a gcp intercept rule, and not otherwise
+    set:
+      database.cloudSqlProxy.enabled: false
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [us-docker.pkg.dev, ghcr.io]
+      codingProxy.tunnel.intercept.caSecret: ca
+      codingProxy.tunnel.intercept.rules:
+        - { host: us-docker.pkg.dev, scheme: gcp }
+    asserts:
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock: { cidr: 169.254.169.254/32 }
+              - ipBlock: { cidr: 169.254.169.252/32 }
+            ports:
+              - { port: 80, protocol: TCP }
+              - { port: 988, protocol: TCP }
+        documentIndex: 2
+  - it: leaves the metadata server out with only bearer and basic rules
+    set:
+      database.cloudSqlProxy.enabled: false
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [ghcr.io]
+      codingProxy.tunnel.intercept.caSecret: ca
+      codingProxy.tunnel.intercept.rules:
+        - { host: ghcr.io, scheme: bearer, credential: env:GHCR_TOKEN }
+    asserts:
+      - notContains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock: { cidr: 169.254.169.254/32 }
+              - ipBlock: { cidr: 169.254.169.252/32 }
+            ports:
+              - { port: 80, protocol: TCP }
+              - { port: 988, protocol: TCP }
+        documentIndex: 2
   - it: passes the tunnel limits through when set
     set:
       codingProxy.tunnel.enabled: true

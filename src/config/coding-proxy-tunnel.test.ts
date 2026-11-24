@@ -158,6 +158,11 @@ describe("loadCodingTunnelConfig TLS interception", () => {
     expect(loadCodingTunnelConfig(withRules([rule]))?.intercept?.rules).toEqual([rule]);
   });
 
+  it("reads a gcp rule, which names no credential: the proxy's own service account supplies it", () => {
+    const rule = { host: "registry.example.com", scheme: "gcp" };
+    expect(loadCodingTunnelConfig(withRules([rule]))?.intercept?.rules).toEqual([rule]);
+  });
+
   it("requires the three settings together", () => {
     for (const name of [
       "CODING_TUNNEL_INTERCEPT_RULES",
@@ -178,7 +183,9 @@ describe("loadCodingTunnelConfig TLS interception", () => {
       [[{ ...rule, host: "10.0.0.1" }], "bare hostnames"],
       [[{ ...rule, host: "other.example.com" }], "listed in CODING_TUNNEL_ALLOWED_HOSTS"],
       [[rule, rule], "each host once"],
-      [[{ ...rule, scheme: "digest" }], 'scheme must be "bearer" or "basic"'],
+      [[{ ...rule, scheme: "digest" }], 'scheme must be "bearer", "basic" or "gcp"'],
+      [[{ ...rule, scheme: "gcp" }], "gcp uses the proxy's own service account"],
+      [[{ host: rule.host, scheme: "gcp", username: "oauth2accesstoken" }], "takes no credential or username"],
       [[{ ...rule, credential: "REGISTRY_TOKEN" }], "env:NAME reference"],
       [[{ ...rule, credential: "env:lowercase" }], "env:NAME reference"],
       [[{ ...rule, username: "user" }], "basic scheme only"],

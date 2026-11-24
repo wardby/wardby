@@ -23,6 +23,7 @@ import {
   resolveInterceptRule,
   type Interceptor,
 } from "./tunnel-intercept.js";
+import { GcpTokenError } from "./gcp-access-token.js";
 
 const TOKEN = "fake-tunnel-token-SECRET-123";
 const CREDENTIAL = "FAKE-REGISTRY-CREDENTIAL-abc123";
@@ -147,6 +148,8 @@ describe("tunnel TLS interception", () => {
   let seen: Seen[];
   let blindConnections: number;
   let runCaPem: string;
+  let runCaPair: Awaited<ReturnType<typeof generateInterceptCa>>;
+  let upstreamCaPem: string;
   let interceptor: Interceptor;
 
   async function start(overrides: Partial<CodingTunnelConfig> = {}): Promise<TunnelListenerHandle> {
@@ -201,6 +204,7 @@ describe("tunnel TLS interception", () => {
     seen = [];
     blindConnections = 0;
     const upstreamCa = await generateInterceptCa({ hosts: [HOST] });
+    upstreamCaPem = upstreamCa.certificatePem;
     const upstreamLeaf = await (await loadInterceptCa({ ...upstreamCa, hosts: [HOST] })).leafFor(HOST);
     upstream = await startUpstream(upstreamLeaf, seen);
     blind = net.createServer((socket) => {
@@ -211,6 +215,7 @@ describe("tunnel TLS interception", () => {
     await new Promise<void>((resolve) => blind.listen(0, "127.0.0.1", resolve));
     const runCa = await generateInterceptCa({ hosts: [HOST] });
     runCaPem = runCa.certificatePem;
+    runCaPair = runCa;
     interceptor = createInterceptor({
       ca: await loadInterceptCa({ ...runCa, hosts: [HOST] }),
       rules: [{ host: HOST, authorization: `Bearer ${CREDENTIAL}` }],
@@ -265,6 +270,45 @@ describe("tunnel TLS interception", () => {
     expect(seen[0].headers["proxy-authorization"]).toBeUndefined();
     expect(seen[0].headers["x-forwarded-for"]).toBeUndefined();
     expect(JSON.stringify(seen[0].headers)).not.toContain("client-supplied");
+  });
+
+  it("attaches a gcp rule's token from its source on each request, and refuses only the request it fails for", async () => {
+    let calls = 0;
+    let fail = false;
+    const source = async () => {
+      calls++;
+      if (fail) throw new GcpTokenError("metadata_http_403");
+      return `Bearer gcp-token-${calls}`;
+    };
+    interceptor = createInterceptor({
+      ca: await loadInterceptCa({ ...runCaPair, hosts: [HOST] }),
+      rules: [{ host: HOST, authorization: source }],
+      allowedHosts: config.allowedHosts,
+      resolve: publicResolver,
+      connect: async () => {
+        const socket = net.connect((upstream.address() as AddressInfo).port, "127.0.0.1");
+        await once(socket, "connect");
+        return socket;
+      },
+      upstreamTls: { ca: upstreamCaPem },
+    });
+    const { port } = await start();
+    const ask = async () =>
+      request(await secureTo(port), [
+        "GET /v2/ HTTP/1.1",
+        `Host: ${HOST}`,
+        `Authorization: ${CLIENT_CREDENTIAL}`,
+        "Connection: close",
+      ]);
+    expect((await ask()).status).toBe(200);
+    expect(seen[0].authorization).toBe("Bearer gcp-token-1");
+    fail = true;
+    const refused = await ask();
+    expect(refused.status).toBe(502);
+    expect(refused.body).toContain("intercept_upstream_failed");
+    expect(refused.body).not.toContain("gcp-token");
+    // The refused request never reached the registry.
+    expect(seen).toHaveLength(1);
   });
 
   it("serves several requests on one tunnel and reports them in the audit record", async () => {
@@ -577,6 +621,14 @@ describe("loadInterceptor", () => {
       expect(resolveInterceptRule(rule, { FAKE_TOKEN: CREDENTIAL, FAKE_USER: "jane@example.com" })).toEqual({
         host: HOST,
         authorization: header("jane@example.com"),
+      });
+    });
+
+    it("hands a gcp rule the token source, reading nothing from the environment", () => {
+      const source = async () => "Bearer t";
+      expect(resolveInterceptRule({ host: HOST, scheme: "gcp" }, {}, source)).toEqual({
+        host: HOST,
+        authorization: source,
       });
     });
 
