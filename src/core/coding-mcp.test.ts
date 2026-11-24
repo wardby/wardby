@@ -38,6 +38,16 @@ const NATIVE: NativeToolPin = {
   toolId: "tool-1",
   toolName: "code_search",
   definition: { description: "Searches the code index.", inputSchema: { type: "object" } },
+  pinned: {
+    code: 'return await secrets.get("API_KEY");',
+    paramsZod: "z.object({})",
+    grants: {
+      allowedSecrets: ["API_KEY"],
+      allowedDatastorePrefixes: [],
+      allowedHosts: [],
+      allowedSharedDatastorePrefixes: {},
+    },
+  },
 };
 
 interface FakeSession {
@@ -230,6 +240,9 @@ describe("handleCodingMcpRequest: protocol", () => {
       },
       { name: "code_search", description: "Searches the code index.", inputSchema: { type: "object" } },
     ]);
+    // Never the pinned code or grants.
+    expect(res.body).not.toContain("secrets.get");
+    expect(res.body).not.toContain("API_KEY");
   });
 
   it("lists nothing when the session has no pins", async () => {

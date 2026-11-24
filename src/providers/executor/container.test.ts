@@ -2648,6 +2648,16 @@ describe("ContainerExecutor", () => {
         toolId: `tool-${name}`,
         toolName: name,
         definition: { description: name, inputSchema: { type: "object" } },
+        pinned: {
+          code: `return "${name}";`,
+          paramsZod: "z.object({})",
+          grants: {
+            allowedSecrets: [],
+            allowedDatastorePrefixes: [],
+            allowedHosts: [],
+            allowedSharedDatastorePrefixes: {},
+          },
+        },
       });
       const CLAUDE = { provider: "claude-code", model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE } as const;
       const claudeHarness = (extra: Partial<ContainerExecutorOptions>) =>
@@ -2702,6 +2712,22 @@ describe("ContainerExecutor", () => {
         expect(nativeToolPins).not.toHaveBeenCalled();
         expect(created.sessions.lastInput).not.toHaveProperty("mcpTools");
         expect(created.jobs.lastSpec).not.toHaveProperty("mcpTools");
+      });
+
+      it("fails the run with coding_failure_native_tool_duplicate_names when two attached tools share a name", async () => {
+        const created = await claudeHarness({
+          nativeToolPins: async () => {
+            throw new Error('coding_native_tool_duplicate_names: the agent has more than one attached tool named "x"');
+          },
+        });
+        await created.executor.start("run-1");
+        expect(created.jobs.launches).toBe(0);
+        expect(created.store.terminations).toEqual([
+          expect.objectContaining({
+            status: "failed",
+            error: expect.stringMatching(/^coding_failure_native_tool_duplicate_names:coding_diag_[0-9a-f-]+$/),
+          }),
+        ]);
       });
 
       it("fails the run with coding_failure_mcp_pins_unavailable when the native pins can't be read", async () => {

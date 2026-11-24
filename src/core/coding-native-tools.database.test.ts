@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import {
   handleNativeTool,
   loadNativeToolPins,
+  nativeToolDefs,
   NATIVE_TOOL_SECRETS_UNAVAILABLE_MESSAGE,
   type NativeToolContext,
   type NativeToolPin,
@@ -32,6 +33,8 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
     thrower: `cnt-thrower-${tag}`,
     badName: `cnt-badname-${tag}`,
     brokered: `cnt-brokered-${tag}`,
+    longDescription: `cnt-long-${tag}`,
+    versioned: `cnt-versioned-${tag}`,
   };
   const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
   const datastore = new PostgresDatastore(db, cipher);
@@ -46,13 +49,12 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
     error: (...a: unknown[]) => consoleLines.push(a),
   } as unknown as Logger;
 
-  const pinOf = (toolId: string, name: string): NativeToolPin => ({
-    kind: "native",
-    exposedName: name,
-    toolId,
-    toolName: name,
-    definition: { description: name, inputSchema: { type: "object" } },
-  });
+  // The run's pins as dispatch fixes them: each tool's version and consented grants at that moment.
+  const pinOf = async (name: string): Promise<NativeToolPin> => {
+    const pin = (await loadNativeToolPins(db, agentId, log)).find((candidate) => candidate.exposedName === name);
+    if (!pin) throw new Error(`no pin named ${name}`);
+    return pin;
+  };
   const ctx = (extra: Partial<NativeToolContext> = {}): NativeToolContext => ({
     db,
     secrets: cipher,
@@ -66,12 +68,18 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
     ...extra,
   });
 
-  const tool = async (id: string, name: string, code: string, timeoutMs?: number) => {
+  const tool = async (
+    id: string,
+    name: string,
+    code: string,
+    timeoutMs?: number,
+    description = `The ${name} tool.`,
+  ) => {
     await db.tool.create({
       data: {
         id,
         name,
-        description: `The ${name} tool.`,
+        description,
         paramsZod: "z.object({ q: z.string().optional() })",
         jsonSchema: { type: "object", properties: { q: { type: "string" } } },
         code,
@@ -136,6 +144,12 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
     // A brokered value the tool can't read, reaching it another way (here, a stored note).
     await datastore.set(agentId, "notes/b", `token ${BROKERED}`);
     await tool(tools.brokered, "leak_brokered", `return { note: await datastore.get("notes/b") };`);
+    await tool(tools.longDescription, "long_description", `return 1;`, undefined, "x".repeat(256 * 1024 + 1));
+    await tool(
+      tools.versioned,
+      "versioned",
+      `return { version: 1, secret: (await secrets.get("API_KEY")) ? "read" : "none" };`,
+    );
 
     const grant = {
       allowedSecrets: ["API_KEY", "SEARCH_KEY"],
@@ -168,9 +182,16 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
     await db.$disconnect();
   });
 
-  it("pins the attached tools by name with their description and schema, leaving out a name Claude Code can't take", async () => {
+  it("pins the attached tools by name with their description, schema, version and consented grants, leaving out one Claude Code can't take", async () => {
     const pins = await loadNativeToolPins(db, agentId, log);
-    expect(pins.map((p) => p.exposedName)).toEqual(["echo_secret", "leak_brokered", "slow", "stores", "thrower"]);
+    expect(pins.map((p) => p.exposedName)).toEqual([
+      "echo_secret",
+      "leak_brokered",
+      "slow",
+      "stores",
+      "thrower",
+      "versioned",
+    ]);
     expect(pins[0]).toEqual({
       kind: "native",
       exposedName: "echo_secret",
@@ -180,18 +201,98 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
         description: "The echo_secret tool.",
         inputSchema: { type: "object", properties: { q: { type: "string" } } },
       },
+      pinned: {
+        code: expect.stringContaining('secrets.get("API_KEY")'),
+        paramsZod: "z.object({ q: z.string().optional() })",
+        grants: {
+          allowedSecrets: ["API_KEY", "SEARCH_KEY"],
+          allowedDatastorePrefixes: ["notes/"],
+          allowedHosts: [],
+          allowedSharedDatastorePrefixes: { kb: ["public/"] },
+        },
+      },
     });
-    // No code and no grants in a pin.
-    expect(JSON.stringify(pins)).not.toContain("secrets.get");
-    expect(JSON.stringify(pins)).not.toContain("API_KEY");
+    // What tools/list serves carries no code and no grants.
+    expect(JSON.stringify(nativeToolDefs(pins))).not.toContain("secrets.get");
+    expect(JSON.stringify(nativeToolDefs(pins))).not.toContain("API_KEY");
     expect(warn).toHaveBeenCalledWith(
       { agentId, toolId: tools.badName },
       "native tool left out of the coding run: its name can't be offered",
     );
+    expect(warn).toHaveBeenCalledWith(
+      { agentId, toolId: tools.longDescription },
+      "native tool left out of the coding run: its description is over the coding proxy's limit",
+    );
+    // The warnings carry ids only, never the tool's code.
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("return");
+  });
+
+  it("fails the pins when two attached tools share a name, as a native run fails", async () => {
+    const dupAgent = `cnt-dup-agent-${tag}`;
+    const dupIds = [`cnt-dup-a-${tag}`, `cnt-dup-b-${tag}`];
+    await db.agent.create({
+      data: { id: dupAgent, name: dupAgent, systemPrompt: "x", model: "m", budgetUsd: 1, maxTurns: 2, ownerId: owner },
+    });
+    // Names are unique per owner: one owner's tool and another's.
+    await db.tool.create({
+      data: {
+        id: dupIds[0],
+        name: "dup",
+        description: "a",
+        paramsZod: "z.object({})",
+        jsonSchema: {},
+        code: "return 1;",
+        ownerId: owner,
+      },
+    });
+    await db.tool.create({
+      data: {
+        id: dupIds[1],
+        name: "dup",
+        description: "b",
+        paramsZod: "z.object({})",
+        jsonSchema: {},
+        code: "return 2;",
+        ownerId: other,
+      },
+    });
+    try {
+      for (const toolId of dupIds) await db.agentTool.create({ data: { agentId: dupAgent, toolId } });
+      await expect(loadNativeToolPins(db, dupAgent, log)).rejects.toThrow(
+        /^coding_native_tool_duplicate_names: the agent has more than one attached tool named "dup"$/,
+      );
+    } finally {
+      await db.agentTool.deleteMany({ where: { agentId: dupAgent } });
+      await db.tool.deleteMany({ where: { id: { in: dupIds } } });
+      await db.agent.deleteMany({ where: { id: dupAgent } });
+    }
+  });
+
+  it("keeps the tool version and grants the run started with when the tool and its grants change mid-run", async () => {
+    const pin = await pinOf("versioned");
+    await db.tool.update({ where: { id: tools.versioned }, data: { code: `return { version: 2 };` } });
+    await db.agentTool.update({
+      where: { agentId_toolId: { agentId, toolId: tools.versioned } },
+      data: { capabilitiesGrantedById: null, allowedSecrets: [] },
+    });
+    try {
+      expect(JSON.parse(await handleNativeTool(pin, "{}", ctx()))).toEqual({ version: 1, secret: "read" });
+      // A run dispatched now gets the new version, with no grants.
+      expect(JSON.parse(await handleNativeTool(await pinOf("versioned"), "{}", ctx()))).toEqual({ version: 2 });
+    } finally {
+      await db.agentTool.update({
+        where: { agentId_toolId: { agentId, toolId: tools.versioned } },
+        data: { capabilitiesGrantedById: owner, allowedSecrets: ["API_KEY", "SEARCH_KEY"] },
+      });
+      await db.tool.update({
+        where: { id: tools.versioned },
+        data: { code: `return { version: 1, secret: (await secrets.get("API_KEY")) ? "read" : "none" };` },
+      });
+    }
   });
 
   it("runs the tool with the attachment's grants: private and shared datastore prefixes enforced", async () => {
-    const text = await handleNativeTool(pinOf(tools.stores, "stores"), "{}", ctx());
+    const text = await handleNativeTool(await pinOf("stores"), "{}", ctx());
     expect(JSON.parse(text)).toEqual({
       privateOk: "private-x",
       // Outside the granted prefixes: nothing comes back.
@@ -203,7 +304,7 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
   });
 
   it("redacts a fake secret value from the result, in plain and encoded forms, and from the console line", async () => {
-    const text = await handleNativeTool(pinOf(tools.echo, "echo_secret"), '{"q":"hi"}', ctx());
+    const text = await handleNativeTool(await pinOf("echo_secret"), '{"q":"hi"}', ctx());
     expect(text).not.toContain(SECRET);
     expect(text).not.toContain(encodeURIComponent(SECRET));
     expect(JSON.parse(text)).toMatchObject({ q: "hi" });
@@ -222,13 +323,13 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
   });
 
   it("redacts a brokered secret's fake value too, though the tool can't read it", async () => {
-    const text = await handleNativeTool(pinOf(tools.brokered, "leak_brokered"), "{}", ctx());
+    const text = await handleNativeTool(await pinOf("leak_brokered"), "{}", ctx());
     expect(text).toContain("token ");
     expect(text).not.toContain(BROKERED);
   });
 
   it("redacts a fake secret value from a tool's error", async () => {
-    const text = await handleNativeTool(pinOf(tools.echo, "echo_secret"), '{"q":"throw"}', ctx());
+    const text = await handleNativeTool(await pinOf("echo_secret"), '{"q":"throw"}', ctx());
     expect(JSON.parse(text)).toMatchObject({ error: expect.any(String) });
     expect(text).toContain("failed with");
     expect(text).not.toContain(SECRET);
@@ -237,7 +338,7 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
 
   it("returns a fixed error and never runs the tool when the secrets can't be read", async () => {
     const broken = { ...cipher, decrypt: async () => Promise.reject(new Error(`cannot decrypt ${SECRET}`)) };
-    const text = await handleNativeTool(pinOf(tools.echo, "echo_secret"), "{}", ctx({ secrets: broken }));
+    const text = await handleNativeTool(await pinOf("echo_secret"), "{}", ctx({ secrets: broken }));
     expect(JSON.parse(text)).toEqual({
       error: "secret_check_unavailable",
       message: NATIVE_TOOL_SECRETS_UNAVAILABLE_MESSAGE,
@@ -252,7 +353,7 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
       data: { capabilitiesGrantedById: other },
     });
     try {
-      const text = await handleNativeTool(pinOf(tools.stores, "stores"), "{}", ctx());
+      const text = await handleNativeTool(await pinOf("stores"), "{}", ctx());
       expect(JSON.parse(text)).toEqual({
         privateOk: null,
         privateDenied: null,
@@ -269,7 +370,11 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
   });
 
   it("refuses a tool that was detached after the run was pinned", async () => {
-    const text = await handleNativeTool(pinOf(`cnt-gone-${tag}`, "gone"), "{}", ctx());
+    const text = await handleNativeTool(
+      { ...(await pinOf("echo_secret")), toolId: `cnt-gone-${tag}`, exposedName: "gone", toolName: "gone" },
+      "{}",
+      ctx(),
+    );
     expect(JSON.parse(text)).toEqual({
       error: "mcp_tool_not_allowed",
       message: 'The tool "gone" is no longer allowed for this agent: it was detached.',
@@ -278,24 +383,24 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
 
   it("stops a call in flight when its signal aborts, and refuses one already stopped", async () => {
     const stop = new AbortController();
-    const pending = handleNativeTool(pinOf(tools.slow, "slow"), "{}", ctx({ signal: stop.signal }));
+    const pending = handleNativeTool(await pinOf("slow"), "{}", ctx({ signal: stop.signal }));
     setTimeout(() => stop.abort(), 200);
     const text = await pending;
     expect(JSON.parse(text)).toMatchObject({ error: expect.any(String) });
     expect(text).not.toContain("late");
-    expect(JSON.parse(await handleNativeTool(pinOf(tools.slow, "slow"), "{}", ctx({ signal: stop.signal })))).toEqual({
+    expect(JSON.parse(await handleNativeTool(await pinOf("slow"), "{}", ctx({ signal: stop.signal })))).toEqual({
       error: "mcp_call_timeout",
       message: "The call was stopped.",
     });
   });
 
   it("never runs past the session deadline", async () => {
-    const text = await handleNativeTool(pinOf(tools.slow, "slow"), "{}", ctx({ deadlineAt: new Date(Date.now() - 1) }));
+    const text = await handleNativeTool(await pinOf("slow"), "{}", ctx({ deadlineAt: new Date(Date.now() - 1) }));
     expect(JSON.parse(text)).toEqual({ error: "mcp_call_timeout", message: "The run's time limit has been reached." });
   });
 
   it("reports a tool's own failure as its error", async () => {
-    const text = await handleNativeTool(pinOf(tools.thrower, "thrower"), "{}", ctx());
+    const text = await handleNativeTool(await pinOf("thrower"), "{}", ctx());
     expect(JSON.parse(text)).toMatchObject({
       error: expect.any(String),
       message: expect.stringContaining("plain failure"),
@@ -349,7 +454,11 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
       const names = (JSON.parse(list.body) as { result: { tools: { name: string }[] } }).result.tools.map(
         (t) => t.name,
       );
-      expect(names).toEqual(["echo_secret", "leak_brokered", "slow", "stores", "thrower"]);
+      expect(names).toEqual(["echo_secret", "leak_brokered", "slow", "stores", "thrower", "versioned"]);
+      // The list carries names, descriptions and schemas only: no pinned code, no grants.
+      expect(list.body).not.toContain("secrets.get");
+      expect(list.body).not.toContain("API_KEY");
+      expect(list.body).not.toContain("pinned");
       const res = await gateway(callBody("echo_secret", { q: "hi" }));
       expect(res.status).toBe(200);
       expect(res.body).not.toContain(SECRET);
@@ -375,6 +484,12 @@ describe.skipIf(!process.env.DATABASE_URL)("native tools in coding runs (databas
       } finally {
         await db.run.update({ where: { id: runId }, data: { status: "running" } });
       }
+    });
+
+    it("runs the version the run was pinned with after update_tool changes the tool", async () => {
+      await db.tool.update({ where: { id: tools.versioned }, data: { code: `return { version: 3 };` } });
+      const result = resultOf((await gateway(callBody("versioned"))).body);
+      expect(JSON.parse(result.content[0].text)).toMatchObject({ version: 1, secret: "read" });
     });
 
     it("refuses a native tool after it is detached", async () => {

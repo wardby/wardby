@@ -1461,6 +1461,21 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         toolName: "code_search",
         definition: { description: "Search code", inputSchema: { type: "object" } },
       };
+      // Dispatch writes the pinned version and grants; the proxy's read leaves them out.
+      const pinnedNative = {
+        ...native,
+        pinned: {
+          code: 'return await secrets.get("API_KEY");',
+          paramsZod: "z.object({})",
+          grants: {
+            allowedSecrets: ["API_KEY"],
+            allowedDatastorePrefixes: [],
+            allowedHosts: [],
+            allowedSharedDatastorePrefixes: {},
+          },
+        },
+      };
+      const mcpKindPin = { ...pin, kind: "mcp" as const, exposedName: "github__other" };
       const ledger = new PrismaProxyLedger(db);
       try {
         await ledger.createSession({
@@ -1473,12 +1488,14 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
           runId: kRun,
           capabilityHash: `mcp-native-cap-${suffix}`,
           registryTokenHash: `mcp-native-registry-${suffix}`,
-          mcpTools: [pin, native],
+          mcpTools: [pin, pinnedNative, mcpKindPin],
           mcpTokenHash: `mcp-native-token-hash-${suffix}`,
         });
-        expect(await ledger.findSessionByMcpTokenHash(`mcp-native-token-hash-${suffix}`)).toMatchObject({
-          mcpTools: [pin, native],
-        });
+        const read = await ledger.findSessionByMcpTokenHash(`mcp-native-token-hash-${suffix}`);
+        // An MCP pin marked kind "mcp" reads like one with no kind; a native pin loses its code and grants.
+        expect(read?.mcpTools).toEqual([pin, native, mcpKindPin]);
+        expect(JSON.stringify(read)).not.toContain("secrets.get");
+        expect(JSON.stringify(read)).not.toContain("API_KEY");
         // A pin of neither shape still refuses the session.
         await db.$executeRaw`UPDATE "CodingProxySession" SET "mcpTools" = ${JSON.stringify([{ kind: "native", exposedName: "x" }])}::jsonb WHERE "runId" = ${kRun}`;
         await expect(ledger.findSessionByMcpTokenHash(`mcp-native-token-hash-${suffix}`)).rejects.toThrow(

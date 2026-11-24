@@ -153,6 +153,16 @@ describe("warmFingerprint native tool pins", () => {
     expect(warmFingerprint({ ...INPUT, mcpTools: [...MCP, { ...NATIVE, exposedName: "code_find" }] })).not.toBe(base);
     expect(warmFingerprint({ ...INPUT, mcpTools: [NATIVE, ...MCP] })).toBe(base);
   });
+
+  it("never takes in a pin's definition, pinned code or grants (as for an MCP pin's definition)", () => {
+    const full = {
+      ...NATIVE,
+      definition: { description: "Search code", inputSchema: { type: "object" } },
+      pinned: { code: 'return await secrets.get("API_KEY");', paramsZod: "z.object({})", grants: {} },
+    };
+    const pins: WarmMcpToolPin[] = [full];
+    expect(warmFingerprint({ ...INPUT, mcpTools: pins })).toBe(warmFingerprint({ ...INPUT, mcpTools: [NATIVE] }));
+  });
 });
 
 describe("warmFingerprint services", () => {

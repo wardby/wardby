@@ -580,3 +580,45 @@ describe("MemoryProxyLedger MCP sessions", () => {
     ).rejects.toThrow("proxy_mcp_token_collision");
   });
 });
+
+describe("MemoryProxyLedger pinned tools", () => {
+  it("holds a native pin as listed: name, description and schema, never its pinned code or grants", async () => {
+    const ledger = new MemoryProxyLedger();
+    const definition = { description: "Search code", inputSchema: { type: "object" } };
+    await ledger.createSession({
+      id: "s1",
+      runId: "r1",
+      capabilityHash: "hash",
+      credentialRef: "anthropic/test",
+      protocol: "anthropic-messages",
+      allowedModels: ["m"],
+      deadlineAt: new Date(Date.now() + 60_000),
+      budgetUsd: 1,
+      registryTokenHash: "registry-hash",
+      mcpTokenHash: "mcp-hash",
+      mcpTools: [
+        {
+          kind: "native",
+          exposedName: "code_search",
+          toolId: "tool-1",
+          toolName: "code_search",
+          definition,
+          pinned: {
+            code: 'return await secrets.get("API_KEY");',
+            paramsZod: "z.object({})",
+            grants: {
+              allowedSecrets: ["API_KEY"],
+              allowedDatastorePrefixes: [],
+              allowedHosts: [],
+              allowedSharedDatastorePrefixes: {},
+            },
+          },
+        },
+      ],
+    });
+    const session = await ledger.findSessionByCapabilityHash("hash");
+    expect(session?.mcpTools).toEqual([
+      { kind: "native", exposedName: "code_search", toolId: "tool-1", toolName: "code_search", definition },
+    ]);
+  });
+});

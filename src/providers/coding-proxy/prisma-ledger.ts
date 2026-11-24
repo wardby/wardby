@@ -2,7 +2,8 @@ import type { Prisma, PrismaClient } from "#prisma";
 import type { LeaseRenewal } from "../../core/request-lease.js";
 import { RUN_STEPS_LEVELS, type RunStepsLevel } from "../../core/run-steps/config.js";
 import { logger } from "../../core/logger.js";
-import { normalizeProxyModelTerms } from "./types.js";
+import type { CodingToolPin } from "../../core/coding-native-tools.js";
+import { listedToolPins, normalizeProxyModelTerms } from "./types.js";
 import type {
   CreateProxySessionInput,
   ExpiredRequest,
@@ -130,22 +131,26 @@ function sessionFromRow(row: SessionRow): ProxySession {
   };
 }
 
-/** An MCP server's pin (no kind: serverId) or a native tool's (kind "native": toolId), by its identifying fields. */
+/** An MCP server's pin (no kind, or "mcp": serverId) or a native tool's (kind "native": toolId), by its identifying fields. */
 function isStoredPin(pin: unknown): boolean {
   if (typeof pin !== "object" || pin === null) return false;
   const p = pin as { kind?: unknown; exposedName?: unknown; toolName?: unknown; serverId?: unknown; toolId?: unknown };
   if (typeof p.exposedName !== "string" || typeof p.toolName !== "string") return false;
-  return p.kind === "native" ? typeof p.toolId === "string" : p.kind === undefined && typeof p.serverId === "string";
+  if (p.kind === "native") return typeof p.toolId === "string";
+  return (p.kind === undefined || p.kind === "mcp") && typeof p.serverId === "string";
 }
 
-/** The session's pinned tools (MCP and native); null when it has none. Anything but a list of pins refuses the session. */
+/**
+ * The session's pinned tools (MCP and native) as listed; null when it has none. Anything but a list of
+ * pins refuses the session. A native pin's code and grants are dropped here: the proxy never holds them.
+ */
 function sessionMcpTools(row: SessionRow): ProxySession["mcpTools"] {
   const stored = row.mcpTools ?? null;
   if (stored === null) return null;
   if (!Array.isArray(stored) || !stored.every(isStoredPin)) {
     throw new Error("invalid_proxy_session_mcp_tools");
   }
-  return stored as NonNullable<ProxySession["mcpTools"]>;
+  return listedToolPins(stored as CodingToolPin[]);
 }
 
 /**

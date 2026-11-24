@@ -2,10 +2,15 @@
  * A Claude Code run's native wardby tools (#622): the agent's attached sandbox tools, served to the
  * worker through the same path as its remote MCP tools (worker → coding proxy /mcp → native gateway
  * /coding-mcp). Dispatch pins each tool's name, description and schema next to the MCP pins
- * (loadNativeToolPins); Claude Code sees one as `mcp__wardby_mcp__<tool name>`. A pin carries no code
- * and no grants: every call re-reads the live attachment (handleNativeTool) and runs the tool with
- * the grants a native run would give it (consentedToolGrants, userToolHost), private datastore and
- * shared datastores included.
+ * (loadNativeToolPins); Claude Code sees one as `mcp__wardby_mcp__<tool name>`. As in a native run, a
+ * run keeps the tool version it started with: the pin also fixes the tool's code, parameter schema,
+ * time limit and the attachment's consented grants (consentedToolGrants) at dispatch, so update_tool
+ * or a grant change mid-run applies to the next run. Those fixed fields are the gateway's alone: the
+ * listed form (tools/list, the coding proxy's ledger read) carries the name, description and schema
+ * only. Every call still checks the attachment exists (a detached tool is refused) and reads the
+ * secret values live, then runs the tool with userToolHost, private datastore and shared datastores
+ * included. The tool code runs in the gateway process, in the same QuickJS sandbox and under the same
+ * time limit as a native agent's control-plane run.
  *
  * Codex runs never get native pins: a Codex run's shell commands can read the run's MCP token, and a
  * native tool has no read-only mark (#623). The gateway refuses a native call from a Codex session too.
@@ -29,7 +34,10 @@ import type { McpToolPin } from "./mcp-tools.js";
 import { readRedactionValues } from "./runner.js";
 import { buildSecretsAccessor, scopeSecretsAccessor } from "./secrets.js";
 import { redactExactSecretValues, withEscapedForms } from "./secret-spans.js";
-import { consentedToolGrants, userToolHost, userToolLimitMs } from "./user-tool-host.js";
+import { duplicateToolNames, NATIVE_TOOL_DESCRIPTION_MAX_CHARS, NATIVE_TOOL_NAME } from "./tool-names.js";
+import { consentedToolGrants, userToolHost, userToolLimitMs, type UserToolGrants } from "./user-tool-host.js";
+
+export { NATIVE_TOOL_NAME, nativeToolNameMessage } from "./tool-names.js";
 
 /** One attached native tool as dispatch pins it for a Claude Code run. */
 export interface NativeToolPin {
@@ -39,21 +47,24 @@ export interface NativeToolPin {
   toolId: string;
   toolName: string;
   definition: { description: string; inputSchema: Record<string, unknown> };
+  /**
+   * The tool version and grants the run started with, fixed at dispatch. Read by the gateway only:
+   * never listed, never read by the coding proxy (listedToolPin), never logged.
+   */
+  pinned: NativeToolVersion;
+}
+
+/** What a native pin fixes for its run: the tool's code, schema and limit, and the consented grants. */
+export interface NativeToolVersion {
+  code: string;
+  paramsZod: string;
+  /** The tool's own timeoutMs; absent = the default. The operator's ceiling is applied per call. */
+  timeoutMs?: number;
+  grants: UserToolGrants;
 }
 
 /** Any pin a coding session holds: an MCP server's tool (no `kind`) or a native tool. */
 export type CodingToolPin = McpToolPin | NativeToolPin;
-
-/**
- * The names Claude Code can be offered: the same rule as an MCP tool's exposed name. A tool whose
- * name doesn't fit is left out of the run (and refused at attach on a Claude Code agent).
- */
-export const NATIVE_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
-
-/** The refusal attach_tool gives for a name Claude Code can't be offered. */
-export function nativeToolNameMessage(name: string): string {
-  return `The tool name "${name.slice(0, 80)}" can't be offered to a Claude Code agent: use only letters, digits, "_" and "-", up to 64 characters.`;
-}
 
 export function isNativeToolPin(value: unknown): value is NativeToolPin {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -73,13 +84,45 @@ export function isNativeToolPin(value: unknown): value is NativeToolPin {
     typeof definition.description === "string" &&
     definition.inputSchema !== null &&
     typeof definition.inputSchema === "object" &&
-    !Array.isArray(definition.inputSchema)
+    !Array.isArray(definition.inputSchema) &&
+    isNativeToolVersion(p.pinned)
   );
 }
 
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((entry) => typeof entry === "string");
+
+function isNativeToolVersion(value: unknown): value is NativeToolVersion {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const grants = v.grants as Record<string, unknown> | null | undefined;
+  const shared = grants?.allowedSharedDatastorePrefixes as Record<string, unknown> | null | undefined;
+  return (
+    typeof v.code === "string" &&
+    typeof v.paramsZod === "string" &&
+    (v.timeoutMs === undefined || (typeof v.timeoutMs === "number" && Number.isSafeInteger(v.timeoutMs))) &&
+    grants !== null &&
+    typeof grants === "object" &&
+    !Array.isArray(grants) &&
+    isStringArray(grants.allowedSecrets) &&
+    isStringArray(grants.allowedDatastorePrefixes) &&
+    isStringArray(grants.allowedHosts) &&
+    shared !== null &&
+    typeof shared === "object" &&
+    !Array.isArray(shared) &&
+    Object.values(shared).every(isStringArray)
+  );
+}
+
+/** A coding run's tools fail when two attached native tools share a name, as a native run does. */
+export const NATIVE_TOOL_DUPLICATE_NAMES_ERROR = "coding_native_tool_duplicate_names";
+
 /**
- * Pins for the agent's attached native tools, by name; a name Claude Code can't be offered is left out
- * with a warning. The caller pins them for a Claude Code run only.
+ * Pins for the agent's attached native tools, by name, each with the tool version and consented grants
+ * the run keeps until it ends. A name Claude Code can't be offered, or a description over the coding
+ * proxy's limit, is left out with a warning (the run still starts). Two attached tools with one name
+ * fail the run (NATIVE_TOOL_DUPLICATE_NAMES_ERROR), as they fail a native run. The caller pins them
+ * for a Claude Code run only.
  */
 export async function loadNativeToolPins(
   db: Pick<PrismaClient, "agentTool">,
@@ -88,13 +131,48 @@ export async function loadNativeToolPins(
 ): Promise<NativeToolPin[]> {
   const rows = await db.agentTool.findMany({
     where: { agentId },
-    select: { tool: { select: { id: true, name: true, description: true, jsonSchema: true } } },
+    select: {
+      capabilitiesGrantedById: true,
+      allowedSecrets: true,
+      allowedDatastorePrefixes: true,
+      allowedHosts: true,
+      allowedSharedDatastorePrefixes: true,
+      agent: { select: { ownerId: true } },
+      tool: {
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          jsonSchema: true,
+          code: true,
+          paramsZod: true,
+          timeoutMs: true,
+        },
+      },
+    },
     orderBy: [{ tool: { name: "asc" } }, { toolId: "asc" }],
   });
+  const duplicates = duplicateToolNames(rows.map((row) => row.tool.name));
+  if (duplicates.length > 0) {
+    // The names are the operator's own tool names; never the code or the grants.
+    throw new Error(
+      `${NATIVE_TOOL_DUPLICATE_NAMES_ERROR}: the agent has more than one attached tool named ${duplicates
+        .map((name) => `"${name.slice(0, 80)}"`)
+        .join(", ")}`,
+    );
+  }
   const pins: NativeToolPin[] = [];
-  for (const { tool } of rows) {
+  for (const row of rows) {
+    const { tool } = row;
     if (!NATIVE_TOOL_NAME.test(tool.name)) {
       log.warn({ agentId, toolId: tool.id }, "native tool left out of the coding run: its name can't be offered");
+      continue;
+    }
+    if (tool.description.length > NATIVE_TOOL_DESCRIPTION_MAX_CHARS) {
+      log.warn(
+        { agentId, toolId: tool.id },
+        "native tool left out of the coding run: its description is over the coding proxy's limit",
+      );
       continue;
     }
     const schema = tool.jsonSchema;
@@ -107,6 +185,12 @@ export async function loadNativeToolPins(
         description: tool.description,
         inputSchema:
           schema !== null && typeof schema === "object" && !Array.isArray(schema) ? schema : { type: "object" },
+      },
+      pinned: {
+        code: tool.code,
+        paramsZod: tool.paramsZod,
+        ...(typeof tool.timeoutMs === "number" ? { timeoutMs: tool.timeoutMs } : {}),
+        grants: consentedToolGrants(row.agent.ownerId, row),
       },
     });
   }
@@ -209,9 +293,10 @@ export async function handleNativeTool(pin: NativeToolPin, argsJson: string, ctx
   };
   const fail = (code: string, message: string) => done(error(code, message), code);
   try {
+    // The attachment must still exist; its tool version and grants are the run's pinned ones.
     const row = await ctx.db.agentTool.findUnique({
       where: { agentId_toolId: { agentId: ctx.agentId, toolId: pin.toolId } },
-      include: { tool: true, agent: { select: { ownerId: true } } },
+      select: { toolId: true },
     });
     if (!row) {
       return fail(
@@ -219,12 +304,12 @@ export async function handleNativeTool(pin: NativeToolPin, argsJson: string, ctx
         `The tool "${pin.exposedName}" is no longer allowed for this agent: it was detached.`,
       );
     }
-    const grants = consentedToolGrants(row.agent.ownerId, row);
+    const { grants } = pin.pinned;
     const tool = {
-      code: row.tool.code,
-      paramsZod: row.tool.paramsZod,
+      code: pin.pinned.code,
+      paramsZod: pin.pinned.paramsZod,
       ...grants,
-      ...(typeof row.tool.timeoutMs === "number" ? { timeoutMs: row.tool.timeoutMs } : {}),
+      ...(pin.pinned.timeoutMs !== undefined ? { timeoutMs: pin.pinned.timeoutMs } : {}),
     };
     const untilDeadline = ctx.deadlineAt ? ctx.deadlineAt.getTime() - Date.now() : Infinity;
     const limitMs = Math.max(0, Math.min(userToolLimitMs(tool), untilDeadline));
@@ -252,6 +337,7 @@ export async function handleNativeTool(pin: NativeToolPin, argsJson: string, ctx
           agentId: ctx.agentId,
           name: pin.toolName,
           tool,
+          limitMs,
           signal,
           redactSecretValues: values,
           datastore: ctx.datastore,

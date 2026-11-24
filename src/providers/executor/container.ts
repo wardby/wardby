@@ -17,7 +17,12 @@ import { loadPlanFiles, type PlanFile } from "../../coding/plan-files/store.js";
 import { withBaseCommit, withExtraRepositories, type GitHistoryWording } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
-import { withoutClashingNativePins, type CodingToolPin, type NativeToolPin } from "../../core/coding-native-tools.js";
+import {
+  NATIVE_TOOL_DUPLICATE_NAMES_ERROR,
+  withoutClashingNativePins,
+  type CodingToolPin,
+  type NativeToolPin,
+} from "../../core/coding-native-tools.js";
 import { CODING_MCP_GATEWAY_UNAVAILABLE } from "../../core/power.js";
 import { codeProviderOf } from "../../coding/code-host.js";
 import { withPullRequestDescription } from "../../coding/pr-description-note.js";
@@ -2409,6 +2414,8 @@ export class ContainerExecutor implements Executor {
             ),
           ];
         } catch (error) {
+          // Two attached native tools with one name fail the run with their own code, as a native run fails.
+          if (error instanceof Error && error.message.startsWith(NATIVE_TOOL_DUPLICATE_NAMES_ERROR)) throw error;
           throw new Error(MCP_PINS_UNAVAILABLE_ERROR, { cause: error });
         }
         const mcpToken = mcpTools.length > 0 ? mintMcpToken() : undefined;
@@ -5728,6 +5735,9 @@ export const MCP_PINS_UNAVAILABLE_ERROR = "coding_mcp_pins_unavailable";
 /** Its category: the run's error is coding_failure_mcp_pins_unavailable:<diagnostic id>. */
 export const MCP_PINS_UNAVAILABLE_CATEGORY = "mcp_pins_unavailable";
 
+/** Two attached native tools share a name (a Claude Code run): the run fails before launch, as a native run does. */
+export const NATIVE_TOOL_DUPLICATE_NAMES_CATEGORY = "native_tool_duplicate_names";
+
 /** Low-power mode: the native gateway serving a run's MCP tools did not wake; nothing launched. */
 export const MCP_GATEWAY_UNAVAILABLE_CATEGORY = "mcp_gateway_unavailable";
 
@@ -5825,6 +5835,8 @@ export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, categor
   ["vcs_", "workspace"],
   // The agent's MCP tool pins could not be read at launch: nothing was launched.
   [MCP_PINS_UNAVAILABLE_ERROR, MCP_PINS_UNAVAILABLE_CATEGORY],
+  // Two of a Claude Code agent's attached native tools share a name: nothing was launched.
+  [NATIVE_TOOL_DUPLICATE_NAMES_ERROR, NATIVE_TOOL_DUPLICATE_NAMES_CATEGORY],
   // Low-power mode: the native gateway serving the run's MCP tools did not wake (jobs/kubernetes.ts).
   [CODING_MCP_GATEWAY_UNAVAILABLE, MCP_GATEWAY_UNAVAILABLE_CATEGORY],
   // Local repositories (LocalRepoError codes): the same family as the vcs_ errors.

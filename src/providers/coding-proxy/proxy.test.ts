@@ -3394,6 +3394,16 @@ describe("MCP tool names in the model-request allowlist", () => {
       toolId: "tool-1",
       toolName: "code_search",
       definition: { description: "Search code", inputSchema: { type: "object" } },
+      pinned: {
+        code: "return 1;",
+        paramsZod: "z.object({})",
+        grants: {
+          allowedSecrets: ["API_KEY"],
+          allowedDatastorePrefixes: [],
+          allowedHosts: [],
+          allowedSharedDatastorePrefixes: {},
+        },
+      },
     };
     const h = await claude([mcpPin("github__list_issues"), native]);
     await execute(
