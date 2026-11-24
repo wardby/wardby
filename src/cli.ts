@@ -91,6 +91,7 @@ import { buildPower } from "./core/power-composition.js";
 import { deriveJsonSchema } from "./sandbox/zod-params.js";
 import { toolSubject, zod3ToolWarnings } from "./core/zod3-window.js";
 import {
+  codingAgentAttachProblem,
   findSameNamedAttachedTool,
   findSameNamedMcpTool,
   reservedToolNameReason,
@@ -449,6 +450,10 @@ async function toolAttach(args: string[], detach: boolean): Promise<void> {
   }
   const mcpClash = await findSameNamedMcpTool(prisma, agent.id, tool.name);
   if (mcpClash) fail(sameNamedMcpToolMessage(agentName, tool.name, mcpClash.serverName));
+  // Same rule as MCP attach_tool: a coding agent takes native tools only when it runs Claude Code,
+  // and only a tool its runs can be offered.
+  const codingProblem = await codingAgentAttachProblem(prisma, agent.id, tool);
+  if (codingProblem) fail(codingProblem);
 
   const patch = ToolCapabilitiesPatchSchema.safeParse({
     allowedSecrets: values["allow-secret"],
@@ -1159,7 +1164,13 @@ async function nativeGateway(): Promise<void> {
     db: prisma,
     providers,
     // Coding runs' MCP calls, forwarded by the coding proxy's /mcp route (its own token auth).
-    codingMcp: { db: prisma, cipher: secrets, log: logger.child({ module: "coding-mcp" }) },
+    // A Claude Code run's native tools run here too, with the same datastore and secrets a native run uses.
+    codingMcp: {
+      db: prisma,
+      cipher: secrets,
+      datastore: providers.datastore,
+      log: logger.child({ module: "coding-mcp" }),
+    },
     // Substrate startup canaries' verdicts (NATIVE_SANDBOX_LAUNCHER=substrate), each with its own capability.
     canaries: new PrismaNativeCanaryStore(prisma),
   });

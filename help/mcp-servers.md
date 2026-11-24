@@ -57,6 +57,9 @@ the coding proxy and the native gateway; the worker never sees the server's URL 
   read-only won't reach Codex runs; the result's `warnings` names them.
 - The proxy gives up on a coding run's MCP call after 5 minutes, whatever
   `WARDBY_TOOL_MAX_TIMEOUT_MS` says ([`mcp_unavailable`](errors/mcp-unavailable.md)).
+- A Claude Code agent can also call native Wardby tools attached with `attach_tool`, as
+  `mcp__wardby_mcp__<tool name>`, through the same route and call limit; see
+  [Native tools on Claude Code coding agents](coding-agent-native-tools.md).
 
 Share a server with `grant_access` (`resourceType: "mcp_server"`; needs the `agents:write` scope,
 registering needs `tools:write`). `use` lets the grantee attach it, and its tools then run with your

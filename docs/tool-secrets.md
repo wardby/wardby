@@ -413,6 +413,14 @@ the value to use `fetch` instead.
 A host provider's credentials must be brokered secrets, placed in a header
 (`header` or `basic`) or query parameter. See [host-providers.md](host-providers.md).
 
+### Tools on Claude Code coding agents
+
+A tool attached to a Claude Code coding agent runs in the native gateway, not in the coding worker,
+so a brokered secret works there exactly as in a native run: the tool names it in `fetch`, and the
+value never reaches the tool, the worker or the model. Before the result goes back to the worker,
+the gateway removes every value of the secrets the attachment grants (readable and brokered) from
+it. See [Native tools on Claude Code agents](mcp-servers.md#native-tools-on-claude-code-agents).
+
 ## What the host enforces
 
 - **https only**, to the default port. Any other scheme or port is refused with

@@ -51,12 +51,10 @@ import { delegationLimitRefusal, delegationSlot, priorDelegationSlots } from "./
 import { runStepsHook } from "./run-steps/native.js";
 import type { RunStepSink } from "./run-steps/types.js";
 
-import { createPrivilegedHost, type PrivilegedHost } from "../sandbox/host-functions.js";
+import type { PrivilegedHost } from "../sandbox/host-functions.js";
 import { consoleRedactionValues } from "../sandbox/secret-broker.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
 import { runUserToolCall } from "../sandbox/user-tool.js";
-import { effectiveToolTimeoutMs, fetchTimeoutFor } from "../sandbox/tool-timeout.js";
-import { loadToolMaxTimeoutMs } from "../config/tool-timeout.js";
 import {
   logUnexpectedError,
   runSandboxedEngine,
@@ -66,8 +64,6 @@ import {
 } from "../native-worker/gateway.js";
 import { NATIVE_WORKER_PROTOCOL_VERSION, type WorkerInput } from "../native-worker/protocol.js";
 import type { PrismaGatewayLedger } from "../native-worker/ledger.js";
-import { asStringArray, asPrefixMap } from "../sandbox/tool-capabilities.js";
-import { scopeDatastore } from "../providers/datastore/scoped.js";
 import { buildSecretsAccessor, scopeSecretsAccessor, type SecretsAccessor } from "./secrets.js";
 import {
   loadAgentSecretValues,
@@ -76,7 +72,8 @@ import {
   SECRET_CHECK_UNAVAILABLE_MESSAGE,
   WITHHELD_TEXT_NOTICE,
 } from "./secret-guard.js";
-import { buildSharedDatastoreAccessor, scopeSharedDatastoreAccessor } from "./datastores.js";
+import { buildSharedDatastoreAccessor } from "./datastores.js";
+import { consentedToolGrants, userToolHost, userToolLimitMs } from "./user-tool-host.js";
 import { effectiveBudgetForRun } from "./budget-groups.js";
 import { stopChildrenOfLostRun } from "./lost-run-children.js";
 import { createDelegationSiblings } from "./delegation-siblings.js";
@@ -1208,18 +1205,15 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
       // §3.4.2): a write-grantee's attachment, a make_owner transfer and a
       // pre-grants row nobody vouched for all run with no secrets, no
       // datastore and no fetch until the owner re-grants with attach_tool.
+      // (consentedToolGrants, shared with a Claude Code run's native tool calls.)
       toolsByName: Object.fromEntries(
         attached.map((attachment) => {
-          const consented = agent.ownerId !== null && attachment.capabilitiesGrantedById === agent.ownerId;
           return [
             attachment.tool.name,
             {
               code: attachment.tool.code,
               paramsZod: attachment.tool.paramsZod,
-              allowedSecrets: consented ? asStringArray(attachment.allowedSecrets) : [],
-              allowedDatastorePrefixes: consented ? asStringArray(attachment.allowedDatastorePrefixes) : [],
-              allowedHosts: consented ? asStringArray(attachment.allowedHosts) : [],
-              allowedSharedDatastorePrefixes: consented ? asPrefixMap(attachment.allowedSharedDatastorePrefixes) : {},
+              ...consentedToolGrants(agent.ownerId, attachment),
               // Only when set, so a default tool's pinned step result is unchanged. The ceiling
               // (WARDBY_TOOL_MAX_TIMEOUT_MS) is applied when the tool runs (toolTimeoutMs below).
               ...(typeof attachment.tool.timeoutMs === "number" ? { timeoutMs: attachment.tool.timeoutMs } : {}),
@@ -1956,17 +1950,16 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
     signal: AbortSignal,
     redactSecretValues?: readonly string[],
   ): PrivilegedHost =>
-    createPrivilegedHost({
-      redactSecretValues,
-      fetchTimeoutMs: fetchTimeoutFor(limitOf(tool)),
+    userToolHost({
       agentId: loaded.agentId,
-      datastore: scopeDatastore(providers.datastore, tool.allowedDatastorePrefixes),
-      sharedDatastore: scopeSharedDatastoreAccessor(sharedDatastoreAccessor, tool.allowedSharedDatastorePrefixes),
-      secrets: scopeSecretsAccessor(secretsAccessor, tool.allowedSecrets),
-      allowedFetchHosts: tool.allowedHosts,
-      fetchImpl: providers.sandboxFetch,
-      logTag: name,
+      name,
+      tool,
       signal,
+      redactSecretValues,
+      datastore: providers.datastore,
+      sharedDatastore: sharedDatastoreAccessor,
+      secrets: secretsAccessor,
+      fetchImpl: providers.sandboxFetch,
     });
   const privilegedHostFor = (
     name: string,
@@ -2043,9 +2036,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
 }
 
 /** A pinned tool's time limit under the current ceiling (WARDBY_TOOL_MAX_TIMEOUT_MS, read each call). */
-function limitOf(tool: { timeoutMs?: number }): number {
-  return effectiveToolTimeoutMs(tool.timeoutMs, loadToolMaxTimeoutMs());
-}
+const limitOf = userToolLimitMs;
 
 /**
  * Live progress for observers (MCP get_run, the viewer). Absolute totals, so a DBOS replay

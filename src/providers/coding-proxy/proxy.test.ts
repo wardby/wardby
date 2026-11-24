@@ -21,6 +21,7 @@ import { WardbyMetrics } from "../../observability/metrics.js";
 import type { LlmEffort } from "../llm/types.js";
 import type { ProxyAuditEvent, ProxyModelTerms, ProxyProtocol } from "./types.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
+import type { CodingToolPin, NativeToolPin } from "../../core/coding-native-tools.js";
 
 const NOW = new Date("2026-09-07T12:00:00.000Z");
 const PRICE: ModelPricing = {
@@ -99,7 +100,7 @@ async function harness(
     terms?: ProxyModelTerms;
     leaseMs?: number;
     ownerId?: string;
-    mcpTools?: McpToolPin[];
+    mcpTools?: CodingToolPin[];
     skills?: boolean;
     workflow?: boolean;
   } = {},
@@ -3276,7 +3277,7 @@ describe("MCP tool names in the model-request allowlist", () => {
     const response = JSON.parse(await fixture("anthropic-message-response.json"));
     return async () => Response.json(response);
   };
-  const claude = async (mcpTools?: McpToolPin[]) =>
+  const claude = async (mcpTools?: CodingToolPin[]) =>
     harness({ protocol: "anthropic-messages", fetch: await anthropicReply(), mcpTools });
   const body = async (change: (body: Record<string, unknown>) => void) => {
     const value = JSON.parse(await fixture("anthropic-sdk-request.json"));
@@ -3383,6 +3384,45 @@ describe("MCP tool names in the model-request allowlist", () => {
     expect(h.fetch).toHaveBeenCalledTimes(1);
     await expect(
       execute(h, "mcp-duplicate", new TestSink(), await body((v) => (v.tools = [...all, mcpTool(LIST_ISSUES)]))),
+    ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+  });
+
+  it("accepts a pinned native tool by its plain name, next to MCP pins", async () => {
+    const native: NativeToolPin = {
+      kind: "native",
+      exposedName: "code_search",
+      toolId: "tool-1",
+      toolName: "code_search",
+      definition: { description: "Search code", inputSchema: { type: "object" } },
+      pinned: {
+        code: "return 1;",
+        paramsZod: "z.object({})",
+        grants: {
+          allowedSecrets: ["API_KEY"],
+          allowedDatastorePrefixes: [],
+          allowedHosts: [],
+          allowedSharedDatastorePrefixes: {},
+        },
+      },
+    };
+    const h = await claude([mcpPin("github__list_issues"), native]);
+    await execute(
+      h,
+      "native-tool",
+      new TestSink(),
+      await body((v) => {
+        v.tools = [runCommandTool, mcpTool(LIST_ISSUES), mcpTool("mcp__wardby_mcp__code_search")];
+        withToolTurn("mcp__wardby_mcp__code_search")(v);
+      }),
+    );
+    expect(h.fetch).toHaveBeenCalledTimes(1);
+    await expect(
+      execute(
+        h,
+        "native-unpinned",
+        new TestSink(),
+        await body((v) => (v.tools = [runCommandTool, mcpTool("mcp__wardby_mcp__other_tool")])),
+      ),
     ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
   });
 

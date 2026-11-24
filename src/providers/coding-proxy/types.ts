@@ -3,7 +3,31 @@ import type { RunStepsLevel } from "../../core/run-steps/config.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
 import type { ProxyRefusalDetails } from "../../core/budget-events.js";
 import type { LeaseRenewal } from "../../core/request-lease.js";
+import type { CodingToolPin, NativeToolPin } from "../../core/coding-native-tools.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
+
+/**
+ * The longest tool description (and other tool text) the proxy accepts in a request, in characters.
+ * A native tool over it is refused at attach on a Claude Code agent and left out of its runs.
+ */
+export const MAX_TOOL_TEXT_BYTES = 256 * 1024;
+
+/** A native pin as the proxy holds it: name, description and schema only, never the pinned code or grants. */
+export type ListedNativeToolPin = Omit<NativeToolPin, "pinned">;
+/** A session's pin as the proxy reads it. */
+export type ListedToolPin = McpToolPin | ListedNativeToolPin;
+
+/**
+ * The pins as the proxy may hold them: a native pin keeps its identifying fields and definition only,
+ * so the tool's code and grants (fixed at dispatch for the gateway) never reach the proxy process.
+ */
+export function listedToolPins(pins: readonly CodingToolPin[]): ListedToolPin[] {
+  return pins.map((pin) => {
+    if ((pin as { kind?: unknown }).kind !== "native") return structuredClone(pin);
+    const { kind, exposedName, toolId, toolName, definition } = pin as NativeToolPin;
+    return structuredClone({ kind, exposedName, toolId, toolName, definition });
+  });
+}
 
 export type ProxySessionStatus = "active" | "cancelled";
 export type ProxyRequestStatus = "reserved" | "completed" | "released" | "uncertain";
@@ -60,8 +84,11 @@ export interface ProxySession {
   requestRefusal?: string | null;
   /** The run's catalog entry, copied at session creation; null on sessions from before the catalog. */
   terms?: ProxyModelTerms | null;
-  /** The run's pinned MCP tools (no URLs or secrets); null when the run has none, and on older sessions. */
-  mcpTools: McpToolPin[] | null;
+  /**
+   * The run's pinned MCP and native tools as listed (no URLs, secrets, tool code or grants); null when
+   * the run has none, and on older sessions.
+   */
+  mcpTools: ListedToolPin[] | null;
   /** SHA-256 (base64url) of the run's MCP token; null when the run has no MCP tools. */
   mcpTokenHash: string | null;
   /** The run's MCP tools/call count so far. */
@@ -130,7 +157,7 @@ export interface CreateProxySessionInput {
   registryTokenHash: string;
   terms?: ProxyModelTerms;
   /** The run's pinned MCP tools; set together with mcpTokenHash, and only when there is at least one. */
-  mcpTools?: McpToolPin[];
+  mcpTools?: CodingToolPin[];
   /** SHA-256 (base64url) of the run's MCP token (mcpTokenHash in src/coding/mcp-token.ts). */
   mcpTokenHash?: string;
   /** The run's level, fixed at dispatch; absent counts as summary. */

@@ -14,6 +14,7 @@ import { handleOAuthCallback } from "../mcp/host-events/oauth-callback.js";
 import { buildMcpServer } from "../mcp/server.js";
 import { registerMcpServerTools } from "../mcp/tools/mcp-servers.js";
 import { registerSecretsTools } from "../mcp/tools/secrets.js";
+import { PostgresDatastore } from "../providers/datastore/index.js";
 import { safeFetch } from "../sandbox/safe-fetch.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-support/fake-oauth-server.test-support.js";
 import { handleCodingMcpRequest } from "./coding-mcp.js";
@@ -406,6 +407,7 @@ describe.skipIf(!process.env.DATABASE_URL)("OAuth secret end to end through an M
       handleCodingMcpRequest(`Bearer ${token}`, JSON.stringify(body), {
         db,
         cipher,
+        datastore: new PostgresDatastore(db, cipher),
         log,
         fetchImpl: tlsFront,
         stopPollMs: 25,

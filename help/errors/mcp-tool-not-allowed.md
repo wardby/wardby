@@ -3,7 +3,17 @@ id: errors/mcp-tool-not-allowed
 title: A remote tool is no longer allowed (mcp_tool_not_allowed)
 summary: The agent's MCP server was detached, the tool left its allowlist, or the agent's owner lost use access to a shared server.
 audience: operator
-tags: [mcp, mcp_tool_not_allowed, attach_mcp_server, detach_mcp_server, allowedTools, revoke_access]
+tags:
+  [
+    mcp,
+    mcp_tool_not_allowed,
+    attach_mcp_server,
+    detach_mcp_server,
+    allowedTools,
+    revoke_access,
+    detach_tool,
+    native tools,
+  ]
 appliesTo: ">=0.8.0"
 ---
 
@@ -16,11 +26,13 @@ A call returned `mcp_tool_not_allowed`. Wardby checks the agent's attachment on 
 - the server was detached, or the tool left `allowedTools`;
 - the server's owner deleted the server;
 - the server is shared with the agent's owner, and its owner revoked that grant or lowered it to `read`. The agent's owner must own the server or hold `use` on it; when that ends, Wardby detaches the server from the agent too.
+- for a native tool in a Claude Code run, the tool was detached (`detach_tool`);
+- a native tool was called from a run that isn't a Claude Code run (native tools work only in Claude Code runs).
 
 ## What to do
 
-1. Check `get_agent` for `mcpServers`.
-2. Re-attach with `attach_mcp_server` and include the tool in `allowedTools`. For a shared server, ask its owner for `use` again first.
+1. Check `get_agent` for `mcpServers` (or `tools`, for a native tool).
+2. Re-attach with `attach_mcp_server` and include the tool in `allowedTools`. For a shared server, ask its owner for `use` again first. For a native tool, re-attach it with `attach_tool`.
 3. A run that started before the change still lists the tool, but every call re-checks the attachment, so the call is refused with this error.
 
-See [Remote MCP servers](../mcp-servers.md).
+See [Remote MCP servers](../mcp-servers.md) and [Native tools on Claude Code coding agents](../coding-agent-native-tools.md).

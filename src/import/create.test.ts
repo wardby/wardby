@@ -46,12 +46,15 @@ function fakeDb() {
     agentPromptVersion: { findFirst: async () => null, create: async () => ({}) },
     tool: {
       findFirst: vi.fn(async () => null),
+      // The coding-agent attach check reads the tool; a native agent has nothing to check.
+      findUnique: vi.fn(async () => ({ name: "n", description: "d" })),
       create: vi.fn(async (a: unknown) => {
         calls.tool.push(a);
         return { id: "t", name: "n" };
       }),
     },
     agent: {
+      findUnique: vi.fn(async () => ({ kind: "native", codingProfile: null })),
       upsert: vi.fn(async (a: unknown) => {
         calls.agent.push(a);
         return { id: "a", name: "n", systemPrompt: "p" };

@@ -1,5 +1,6 @@
 import type { LeaseRenewal } from "../../core/request-lease.js";
 import {
+  listedToolPins,
   normalizeProxyModelTerms,
   type ExpiredRequest,
   type PreviousReply,
@@ -68,7 +69,8 @@ export class MemoryProxyLedger implements ProxyLedger {
       allowedModels: [...input.allowedModels],
       status: "active",
       terms: input.terms ? normalizeProxyModelTerms(input.terms) : null,
-      mcpTools: input.mcpTools ? structuredClone(input.mcpTools) : null,
+      // As the Prisma ledger reads it back: a native pin's code and grants never reach the proxy.
+      mcpTools: input.mcpTools ? listedToolPins(input.mcpTools) : null,
       mcpTokenHash: input.mcpTokenHash ?? null,
       mcpCallCount: 0,
       runStepsLevel: input.runStepsLevel ?? null,

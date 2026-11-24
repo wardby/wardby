@@ -136,6 +136,35 @@ describe("warmFingerprint MCP tool pins", () => {
   });
 });
 
+describe("warmFingerprint native tool pins", () => {
+  const MCP: WarmMcpToolPin[] = [{ serverId: "srv-docs", exposedName: "docs__search" }];
+  const NATIVE: WarmMcpToolPin = { toolId: "tool-1", exposedName: "code_search" };
+
+  it("leaves an MCP-only fingerprint unchanged", () => {
+    expect(canonicalJson({ ...INPUT, mcpTools: MCP })).toContain(
+      '"mcpTools":[{"exposedName":"docs__search","serverId":"srv-docs"}]',
+    );
+  });
+
+  it("covers a native pin by tool id and name", () => {
+    const base = warmFingerprint({ ...INPUT, mcpTools: [...MCP, NATIVE] });
+    expect(base).not.toBe(warmFingerprint({ ...INPUT, mcpTools: MCP }));
+    expect(warmFingerprint({ ...INPUT, mcpTools: [...MCP, { ...NATIVE, toolId: "tool-2" }] })).not.toBe(base);
+    expect(warmFingerprint({ ...INPUT, mcpTools: [...MCP, { ...NATIVE, exposedName: "code_find" }] })).not.toBe(base);
+    expect(warmFingerprint({ ...INPUT, mcpTools: [NATIVE, ...MCP] })).toBe(base);
+  });
+
+  it("never takes in a pin's definition, pinned code or grants (as for an MCP pin's definition)", () => {
+    const full = {
+      ...NATIVE,
+      definition: { description: "Search code", inputSchema: { type: "object" } },
+      pinned: { code: 'return await secrets.get("API_KEY");', paramsZod: "z.object({})", grants: {} },
+    };
+    const pins: WarmMcpToolPin[] = [full];
+    expect(warmFingerprint({ ...INPUT, mcpTools: pins })).toBe(warmFingerprint({ ...INPUT, mcpTools: [NATIVE] }));
+  });
+});
+
 describe("warmFingerprint services", () => {
   const entry = (name: string, version: string) =>
     resolvedFromDefinition(BUILTIN_CODING_SERVICES.find((s) => s.name === name && s.version === version)!);

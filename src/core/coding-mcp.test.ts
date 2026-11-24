@@ -3,13 +3,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "#prisma";
 import { mcpTokenHash, mintMcpToken } from "../coding/mcp-token.js";
 import { HTTP_LIMITS } from "../mcp/transport/http-limits.js";
+import type { Datastore } from "../providers/datastore/types.js";
 import type { Logger } from "./logger.js";
 import type { McpToolContext, McpToolPin } from "./mcp-tools.js";
+import type { NativeToolContext, NativeToolPin } from "./coding-native-tools.js";
 
 const handleMcpTool = vi.fn<(pin: McpToolPin, argsJson: string, ctx: McpToolContext) => Promise<string>>();
 vi.mock("./mcp-tools.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./mcp-tools.js")>();
   return { ...actual, handleMcpTool: (...args: Parameters<typeof actual.handleMcpTool>) => handleMcpTool(...args) };
+});
+const handleNativeTool = vi.fn<(pin: NativeToolPin, argsJson: string, ctx: NativeToolContext) => Promise<string>>();
+vi.mock("./coding-native-tools.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./coding-native-tools.js")>();
+  return {
+    ...actual,
+    handleNativeTool: (...args: Parameters<typeof actual.handleNativeTool>) => handleNativeTool(...args),
+  };
 });
 
 const { handleCodingMcpRequest, isMcpErrorText, isMcpToolPin, storedPins } = await import("./coding-mcp.js");
@@ -21,6 +31,23 @@ const PIN: McpToolPin = {
   serverId: "srv-1",
   serverName: "datadog",
   definition: { description: "Searches logs.", inputSchema: { type: "object", properties: { q: { type: "string" } } } },
+};
+const NATIVE: NativeToolPin = {
+  kind: "native",
+  exposedName: "code_search",
+  toolId: "tool-1",
+  toolName: "code_search",
+  definition: { description: "Searches the code index.", inputSchema: { type: "object" } },
+  pinned: {
+    code: 'return await secrets.get("API_KEY");',
+    paramsZod: "z.object({})",
+    grants: {
+      allowedSecrets: ["API_KEY"],
+      allowedDatastorePrefixes: [],
+      allowedHosts: [],
+      allowedSharedDatastorePrefixes: {},
+    },
+  },
 };
 
 interface FakeSession {
@@ -76,6 +103,7 @@ function fakeLog() {
 }
 
 const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
+const datastore = { kind: "test datastore" } as unknown as Datastore;
 
 const NO_AUTH: unique symbol = Symbol("no auth");
 function call(
@@ -87,7 +115,7 @@ function call(
   const auth = authorization === NO_AUTH ? undefined : authorization;
   const { log, info, logged } = fakeLog();
   const raw = typeof body === "string" ? body : JSON.stringify(body);
-  return handleCodingMcpRequest(auth, raw, { db, cipher, log, now }).then((res) => ({ res, info, logged }));
+  return handleCodingMcpRequest(auth, raw, { db, cipher, datastore, log, now }).then((res) => ({ res, info, logged }));
 }
 
 const rpc = (method: string, params?: unknown, id: number | string = 1) => ({ jsonrpc: "2.0", id, method, params });
@@ -96,6 +124,7 @@ const parsed = (body: string) => JSON.parse(body) as { id?: unknown; result?: an
 const env = { ...process.env };
 beforeEach(() => {
   handleMcpTool.mockReset();
+  handleNativeTool.mockReset();
 });
 afterEach(() => {
   process.env = { ...env };
@@ -198,6 +227,22 @@ describe("handleCodingMcpRequest: protocol", () => {
     });
     const { res } = await call(db, rpc("tools/list"));
     expect(parsed(res.body).result.tools.map((t: { name: string }) => t.name)).toEqual(["datadog__search"]);
+  });
+
+  it("lists native pins after MCP pins, with the tool's own description", async () => {
+    const { db } = fakeDb({ mcpTools: [PIN, NATIVE] });
+    const { res } = await call(db, rpc("tools/list"));
+    expect(parsed(res.body).result.tools).toEqual([
+      {
+        name: "datadog__search",
+        description: "From MCP server datadog: Searches logs.",
+        inputSchema: PIN.definition.inputSchema,
+      },
+      { name: "code_search", description: "Searches the code index.", inputSchema: { type: "object" } },
+    ]);
+    // Never the pinned code or grants.
+    expect(res.body).not.toContain("secrets.get");
+    expect(res.body).not.toContain("API_KEY");
   });
 
   it("lists nothing when the session has no pins", async () => {
@@ -326,6 +371,69 @@ describe("handleCodingMcpRequest: tools/call", () => {
   });
 });
 
+describe("handleCodingMcpRequest: tools/call for a native tool", () => {
+  it("runs a native pin through handleNativeTool with the run's agent, run, deadline, providers and stop signal", async () => {
+    const { db, row } = fakeDb({ mcpTools: [PIN, NATIVE] });
+    handleNativeTool.mockResolvedValue('{"hits":2}');
+    const { res, info } = await call(db, rpc("tools/call", { name: "code_search", arguments: { q: "needle" } }));
+    expect(parsed(res.body).result).toEqual({ content: [{ type: "text", text: '{"hits":2}' }] });
+    expect(handleMcpTool).not.toHaveBeenCalled();
+    expect(handleNativeTool).toHaveBeenCalledTimes(1);
+    const [pin, argsJson, ctx] = handleNativeTool.mock.calls[0];
+    expect(pin).toEqual(NATIVE);
+    expect(JSON.parse(argsJson)).toEqual({ q: "needle" });
+    expect(ctx).toMatchObject({
+      agentId: "agent-1",
+      runId: "run-1",
+      deadlineAt: row.deadlineAt,
+      secrets: cipher,
+      datastore,
+    });
+    expect(ctx.signal).toBeInstanceOf(AbortSignal);
+    expect(row.mcpCallCount).toBe(1);
+    // The route's own log line: method, status and session id only.
+    expect(info).toHaveBeenCalledWith({ method: "tools/call", status: 200, sessionId: "sess-1" }, "coding mcp request");
+    expect(JSON.stringify(info.mock.calls)).not.toContain("needle");
+    expect(JSON.stringify(info.mock.calls)).not.toContain("hits");
+  });
+
+  it("flags a native tool's JSON error as an isError result", async () => {
+    const { db } = fakeDb({ mcpTools: [NATIVE] });
+    const text = JSON.stringify({ error: "mcp_tool_not_allowed", message: "detached" });
+    handleNativeTool.mockResolvedValue(text);
+    const { res } = await call(db, rpc("tools/call", { name: "code_search", arguments: {} }));
+    expect(parsed(res.body).result).toEqual({ content: [{ type: "text", text }], isError: true });
+  });
+
+  it("refuses a native pin on a session whose run is not Claude Code, counting the call", async () => {
+    for (const provider of ["codex", "something-else"]) {
+      const { db, row } = fakeDb({ mcpTools: [NATIVE], run: { provider } });
+      const { res } = await call(db, rpc("tools/call", { name: "code_search", arguments: {} }));
+      const result = parsed(res.body).result;
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        error: "mcp_tool_not_allowed",
+        message: 'The tool "code_search" is not allowed for this run: native tools work only in Claude Code runs.',
+      });
+      expect(row.mcpCallCount).toBe(1);
+    }
+    expect(handleNativeTool).not.toHaveBeenCalled();
+  });
+
+  it("shares the run's call limit with MCP tools", async () => {
+    process.env.WARDBY_MCP_MAX_CALLS_PER_RUN = "2";
+    const { db, row } = fakeDb({ mcpTools: [PIN, NATIVE] });
+    handleMcpTool.mockResolvedValue("ok");
+    handleNativeTool.mockResolvedValue("ok");
+    await call(db, rpc("tools/call", { name: "datadog__search", arguments: {} }));
+    await call(db, rpc("tools/call", { name: "code_search", arguments: {} }));
+    const { res } = await call(db, rpc("tools/call", { name: "code_search", arguments: {} }));
+    expect(JSON.parse(parsed(res.body).result.content[0].text)).toMatchObject({ error: "mcp_call_limit" });
+    expect(handleNativeTool).toHaveBeenCalledTimes(1);
+    expect(row.mcpCallCount).toBe(2);
+  });
+});
+
 describe("helpers", () => {
   it("isMcpErrorText recognises only the { error, message } shape", () => {
     expect(isMcpErrorText(JSON.stringify({ error: "mcp_server_error", message: "x" }))).toBe(true);
@@ -348,5 +456,22 @@ describe("helpers", () => {
   it("storedPins keeps the first of each exposed name", () => {
     expect(storedPins([PIN, { ...PIN, toolName: "other" }])).toEqual([PIN]);
     expect(storedPins({})).toEqual([]);
+  });
+
+  it("storedPins reads both kinds, a legacy MCP pin unchanged, and leaves a malformed native pin out", () => {
+    expect(storedPins([PIN, NATIVE])).toEqual([PIN, NATIVE]);
+    expect(
+      storedPins([
+        { ...NATIVE, toolId: "" },
+        { ...NATIVE, exposedName: "bad name" },
+        { ...NATIVE, definition: { description: "x" } },
+        { ...NATIVE, kind: "other" },
+        // Not an MCP pin either: a pin that says it is native is judged as one.
+        { ...PIN, kind: "native" },
+        { ...PIN, kind: "mcp-ish" },
+      ]),
+    ).toEqual([]);
+    // A native pin can't take an MCP pin's exposed name, nor the reverse.
+    expect(storedPins([PIN, { ...NATIVE, exposedName: PIN.exposedName }])).toEqual([PIN]);
   });
 });

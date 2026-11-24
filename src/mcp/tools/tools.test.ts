@@ -27,6 +27,7 @@ interface FakeAgentRow {
   name?: string;
   ownerId: string | null;
   kind?: "native" | "coding";
+  codingProfile?: { provider: string } | null;
 }
 
 function fakeDb(
@@ -756,30 +757,75 @@ describe("tool authoring tools", () => {
     await client.close();
   });
 
-  it("attach_tool rejects native sandbox tools for coding agents", async () => {
-    const db = fakeDb(
-      [
-        {
-          id: "t1",
-          name: "greet",
-          description: "x",
-          paramsZod: "z.object({})",
-          jsonSchema: {},
-          code: "",
-          ownerId: "p1",
-        },
-      ],
-      [{ id: "a1", ownerId: "p1", kind: "coding" }],
-    );
-    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
-    mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
-    registerToolAuthoringTools(mcp);
-    const client = await connectClient(mcp);
+  describe("attach_tool on coding agents", () => {
+    const tool = (name: string, description = "x"): FakeToolRow => ({
+      id: "t1",
+      name,
+      description,
+      paramsZod: "z.object({})",
+      jsonSchema: {},
+      code: "",
+      ownerId: "p1",
+    });
+    async function attach(agent: FakeAgentRow, name = "greet", description?: string) {
+      const db = fakeDb([tool(name, description)], [agent]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["tools:write"]));
+      registerToolAuthoringTools(mcp);
+      const client = await connectClient(mcp);
+      const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1" } });
+      await client.close();
+      return result as { isError?: boolean; content: { text: string }[] };
+    }
 
-    const result = await client.callTool({ name: "attach_tool", arguments: { agentId: "a1", toolId: "t1" } });
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result)).toMatch(/coding|native/i);
-    await client.close();
+    it("attaches a native tool to a Claude Code coding agent", async () => {
+      const result = await attach({
+        id: "a1",
+        ownerId: "p1",
+        kind: "coding",
+        codingProfile: { provider: "claude-code" },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(parseText(result)).toEqual({ attached: true });
+    });
+
+    it.each([
+      ["a Codex coding agent", { provider: "codex" }],
+      ["a coding agent with no profile", null],
+    ])("refuses %s, saying Codex support is tracked separately", async (_label, codingProfile) => {
+      const result = await attach({ id: "a1", ownerId: "p1", kind: "coding", codingProfile });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(
+        "Native tools work only on Claude Code coding agents for now; Codex support is tracked separately.",
+      );
+    });
+
+    it("refuses a tool whose name Claude Code can't be offered, on a Claude Code agent only", async () => {
+      const claude = await attach(
+        { id: "a1", ownerId: "p1", kind: "coding", codingProfile: { provider: "claude-code" } },
+        "greet people",
+      );
+      expect(claude.isError).toBe(true);
+      expect(claude.content[0].text).toContain(
+        'The tool name "greet people" can\'t be offered to a Claude Code agent: use only letters, digits, "_" and "-", up to 64 characters.',
+      );
+      // A native agent is unchanged.
+      expect((await attach({ id: "a1", ownerId: "p1", kind: "native" }, "greet people")).isError).toBeFalsy();
+    });
+
+    it("refuses a tool whose description is over the coding proxy's limit, on a Claude Code agent only", async () => {
+      const long = "x".repeat(256 * 1024 + 1);
+      const claude = await attach(
+        { id: "a1", ownerId: "p1", kind: "coding", codingProfile: { provider: "claude-code" } },
+        "greet",
+        long,
+      );
+      expect(claude.isError).toBe(true);
+      expect(claude.content[0].text).toContain(
+        'The tool "greet" can\'t be offered to a Claude Code agent: its description is over 262144 characters.',
+      );
+      expect((await attach({ id: "a1", ownerId: "p1", kind: "native" }, "greet", long)).isError).toBeFalsy();
+    });
   });
 
   it("attach_tool and detach_tool succeed for the owner of both, and list_tools reflects it", async () => {

@@ -17,6 +17,8 @@ import { MEMORY_TOOL_NAMES } from "./memory-tools.js";
 import { SUBAGENT_MEMORY_TOOL_NAMES } from "./subagent-memory-tools.js";
 import { ISSUE_TRACKER_TOOL_NAMES } from "./issue-tracker-tools.js";
 import { exposedNames } from "./mcp-servers.js";
+import { isCodexCoding } from "./mcp-tools.js";
+import { MAX_TOOL_TEXT_BYTES } from "../providers/coding-proxy/types.js";
 
 /** The runner's synthesized sub-agent tools are `delegate_to_<boundName>`. */
 export const DELEGATE_TOOL_PREFIX = "delegate_to_";
@@ -90,6 +92,71 @@ export async function findSameNamedMcpTool(
 /** The refusal for a Tool whose name is an exposed MCP tool name on the agent (findSameNamedMcpTool). */
 export function sameNamedMcpToolMessage(agentRef: string, toolName: string, serverName: string): string {
   return `Agent "${agentRef}" already has the tool "${toolName}" from MCP server "${serverName}"; detach it or allow a different tool first.`;
+}
+
+/**
+ * The names Claude Code can be offered: the same rule as an MCP tool's exposed name. A native tool
+ * whose name doesn't fit is refused at attach on a Claude Code agent and left out of its runs (#622).
+ */
+export const NATIVE_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** The longest native tool description a Claude Code run can carry: the coding proxy's tool-text limit. */
+export const NATIVE_TOOL_DESCRIPTION_MAX_CHARS = MAX_TOOL_TEXT_BYTES;
+
+/** The refusal for a name Claude Code can't be offered. */
+export function nativeToolNameMessage(name: string): string {
+  return `The tool name "${name.slice(0, 80)}" can't be offered to a Claude Code agent: use only letters, digits, "_" and "-", up to 64 characters.`;
+}
+
+/** The refusal for a description over the coding proxy's limit. */
+export function nativeToolDescriptionMessage(name: string): string {
+  return `The tool "${name.slice(0, 80)}" can't be offered to a Claude Code agent: its description is over ${NATIVE_TOOL_DESCRIPTION_MAX_CHARS} characters.`;
+}
+
+/** The refusal for attaching a native tool to a Codex coding agent (Codex support is tracked separately). */
+export const CODEX_NATIVE_TOOLS_MESSAGE =
+  "Native tools work only on Claude Code coding agents for now; Codex support is tracked separately.";
+
+/** Why a Claude Code run can't be offered `tool`, or undefined when it can. */
+export function claudeCodeToolProblem(tool: Pick<Tool, "name" | "description">): string | undefined {
+  if (!NATIVE_TOOL_NAME.test(tool.name)) return nativeToolNameMessage(tool.name);
+  if (tool.description.length > NATIVE_TOOL_DESCRIPTION_MAX_CHARS) return nativeToolDescriptionMessage(tool.name);
+  return undefined;
+}
+
+/**
+ * Why `tool` can't be attached to the agent `agentId` because the agent is a coding agent, or undefined
+ * (a native agent, or a Claude Code agent the tool fits). A Codex coding agent (or one with no coding
+ * profile, which counts as Codex) takes no native tools; a Claude Code agent takes only a tool its runs
+ * can be offered. Every attach path asks it: MCP attach_tool, `wardby tool attach` and the importer.
+ */
+export async function codingAgentAttachProblem(
+  db: Pick<PrismaClient | Prisma.TransactionClient, "agent">,
+  agentId: string,
+  tool: Pick<Tool, "name" | "description">,
+): Promise<string | undefined> {
+  const agent = await db.agent.findUnique({
+    where: { id: agentId },
+    select: { kind: true, codingProfile: { select: { provider: true } } },
+  });
+  if (!agent || agent.kind !== "coding") return undefined;
+  if (isCodexCoding(agent.codingProfile?.provider)) return CODEX_NATIVE_TOOLS_MESSAGE;
+  return claudeCodeToolProblem(tool);
+}
+
+/**
+ * The names of the agent's attached tools a Claude Code run can't be offered (claudeCodeToolProblem),
+ * sorted: update_agent warns with them when an agent becomes Claude Code.
+ */
+export async function claudeCodeUnofferedTools(
+  db: Pick<PrismaClient | Prisma.TransactionClient, "agentTool">,
+  agentId: string,
+): Promise<string[]> {
+  const rows = await db.agentTool.findMany({
+    where: { agentId },
+    select: { tool: { select: { name: true, description: true } } },
+  });
+  return [...new Set(rows.filter((row) => claudeCodeToolProblem(row.tool)).map((row) => row.tool.name))].sort();
 }
 
 /**

@@ -53,6 +53,8 @@ import { scheduleStartFields } from "../../core/schedule-start.js";
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
 import { agentMcpServerViews, codexUnavailableMcpTools, codexWriteToolsWarning } from "./mcp-servers.js";
+import { claudeCodeUnofferedToolsWarning, codexNativeToolsWarning, codexUnavailableNativeTools } from "./tools.js";
+import { claudeCodeUnofferedTools } from "../../core/tool-names.js";
 import { isCodexCoding } from "../../core/mcp-tools.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
 import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
@@ -1167,10 +1169,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
 
           let nextProfile: CodingProfile | null = null;
           if (nextKind === "coding") {
-            const attachedTools = await tx.agentTool.count({ where: { agentId: args.id } });
-            if (attachedTools > 0) {
-              throw new McpError(400, "Detach all native sandbox tools before changing an agent to coding.");
-            }
+            // Attached native tools stay: a Claude Code run serves them through its MCP token (#622); a
+            // Codex run leaves them out, and the answer warns below.
             const currentProfile = existing.codingProfile ? storedProfile(existing.codingProfile) : undefined;
             const {
               debugTraceMinutes: _minutes,
@@ -1317,13 +1317,23 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       const shown = withRunStepsWarning(withProfileWarnings(withOperatorMode(agent)));
       // Becoming Codex (a provider switch, or a native agent becoming coding) leaves out every attached
       // MCP tool the server doesn't mark read-only: say which, so the owner isn't surprised by a run.
+      // Its attached native tools are left out of Codex runs altogether (#622): say which, too.
       const wasCodex = before.kind === "coding" && isCodexCoding(before.codingProfile?.provider);
+      const added: string[] = [];
       if (agent.kind === "coding" && isCodexCoding(agent.codingProfile?.provider) && !wasCodex) {
         const writers = await codexUnavailableMcpTools(ctx.db, agent.id);
-        if (writers.length > 0) {
-          return textResult({ ...shown, warnings: [...(shown.warnings ?? []), codexWriteToolsWarning(writers)] });
-        }
+        const nativeTools = await codexUnavailableNativeTools(ctx.db, agent.id);
+        if (writers.length > 0) added.push(codexWriteToolsWarning(writers));
+        if (nativeTools.length > 0) added.push(codexNativeToolsWarning(nativeTools));
       }
+      // Becoming Claude Code (a provider switch, or a native agent becoming coding): its runs leave out
+      // an attached tool whose name or description Claude Code can't be offered; say which.
+      const wasClaudeCode = before.kind === "coding" && !wasCodex;
+      if (agent.kind === "coding" && !isCodexCoding(agent.codingProfile?.provider) && !wasClaudeCode) {
+        const unoffered = await claudeCodeUnofferedTools(ctx.db, agent.id);
+        if (unoffered.length > 0) added.push(claudeCodeUnofferedToolsWarning(unoffered));
+      }
+      if (added.length > 0) return textResult({ ...shown, warnings: [...(shown.warnings ?? []), ...added] });
       return textResult(shown);
     },
   });

@@ -4,7 +4,8 @@
  * (queued included) or running, or finished at or after `since`; the gateway
  * is also busy while any gateway session is active. The gateway's runs are
  * sandboxed native runs plus coding runs with MCP tools: a coding run's MCP
- * calls go coding proxy -> gateway, so it needs both. powerBlockers lists the
+ * calls (a Claude Code run's native tool calls too, which get the same MCP
+ * token) go coding proxy -> gateway, so it needs both. powerBlockers lists the
  * run ids that keep a target busy right now (recent finishes do not count).
  */
 import type { PrismaClient, RunStatus } from "#prisma";
@@ -12,7 +13,7 @@ import { EXPORT_STALE_MS } from "./documents/exports.js";
 import type { PowerTarget } from "./power.js";
 
 const ACTIVE = { in: ["pending", "running"] as RunStatus[] };
-/** A coding run whose proxy session holds an MCP token: it has MCP tools, served through the gateway. */
+/** A coding run whose proxy session holds an MCP token: it has MCP (or native) tools, served through the gateway. */
 const WITH_MCP_TOOLS = { proxySession: { is: { mcpTokenHash: { not: null } } } };
 
 export async function proxyBusy(db: PrismaClient, since: Date): Promise<boolean> {

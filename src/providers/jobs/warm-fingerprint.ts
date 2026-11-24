@@ -36,9 +36,13 @@ export interface WarmSecretVersion {
   updatedAt: string;
 }
 
-/** One pinned MCP tool, as the fingerprint sees it: which tool of which server (no definition). */
+/**
+ * One pinned tool, as the fingerprint sees it (no definition): which tool of which MCP server, or
+ * which attached native tool (#622).
+ */
 export interface WarmMcpToolPin {
-  serverId: string;
+  serverId?: string;
+  toolId?: string;
   exposedName: string;
 }
 
@@ -157,9 +161,19 @@ export function warmFingerprint(input: WarmFingerprintInput): string {
       .sort((a, b) => compare(a.name, b.name) || compare(a.id, b.id) || compare(a.updatedAt, b.updatedAt)),
     ...(input.mcpTools && input.mcpTools.length > 0
       ? {
+          // An MCP pin keeps exactly today's shape; a native pin is named by its tool id.
           mcpTools: input.mcpTools
-            .map(({ serverId, exposedName }) => ({ serverId, exposedName }))
-            .sort((a, b) => compare(a.exposedName, b.exposedName) || compare(a.serverId, b.serverId)),
+            .map(({ serverId, toolId, exposedName }) => ({
+              ...(serverId !== undefined ? { serverId } : {}),
+              ...(toolId !== undefined ? { toolId } : {}),
+              exposedName,
+            }))
+            .sort(
+              (a, b) =>
+                compare(a.exposedName, b.exposedName) ||
+                compare(a.serverId ?? "", b.serverId ?? "") ||
+                compare(a.toolId ?? "", b.toolId ?? ""),
+            ),
         }
       : {}),
     ...(input.services ? { services: input.services } : {}),

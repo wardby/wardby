@@ -25,6 +25,8 @@ import { loadToolMaxTimeoutMs } from "../../config/tool-timeout.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
 import { buildSharedDatastoreAccessor } from "../../core/datastores.js";
 import {
+  NATIVE_TOOL_DESCRIPTION_MAX_CHARS,
+  codingAgentAttachProblem,
   findSameNamedAttachedTool,
   findSameNamedMcpTool,
   reservedToolNameReason,
@@ -131,6 +133,31 @@ async function brokeredSecretWarnings(
   });
   const brokered = new Set(bindings.filter((b) => b.secret.broker != null).map((b) => b.boundName));
   return brokerCompatibilityWarnings([{ ...tool, allowedSecrets }], brokered);
+}
+
+export { CODEX_NATIVE_TOOLS_MESSAGE } from "../../core/tool-names.js";
+
+/** The update_agent warning when an agent becomes Codex with native tools attached (#622). */
+export function codexNativeToolsWarning(names: readonly string[]): string {
+  return `These native tools won't be available to Codex runs: ${names.join(", ")}.`;
+}
+
+/**
+ * The update_agent warning when an agent becomes Claude Code with attached tools its runs can't be
+ * offered (a name Claude Code can't take, or a description over the coding proxy's limit): each run
+ * leaves them out.
+ */
+export function claudeCodeUnofferedToolsWarning(names: readonly string[]): string {
+  return `These native tools won't be available to Claude Code runs (a name with characters other than letters, digits, "_" and "-" or over 64 characters, or a description over ${NATIVE_TOOL_DESCRIPTION_MAX_CHARS} characters): ${names.map((name) => name.slice(0, 80)).join(", ")}.`;
+}
+
+/** The names of the native tools attached to `agentId`, sorted: a Codex run never gets them. */
+export async function codexUnavailableNativeTools(
+  db: Pick<PrismaClient, "agentTool">,
+  agentId: string,
+): Promise<string[]> {
+  const rows = await db.agentTool.findMany({ where: { agentId }, select: { tool: { select: { name: true } } } });
+  return [...new Set(rows.map((row) => row.tool.name))].sort();
 }
 
 /** Refuses a name one of the runner's built-ins would shadow (see core/tool-names.ts). */
@@ -373,7 +400,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "attach_tool",
     scope: "tools:write",
     description:
-      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant. Granting a brokered secret lets the tool send it only via fetch(url, { secrets: [name] }), never read it; the result includes warnings when the tool calls secrets.get() on one.",
+      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant. Granting a brokered secret lets the tool send it only via fetch(url, { secrets: [name] }), never read it; the result includes warnings when the tool calls secrets.get() on one. A coding agent can take native tools only when it runs Claude Code: its runs call the tool as mcp__wardby_mcp__<tool name>, through the same gateway and per-run call limit as its MCP tools (Codex agents are refused for now).",
     inputSchema: {
       type: "object",
       properties: {
@@ -424,9 +451,6 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
             "write",
             tx,
           );
-          if (agent.kind === "coding") {
-            throw new McpError(400, "Native sandbox tools cannot be attached to coding agents.");
-          }
           // Capabilities carry the owner's consent (resource-sharing grants
           // spec §3.4.2). Strict ownership: neither a write-grantee nor the
           // stdio operator may hand the owner's secrets, datastores or
@@ -459,6 +483,10 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           // owner: a second same-named tool on one agent would be a
           // duplicate tool name to the model and silently shadow one of them.
           attachedTool = { name: tool.name, code: tool.code };
+          // A coding agent's native tools run through its MCP token (#622): Claude Code only, and only
+          // a tool its runs can be offered (name and description). Shared with every attach path.
+          const codingProblem = await codingAgentAttachProblem(tx, args.agentId, tool);
+          if (codingProblem) throw new McpError(400, codingProblem);
           const clash = await findSameNamedAttachedTool(tx, args.agentId, tool);
           if (clash) {
             // The clashing tool may be another principal's private one (a

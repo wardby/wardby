@@ -13,7 +13,8 @@ appliesTo: ">=0.8.0"
 
 The run's error starts with `coding_failure_mcp_pins_unavailable`, followed by
 a diagnostic id. When wardby launches a coding run, it reads the MCP server
-tools attached to the agent and fixes them for that run. That read failed, so
+tools attached to the agent (and, for a Claude Code run, its attached native
+tools) and fixes them for that run. That read failed, so
 wardby failed the run rather than launch it without the tools it expected.
 Nothing was launched, so the run made no changes.
 
@@ -31,5 +32,6 @@ the internal code `coding_mcp_pins_unavailable`.
 3. If it keeps happening and you don't need MCP tools on this agent, detach
    its MCP servers with `detach_mcp_server`, or turn MCP servers off with
    `WARDBY_MCP_SERVERS=off`. Either way, the run no longer reads them.
+   For a Claude Code agent's native tools, detach them with `detach_tool`.
 
 See [Remote MCP servers for coding agents](../../docs/mcp-servers.md#coding-agents).

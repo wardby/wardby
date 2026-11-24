@@ -6,7 +6,7 @@ import type { ThinkingMode } from "../llm/catalog-types.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { capabilityHash } from "./capability-hash.js";
 import { CLAUDE_MCP_TOOL_PREFIX } from "../../coding/mcp-token.js";
-import type { McpToolPin } from "../../core/mcp-tools.js";
+import type { CodingToolPin } from "../../core/coding-native-tools.js";
 import {
   renewHeldLeases,
   sweepExpiredLeases,
@@ -58,7 +58,9 @@ import type {
   ProxyUsage,
   ReserveProxyRequestInput,
   ReserveProxyRequestResult,
+  ListedToolPin,
 } from "./types.js";
+import { MAX_TOOL_TEXT_BYTES } from "./types.js";
 
 export const PROXY_MAX_BODY_BYTES = 8 * 1024 * 1024;
 export const PROXY_MAX_OUTPUT_TOKENS = 1_000_000;
@@ -92,7 +94,6 @@ export const SKILL_TOOL = "Skill";
 /** The thinking.display values Claude Code's workflow sub-agents send (#582). */
 const WORKFLOW_THINKING_DISPLAY = new Set(["omitted", "summarized"]);
 const MAX_COMMAND_BYTES = 16 * 1024;
-const MAX_TOOL_TEXT_BYTES = 256 * 1024;
 /**
  * The longest run_command timeout any Claude tool runner can offer the model (its
  * MAX_COMMAND_TIMEOUT_MS, src/claude-tool-runner/command.mjs; the proxy tests keep the two equal).
@@ -147,7 +148,7 @@ export interface CreateCodingProxySession {
   /** The run's catalog entry recorded at dispatch; the session then prices and shapes requests from it. */
   terms?: ProxyModelTerms;
   /** The run's pinned MCP tools (no URLs or secrets); only with mcpTokenHash, and only when there is one. */
-  mcpTools?: McpToolPin[];
+  mcpTools?: CodingToolPin[];
   /** SHA-256 (base64url) of the run's MCP token; the control plane mints and delivers the token itself. */
   mcpTokenHash?: string;
   /** The run's level (Run.runStepsLevel), fixed at dispatch; absent counts as summary. */
@@ -1140,7 +1141,7 @@ function parseAnthropicRequest(
 }
 
 /** The Claude tool names of a session's pinned MCP tools; empty for a session without pins. */
-function claudeMcpToolNames(pins: readonly McpToolPin[] | null | undefined): ReadonlySet<string> {
+function claudeMcpToolNames(pins: readonly ListedToolPin[] | null | undefined): ReadonlySet<string> {
   return new Set((pins ?? []).map((pin) => `${CLAUDE_MCP_TOOL_PREFIX}${pin.exposedName}`));
 }
 
