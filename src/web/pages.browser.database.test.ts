@@ -229,6 +229,55 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await context.close();
   }, 120_000);
 
+  it("shows inline style attributes in the editor, and keeps them through a save and a reload", async () => {
+    const start = files();
+    // Inline styles on an element that gets edited and on one that does not.
+    start["boards/home.html"] = start["boards/home.html"]
+      .replace("<h1>Good coffee", '<h1 style="color: rgb(1, 2, 3)">Good coffee')
+      .replace("<p>Little Fern Coffee", '<p style="letter-spacing: 3px">Little Fern Coffee');
+    const { documentId, cookie } = await server.design({ title: "Coffee", files: start, access: "write" });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    const seen = watch(page, server.origin);
+    const sent: Record<string, string | null>[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "PUT")
+        sent.push((JSON.parse(r.postData() ?? "{}") as { files: Record<string, string | null> }).files);
+    });
+    const styled = () =>
+      page
+        .frameLocator(CANVAS)
+        .locator("body")
+        .evaluate((body) => {
+          const h1 = body.querySelector("h1")!;
+          const p = h1.nextElementSibling!;
+          const css = body.ownerDocument.defaultView!.getComputedStyle;
+          return [css(h1).color, css(p).letterSpacing];
+        });
+    await page.goto(`${server.origin}/d/${documentId}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    // In the editor's canvas, not only in Play: loading the stylesheet used to drop these rules.
+    await expect.poll(styled, { timeout: 10_000 }).toEqual(["rgb(1, 2, 3)", "3px"]);
+    const h1 = page.frameLocator(CANVAS).locator("h1").first();
+    await h1.dblclick();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" (edited)");
+    await page.locator(".topbar .crumbs").click();
+    await expect.poll(() => page.locator(".badge.version").textContent(), { timeout: 20_000 }).toContain("v2");
+    // The saved board still styles both elements (as an id rule in the edits layer).
+    const home = sent[sent.length - 1]["boards/home.html"]!;
+    expect(home).toMatch(/color:\s*rgb\(1, ?2, ?3\)/);
+    expect(home).toMatch(/letter-spacing:\s*3px/);
+    await page.reload();
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    await expect.poll(styled, { timeout: 10_000 }).toEqual(["rgb(1, 2, 3)", "3px"]);
+    expect(await h1.textContent()).toContain("(edited)");
+    expect(seen.violations).toEqual([]);
+    expect(seen.errors).toEqual([]);
+    await context.close();
+  }, 90_000);
+
   it("keeps the edits to each rule of a selector the base styles twice, and Style Manager edits, across reloads", async () => {
     const start = files();
     // A second `.btn` rule, with the same selectors, state and media as the fixture's first one, and
