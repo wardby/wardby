@@ -986,6 +986,67 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       ).toBe(true);
     }, 60_000);
 
+    it("reject_document takes a plan option out of its plan; plan.md and loose documents are refused", async () => {
+      const callOwner = await connect(owner);
+      const callOther = await connect(other);
+      const planner = await db.agent.create({
+        data: {
+          name: `reject-mcp-${randomUUID().slice(0, 8)}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const set = await db.planSet.create({
+        data: {
+          agentId: planner.id,
+          repository: "o/reject-mcp",
+          number: 1,
+          store: "wardby",
+          createdByRunId: "fixture",
+        },
+      });
+      const make = async (title: string, planPath: string | null) => {
+        const id = (await callOwner("create_document", { title, markdown: `# ${title}` })).json.documentId as string;
+        if (planPath) await db.document.update({ where: { id }, data: { planSetId: set.id, planPath } });
+        await callOwner("submit_for_review", { documentId: id, reviewers: [other.id] });
+        return id;
+      };
+      const planMd = await make("Plan", "plan.md");
+      const option = await make("Option C", "option-c.md");
+      const loose = await make("Loose", null);
+      try {
+        // Refused: plan.md, a document outside a plan, a missing note, and someone who is not a reviewer's peer.
+        expect((await callOwner("reject_document", { documentId: planMd, note: "no" })).text).toContain(
+          "document_reject_not_plan_document",
+        );
+        expect((await callOwner("reject_document", { documentId: loose, note: "no" })).text).toContain(
+          "document_reject_not_plan_document",
+        );
+        expect((await callOwner("reject_document", { documentId: option, note: "  " })).isError).toBe(true);
+        const readOnly = await connect(owner, ["documents:read"]);
+        expect((await readOnly("reject_document", { documentId: option, note: "no" })).isError).toBe(true);
+        // A named reviewer rejects with a note: rejected, out of the plan.
+        const rejected = await callOther("reject_document", { documentId: option, note: "Option B was chosen" });
+        expect(rejected.isError).toBe(false);
+        expect(rejected.json.reviewState).toBe("rejected");
+        expect(rejected.json.events[0]).toMatchObject({ kind: "rejected", toState: "rejected" });
+        expect((await db.document.findUniqueOrThrow({ where: { id: option } })).removedFromPlan).toBe(true);
+        // Locked: no new version; reopen brings it back on v2.
+        expect((await callOwner("publish_version", { documentId: option, markdown: "# C v2" })).text).toContain(
+          "document_locked",
+        );
+        const reopened = await callOwner("reopen_document", { documentId: option });
+        expect([reopened.json.reviewState, reopened.json.currentVersion]).toEqual(["in_review", 2]);
+        expect((await db.document.findUniqueOrThrow({ where: { id: option } })).removedFromPlan).toBe(false);
+      } finally {
+        await db.document.updateMany({ where: { planSetId: set.id }, data: { planSetId: null } });
+        await db.planSet.delete({ where: { id: set.id } });
+        await db.agent.delete({ where: { id: planner.id } });
+      }
+    }, 60_000);
+
     it("gives the owner the review candidates, guests included, and no one else", async () => {
       const callOwner = await connect(owner);
       const callOther = await connect(other);

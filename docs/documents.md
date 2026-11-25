@@ -85,8 +85,10 @@ agent publishes its plan as a plan set: one document per top-level `*.md` file
 (`plan.md` first, titled by its first heading or else its file name), one design
 per board subfolder (titled by its folder name), up to 20 in all. Other files
 are ignored and listed. Later runs version changed files, add new documents and
-mark a removed file `removedFromPlan`; approved or archived documents are never
-changed by a run. Removed documents stay listed, and are read-only to agents.
+mark a removed file `removedFromPlan`; approved, rejected or archived documents
+are never changed by a run (a rejected document stays out of the plan even when a
+run writes its file again; the reply says "not in the plan, reopen it to bring it
+back"). Removed documents stay listed, and are read-only to agents.
 `get_document` on a plan document returns the set's documents, and
 `list_documents` takes a `planNumber` filter.
 
@@ -98,7 +100,8 @@ top, and naming someone as reviewer adds no grant. Sharing an agent with everyon
 lets every signed-in user read and comment on the plans it produces.
 
 **Plan bar.** Each page of a set shows "Plan N · X of Y approved" over the
-documents the viewer can read, with a chip per document; relative links in the
+documents the viewer can read, with a chip per document (rejected and removed
+documents last, struck through, marked "Rejected" or "Removed", and not counted); relative links in the
 Markdown open the other documents or boards. A share-link guest sees only
 "Plan N" and their own document. The bar updates live: a plan document's event
 stream also carries the review and version events of the other documents of its
@@ -239,7 +242,7 @@ with `{"baseNumber": <n>}` (CSRF and `Origin` as for every change).
 
 A whole document or design has a review state, separate from its comment
 threads: **draft** (the default), **in review**, **changes requested**,
-**approved** and **archived**. The owner submits it for review (`submit_for_review`,
+**approved**, **rejected** (plan documents only) and **archived**. The owner submits it for review (`submit_for_review`,
 or **Start review** on the page's Review tab) and names the reviewers: members
 with access to the document, or guests of this document's live comment share
 links who gave a name. Naming a member gives them comment access if they lack
@@ -266,9 +269,20 @@ nothing and records no event.
   version over missing verdicts and requested changes. A note is required and
   the history lists who was overridden. It is only possible in review or with
   changes requested.
-- **Reopen**: a writer reopens an approved document. Reopen for review creates a
-  new version (a copy of the approved one) and puts it in review; the approved
-  version stays in History as the approved record. Every reviewer then reviews
+- **Reject** (documents of a plan only): the owner, the final approver or a
+  named member reviewer rejects a document the plan does not need, such as a
+  design option that was not chosen (`reject_document`, or **Reject** on the
+  Review tab). A note is required. It works in review, with changes requested
+  or approved. The document becomes rejected: locked like an approved one, and
+  out of the plan, so it no longer counts toward the plan's approval and a
+  builder never gets it; rejecting the last document the plan waited for
+  approves the plan. A plan's own `plan.md`, a document outside a plan, and a
+  document already out of the plan are refused with
+  `document_reject_not_plan_document`. Guests cannot reject.
+- **Reopen**: a writer reopens an approved or rejected document. Reopen for
+  review creates a new version (a copy of the current one) and puts it in
+  review, and a rejected document goes back into its plan; the earlier version
+  stays in History as the record. Every reviewer then reviews
   the new version. A named reviewer can
   also request changes on a document every reviewer approved, which moves it to
   changes requested and unlocks it. A force approval is final: reviewers cannot
@@ -276,7 +290,7 @@ nothing and records no event.
   and a writer reopens it for review.
 - **Archive**: the owner archives and unarchives; unarchive returns the state it
   had before.
-- **The lock**: an approved or archived document takes no new version by any
+- **The lock**: an approved, rejected or archived document takes no new version by any
   route (editor, board saves, `publish_version`, restore, agent edits), and its
   threads cannot be sent to an agent: all are refused with `document_locked`. A
   document its planner removed from the plan is read-only to agents too: its
@@ -299,7 +313,8 @@ returns when someone else comments (`reason: "comment"`); many MCP clients time
 out a request after 60 seconds, so pass `timeoutSeconds` of 50 or less and call
 again. Errors:
 `document_locked` (409), `document_review_forbidden` (403),
-`document_review_state_invalid` (409) and `document_version_conflict` (409). See
+`document_review_state_invalid` (409), `document_reject_not_plan_document` (409)
+and `document_version_conflict` (409). See
 [Review and approve documents](../help/document-review.md) for the details and
 the per-code help articles.
 
@@ -715,7 +730,7 @@ Each error code has an article under `help/errors/`: `document_not_found`,
 `document_agent_unavailable`, `document_repo_link_invalid`,
 `document_send_failed`, `document_send_not_available`,
 `document_too_large_for_agent`, `document_format_mismatch`,
-`board_format_invalid`, `board_too_large`, `comment_anchor_invalid`, `comment_too_long`,
+`document_reject_not_plan_document`, `board_format_invalid`, `board_too_large`, `comment_anchor_invalid`, `comment_too_long`,
 `comment_thread_closed`, `comment_thread_already_sent`,
 `comment_send_rate_limited`, `comment_not_found`, `comment_edit_forbidden`,
 `guest_name_invalid`, `guest_email_invalid`, `share_link_invalid`,

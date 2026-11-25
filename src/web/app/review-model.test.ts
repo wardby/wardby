@@ -10,6 +10,9 @@ import {
   reviewerChip,
   verdictControls,
   verdictLabels,
+  EVENT_LABEL,
+  isLockedState,
+  STATE_LABEL,
 } from "./review-model.js";
 
 const rv = (over: Partial<ReviewerPayload>): ReviewerPayload => ({
@@ -60,6 +63,8 @@ describe("review model", () => {
     expect(bannerText(review({ state: "changes_requested" }))).toBe("Changes requested · v4 · 1 of 2 approved");
     expect(bannerText(review({ state: "draft", progress: { approved: 0, total: 0 } }))).toBe("Draft · v4");
     expect(bannerText(review({ state: "archived" }))).toBe("Archived · v4");
+    // Rejected: the state and version only; the reviewers' progress no longer means anything.
+    expect(bannerText(review({ state: "rejected" }))).toBe("Rejected · v4");
     expect(
       bannerText(
         review({
@@ -71,6 +76,13 @@ describe("review model", () => {
     expect(bannerText(review({ state: "approved", progress: { approved: 2, total: 2 } }))).toBe(
       "Approved · v4 · 2 of 2 approved",
     );
+  });
+
+  it("names the rejected state and event, and counts it as locked", () => {
+    expect(STATE_LABEL.rejected).toBe("Rejected");
+    expect(EVENT_LABEL.rejected).toBe("rejected");
+    expect(isLockedState("rejected")).toBe(true);
+    expect(isLockedState("in_review")).toBe(false);
   });
 
   it("words each reviewer's chip", () => {

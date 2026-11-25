@@ -134,6 +134,11 @@ async function inReviewTx<T>(db: PrismaClient, fn: (tx: Tx) => Promise<T>): Prom
   );
 }
 
+/** A document Reject applies to: one of a plan set, still in it, and not the set's plan.md. */
+function rejectablePlacement(doc: { planSetId: string | null; planPath: string | null; removedFromPlan: boolean }) {
+  return doc.planSetId !== null && doc.planPath !== null && doc.planPath !== "plan.md" && !doc.removedFromPlan;
+}
+
 /** Everything the state rule reads, inside the caller's transaction. */
 async function readReview(tx: Tx, documentId: string) {
   const doc = await tx.document.findUnique({
@@ -145,6 +150,10 @@ async function readReview(tx: Tx, documentId: string) {
       reviewState: true,
       reviewStateBeforeArchive: true,
       finalApproverId: true,
+      // Plan placement, for Reject (rejectDocument and the view's can.reject read it in the same snapshot).
+      planSetId: true,
+      planPath: true,
+      removedFromPlan: true,
     },
   });
   if (!doc) throw new Error("document_not_found");
@@ -457,17 +466,11 @@ export async function rejectDocument(
     const accessNow = await documentAccess(tx, input.documentId, viewer);
     if (accessNow === "none") throw new Error("document_not_found");
     const { doc, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
-    const plan = await tx.document.findUnique({
-      where: { id: doc.id },
-      select: { planSetId: true, planPath: true, removedFromPlan: true },
-    });
     const named = reviewers.some((r) => r.principalId === principalId);
     const isApprover = doc.finalApproverId === principalId;
     const allowed = accessNow === "owner" || ((named || isApprover) && atLeast("document", accessNow, "comment"));
     if (!allowed) throw new Error("document_review_forbidden");
-    if (!plan?.planSetId || plan.planPath === null || plan.planPath === "plan.md" || plan.removedFromPlan) {
-      throw new Error("document_reject_not_plan_document");
-    }
+    if (!rejectablePlacement(doc)) throw new Error("document_reject_not_plan_document");
     if (!REJECTABLE.has(doc.reviewState)) invalid();
     await record(tx, {
       documentId: doc.id,
@@ -702,15 +705,7 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
   const principalId = viewer.kind === "principal" ? viewer.principalId : null;
   const owner = access === "owner";
   const listed = reviewerViews.some((r) => r.me);
-  const placement = await db.document.findUnique({
-    where: { id: documentId },
-    select: { planSetId: true, planPath: true, removedFromPlan: true },
-  });
-  const rejectablePlanDocument =
-    !!placement?.planSetId &&
-    placement.planPath !== null &&
-    placement.planPath !== "plan.md" &&
-    !placement.removedFromPlan;
+  const rejectablePlanDocument = rejectablePlacement(doc);
   return {
     documentId,
     state,

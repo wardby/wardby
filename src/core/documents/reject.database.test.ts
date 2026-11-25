@@ -9,7 +9,7 @@ import { createPrismaClient } from "../db.js";
 import { setPlanReviewHook } from "../plans/approval.js";
 import { resolveBuildPlan } from "../plans/build.js";
 import { createPlanSetFixture } from "../plans/build.test-support.js";
-import { getReviewView, rejectDocument, reopenDocument } from "./review.js";
+import { getReviewView, rejectDocument, reopenDocument, reviewDocument, submitForReview } from "./review.js";
 
 const PLAN_MD = "# Plan\n\n## Tickets\n### Ticket 1: Build it\n\nScope.\n";
 const design = (title: string) => ({
@@ -24,6 +24,10 @@ describe.skipIf(!process.env.DATABASE_URL)("rejectDocument (database)", () => {
   const repository = `o/reject-${s}`;
   const owner = `reject-owner-${s}`;
   const outsider = `reject-outsider-${s}`;
+  const reviewer = `reject-reviewer-${s}`;
+  const approver = `reject-approver-${s}`;
+  const commenter = `reject-commenter-${s}`;
+  const as = (principalId: string) => ({ kind: "principal" as const, principalId });
   const agents: string[] = [];
   let planner: string;
   let builder: string;
@@ -52,7 +56,8 @@ describe.skipIf(!process.env.DATABASE_URL)("rejectDocument (database)", () => {
 
   beforeAll(async () => {
     await db.principal.create({ data: { id: owner, subject: owner } });
-    await db.principal.create({ data: { id: outsider, subject: outsider } });
+    for (const id of [outsider, reviewer, approver, commenter])
+      await db.principal.create({ data: { id, subject: id } });
     for (const profile of [{ planDocument: { store: "wardby", reviewers: [owner] } }, { buildFromPlan: true }]) {
       const agent = await db.agent.create({
         data: {
@@ -74,7 +79,8 @@ describe.skipIf(!process.env.DATABASE_URL)("rejectDocument (database)", () => {
     await db.document.deleteMany({ where: { ownerId: owner } });
     await db.planSet.deleteMany({ where: { agentId: { in: agents } } });
     await db.agent.deleteMany({ where: { id: { in: agents } } });
-    await db.principal.deleteMany({ where: { id: { in: [owner, outsider] } } });
+    await db.resourceGrant.deleteMany({ where: { granteePrincipalId: { in: [reviewer, approver, commenter] } } });
+    await db.principal.deleteMany({ where: { id: { in: [owner, outsider, reviewer, approver, commenter] } } });
     await db.$disconnect();
   });
 
@@ -164,5 +170,66 @@ describe.skipIf(!process.env.DATABASE_URL)("rejectDocument (database)", () => {
     expect(row.removedFromPlan).toBe(false);
     // Back in the plan and waiting again: the builder's gate refuses.
     await expect(resolve(number)).rejects.toThrow(/^plan_not_approved: .*option-c/);
+  });
+
+  /** option-c in review with a named reviewer and a final approver, and a plain commenter who is neither. */
+  async function reviewedOption() {
+    const set = await planSet();
+    const id = set.documentIds["option-c/"];
+    await submitForReview(db, { documentId: id, viewer: asOwner, reviewers: [reviewer], finalApproverId: approver });
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "document",
+        resourceId: id,
+        granteeKind: "principal",
+        granteePrincipalId: commenter,
+        granteeKey: `principal:${commenter}`,
+        level: "comment",
+      },
+    });
+    return { ...set, id };
+  }
+
+  it("a named member reviewer may reject, and is offered Reject", async () => {
+    const { id } = await reviewedOption();
+    expect((await getReviewView(db, id, as(reviewer))).can.reject).toBe(true);
+    const view = await rejectDocument(db, cipher, { documentId: id, viewer: as(reviewer), note: "B chosen" });
+    expect(view.state).toBe("rejected");
+  });
+
+  it("the final approver may reject even when not a reviewer", async () => {
+    const { id } = await reviewedOption();
+    expect((await getReviewView(db, id, as(approver))).can.reject).toBe(true);
+    const view = await rejectDocument(db, cipher, { documentId: id, viewer: as(approver), note: "B chosen" });
+    expect(view.state).toBe("rejected");
+  });
+
+  it("a commenter who is neither reviewer nor final approver is refused, and not offered Reject", async () => {
+    const { id } = await reviewedOption();
+    expect((await getReviewView(db, id, as(commenter))).can.reject).toBe(false);
+    await expect(rejectDocument(db, cipher, { documentId: id, viewer: as(commenter), note: "no" })).rejects.toThrow(
+      "document_review_forbidden",
+    );
+  });
+
+  it("rejects from changes requested", async () => {
+    const { id } = await reviewedOption();
+    await reviewDocument(db, cipher, {
+      documentId: id,
+      viewer: as(reviewer),
+      verdict: "request_changes",
+      versionNumber: 1,
+    });
+    expect((await getReviewView(db, id, asOwner)).state).toBe("changes_requested");
+    const view = await rejectDocument(db, cipher, { documentId: id, viewer: asOwner, note: "dropped" });
+    expect(view.events[0]).toMatchObject({ kind: "rejected", fromState: "changes_requested", toState: "rejected" });
+  });
+
+  it("rejecting an option of an already approved plan leaves the plan approved and buildable", async () => {
+    const { number, documentIds } = await planSet();
+    await rejectDocument(db, cipher, { documentId: documentIds["option-c/"], viewer: asOwner, note: "dropped" });
+    expect((await resolve(number))?.versions.map((v) => v.path)).toEqual(["plan.md", "option-a/", "option-b/"]);
+    await rejectDocument(db, cipher, { documentId: documentIds["option-a/"], viewer: asOwner, note: "dropped" });
+    expect((await resolve(number))?.versions.map((v) => v.path)).toEqual(["plan.md", "option-b/"]);
   });
 });

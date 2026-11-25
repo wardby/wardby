@@ -936,6 +936,8 @@ img.ProseMirror-separator {
 }
 .plan-chips s .plan-chip {
   color: var(--muted);
+  /* The chip is a link (text-decoration: none), so the <s> line has to be set on it. */
+  text-decoration: line-through;
 }
 .plan-link-missing {
   border-bottom: 1px dotted var(--warn);

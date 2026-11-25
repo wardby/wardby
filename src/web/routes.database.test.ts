@@ -1814,6 +1814,48 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       ).toBe(403);
     });
 
+    it("rejects a plan option through the page API; a blank note is 400, a loose document 409", async () => {
+      const id = await newDoc();
+      const o = await session(owner.id);
+      await post(id, o, { action: "submit", reviewers: [member.id] });
+      expect((await post(id, o, { action: "reject", note: "  " })).status).toBe(400);
+      const loose = await post(id, o, { action: "reject", note: "no" });
+      expect([loose.status, await loose.json()]).toEqual([409, { error: "document_reject_not_plan_document" }]);
+      const planner = await db.agent.create({
+        data: {
+          name: `reject-web-${randomUUID().slice(0, 8)}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const set = await db.planSet.create({
+        data: {
+          agentId: planner.id,
+          repository: "o/reject-web",
+          number: 1,
+          store: "wardby",
+          createdByRunId: "fixture",
+        },
+      });
+      try {
+        await db.document.update({ where: { id }, data: { planSetId: set.id, planPath: "option-c.md" } });
+        const before = ((await (await call(`/d/api/${id}`, { jar: o.jar })).json()) as any).review;
+        expect(before.can.reject).toBe(true);
+        const res = await post(id, o, { action: "reject", note: "Option B was chosen" });
+        expect(res.status).toBe(200);
+        const review = ((await res.json()) as any).review;
+        expect(review.state).toBe("rejected");
+        expect(review.can).toMatchObject({ reject: false, reopen: true });
+        expect((await db.document.findUniqueOrThrow({ where: { id } })).removedFromPlan).toBe(true);
+      } finally {
+        await db.document.update({ where: { id }, data: { planSetId: null } });
+        await db.planSet.delete({ where: { id: set.id } });
+        await db.agent.delete({ where: { id: planner.id } });
+      }
+    });
+
     it("lets a guest reviewer on a comment link approve through the page API", async () => {
       const id = await newDoc();
       const o = await session(owner.id);

@@ -13,7 +13,7 @@ appliesTo: ">=0.10.0"
 
 - a verdict on a draft or an archived document;
 - submitting with no reviewers, more than 50, an unknown person, or a guest who is not on one of this document's live comment share links;
-- changing the reviewer list of an approved or archived document (reopen or unarchive it first);
+- changing the reviewer list of an approved, rejected or archived document (reopen or unarchive it first);
 - force approving a draft, an approved or an archived document, or without a note;
 - a reviewer's verdict on a document the owner or final approver force approved (a force approval is final; a writer reopens it for review);
 - reopening a document that is not approved;

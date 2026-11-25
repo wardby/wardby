@@ -638,8 +638,13 @@ async function publishSet(
     if (given !== null && (given === GIVEN_UNREADABLE || !given.has(gone.planPath!))) continue;
     await hold();
     try {
-      // Never removed: an approved or archived document (read-only), or a revision's threads' document.
-      if (gone.reviewState === "approved" || gone.reviewState === "archived" || gone.id === deps.threadsDocument?.id) {
+      // Never removed: an approved, rejected or archived document (read-only), or a revision's threads' document.
+      if (
+        gone.reviewState === "approved" ||
+        gone.reviewState === "rejected" ||
+        gone.reviewState === "archived" ||
+        gone.id === deps.threadsDocument?.id
+      ) {
         await report(gone.id, { kind: asKind(gone.kind), path: gone.planPath! }, keptChange(gone.reviewState));
         continue;
       }
@@ -731,9 +736,14 @@ export async function planSummaryForRun(
             : keptChange(row.reviewState);
     documents.push(describeRow(row, doc, change));
   }
-  // Not in this run's files: removed, unless the publish kept it (approved or archived, never removed).
+  // Not in this run's files: removed, unless the publish kept it (approved, rejected or archived, never removed).
   for (const row of byPath.values()) {
-    const change = row.removedFromPlan ? "removed" : keptChange(row.reviewState);
+    const change =
+      row.reviewState === "rejected"
+        ? "rejected_unchanged"
+        : row.removedFromPlan
+          ? "removed"
+          : keptChange(row.reviewState);
     documents.push(describeRow(row, { kind: asKind(row.kind), path: row.planPath! }, change));
   }
   const { skippedReviewers } = await planReviewers(db, { id: agentId, ownerId }, set.accessAgentId ?? agentId, setting);

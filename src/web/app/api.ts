@@ -405,7 +405,8 @@ const MESSAGES: Record<string, string> = {
   export_failed: "The export couldn't be made. Try again.",
   export_too_large: "This is too large to export.",
   export_not_found: "That export is no longer available. Try again.",
-  document_locked: "This document is approved or archived, so it can't be changed. Reopen it for review first.",
+  document_locked:
+    "This document is approved, rejected or archived, so it can't be changed. Reopen it for review first.",
   document_review_forbidden: "You can't do that in this review.",
   document_reject_not_plan_document: "Only a document of a plan can be rejected, and never its plan.md.",
   document_review_state_invalid: "That can't be done in the document's current review state. Reload to see it.",
