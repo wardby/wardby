@@ -49,6 +49,7 @@ import {
   validDocumentBaseRef,
   validDocumentPath,
   assertAgentRepository,
+  assertNativeWriter,
   validDocumentRepository,
 } from "../../core/documents/agent-link.js";
 import {
@@ -584,7 +585,8 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     scope: "documents:write",
     description:
       "Links a document or design you own to a coding agent and a repository file, or changes or clears that link, so " +
-      "comment threads can be sent to the agent. The same rules as create_document: give agentId (a coding agent you own, " +
+      "comment threads can be sent to the agent. A native agent with documentTools write (and execute for you) can be linked as the " +
+      "document's writer with agentId alone: no repository (a plan document cannot have one). The same rules as create_document: give agentId (a coding agent you own, " +
       "or one whose owner allows others' task text) with repository and path; for a Markdown document path is a " +
       "repo-relative .md file and baseRef is optional; for a design path is the boards directory (. for the root) and " +
       "baseRef is required. agentId alone links the agent without a repository. unlink: true clears the link. The " +
@@ -621,13 +623,28 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         if (design && input.repository !== undefined && input.baseRef === undefined) {
           throw new McpError(400, "document_repo_link_invalid");
         }
-        const checked = await checkedLink(ctx, input, design);
-        link = {
-          agentId: input.agentId!,
-          repository: checked.repository ?? null,
-          path: checked.path ?? null,
-          baseRef: checked.baseRef ?? null,
-        };
+        const target = await ctx.db.agent.findUnique({ where: { id: input.agentId! }, select: { kind: true } });
+        if (target?.kind === "native") {
+          // A native writer edits through its doc_* tools: no repository, and never a plan document.
+          if (input.repository !== undefined || input.path !== undefined || input.baseRef !== undefined) {
+            throw new McpError(400, "document_repo_link_invalid");
+          }
+          const planned = await ctx.db.document.findUnique({
+            where: { id: input.documentId },
+            select: { planSetId: true },
+          });
+          if (planned?.planSetId) throw new McpError(400, "document_agent_unavailable");
+          await mapped(() => assertNativeWriter(ctx.db, ctx.principal.id, input.agentId!));
+          link = { agentId: input.agentId!, repository: null, path: null, baseRef: null };
+        } else {
+          const checked = await checkedLink(ctx, input, design);
+          link = {
+            agentId: input.agentId!,
+            repository: checked.repository ?? null,
+            path: checked.path ?? null,
+            baseRef: checked.baseRef ?? null,
+          };
+        }
       }
       await mapped(() => linkDocument(ctx.db, { documentId: input.documentId, viewer, link }));
       return textResult({

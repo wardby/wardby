@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
-import type { Principal } from "#prisma";
+import { Prisma, type Principal } from "#prisma";
 import { createPrismaClient } from "../../core/db.js";
 import { requestRenderedExport, runExport, type ExportDeps } from "../../core/documents/exports.js";
 import type { McpProviders, McpRequestContext } from "../context.js";
@@ -654,6 +654,84 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       await connect(owner)
     )("create_document", { title: "O", markdown: "x", agentId: profiledAgentId });
     expect(mine.isError).toBe(false);
+  });
+
+  it("link_document links a native agent with documentTools write as the writer, and refuses the rest", async () => {
+    const call = await connect(owner);
+    const documentId = (await call("create_document", { title: "N", markdown: "# N\n" })).json.documentId as string;
+    const setTools = (documentTools: object | null) =>
+      db.agent.update({ where: { id: nativeAgentId }, data: { documentTools: documentTools ?? Prisma.DbNull } });
+    try {
+      // No setting, or read-only: unavailable.
+      await setTools(null);
+      expect((await call("link_document", { documentId, agentId: nativeAgentId })).text).toContain(
+        "document_agent_unavailable",
+      );
+      await setTools({ access: "read", reviewers: [owner.id] });
+      expect((await call("link_document", { documentId, agentId: nativeAgentId })).text).toContain(
+        "document_agent_unavailable",
+      );
+      await setTools({ access: "write", reviewers: [owner.id] });
+      // Repository fields are coding-only.
+      const withRepo = await call("link_document", {
+        documentId,
+        agentId: nativeAgentId,
+        repository: "acme/docs",
+        path: "docs/n.md",
+      });
+      expect(withRepo.text).toContain("document_repo_link_invalid");
+      // A linker without execute on the agent.
+      const stranger = await db.principal.create({ data: { subject: `docmcp-native-stranger-${s}` } });
+      try {
+        const strangerDoc = (await (await connect(stranger))("create_document", { title: "S", markdown: "# S\n" })).json
+          .documentId as string;
+        expect(
+          (await (await connect(stranger))("link_document", { documentId: strangerDoc, agentId: nativeAgentId }))
+            .isError,
+        ).toBe(true);
+        const fresh = await db.agent.findUniqueOrThrow({ where: { id: nativeAgentId } });
+        expect(fresh.ownerId).toBe(owner.id);
+      } finally {
+        await db.document.deleteMany({ where: { ownerId: stranger.id } });
+        await db.principal.delete({ where: { id: stranger.id } });
+      }
+      const ok = await call("link_document", { documentId, agentId: nativeAgentId });
+      expect(ok.isError).toBe(false);
+      expect(ok.json).toMatchObject({ linked: true, agentId: nativeAgentId, repository: null, path: null });
+      expect(await db.document.findUniqueOrThrow({ where: { id: documentId } })).toMatchObject({
+        agentId: nativeAgentId,
+        repository: null,
+        path: null,
+      });
+      // A plan document cannot take a native writer.
+      const lead = await db.planSet.create({
+        data: {
+          agentId: codingAgentId,
+          accessAgentId: nativeAgentId,
+          repository: `acme/nplan-${s}`,
+          number: 91,
+          store: "wardby",
+          createdByRunId: "run-nplan",
+        },
+      });
+      try {
+        await db.document.update({
+          where: { id: documentId },
+          data: { planSetId: lead.id, planPath: "p.md", agentId: null },
+        });
+        expect((await call("link_document", { documentId, agentId: nativeAgentId })).text).toContain(
+          "document_agent_unavailable",
+        );
+      } finally {
+        await db.document.update({ where: { id: documentId }, data: { planSetId: null, planPath: null } });
+        await db.planSet.delete({ where: { id: lead.id } });
+      }
+      // Unlinking stays as before.
+      await call("link_document", { documentId, agentId: nativeAgentId });
+      expect((await call("link_document", { documentId, unlink: true })).json).toMatchObject({ linked: false });
+    } finally {
+      await setTools(null);
+    }
   });
 
   it("link_document links, relinks and unlinks a document its owner holds, under create_document's rules", async () => {
