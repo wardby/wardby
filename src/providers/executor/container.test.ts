@@ -2639,6 +2639,44 @@ describe("ContainerExecutor", () => {
       expect(created.store.run.status).toBe("succeeded");
     });
 
+    it("pins the agent's tunnel hosts on the session once at dispatch, for Claude Code and Codex alike (#627)", async () => {
+      for (const overrides of [
+        {},
+        { provider: "claude-code" as const, model: "claude-sonnet-5", workerImage: CLAUDE_IMAGE },
+      ]) {
+        let current = ["api.example.com", "*.apps.example.org"];
+        const asked: string[] = [];
+        const created = await harness(
+          overrides,
+          IMAGE,
+          new InMemoryCodingRunObserver(),
+          overrides.provider ? { workerImage: CLAUDE_IMAGE, toolImage: CLAUDE_TOOL_IMAGE } : undefined,
+          {
+            tunnelHostPins: async (agentId) => {
+              asked.push(agentId);
+              return [...current];
+            },
+          },
+        );
+        await created.executor.start("run-1");
+        expect(asked).toEqual(["agent-1"]);
+        expect(created.sessions.lastInput?.tunnelHosts).toEqual(["api.example.com", "*.apps.example.org"]);
+        // An edit after dispatch is not read again for this run.
+        current = ["*"];
+        expect(created.sessions.lastInput?.tunnelHosts).toEqual(["api.example.com", "*.apps.example.org"]);
+        expect(asked).toHaveLength(1);
+        expect(created.store.run.status).toBe("succeeded");
+      }
+    });
+
+    it("gives no tunnel hosts without the loader or when the agent has none", async () => {
+      for (const extra of [{}, { tunnelHostPins: async () => [] }]) {
+        const created = await harness({}, IMAGE, undefined, undefined, extra);
+        await created.executor.start("run-1");
+        expect(created.sessions.lastInput).not.toHaveProperty("tunnelHosts");
+      }
+    });
+
     it("asks for read-only pins by the run's dispatched provider, not the agent's profile", async () => {
       const asked: boolean[] = [];
       const pins = async (_agentId: string, options: { readOnlyOnly: boolean }) => {

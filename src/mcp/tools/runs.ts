@@ -395,7 +395,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
     description:
       "One run in full: status, cost, request, result, errors and budget events, plus triggerInfo (what started it: " +
       "a pull request review or mention, an issue, a schedule or a lead run), outcomes (pull requests opened, comments, " +
-      "checks) and serviceReadiness. A run's pull-request outcome matching another run's triggerInfo links the two. " +
+      "checks) and serviceReadiness. A coding run given per-agent tunnel hosts has tunnelHosts, the patterns pinned at dispatch. A run's pull-request outcome matching another run's triggerInfo links the two. " +
       "lastStep is the newest step; get_run_steps lists them all. A coding run over several repositories also has " +
       "repositories, the run's other repositories in order (name, access, repository, requestedRef, resolvedSha, pullRequestNumber, pullRequestUrl, resultBranch, outcome; null when absent); the default repository is in codingResult, not in this list. A coding run has packageCount (packages the registry " +
       "served it), packagePlan and packageRefusals; use get_run_packages for the packages themselves. A follow-up round " +
@@ -458,14 +458,15 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       // versions approved for the run, and distinct entries it refused. When
       // the run sent a lockfile the plan could not read, the ecosystems (ids
       // only) and the fixed line the status comments show.
-      const unchecked = codingRun
-        ? ((
-            await ctx.db.codingProxySession.findUnique({
-              where: { runId: run.id },
-              select: { registryPlanUnchecked: true },
-            })
-          )?.registryPlanUnchecked ?? [])
-        : [];
+      const session = codingRun
+        ? await ctx.db.codingProxySession.findUnique({
+            where: { runId: run.id },
+            select: { registryPlanUnchecked: true, tunnelHosts: true },
+          })
+        : null;
+      const unchecked = session?.registryPlanUnchecked ?? [];
+      // The tunnel host patterns the run was given at dispatch (#627); the server list is not repeated here.
+      const tunnelHosts = session?.tunnelHosts ?? [];
       const packagePlan = codingRun
         ? {
             approved: await ctx.db.registryApprovedVersion.count({ where: { runId: run.id } }),
@@ -527,6 +528,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         ...(codingRun?.debugTrace ? { debugTrace: true } : {}),
         ...(codingRun?.debugTrace && codingRun.debugTraceMaxMb ? { debugTraceMaxMb: codingRun.debugTraceMaxMb } : {}),
         ...(services.length > 0 ? { services } : {}),
+        ...(tunnelHosts.length > 0 ? { tunnelHosts } : {}),
         ...(codingRun?.resultBranch ? { resultBranch: codingRun.resultBranch } : {}),
         ...(codingRun?.baseSha ? { baseSha: codingRun.baseSha } : {}),
         ...(dependencyCache ? { dependencyCache } : {}),

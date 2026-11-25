@@ -33,6 +33,8 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
       "review fix rounds, after-merge triggers and ticket status hand-offs (an agent that moves a Jira ticket to a status " +
       "starts the agents that trigger on it), plus each agent's entry points (mention, Jira, a status only a person sets, " +
       "schedule, webhook, manual). " +
+      "notes lists each agent's MCP servers (mcp:<name>), run hooks (runHook:<event>) and tunnel hosts " +
+      "(tunnel:<pattern>, tunnel:* for any public host). " +
       "Link facts only, never secrets. A link to an agent you cannot read is counted in `hidden`. " +
       "all: true covers every agent in the deployment (admins only, admin:view).",
     inputSchema: { type: "object", properties: { all: { type: "boolean" } }, additionalProperties: false },
@@ -56,7 +58,7 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
           schedule: true,
           scheduleEnabled: true,
           budgetGroup: { select: { id: true, name: true } },
-          codingProfile: { select: { provider: true, repository: true } },
+          codingProfile: { select: { provider: true, repository: true, tunnelHosts: true } },
           repositories: {
             select: {
               provider: true,
@@ -130,6 +132,8 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
           repositories: facts[i].repositories,
           notes: [
             ...r.mcpServers.map((m) => `mcp:${m.server.name}`),
+            // Per-agent tunnel hosts (#627): which agents' runs can reach the internet, and where.
+            ...(r.codingProfile?.tunnelHosts ?? []).map((pattern) => `tunnel:${pattern}`),
             ...[...new Set(r.runHooks.flatMap((h) => (h.events.length === 0 ? ["all"] : h.events)))]
               .sort()
               .map((ev) => `runHook:${ev}`),

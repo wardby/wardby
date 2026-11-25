@@ -264,6 +264,29 @@ describe("list_agent_links", () => {
     expect(row.promptFirstLine).toBe("Click red line");
   });
 
+  it("notes each tunnel host pattern an agent's runs are given (#627)", async () => {
+    const me = await principal();
+    const recon = await agent(me.id, "recon", {
+      kind: "coding",
+      codingProfile: {
+        create: {
+          repository: REPO,
+          protectedPaths: [".github/**"],
+          tunnelHosts: ["*.apps.example.org", "*"],
+          tunnelAnyHostAuthorizedById: me.id,
+        },
+      },
+    });
+    const plain = await agent(me.id, "plain-coder", {
+      kind: "coding",
+      codingProfile: { create: { repository: REPO, protectedPaths: [".github/**"] } },
+    });
+    const { value } = await (await connect(me))();
+    const row = (id: string) => value.agents.find((r: { id: string }) => r.id === id);
+    expect(row(recon.id).notes).toEqual(["tunnel:*.apps.example.org", "tunnel:*"]);
+    expect(row(plain.id).notes).toEqual([]);
+  });
+
   it("refuses all: true without admin:view, and an admin sees every agent", async () => {
     const me = await principal();
     const call = await connect(me);
