@@ -23,6 +23,11 @@ spec:
       port: {{ $w.metrics.port }}
       targetPort: {{ $w.metrics.port }}
     {{- end }}
+    {{- if $w.tunnel.enabled }}
+    - name: tunnel
+      port: {{ $w.tunnel.port }}
+      targetPort: {{ $w.tunnel.port }}
+    {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -80,6 +85,10 @@ spec:
             - name: metrics
               containerPort: {{ $w.metrics.port }}
             {{- end }}
+            {{- if $w.tunnel.enabled }}
+            - name: tunnel
+              containerPort: {{ $w.tunnel.port }}
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: 8787
@@ -96,11 +105,27 @@ spec:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           volumeMounts:
             {{- include "wardby.tmpVolumeMount" . | nindent 12 }}
+            {{- if include "wardby.codingProxy.interceptCaSecret" . }}
+            # A directory mount, never subPath: the kubelet updates it when the Secret is renewed.
+            - name: tunnel-intercept-ca
+              mountPath: /etc/wardby/tunnel-intercept-ca
+              readOnly: true
+            {{- end }}
       volumes:
         {{- include "wardby.tmpVolume" $w | nindent 8 }}
+        {{- with include "wardby.codingProxy.interceptCaSecret" . }}
+        - name: tunnel-intercept-ca
+          secret:
+            secretName: {{ . }}
+            items:
+              - key: tls.crt
+                path: ca.crt
+              - key: tls.key
+                path: ca.key
+        {{- end }}
 ---
-# Admits coding-run pods on the proxy port and on the deny port, the enforcement witness,
-# and the metrics scrapers when metrics are on.
+# Admits coding-run pods on the proxy port, on the deny port (the enforcement witness) and, when the
+# tunnel is on, on the tunnel port, and the metrics scrapers when metrics are on.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -125,6 +150,10 @@ spec:
           protocol: TCP
         - port: 8788
           protocol: TCP
+        {{- if $w.tunnel.enabled }}
+        - port: {{ $w.tunnel.port }}
+          protocol: TCP
+        {{- end }}
     {{- if $w.metrics.enabled }}
     {{- with $w.metrics.ingressFrom }}
     # The metrics scrapers.
@@ -138,6 +167,27 @@ spec:
   egress:
     {{- include "wardby.kubeDnsEgress" . | nindent 4 }}
     {{- include "wardby.publicHttpsEgress" . | nindent 4 }}
+    {{- /* A gcp intercept rule's token comes from the metadata server (the proxy's own Workload Identity): admit it
+    here, not only through the Cloud SQL proxy's rule, which is there only while that proxy is enabled. */}}
+    {{- $gcpRule := false }}
+    {{- if .Values.codingProxy.tunnel.enabled }}
+    {{- range .Values.codingProxy.tunnel.intercept.rules }}
+    {{- if eq (toString .scheme) "gcp" }}{{ $gcpRule = true }}{{ end }}
+    {{- end }}
+    {{- end }}
+    {{- if $gcpRule }}
+    {{- $md := .Values.database.cloudSqlProxy.metadataServer }}
+    - to:
+        {{- range $md.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range $md.ports }}
+        - port: {{ int . }}
+          protocol: TCP
+        {{- end }}
+    {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

@@ -51,6 +51,8 @@ interface SessionRow {
   budgetUsd: unknown;
   status: string;
   registryTokenHash: string | null;
+  /** Selected by findSessionByTunnelTokenHash only. */
+  tunnelTokenHash?: string | null;
   budgetExhaustedAt?: Date | null;
   upstreamFailure?: string | null;
   requestRefusal?: string | null;
@@ -118,6 +120,7 @@ function sessionFromRow(row: SessionRow): ProxySession {
     budgetUsd: Number(row.budgetUsd),
     status: row.status as ProxySessionStatus,
     registryTokenHash: row.registryTokenHash,
+    ...(row.tunnelTokenHash !== undefined ? { tunnelTokenHash: row.tunnelTokenHash } : {}),
     budgetExhaustedAt: row.budgetExhaustedAt ?? null,
     upstreamFailure: row.upstreamFailure ?? null,
     requestRefusal: row.requestRefusal ?? null,
@@ -232,11 +235,11 @@ export class PrismaProxyLedger implements ProxyLedger {
     await this.db.$executeRaw`
       INSERT INTO "CodingProxySession"
         ("id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt",
-         "budgetUsd", "status", "registryTokenHash", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "runStepsLevel",
+         "budgetUsd", "status", "registryTokenHash", "tunnelTokenHash", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "runStepsLevel",
          "workflow", "skills", "createdAt", "updatedAt")
       VALUES
         (${input.id}, ${input.runId}, ${input.capabilityHash}, ${input.credentialRef}, ${input.protocol}, ${models}::jsonb,
-         ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash},
+         ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash}, ${input.tunnelTokenHash ?? null},
          ${terms?.version ?? null}, ${terms ? JSON.stringify(terms.entry) : null}::jsonb,
          ${input.mcpTools ? JSON.stringify(input.mcpTools) : null}::jsonb, ${input.mcpTokenHash ?? null},
          ${input.runStepsLevel ?? null}::"RunStepsLevel",
@@ -260,6 +263,23 @@ export class PrismaProxyLedger implements ProxyLedger {
       FROM "CodingProxySession" WHERE "mcpTokenHash" = ${mcpTokenHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : undefined;
+  }
+
+  async findSessionByTunnelTokenHash(tunnelTokenHash: string): Promise<ProxySession | undefined> {
+    const rows = await this.db.$queryRaw<SessionRow[]>`
+      SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
+             "tunnelTokenHash", "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel"
+      FROM "CodingProxySession" WHERE "tunnelTokenHash" = ${tunnelTokenHash}
+    `;
+    return rows[0] ? sessionFromRow(rows[0]) : undefined;
+  }
+
+  async sessionActiveForRun(runId: string): Promise<boolean> {
+    const rows = await this.db.$queryRaw<Array<{ active: boolean }>>`
+      SELECT TRUE AS "active" FROM "CodingProxySession"
+      WHERE "runId" = ${runId} AND "status" = 'active' AND "deadlineAt" > CURRENT_TIMESTAMP
+    `;
+    return rows.length > 0;
   }
 
   async reserve(input: ReserveProxyRequestInput): Promise<ReserveProxyRequestResult> {

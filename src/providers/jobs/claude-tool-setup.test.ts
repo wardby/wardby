@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
+import { deriveTunnelToken } from "../../coding/tunnel-token.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { BUILTIN_CODING_SERVICES } from "../../coding/services/builtins.js";
 import {
@@ -140,6 +141,33 @@ describe("claudeToolSetup", () => {
     const raw = claudeToolSetup(spec, CAPABILITY);
     expect(raw).not.toContain(CAPABILITY);
     expect(raw).toContain(deriveRegistryToken(CAPABILITY));
+  });
+
+  it("adds the proxy variables, with the tunnel-only token, only when the tunnel is on", () => {
+    const on = claudeToolSetup({ ...spec, tunnelPort: 8789 }, CAPABILITY);
+    const url = `http://run:${deriveTunnelToken(CAPABILITY)}@wardby-proxy:8789`;
+    // The tool runner reads it back as the env it gives every command.
+    expect(parseToolSetup(on).env).toMatchObject({ HTTPS_PROXY: url, https_proxy: url, HTTP_PROXY: url });
+    expect(parseToolSetup(on).env.NO_PROXY).toContain("wardby-proxy");
+    expect(on).not.toContain(CAPABILITY);
+    const off = parseToolSetup(claudeToolSetup(spec, CAPABILITY)).env;
+    for (const name of ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"]) {
+      expect(off).not.toHaveProperty(name);
+    }
+  });
+
+  it("places the tunnel's CA certificate and the trust variables only with the tunnel and a certificate", () => {
+    const caCert = "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n";
+    const path = "/workspace/.cache/tunnel/ca.crt";
+    const on = parseToolSetup(claudeToolSetup({ ...spec, tunnelPort: 8789, tunnelCaCert: caCert }, CAPABILITY));
+    expect(on.files).toContainEqual({ path, content: caCert, mode: 0o644 });
+    expect(on.env).toMatchObject({ SSL_CERT_FILE: path, NODE_EXTRA_CA_CERTS: path, PIP_CERT: path });
+    for (const other of [{ ...spec, tunnelPort: 8789 }, { ...spec, tunnelCaCert: caCert }, spec]) {
+      const setup = parseToolSetup(claudeToolSetup(other, CAPABILITY));
+      expect(setup.files.map((file) => file.path)).not.toContain(path);
+      for (const name of ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "PIP_CERT"])
+        expect(setup.env).not.toHaveProperty(name);
+    }
   });
 
   it("adds each service's test variables", () => {

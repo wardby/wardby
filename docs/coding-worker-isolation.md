@@ -54,6 +54,11 @@ runner gets a fixed 0.25 CPU, a third of the run's memory (clamped between
 run needs `cpus ≥ 0.35`, `memoryMb ≥ 256`, and `pids ≥ 96` (the default
 `CODING_PIDS` is 128).
 
+When the proxy's CONNECT tunnel is on, the run's commands also get proxy
+variables carrying a third token, derived from the capability and good only on
+the tunnel port. It gives them the allowlisted HTTPS hosts and nothing the run
+network did not already allow; see [CONNECT tunnel for coding runs](coding-proxy-tunnel.md).
+
 **Upgrading with Claude Code runs in flight (Docker launcher).** Let in-flight
 Claude Code runs finish, or stop them, before upgrading the control plane. A
 run launched by a different version fails the new version's container

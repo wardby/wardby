@@ -362,6 +362,60 @@ codingProxy:
     # -- NetworkPolicy peers allowed to scrape the metrics port, e.g. `[{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}]`.
     # Empty admits no one: the default-deny policy keeps the port closed.
     ingressFrom: []
+  tunnel:
+    # -- Serve a CONNECT tunnel on `port` (sets `CODING_TUNNEL_PORT` and `CODING_TUNNEL_ALLOWED_HOSTS` on the proxy), add the
+    # port to the container and the Service, and to the NetworkPolicy rule that admits coding-run pods, and give the control
+    # plane the port and hosts so it points each run at the tunnel. Needs `allowedHosts`.
+    enabled: false
+    # -- Port of the tunnel. It must differ from the proxy port (8787) and the deny port (8788).
+    port: 8789
+    # -- Hostnames a run may tunnel to, on port 443 only. No IP addresses, wildcards or ports.
+    allowedHosts: []
+    # -- Open tunnels per run (`CODING_TUNNEL_MAX_CONNECTIONS`). Unset uses the proxy's default.
+    maxConnections: null
+    # -- Bytes per run, both directions (`CODING_TUNNEL_MAX_BYTES`). Unset uses the proxy's default.
+    maxBytes: null
+    # -- Milliseconds a tunnel may sit idle (`CODING_TUNNEL_IDLE_MS`). Unset uses the proxy's default.
+    idleMs: null
+    # -- Milliseconds a tunnel may stay open (`CODING_TUNNEL_MAX_DURATION_MS`). Unset uses the proxy's default.
+    maxDurationMs: null
+    # TLS interception for the few allowed hosts that need a credential the run must not hold: the proxy decrypts their
+    # traffic, drops the run's own `Authorization` and attaches the credential. Every other host stays a blind tunnel.
+    intercept:
+      # -- One entry per intercepted host: `{host, scheme: bearer|basic, credential: env:NAME}`, and for basic exactly one of
+      # `username` or `usernameCredential: env:NAME`; or `{host, scheme: gcp}`, which attaches an access token for the proxy's
+      # own Google service account (Workload Identity, from the metadata server, refreshed before it expires) and admits the
+      # metadata server (`database.cloudSqlProxy.metadataServer`) in the proxy's NetworkPolicy.
+      # Each `host` must also be in `allowedHosts`. `NAME` is an environment variable on the proxy, normally from
+      # `codingProxy.envFromSecret` or `extraEnv`. Empty leaves every tunnel blind.
+      # The proxy also needs the CA: set `CODING_TUNNEL_INTERCEPT_CA_CERT` and `CODING_TUNNEL_INTERCEPT_CA_KEY` (PEM text, for
+      # example from `secretKeyRef`s in `extraEnv`; `wardby coding intercept-ca` writes the files to copy). Without them the proxy refuses to start. A name constraint on the
+      # certificate must be critical and permit the `rules` hosts; a certificate with none is accepted, with a warning in the
+      # proxy's log (a leaked key could then sign for any host). To make runs trust the CA, set
+      # `CODING_TUNNEL_TRUST_CA_CERT` (the certificate alone, never the key) in `controlPlane.extraEnv`.
+      # Or set `caSecret` instead.
+      rules: []
+      # -- The name of a `kubernetes.io/tls` Secret holding the CA (`tls.crt`, `tls.key`), normally a cert-manager
+      # `Certificate`'s. Set, the chart mounts it on the proxy (certificate and key) and on the control plane (the
+      # certificate alone) and sets the `_FILE` variables; leave the PEM variables out of `extraEnv`. Mounted files follow
+      # the Secret, so a renewed CA reaches the proxy and new runs without a restart. Empty uses the `extraEnv` variables.
+      caSecret: ""
+      # Or have the chart issue the CA from cert-manager (which must be installed, with name constraints supported):
+      # a self-signed ECDSA P-256 CA whose critical name constraint permits exactly the `rules` hosts, mounted as
+      # `caSecret` would be (Secret `wardby-coding-proxy-intercept-ca`). Its common name ends in a hash of the rest of
+      # the Certificate's spec, so adding or removing a rule host (or changing the settings below) has cert-manager
+      # reissue the CA into the same Secret, which it does not do for a changed name constraint alone. A run already
+      # going trusts only the old CA, so it loses its intercepted connections when that happens.
+      certManager:
+        # -- Issue the CA with cert-manager. Cannot be combined with `caSecret`.
+        enabled: false
+        # -- Lifetime of the CA.
+        duration: 2160h
+        # -- How long before expiry cert-manager renews it.
+        renewBefore: 720h
+        # -- `Always` gives each renewal a new key (a run already going then loses its intercepted connections);
+        # `Never` keeps the key, so runs are unaffected by a renewal but the key never rotates.
+        rotationPolicy: Always
   # -- Annotations added to this workload's pods, over `podAnnotations`. Changing them restarts the pods.
   podAnnotations: {}
   nodeSelector: {}

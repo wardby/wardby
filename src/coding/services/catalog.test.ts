@@ -4,6 +4,8 @@ import { BUILTIN_CODING_SERVICES, MYSQL_SUBSTRATE_SCRIPT, POSTGRES_SUBSTRATE_SCR
 import {
   CodingServiceDefinitionSchema,
   DEFAULT_SETUP_TIMEOUT_SECONDS,
+  DOCKER_CLIENT_ENV_NAMES,
+  DOCKER_TEST_ENV,
   StoredCodingServicesSchema,
   catalogEntryFromRow,
   isSetupService,
@@ -124,6 +126,8 @@ describe("CodingServiceDefinitionSchema", () => {
     ["an image tag instead of a digest", { image: "postgres:16" }],
     ["the reserved external kind", { kind: "external" }],
     ["a reserved test variable", { testEnv: { PATH: "/tmp" } }],
+    ["a test variable that points the docker CLI elsewhere", { testEnv: { DOCKER_HOST: "tcp://10.0.0.1:2375" } }],
+    ["a docker context", { testEnv: { DOCKER_CONTEXT: "remote" } }],
     ["a relative data path", { dataPath: "var/lib/postgresql/data" }],
     ["a data path under /proc", { dataPath: "/proc/data" }],
     ["a traversal component", { dataPath: "/var/../etc" }],
@@ -286,6 +290,23 @@ describe("CodingServiceDefinitionSchema for a toolchain", () => {
 
   it("refuses a tag instead of a digest", () => {
     expect(CodingServiceDefinitionSchema.safeParse({ ...PYTHON_DEV, image: "python:3.13" }).success).toBe(false);
+  });
+});
+
+describe("docker CLI variables", () => {
+  it("are refused in a toolchain's testEnv too", () => {
+    for (const name of DOCKER_CLIENT_ENV_NAMES) {
+      expect(CodingServiceDefinitionSchema.safeParse({ ...PYTHON_DEV, testEnv: { [name]: "x" } }).success).toBe(false);
+    }
+  });
+
+  it("stay readable in an entry already stored, so a recorded run still parses", () => {
+    const stored = { ...resolvedFromDefinition(postgres16), testEnv: { DOCKER_HOST: "unix:///elsewhere.sock" } };
+    expect(parseStoredServices([stored])).toEqual([stored]);
+  });
+
+  it("leave the docker service's own DOCKER_HOST, which wardby sets", () => {
+    expect(DOCKER_TEST_ENV).toEqual({ DOCKER_HOST: "unix:///wardby/docker/docker.sock" });
   });
 });
 

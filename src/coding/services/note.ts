@@ -19,7 +19,7 @@ export const DOCKER_SERVICE_NOTE = [
   "Docker: the `docker` CLI in your shell reaches a rootless Docker daemon for this run (DOCKER_HOST is set).",
   "Use host networking only: `docker build --network=host`, `docker run --network=host`, and `network_mode: host` in compose files; the default network has no DNS.",
   "Containers you start cannot reach the run's other services on 127.0.0.1.",
-  "Images cannot be pulled from any registry, so build only images that need no base image pulled. Pushing images is not possible.",
+  "The daemon pulls and pushes through the run's HTTPS proxy, so only the registries the deployment allows are reachable; a short name such as `alpine` means Docker Hub, which works only if the deployment allows it, and a refused host fails the pull. `docker build` RUN steps do not get the proxy on their own: pass `--build-arg HTTPS_PROXY --build-arg HTTP_PROXY` when a step downloads.",
 ].join(" ");
 
 const variablesOf = (entry: NoteEntry): string =>

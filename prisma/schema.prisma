@@ -1089,6 +1089,9 @@ model CodingProxySession {
   /// Hash of the derived registry-only token (see deriveRegistryToken); the
   /// token itself is never persisted.
   registryTokenHash         String?                  @unique
+  /// Hash of the derived tunnel-only token (see deriveTunnelToken) that opens CONNECT tunnels on the
+  /// proxy's tunnel port; the token itself is never persisted. Null on sessions from before the tunnel.
+  tunnelTokenHash           String?                  @unique
   /// Set the first time the proxy refuses a request of this session for
   /// budget; lets the executor report the run as out of budget.
   budgetExhaustedAt         DateTime?

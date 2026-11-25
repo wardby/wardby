@@ -94,3 +94,238 @@ tests:
           path: spec.template.spec.containers[0].env
           content: { name: METRICS_BIND, value: 127.0.0.1:9464 }
         documentIndex: 1
+  - it: serves no tunnel by default
+    asserts:
+      - notContains:
+          path: spec.ports
+          content: { name: tunnel, port: 8789, targetPort: 8789 }
+        documentIndex: 0
+      - notContains:
+          path: spec.template.spec.containers[0].ports
+          content: { name: tunnel, containerPort: 8789 }
+        documentIndex: 1
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_PORT, value: "8789" }
+        documentIndex: 1
+      - lengthEqual:
+          path: spec.ingress[0].ports
+          count: 2
+        documentIndex: 2
+  - it: serves the tunnel on its own port when enabled
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [registry.example.com, ghcr.io]
+    asserts:
+      - equal:
+          path: spec.ports[2]
+          value: { name: tunnel, port: 8789, targetPort: 8789 }
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.containers[0].ports[2]
+          value: { name: tunnel, containerPort: 8789 }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_PORT, value: "8789" }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_ALLOWED_HOSTS, value: "registry.example.com,ghcr.io" }
+        documentIndex: 1
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_MAX_CONNECTIONS, value: "16" }
+        documentIndex: 1
+  - it: admits coding-run pods on the tunnel port, and nothing else
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.port: 8800
+      codingProxy.tunnel.allowedHosts: [ghcr.io]
+    asserts:
+      - equal:
+          path: spec.ingress[0]
+          value:
+            from:
+              - podSelector:
+                  matchLabels:
+                    wardby.io/component: coding-run
+            ports:
+              - port: 8787
+                protocol: TCP
+              - port: 8788
+                protocol: TCP
+              - port: 8800
+                protocol: TCP
+        documentIndex: 2
+      - lengthEqual:
+          path: spec.ingress
+          count: 1
+        documentIndex: 2
+  - it: admits the metadata server for a gcp intercept rule, and not otherwise
+    set:
+      database.cloudSqlProxy.enabled: false
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [us-docker.pkg.dev, ghcr.io]
+      codingProxy.tunnel.intercept.caSecret: ca
+      codingProxy.tunnel.intercept.rules:
+        - { host: us-docker.pkg.dev, scheme: gcp }
+    asserts:
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock: { cidr: 169.254.169.254/32 }
+              - ipBlock: { cidr: 169.254.169.252/32 }
+            ports:
+              - { port: 80, protocol: TCP }
+              - { port: 988, protocol: TCP }
+        documentIndex: 2
+  - it: leaves the metadata server out with only bearer and basic rules
+    set:
+      database.cloudSqlProxy.enabled: false
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [ghcr.io]
+      codingProxy.tunnel.intercept.caSecret: ca
+      codingProxy.tunnel.intercept.rules:
+        - { host: ghcr.io, scheme: bearer, credential: env:GHCR_TOKEN }
+    asserts:
+      - notContains:
+          path: spec.egress
+          content:
+            to:
+              - ipBlock: { cidr: 169.254.169.254/32 }
+              - ipBlock: { cidr: 169.254.169.252/32 }
+            ports:
+              - { port: 80, protocol: TCP }
+              - { port: 988, protocol: TCP }
+        documentIndex: 2
+  - it: passes the tunnel limits through when set
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [ghcr.io]
+      codingProxy.tunnel.maxConnections: 4
+      codingProxy.tunnel.maxBytes: 1073741824
+      codingProxy.tunnel.idleMs: 30000
+      codingProxy.tunnel.maxDurationMs: 600000
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_MAX_CONNECTIONS, value: "4" }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_MAX_BYTES, value: "1073741824" }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_IDLE_MS, value: "30000" }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_MAX_DURATION_MS, value: "600000" }
+        documentIndex: 1
+  - it: keeps the metrics port ahead of the tunnel port when both are on
+    set:
+      codingProxy.metrics.enabled: true
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [ghcr.io]
+    asserts:
+      - equal:
+          path: spec.ports[2]
+          value: { name: metrics, port: 9464, targetPort: 9464 }
+        documentIndex: 0
+      - equal:
+          path: spec.ports[3]
+          value: { name: tunnel, port: 8789, targetPort: 8789 }
+        documentIndex: 0
+  - it: refuses to render an enabled tunnel with no allowed hosts
+    set:
+      codingProxy.tunnel.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true
+  - it: leaves every tunnel blind when no interception rule is set
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [ghcr.io]
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 1
+        documentIndex: 1
+  - it: gives the proxy the interception rules, and leaves the CA to its environment
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [ghcr.io, registry.example.com]
+      codingProxy.tunnel.intercept.rules:
+        - { host: registry.example.com, scheme: bearer, credential: "env:REGISTRY_TOKEN" }
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_TUNNEL_INTERCEPT_RULES
+            value: '[{"credential":"env:REGISTRY_TOKEN","host":"registry.example.com","scheme":"bearer"}]'
+        documentIndex: 1
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 1
+        documentIndex: 1
+      - lengthEqual:
+          path: spec.template.spec.containers[0].volumeMounts
+          count: 1
+        documentIndex: 1
+  - it: mounts the CA from caSecret as a directory the kubelet updates on renewal
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [registry.example.com]
+      codingProxy.tunnel.intercept.rules:
+        - { host: registry.example.com, scheme: bearer, credential: "env:REGISTRY_TOKEN" }
+      codingProxy.tunnel.intercept.caSecret: wardby-tunnel-ca
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_INTERCEPT_CA_CERT_FILE, value: /etc/wardby/tunnel-intercept-ca/ca.crt }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_INTERCEPT_CA_KEY_FILE, value: /etc/wardby/tunnel-intercept-ca/ca.key }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: tunnel-intercept-ca, mountPath: /etc/wardby/tunnel-intercept-ca, readOnly: true }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: tunnel-intercept-ca
+            secret:
+              secretName: wardby-tunnel-ca
+              items:
+                - { key: tls.crt, path: ca.crt }
+                - { key: tls.key, path: ca.key }
+        documentIndex: 1
+  - it: takes the CA from the proxy's extraEnv, not from the chart
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [registry.example.com]
+      codingProxy.tunnel.intercept.rules:
+        - { host: registry.example.com, scheme: bearer, credential: "env:REGISTRY_TOKEN" }
+      codingProxy.extraEnv:
+        - name: CODING_TUNNEL_INTERCEPT_CA_CERT
+          valueFrom: { secretKeyRef: { name: wardby-ca-crt, key: ca-crt } }
+        - name: CODING_TUNNEL_INTERCEPT_CA_KEY
+          valueFrom: { secretKeyRef: { name: wardby-ca-key, key: ca-key } }
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_TUNNEL_INTERCEPT_CA_CERT
+            valueFrom: { secretKeyRef: { name: wardby-ca-crt, key: ca-crt } }
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CODING_TUNNEL_INTERCEPT_CA_KEY
+            valueFrom: { secretKeyRef: { name: wardby-ca-key, key: ca-key } }
+        documentIndex: 1

@@ -39,6 +39,20 @@ export const DOCKER_SOCKET_PATH = `${DOCKER_SOCKET_DIR}/docker.sock`;
 export const DOCKER_TEST_ENV: Readonly<Record<string, string>> = Object.freeze({
   DOCKER_HOST: `unix://${DOCKER_SOCKET_PATH}`,
 });
+/**
+ * The variables that point the docker CLI at a daemon, or change how it connects. Wardby sets the one
+ * that matters (DOCKER_HOST, from a docker service); no other catalog entry may set any of them in its
+ * testEnv, so the agent's docker CLI only ever reaches the run's own docker service. Checked when an
+ * entry is defined, not on stored entries, so a run already recorded still reads.
+ */
+export const DOCKER_CLIENT_ENV_NAMES: ReadonlySet<string> = new Set([
+  "DOCKER_HOST",
+  "DOCKER_CONTEXT",
+  "DOCKER_CONFIG",
+  "DOCKER_TLS",
+  "DOCKER_TLS_VERIFY",
+  "DOCKER_CERT_PATH",
+]);
 /** How many service names one agent may be allowed. */
 export const MAX_AGENT_SERVICES = 16;
 export const MAX_SERVICE_ENV = 32;
@@ -310,6 +324,19 @@ function checkReservedMounts(where: string) {
 const checkToolchain = checkReservedMounts("a toolchain");
 const checkSetup = checkReservedMounts("a setup job");
 
+/** A new entry's testEnv leaves the docker CLI's connection to wardby (DOCKER_CLIENT_ENV_NAMES). */
+function checkDockerClientEnv(value: { testEnv: Record<string, string> }, ctx: z.RefinementCtx): void {
+  for (const name of Object.keys(value.testEnv)) {
+    if (DOCKER_CLIENT_ENV_NAMES.has(name)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["testEnv", name],
+        message: "is set by wardby: the docker CLI reaches only the run's docker service",
+      });
+    }
+  }
+}
+
 /** An entry without a kind (every snapshot and row from before toolchains) is a sidecar. */
 function defaultKind(value: unknown): unknown {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
@@ -346,8 +373,8 @@ export const ResolvedCodingServiceSchema = z.preprocess(
 export const CodingServiceDefinitionSchema = z.preprocess(
   defaultKind,
   z.discriminatedUnion("kind", [
-    z.object(sidecarFields).strict().superRefine(checkSidecar),
-    z.object(toolchainFields).strict().superRefine(checkToolchain),
+    z.object(sidecarFields).strict().superRefine(checkSidecar).superRefine(checkDockerClientEnv),
+    z.object(toolchainFields).strict().superRefine(checkToolchain).superRefine(checkDockerClientEnv),
     z.object(dockerFields).strict(),
     z.object(setupFields).strict().superRefine(checkSetup),
   ]),

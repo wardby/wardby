@@ -175,16 +175,24 @@ images it builds. Its shells receive
   mounts the socket there and supplies the CLI (`DOCKER_HOST`,
   `DOCKER_CONFIG=/opt/wardby-cmd/docker`, appended to `PATH`); the team image
   needs no Docker CLI.
-- **Pulls.** None yet: the daemon points its registry mirror at the coding
-  proxy, which does not serve container images in this release, and the run's
-  network policy blocks every registry. `docker build` and `docker run` of an
-  image the run has not built itself fail to pull. No pushes.
+- **Pulls and pushes.** Through the run's CONNECT tunnel, like any HTTPS
+  client in the run: the daemon gets the run's `HTTPS_PROXY`, `HTTP_PROXY` and
+  `NO_PROXY` from the run's Secret, and the interception CA when one is set, so
+  an intercepted registry gets its credential from the proxy. Only the hosts in
+  `CODING_TUNNEL_ALLOWED_HOSTS` are reachable; with the tunnel off, none. No
+  registry mirror. `RUN` steps get the proxy only with
+  `--build-arg HTTPS_PROXY --build-arg HTTP_PROXY`.
+- **Only this daemon.** The agent's `docker` CLI reaches only this socket: no
+  other catalog entry may set `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`,
+  `DOCKER_TLS`, `DOCKER_TLS_VERIFY` or `DOCKER_CERT_PATH` in its `testEnv`.
 - **Networking.** Host networking only: `docker build --network=host`,
   `docker run --network=host`, `network_mode: host` in compose. The default
   network has no DNS. Containers it starts cannot reach the run's other
   services on `127.0.0.1`.
 - **Security.** The daemon is rootless (root inside its containers is the
-  run's unprivileged user outside) and gets no secret value. Its socket gives
+  run's unprivileged user outside). With the tunnel on, its one secret value is
+  the run's tunnel-only token in its proxy URL, which the agent's shells hold
+  too; never the capability. Its socket gives
   the agent's shell control of that daemon inside the run's gVisor sandbox;
   gVisor stays the boundary to the node.
 

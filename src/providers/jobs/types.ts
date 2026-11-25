@@ -81,6 +81,18 @@ export interface JobSpec {
    */
   mcpTools?: true;
   /**
+   * The coding proxy's CONNECT tunnel port, set only when the tunnel is on and the launcher is Docker
+   * or Kubernetes; absent otherwise. A Kubernetes run's NetworkPolicy then also admits this port on the
+   * proxy pod, and Claude's tool runner gets the proxy variables in its setup. A port, never a token.
+   */
+  tunnelPort?: number;
+  /**
+   * With tunnelPort only: the public CA certificate (PEM) the proxy intercepts TLS with, when the operator
+   * set CODING_TUNNEL_TRUST_CA_CERT_FILE. Claude's tool runner gets it as a setup file with the trust
+   * variables. Never a key.
+   */
+  tunnelCaCert?: string;
+  /**
    * Claude Code only: run_command's default and longest per-command time limit, in ms, delivered to
    * the tool runner in its setup (claude-tool-setup.ts). Already capped at timeoutSec (claudeCommandTimeouts).
    */

@@ -1,6 +1,9 @@
 import type { PrismaClient } from "#prisma";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CODING_PROXY_ALIAS, CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../jobs/docker-isolation.js";
 import { logger } from "../../core/logger.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
@@ -17,6 +20,9 @@ import {
   substrateRunLayoutLookup,
 } from "./runtime.js";
 import type { CodingProxyServerHandle } from "./server.js";
+import { LedgerTunnelAuthenticator } from "./tunnel-auth.js";
+import { generateInterceptCa } from "./tunnel-ca.js";
+import type { Interceptor } from "./tunnel-intercept.js";
 import type { ProxyAuditEvent } from "./types.js";
 
 // Records the options every CodingProxy is constructed with, so a test can see
@@ -844,6 +850,174 @@ describe("configured coding proxy runtime: run steps", () => {
     await expect(result).rejects.toThrow("WARDBY_RUN_STEPS_URL");
     await expect(result).rejects.not.toThrow("fake-secret-pw");
     expect(startServer).not.toHaveBeenCalled();
+  });
+
+  it("an invalid CODING_TUNNEL_* setting stops start-up before anything listens, without echoing it", async () => {
+    const startServer = vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} }));
+    const secret = "fake-secret-host-value";
+    for (const env of [
+      { CODING_TUNNEL_PORT: "8789", CODING_TUNNEL_ALLOWED_HOSTS: `https://u:${secret}@h.example.com` },
+      { CODING_TUNNEL_PORT: "8789" },
+      { CODING_TUNNEL_ALLOWED_HOSTS: "ghcr.io" },
+    ]) {
+      const result = startConfiguredCodingProxy({ db: {} as PrismaClient, env, startServer, startDenyPort });
+      await expect(result).rejects.toThrow("CODING_TUNNEL_");
+      await expect(result).rejects.not.toThrow(secret);
+    }
+    expect(startServer).not.toHaveBeenCalled();
+  });
+
+  describe("CONNECT tunnel", () => {
+    const tunnelEnv = { CODING_TUNNEL_PORT: "8789", CODING_TUNNEL_ALLOWED_HOSTS: "registry.example.com" };
+    const authenticator = { authenticate: vi.fn(), isActive: vi.fn() };
+
+    it("is not started when CODING_TUNNEL_PORT is unset", async () => {
+      const startTunnel = vi.fn();
+      const handle = await startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: {},
+        startServer: vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} })),
+        startDenyPort,
+        startTunnel,
+      });
+      await handle.close();
+      expect(startTunnel).not.toHaveBeenCalled();
+    });
+
+    it("authenticates against the session ledger unless told otherwise", async () => {
+      const startTunnel = vi.fn(async () => ({ port: 8789, close: async () => {} }));
+      const handle = await startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: tunnelEnv,
+        startServer: vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} })),
+        startDenyPort,
+        startTunnel,
+      });
+      await handle.close();
+      expect(startTunnel).toHaveBeenCalledWith(
+        expect.objectContaining({ authenticator: expect.any(LedgerTunnelAuthenticator) }),
+      );
+    });
+
+    it("starts the tunnel on its own port with the configured settings, and closes it first", async () => {
+      const order: string[] = [];
+      const startTunnel = vi.fn(async () => ({
+        port: 8789,
+        close: async () => void order.push("tunnel"),
+      }));
+      const audit = vi.fn();
+      const onRequest = vi.fn();
+      const handle = await startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: { ...tunnelEnv, CODING_TUNNEL_MAX_CONNECTIONS: "3" },
+        startServer: vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => void order.push("server") })),
+        startDenyPort: vi.fn(async () => ({
+          port: CODING_PROXY_DENY_PORT,
+          close: async () => void order.push("deny"),
+        })),
+        tunnelAuthenticator: authenticator,
+        tunnelAudit: audit,
+        onRequest,
+        startTunnel,
+      });
+      expect(startTunnel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          host: "0.0.0.0",
+          config: expect.objectContaining({
+            port: 8789,
+            allowedHosts: ["registry.example.com"],
+            maxConnections: 3,
+          }),
+          authenticator,
+          audit,
+          onRequest,
+        }),
+      );
+      await handle.close();
+      expect(order).toEqual(["tunnel", "deny", "server"]);
+    });
+
+    it("stops the proxy it already started when the tunnel cannot listen", async () => {
+      const closed: string[] = [];
+      await expect(
+        startConfiguredCodingProxy({
+          db: {} as PrismaClient,
+          env: tunnelEnv,
+          startServer: vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => void closed.push("server") })),
+          startDenyPort: vi.fn(async () => ({
+            port: CODING_PROXY_DENY_PORT,
+            close: async () => void closed.push("deny"),
+          })),
+          tunnelAuthenticator: authenticator,
+          startTunnel: vi.fn(async () => {
+            throw new Error("listen EADDRINUSE");
+          }),
+        }),
+      ).rejects.toThrow("EADDRINUSE");
+      expect(closed).toEqual(["deny", "server"]);
+    });
+
+    describe("TLS interception", () => {
+      let directory: string;
+      let interceptEnv: Record<string, string>;
+
+      beforeEach(async () => {
+        directory = await mkdtemp(join(tmpdir(), "runtime-intercept-"));
+        const ca = await generateInterceptCa({ hosts: ["registry.example.com"] });
+        await writeFile(join(directory, "ca.crt"), ca.certificatePem);
+        await writeFile(join(directory, "ca.key"), ca.privateKeyPem);
+        interceptEnv = {
+          ...tunnelEnv,
+          CODING_TUNNEL_INTERCEPT_RULES: JSON.stringify([
+            { host: "registry.example.com", scheme: "bearer", credential: "env:FAKE_REGISTRY_CREDENTIAL" },
+          ]),
+          CODING_TUNNEL_INTERCEPT_CA_CERT_FILE: join(directory, "ca.crt"),
+          CODING_TUNNEL_INTERCEPT_CA_KEY_FILE: join(directory, "ca.key"),
+        };
+      });
+
+      afterEach(async () => {
+        await rm(directory, { recursive: true, force: true });
+      });
+
+      it("gives the tunnel an interceptor for the rules' hosts", async () => {
+        const startTunnel = vi.fn(async () => ({ port: 8789, close: async () => {} }));
+        const handle = await startConfiguredCodingProxy({
+          db: {} as PrismaClient,
+          env: { ...interceptEnv, FAKE_REGISTRY_CREDENTIAL: "fake-credential-value" },
+          startServer: vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} })),
+          startDenyPort,
+          tunnelAuthenticator: authenticator,
+          startTunnel,
+        });
+        await handle.close();
+        const [{ interceptor }] = startTunnel.mock.calls[0] as unknown as [{ interceptor?: Interceptor }];
+        expect([...(interceptor?.hosts ?? [])]).toEqual(["registry.example.com"]);
+      });
+
+      it("stops start-up, closing what it started, when a credential is unset, naming only the variable", async () => {
+        const closed: string[] = [];
+        const startTunnel = vi.fn();
+        await expect(
+          startConfiguredCodingProxy({
+            db: {} as PrismaClient,
+            env: interceptEnv,
+            startServer: vi.fn(async () => ({
+              port: CODING_PROXY_PORT,
+              close: async () => void closed.push("server"),
+            })),
+            startDenyPort: vi.fn(async () => ({
+              port: CODING_PROXY_DENY_PORT,
+              close: async () => void closed.push("deny"),
+            })),
+            tunnelAuthenticator: authenticator,
+            startTunnel,
+          }),
+        ).rejects.toThrow("FAKE_REGISTRY_CREDENTIAL, which is not set");
+        expect(startTunnel).not.toHaveBeenCalled();
+        expect(closed).toEqual(["deny", "server"]);
+      });
+    });
   });
 
   it("builds none when WARDBY_RUN_STEPS is off, and builds one at the default and at detail", async () => {
