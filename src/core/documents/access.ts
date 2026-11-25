@@ -71,19 +71,27 @@ async function planAccess(db: DocumentDb, doc: AccessDoc, principalId: string): 
 /**
  * What a native agent may do with a document (#625). Never derived from its owner's reach: only the document
  * it is linked to (write; comment inside a plan set), agent grants (capped at comment), and the planners named
- * in its documentTools.plans (comment). No setting, or a non-native agent, means none; access "read" caps at read.
+ * in its documentTools.plans (comment). Both are live: the link counts only while the document's owner may
+ * execute the agent, and a planner only while the agent's owner may execute it. No setting, or a non-native
+ * agent, means none; access "read" caps at read.
  */
 export async function agentDocumentAccess(db: DocumentDb, doc: AccessDoc, agentId: string): Promise<DocumentAccess> {
-  const agent = await db.agent.findUnique({ where: { id: agentId }, select: { kind: true, documentTools: true } });
+  const agent = await db.agent.findUnique({
+    where: { id: agentId },
+    select: { id: true, ownerId: true, kind: true, documentTools: true },
+  });
   const setting = agent?.kind === "native" ? parseStoredDocumentTools(agent.documentTools) : null;
-  if (!setting) return "none";
+  if (!agent || !setting) return "none";
   const full = await db.document.findUnique({
     where: { id: doc.id },
-    select: { agentId: true, planSet: { select: { agentId: true } } },
+    select: { agentId: true, ownerId: true, planSet: { select: { agentId: true } } },
   });
   if (!full) return "none";
   let best: DocumentAccess = "none";
-  if (full.agentId === agentId) best = full.planSet ? "comment" : "write";
+  // The link is good only while the document's owner still holds execute on the agent (assertNativeWriter's rule).
+  if (full.agentId === agentId && (await canExecute(db, agent, full.ownerId))) {
+    best = full.planSet ? "comment" : "write";
+  }
   const grant = await db.resourceGrant.findUnique({
     where: {
       resourceType_resourceId_granteeKey: {
@@ -101,9 +109,24 @@ export async function agentDocumentAccess(db: DocumentDb, doc: AccessDoc, agentI
         : grant.level;
     best = higher(best, capped);
   }
-  if (full.planSet && setting.plans.includes(full.planSet.agentId)) best = higher(best, "comment");
+  // A named planner counts only while the agent's current owner holds execute on it.
+  if (full.planSet && setting.plans.includes(full.planSet.agentId) && agent.ownerId) {
+    const planner = await db.agent.findUnique({
+      where: { id: full.planSet.agentId },
+      select: { id: true, ownerId: true },
+    });
+    if (planner && (await canExecute(db, planner, agent.ownerId))) best = higher(best, "comment");
+  }
   if (setting.access === "read" && accessRank("document", best) > accessRank("document", "read")) best = "read";
   return best;
+}
+
+async function canExecute(
+  db: DocumentDb,
+  agent: { id: string; ownerId: string | null },
+  principalId: string,
+): Promise<boolean> {
+  return atLeast("agent", await effectiveAccess(db, "agent", agent, principalId), "execute");
 }
 
 async function accessTo(db: DocumentDb, doc: AccessDoc, viewer: Viewer): Promise<DocumentAccess> {

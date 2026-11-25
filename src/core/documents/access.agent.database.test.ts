@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Prisma, type Principal } from "#prisma";
 import { createPrismaClient } from "../db.js";
-import { agentGranteeKey } from "../grants.js";
+import { agentGranteeKey, principalGranteeKey } from "../grants.js";
 import { documentAccess, requireDocumentAccess, type Viewer } from "./access.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("agent viewer: access never comes from the owner (database)", () => {
@@ -113,6 +113,64 @@ describe.skipIf(!process.env.DATABASE_URL)("agent viewer: access never comes fro
     expect(await documentAccess(db, d1, viewer(A))).toBe("none");
     await db.agent.update({ where: { id: A }, data: { documentTools: setting("write", [P]) } });
     expect(await documentAccess(db, d1, viewer(A))).toBe("write");
+  });
+
+  it("a linked document gives nothing once its owner loses execute on the agent", async () => {
+    const q = await db.principal.create({ data: { subject: `agdoc-q-${s}` } });
+    const key = principalGranteeKey(q.id);
+    const execute = () =>
+      db.resourceGrant.create({
+        data: {
+          resourceType: "agent",
+          resourceId: A,
+          granteeKind: "principal",
+          granteePrincipalId: q.id,
+          granteeKey: key,
+          level: "execute",
+        },
+      });
+    await execute();
+    const dq = (await db.document.create({ data: { title: "Q", ownerId: q.id, agentId: A } })).id;
+    try {
+      expect(await documentAccess(db, dq, viewer(A))).toBe("write");
+      await db.resourceGrant.deleteMany({ where: { resourceType: "agent", resourceId: A, granteeKey: key } });
+      expect(await documentAccess(db, dq, viewer(A))).toBe("none");
+      // An agent grant on the document still counts on its own.
+      await grant(A, dq, "comment");
+      expect(await documentAccess(db, dq, viewer(A))).toBe("comment");
+    } finally {
+      await db.resourceGrant.deleteMany({
+        where: { resourceId: { in: [dq, A] }, granteeKey: { in: [key, agentGranteeKey(A)] } },
+      });
+      await db.document.deleteMany({ where: { id: dq } });
+      await db.principal.delete({ where: { id: q.id } });
+    }
+  });
+
+  it("a named planner gives nothing once the agent's owner loses execute on it", async () => {
+    const q = await db.principal.create({ data: { subject: `agdoc-q2-${s}` } });
+    const key = principalGranteeKey(o.id);
+    await db.agent.update({ where: { id: P }, data: { ownerId: q.id } });
+    try {
+      expect(await documentAccess(db, pd, viewer(A))).toBe("none");
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "agent",
+          resourceId: P,
+          granteeKind: "principal",
+          granteePrincipalId: o.id,
+          granteeKey: key,
+          level: "execute",
+        },
+      });
+      expect(await documentAccess(db, pd, viewer(A))).toBe("comment");
+      await db.resourceGrant.deleteMany({ where: { resourceType: "agent", resourceId: P, granteeKey: key } });
+      expect(await documentAccess(db, pd, viewer(A))).toBe("none");
+    } finally {
+      await db.resourceGrant.deleteMany({ where: { resourceType: "agent", resourceId: P } });
+      await db.agent.update({ where: { id: P }, data: { ownerId: o.id } });
+      await db.principal.delete({ where: { id: q.id } });
+    }
   });
 
   it("none is document_not_found, as for people", async () => {
