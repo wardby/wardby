@@ -77,4 +77,5 @@ Native agents do not edit documents yet. See [Documents](documents.md) and [Codi
 ## Related
 
 - [Documents](documents.md)
+- [Documents from native agents](native-agent-documents.md) (a native writer takes sends too)
 - [Review and approve documents](document-review.md) (an approved or archived document takes no agent edit)

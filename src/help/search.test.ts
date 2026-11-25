@@ -718,3 +718,24 @@ describe("coding workflows help (#582)", () => {
     }
   });
 });
+
+describe("native agent documents help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["native agent documents", "doc_create", "documentTools"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("native-agent-documents");
+    }
+  });
+
+  it.each(["document_tools_invalid", "document_agent_grant_level", "document_run_limit"])(
+    "finds the article for %s",
+    async (code) => {
+      const { buildHelpCatalog } = await import("./catalog.js");
+      const { fileURLToPath } = await import("node:url");
+      const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+      expect(searchHelp(catalog, code)[0]?.page.id, code).toBe(`errors/${code.replaceAll("_", "-")}`);
+    },
+  );
+});

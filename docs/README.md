@@ -55,7 +55,7 @@
   events, such as `run_completed`, to send results to Slack, email or any API.
 - [Documents](documents.md) (0.10.0+) covers Markdown documents with anchored
   comments, share links for guests, browser sign-in and sending comment threads
-  to a coding agent.
+  to a coding agent or a native agent (`documentTools`).
 - [Observability](observability.md) covers Prometheus metrics, Grafana, cloud
   collectors, retention, and production ownership.
 - [Release verification](release-verification.md) lists the automated and live

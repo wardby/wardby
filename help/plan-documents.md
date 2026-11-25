@@ -283,4 +283,4 @@ codes): `failed`, `cancelled`, `refused`, `lost`, `budget_exhausted`,
 
 ## Related
 
-[Documents](documents.md) · [Review and approve documents](document-review.md) · [Builder agent](builder-agent.md) · [Agent recipes](agent-recipes.md)
+[Documents](documents.md) · [Review and approve documents](document-review.md) · [Builder agent](builder-agent.md) · [Agent recipes](agent-recipes.md) · [Documents from native agents](native-agent-documents.md)
