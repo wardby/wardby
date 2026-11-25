@@ -184,7 +184,7 @@ function assertOverrideAllowed(
   if (!codingOverrideAllowed(principalId, agent)) {
     throw new McpError(
       403,
-      `Agent "${agent.id}": only its owner can pass a task, baseRef, branch, repository, repositories or workflowArgs, unless the owner allows it (codingProfile.allowWebhookTaskOverride).`,
+      `Agent "${agent.id}": only its owner can pass a task, baseRef, branch, repository, repositories or workflowArgs, unless the owner allows it (codingProfile.allowWebhookTaskOverride). Trigger it without them, or ask the owner. See help article "mcp".`,
     );
   }
 }

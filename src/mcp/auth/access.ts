@@ -5,7 +5,9 @@
  * only through its grants (the migration gives everyone execute).
  *
  * - Below read: 404 with the same text as a missing row, so existence never
- *   leaks. At read or above but below the level required: 403 naming both.
+ *   leaks; except to an admin:view caller, who already sees every agent in
+ *   the deployment-wide listing and gets a 403 saying it has no access. At
+ *   read or above but below the level required: 403 naming both.
  * - The helpers take a `db` argument so a Serializable transaction reads the
  *   grant rows through `tx`; a concurrent revoke then conflicts instead of
  *   racing.
@@ -26,7 +28,7 @@ import {
 } from "../../core/grants.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
-import { isOwnerAll } from "./resource-server.js";
+import { isOwnerAll, scopeAllowed } from "./resource-server.js";
 
 export type AgentLevel = Level<"agent">;
 export type AgentAccess = Access<"agent">;
@@ -35,6 +37,16 @@ type GrantDb = Pick<PrismaClient, "resourceGrant">;
 
 export function agentNotFound(id: string): McpError {
   return new McpError(404, `Agent "${id}" not found.`);
+}
+
+/** For a caller who can see the agent through admin:view but has no grant on it. */
+export function noAgentAccess(id: string): McpError {
+  return new McpError(
+    403,
+    `Agent "${id}": you have no access to this agent (access: none). You can see it in the deployment-wide ` +
+      "listing (admin:view), but reading or running it needs a grant from its owner. See help article " +
+      '"identity-and-access".',
+  );
 }
 
 function describeLevel(level: AgentLevel | "owner"): string {
@@ -63,7 +75,12 @@ export async function assertAgentAccess<A extends AgentRef>(
 ): Promise<{ agent: A; access: AgentAccess }> {
   if (!agent) throw agentNotFound(id);
   const access = await agentAccess(ctx, agent, db);
-  if (!atLeast("agent", access, "read")) throw agentNotFound(id);
+  if (!atLeast("agent", access, "read")) {
+    // An admin:view caller already sees every agent in list_agents { all: true }, so saying it exists
+    // leaks nothing; "not found" would contradict that listing.
+    if (scopeAllowed(ctx, "admin:view")) throw noAgentAccess(id);
+    throw agentNotFound(id);
+  }
   if (!atLeast("agent", access, required)) throw insufficientAgentAccess(id, required, access);
   return { agent, access };
 }

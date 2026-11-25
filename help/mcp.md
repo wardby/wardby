@@ -25,6 +25,11 @@ With the existing `agents:read` scope, clients can also use `search_help` to
 find bundled self-hosted guidance with fuzzy matching and `get_help_article`
 to read a complete article by id. These tools use the same release-bundled,
 offline catalog as `wardby help`; they expose no instance data or credentials.
+The server's instructions to connecting assistants, and the `search_help`
+description, tell them to search the help by tool name, feature or error code
+(every error code has an article, `errors/<code>`; `get_help_article` and `wardby help open` accept
+the code with its underscores, such as `errors/mcp_unavailable`) before guessing how a feature
+works or why a call was refused or a run failed.
 
 Call `get_version` (also `agents:read`) to see which Wardby version the server
 is running. It returns `{ "version": "<semver>" }`, the same value as
@@ -34,7 +39,11 @@ Call `whoami` (also `agents:read`) to see who your connection is: your Wardby
 principal (`id`, `subject`, shown `name`), the identity claims of your token
 (`sub`, and `uid`, `cid`, `client_id` or `azp` when the token has them; with
 Wardby's own sign-in, `uid` is Wardby's internal user id), your
-Wardby roles for this request, the scopes your token grants, and your teams. It
+Wardby roles for this request, the scopes your token grants, your teams, and
+`permissions`: what you can actually do. A call needs both a scope and a role
+that allow it, so a token with admin scopes but only the `viewer` role can't act
+as an admin; `permissions` shows the result. `ownerAll` is true when you act as
+owner of every owner's resources (`owner:all` with the `wardby_owner` role). It
 never returns the token. Use it after a group or role change to check it has
 reached Wardby (roles are read from the token, so a new group needs a new
 token), and compare `principal.subject` with the browser's `/web/whoami` to

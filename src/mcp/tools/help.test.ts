@@ -105,6 +105,11 @@ describe("help MCP tools", () => {
       expect.objectContaining({ id: "deploy-gke", markdown: expect.stringContaining("Cloud SQL") }),
     );
 
+    // An id written with underscores, the way error codes are, finds the hyphenated article.
+    const underscored = await client.callTool({ name: "get_help_article", arguments: { id: "deploy_gke" } });
+    expect(underscored.isError).toBeFalsy();
+    expect(content(underscored)).toEqual(expect.objectContaining({ id: "deploy-gke" }));
+
     const absent = await client.callTool({ name: "get_help_article", arguments: { id: "missing" } });
     expect(absent.isError).toBe(true);
     expect((absent.content as { text: string }[])[0].text).toContain('Help article "missing" not found.');

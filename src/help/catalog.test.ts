@@ -138,6 +138,11 @@ describe("buildHelpCatalog", () => {
     await expect(buildHelpCatalog(root, "latest")).rejects.toThrow('Invalid help release version "latest"');
   });
 
+  it("has no article id with an underscore, so findHelpPage can read underscores as hyphens", async () => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    expect(catalog.pages.map((entry) => entry.id).filter((id) => id.includes("_"))).toEqual([]);
+  });
+
   it("finds the wardby_owner role and the owner:all scope in the checked-in corpus", async () => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
     for (const query of ["wardby_owner", "owner:all"]) {

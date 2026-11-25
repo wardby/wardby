@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HelpCatalog, HelpPage } from "./catalog.js";
-import { searchHelp } from "./search.js";
+import { findHelpPage, searchHelp } from "./search.js";
 
 function page(overrides: Partial<HelpPage>): HelpPage {
   return {
@@ -738,4 +738,24 @@ describe("native agent documents help", () => {
       expect(searchHelp(catalog, code)[0]?.page.id, code).toBe(`errors/${code.replaceAll("_", "-")}`);
     },
   );
+});
+
+describe("findHelpPage", () => {
+  const errors: HelpCatalog = {
+    schemaVersion: 1,
+    pages: [page({ id: "errors/mcp-unavailable" }), page({ id: "deploy-gke" })],
+  };
+
+  it("finds an exact id", () => {
+    expect(findHelpPage(errors, "deploy-gke")?.id).toBe("deploy-gke");
+  });
+
+  it("reads underscores as hyphens, so an error code as written finds its article", () => {
+    expect(findHelpPage(errors, "errors/mcp_unavailable")?.id).toBe("errors/mcp-unavailable");
+  });
+
+  it("finds nothing for an id that matches neither way", () => {
+    expect(findHelpPage(errors, "errors/no_such_code")).toBeUndefined();
+    expect(findHelpPage(errors, "missing")).toBeUndefined();
+  });
 });
