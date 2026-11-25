@@ -293,9 +293,12 @@ nothing and records no event.
   part is refused, nothing changes. `choose_plan_option` does the same over MCP.
   The plan bar's **Pick an option…** starts the same step from any page of the
   plan: it offers the alternatives (documents of one name family, not shared
-  parts such as `screens/`) and opens the chosen option's Review tab after
-  confirming. A step (choose, reject, force approve, reviewers) has the Review
-  tab to itself until it is confirmed or cancelled.
+  parts such as `screens/`) and, after confirming, says under the bar what it
+  rejected and what the plan still waits for. The Review tab shows a next-step card (the one main button for the
+  state: review, choose, or nothing once approved) and, below it, the other
+  actions under Plan and Manage. Each of those (choose, reject, force approve,
+  reviewers, reopen, archive) is a confirm step that has the Review tab to
+  itself until it is confirmed or cancelled.
 - **Reopen**: a writer reopens an approved or rejected document. Reopen for
   review creates a new version (a copy of the current one) and puts it in
   review, and a rejected document goes back into its plan; the earlier version

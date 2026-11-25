@@ -145,4 +145,26 @@ describe("Pick an option…", () => {
     // A refusal is shown in the step, which stays open.
     await vi.waitFor(() => expect(host.querySelector(".plan-pick [role=alert]")).not.toBeNull());
   });
+
+  it("says what the choice did under the bar, without leaving the page", async () => {
+    const host = document.createElement("nav");
+    document.body.replaceChildren(host);
+    setPlanBarChooser(
+      host,
+      vi.fn(() => Promise.resolve({ review: { state: "approved" } })),
+    );
+    renderPlanBar(host, PLAN);
+    button(host, "Pick an option…")!.click();
+    const radio = host.querySelectorAll<HTMLInputElement>('.plan-pick input[type="radio"]')[0];
+    radio.checked = true;
+    radio.dispatchEvent(new Event("change"));
+    button(host, /^Approve and reject/)!.click();
+    await vi.waitFor(() => expect(host.querySelector(".plan-result")).not.toBeNull());
+    expect(host.querySelector(".plan-result span")!.textContent).toBe(
+      "You chose option-a/. Rejected: option-b/ and option-c/. Still waiting: screens/.",
+    );
+    expect(host.querySelector(".plan-pick")).toBeNull();
+    button(host, "Dismiss")!.click();
+    expect(host.querySelector(".plan-result")).toBeNull();
+  });
 });

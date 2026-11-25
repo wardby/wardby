@@ -1047,6 +1047,61 @@ img.ProseMirror-separator {
   box-sizing: border-box;
   margin: 0.25rem 0;
 }
+/* The Review tab: the next-step card is the one boxed element, its left edge saying the state (to do, waiting,
+   done, out); the plan and manage actions below it are plain buttons under quiet sentence-case headings. */
+.rv-card {
+  margin: 0.7rem 0 0.9rem;
+  padding: 0.6rem 0.75rem 0.7rem;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.rv-card h3 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+}
+.rv-card p {
+  margin: 0.2rem 0 0.45rem;
+  line-height: 1.4;
+}
+.rv-card textarea,
+.rv-section textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+}
+.rv-card.tone-todo {
+  border-left-color: var(--accent);
+}
+.rv-card.tone-done {
+  border-left-color: var(--ok);
+}
+.rv-card.tone-wait,
+.rv-card.tone-draft {
+  border-left-color: var(--warn);
+}
+.rv-card.tone-out {
+  border-left-color: var(--muted);
+}
+.rv-section {
+  margin: 0.2rem 0 0.7rem;
+}
+.rv-section h4 {
+  margin: 0 0 0.3rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.plan-result {
+  flex-basis: 100%;
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 0.35rem 0.6rem;
+  border-left: 4px solid var(--ok);
+  background: var(--surface);
+}
 /* The plan bar's "Pick an option…": its button, and the step that opens under the chips. */
 .plan-pick-open {
   margin-left: auto;

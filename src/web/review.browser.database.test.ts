@@ -84,7 +84,9 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect.poll(() => editable(o)).toBe("false");
       expect(await o.locator(".toolbar").isVisible()).toBe(false);
       // Reopening starts v2, a copy of the approved v1, in review: the page moves to it, unlocked.
-      await o.getByRole("button", { name: "Reopen for review" }).click();
+      // Reopen is a confirm step: the first click only opens it.
+      await o.getByRole("button", { name: "Reopen for review…" }).click();
+      await o.getByRole("button", { name: "Reopen", exact: true }).click();
       await expect.poll(() => banner(o)).toContain("In review · v2 · 0 of 2 approved");
       await expect.poll(() => shownVersion(o)).toBe("v2");
       await expect.poll(() => editable(o)).toBe("true");

@@ -17,6 +17,8 @@ import {
   REJECT_EXPLAIN,
   REJECTED_NOTE,
   chooseCandidates,
+  planAlternatives,
+  choiceResult,
   type ChooseCandidate,
   isLockedState,
   isReopenCopy,
@@ -51,7 +53,7 @@ export interface ReviewHost {
   planDocuments?(): PlanSetPayload["documents"];
 }
 
-type Form = "none" | "submit" | "force" | "reject" | "choose";
+type Form = "none" | "submit" | "force" | "reject" | "choose" | "reopen" | "archive";
 
 export class ReviewPanel {
   private review: ReviewPayload;
@@ -63,6 +65,8 @@ export class ReviewPanel {
   private rejectNote = "";
   /** The documents ticked in the "Choose this option" checklist (ids), and its optional note. */
   private chooseState: ChooseStepState = { ticks: new Set(), note: "" };
+  /** What the last choice made here did, shown in the next-step card until the next action. */
+  private lastChoice: string | null = null;
   private raced: { verdict: "approve" | "request_changes" } | null = null;
   private form: Form = "none";
   private picked = new Set<string>();
@@ -167,11 +171,12 @@ export class ReviewPanel {
       if (this.form === "force") panel.append(this.forceForm());
       if (this.form === "reject") panel.append(this.rejectForm());
       if (this.form === "choose") panel.append(this.chooseForm());
+      if (this.form === "reopen") panel.append(this.reopenForm());
+      if (this.form === "archive") panel.append(this.archiveForm());
       return;
     }
     panel.classList.remove("rv-focused");
-    if (r.can.review) panel.append(this.verdictBox());
-    panel.append(this.actions());
+    panel.append(this.nextStep(), ...this.sections());
     const list = h("ul", { class: "rv-reviewers", aria: { label: "Reviewers" } });
     for (const x of r.reviewers) {
       list.append(
@@ -206,7 +211,8 @@ export class ReviewPanel {
     }
   }
 
-  private verdictBox(): HTMLElement {
+  /** The note and verdict buttons; with `choose`, "Choose this option…" is the primary action and the verdicts plain. */
+  private verdictBox(choose = false): HTMLElement {
     const r = this.review;
     const box = h("div", { class: "rv-verdict" });
     const c = verdictControls({
@@ -232,66 +238,158 @@ export class ReviewPanel {
       box.append(btn(c.review, () => void this.reviewNewer(), "primary"));
       return box;
     }
-    if (c.approve) box.append(btn(c.approve, () => void this.verdict("approve"), "primary"));
-    if (c.changes) box.append(btn(c.changes, () => void this.verdict("request_changes"), "tonal"));
+    const row = h("div", { class: "rv-actions" });
+    if (choose) row.append(btn("Choose this option…", () => this.open("choose"), "primary"));
+    if (c.approve) row.append(btn(c.approve, () => void this.verdict("approve"), choose ? "neutral" : "primary"));
+    if (c.changes) row.append(btn(c.changes, () => void this.verdict("request_changes"), "neutral"));
+    box.append(row);
     return box;
   }
 
-  private actions(): HTMLElement {
-    const { can, state } = this.review;
-    const bar = h("div", { class: "rv-actions" });
-    const btn = (label: string, run: () => void, variant: ButtonVariant = "neutral") =>
-      h("button", { type: "button", class: variant, disabled: this.busy, onClick: run }, label);
-    if (can.submit)
-      bar.append(
-        btn(
-          state === "draft" ? PICKER.start : PICKER.edit,
-          () => void this.openSubmit(),
-          state === "draft" ? "primary" : "neutral",
-        ),
-      );
-    if (can.force)
-      bar.append(
-        btn(
-          "Force approve",
-          () => {
-            this.form = "force";
-            this.render();
-          },
-          "danger",
-        ),
-      );
-    if (can.choose && this.chooseOptions().length > 0)
-      bar.append(
-        btn(
-          "Choose this option…",
-          () => {
-            const ticked = this.chooseOptions().filter((c) => c.ticked);
-            this.chooseState = { ticks: new Set(ticked.map((c) => c.id)), note: "" };
-            this.form = "choose";
-            this.render();
-          },
-          "primary",
-        ),
-      );
-    if (can.reject)
-      bar.append(
-        btn(
-          "Reject",
-          () => {
-            this.form = "reject";
-            this.render();
-          },
-          "danger",
-        ),
-      );
-    if (can.reopen) bar.append(btn("Reopen for review", () => void this.act({ action: "reopen" }), "primary"));
-    else if (state === "approved") bar.append(h("div", { class: "rv-mine", role: "note" }, ASK_TO_REOPEN));
-    else if (state === "rejected") bar.append(h("div", { class: "rv-mine", role: "note" }, REJECTED_NOTE));
-    if (can.archive) bar.append(btn("Archive", () => void this.act({ action: "archive", archived: true })));
-    if (can.unarchive)
-      bar.append(btn("Unarchive", () => void this.act({ action: "archive", archived: false }), "primary"));
-    return bar;
+  private open(form: Form): void {
+    if (form === "choose") {
+      const ticked = this.chooseOptions().filter((c) => c.ticked);
+      this.chooseState = { ticks: new Set(ticked.map((c) => c.id)), note: "" };
+    }
+    this.form = form;
+    this.render();
+  }
+
+  private button(label: string, run: () => void, variant: ButtonVariant = "neutral"): HTMLButtonElement {
+    return h("button", { type: "button", class: variant, disabled: this.busy, onClick: run }, label);
+  }
+
+  /**
+   * The next-step card: the one boxed thing in the panel, its edge coloured by state, saying what (if anything) the
+   * viewer should do now, with that action as the panel's only primary button.
+   */
+  private nextStep(): HTMLElement {
+    const r = this.review;
+    const can = r.can;
+    const card = (tone: string, title: string, ...body: Array<Node | string | null>) =>
+      h("section", { class: `rv-card tone-${tone}`, aria: { label: title } }, h("h3", {}, title), ...body);
+    const text = (t: string) => h("p", {}, t);
+    if (this.lastChoice) return card("done", "Choice made", text(this.lastChoice));
+    const choosable = can.choose === true && this.chooseOptions().length > 0;
+    switch (r.state) {
+      case "draft":
+        return can.submit
+          ? card(
+              "draft",
+              "Not in review yet",
+              text("Choose who reviews it to start the review."),
+              this.button(PICKER.start, () => void this.openSubmit(), "primary"),
+            )
+          : card("draft", "Not in review yet", text("The owner hasn't asked for reviews yet."));
+      case "approved": {
+        const by = r.events.find((e) => e.kind === "approved" || e.kind === "force_approved");
+        const when = by ? relativeTime(by.createdAt) : "";
+        // "12m" reads as "12m ago"; "just now" as is; an older date as "on 2026-11-20".
+        const ago = /^\d+[mhd]$/.test(when) ? `${when} ago` : when === "just now" ? when : `on ${when}`;
+        const who = by ? ` by ${by.actorName}, ${ago}` : "";
+        const lines = [text(r.forced ? bannerText(r) : `Approved v${r.currentVersion}${who}.`)];
+        lines.push(text(can.reopen ? "Nothing to do here." : ASK_TO_REOPEN));
+        return card("done", "Approved", ...lines);
+      }
+      case "rejected": {
+        const ev = r.events.find((e) => e.kind === "rejected");
+        return card(
+          "out",
+          "Out of the plan",
+          text(ev?.note ? `Rejected: “${ev.note}”` : "Rejected."),
+          can.reopen ? null : text(REJECTED_NOTE),
+        );
+      }
+      case "archived":
+        return card(
+          "out",
+          "Archived",
+          text("Read-only, and out of the document lists."),
+          can.unarchive
+            ? this.button("Unarchive", () => void this.act({ action: "archive", archived: false }), "primary")
+            : null,
+        );
+      default: {
+        if (can.review) {
+          const prompt = choosable ? "Pick this option for the plan, or give your review." : "Give your review.";
+          return card("todo", "Your next step", text(prompt), this.verdictBox(choosable));
+        }
+        const waiting = r.reviewers.filter((x) => !(x.verdict === "approved" && x.current)).map((x) => x.name);
+        const lead =
+          r.state === "changes_requested"
+            ? "Changes requested. A new version goes back to the reviewers."
+            : `${r.progress.approved} of ${r.progress.total} approved.`;
+        return card("wait", "Waiting", text(waiting.length ? `${lead} Waiting for ${waiting.join(", ")}.` : lead));
+      }
+    }
+  }
+
+  /** "Plan" and "Manage": every other action the viewer may take, as plain buttons; a heading only when it has some. */
+  private sections(): HTMLElement[] {
+    const r = this.review;
+    const can = r.can;
+    const out: HTMLElement[] = [];
+    const section = (title: string, buttons: HTMLElement[]) => {
+      if (buttons.length)
+        out.push(h("div", { class: "rv-section" }, h("h4", {}, title), h("div", { class: "rv-actions" }, ...buttons)));
+    };
+    // On an approved document a reviewer may still request changes: their review, below the card.
+    if (r.state === "approved" && can.review) section("Your review", [this.verdictBox(false)]);
+    const plan: HTMLElement[] = [];
+    // In review, Choose is the card's primary action; once approved it is one of the plan actions.
+    if (can.choose && r.state === "approved" && this.chooseOptions().length > 0)
+      plan.push(this.button("Choose this option…", () => this.open("choose")));
+    if (can.reject) plan.push(this.button("Reject…", () => this.open("reject")));
+    section("Plan", plan);
+    const manage: HTMLElement[] = [];
+    if (can.submit && r.state !== "draft") manage.push(this.button(PICKER.edit, () => void this.openSubmit()));
+    if (can.force) manage.push(this.button("Force approve…", () => this.open("force")));
+    if (can.reopen) manage.push(this.button("Reopen for review…", () => this.open("reopen")));
+    if (can.archive) manage.push(this.button("Archive…", () => this.open("archive")));
+    section("Manage", manage);
+    return out;
+  }
+
+  /** A confirm step: a heading, what confirming does, and Confirm / Cancel. */
+  private confirmStep(label: string, heading: string, explain: string, confirm: string, run: () => void): HTMLElement {
+    return h(
+      "div",
+      { class: "rv-form", role: "group", aria: { label } },
+      h("h3", {}, heading),
+      h("p", {}, explain),
+      h(
+        "div",
+        { class: "rv-actions" },
+        this.button(confirm, run, "primary"),
+        this.button("Cancel", () => {
+          this.form = "none";
+          this.render();
+        }),
+      ),
+    );
+  }
+
+  private reopenForm(): HTMLElement {
+    const n = this.review.currentVersion;
+    return this.confirmStep(
+      "Reopen for review",
+      "Reopen for review",
+      `This starts v${n + 1}, a copy of v${n}, and puts it in review: every reviewer approves again.${
+        this.review.state === "rejected" ? " It goes back into the plan." : ""
+      } v${n} stays in History as the record.`,
+      "Reopen",
+      () => void this.act({ action: "reopen" }),
+    );
+  }
+
+  private archiveForm(): HTMLElement {
+    return this.confirmStep(
+      "Archive",
+      "Archive this document",
+      "It becomes read-only and leaves the document lists. You can unarchive it later.",
+      "Archive",
+      () => void this.act({ action: "archive", archived: true }),
+    );
   }
 
   private async openSubmit(): Promise<void> {
@@ -465,7 +563,14 @@ export class ReviewPanel {
 
   /** The documents a choice may reject now (see chooseCandidates). */
   private chooseOptions(): ChooseCandidate[] {
-    return chooseCandidates(this.host.planDocuments?.() ?? []);
+    const documents = this.host.planDocuments?.() ?? [];
+    // Only an alternative is chosen (option-b/ among option-a/, option-c/), never a shared part such as screens/.
+    const open = documents.filter(
+      (d) =>
+        !d.removed && d.path !== "plan.md" && ["in_review", "changes_requested", "approved"].includes(d.reviewState),
+    );
+    if (!planAlternatives(open).some((d) => d.current)) return [];
+    return chooseCandidates(documents);
   }
 
   private chooseForm(): HTMLElement {
@@ -487,8 +592,7 @@ export class ReviewPanel {
           documents.every((d) => d.current || d.removed || rejectIds.has(d.id) || d.reviewState === "approved"),
         state: this.chooseState,
         busy: this.busy,
-        onConfirm: (reject, note) =>
-          void this.act({ action: "choose", versionNumber: this.read, reject, ...(note ? { note } : {}) }),
+        onConfirm: (reject, note) => void this.choose(reject, note),
         onCancel: () => {
           this.form = "none";
           this.render();
@@ -496,6 +600,25 @@ export class ReviewPanel {
       }),
     );
     return form;
+  }
+
+  /** Makes the choice; on success the card says what it did and what the plan still waits for. */
+  private async choose(reject: string[], note: string | undefined): Promise<void> {
+    const documents = this.host.planDocuments?.() ?? [];
+    const chosen = documents.find((d) => d.current)?.path ?? "this option";
+    const ids = new Set(reject);
+    const code = await this.act({ action: "choose", versionNumber: this.read, reject, ...(note ? { note } : {}) });
+    if (code !== null) return;
+    const waiting = documents
+      .filter((d) => !d.current && !d.removed && !ids.has(d.id) && d.reviewState !== "approved")
+      .map((d) => d.path);
+    this.lastChoice = choiceResult({
+      chosenPath: chosen,
+      chosenApproved: this.review.state === "approved",
+      rejectedPaths: documents.filter((d) => ids.has(d.id)).map((d) => d.path),
+      waitingPaths: waiting,
+    });
+    this.render();
   }
 
   private rejectForm(): HTMLElement {
@@ -596,6 +719,7 @@ export class ReviewPanel {
   /** Runs one action; never throws. Returns the error code on failure (shown in the panel unless the caller handles it). */
   private async act(body: ReviewAction): Promise<string | null> {
     if (this.busy) return "busy";
+    this.lastChoice = null;
     this.busy = true;
     this.error = "";
     this.render();

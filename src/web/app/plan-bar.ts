@@ -7,7 +7,7 @@
  */
 import type { PlanSetPayload } from "../../core/plans/page-payload.js";
 import { clear, h } from "./dom.js";
-import { chooseCandidates, STATE_LABEL } from "./review-model.js";
+import { choiceResult, chooseCandidates, planAlternatives, STATE_LABEL } from "./review-model.js";
 import { errorMessage, type ReviewAction, type ReviewState } from "./api.js";
 import { chooseStep, type ChooseStepState } from "./choose-ui.js";
 
@@ -27,8 +27,18 @@ interface PickState {
   step: ChooseStepState;
   busy: boolean;
   error: string;
+  /** What the last choice did, shown under the bar until dismissed. */
+  result: string | null;
 }
 const choosers = new WeakMap<HTMLElement, PlanChooser>();
+const emptyPick = (): PickState => ({
+  open: false,
+  chosenId: null,
+  step: { ticks: new Set(), note: "" },
+  busy: false,
+  error: "",
+  result: null,
+});
 const picks = new WeakMap<HTMLElement, PickState>();
 
 /** Turns on "Pick an option…" in this bar (members only: a guest's bar never shows it). */
@@ -46,24 +56,7 @@ function pickable(plan: PlanSetPayload): PlanSetPayload["documents"] {
   );
 }
 
-/**
- * The alternatives among them: documents named in one family with at least one other (option-a/, option-b/ share
- * "option-"); shared parts such as screens/ are not offered as something to build. With no family-style names at
- * all, every one of them.
- */
-function options(plan: PlanSetPayload): PlanSetPayload["documents"] {
-  const docs = pickable(plan);
-  const family = (path: string) => (path.indexOf("-") > 0 ? path.slice(0, path.indexOf("-") + 1) : null);
-  const sizes = new Map<string, number>();
-  for (const d of docs) {
-    const f = family(d.path);
-    if (f) sizes.set(f, (sizes.get(f) ?? 0) + 1);
-  }
-  // Named like options at all: only families of two or more are alternatives (a lone option-a/ beside screens/ is
-  // a choice already made). Named otherwise (tree/, cards/): every one of them.
-  if (sizes.size === 0) return docs;
-  return docs.filter((d) => (sizes.get(family(d.path) ?? "") ?? 0) >= 2);
-}
+const options = (plan: PlanSetPayload) => planAlternatives(pickable(plan));
 
 /** The plan bar's "Pick an option…" step: which option to build, then the shared choose step for it. */
 function pickPanel(host: HTMLElement, plan: PlanSetPayload, pick: PickState, chooser: PlanChooser): HTMLElement {
@@ -108,9 +101,10 @@ function pickPanel(host: HTMLElement, plan: PlanSetPayload, pick: PickState, cho
   const chosen = choices.find((d) => d.id === pick.chosenId);
   if (pick.error) panel.append(h("div", { class: "err", role: "alert" }, pick.error));
   const cancel = () => {
-    picks.set(host, { open: false, chosenId: null, step: { ticks: new Set(), note: "" }, busy: false, error: "" });
+    picks.set(host, emptyPick());
     rerender();
   };
+
   if (!chosen) {
     panel.append(
       h("p", { class: "muted" }, "Pick the option to build; the others can then be rejected in the same step."),
@@ -136,14 +130,29 @@ function pickPanel(host: HTMLElement, plan: PlanSetPayload, pick: PickState, cho
         pick.busy = true;
         pick.error = "";
         rerender();
+        const ids = new Set(reject);
         chooser(chosen.id, {
           action: "choose",
           versionNumber: chosen.versionNumber!,
           reject,
           ...(note ? { note } : {}),
         }).then(
-          // Show the result on the chosen option's own page, on its Review tab.
-          () => location.assign(withTab(chosen.pagePath, "review")),
+          // Say what happened here, in the bar; the chips update live from the documents' events.
+          (out) => {
+            const state = (out as { review?: { state?: string } } | undefined)?.review?.state;
+            picks.set(host, {
+              ...emptyPick(),
+              result: choiceResult({
+                chosenPath: chosen.path,
+                chosenApproved: state === "approved",
+                rejectedPaths: plan.documents.filter((d) => ids.has(d.id)).map((d) => d.path),
+                waitingPaths: plan.documents
+                  .filter((d) => d.id !== chosen.id && !d.removed && !ids.has(d.id) && d.reviewState !== "approved")
+                  .map((d) => d.path),
+              }),
+            });
+            rerender();
+          },
           (err: unknown) => {
             pick.busy = false;
             pick.error = errorMessage(err);
@@ -200,15 +209,30 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
   );
   // "Pick an option…": for members (a guest sees part of the set) when there are options to choose between.
   const chooser = choosers.get(host);
-  if (!chooser || plan.partial || options(plan).length < 2) return;
-  const pick = picks.get(host) ?? {
-    open: false,
-    chosenId: null,
-    step: { ticks: new Set(), note: "" },
-    busy: false,
-    error: "",
-  };
+  const pick = picks.get(host) ?? emptyPick();
   picks.set(host, pick);
+  if (pick.result) {
+    host.append(
+      h(
+        "div",
+        { class: "plan-result", role: "status" },
+        h("span", {}, pick.result),
+        h(
+          "button",
+          {
+            type: "button",
+            class: "link",
+            onClick: () => {
+              pick.result = null;
+              renderPlanBar(host, shown.get(host));
+            },
+          },
+          "Dismiss",
+        ),
+      ),
+    );
+  }
+  if (!chooser || plan.partial || options(plan).length < 2) return;
   host.append(
     h(
       "button",

@@ -62,6 +62,34 @@ export function chooseSummary(input: {
     : `${first} Other documents still need approval before the plan can be built.`;
 }
 
+/**
+ * The alternatives among a plan's open documents: those named in one family with at least one other (option-a/ and
+ * option-b/ share "option-"); shared parts such as screens/ are not alternatives. With no family-style names at all,
+ * every one of them. (A lone option-a/ beside screens/ is a choice already made.)
+ */
+export function planAlternatives<T extends { path: string }>(docs: T[]): T[] {
+  const family = (path: string) => (path.indexOf("-") > 0 ? path.slice(0, path.indexOf("-") + 1) : null);
+  const sizes = new Map<string, number>();
+  for (const d of docs) {
+    const f = family(d.path);
+    if (f) sizes.set(f, (sizes.get(f) ?? 0) + 1);
+  }
+  if (sizes.size === 0) return docs;
+  return docs.filter((d) => (sizes.get(family(d.path) ?? "") ?? 0) >= 2);
+}
+
+/** What a choice did, said after it lands: rejected, and what the plan still waits for (or that it is ready). */
+export function choiceResult(input: {
+  chosenPath: string;
+  chosenApproved: boolean;
+  rejectedPaths: string[];
+  waitingPaths: string[];
+}): string {
+  const head = `You chose ${input.chosenPath}. Rejected: ${listOf(input.rejectedPaths)}.`;
+  const waiting = [...(input.chosenApproved ? [] : [`${input.chosenPath} (more approvals)`]), ...input.waitingPaths];
+  return waiting.length ? `${head} Still waiting: ${listOf(waiting)}.` : `${head} The plan is ready to build.`;
+}
+
 /** One document the "Choose this option" checklist offers. */
 export interface ChooseCandidate {
   id: string;
@@ -111,7 +139,7 @@ export const ASK_TO_REOPEN = "Approved and locked. To change it, ask someone who
 export const PICKER = {
   start: "Start review",
   submit: "Submit for review",
-  edit: "Edit reviewers",
+  edit: "Edit reviewers…",
   save: "Save reviewers",
   find: "Find people",
   onlyYou:
