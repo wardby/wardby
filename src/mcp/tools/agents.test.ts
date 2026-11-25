@@ -4250,3 +4250,202 @@ describe("codingProfile.workflow JSON schema (#582)", () => {
     expect(Object.keys(json).sort()).toEqual(Object.keys(zod).sort());
   });
 });
+
+describe("codingProfile.tunnelHosts (#627)", () => {
+  const text = (result: { content: unknown }) => (result.content as { text: string }[])[0].text;
+  const createCoding = (tunnelHosts: unknown, provider = "claude-code") => ({
+    name: "create_agent",
+    arguments: {
+      name: "recon",
+      systemPrompt: "x",
+      model: provider === "codex" ? "gpt-5.6-luna" : "claude-haiku-4-5",
+      budgetUsd: 0.25,
+      kind: "coding",
+      codingProfile: { provider, repository: "openai/example", tunnelHosts },
+    },
+  });
+  async function connect(db: ReturnType<typeof fakeDb>, opts: { roles?: string[]; scopes?: string[] } = {}) {
+    const providers = { repoAccess: gateAt("admin").gate } as unknown as import("../context.js").McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", opts.scopes ?? ["agents:write"], opts.roles ?? [], providers));
+    registerAgentTools(mcp);
+    return connectClient(mcp);
+  }
+  const ceiling = (level: string | undefined) => {
+    vi.stubEnv("CODING_TUNNEL_PORT", level === undefined ? "" : "8789");
+    vi.stubEnv("CODING_TUNNEL_AGENT_HOSTS", level ?? "");
+  };
+  const adminOpts = { roles: ["admin"], scopes: ["agents:write", "agents:admin"] };
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("stores normalised, de-duplicated patterns that the ceiling allows, for Claude Code and Codex alike", async () => {
+    ceiling("pattern");
+    for (const provider of ["claude-code", "codex"]) {
+      const client = await connect(fakeDb());
+      const result = await client.callTool(
+        createCoding(["API.Example.com.", "*.Example.org", "*.example.org", "api.example.com"], provider),
+      );
+      expect(result.isError, text(result)).toBeFalsy();
+      expect(JSON.parse(text(result)).codingProfile.tunnelHosts).toEqual(["api.example.com", "*.example.org"]);
+      await client.close();
+    }
+  });
+
+  it.each([
+    ["an IP address", "10.0.0.1"],
+    ["a port", "example.com:8443"],
+    ["a scheme", "https://example.com"],
+    ["a path", "example.com/x"],
+    ["* inside a label", "ex*.com"],
+    ["a bare TLD", "*.com"],
+    ["a public suffix", "*.co.uk"],
+  ])("refuses %s with tunnel_hosts_invalid", async (_name, entry) => {
+    ceiling("any");
+    const db = fakeDb();
+    const client = await connect(db, adminOpts);
+    const result = await client.callTool(createCoding(["ok.example.com", entry]));
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/tunnel_hosts_invalid: entry 1 /);
+    expect((await db.agent.findMany({})).length).toBe(0);
+    await client.close();
+  });
+
+  it("refuses more than 50 entries", async () => {
+    ceiling("exact");
+    const client = await connect(fakeDb());
+    const result = await client.callTool(createCoding(Array.from({ length: 51 }, (_, i) => `h${i}.example.com`)));
+    expect(result.isError).toBe(true);
+    expect(text(result)).toMatch(/tunnel_hosts_invalid: at most 50 entries/);
+    await client.close();
+  });
+
+  it("refuses any entry while the ceiling is off, and when the tunnel itself is off", async () => {
+    for (const level of ["off", undefined]) {
+      ceiling(level);
+      const client = await connect(fakeDb(), adminOpts);
+      const result = await client.callTool(createCoding(["api.example.com"]));
+      expect(result.isError).toBe(true);
+      expect(text(result)).toMatch(/tunnel_hosts_invalid: per-agent tunnel hosts are off on this server/);
+      // An empty list is always accepted.
+      const empty = await client.callTool(createCoding([]));
+      expect(empty.isError, text(empty)).toBeFalsy();
+      await client.close();
+    }
+  });
+
+  it("holds each kind to its ceiling level", async () => {
+    const cases: Array<[string, string, boolean]> = [
+      ["exact", "api.example.com", true],
+      ["exact", "*.example.com", false],
+      ["pattern", "*.example.com", true],
+      ["pattern", "*", false],
+      ["any", "*", true],
+    ];
+    for (const [level, entry, ok] of cases) {
+      ceiling(level);
+      const client = await connect(fakeDb(), adminOpts);
+      const result = await client.callTool(createCoding([entry]));
+      expect(Boolean(result.isError), `${level} ${entry}: ${text(result)}`).toBe(!ok);
+      if (!ok) expect(text(result)).toMatch(/tunnel_hosts_invalid: entry 0 .* needs CODING_TUNNEL_AGENT_HOSTS=/);
+      await client.close();
+    }
+  });
+
+  it("needs an admin for *, records who approved it, and refuses a member", async () => {
+    ceiling("any");
+    const member = await connect(fakeDb(), { scopes: ["agents:write"] });
+    const refusedScope = await member.callTool(createCoding(["*"]));
+    expect(refusedScope.isError).toBe(true);
+    expect(text(refusedScope)).toMatch(/agents:admin/);
+    await member.close();
+
+    const scopeWithoutRole = await connect(fakeDb(), { scopes: ["agents:write", "agents:admin"] });
+    const refusedRole = await scopeWithoutRole.callTool(createCoding(["*"]));
+    expect(refusedRole.isError).toBe(true);
+    expect(text(refusedRole)).toMatch(/requires a role/);
+    await scopeWithoutRole.close();
+
+    const admin = await connect(fakeDb(), adminOpts);
+    const approved = await admin.callTool(createCoding(["*"]));
+    expect(approved.isError, text(approved)).toBeFalsy();
+    const profile = JSON.parse(text(approved)).codingProfile;
+    expect(profile).toMatchObject({ tunnelHosts: ["*"], tunnelAnyHostAuthorizedById: "p1" });
+    expect(Number.isNaN(Date.parse(profile.tunnelAnyHostAuthorizedAt))).toBe(false);
+    await admin.close();
+
+    // Patterns at or below the ceiling need only ownership.
+    const owner = await connect(fakeDb(), { scopes: ["agents:write"] });
+    const plain = await owner.callTool(createCoding(["*.example.com", "api.example.org"]));
+    expect(plain.isError, text(plain)).toBeFalsy();
+    expect(JSON.parse(text(plain)).codingProfile.tunnelAnyHostAuthorizedById ?? null).toBeNull();
+    await owner.close();
+  });
+
+  it("update_agent keeps the * approval while * stays, clears it when * goes, and needs an admin to add it", async () => {
+    ceiling("any");
+    const db = fakeDb();
+    const admin = await connect(db, adminOpts);
+    const created = JSON.parse(text(await admin.callTool(createCoding(["*"]))));
+    await admin.close();
+
+    const owner = await connect(db, { scopes: ["agents:write"] });
+    const kept = await owner.callTool({
+      name: "update_agent",
+      arguments: { id: created.id, codingProfile: { tunnelHosts: ["*", "api.example.com"] } },
+    });
+    expect(kept.isError, text(kept)).toBeFalsy();
+    expect(JSON.parse(text(kept)).codingProfile).toMatchObject({
+      tunnelHosts: ["*", "api.example.com"],
+      tunnelAnyHostAuthorizedById: "p1",
+    });
+    const dropped = await owner.callTool({
+      name: "update_agent",
+      arguments: { id: created.id, codingProfile: { tunnelHosts: ["api.example.com"] } },
+    });
+    expect(JSON.parse(text(dropped)).codingProfile).toMatchObject({
+      tunnelHosts: ["api.example.com"],
+      tunnelAnyHostAuthorizedById: null,
+      tunnelAnyHostAuthorizedAt: null,
+    });
+    const readded = await owner.callTool({
+      name: "update_agent",
+      arguments: { id: created.id, codingProfile: { tunnelHosts: ["*"] } },
+    });
+    expect(readded.isError).toBe(true);
+    expect(text(readded)).toMatch(/agents:admin/);
+    await owner.close();
+  });
+
+  it("update_agent leaves stored hosts above a lowered ceiling alone on unrelated edits, with a warning", async () => {
+    ceiling("pattern");
+    const db = fakeDb();
+    const client = await connect(db);
+    const created = JSON.parse(text(await client.callTool(createCoding(["*.example.com", "api.example.org"]))));
+    ceiling("exact");
+    const edited = await client.callTool({ name: "update_agent", arguments: { id: created.id, systemPrompt: "y" } });
+    expect(edited.isError, text(edited)).toBeFalsy();
+    const body = JSON.parse(text(edited));
+    expect(body.codingProfile.tunnelHosts).toEqual(["*.example.com", "api.example.org"]);
+    expect(body.warnings.join(" ")).toMatch(/1 of codingProfile.tunnelHosts is above this server's ceiling/);
+    // A change to the list is held to the ceiling now.
+    const changed = await client.callTool({
+      name: "update_agent",
+      arguments: { id: created.id, codingProfile: { tunnelHosts: ["*.example.com"] } },
+    });
+    expect(changed.isError).toBe(true);
+    expect(text(changed)).toMatch(/tunnel_hosts_invalid/);
+    await client.close();
+  });
+
+  it("describes tunnelHosts in the tool schema", async () => {
+    const { profileJsonSchema } = await import("./agents.js");
+    const property = (profileJsonSchema.properties as Record<string, { description?: string; maxItems?: number }>)
+      .tunnelHosts;
+    expect(property.description).toMatch(/^Up to 50 hosts/);
+    expect(property.description).toMatch(/CODING_TUNNEL_AGENT_HOSTS/);
+    expect(property.description).toMatch(/tunnel_hosts_invalid/);
+  });
+});

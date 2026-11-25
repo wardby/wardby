@@ -88,6 +88,15 @@ import {
 } from "../auth/repo-authorization.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
+import {
+  MAX_TUNNEL_HOSTS,
+  TUNNEL_HOSTS_INVALID,
+  ceilingAllows,
+  currentTunnelAgentHostLevel,
+  tunnelHostKind,
+  tunnelHostsWithinCeiling,
+  type TunnelAgentHostLevel,
+} from "../../coding/tunnel-hosts.js";
 import { checkPlanDocumentSetting } from "../../core/plans/settings.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -207,6 +216,24 @@ export const SESSION_RESUME_NO_STORE_WARNING =
 export const SUBSTRATE_IMAGE_WARNING =
   "This deployment runs coding agents on Substrate: the image must contain this release's Substrate bridge (see the build-claude-code-image or build-worker-image help article), and end as a non-root user, or its runs fail (substrate_image_unready, substrate_bridge_incompatible or substrate_image_incomplete).";
 
+export const TUNNEL_HOSTS_SUBSTRATE_WARNING =
+  "This deployment runs coding agents on Substrate, which does not use the CONNECT tunnel yet: codingProfile.tunnelHosts has no effect on its runs.";
+
+/** A warning when some stored tunnel hosts are above the operator's ceiling now: runs are given only the rest. */
+export function tunnelHostsAboveCeilingWarning(
+  patterns: readonly string[],
+  level: TunnelAgentHostLevel,
+  anyApproved: boolean,
+): string | undefined {
+  const given = tunnelHostsWithinCeiling(patterns, level).filter((pattern) => pattern !== "*" || anyApproved);
+  if (given.length === patterns.length) return undefined;
+  return (
+    `${patterns.length - given.length} of codingProfile.tunnelHosts ${patterns.length - given.length === 1 ? "is" : "are"} above ` +
+    `this server's ceiling (CODING_TUNNEL_AGENT_HOSTS=${level})${patterns.includes("*") && !anyApproved ? " or lacks the admin approval * needs" : ""}, ` +
+    "so runs are not given them. See the coding-proxy-tunnel help article."
+  );
+}
+
 /** The stored coding-profile fields the output warnings read. */
 interface WarnedProfile {
   dependencyCache: boolean;
@@ -214,6 +241,8 @@ interface WarnedProfile {
   workerImageRef: string | null;
   packageAuditMode?: string | null;
   packageAuditUntil?: Date | null;
+  tunnelHosts?: string[];
+  tunnelAnyHostAuthorizedById?: string | null;
 }
 
 /** For a warning only: a half-set BLOB_STORE (which throws) counts as none, and never fails the tool call. */
@@ -242,6 +271,15 @@ function profileWarnings(profile: WarnedProfile | null, now: Date): string[] {
   if (profile?.workerImageRef && substrateLauncher()) warnings.push(SUBSTRATE_IMAGE_WARNING);
   if (profile && isPackageAuditActive(profile.packageAuditMode, profile.packageAuditUntil, now))
     warnings.push(packageAuditActiveWarning(profile.packageAuditMode, profile.packageAuditUntil!));
+  if (profile?.tunnelHosts?.length) {
+    if (substrateLauncher()) warnings.push(TUNNEL_HOSTS_SUBSTRATE_WARNING);
+    const ceiling = tunnelHostsAboveCeilingWarning(
+      profile.tunnelHosts,
+      currentTunnelAgentHostLevel(process.env),
+      Boolean(profile.tunnelAnyHostAuthorizedById),
+    );
+    if (ceiling) warnings.push(ceiling);
+  }
   return warnings;
 }
 
@@ -446,6 +484,48 @@ async function withCanonicalRepository<T extends { codingProfile?: { repository?
   return { ...args, codingProfile: { ...args.codingProfile, repository: await canonicalLocalRepository(repository) } };
 }
 
+/**
+ * Checks codingProfile.tunnelHosts as saved, and returns the columns that record who approved `*`.
+ * An unchanged list is not re-checked, so an agent whose hosts are above a since-lowered ceiling can still
+ * take unrelated edits (its runs are given only what the ceiling allows). A changed list must fit the
+ * operator's ceiling (CODING_TUNNEL_AGENT_HOSTS); `*` needs an admin (agents:admin with the admin role,
+ * role-gated like repositoryAdminOverride), recorded by id and time, kept while `*` stays on the list.
+ */
+function tunnelHostsStamp(
+  ctx: McpRequestContext,
+  next: readonly string[],
+  previous: { tunnelHosts: string[]; tunnelAnyHostAuthorizedById: string | null } | null | undefined,
+): { tunnelAnyHostAuthorizedById: string | null; tunnelAnyHostAuthorizedAt: Date | null } | undefined {
+  const before = previous?.tunnelHosts ?? [];
+  if (next.length === before.length && next.every((pattern, i) => pattern === before[i])) return undefined;
+  if (next.length > 0) checkTunnelHostsCeiling(next);
+  if (!next.includes("*")) return { tunnelAnyHostAuthorizedById: null, tunnelAnyHostAuthorizedAt: null };
+  if (before.includes("*") && previous?.tunnelAnyHostAuthorizedById) return undefined;
+  // Role-gated: the scope alone never suffices (resource-server.ts), as for repositoryAdminOverride.
+  if (!isOwnerAll(ctx)) requireScope(ctx, ctx.canonicalUri, "agents:admin");
+  return { tunnelAnyHostAuthorizedById: ctx.principal.id, tunnelAnyHostAuthorizedAt: new Date() };
+}
+
+/** Refuses a list the operator's ceiling does not allow, naming the entry and the level it needs. */
+function checkTunnelHostsCeiling(patterns: readonly string[]): void {
+  const level = currentTunnelAgentHostLevel(process.env);
+  if (level === "off") {
+    throw new McpError(
+      400,
+      `${TUNNEL_HOSTS_INVALID}: per-agent tunnel hosts are off on this server (CODING_TUNNEL_AGENT_HOSTS is off or the tunnel is not enabled); only the server list (CODING_TUNNEL_ALLOWED_HOSTS) applies. Set codingProfile.tunnelHosts to [] or ask the operator.`,
+    );
+  }
+  patterns.forEach((pattern, index) => {
+    const kind = tunnelHostKind(pattern);
+    if (ceilingAllows(level, kind)) return;
+    const needed = kind === "any" ? "any" : "pattern";
+    throw new McpError(
+      400,
+      `${TUNNEL_HOSTS_INVALID}: entry ${index} (${kind === "any" ? "*" : "a *.domain pattern"}) needs CODING_TUNNEL_AGENT_HOSTS=${needed}; this server allows ${level === "exact" ? "exact hosts only" : "exact hosts and *.domain patterns"}.`,
+    );
+  });
+}
+
 /** The profile columns a repository authorization is stamped into. */
 function profileStamp(authorization: RepositoryAuthorization) {
   return {
@@ -590,6 +670,17 @@ export const profileJsonSchema = {
       description:
         'Coding-run services this agent\'s runs may start: catalog names such as "postgres" (any version the catalog has). A repository asks for them in .wardby/services.yaml on its base branch; a run asking for one not listed here is refused. Empty = none.',
     },
+    // No maxItems here: the zod check refuses more than MAX_TUNNEL_HOSTS with tunnel_hosts_invalid.
+    tunnelHosts: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        `Up to ${MAX_TUNNEL_HOSTS} hosts this agent's coding runs may reach over HTTPS (port 443) through the coding proxy's CONNECT tunnel, on top of the server's own list: ` +
+        '"api.example.com" (that host), "*.example.com" (any subdomain at any depth, not example.com itself) or "*" (any public host). ' +
+        'Up to the operator\'s ceiling (CODING_TUNNEL_AGENT_HOSTS: off by default, then exact, pattern or any); "*" also needs an admin (agents:admin with the admin role), recorded on the profile. ' +
+        "Refused (tunnel_hosts_invalid): IP addresses, ports, schemes, paths, * inside a label, public suffixes such as *.com or *.co.uk. " +
+        "Private and metadata addresses stay blocked whatever the pattern. Fixed per run at dispatch. Empty = none (see the coding-proxy-tunnel help article).",
+    },
   },
 };
 
@@ -722,6 +813,7 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
             ...(profile.workflowRepository ? { repository: profile.workflowRepository } : {}),
             ...(profile.workflowReplyField ? { replyField: profile.workflowReplyField } : {}),
           },
+    tunnelHosts: profile.tunnelHosts,
   });
 }
 
@@ -848,6 +940,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           throw new McpError(400, err instanceof Error ? err.message : "plan_settings_invalid");
         }
       }
+      // Per-agent tunnel hosts: within the operator's ceiling, and * only with an admin's approval.
+      const tunnelStamp = codingProfile ? tunnelHostsStamp(ctx, codingProfile.tunnelHosts, null) : undefined;
       const agent = await ctx.db.$transaction(async (tx) => {
         const created = await tx.agent.create({
           data: {
@@ -866,6 +960,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
                         planChecked ? { ...codingProfile, planDocument: planChecked } : codingProfile,
                       ),
                       ...profileStamp(authorization),
+                      ...tunnelStamp,
                     },
                   },
                 }
@@ -1168,6 +1263,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           }
 
           let nextProfile: CodingProfile | null = null;
+          let tunnelStamp: ReturnType<typeof tunnelHostsStamp>;
           if (nextKind === "coding") {
             // Attached native tools stay: a Claude Code run serves them through its MCP token (#622); a
             // Codex run leaves them out, and the answer warns below.
@@ -1197,6 +1293,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               validateWorkspaceDiskMb(nextProfile.workspaceDiskMb);
             }
             if (args.codingProfile?.services !== undefined) await requireCatalogServiceNames(tx, nextProfile.services);
+            tunnelStamp = tunnelHostsStamp(ctx, nextProfile.tunnelHosts, existing.codingProfile);
             const nextModel = args.model ?? existing.model;
             const pairingChanges =
               args.model !== undefined ||
@@ -1258,8 +1355,8 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
                 ? { delete: true as const }
                 : undefined
               : existing.codingProfile
-                ? { update: { ...codingProfileColumns(nextProfile!), ...stamp, ...trace } }
-                : { create: { ...codingProfileColumns(nextProfile!), ...stamp, ...trace } };
+                ? { update: { ...codingProfileColumns(nextProfile!), ...stamp, ...trace, ...tunnelStamp } }
+                : { create: { ...codingProfileColumns(nextProfile!), ...stamp, ...trace, ...tunnelStamp } };
           const scheduleStart = await scheduleStartFields(tx, existing, {
             schedule: nextSchedule,
             timezone: nextTimezone,

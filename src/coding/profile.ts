@@ -16,6 +16,12 @@ import { WARDBY_PROTECTED_PATHS, isWellFormedProtectedPath, protectsSomePath } f
 import { acceptedAdvisoriesSchema, parseAllowlist, resolvePolicy } from "./registry/allowlist.js";
 import { REGISTRY_ADAPTERS } from "./registry/adapters.js";
 import { AllowedServiceNamesSchema } from "./services/catalog.js";
+import {
+  MAX_TUNNEL_HOSTS,
+  TUNNEL_HOSTS_INVALID,
+  parseTunnelHostPattern,
+  tunnelHostRefusalText,
+} from "./tunnel-hosts.js";
 
 export const MIN_CODING_TIMEOUT_SEC = 60;
 export const MAX_CODING_TIMEOUT_SEC = 7200;
@@ -186,6 +192,29 @@ const packagePolicySchema = z
     }
   });
 
+/**
+ * Per-agent CONNECT tunnel hosts (src/coding/tunnel-hosts.ts): up to 50 exact hosts, `*.domain` patterns or
+ * `*`, normalised and de-duplicated. Syntax only: the operator's ceiling and the admin approval `*` needs are
+ * checked where the agent is saved, and the ceiling again at dispatch. Empty = none.
+ */
+const tunnelHostsSchema = z
+  .array(z.string().max(300, `${TUNNEL_HOSTS_INVALID}: each entry is a hostname of at most 253 characters`))
+  .max(MAX_TUNNEL_HOSTS, `${TUNNEL_HOSTS_INVALID}: at most ${MAX_TUNNEL_HOSTS} entries`)
+  .transform((values, ctx) => {
+    const patterns: string[] = [];
+    values.forEach((value, index) => {
+      const parsed = parseTunnelHostPattern(value);
+      if (parsed.ok) patterns.push(parsed.pattern);
+      else
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index],
+          message: `${TUNNEL_HOSTS_INVALID}: entry ${index} ${tunnelHostRefusalText(parsed.reason)}`,
+        });
+    });
+    return [...new Set(patterns)];
+  });
+
 const PLAN_PATH = /^(?!\/)(?!.*\.\.)(?!.*\/\/)[A-Za-z0-9._{}/-]{1,200}\/$/;
 export const PlanDocumentSchema = z
   .object({
@@ -262,6 +291,8 @@ const codingProfileFields = {
   buildFromPlan: z.boolean(),
   /** Run a repository workflow script instead of a free-form task (Claude Code only, #582). */
   workflow: WorkflowSchema,
+  /** Hosts this agent's runs may reach through the CONNECT tunnel, on top of the server list (#627). */
+  tunnelHosts: tunnelHostsSchema,
 };
 
 export const CodingProfileSchema = z
@@ -291,6 +322,7 @@ export const CodingProfileSchema = z
     planDocument: codingProfileFields.planDocument.default(null),
     buildFromPlan: codingProfileFields.buildFromPlan.default(false),
     workflow: codingProfileFields.workflow.default(null),
+    tunnelHosts: codingProfileFields.tunnelHosts.default([]),
   })
   .strict()
   .superRefine((profile, ctx) => {
@@ -352,6 +384,7 @@ export const CodingProfilePatchSchema = z
     planDocument: codingProfileFields.planDocument.optional(),
     buildFromPlan: codingProfileFields.buildFromPlan.optional(),
     workflow: codingProfileFields.workflow.optional(),
+    tunnelHosts: codingProfileFields.tunnelHosts.optional(),
   })
   .strict();
 
