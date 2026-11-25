@@ -35,7 +35,9 @@ import { loadContent } from "../core/documents/files.js";
 import { createShareLink } from "../core/documents/share-links.js";
 import { getDocument, publishVersion } from "../core/documents/service.js";
 import {
+  chooseOption,
   forceApprove,
+  MAX_CHOOSE_REJECTS,
   rejectDocument,
   getReviewView,
   reopenDocument,
@@ -295,6 +297,25 @@ export async function postReview(
       const note = str(body, "note");
       if (note.trim() === "") return invalid();
       view = await rejectDocument(deps.db, deps.cipher, { documentId, viewer, note });
+      break;
+    }
+    case "choose": {
+      // Approve this option and reject the listed documents of its plan, in one transaction (chooseOption).
+      const n = body.versionNumber;
+      const reject = body.reject;
+      if (typeof n !== "number" || !Number.isInteger(n) || n < 1) return invalid();
+      if (!Array.isArray(reject) || reject.length > MAX_CHOOSE_REJECTS) return invalid();
+      if (!reject.every((r): r is string => typeof r === "string" && r !== "")) return invalid();
+      if (body.note !== undefined && typeof body.note !== "string") return invalid();
+      view = (
+        await chooseOption(deps.db, deps.cipher, {
+          documentId,
+          viewer,
+          versionNumber: n,
+          reject,
+          ...(typeof body.note === "string" ? { note: body.note } : {}),
+        })
+      ).view;
       break;
     }
     case "reopen":

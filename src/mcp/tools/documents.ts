@@ -52,8 +52,10 @@ import {
   validDocumentRepository,
 } from "../../core/documents/agent-link.js";
 import {
+  chooseOption,
   documentReviewState,
   forceApprove,
+  MAX_CHOOSE_REJECTS,
   rejectDocument,
   getReviewView,
   reopenDocument,
@@ -424,6 +426,12 @@ const verdictArgs = z.object({
 });
 const forceArgs = z.object({ documentId: id, note: z.string().trim().min(1).max(MAX_REVIEW_NOTE_CHARS) });
 const rejectArgs = forceArgs;
+const chooseArgs = z.object({
+  documentId: id,
+  versionNumber: z.number().int().min(1),
+  reject: z.array(id).min(1).max(MAX_CHOOSE_REJECTS),
+  note: z.string().max(MAX_REVIEW_NOTE_CHARS).optional(),
+});
 const archiveArgs = z.object({ documentId: id, archived: z.boolean() });
 const waitArgs = z.object({
   documentId: id,
@@ -1086,6 +1094,36 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         }),
       );
       return textResult(reviewPayload(view));
+    },
+  });
+
+  mcp.registerTool({
+    name: "choose_plan_option",
+    scope: "documents:write",
+    description:
+      'Chooses one option of a plan in a single step: approves documentId as your verdict (as review_document approve: you must be a named reviewer; versionNumber is the version you read; skipped when it is already approved) and rejects every document in reject (as reject_document: the same rights, documents of the same plan, never plan.md), all in one transaction, so if any part is refused nothing changes. Each rejected document gets the note "Chose <path>" plus your note when given. Use it when a plan offers alternatives (for example option-a/, option-b/, option-c/) and one is picked; leave out documents that are not alternatives (shared screens). Returns the chosen document\'s review and the rejected ids.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        documentId: { type: "string" },
+        versionNumber: { type: "integer", minimum: 1 },
+        reject: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_CHOOSE_REJECTS },
+        note: { type: "string" },
+      },
+      required: ["documentId", "versionNumber", "reject"],
+    },
+    handler: async (args: unknown, ctx) => {
+      const input = chooseArgs.parse(args);
+      const out = await mapped(() =>
+        chooseOption(ctx.db, ctx.providers.secrets, {
+          documentId: input.documentId,
+          viewer: viewerOf(ctx),
+          versionNumber: input.versionNumber,
+          reject: input.reject,
+          ...(input.note !== undefined ? { note: input.note } : {}),
+        }),
+      );
+      return textResult({ ...reviewPayload(out.view), rejected: out.rejected });
     },
   });
 

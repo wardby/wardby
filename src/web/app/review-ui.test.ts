@@ -347,3 +347,118 @@ describe("ReviewPanel: Reject", () => {
     expect(panel.textContent).toContain("Rejected: it is not part of the plan");
   });
 });
+
+describe("ReviewPanel: Choose this option", () => {
+  const can = (over: Partial<ReviewPayload["can"]>): ReviewPayload["can"] => ({
+    submit: false,
+    review: false,
+    force: false,
+    reopen: false,
+    archive: false,
+    unarchive: false,
+    ...over,
+  });
+  const doc = (
+    id: string,
+    path: string,
+    reviewState = "in_review",
+    over: { removed?: boolean; current?: boolean } = {},
+  ) => ({
+    id,
+    title: path,
+    kind: "design" as const,
+    reviewState,
+    path,
+    removed: over.removed ?? false,
+    current: over.current ?? false,
+    pagePath: `/d/${id}`,
+  });
+  const PLAN = [
+    doc("pm", "plan.md", "approved"),
+    doc("a", "option-a-tree/", "in_review", { current: true }),
+    doc("b", "option-b-cards/"),
+    doc("c", "option-c-lanes/", "approved"),
+    doc("s", "screens/"),
+    doc("x", "option-x/", "rejected", { removed: true }),
+  ];
+  function mount(review: ReviewPayload, documents = PLAN) {
+    document.body.replaceChildren();
+    const banner = document.createElement("div");
+    const panel = document.createElement("div");
+    document.body.append(banner, panel);
+    const reviewCall = vi.fn((_body: unknown) =>
+      Promise.resolve({ review: { ...review, state: "approved" as const } }),
+    );
+    const host: ReviewHost = {
+      api: { review: reviewCall } as unknown as Api,
+      banner,
+      panel,
+      showReviewTab: vi.fn(),
+      showChanges: vi.fn(),
+      loadLatest: vi.fn(() => Promise.resolve()),
+      onLock: vi.fn(),
+      onState: vi.fn(),
+      planDocuments: () => documents,
+    };
+    new ReviewPanel(host, review, review.currentVersion);
+    return { panel, reviewCall };
+  }
+  const button = (panel: HTMLElement, label: string | RegExp) =>
+    [...panel.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      typeof label === "string" ? b.textContent === label : label.test(b.textContent ?? ""),
+    );
+
+  it("is offered only when the server allows it and the plan has something to reject", () => {
+    expect(button(mount({ ...payload(1), can: can({}) }).panel, "Choose this option…")).toBeUndefined();
+    expect(button(mount({ ...payload(1), can: can({ choose: true }) }).panel, "Choose this option…")).toBeDefined();
+    const alone = [doc("pm", "plan.md", "approved"), doc("a", "option-a/", "in_review", { current: true })];
+    expect(
+      button(mount({ ...payload(1), can: can({ choose: true }) }, alone).panel, "Choose this option…"),
+    ).toBeUndefined();
+  });
+
+  it("lists the other open documents, ticks the same-named options, and posts the ticked ids", async () => {
+    const { panel, reviewCall } = mount({ ...payload(1), can: can({ choose: true }) });
+    button(panel, "Choose this option…")!.click();
+    const rows = [...panel.querySelectorAll<HTMLLabelElement>(".rv-choose label")].map((l) => [
+      l.querySelector("input")!.checked,
+      l.textContent,
+    ]);
+    // plan.md, the chosen one and the already rejected option are not offered; screens/ starts unticked.
+    expect(rows).toEqual([
+      [true, "option-b-cards/ · In review"],
+      [true, "option-c-lanes/ · Approved"],
+      [false, "screens/ · In review"],
+    ]);
+    expect(panel.textContent).toContain("“Chose option-a-tree/”");
+    const confirm = button(panel, /^Approve and reject/)!;
+    expect(confirm.textContent).toBe("Approve and reject 2 others");
+    // Unticking all disables it; ticking one back enables it.
+    const boxes = [...panel.querySelectorAll<HTMLInputElement>(".rv-choose input")];
+    for (const box of boxes.slice(0, 2)) {
+      box.checked = false;
+      box.dispatchEvent(new Event("change"));
+    }
+    expect([confirm.disabled, confirm.textContent]).toEqual([true, "Approve and reject 0 others"]);
+    boxes[1].checked = true;
+    boxes[1].dispatchEvent(new Event("change"));
+    expect([confirm.disabled, confirm.textContent]).toEqual([false, "Approve and reject 1 other"]);
+    const note = panel.querySelector<HTMLInputElement>('input[aria-label="Choice note"]')!;
+    note.value = "cleanest";
+    note.dispatchEvent(new Event("input"));
+    confirm.click();
+    await vi.waitFor(() => expect(reviewCall).toHaveBeenCalled());
+    expect(reviewCall.mock.calls[0][0]).toEqual({
+      action: "choose",
+      versionNumber: 1,
+      reject: ["c"],
+      note: "cleanest",
+    });
+  });
+
+  it("says Reject, not Approve, when the option is already approved", () => {
+    const { panel } = mount({ ...payload(1), state: "approved", can: can({ choose: true }) });
+    button(panel, "Choose this option…")!.click();
+    expect(button(panel, /^Reject \d/)?.textContent).toBe("Reject 2 others");
+  });
+});

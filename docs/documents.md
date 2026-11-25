@@ -55,6 +55,7 @@ directory.
 | `review_document`                                            | `documents:write` | Give a verdict as a named reviewer (`approve` or `request_changes`, on `versionNumber`)                           |
 | `force_approve_document`                                     | `documents:write` | Owner or final approver approves the current version over missing verdicts (`note` required)                      |
 | `reject_document`                                            | `documents:write` | Reject a plan document (never `plan.md`): it leaves the plan; owner, final approver or reviewer (`note` required) |
+| `choose_plan_option`                                         | `documents:write` | Approve one option of a plan and reject the listed others, in one transaction (`versionNumber`, `reject`)         |
 | `reopen_document`                                            | `documents:write` | Reopen an approved or rejected document for review as a new version, a copy of the current one (`write`)          |
 | `archive_document`                                           | `documents:write` | Archive or unarchive a document you own                                                                           |
 | `wait_for_review`                                            | `documents:read`  | Wait for a state change, a comment by someone else, or a timeout (default 300 s, max 600 s)                       |
@@ -282,6 +283,14 @@ nothing and records no event.
   approves the plan. A plan's own `plan.md`, a document outside a plan, and a
   document already out of the plan are refused with
   `document_reject_not_plan_document`. Guests cannot reject.
+- **Choose this option** (alternatives in a plan): on the chosen option's
+  Review tab, **Choose this option…** lists the plan's other undecided or
+  approved documents, ticking those named like it (`option-b/` beside
+  `option-a/`) and leaving the rest (shared screens) unticked. Confirming
+  approves the chosen option as the viewer's verdict (a named reviewer; an
+  approved option is left as it is) and rejects each ticked document with the
+  note "Chose option-a/" (plus an optional note), in one transaction: if any
+  part is refused, nothing changes. `choose_plan_option` does the same over MCP.
 - **Reopen**: a writer reopens an approved or rejected document. Reopen for
   review creates a new version (a copy of the current one) and puts it in
   review, and a rejected document goes back into its plan; the earlier version

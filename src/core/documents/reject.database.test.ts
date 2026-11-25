@@ -9,7 +9,15 @@ import { createPrismaClient } from "../db.js";
 import { setPlanReviewHook } from "../plans/approval.js";
 import { resolveBuildPlan } from "../plans/build.js";
 import { createPlanSetFixture } from "../plans/build.test-support.js";
-import { getReviewView, rejectDocument, reopenDocument, reviewDocument, submitForReview } from "./review.js";
+import {
+  chooseOption,
+  getReviewView,
+  rejectDocument,
+  reopenDocument,
+  ReviewVersionConflictError,
+  reviewDocument,
+  submitForReview,
+} from "./review.js";
 
 const PLAN_MD = "# Plan\n\n## Tickets\n### Ticket 1: Build it\n\nScope.\n";
 const design = (title: string) => ({
@@ -231,5 +239,130 @@ describe.skipIf(!process.env.DATABASE_URL)("rejectDocument (database)", () => {
     expect((await resolve(number))?.versions.map((v) => v.path)).toEqual(["plan.md", "option-a/", "option-b/"]);
     await rejectDocument(db, cipher, { documentId: documentIds["option-a/"], viewer: asOwner, note: "dropped" });
     expect((await resolve(number))?.versions.map((v) => v.path)).toEqual(["plan.md", "option-b/"]);
+  });
+
+  describe("chooseOption", () => {
+    /** plan.md approved; options a, b and c in review with the owner as their reviewer. */
+    async function optionsInReview() {
+      const number = ++nextNumber;
+      const fixture = await createPlanSetFixture(db, {
+        plannerId: planner,
+        ownerId: owner,
+        repository,
+        number,
+        documents: [
+          { path: "plan.md", content: PLAN_MD, version: 1 },
+          { path: "option-a/", content: design("A"), version: 1, reviewState: "draft" },
+          { path: "option-b/", content: design("B"), version: 1, reviewState: "draft" },
+          { path: "option-c/", content: design("C"), version: 1, reviewState: "draft" },
+        ],
+      });
+      for (const path of ["option-a/", "option-b/", "option-c/"]) {
+        await submitForReview(db, { documentId: fixture.documentIds[path], viewer: asOwner, reviewers: [owner] });
+      }
+      return { ...fixture, number, ids: fixture.documentIds };
+    }
+    const state = async (id: string) =>
+      db.document.findUniqueOrThrow({ where: { id }, select: { reviewState: true, removedFromPlan: true } });
+
+    it("approves the chosen option and rejects the others in one go, so the plan can be built", async () => {
+      const { number, ids } = await optionsInReview();
+      const calls: string[] = [];
+      setPlanReviewHook(async (_db, documentId) => {
+        calls.push(documentId);
+      });
+      expect((await getReviewView(db, ids["option-a/"], asOwner)).can.choose).toBe(true);
+      const out = await chooseOption(db, cipher, {
+        documentId: ids["option-a/"],
+        viewer: asOwner,
+        versionNumber: 1,
+        reject: [ids["option-b/"], ids["option-c/"]],
+      });
+      expect(out.view.state).toBe("approved");
+      expect(out.rejected).toEqual([ids["option-b/"], ids["option-c/"]]);
+      for (const path of ["option-b/", "option-c/"]) {
+        expect(await state(ids[path])).toEqual({ reviewState: "rejected", removedFromPlan: true });
+        const v = await getReviewView(db, ids[path], asOwner);
+        expect(v.events[0]).toMatchObject({ kind: "rejected", note: "Chose option-a/" });
+      }
+      // The hook runs once, after everything is committed.
+      expect(calls).toEqual([ids["option-a/"]]);
+      expect((await resolve(number))?.versions.map((v) => v.path)).toEqual(["plan.md", "option-a/"]);
+    });
+
+    it("adds the viewer's note, and keeps an already approved choice as it is", async () => {
+      const { ids } = await optionsInReview();
+      await reviewDocument(db, cipher, {
+        documentId: ids["option-a/"],
+        viewer: asOwner,
+        verdict: "approve",
+        versionNumber: 1,
+      });
+      const before = (await getReviewView(db, ids["option-a/"], asOwner)).events.length;
+      const out = await chooseOption(db, cipher, {
+        documentId: ids["option-a/"],
+        viewer: asOwner,
+        versionNumber: 1,
+        reject: [ids["option-c/"]],
+        note: "simplest on a phone",
+      });
+      expect(out.view.events).toHaveLength(before);
+      expect((await getReviewView(db, ids["option-c/"], asOwner)).events[0].note).toBe(
+        "Chose option-a/: simplest on a phone",
+      );
+      expect((await state(ids["option-b/"])).reviewState).toBe("in_review");
+    });
+
+    it("changes nothing when any part is refused: plan.md, another plan's document, a stale version", async () => {
+      const { ids } = await optionsInReview();
+      const other = await optionsInReview();
+      const attempts: Array<[string[], number, string | RegExp | typeof ReviewVersionConflictError]> = [
+        [[ids["option-b/"], ids["plan.md"]], 1, "document_reject_not_plan_document"],
+        [[ids["option-b/"], other.ids["option-b/"]], 1, "document_reject_not_plan_document"],
+        [[ids["option-b/"]], 2, ReviewVersionConflictError],
+      ];
+      for (const [reject, versionNumber, error] of attempts) {
+        await expect(
+          chooseOption(db, cipher, { documentId: ids["option-a/"], viewer: asOwner, versionNumber, reject }),
+        ).rejects.toThrow(error);
+      }
+      for (const path of ["option-a/", "option-b/", "option-c/"]) {
+        expect(await state(ids[path])).toEqual({ reviewState: "in_review", removedFromPlan: false });
+      }
+      expect((await state(other.ids["option-b/"])).reviewState).toBe("in_review");
+    });
+
+    it("refuses an empty list, the chosen document in its own list, and plan.md as the choice", async () => {
+      const { ids } = await optionsInReview();
+      const choose = (documentId: string, reject: string[]) =>
+        chooseOption(db, cipher, { documentId, viewer: asOwner, versionNumber: 1, reject });
+      await expect(choose(ids["option-a/"], [])).rejects.toThrow("document_review_state_invalid");
+      await expect(choose(ids["option-a/"], [ids["option-a/"]])).rejects.toThrow("document_review_state_invalid");
+      await expect(choose(ids["plan.md"], [ids["option-b/"]])).rejects.toThrow("document_reject_not_plan_document");
+      expect((await getReviewView(db, ids["plan.md"], asOwner)).can.choose).toBe(false);
+    });
+
+    it("needs the right to approve the choice: a commenter is refused and not offered it", async () => {
+      const { id } = await reviewedOption();
+      const set = await db.document.findUniqueOrThrow({ where: { id }, select: { planSetId: true } });
+      const b = await db.document.findFirstOrThrow({ where: { planSetId: set.planSetId, planPath: "option-b/" } });
+      expect((await getReviewView(db, id, as(commenter))).can.choose).toBe(false);
+      await expect(
+        chooseOption(db, cipher, { documentId: id, viewer: as(commenter), versionNumber: 1, reject: [b.id] }),
+      ).rejects.toThrow("document_review_forbidden");
+      // The named reviewer of option-c is offered it, but cannot reject option-b, which they cannot see: the
+      // whole choice is refused, and option-c is not approved either.
+      expect((await getReviewView(db, id, as(reviewer))).can.choose).toBe(true);
+      const choose = () =>
+        chooseOption(db, cipher, { documentId: id, viewer: as(reviewer), versionNumber: 1, reject: [b.id] });
+      await expect(choose()).rejects.toThrow("document_not_found");
+      expect((await state(id)).reviewState).toBe("in_review");
+      // Once they review option-b too (back in review, with them as its reviewer), the choice goes through.
+      await db.document.update({ where: { id: b.id }, data: { reviewState: "in_review" } });
+      await submitForReview(db, { documentId: b.id, viewer: asOwner, reviewers: [reviewer] });
+      await choose();
+      expect((await state(id)).reviewState).toBe("approved");
+      expect((await state(b.id)).reviewState).toBe("rejected");
+    });
   });
 });

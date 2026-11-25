@@ -1047,6 +1047,23 @@ img.ProseMirror-separator {
   box-sizing: border-box;
   margin: 0.25rem 0;
 }
+/* "Choose this option": the documents it rejects, then an optional note. */
+.rv-choose {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.3rem 0.6rem 0.4rem;
+  margin: 0.4rem 0;
+}
+.rv-choose legend {
+  font-size: 0.8rem;
+  color: var(--muted);
+  padding: 0 0.25rem;
+}
+.rv-form > input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0.25rem 0;
+}
 .rv-pick-list {
   max-height: 14rem;
   overflow-y: auto;

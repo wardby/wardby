@@ -66,6 +66,10 @@ A document of a [plan](plan-documents.md) can be **rejected** instead of approve
 - Rejecting the last document the plan was waiting for approves the plan, the same as an approval does (with `onApproved: "build"`, ticket 1 starts).
 - A later planner run does not change it or bring it back.
 
+### Choose this option
+
+When a plan offers alternatives, such as `option-a/`, `option-b/` and `option-c/`, **Choose this option…** on the chosen option's Review tab does the approve and the rejects in one step. It lists the plan's other documents that are still undecided or approved, with the ones named like the chosen option ticked (`option-b/` and `option-c/` beside `option-a/`) and anything else, such as shared screens, unticked. Untick or tick any of them, add a note if you like, and confirm: the chosen option gets your approval (you must be one of its reviewers; an already approved option stays as it is) and each ticked document is rejected with the note "Chose option-a/". Everything happens together or not at all: if one document can't be rejected (you can't see it, or it isn't in this plan), nothing changes. Agents use `choose_plan_option`.
+
 A writer reopens a rejected document for review to bring it back into the plan: like reopening an approved one, it starts a new version and every reviewer gives their verdict again. A plan's own `plan.md`, and a document that is not part of a plan, cannot be rejected ([`document_reject_not_plan_document`](errors/document-reject-not-plan-document.md)).
 
 ## The lock
@@ -88,15 +92,16 @@ Every document and design page shows a banner with the state and the approval co
 
 ## MCP tools
 
-| Tool                     | Who                                              | Does                                                                                                                                                                |
-| ------------------------ | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `submit_for_review`      | owner                                            | `reviewers` (principal ids and/or `guest:<id>`, 1 to 50), optional `finalApproverId`; draft to in review, or replaces the list while in review or changes requested |
-| `review_document`        | a named reviewer                                 | `verdict` `approve` or `request_changes`, `versionNumber` (required), optional `note`                                                                               |
-| `force_approve_document` | owner or final approver                          | `note` required; the result lists `overridden`                                                                                                                      |
-| `reject_document`        | owner, final approver or a named member reviewer | a plan document (never `plan.md`) to rejected and out of the plan; `note` required                                                                                  |
-| `reopen_document`        | writers                                          | approved or rejected to in review on a new version, a copy of the current one; `currentVersion` in the result is the new version's number                           |
-| `archive_document`       | owner                                            | `archived: true` or `false`                                                                                                                                         |
-| `wait_for_review`        | `documents:read`                                 | waits until the state differs from `state`, someone else comments, or `timeoutSeconds` (default 300, at most 600) passes; returns `changed` and `reason`            |
+| Tool                     | Who                                                                     | Does                                                                                                                                                                               |
+| ------------------------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `submit_for_review`      | owner                                                                   | `reviewers` (principal ids and/or `guest:<id>`, 1 to 50), optional `finalApproverId`; draft to in review, or replaces the list while in review or changes requested                |
+| `review_document`        | a named reviewer                                                        | `verdict` `approve` or `request_changes`, `versionNumber` (required), optional `note`                                                                                              |
+| `force_approve_document` | owner or final approver                                                 | `note` required; the result lists `overridden`                                                                                                                                     |
+| `reject_document`        | owner, final approver or a named member reviewer                        | a plan document (never `plan.md`) to rejected and out of the plan; `note` required                                                                                                 |
+| `choose_plan_option`     | a named reviewer of the chosen option, with reject rights on the others | `documentId` (the chosen option), `versionNumber`, `reject` (ids of other documents of the same plan), optional `note`; approves the one and rejects the others in one transaction |
+| `reopen_document`        | writers                                                                 | approved or rejected to in review on a new version, a copy of the current one; `currentVersion` in the result is the new version's number                                          |
+| `archive_document`       | owner                                                                   | `archived: true` or `false`                                                                                                                                                        |
+| `wait_for_review`        | `documents:read`                                                        | waits until the state differs from `state`, someone else comments, or `timeoutSeconds` (default 300, at most 600) passes; returns `changed` and `reason`                           |
 
 `get_document` and `list_documents` include `reviewState`; `get_document` also returns the reviewers, the final approver and the last 20 review events. Only the owner gets the ids of people: each reviewer's `ref`, each event's `actorRef`, `finalApproverId`, and `reviewCandidates` (the people and guests that can be named); everyone else gets names and verdicts. Names and review notes come back only in `reviewText`, wrapped as untrusted tool output. Review notes are stored with the linked agent's secret values redacted.
 

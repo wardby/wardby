@@ -39,6 +39,52 @@ export const REJECTED_NOTE =
 export const REJECT_EXPLAIN =
   "This takes the document out of the plan: it stops counting toward the plan's approval and is not given to a builder. It stays here, read-only, as the record. Reopen brings it back.";
 
+/** "Choose this option": what it does, for the option at `path`. */
+export const chooseExplain = (path: string) =>
+  `Approves this option and rejects the documents you tick, in one step. Each rejected one leaves the plan with the note “Chose ${path}”; Reopen brings one back.`;
+
+/** One document the "Choose this option" checklist offers. */
+export interface ChooseCandidate {
+  id: string;
+  title: string;
+  path: string;
+  reviewState: string;
+  /** Ticked at first: named like the chosen one (option-b/ beside option-a/). */
+  ticked: boolean;
+}
+
+const OPEN_FOR_CHOICE = new Set(["in_review", "changes_requested", "approved"]);
+
+/**
+ * The other documents of the plan a choice can reject: still in the plan, not plan.md, not the chosen one,
+ * and in a state Reject takes. Those named like the chosen one (the part of the path before its first "-",
+ * as "option" in option-a-tree/) start ticked; the rest (shared screens, other parts) start unticked.
+ */
+export function chooseCandidates(
+  documents: Array<{
+    id: string;
+    title: string;
+    path: string;
+    reviewState: string;
+    removed: boolean;
+    current: boolean;
+  }>,
+): ChooseCandidate[] {
+  const chosen = documents.find((d) => d.current);
+  if (!chosen) return [];
+  const dash = chosen.path.indexOf("-");
+  const family = dash > 0 ? `${chosen.path.slice(0, dash)}-` : null;
+  return documents
+    .filter((d) => !d.current && !d.removed && d.path !== "plan.md" && OPEN_FOR_CHOICE.has(d.reviewState))
+    .map((d) => ({
+      id: d.id,
+      title: d.title,
+      path: d.path,
+      reviewState: d.reviewState,
+      ticked: family !== null && d.path.startsWith(family),
+    }));
+}
+
 /** Shown on an approved document to anyone who can't reopen it (a guest, or a member without write access). */
 export const ASK_TO_REOPEN = "Approved and locked. To change it, ask someone who can edit it to reopen it.";
 

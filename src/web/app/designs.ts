@@ -43,7 +43,7 @@ import {
   statusConnected,
   versionAction,
 } from "./live.js";
-import { planBarHost, renderPlanBar, requestedTab, setPlanBarTab } from "./plan-bar.js";
+import { planBarHost, planDocumentsOf, renderPlanBar, requestedTab, setPlanBarTab } from "./plan-bar.js";
 import { ReviewPanel } from "./review-ui.js";
 import { isLockedState, isReopenCopy } from "./review-model.js";
 
@@ -908,6 +908,7 @@ function mount(
     {
       api,
       banner: reviewBanner,
+      planDocuments: () => planDocumentsOf(planBar),
       panel: reviewPanelEl,
       showReviewTab: () => showTab("review"),
       showChanges: (from, to) => {

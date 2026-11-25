@@ -14,9 +14,18 @@ const KIND_ICON = { document: "📄", design: "🎨" } as const;
 
 const stateLabel = (s: string) => STATE_LABEL[s as ReviewState] ?? s;
 
+/** The plan each bar last rendered, for the Review tab's "Choose this option" checklist. */
+const shown = new WeakMap<HTMLElement, PlanSetPayload | undefined>();
+
+/** The documents of the plan `host` shows now (empty when the page is not in a plan set). */
+export function planDocumentsOf(host: HTMLElement): PlanSetPayload["documents"] {
+  return shown.get(host)?.documents ?? [];
+}
+
 /** Renders the bar into `host`, or hides it when the document is not in a plan set. */
 export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefined): void {
   clear(host);
+  shown.set(host, plan);
   host.hidden = !plan;
   if (!plan) return;
   const chip = (d: PlanSetPayload["documents"][number]) => {

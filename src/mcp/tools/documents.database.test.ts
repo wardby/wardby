@@ -986,6 +986,73 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       ).toBe(true);
     }, 60_000);
 
+    it("choose_plan_option approves one option and rejects the others in one call", async () => {
+      const callOwner = await connect(owner);
+      const callOther = await connect(other);
+      const planner = await db.agent.create({
+        data: {
+          name: `choose-mcp-${randomUUID().slice(0, 8)}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const set = await db.planSet.create({
+        data: {
+          agentId: planner.id,
+          repository: "o/choose-mcp",
+          number: 1,
+          store: "wardby",
+          createdByRunId: "fixture",
+        },
+      });
+      const make = async (title: string, planPath: string) => {
+        const id = (await callOwner("create_document", { title, markdown: `# ${title}` })).json.documentId as string;
+        await db.document.update({ where: { id }, data: { planSetId: set.id, planPath } });
+        await callOwner("submit_for_review", { documentId: id, reviewers: [other.id] });
+        return id;
+      };
+      const planMd = await make("Plan", "plan.md");
+      const [a, b, c] = [
+        await make("A", "option-a.md"),
+        await make("B", "option-b.md"),
+        await make("C", "option-c.md"),
+      ];
+      try {
+        // Refused as a whole: plan.md in the list; nothing changes.
+        const refused = await callOther("choose_plan_option", { documentId: a, versionNumber: 1, reject: [b, planMd] });
+        expect(refused.text).toContain("document_reject_not_plan_document");
+        expect((await db.document.findUniqueOrThrow({ where: { id: a } })).reviewState).toBe("in_review");
+        expect((await db.document.findUniqueOrThrow({ where: { id: b } })).reviewState).toBe("in_review");
+        // The named reviewer chooses A over B and C.
+        const out = await callOther("choose_plan_option", {
+          documentId: a,
+          versionNumber: 1,
+          reject: [b, c],
+          note: "fits the phone",
+        });
+        expect(out.isError).toBe(false);
+        expect(out.json.reviewState).toBe("approved");
+        expect(out.json.rejected).toEqual([b, c]);
+        for (const id of [b, c]) {
+          const row = await db.document.findUniqueOrThrow({ where: { id } });
+          expect(row).toMatchObject({ reviewState: "rejected", removedFromPlan: true });
+          const ev = await db.documentReviewEvent.findFirstOrThrow({ where: { documentId: id, kind: "rejected" } });
+          expect(ev.note).toBe("Chose option-a.md: fits the phone");
+        }
+        // Read-only scope cannot.
+        const readOnly = await connect(other, ["documents:read"]);
+        expect((await readOnly("choose_plan_option", { documentId: a, versionNumber: 1, reject: [b] })).isError).toBe(
+          true,
+        );
+      } finally {
+        await db.document.updateMany({ where: { planSetId: set.id }, data: { planSetId: null } });
+        await db.planSet.delete({ where: { id: set.id } });
+        await db.agent.delete({ where: { id: planner.id } });
+      }
+    }, 60_000);
+
     it("reject_document takes a plan option out of its plan; plan.md and loose documents are refused", async () => {
       const callOwner = await connect(owner);
       const callOther = await connect(other);

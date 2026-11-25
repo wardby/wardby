@@ -114,6 +114,8 @@ export interface ReviewPayload {
     reopen: boolean;
     /** Older servers leave it out: no Reject button. */
     reject?: boolean;
+    /** Older servers leave it out: no "Choose this option". */
+    choose?: boolean;
     archive: boolean;
     unarchive: boolean;
   };
@@ -125,6 +127,7 @@ export type ReviewAction =
   | { action: "verdict"; verdict: "approve" | "request_changes"; versionNumber: number; note?: string }
   | { action: "force"; note: string }
   | { action: "reject"; note: string }
+  | { action: "choose"; versionNumber: number; reject: string[]; note?: string }
   | { action: "reopen" }
   | { action: "archive"; archived: boolean };
 

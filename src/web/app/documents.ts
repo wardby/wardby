@@ -36,7 +36,7 @@ import {
 } from "./live.js";
 import { isReopenCopy } from "./review-model.js";
 import { planLinkTargets } from "./extensions.js";
-import { planBarHost, renderPlanBar, requestedTab, setPlanBarTab } from "./plan-bar.js";
+import { planBarHost, planDocumentsOf, renderPlanBar, requestedTab, setPlanBarTab } from "./plan-bar.js";
 import { ReviewPanel } from "./review-ui.js";
 import { unresolvedLinksText } from "../../core/plans/page-payload.js";
 import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
@@ -530,6 +530,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     {
       api,
       banner: reviewBanner,
+      planDocuments: () => planDocumentsOf(planBar),
       panel: reviewPanel,
       showReviewTab: () => showTray("review"),
       showChanges: (from, to) => {

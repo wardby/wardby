@@ -1856,6 +1856,56 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       }
     });
 
+    it("chooses a plan option through the page API: one approved, the listed ones rejected", async () => {
+      const o = await session(owner.id);
+      const planner = await db.agent.create({
+        data: {
+          name: `choose-web-${randomUUID().slice(0, 8)}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const set = await db.planSet.create({
+        data: {
+          agentId: planner.id,
+          repository: "o/choose-web",
+          number: 1,
+          store: "wardby",
+          createdByRunId: "fixture",
+        },
+      });
+      const option = async (planPath: string) => {
+        const id = await newDoc();
+        await db.document.update({ where: { id }, data: { planSetId: set.id, planPath } });
+        await post(id, o, { action: "submit", reviewers: [owner.id] });
+        return id;
+      };
+      const [a, b, c] = [await option("option-a.md"), await option("option-b.md"), await option("option-c.md")];
+      try {
+        // Malformed: no list, a non-string entry, no version.
+        expect((await post(a, o, { action: "choose", versionNumber: 1 })).status).toBe(400);
+        expect((await post(a, o, { action: "choose", versionNumber: 1, reject: [b, 7] })).status).toBe(400);
+        expect((await post(a, o, { action: "choose", reject: [b] })).status).toBe(400);
+        const before = ((await (await call(`/d/api/${a}`, { jar: o.jar })).json()) as any).review;
+        expect(before.can.choose).toBe(true);
+        const res = await post(a, o, { action: "choose", versionNumber: 1, reject: [b, c] });
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as any).review.state).toBe("approved");
+        for (const id of [b, c]) {
+          expect(await db.document.findUniqueOrThrow({ where: { id } })).toMatchObject({
+            reviewState: "rejected",
+            removedFromPlan: true,
+          });
+        }
+      } finally {
+        await db.document.updateMany({ where: { planSetId: set.id }, data: { planSetId: null } });
+        await db.planSet.delete({ where: { id: set.id } });
+        await db.agent.delete({ where: { id: planner.id } });
+      }
+    });
+
     it("lets a guest reviewer on a comment link approve through the page API", async () => {
       const id = await newDoc();
       const o = await session(owner.id);

@@ -102,7 +102,9 @@ page ([Review and approve documents](document-review.md)). A document the plan
 does not need, such as a design option that was not chosen, can be **rejected**
 instead: it leaves the plan, so it no longer counts toward approval and the
 builder never gets it, and rejecting the last waiting document approves the plan
-([Reject](document-review.md#reject)). `plan.md` itself cannot be rejected. Sending comment
+([Reject](document-review.md#reject)). `plan.md` itself cannot be rejected. When the plan offers
+alternatives, **Choose this option…** approves the one you pick and rejects the others in one step
+([Choose this option](document-review.md#choose-this-option)). Sending comment
 threads to the agent
 ([Comment threads and agents](comment-threads-and-agents.md)) starts the plan's
 own planner with the current version of every document still in the plan (not

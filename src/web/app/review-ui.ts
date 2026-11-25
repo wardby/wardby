@@ -8,12 +8,16 @@
 import { ApiError, errorMessage, type Api, type ReviewAction, type ReviewPayload, type ReviewState } from "./api.js";
 import { relativeTime } from "./comments.js";
 import { append, clear, h } from "./dom.js";
+import type { PlanSetPayload } from "../../core/plans/page-payload.js";
 import {
   bannerText,
   EVENT_LABEL,
   ASK_TO_REOPEN,
   REJECT_EXPLAIN,
   REJECTED_NOTE,
+  chooseExplain,
+  chooseCandidates,
+  type ChooseCandidate,
   isLockedState,
   isReopenCopy,
   matchesQuery,
@@ -43,9 +47,11 @@ export interface ReviewHost {
    */
   onLock(locked: boolean, state: ReviewState): void;
   onState(state: ReviewState): void;
+  /** The plan's documents (the plan bar's), for "Choose this option"; none outside a plan. */
+  planDocuments?(): PlanSetPayload["documents"];
 }
 
-type Form = "none" | "submit" | "force" | "reject";
+type Form = "none" | "submit" | "force" | "reject" | "choose";
 
 export class ReviewPanel {
   private review: ReviewPayload;
@@ -55,6 +61,9 @@ export class ReviewPanel {
   private forceNote = "";
   /** The reject note as typed: kept across re-renders (a failed reject keeps it). */
   private rejectNote = "";
+  /** The documents ticked in the "Choose this option" checklist (ids), and its optional note. */
+  private chooseTicks = new Set<string>();
+  private chooseNote = "";
   private raced: { verdict: "approve" | "request_changes" } | null = null;
   private form: Form = "none";
   private picked = new Set<string>();
@@ -156,6 +165,7 @@ export class ReviewPanel {
     if (this.form === "submit") panel.append(this.submitForm());
     if (this.form === "force") panel.append(this.forceForm());
     if (this.form === "reject") panel.append(this.rejectForm());
+    if (this.form === "choose") panel.append(this.chooseForm());
     const list = h("ul", { class: "rv-reviewers", aria: { label: "Reviewers" } });
     for (const x of r.reviewers) {
       list.append(
@@ -243,6 +253,23 @@ export class ReviewPanel {
             this.render();
           },
           "danger",
+        ),
+      );
+    if (can.choose && this.chooseOptions().length > 0)
+      bar.append(
+        btn(
+          "Choose this option…",
+          () => {
+            this.chooseTicks = new Set(
+              this.chooseOptions()
+                .filter((c) => c.ticked)
+                .map((c) => c.id),
+            );
+            this.chooseNote = "";
+            this.form = "choose";
+            this.render();
+          },
+          "primary",
         ),
       );
     if (can.reject)
@@ -434,6 +461,95 @@ export class ReviewPanel {
     return form;
   }
 
+  /** The documents a choice may reject now (see chooseCandidates). */
+  private chooseOptions(): ChooseCandidate[] {
+    return chooseCandidates(this.host.planDocuments?.() ?? []);
+  }
+
+  private chooseForm(): HTMLElement {
+    const form = h("div", { class: "rv-form", role: "group", aria: { label: "Choose this option" } });
+    const mine = this.host.planDocuments?.().find((d) => d.current);
+    form.append(h("p", {}, chooseExplain(mine?.path ?? "this option")));
+    const list = h("fieldset", { class: "rv-choose" }, h("legend", {}, "Reject"));
+    const candidates = this.chooseOptions();
+    // Ticks for documents no longer offered (decided meanwhile) are dropped.
+    for (const id of [...this.chooseTicks]) if (!candidates.some((c) => c.id === id)) this.chooseTicks.delete(id);
+    const approved = this.review.state === "approved";
+    const confirmLabel = () => {
+      const n = this.chooseTicks.size;
+      const what = `${n} other${n === 1 ? "" : "s"}`;
+      return approved ? `Reject ${what}` : `Approve and reject ${what}`;
+    };
+    const confirm = h(
+      "button",
+      {
+        type: "button",
+        class: "primary",
+        disabled: this.busy || this.chooseTicks.size === 0,
+        onClick: () =>
+          void this.act({
+            action: "choose",
+            versionNumber: this.read,
+            reject: candidates.filter((c) => this.chooseTicks.has(c.id)).map((c) => c.id),
+            ...(this.chooseNote.trim() ? { note: this.chooseNote } : {}),
+          }),
+      },
+      confirmLabel(),
+    );
+    for (const c of candidates) {
+      const box = h("input", {
+        type: "checkbox",
+        onChange: () => {
+          if (box.checked) this.chooseTicks.add(c.id);
+          else this.chooseTicks.delete(c.id);
+          confirm.textContent = confirmLabel();
+          confirm.disabled = this.busy || this.chooseTicks.size === 0;
+        },
+      });
+      box.checked = this.chooseTicks.has(c.id);
+      list.append(
+        h(
+          "label",
+          { class: "rv-pick" },
+          box,
+          h("span", {}, c.path),
+          h("span", { class: "muted" }, ` · ${STATE_LABEL[c.reviewState as ReviewState] ?? c.reviewState}`),
+        ),
+      );
+    }
+    const note = h("input", {
+      type: "text",
+      attrs: { placeholder: "Why (optional), added to each reject note" },
+      aria: { label: "Choice note" },
+      onInput: () => {
+        this.chooseNote = note.value;
+      },
+    });
+    note.value = this.chooseNote;
+    form.append(
+      list,
+      note,
+      h(
+        "div",
+        { class: "rv-actions" },
+        confirm,
+        h(
+          "button",
+          {
+            type: "button",
+            class: "neutral",
+            onClick: () => {
+              this.form = "none";
+              this.render();
+            },
+          },
+          "Cancel",
+        ),
+      ),
+    );
+    return form;
+  }
+
   private rejectForm(): HTMLElement {
     const form = h("div", { class: "rv-form", role: "group", aria: { label: "Reject" } });
     form.append(h("p", {}, REJECT_EXPLAIN));
@@ -540,6 +656,8 @@ export class ReviewPanel {
       this.newLink = null;
       this.forceNote = "";
       this.rejectNote = "";
+      this.chooseTicks.clear();
+      this.chooseNote = "";
       this.busy = false;
       this.apply(out.review);
       return null;
