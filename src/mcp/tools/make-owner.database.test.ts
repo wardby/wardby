@@ -322,6 +322,52 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
     expect(await db.mcpServer.count({ where: { id: aServer.id } })).toBe(1);
   });
 
+  it("between two owners make_owner turns document tools off and says so", async () => {
+    const [admin, a, b] = [await principal(), await principal(), await principal()];
+    const agent = await db.agent.create({
+      data: {
+        name: `make-owner-${randomUUID()}`,
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        ownerId: a.id,
+        documentTools: { access: "write", reviewers: [a.id], finalApproverId: null, maxNewPerRun: 5, plans: [] },
+      },
+    });
+    agentIds.push(agent.id);
+    const providers = {} as McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: "https://host/mcp" } });
+    mcp.setFixedContext({
+      principal: admin,
+      scopes: new Set(["agents:admin"]),
+      roles: ["admin"],
+      canonicalUri: "https://host/mcp",
+      providers,
+      db,
+      clientSupportsTasks: false,
+      mcpReq: { requestState: () => undefined },
+    });
+    registerAgentTools(mcp);
+    const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "t", version: "1" }, { versionNegotiation: { mode: "auto" } });
+    await server.connect(st);
+    await client.connect(ct);
+    const call = async (ownerId: string) =>
+      (await client.callTool({ name: "make_owner", arguments: { agentId: agent.id, ownerId } })) as {
+        isError?: boolean;
+        content: { text: string }[];
+      };
+    const result = await call(b.id);
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(result.content[0].text).documentToolsCleared).toBe(true);
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).documentTools).toBeNull();
+    // Nothing left to clear: the next transfer says false.
+    const again = await call(a.id);
+    await client.close();
+    expect(JSON.parse(again.content[0].text).documentToolsCleared).toBe(false);
+  });
+
   it("adopting an owner-less agent keeps its grants", async () => {
     const [admin, owner] = [await principal(), await principal()];
     const agent = await db.agent.create({
