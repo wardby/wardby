@@ -36,7 +36,7 @@ import {
 } from "./live.js";
 import { isReopenCopy } from "./review-model.js";
 import { planLinkTargets } from "./extensions.js";
-import { planBarHost, renderPlanBar } from "./plan-bar.js";
+import { planBarHost, renderPlanBar, requestedTab, setPlanBarTab } from "./plan-bar.js";
 import { ReviewPanel } from "./review-ui.js";
 import { unresolvedLinksText } from "../../core/plans/page-payload.js";
 import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
@@ -331,11 +331,20 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       t.tab.className = on ? "on" : "";
       t.tab.setAttribute("aria-selected", String(on));
     }
+    setPlanBarTab(planBar, which);
     if (which === "edits") void edits.open();
   };
   commentsTab.addEventListener("click", () => showTray("comments"));
   editsTab.addEventListener("click", () => showTray("edits"));
   reviewTab.addEventListener("click", () => showTray("review"));
+  // Arriving from another document of the plan: open the tab that was open there (a design's
+  // History is this page's Edits; its Style and Settings have no counterpart here).
+  const askedTray = requestedTab(["comments", "edits", "review"] as const, {
+    history: "edits",
+    style: "comments",
+    settings: "comments",
+  });
+  if (askedTray && askedTray !== "comments") showTray(askedTray);
 
   renderViewer();
   comments.apply(payload);

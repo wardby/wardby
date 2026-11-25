@@ -43,7 +43,7 @@ import {
   statusConnected,
   versionAction,
 } from "./live.js";
-import { planBarHost, renderPlanBar } from "./plan-bar.js";
+import { planBarHost, renderPlanBar, requestedTab, setPlanBarTab } from "./plan-bar.js";
 import { ReviewPanel } from "./review-ui.js";
 import { isLockedState, isReopenCopy } from "./review-model.js";
 
@@ -227,6 +227,7 @@ function mount(
       tabs[k].setAttribute("aria-selected", String(on));
       panes[k].hidden = !on;
     }
+    setPlanBarTab(planBar, which);
   };
   for (const k of TABS) {
     tabs[k].addEventListener("click", () => {
@@ -234,7 +235,10 @@ function mount(
       if (k === "history") void designHistory.open();
     });
   }
-  showTab(canEdit ? "style" : "comments");
+  // Arriving from another document of the plan: open the tab that was open there (a document's Edits
+  // is History here); Style and Settings only for someone who can edit.
+  const askedTab = requestedTab(canEdit ? TABS : (["comments", "review", "history"] as const), { edits: "history" });
+  showTab(askedTab ?? (canEdit ? "style" : "comments"));
 
   const layersHeading = h("h2", { hidden: !canEdit }, "Layers");
   const layersHost = h("div", { hidden: !canEdit }, layersPanel);
