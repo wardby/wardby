@@ -285,6 +285,18 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(html).not.toContain(OWNER_EMAIL);
     });
 
+    it("still serves the page when its document cannot be put in the bootstrap: the app fetches it", async () => {
+      const broken = (await createDocument(db, cipher, { ownerId: owner.id, title: "No version", markdown: "x" })).id;
+      // A document whose current version is gone: building the page's copy fails (document_not_found).
+      await db.document.update({ where: { id: broken }, data: { currentVersionId: null } });
+      const { jar } = await session(owner.id);
+      const res = await call(`/d/${broken}`, { jar });
+      expect(res.status).toBe(200);
+      const boot = bootstrapOf(await res.text());
+      expect(boot.documentId).toBe(broken);
+      expect(boot).not.toHaveProperty("initial");
+    });
+
     it("answers 404 to a signed-in principal without access", async () => {
       const { jar } = await session(outsider.id);
       const res = await call(`/d/${docId}`, { jar });

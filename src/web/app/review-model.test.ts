@@ -13,6 +13,9 @@ import {
   EVENT_LABEL,
   isLockedState,
   STATE_LABEL,
+  chooseCandidates,
+  optionFamily,
+  planAlternatives,
 } from "./review-model.js";
 
 const rv = (over: Partial<ReviewerPayload>): ReviewerPayload => ({
@@ -194,5 +197,54 @@ describe("review model", () => {
         }
       }
     });
+  });
+});
+
+describe("optionFamily", () => {
+  it("names the family of a one-letter or one-digit variant, and nothing for a word after the dash", () => {
+    expect(["option-a/", "option-b-cards/", "Option-C.md", "design-2.md", "option-a"].map(optionFamily)).toEqual([
+      "option-",
+      "option-",
+      "option-",
+      "design-",
+      "option-",
+    ]);
+    expect(["api-spec.md", "api-client.md", "screens/", "plan.md", "-a/"].map(optionFamily)).toEqual([
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  it("pre-ticks only the chosen option's family, never look-alike names", () => {
+    const d = (id: string, path: string, current = false) => ({
+      id,
+      title: path,
+      path,
+      reviewState: "in_review",
+      removed: false,
+      current,
+    });
+    const ticks = chooseCandidates([
+      d("a", "option-a/", true),
+      d("b", "option-b-cards/"),
+      d("s", "api-spec.md"),
+      d("c", "api-client.md"),
+    ]).map((c) => [c.path, c.ticked]);
+    expect(ticks).toEqual([
+      ["option-b-cards/", true],
+      ["api-spec.md", false],
+      ["api-client.md", false],
+    ]);
+    // Choosing api-spec.md pre-ticks nothing: api-client.md only looks like a sibling.
+    expect(
+      chooseCandidates([d("s", "api-spec.md", true), d("c", "api-client.md"), d("b", "option-b/")]).map(
+        (c) => c.ticked,
+      ),
+    ).toEqual([false, false]);
+    // Two look-alike documents are not alternatives either: Choose is not offered between them.
+    expect(planAlternatives([{ path: "api-spec.md" }, { path: "api-client.md" }, { path: "option-a/" }])).toEqual([]);
   });
 });

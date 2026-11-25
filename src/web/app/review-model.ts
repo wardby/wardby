@@ -63,19 +63,27 @@ export function chooseSummary(input: {
 }
 
 /**
- * The alternatives among a plan's open documents: those named in one family with at least one other (option-a/ and
- * option-b/ share "option-"); shared parts such as screens/ are not alternatives. With no family-style names at all,
- * every one of them. (A lone option-a/ beside screens/ is a choice already made.)
+ * The option family a path names, or null: a prefix, a dash, then a one-letter or one-digit variant ending the name or
+ * followed by "-", "." or "/" (option-a/, option-b-cards/, design-2.md share "option-" or "design-"). A word after the
+ * dash is not a variant, so api-spec.md and api-client.md are not options of one another.
+ */
+export function optionFamily(path: string): string | null {
+  const m = /^(.+?-)[a-z0-9](?:[-./]|$)/i.exec(path);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * The alternatives among a plan's open documents: those named in one option family (optionFamily) with at least one
+ * other; shared parts such as screens/ are not alternatives. With no family-style names at all, every one of them. (A lone option-a/ beside screens/ is a choice already made.)
  */
 export function planAlternatives<T extends { path: string }>(docs: T[]): T[] {
-  const family = (path: string) => (path.indexOf("-") > 0 ? path.slice(0, path.indexOf("-") + 1) : null);
   const sizes = new Map<string, number>();
   for (const d of docs) {
-    const f = family(d.path);
+    const f = optionFamily(d.path);
     if (f) sizes.set(f, (sizes.get(f) ?? 0) + 1);
   }
   if (sizes.size === 0) return docs;
-  return docs.filter((d) => (sizes.get(family(d.path) ?? "") ?? 0) >= 2);
+  return docs.filter((d) => (sizes.get(optionFamily(d.path) ?? "") ?? 0) >= 2);
 }
 
 /** What a choice did, said after it lands: rejected, and what the plan still waits for (or that it is ready). */
@@ -104,8 +112,8 @@ const OPEN_FOR_CHOICE = new Set(["in_review", "changes_requested", "approved"]);
 
 /**
  * The other documents of the plan a choice can reject: still in the plan, not plan.md, not the chosen one,
- * and in a state Reject takes. Those named like the chosen one (the part of the path before its first "-",
- * as "option" in option-a-tree/) start ticked; the rest (shared screens, other parts) start unticked.
+ * and in a state Reject takes. Those in the chosen one's option family (optionFamily: option-b-cards/ beside
+ * option-a-tree/) start ticked; the rest (shared screens, other parts) start unticked.
  */
 export function chooseCandidates(
   documents: Array<{
@@ -119,8 +127,7 @@ export function chooseCandidates(
 ): ChooseCandidate[] {
   const chosen = documents.find((d) => d.current);
   if (!chosen) return [];
-  const dash = chosen.path.indexOf("-");
-  const family = dash > 0 ? `${chosen.path.slice(0, dash)}-` : null;
+  const family = optionFamily(chosen.path);
   return documents
     .filter((d) => !d.current && !d.removed && d.path !== "plan.md" && OPEN_FOR_CHOICE.has(d.reviewState))
     .map((d) => ({
@@ -128,7 +135,7 @@ export function chooseCandidates(
       title: d.title,
       path: d.path,
       reviewState: d.reviewState,
-      ticked: family !== null && d.path.startsWith(family),
+      ticked: family !== null && optionFamily(d.path) === family,
     }));
 }
 
