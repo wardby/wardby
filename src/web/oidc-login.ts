@@ -50,8 +50,6 @@ export interface OidcLoginOptions {
   scopes: string;
   /** WEB_OIDC_SUBJECT_CLAIM; default `sub`. */
   subjectClaim?: string;
-  /** WEB_OIDC_SUBJECT_EMAIL_DOMAIN (lowercase); when set, it replaces subjectClaim. */
-  subjectEmailDomain?: string;
   /** MCP_CANONICAL_URI: its origin hosts the pages and the callback. */
   canonicalUri: string;
   /** SECRET_APP_KEY (64 hex chars); the state cookie key is derived from it. */
@@ -64,8 +62,8 @@ export interface OidcLoginOptions {
   now?: () => number;
 }
 
-/** Where a browser sign-in's principal subject comes from (WEB_OIDC_SUBJECT_*), as /web/whoami reports it. */
-export type WebSubjectSource = { claim: string } | { emailDomain: string };
+/** Where a browser sign-in's principal subject comes from (WEB_OIDC_SUBJECT_CLAIM), as /web/whoami reports it. */
+export type WebSubjectSource = { claim: string };
 
 export interface OidcLogin {
   readonly configured: boolean;
@@ -86,24 +84,10 @@ const fail = (code: string): never => {
 /**
  * The principal subject for a verified ID token. By default its `sub`, as on the bearer path; an
  * operator whose provider puts a different value in the access token's `sub` names a claim carrying
- * that value, or (WEB_OIDC_SUBJECT_EMAIL_DOMAIN) takes the local part of a verified email at exactly
- * that domain. A missing or unusable value throws: it never falls back to `sub`, which would land the
+ * that value. A missing or unusable value throws: it never falls back to `sub`, which would land the
  * person on a second principal. requireSubject still applies, so the reserved team prefix is refused.
  */
-export function webSubjectFromClaims(
-  claims: Record<string, unknown>,
-  options: { subjectClaim?: string; subjectEmailDomain?: string } = {},
-): string {
-  if (options.subjectEmailDomain !== undefined) {
-    const email = claims.email;
-    if (claims.email_verified !== true || typeof email !== "string") throw new Error("Unverified email.");
-    const at = email.lastIndexOf("@");
-    const local = email.slice(0, at);
-    if (at <= 0 || local.includes("@") || email.slice(at + 1).toLowerCase() !== options.subjectEmailDomain) {
-      throw new Error("Email outside the subject domain.");
-    }
-    return requireSubject(local);
-  }
+export function webSubjectFromClaims(claims: Record<string, unknown>, options: { subjectClaim?: string } = {}): string {
   const claim = options.subjectClaim ?? "sub";
   return requireSubject(Object.hasOwn(claims, claim) ? claims[claim] : undefined);
 }
@@ -289,10 +273,7 @@ export function createOidcLogin(options: OidcLoginOptions): OidcLogin {
 
   return {
     configured,
-    subjectSource:
-      options.subjectEmailDomain !== undefined
-        ? { emailDomain: options.subjectEmailDomain }
-        : { claim: options.subjectClaim ?? "sub" },
+    subjectSource: { claim: options.subjectClaim ?? "sub" },
 
     async startLogin({ returnTo }) {
       const { issuer, clientId, key: k } = requireConfigured();
@@ -352,10 +333,7 @@ export function createOidcLogin(options: OidcLoginOptions): OidcLogin {
           return fail(WEB_LOGIN_FAILED);
         }
         if (typeof claims.nonce !== "string" || !sameSecret(claims.nonce, saved.n)) return fail(WEB_LOGIN_FAILED);
-        subject = webSubjectFromClaims(claims, {
-          subjectClaim: options.subjectClaim,
-          subjectEmailDomain: options.subjectEmailDomain,
-        });
+        subject = webSubjectFromClaims(claims, { subjectClaim: options.subjectClaim });
       } catch {
         return fail(WEB_LOGIN_FAILED);
       }
