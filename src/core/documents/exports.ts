@@ -141,6 +141,8 @@ export async function requestRenderedExport(
   deps: ExportDeps,
   input: { documentId: string; viewer: Viewer; format: RenderedExportFormat; board?: string; versionNumber?: number },
 ): Promise<{ exportId: string }> {
+  // Before anything is counted: an agent never consumes an export rate-limit slot.
+  refuseAgentViewer(input.viewer);
   const { db } = deps;
   const { doc, version, content } = await source(db, input.documentId, input.viewer, input.versionNumber);
   let board: string | undefined;
