@@ -372,4 +372,16 @@ tests:
       codingProxy.tunnel.enabled: true
     asserts:
       - failedTemplate:
-          errorMessage: codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true
+          errorMessage: codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true and codingProxy.tunnel.agentHosts is off
+  - it: tells the launcher the per-agent hosts ceiling, with an empty server list
+    documentIndex: 1
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.agentHosts: any
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_AGENT_HOSTS, value: any }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_PORT, value: "8789" }

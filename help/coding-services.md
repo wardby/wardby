@@ -1,9 +1,9 @@
 ---
 id: coding-services
 title: Give coding runs the services their tests need
-summary: Let coding runs on the Kubernetes, Docker or Substrate launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml; startCommand and substrateImage for Substrate; a rootless Docker daemon (docker kind) on Kubernetes with gVisor.
+summary: Let coding runs on the Kubernetes, Docker or Substrate launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml; startCommand and substrateImage for Substrate; a rootless Docker daemon (docker kind) on Kubernetes with gVisor; a headless browser service reaching the web through the run's CONNECT tunnel.
 audience: operator
-tags: [coding-agents, services, postgres, redis, valkey, mysql, substrate, startCommand, substrateImage, docker]
+tags: [coding-agents, services, postgres, redis, valkey, mysql, substrate, startCommand, substrateImage, docker, browser, chromium, playwright, cdp, tunnel]
 appliesTo: >=0.2.1
 ---
 
@@ -144,6 +144,37 @@ launchers.
 See [On the Substrate job launcher](../docs/coding-services.md#on-the-substrate-job-launcher)
 and the `job-launcher-substrate` help article.
 
+## Services that reach the internet (a headless browser)
+
+A service shares the run's network but not the agent's environment: it gets no
+`HTTPS_PROXY` and no tunnel token, so alone it reaches only the run's other
+services. For a service that must load outside pages, such as a headless
+Chromium the agent drives to check a web app, the agent passes the run's
+[CONNECT tunnel](coding-proxy-tunnel.md) at use time. Give the agent the app's
+hosts (often `*.example.com`) in `codingProfile.tunnelHosts`, within the
+operator's `CODING_TUNNEL_AGENT_HOSTS`, then with Playwright over CDP:
+
+```js
+import { chromium } from "playwright-core";
+
+const tunnel = new URL(process.env.HTTPS_PROXY); // carries the token: never print it
+const browser = await chromium.connectOverCDP("http://127.0.0.1:9222");
+const context = await browser.newContext({
+  proxy: {
+    server: `${tunnel.protocol}//${tunnel.host}`,
+    username: decodeURIComponent(tunnel.username),
+    password: decodeURIComponent(tunnel.password),
+  },
+});
+await (await context.newPage()).goto("https://app.example.com/");
+```
+
+Each host a page loads is then checked like any tunnel: anything outside the
+server list and the agent's entries is refused
+([`tunnel_host_not_allowed`](errors/tunnel-host-not-allowed.md)), plain
+`http://` is refused, and private addresses stay blocked. See
+[Services that reach the internet](../docs/coding-services.md#services-that-reach-the-internet-a-headless-browser).
+
 ## Docker in coding runs (`docker` kind)
 
 A catalog entry of kind `docker` gives each run a rootless Docker daemon, so
@@ -179,7 +210,8 @@ images it builds. Its shells receive
   client in the run: the daemon gets the run's `HTTPS_PROXY`, `HTTP_PROXY` and
   `NO_PROXY` from the run's Secret, and the interception CA when one is set, so
   an intercepted registry gets its credential from the proxy. Only the hosts in
-  `CODING_TUNNEL_ALLOWED_HOSTS` are reachable; with the tunnel off, none. No
+  `CODING_TUNNEL_ALLOWED_HOSTS` and the agent's own `codingProfile.tunnelHosts`
+  are reachable; with the tunnel off, none. No
   registry mirror. `RUN` steps get the proxy only with
   `--build-arg HTTPS_PROXY --build-arg HTTP_PROXY`.
 - **Only this daemon.** The agent's `docker` CLI reaches only this socket: no

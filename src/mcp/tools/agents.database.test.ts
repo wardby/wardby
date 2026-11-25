@@ -202,6 +202,52 @@ describe.skipIf(!process.env.DATABASE_URL)("plan settings (PostgreSQL)", () => {
   });
 });
 
+describe.skipIf(!process.env.DATABASE_URL)("codingProfile.tunnelHosts (PostgreSQL)", () => {
+  const saved = { port: process.env.CODING_TUNNEL_PORT, level: process.env.CODING_TUNNEL_AGENT_HOSTS };
+  beforeAll(() => {
+    process.env.CODING_TUNNEL_PORT = "8789";
+    process.env.CODING_TUNNEL_AGENT_HOSTS = "any";
+  });
+  afterAll(async () => {
+    for (const [name, value] of [
+      ["CODING_TUNNEL_PORT", saved.port],
+      ["CODING_TUNNEL_AGENT_HOSTS", saved.level],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await db.agent.deleteMany({ where: { id: { in: agentIds } } });
+    await db.principal.deleteMany({ where: { id: { in: principalIds } } });
+  });
+
+  it("stores the patterns and the * approval in the profile columns", async () => {
+    const owner = await principal();
+    const created = await codingAgent(owner.id);
+    const admin = await connect(owner, true);
+    const result = await admin.call("update_agent", {
+      id: created.id,
+      codingProfile: { tunnelHosts: ["*", "*.Example.com", "api.example.org"] },
+    });
+    await admin.close();
+    expect(result.isError, result.content[0].text).toBeFalsy();
+    const row = await db.codingAgentProfile.findUniqueOrThrow({ where: { agentId: created.id } });
+    expect(row.tunnelHosts).toEqual(["*", "*.example.com", "api.example.org"]);
+    expect(row.tunnelAnyHostAuthorizedById).toBe(owner.id);
+    expect(row.tunnelAnyHostAuthorizedAt).toBeInstanceOf(Date);
+
+    const plain = await connect(owner);
+    const cleared = await plain.call("update_agent", { id: created.id, codingProfile: { tunnelHosts: [] } });
+    await plain.close();
+    expect(cleared.isError, cleared.content[0].text).toBeFalsy();
+    const after = await db.codingAgentProfile.findUniqueOrThrow({ where: { agentId: created.id } });
+    expect(after).toMatchObject({
+      tunnelHosts: [],
+      tunnelAnyHostAuthorizedById: null,
+      tunnelAnyHostAuthorizedAt: null,
+    });
+  });
+});
+
 describe.skipIf(!process.env.DATABASE_URL)("documentTools setting (PostgreSQL)", () => {
   let owner: Principal;
   let stranger: Principal;

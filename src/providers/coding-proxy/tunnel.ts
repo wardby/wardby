@@ -3,6 +3,10 @@
  * clients (a build's package manager, a container engine) that honour HTTPS_PROXY. TLS passes through
  * end to end, so nothing here ever sees or alters the payload.
  *
+ * A host is allowed when it is on the server list (CODING_TUNNEL_ALLOWED_HOSTS, every run) or matches one
+ * of the patterns the run was given at dispatch (its agent's codingProfile.tunnelHosts, src/coding/tunnel-hosts.ts),
+ * within this proxy's own ceiling (CODING_TUNNEL_AGENT_HOSTS). Every other check applies the same either way.
+ *
  * An allowed host with an intercept rule is the one exception (tunnel-intercept.ts): the proxy terminates the
  * run's TLS for it and attaches a credential. Every other host stays blind.
  *
@@ -12,8 +16,11 @@
  * destination address (public only, and the connection is pinned to the address that was checked).
  *
  * Secrets: the token, the `Proxy-Authorization` value and every other header value stay out of every
- * response, log line, audit record and metric. A requested host reaches an audit record only when it
- * is on the allowlist; a refused host is attacker-controlled text and is never echoed.
+ * response, log line, audit record and metric. A requested host reaches an audit record only when its
+ * whole name was written by the operator or the agent's owner: on the server list, or equal to one of the
+ * run's exact patterns. A host allowed by `*.domain` or `*` is partly or wholly the run's own text (it could
+ * carry anything the run holds), so its record names only the pattern (`matchedBy`); a refused host is
+ * attacker-controlled text and is never echoed.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { isIP, type Socket } from "node:net";
@@ -22,6 +29,7 @@ import { logger } from "../../core/logger.js";
 import { HTTP_LIMITS } from "../../mcp/transport/http-limits.js";
 import { FetchPolicyError, normalizeHost, resolveDestination, type Resolver } from "../../sandbox/fetch-policy.js";
 import { connectPinned } from "../../sandbox/safe-fetch.js";
+import { matchTunnelHost, tunnelHostKind, tunnelHostsWithinCeiling } from "../../coding/tunnel-hosts.js";
 import type { TunnelAuthenticator, TunnelIdentity } from "./tunnel-auth.js";
 import type { InterceptHandle, Interceptor } from "./tunnel-intercept.js";
 
@@ -65,8 +73,10 @@ export type TunnelOutcome =
  */
 export interface TunnelAuditEvent {
   runId: string;
-  /** Present only when the requested host is on the allowlist. */
+  /** Present only when the whole host was written by the operator or the agent's owner (see the header). */
   host?: string;
+  /** What allowed the host: `server` (CODING_TUNNEL_ALLOWED_HOSTS), or the run's pattern that matched. */
+  matchedBy?: string;
   status: number;
   outcome: TunnelOutcome | TunnelRefusal;
   /** Bytes from the upstream host to the client, and from the client to the upstream host. */
@@ -204,7 +214,7 @@ export async function startTunnelListener(options: TunnelListenerOptions): Promi
     // Until the tunnel is up a failing client socket is not an event; once it is, finish() owns it.
     client.on("error", () => undefined);
     // Filled in as the checks pass, so a refusal records only what it has earned.
-    const known: { identity?: TunnelIdentity; host?: string } = {};
+    const known: { identity?: TunnelIdentity; host?: string; matchedBy?: string } = {};
 
     const refuse = (code: TunnelRefusal): void => {
       const durationMs = performance.now() - t0;
@@ -217,6 +227,7 @@ export async function startTunnelListener(options: TunnelListenerOptions): Promi
         record({
           runId: known.identity.runId,
           ...(known.host ? { host: known.host } : {}),
+          ...(known.matchedBy ? { matchedBy: known.matchedBy } : {}),
           status: TUNNEL_REFUSALS[code],
           outcome: code,
           bytesIn: 0,
@@ -243,9 +254,16 @@ export async function startTunnelListener(options: TunnelListenerOptions): Promi
 
     const target = parseTarget(request.url);
     if (target.kind === "bad") return refuse("tunnel_bad_target");
-    if (isIP(target.host) !== 0 || !allowedHosts.has(target.host)) return refuse("tunnel_host_not_allowed");
+    if (isIP(target.host) !== 0) return refuse("tunnel_host_not_allowed");
     const tunnelHost = target.host;
-    known.host = tunnelHost;
+    // The server list first, then the run's own patterns as this proxy's ceiling allows them now.
+    const matchedBy = allowedHosts.has(tunnelHost)
+      ? "server"
+      : matchTunnelHost(tunnelHost, tunnelHostsWithinCeiling(identity.tunnelHosts ?? [], config.agentHosts));
+    if (matchedBy === undefined) return refuse("tunnel_host_not_allowed");
+    const recordedHost = matchedBy === "server" || tunnelHostKind(matchedBy) === "exact" ? tunnelHost : undefined;
+    known.host = recordedHost;
+    known.matchedBy = matchedBy;
     if (target.port !== TUNNEL_PORT) return refuse("tunnel_port_not_allowed");
 
     const state = runState(identity.runId);
@@ -260,12 +278,13 @@ export async function startTunnelListener(options: TunnelListenerOptions): Promi
     const aborted = new AbortController();
     client.once("close", () => aborted.abort());
     // An intercepted host connects upstream per request, inside the interceptor, so no tunnel-wide upstream.
-    const intercepting = options.interceptor?.hosts.has(tunnelHost) === true;
+    // Interception rules are exact server-list hosts: a host allowed only by a run's pattern is never intercepted.
+    const intercepting = matchedBy === "server" && options.interceptor?.hosts.has(tunnelHost) === true;
     let upstream: Socket | undefined;
     if (!intercepting) {
       try {
         const destination = await resolveDestination(`https://${tunnelHost}/`, {
-          allowedHosts: [...allowedHosts],
+          allowedHosts: [tunnelHost],
           restrictToAllowedHosts: true,
           resolve: options.resolve,
         });
@@ -306,7 +325,8 @@ export async function startTunnelListener(options: TunnelListenerOptions): Promi
       const durationMs = performance.now() - t0;
       record({
         runId: run.runId,
-        host: tunnelHost,
+        ...(recordedHost ? { host: recordedHost } : {}),
+        matchedBy,
         status: 200,
         outcome,
         bytesIn,

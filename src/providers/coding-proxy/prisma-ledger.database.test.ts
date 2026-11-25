@@ -1514,11 +1514,12 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
     const oRun = `tunnel-old-run-${suffix}`;
     const eRun = `tunnel-expired-run-${suffix}`;
     const dRun = `tunnel-dup-run-${suffix}`;
+    const pRun = `tunnel-pattern-run-${suffix}`;
 
     afterAll(async () => {
-      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "runId" IN (${tRun}, ${oRun}, ${eRun}, ${dRun})`;
-      await db.codingRun.deleteMany({ where: { runId: { in: [tRun, oRun, eRun, dRun] } } });
-      await db.run.deleteMany({ where: { id: { in: [tRun, oRun, eRun, dRun] } } });
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "runId" IN (${tRun}, ${oRun}, ${eRun}, ${dRun}, ${pRun})`;
+      await db.codingRun.deleteMany({ where: { runId: { in: [tRun, oRun, eRun, dRun, pRun] } } });
+      await db.run.deleteMany({ where: { id: { in: [tRun, oRun, eRun, dRun, pRun] } } });
       await db.agent.deleteMany({ where: { id: tAgent } });
     });
 
@@ -1526,7 +1527,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       await db.agent.create({
         data: { id: tAgent, name: tAgent, systemPrompt: "x", model: "gpt-5.6-luna", budgetUsd: 1 },
       });
-      for (const id of [tRun, oRun, eRun, dRun]) {
+      for (const id of [tRun, oRun, eRun, dRun, pRun]) {
         await db.run.create({ data: { id, agentId: tAgent, executionManaged: true } });
         await db.codingRun.create({
           data: {
@@ -1583,6 +1584,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         runId: tRun,
         status: "active",
         tunnelTokenHash: `tunnel-token-hash-${suffix}`,
+        tunnelHosts: [],
       });
       expect(await ledger.findSessionByTunnelTokenHash(`tunnel-registry-${suffix}`)).toBeUndefined();
       expect(await ledger.findSessionByTunnelTokenHash(`tunnel-cap-${suffix}`)).toBeUndefined();
@@ -1595,6 +1597,35 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       expect(await ledger.sessionActiveForRun(`missing-${suffix}`)).toBe(false);
       await ledger.cancelSession(`tunnel-session-${suffix}`);
       expect(await ledger.sessionActiveForRun(tRun)).toBe(false);
+    });
+
+    it("stores the run's tunnel host patterns and returns them with the tunnel lookup only", async () => {
+      const ledger = new PrismaProxyLedger(db);
+      await ledger.createSession({
+        id: `tunnel-pattern-session-${suffix}`,
+        runId: pRun,
+        capabilityHash: `tunnel-pattern-cap-${suffix}`,
+        registryTokenHash: `tunnel-pattern-registry-${suffix}`,
+        tunnelTokenHash: `tunnel-pattern-hash-${suffix}`,
+        tunnelHosts: ["api.example.com", "*.example.org", "*"],
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: ["gpt-5.6-luna"],
+        budgetUsd: 1,
+        deadlineAt: new Date(Date.now() + 60_000),
+      });
+      expect(await ledger.findSessionByTunnelTokenHash(`tunnel-pattern-hash-${suffix}`)).toMatchObject({
+        runId: pRun,
+        tunnelHosts: ["api.example.com", "*.example.org", "*"],
+      });
+      expect(await ledger.findSessionByCapabilityHash(`tunnel-pattern-cap-${suffix}`)).not.toHaveProperty(
+        "tunnelHosts",
+      );
+      // A row that no longer parses gives the run no patterns, never a widened list.
+      await db.$executeRaw`UPDATE "CodingProxySession" SET "tunnelHosts" = ARRAY['*.com', '*']::text[] WHERE "runId" = ${pRun}`;
+      expect(await ledger.findSessionByTunnelTokenHash(`tunnel-pattern-hash-${suffix}`)).toMatchObject({
+        tunnelHosts: [],
+      });
     });
 
     it("refuses a second session with the same tunnel token hash", async () => {

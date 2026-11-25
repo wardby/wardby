@@ -365,12 +365,17 @@ codingProxy:
   tunnel:
     # -- Serve a CONNECT tunnel on `port` (sets `CODING_TUNNEL_PORT` and `CODING_TUNNEL_ALLOWED_HOSTS` on the proxy), add the
     # port to the container and the Service, and to the NetworkPolicy rule that admits coding-run pods, and give the control
-    # plane the port and hosts so it points each run at the tunnel. Needs `allowedHosts`.
+    # plane the port and hosts so it points each run at the tunnel. Needs `allowedHosts`, unless `agentHosts` is not off.
     enabled: false
     # -- Port of the tunnel. It must differ from the proxy port (8787) and the deny port (8788).
     port: 8789
-    # -- Hostnames a run may tunnel to, on port 443 only. No IP addresses, wildcards or ports.
+    # -- Hostnames every run may tunnel to, on port 443 only. No IP addresses, wildcards or ports. May be empty when
+    # `agentHosts` is not off.
     allowedHosts: []
+    # -- The ceiling on per-agent tunnel hosts (`CODING_TUNNEL_AGENT_HOSTS`, set on the proxy and the control plane):
+    # `off` (only `allowedHosts`), `exact` (an agent's codingProfile.tunnelHosts may list exact hosts), `pattern` (also
+    # `*.domain`) or `any` (also `*`, which also needs an admin's approval on the agent).
+    agentHosts: "off"
     # -- Open tunnels per run (`CODING_TUNNEL_MAX_CONNECTIONS`). Unset uses the proxy's default.
     maxConnections: null
     # -- Bytes per run, both directions (`CODING_TUNNEL_MAX_BYTES`). Unset uses the proxy's default.

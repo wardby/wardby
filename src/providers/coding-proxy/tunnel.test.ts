@@ -23,6 +23,7 @@ const publicResolver: Resolver = async () => [{ address: PUBLIC_ADDRESS, family:
 
 const baseConfig: CodingTunnelConfig = {
   port: 0,
+  agentHosts: "off",
   allowedHosts: [HOST, "ghcr.io"],
   maxConnections: 16,
   maxBytes: 1024 * 1024,
@@ -287,6 +288,160 @@ describe("coding proxy CONNECT tunnel", () => {
     });
   });
 
+  describe("per-agent tunnel hosts", () => {
+    const PATTERNS = ["api.example.org", "*.apps.example.org"];
+
+    beforeEach(() => {
+      auth.register("agent-token", { runId: "run-agent", tunnelHosts: PATTERNS });
+      auth.register("any-token", { runId: "run-any", tunnelHosts: ["*"] });
+    });
+
+    async function audited(port: number, target: string, token: string): Promise<TunnelAuditEvent> {
+      const reply = await tunnel(port, target, basic(token));
+      reply.socket.destroy();
+      await vi.waitFor(() => expect(audits.length).toBeGreaterThan(0));
+      return audits.pop()!;
+    }
+
+    it("allows a server-list host to every run, recorded as matched by the server list", async () => {
+      const { port } = await start({ config: { agentHosts: "pattern" } });
+      expect((await tunnel(port, `${HOST}:443`, basic("agent-token"))).status).toBe(200);
+      expect(await audited(port, `${HOST}:443`, "agent-token")).toMatchObject({ host: HOST, matchedBy: "server" });
+    });
+
+    it("allows the run's exact pattern and records the host and the pattern", async () => {
+      const { port } = await start({ config: { agentHosts: "exact" } });
+      expect(await audited(port, "API.Example.org.:443", "agent-token")).toMatchObject({
+        runId: "run-agent",
+        host: "api.example.org",
+        matchedBy: "api.example.org",
+        outcome: "closed",
+        status: 200,
+      });
+    });
+
+    it("allows *.domain at several depths, recording the pattern but not the run's own name", async () => {
+      const { port } = await start({ config: { agentHosts: "pattern" } });
+      for (const target of ["a.apps.example.org", "a.b.apps.example.org", "x.y.z.apps.example.org"]) {
+        const event = await audited(port, `${target}:443`, "agent-token");
+        expect(event).toMatchObject({ runId: "run-agent", matchedBy: "*.apps.example.org", status: 200 });
+        expect(event.host).toBeUndefined();
+      }
+      expect(connect).toHaveBeenLastCalledWith(
+        expect.objectContaining({ hostname: "x.y.z.apps.example.org", address: PUBLIC_ADDRESS }),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it("refuses every other host, the pattern's own domain and a label-boundary lookalike", async () => {
+      const { port } = await start({ config: { agentHosts: "pattern" } });
+      for (const target of ["apps.example.org", "evilapps.example.org", "x.example.org", "example.org", "other.net"]) {
+        const reply = await tunnel(port, `${target}:443`, basic("agent-token"));
+        expect(reply.code).toBe("tunnel_host_not_allowed");
+      }
+      expect(connect).not.toHaveBeenCalled();
+      expect(audits.every((event) => event.host === undefined && event.matchedBy === undefined)).toBe(true);
+    });
+
+    it("gives a run only its own patterns", async () => {
+      const { port } = await start({ config: { agentHosts: "any" } });
+      expect((await tunnel(port, "a.apps.example.org:443")).code).toBe("tunnel_host_not_allowed");
+      expect((await tunnel(port, "a.apps.example.org:443", basic("agent-token"))).status).toBe(200);
+    });
+
+    it("applies this proxy's own ceiling to the run's patterns", async () => {
+      const off = await start({ config: { agentHosts: "off" } });
+      expect((await tunnel(off.port, "api.example.org:443", basic("agent-token"))).code).toBe(
+        "tunnel_host_not_allowed",
+      );
+      const exact = await start({ config: { agentHosts: "exact" } });
+      expect((await tunnel(exact.port, "api.example.org:443", basic("agent-token"))).status).toBe(200);
+      expect((await tunnel(exact.port, "a.apps.example.org:443", basic("agent-token"))).code).toBe(
+        "tunnel_host_not_allowed",
+      );
+      const pattern = await start({ config: { agentHosts: "pattern" } });
+      expect((await tunnel(pattern.port, "any.example.net:443", basic("any-token"))).code).toBe(
+        "tunnel_host_not_allowed",
+      );
+      const any = await start({ config: { agentHosts: "any" } });
+      expect((await tunnel(any.port, "any.example.net:443", basic("any-token"))).status).toBe(200);
+    });
+
+    it("works with an empty server list", async () => {
+      const { port } = await start({ config: { allowedHosts: [], agentHosts: "pattern" } });
+      expect((await tunnel(port, `${HOST}:443`, basic("agent-token"))).code).toBe("tunnel_host_not_allowed");
+      expect((await tunnel(port, "a.apps.example.org:443", basic("agent-token"))).status).toBe(200);
+    });
+
+    it("keeps every other check under *: IP literals, port 443, private and metadata destinations", async () => {
+      const { port } = await start({ config: { agentHosts: "any" } });
+      expect((await tunnel(port, `${PUBLIC_ADDRESS}:443`, basic("any-token"))).code).toBe("tunnel_host_not_allowed");
+      expect((await tunnel(port, "[2606:2800:220:1::1]:443", basic("any-token"))).code).toBe("tunnel_host_not_allowed");
+      expect((await tunnel(port, "any.example.net:80", basic("any-token"))).code).toBe("tunnel_port_not_allowed");
+      expect((await tunnel(port, "metadata.google.internal:443", basic("any-token"))).code).toBe(
+        "tunnel_destination_blocked",
+      );
+      for (const address of ["10.0.0.5", "127.0.0.1", "169.254.169.254", "fd00:ec2::254", "192.168.1.10"]) {
+        const blocked = await start({
+          config: { agentHosts: "any" },
+          resolve: async () => [{ address, family: address.includes(":") ? 6 : 4 }],
+        });
+        const reply = await tunnel(blocked.port, "internal.example.net:443", basic("any-token"));
+        expect(reply.code).toBe("tunnel_destination_blocked");
+      }
+      expect(connect).not.toHaveBeenCalled();
+    });
+
+    it("keeps the per-run limits for hosts a pattern allows", async () => {
+      const { port } = await start({ config: { agentHosts: "any", maxConnections: 1 } });
+      const first = await tunnel(port, "one.example.net:443", basic("any-token"));
+      expect(first.status).toBe(200);
+      expect((await tunnel(port, "two.example.net:443", basic("any-token"))).code).toBe("tunnel_limit");
+    });
+
+    it("never intercepts a host that only a pattern allows", async () => {
+      const attach = vi.fn();
+      const { port } = await start({
+        config: { agentHosts: "pattern" },
+        interceptor: { hosts: new Set(["a.apps.example.org", HOST]), attach },
+      });
+      const reply = await tunnel(port, "a.apps.example.org:443", basic("agent-token"));
+      expect(reply.status).toBe(200);
+      reply.socket.write("blind");
+      const [chunk] = (await once(reply.socket, "data")) as [Buffer];
+      expect(chunk.toString()).toBe("blind");
+      expect(attach).not.toHaveBeenCalled();
+      expect(connect).toHaveBeenCalledTimes(1);
+    });
+
+    it("never writes a pattern-matched host to a log, audit record or metric (fake values)", async () => {
+      const lines: string[] = [];
+      setLogLineFilter((line) => {
+        lines.push(line);
+        return line;
+      });
+      const smuggled = `${TOKEN.toLowerCase()}.leak.example.net`;
+      const smuggledSuffix = "fake-credential-789.apps.example.org";
+      try {
+        const { port } = await start({ config: { agentHosts: "any" } });
+        const replies = [
+          await tunnel(port, `${smuggled}:443`, basic("any-token")),
+          await tunnel(port, `${smuggledSuffix}:443`, basic("agent-token")),
+          await tunnel(port, `${smuggled}:8443`, basic("any-token")),
+        ];
+        for (const reply of replies) reply.socket.destroy();
+        await vi.waitFor(() => expect(audits).toHaveLength(3));
+        expect(audits.map((event) => event.matchedBy).sort()).toEqual(["*", "*", "*.apps.example.org"]);
+        const seen = JSON.stringify([replies.map((r) => [r.head, r.body]), audits, requests]) + lines.join("\n");
+        for (const secret of [smuggled, "fake-credential-789", TOKEN.toLowerCase(), "any-token", "agent-token"]) {
+          expect(seen).not.toContain(secret);
+        }
+      } finally {
+        setLogLineFilter((line) => line);
+      }
+    });
+  });
+
   describe("destination check", () => {
     it("refuses a host that resolves to a private address", async () => {
       const { port } = await start({ resolve: async () => [{ address: "10.0.0.5", family: 4 }] });
@@ -479,7 +634,7 @@ describe("coding proxy CONNECT tunnel", () => {
       expect(event.startedAt).toBeInstanceOf(Date);
       expect(event.durationMs).toBeGreaterThanOrEqual(0);
       expect(Object.keys(event).sort()).toEqual(
-        ["bytesIn", "bytesOut", "durationMs", "host", "outcome", "runId", "startedAt", "status"].sort(),
+        ["bytesIn", "bytesOut", "durationMs", "host", "matchedBy", "outcome", "runId", "startedAt", "status"].sort(),
       );
     });
 

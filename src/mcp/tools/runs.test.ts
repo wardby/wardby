@@ -81,6 +81,8 @@ interface FakeRunRow {
   approvedVersions?: number;
   /** CodingProxySession.registryPlanUnchecked; absent = no session row. */
   planUnchecked?: string[];
+  /** CodingProxySession.tunnelHosts; absent = no session row. */
+  sessionTunnelHosts?: string[];
   budgetEvents?: Array<{ kind: string; limit: string; at: Date; details: unknown }>;
   localPullRequest?: Record<string, unknown> | null;
   /** What a select of parentRunId + agent (name, budget, group) sees. */
@@ -152,8 +154,9 @@ function fakeDb(agents: FakeAgentRow[], runs: FakeRunRow[], grants: FakeGrantSee
     },
     codingProxySession: {
       findUnique: async ({ where }: { where: { runId: string } }) => {
-        const unchecked = runRows.get(where.runId)?.planUnchecked;
-        return unchecked ? { registryPlanUnchecked: unchecked } : null;
+        const row = runRows.get(where.runId);
+        if (!row?.planUnchecked && !row?.sessionTunnelHosts) return null;
+        return { registryPlanUnchecked: row.planUnchecked ?? [], tunnelHosts: row.sessionTunnelHosts ?? [] };
       },
     },
     registryFetch: {
@@ -1281,6 +1284,43 @@ describe("run observability tools", () => {
     expect(JSON.stringify(withServices)).not.toContain('"image"');
     const without = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r2" } })) as never);
     expect(without).not.toHaveProperty("services");
+    await client.close();
+  });
+});
+
+describe("get_run: the run's tunnel host patterns (#627)", () => {
+  it("shows the patterns pinned at dispatch, and nothing for a run without any", async () => {
+    const now = new Date();
+    const row = (id: string, sessionTunnelHosts?: string[]) => ({
+      id,
+      agentId: "a1",
+      status: "succeeded",
+      trigger: "manual" as const,
+      turns: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      costUsd: 0,
+      finalText: null,
+      error: null,
+      startedAt: now,
+      finishedAt: now,
+      codingRun: { result: null, services: [] },
+      ...(sessionTunnelHosts ? { sessionTunnelHosts } : {}),
+    });
+    const db = fakeDb(
+      [{ id: "a1", ownerId: "p1" }],
+      [row("r1", ["*.apps.example.org", "*"]), row("r2", []), row("r3")],
+    );
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["agents:read"]));
+    registerRunTools(mcp);
+    const client = await connectClient(mcp);
+    const pinned = parseText((await client.callTool({ name: "get_run", arguments: { runId: "r1" } })) as never);
+    expect(pinned).toMatchObject({ tunnelHosts: ["*.apps.example.org", "*"] });
+    for (const runId of ["r2", "r3"]) {
+      const none = parseText((await client.callTool({ name: "get_run", arguments: { runId } })) as never);
+      expect(none).not.toHaveProperty("tunnelHosts");
+    }
     await client.close();
   });
 });

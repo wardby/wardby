@@ -82,6 +82,7 @@ import { createBlobStore } from "../storage/index.js";
 import { ContainerExecutor, PrismaContainerExecutionStore, RunCapabilityVault } from "./container.js";
 import { loadMcpToolPins } from "../../core/mcp-tools.js";
 import { loadNativeToolPins } from "../../core/coding-native-tools.js";
+import { loadTunnelHostPins } from "../../core/coding-tunnel-hosts.js";
 import { PrismaExecutionKindResolver, RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
 import { createRepoAccessGate, type RepoAccessGate } from "../../core/repo-access.js";
@@ -577,6 +578,13 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     mcpToolPins: (agentId, pinOptions) => loadMcpToolPins(options.db, agentId, pinOptions),
     // A Claude Code run's attached native tools, served through the same token and gateway route (#622).
     nativeToolPins: (agentId) => loadNativeToolPins(options.db, agentId, compositionLog),
+    // Per-agent tunnel hosts (#627), for every provider, within the ceiling this process started with.
+    ...(tunnel
+      ? {
+          tunnelHostPins: (agentId: string) =>
+            loadTunnelHostPins(options.db, agentId, tunnel.agentHosts, compositionLog),
+        }
+      : {}),
     artifactRoot,
     workerImage: config.workerImage,
     claudeWorkerImage: config.claudeWorkerImage,

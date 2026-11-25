@@ -1897,6 +1897,8 @@ export interface CodingSessionController {
     runStepsLevel?: RunStepsLevel;
     /** A workflow run (#582): the proxy accepts the Workflow tool's request shapes for it alone. */
     workflow?: boolean;
+    /** The run's tunnel host patterns, fixed at dispatch (codingProfile.tunnelHosts within the ceiling). */
+    tunnelHosts?: string[];
   }): Promise<{ id: string; capability: string }>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether the proxy refused a request of this session for budget. */
@@ -1973,6 +1975,12 @@ export interface ContainerExecutorOptions {
    * route as its MCP tools (#622). Absent = no coding run gets native tools.
    */
   nativeToolPins?: (agentId: string) => Promise<NativeToolPin[]>;
+  /**
+   * The agent's tunnel host patterns within the operator's ceiling now (composition wires
+   * loadTunnelHostPins when the tunnel is on), read once at dispatch for every provider and pinned on
+   * the run's proxy session: a later edit to the agent does not change the run. Absent = none.
+   */
+  tunnelHostPins?: (agentId: string) => Promise<string[]>;
   artifactRoot: string;
   /**
    * The Codex worker for the "node" toolchain (CODING_WORKER_IMAGE). Optional on a Claude-only
@@ -2431,6 +2439,8 @@ export class ContainerExecutor implements Executor {
           throw new Error(MCP_PINS_UNAVAILABLE_ERROR, { cause: error });
         }
         const mcpToken = mcpTools.length > 0 ? mintMcpToken() : undefined;
+        // The same for Claude Code and Codex: both reach the internet only through the tunnel.
+        const tunnelHosts = (await this.options.tunnelHostPins?.(run.agentId)) ?? [];
         const session = await this.options.sessions.createSession({
           runId,
           credentialRef: this.credentialRef(run.provider),
@@ -2440,6 +2450,7 @@ export class ContainerExecutor implements Executor {
           budgetUsd: run.budgetUsd,
           terms: this.modelTerms(run),
           ...(mcpToken ? { mcpTools, mcpTokenHash: mcpTokenHash(mcpToken) } : {}),
+          ...(tunnelHosts.length > 0 ? { tunnelHosts } : {}),
           ...(run.runStepsLevel ? { runStepsLevel: run.runStepsLevel } : {}),
           ...(run.provider === "claude-code" && run.workflowName ? { workflow: true } : {}),
           // Native mode (opted into, or a workflow run's) with repository skills on: the worker may offer

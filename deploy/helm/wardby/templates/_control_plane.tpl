@@ -64,11 +64,15 @@
 wardby.codingProxy.env, from the same codingProxy.tunnel values. The hosts are validated here, not used. */ -}}
 {{- with .Values.codingProxy.tunnel }}
 {{- if .enabled }}
-{{- if not .allowedHosts }}
-{{- fail "codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true" }}
-{{- end }}
+{{- include "wardby.codingProxy.tunnelAgentHosts" $ }}
 {{- $_ := set $env "CODING_TUNNEL_PORT" (int .port | toString) }}
+{{- if .allowedHosts }}
 {{- $_ := set $env "CODING_TUNNEL_ALLOWED_HOSTS" (join "," .allowedHosts) }}
+{{- end }}
+{{- /* The ceiling on per-agent hosts is checked when an agent is saved and when a run is dispatched. */ -}}
+{{- if ne (toString (default "off" .agentHosts)) "off" }}
+{{- $_ := set $env "CODING_TUNNEL_AGENT_HOSTS" (toString .agentHosts) }}
+{{- end }}
 {{- /* To have runs trust the interception CA, give the control plane the public certificate alone: from
 the CA Secret (mounted in control_plane.yaml), or as CODING_TUNNEL_TRUST_CA_CERT (controlPlane.extraEnv).
 The key is the proxy's and never goes here. */ -}}

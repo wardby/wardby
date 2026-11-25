@@ -2,7 +2,9 @@
  * The coding proxy's CONNECT tunnel (off unless CODING_TUNNEL_PORT is set): the port it listens on,
  * the hostnames a run may tunnel to, and the limits on each run's tunnels.
  *
- * CODING_TUNNEL_PORT, CODING_TUNNEL_ALLOWED_HOSTS (comma-separated bare hostnames),
+ * CODING_TUNNEL_PORT, CODING_TUNNEL_ALLOWED_HOSTS (comma-separated bare hostnames, for every run),
+ * CODING_TUNNEL_AGENT_HOSTS (the ceiling on per-agent hosts, codingProfile.tunnelHosts: off, exact, pattern
+ * or any; default off, and while it is off the server list must name at least one host),
  * CODING_TUNNEL_MAX_CONNECTIONS (open tunnels per run), CODING_TUNNEL_MAX_BYTES (bytes per run, both
  * directions), CODING_TUNNEL_IDLE_MS and CODING_TUNNEL_MAX_DURATION_MS (per tunnel).
  *
@@ -21,6 +23,7 @@
 import { isAbsolute } from "node:path";
 import { isIP } from "node:net";
 import { normalizeHost } from "../sandbox/fetch-policy.js";
+import { loadTunnelAgentHostLevel, type TunnelAgentHostLevel } from "../coding/tunnel-hosts.js";
 import { CODING_PROXY_DENY_PORT, CODING_PROXY_PORT } from "../providers/jobs/docker-isolation.js";
 
 /**
@@ -50,7 +53,10 @@ export interface CodingTunnelInterceptConfig {
 
 export interface CodingTunnelConfig {
   port: number;
+  /** Every run may reach these. May be empty when agentHosts is not off. */
   allowedHosts: string[];
+  /** The ceiling on the hosts an agent's runs may be given on top of allowedHosts (codingProfile.tunnelHosts). */
+  agentHosts: TunnelAgentHostLevel;
   maxConnections: number;
   maxBytes: number;
   idleMs: number;
@@ -82,12 +88,14 @@ function loadPort(raw: string): number {
   return value;
 }
 
-function loadAllowedHosts(env: NodeJS.ProcessEnv): string[] {
+function loadAllowedHosts(env: NodeJS.ProcessEnv, agentHosts: TunnelAgentHostLevel): string[] {
   const entries = (env.CODING_TUNNEL_ALLOWED_HOSTS ?? "")
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
-  if (entries.length === 0) throw new Error("CODING_TUNNEL_ALLOWED_HOSTS must list at least one host.");
+  // With per-agent hosts on, the server list may be empty: each agent then names its own.
+  if (entries.length === 0 && agentHosts === "off")
+    throw new Error("CODING_TUNNEL_ALLOWED_HOSTS must list at least one host while CODING_TUNNEL_AGENT_HOSTS is off.");
   const hosts = new Set<string>();
   for (const entry of entries) {
     let host: string | undefined;
@@ -210,7 +218,8 @@ export function loadCodingTunnelConfig(env: NodeJS.ProcessEnv = process.env): Co
     return undefined;
   }
   const port = loadPort(rawPort);
-  const allowedHosts = loadAllowedHosts(env);
+  const agentHosts = loadTunnelAgentHostLevel(env);
+  const allowedHosts = loadAllowedHosts(env, agentHosts);
   const idleMs = positiveInteger(env, "CODING_TUNNEL_IDLE_MS", 120_000);
   const maxDurationMs = positiveInteger(env, "CODING_TUNNEL_MAX_DURATION_MS", 1_800_000);
   if (idleMs > maxDurationMs) throw new Error("CODING_TUNNEL_IDLE_MS must not exceed CODING_TUNNEL_MAX_DURATION_MS.");
@@ -221,6 +230,7 @@ export function loadCodingTunnelConfig(env: NodeJS.ProcessEnv = process.env): Co
   return {
     port,
     allowedHosts,
+    agentHosts,
     maxConnections: positiveInteger(env, "CODING_TUNNEL_MAX_CONNECTIONS", 16),
     maxBytes: positiveInteger(env, "CODING_TUNNEL_MAX_BYTES", 4096 * MIB),
     idleMs,

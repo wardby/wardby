@@ -36,7 +36,28 @@ describe("CodingProfileSchema", () => {
       planDocument: null,
       buildFromPlan: false,
       workflow: null,
+      tunnelHosts: [],
     });
+  });
+
+  it("normalises tunnelHosts and refuses a bad entry with tunnel_hosts_invalid", () => {
+    const base = { repository: "openai/example" };
+    expect(
+      CodingProfileSchema.parse({ ...base, tunnelHosts: ["A.Example.com.", "*.example.org", "a.example.com"] })
+        .tunnelHosts,
+    ).toEqual(["a.example.com", "*.example.org"]);
+    const refused = CodingProfileSchema.safeParse({ ...base, tunnelHosts: ["ok.example.com", "*.co.uk"] });
+    expect(refused.success).toBe(false);
+    expect(refused.error?.issues[0]).toMatchObject({
+      path: ["tunnelHosts", 1],
+      message: expect.stringMatching(/^tunnel_hosts_invalid: entry 1 is a top-level domain or public suffix/),
+    });
+    // The refusal never repeats the entry.
+    const secretish = CodingProfileSchema.safeParse({
+      ...base,
+      tunnelHosts: ["https://fake-secret-value.example.com"],
+    });
+    expect(JSON.stringify(secretish.error?.issues)).not.toContain("fake-secret-value");
   });
 
   it("validates package allowlists per ecosystem", () => {
