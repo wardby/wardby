@@ -116,8 +116,10 @@ run on its file).
 ## The plan bar and links
 
 Every document in a set shows "Plan N · X of Y approved" over the documents the
-viewer can read, with a chip per document. A share-link guest sees only "Plan N"
-and their own document. Relative Markdown links between files of the set open
+viewer can read, with a chip per document. Clicking a chip keeps the side-panel
+tab you have open: on Review, the next document opens on Review too (a
+document's Edits tab opens a design's History, and back). A share-link guest
+sees only "Plan N" and their own document. Relative Markdown links between files of the set open
 the other documents or boards. The bar updates live with the other documents'
 review events.
 

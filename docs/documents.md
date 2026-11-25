@@ -102,7 +102,9 @@ lets every signed-in user read and comment on the plans it produces.
 **Plan bar.** Each page of a set shows "Plan N · X of Y approved" over the
 documents the viewer can read, with a chip per document (rejected and removed
 documents last, struck through, marked "Rejected" or "Removed", and not counted); relative links in the
-Markdown open the other documents or boards. A share-link guest sees only
+Markdown open the other documents or boards. A chip opens its document on the
+side-panel tab open now (Review stays Review; a document's Edits is a design's
+History), so a reviewer can step through the set. A share-link guest sees only
 "Plan N" and their own document. The bar updates live: a plan document's event
 stream also carries the review and version events of the other documents of its
 set that the viewer can read.
