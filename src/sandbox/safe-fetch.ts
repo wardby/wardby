@@ -54,24 +54,39 @@ export function requestPinned(
 /**
  * A plain TCP connection to the vetted address, for a tunnel that carries someone else's TLS: the
  * hostname is never resolved again, and the port is the destination URL's own (443 for https).
+ *
+ * `signal` bounds the connect only and is let go once connected, so a connect timeout never cuts an
+ * established tunnel. (net.connect's own `signal` option would destroy the socket whenever the signal
+ * aborts, for the socket's whole life.) The caller closes an established socket itself.
  */
 export function connectPinned(destination: Destination, signal: AbortSignal): Promise<Socket> {
   return new Promise((resolve, reject) => {
+    const abortError = () => (signal.reason instanceof Error ? signal.reason : new Error("connect aborted"));
+    if (signal.aborted) {
+      reject(abortError());
+      return;
+    }
     const port = Number(destination.url.port) || (destination.url.protocol === "https:" ? 443 : 80);
     const socket = netConnect({
       host: destination.hostname,
       port,
       lookup: pinnedLookup(destination),
       family: destination.family,
-      signal,
     });
+    const cleanup = () => {
+      signal.removeEventListener("abort", onAbort);
+      socket.off("error", failed);
+    };
     const failed = (error: Error) => {
+      cleanup();
       socket.destroy();
       reject(error);
     };
+    const onAbort = () => failed(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
     socket.once("error", failed);
     socket.once("connect", () => {
-      socket.off("error", failed);
+      cleanup();
       resolve(socket);
     });
   });

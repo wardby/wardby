@@ -51,4 +51,37 @@ describe("connectPinned", () => {
     controller.abort();
     await expect(connectPinned(destination(port), controller.signal)).rejects.toThrow();
   });
+
+  it("keeps an established connection open when the signal aborts after connecting", async () => {
+    const port = await listen((socket) => socket.pipe(socket));
+    const controller = new AbortController();
+    const socket = await connectPinned(destination(port), controller.signal);
+    sockets.push(socket);
+    // The tunnel's connect timeout firing later must not cut the tunnel: the caller closes it itself.
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(socket.destroyed).toBe(false);
+    socket.write("still here");
+    const [chunk] = (await once(socket, "data")) as [Buffer];
+    expect(chunk.toString()).toBe("still here");
+  });
+
+  it("outlives a timeout signal that fires after connecting", async () => {
+    const port = await listen((socket) => socket.pipe(socket));
+    const socket = await connectPinned(destination(port), AbortSignal.timeout(100));
+    sockets.push(socket);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(socket.destroyed).toBe(false);
+    socket.write("after timeout");
+    const [chunk] = (await once(socket, "data")) as [Buffer];
+    expect(chunk.toString()).toBe("after timeout");
+  });
+
+  it("rejects when the signal aborts while the connect is in progress", async () => {
+    const port = await listen((socket) => socket.pipe(socket));
+    const controller = new AbortController();
+    const pending = connectPinned(destination(port), controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+  });
 });
