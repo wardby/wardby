@@ -829,6 +829,21 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await context.close();
   }, 90_000);
 
+  it("opens History with its versions when the page is reached on ?tab=history (a plan bar link)", async () => {
+    const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "write" });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    await page.goto(`${server.origin}/d/${documentId}?tab=history`);
+    // No click on the tab: the versions load because the page arrived on it.
+    await expect
+      .poll(() => page.locator("[data-tab=history]").getAttribute("aria-selected"), { timeout: 20_000 })
+      .toBe("true");
+    await expect.poll(() => page.locator(".tp-row").count(), { timeout: 20_000 }).toBe(1);
+    expect(new URL(page.url()).search).toBe("");
+    await context.close();
+  }, 60_000);
+
   it("lets a reader see the history but not restore", async () => {
     const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "read" });
     const context = await browser.newContext();

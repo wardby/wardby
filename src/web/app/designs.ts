@@ -565,6 +565,8 @@ function mount(
     },
     onRestored: () => void refresh(),
   });
+  // Arriving on History from another document of the plan (?tab=history): load it, as a click on the tab does.
+  if (askedTab === "history") void designHistory.open();
   let historyNumber = baseNumber;
   /** Threads, the boards list and History; the mount shows the first payload's review through the panel itself. */
   const applyThreads = (p: DocumentPayload) => {

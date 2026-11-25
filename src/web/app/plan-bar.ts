@@ -261,6 +261,7 @@ export function planBarHost(): HTMLElement {
 /** `path` with `?tab=<tab>` (or as is with no tab). */
 function withTab(path: string, tab: string | undefined): string {
   if (!tab) return path;
+  // `path` is same-origin ("/d/<id>"); the base is a placeholder only so URL can parse it, and is dropped below.
   const url = new URL(path, "http://x");
   url.searchParams.set("tab", tab);
   return `${url.pathname}${url.search}${url.hash}`;
