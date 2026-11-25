@@ -65,6 +65,8 @@ COPY --from=build /build/dist/coding/transcript/format.js ./coding/transcript/fo
 COPY --from=build /build/dist/coding/redact.js ./coding/redact.js
 COPY --from=build /build/dist/core/secret-spans.js ./core/secret-spans.js
 COPY --from=build /build/dist/coding/registry/token.js ./coding/registry/token.js
+# debug-trace.js redacts the tunnel token too (coding/tunnel-token.js imports only node:crypto).
+COPY --from=build /build/dist/coding/tunnel-token.js ./coding/tunnel-token.js
 # tool-socket.js derives its wait for the tool runner's dependency cache from the module's own
 # timeouts (DEFAULT_TIMEOUTS); only its constants are read here, the tool runner runs it.
 COPY src/coding-worker/dependency-cache.mjs ./coding-worker/dependency-cache.mjs

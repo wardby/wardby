@@ -294,8 +294,80 @@ podSelector:
 {{/* The coding proxy's chart-derived environment, as a map; codingProxy.env overrides it. */}}
 {{- define "wardby.codingProxy.env" -}}
 {{- $m := .Values.codingProxy.metrics -}}
+{{- $t := .Values.codingProxy.tunnel -}}
 {{- if $m.enabled }}
 METRICS_BIND: {{ printf "0.0.0.0:%d" (int $m.port) | quote }}
 METRICS_ALLOW_NON_LOOPBACK: "true"
 {{- end }}
+{{- if $t.enabled }}
+{{- if not $t.allowedHosts }}
+{{- fail "codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true" }}
+{{- end }}
+CODING_TUNNEL_PORT: {{ int $t.port | quote }}
+CODING_TUNNEL_ALLOWED_HOSTS: {{ join "," $t.allowedHosts | quote }}
+{{- if not (kindIs "invalid" $t.maxConnections) }}
+CODING_TUNNEL_MAX_CONNECTIONS: {{ int $t.maxConnections | quote }}
+{{- end }}
+{{- if not (kindIs "invalid" $t.maxBytes) }}
+CODING_TUNNEL_MAX_BYTES: {{ int64 $t.maxBytes | quote }}
+{{- end }}
+{{- if not (kindIs "invalid" $t.idleMs) }}
+CODING_TUNNEL_IDLE_MS: {{ int $t.idleMs | quote }}
+{{- end }}
+{{- if not (kindIs "invalid" $t.maxDurationMs) }}
+CODING_TUNNEL_MAX_DURATION_MS: {{ int $t.maxDurationMs | quote }}
+{{- end }}
+{{- /* The CA certificate and key reach the proxy as files from the CA Secret (mounted in coding_proxy.yaml),
+or as CODING_TUNNEL_INTERCEPT_CA_CERT and _CA_KEY from secretKeyRefs in codingProxy.extraEnv; the proxy refuses
+to start with rules and no CA. */ -}}
+{{- if $t.intercept.rules }}
+CODING_TUNNEL_INTERCEPT_RULES: {{ toJson $t.intercept.rules | quote }}
+{{- if include "wardby.codingProxy.interceptCaSecret" . }}
+CODING_TUNNEL_INTERCEPT_CA_CERT_FILE: /etc/wardby/tunnel-intercept-ca/ca.crt
+CODING_TUNNEL_INTERCEPT_CA_KEY_FILE: /etc/wardby/tunnel-intercept-ca/ca.key
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/* The interception CA's Certificate spec when the chart issues it (intercept.certManager), without its
+secretName and commonName: a self-signed CA whose critical name constraint permits exactly the rule hosts. */}}
+{{- define "wardby.codingProxy.interceptCaSpec" -}}
+{{- $t := .Values.codingProxy.tunnel -}}
+{{- $c := $t.intercept.certManager -}}
+{{- $hosts := list -}}
+{{- range $t.intercept.rules }}{{ $hosts = append $hosts (lower .host) }}{{ end -}}
+isCA: true
+duration: {{ $c.duration }}
+renewBefore: {{ $c.renewBefore }}
+privateKey:
+  algorithm: ECDSA
+  size: 256
+  encoding: PKCS8
+  rotationPolicy: {{ $c.rotationPolicy }}
+nameConstraints:
+  critical: true
+  permitted:
+    dnsDomains:
+      {{- toYaml ($hosts | uniq | sortAlpha) | nindent 6 }}
+issuerRef:
+  group: cert-manager.io
+  kind: Issuer
+  name: wardby-coding-proxy-intercept-ca-selfsigned
+{{- end -}}
+
+{{/* The Secret the interception CA is mounted from, or empty when the chart mounts none: intercept.caSecret, or
+the Certificate's Secret with intercept.certManager. */}}
+{{- define "wardby.codingProxy.interceptCaSecret" -}}
+{{- $t := .Values.codingProxy.tunnel -}}
+{{- if and $t.enabled $t.intercept.rules -}}
+{{- if $t.intercept.certManager.enabled -}}
+{{- if $t.intercept.caSecret }}
+{{- fail "codingProxy.tunnel.intercept.caSecret and intercept.certManager.enabled cannot both be set" }}
+{{- end -}}
+wardby-coding-proxy-intercept-ca
+{{- else -}}
+{{- $t.intercept.caSecret -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}

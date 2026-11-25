@@ -52,6 +52,10 @@ COPY --from=build /build/dist/core/secret-spans.js ./core/secret-spans.js
 # The driver's registry-mode setup (driver.js -> coding/registry/worker-config.js)
 # and its adapters. Their third-party imports are in src/coding-worker/package.json.
 COPY --from=build /build/dist/coding/registry ./coding/registry
+# The CONNECT tunnel's proxy variables and its tunnel-only token (driver.js -> coding/tunnel-env.js;
+# driver.js and debug-trace.js -> coding/tunnel-token.js, which imports only node:crypto).
+COPY --from=build /build/dist/coding/tunnel-env.js ./coding/tunnel-env.js
+COPY --from=build /build/dist/coding/tunnel-token.js ./coding/tunnel-token.js
 # The lockfile normaliser (coding/registry/lockfiles.js) skips the folders collection excludes.
 COPY --from=build /build/dist/coding/collect-exclude.js ./coding/collect-exclude.js
 # The package-manager shim (npm-shim.mjs), linked as npm, pnpm and yarn:

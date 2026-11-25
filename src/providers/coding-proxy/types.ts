@@ -74,6 +74,11 @@ export interface ProxySession {
   budgetUsd: number;
   status: ProxySessionStatus;
   registryTokenHash?: string | null;
+  /**
+   * SHA-256 (base64url) of the run's tunnel token (deriveTunnelToken). Only findSessionByTunnelTokenHash
+   * returns it; null on sessions from before the tunnel.
+   */
+  tunnelTokenHash?: string | null;
   /** When the ledger first refused a request of this session for budget. */
   budgetExhaustedAt?: Date | null;
   /** The numbers behind the first budget refusal, set with budgetExhaustedAt. */
@@ -155,6 +160,8 @@ export interface CreateProxySessionInput {
   deadlineAt: Date;
   budgetUsd: number;
   registryTokenHash: string;
+  /** SHA-256 (base64url) of the run's tunnel token; absent when the session cannot open tunnels. */
+  tunnelTokenHash?: string;
   terms?: ProxyModelTerms;
   /** The run's pinned MCP tools; set together with mcpTokenHash, and only when there is at least one. */
   mcpTools?: CodingToolPin[];
@@ -224,6 +231,10 @@ export interface ProxyLedger {
   findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null>;
   /** The session whose MCP token hashes to this; any status (the caller checks it is active and in time). */
   findSessionByMcpTokenHash(mcpTokenHash: string): Promise<ProxySession | undefined>;
+  /** The session whose tunnel token hashes to this, with its tunnelTokenHash; any status (the caller checks it is active and in time). */
+  findSessionByTunnelTokenHash(tunnelTokenHash: string): Promise<ProxySession | undefined>;
+  /** Whether the run's session exists, is active and has not passed its deadline, on the ledger's clock. */
+  sessionActiveForRun(runId: string): Promise<boolean>;
   reserve(input: ReserveProxyRequestInput): Promise<ReserveProxyRequestResult>;
   complete(requestId: string, usage: ProxyUsage, actualCostUsd: number, upstreamStatus: number): Promise<ProxyRequest>;
   release(requestId: string, upstreamStatus: number): Promise<void>;

@@ -3,7 +3,7 @@ import { request as httpsRequest } from "node:https";
 import { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createInflate, createBrotliDecompress } from "node:zlib";
-import type { LookupFunction } from "node:net";
+import { connect as netConnect, type LookupFunction, type Socket } from "node:net";
 import { resolveDestination, type FetchPolicyOptions } from "./fetch-policy.js";
 import { BRIDGE_INPUT_BYTES, FETCH_RESPONSE_BYTES, FETCH_TIMEOUT_MS, MAX_REDIRECTS } from "./limits.js";
 
@@ -49,6 +49,46 @@ export function requestPinned(
     );
     request.once("error", reject);
     request.end(init.body);
+  });
+}
+/**
+ * A plain TCP connection to the vetted address, for a tunnel that carries someone else's TLS: the
+ * hostname is never resolved again, and the port is the destination URL's own (443 for https).
+ *
+ * `signal` bounds the connect only and is let go once connected, so a connect timeout never cuts an
+ * established tunnel. (net.connect's own `signal` option would destroy the socket whenever the signal
+ * aborts, for the socket's whole life.) The caller closes an established socket itself.
+ */
+export function connectPinned(destination: Destination, signal: AbortSignal): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const abortError = () => (signal.reason instanceof Error ? signal.reason : new Error("connect aborted"));
+    if (signal.aborted) {
+      reject(abortError());
+      return;
+    }
+    const port = Number(destination.url.port) || (destination.url.protocol === "https:" ? 443 : 80);
+    const socket = netConnect({
+      host: destination.hostname,
+      port,
+      lookup: pinnedLookup(destination),
+      family: destination.family,
+    });
+    const cleanup = () => {
+      signal.removeEventListener("abort", onAbort);
+      socket.off("error", failed);
+    };
+    const failed = (error: Error) => {
+      cleanup();
+      socket.destroy();
+      reject(error);
+    };
+    const onAbort = () => failed(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    socket.once("error", failed);
+    socket.once("connect", () => {
+      cleanup();
+      resolve(socket);
+    });
   });
 }
 export interface SafeFetchOptions extends FetchPolicyOptions {

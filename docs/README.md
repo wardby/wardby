@@ -41,6 +41,9 @@
   extend the reviewed worker image contract.
 - [Installing packages in coding runs](coding-packages.md) covers the coding
   package registry: allowlists, safeguards, limits, and error codes.
+- [CONNECT tunnel for coding runs](coding-proxy-tunnel.md) lets a run reach a
+  short allowlist of HTTPS hosts through the coding proxy: settings, the
+  checks and error codes, limits, and audit.
 - [Services for coding runs](coding-services.md) gives coding runs fresh
   PostgreSQL, Redis or MySQL instances declared in `.wardby/services.yaml`:
   the catalog, per-agent permission, variables, and errors.

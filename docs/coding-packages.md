@@ -60,6 +60,12 @@ default for a new agent), an install in that ecosystem gets a clear refusal
 (`403 wardby_package_not_allowed`) rather than silently failing or reaching
 the real registry.
 
+None of the checks in this guide apply to traffic a run sends through the
+optional [CONNECT tunnel](coding-proxy-tunnel.md): it carries TLS end to end (or,
+for a host you configure for interception, ends it at the proxy to add a
+credential), so the proxy does no package, version or lockfile checking there. Keep the tunnel's
+allowlist short, and keep package installs on the registry routes.
+
 ## Enabling packages on an agent
 
 Package permissions live on the coding profile's `packageAllowlist` field,

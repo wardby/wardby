@@ -1508,4 +1508,111 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       }
     });
   });
+  describe("tunnel sessions", () => {
+    const tAgent = `tunnel-agent-${suffix}`;
+    const tRun = `tunnel-run-${suffix}`;
+    const oRun = `tunnel-old-run-${suffix}`;
+    const eRun = `tunnel-expired-run-${suffix}`;
+    const dRun = `tunnel-dup-run-${suffix}`;
+
+    afterAll(async () => {
+      await db.$executeRaw`DELETE FROM "CodingProxySession" WHERE "runId" IN (${tRun}, ${oRun}, ${eRun}, ${dRun})`;
+      await db.codingRun.deleteMany({ where: { runId: { in: [tRun, oRun, eRun, dRun] } } });
+      await db.run.deleteMany({ where: { id: { in: [tRun, oRun, eRun, dRun] } } });
+      await db.agent.deleteMany({ where: { id: tAgent } });
+    });
+
+    it("stores the tunnel token hash, finds the session by it, and tells whether the run is active", async () => {
+      await db.agent.create({
+        data: { id: tAgent, name: tAgent, systemPrompt: "x", model: "gpt-5.6-luna", budgetUsd: 1 },
+      });
+      for (const id of [tRun, oRun, eRun, dRun]) {
+        await db.run.create({ data: { id, agentId: tAgent, executionManaged: true } });
+        await db.codingRun.create({
+          data: {
+            runId: id,
+            task: "test",
+            repository: "openai/example",
+            baseRef: "main",
+            headRef: `wardby/run-${id}`,
+            provider: "codex",
+            model: "gpt-5.6-luna",
+            timeoutSec: 60,
+            allowedEgress: [],
+            protectedPaths: [],
+            budgetReservedUsd: 1,
+          },
+        });
+      }
+      const ledger = new PrismaProxyLedger(db);
+      const base = {
+        credentialRef: "openai/test",
+        protocol: "openai-responses" as const,
+        allowedModels: ["gpt-5.6-luna"],
+        budgetUsd: 1,
+      };
+      await ledger.createSession({
+        ...base,
+        id: `tunnel-session-${suffix}`,
+        runId: tRun,
+        capabilityHash: `tunnel-cap-${suffix}`,
+        registryTokenHash: `tunnel-registry-${suffix}`,
+        tunnelTokenHash: `tunnel-token-hash-${suffix}`,
+        deadlineAt: new Date(Date.now() + 60_000),
+      });
+      await ledger.createSession({
+        ...base,
+        id: `tunnel-old-session-${suffix}`,
+        runId: oRun,
+        capabilityHash: `tunnel-old-cap-${suffix}`,
+        registryTokenHash: `tunnel-old-registry-${suffix}`,
+        deadlineAt: new Date(Date.now() + 60_000),
+      });
+      await ledger.createSession({
+        ...base,
+        id: `tunnel-expired-session-${suffix}`,
+        runId: eRun,
+        capabilityHash: `tunnel-expired-cap-${suffix}`,
+        registryTokenHash: `tunnel-expired-registry-${suffix}`,
+        tunnelTokenHash: `tunnel-expired-hash-${suffix}`,
+        deadlineAt: new Date(Date.now() - 1_000),
+      });
+
+      expect(await ledger.findSessionByTunnelTokenHash(`tunnel-token-hash-${suffix}`)).toMatchObject({
+        id: `tunnel-session-${suffix}`,
+        runId: tRun,
+        status: "active",
+        tunnelTokenHash: `tunnel-token-hash-${suffix}`,
+      });
+      expect(await ledger.findSessionByTunnelTokenHash(`tunnel-registry-${suffix}`)).toBeUndefined();
+      expect(await ledger.findSessionByTunnelTokenHash(`tunnel-cap-${suffix}`)).toBeUndefined();
+      // Only the tunnel lookup selects the hash: the capability lookup is unchanged.
+      expect(await ledger.findSessionByCapabilityHash(`tunnel-cap-${suffix}`)).not.toHaveProperty("tunnelTokenHash");
+
+      expect(await ledger.sessionActiveForRun(tRun)).toBe(true);
+      expect(await ledger.sessionActiveForRun(oRun)).toBe(true);
+      expect(await ledger.sessionActiveForRun(eRun)).toBe(false);
+      expect(await ledger.sessionActiveForRun(`missing-${suffix}`)).toBe(false);
+      await ledger.cancelSession(`tunnel-session-${suffix}`);
+      expect(await ledger.sessionActiveForRun(tRun)).toBe(false);
+    });
+
+    it("refuses a second session with the same tunnel token hash", async () => {
+      const ledger = new PrismaProxyLedger(db);
+      await expect(
+        ledger.createSession({
+          id: `tunnel-dup-session-${suffix}`,
+          runId: dRun,
+          capabilityHash: `tunnel-dup-cap-${suffix}`,
+          registryTokenHash: `tunnel-dup-registry-${suffix}`,
+          tunnelTokenHash: `tunnel-token-hash-${suffix}`,
+          credentialRef: "openai/test",
+          protocol: "openai-responses",
+          allowedModels: ["gpt-5.6-luna"],
+          budgetUsd: 1,
+          deadlineAt: new Date(Date.now() + 60_000),
+        }),
+      ).rejects.toThrow();
+    });
+  });
 });

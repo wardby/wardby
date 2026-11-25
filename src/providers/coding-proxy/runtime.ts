@@ -1,5 +1,6 @@
 import type { PrismaClient } from "#prisma";
 import { loadCodingProxyLeaseConfig } from "../../config/coding-proxy-lease.js";
+import { loadCodingTunnelConfig } from "../../config/coding-proxy-tunnel.js";
 import { createRemoteJWKSet } from "jose";
 import { loadDependencyCacheConfig } from "../../config/dependency-cache.js";
 import {
@@ -46,6 +47,9 @@ import {
   type PinnedProxyFetchOptions,
 } from "./secure-fetch.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.js";
+import { startTunnelListener, type TunnelAuditSink, type TunnelListenerHandle } from "./tunnel.js";
+import { loadInterceptor } from "./tunnel-intercept.js";
+import { LedgerTunnelAuthenticator, type TunnelAuthenticator } from "./tunnel-auth.js";
 import type { ProxyAuditSink } from "./types.js";
 import { createActorIdentityVerifier } from "./substrate/actor-identity.js";
 import { PrismaRelayStore } from "./substrate/prisma-relay-store.js";
@@ -302,10 +306,16 @@ export interface CodingProxyRuntimeOptions {
   /** Overridable for tests: builds the dependency cache's blob store. */
   createBlobStore?: (config: BlobStoreConfig) => BlobStore;
   onRequest?: (event: {
-    protocol: "openai-responses" | "anthropic-messages" | "other";
+    protocol: "openai-responses" | "anthropic-messages" | "tunnel" | "other";
     status: number;
     durationMs: number;
   }) => void;
+  /** Who a CONNECT tunnel token belongs to; defaults to the session ledger (tunnelTokenHash). Overridable for tests. */
+  tunnelAuthenticator?: TunnelAuthenticator;
+  /** One record per tunnel; defaults to the proxy's own log. */
+  tunnelAudit?: TunnelAuditSink;
+  /** Overridable for tests. */
+  startTunnel?: typeof startTunnelListener;
   /** Called for each failed lease renewal or sweep (metrics); the failure itself is logged. */
   onLeaseError?: (stage: "renew" | "sweep") => void;
 }
@@ -336,6 +346,8 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   const runStepsUrl = loadRunStepsUrl(env);
   // Throws on an invalid WARDBY_RUN_STEPS. At off no step text leaves the proxy.
   const runStepsCeiling = loadRunStepsLevel(env);
+  // Throws on an invalid CODING_TUNNEL_* combination, before anything listens. Undefined: no tunnel.
+  const tunnelConfig = loadCodingTunnelConfig(env);
   // Throws (test_simulators_refused) on any refusal, before anything listens.
   const simulators = startupTestSimulators("coding-proxy", env);
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
@@ -498,6 +510,30 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     }
     throw error;
   }
+  let tunnel: TunnelListenerHandle | undefined;
+  if (tunnelConfig) {
+    try {
+      // Throws when a rule's credential is unset or the CA is unreadable or unsafe, before the tunnel listens.
+      const interceptor = await loadInterceptor(tunnelConfig, env);
+      tunnel = await (options.startTunnel ?? startTunnelListener)({
+        host: "0.0.0.0",
+        config: tunnelConfig,
+        ...(interceptor ? { interceptor } : {}),
+        authenticator: options.tunnelAuthenticator ?? new LedgerTunnelAuthenticator(ledger),
+        ...(options.tunnelAudit ? { audit: options.tunnelAudit } : {}),
+        onRequest: options.onRequest,
+      });
+    } catch (error) {
+      eviction?.stop();
+      try {
+        await deny.close();
+        await server.close();
+      } finally {
+        await steps?.close();
+      }
+      throw error;
+    }
+  }
   // Started last, so no startup failure above has to stop them. Both run until close() has drained
   // the server: a request still streaming while the process shuts down keeps its lease.
   const leaseTimers = startLeaseTimers({
@@ -514,6 +550,8 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     close: async () => {
       eviction?.stop();
       try {
+        // First: open tunnels end, so no new bytes flow while the rest drains.
+        await tunnel?.close();
         await deny.close();
         await server.close();
         await leaseTimers.stop();

@@ -2,8 +2,9 @@
  * What Claude Code's tool runner (the credential-free container that runs commands in the
  * repository) needs from the trusted launcher: the package-registry settings every Codex shell
  * gets, built from the run's registry-only token (deriveRegistryToken, never the capability), the
- * run's service test variables, whether the run's dependency cache is on, and whether the
- * workspace is a resumed one (a Substrate warm round). Delivered as the WARDBY_TOOL_SETUP
+ * run's service test variables, whether the run's dependency cache is on, whether the
+ * workspace is a resumed one (a Substrate warm round) and, when the CONNECT tunnel is on, the proxy
+ * variables carrying the run's tunnel-only token (deriveTunnelToken). Delivered as the WARDBY_TOOL_SETUP
  * environment variable (CLAUDE_TOOL_SETUP_ENV, docker-isolation.ts; a test keeps it equal to the
  * tool runner's TOOL_SETUP_ENV): a Kubernetes Secret key, or `docker create --env NAME` with the
  * value in the CLI's own environment.
@@ -11,6 +12,8 @@
 import { serviceEnvironment } from "../../coding-worker/driver.js";
 import { configuredRegistryAdapters } from "../../coding/registry/adapters.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
+import { TUNNEL_CA_RELATIVE_PATH, tunnelProxyEnv, tunnelTrustEnv } from "../../coding/tunnel-env.js";
+import { deriveTunnelToken } from "../../coding/tunnel-token.js";
 import { registryWorkerSetup } from "../../coding/registry/worker-config.js";
 import { CODING_PROXY_ALIAS, CODING_PROXY_PORT } from "./docker-isolation.js";
 import { runDockerService, runToolchain, workerServices } from "../../coding/services/catalog.js";
@@ -83,11 +86,30 @@ export function claudeToolSetup(spec: JobSpec, capability: string, options: Clau
     // Only the non-secret JFrog settings are read; the upstream credential is the proxy's alone.
     adapters: configuredRegistryAdapters(options.env ?? process.env),
   });
+  // The tunnel's CA certificate, only with the tunnel on: a file under the cache root, and the variables that point at it.
+  const tunnelCaFile =
+    spec.tunnelPort && spec.tunnelCaCert ? `${TOOL_WORKSPACE}/.cache/${TUNNEL_CA_RELATIVE_PATH}` : undefined;
   const setup: ClaudeToolSetup = {
     schemaVersion: 1,
-    // Same precedence as the Codex driver: the registry's own settings win over a service's.
-    env: { ...serviceEnvironment(spec.services && workerServices(spec.services)), ...registry.env },
-    files: registry.files,
+    // Same precedence as the Codex driver: the registry's own settings win over a service's. The proxy
+    // variables are reserved names, so a service cannot set them; they are present only when the tunnel
+    // is on, and carry the tunnel-only token, never the capability.
+    env: {
+      ...serviceEnvironment(spec.services && workerServices(spec.services)),
+      ...registry.env,
+      ...(spec.tunnelPort
+        ? tunnelProxyEnv({
+            proxyHost: CODING_PROXY_ALIAS,
+            port: spec.tunnelPort,
+            token: deriveTunnelToken(capability),
+          })
+        : {}),
+      ...(tunnelCaFile ? tunnelTrustEnv(tunnelCaFile) : {}),
+    },
+    files: [
+      ...registry.files,
+      ...(tunnelCaFile && spec.tunnelCaCert ? [{ path: tunnelCaFile, content: spec.tunnelCaCert, mode: 0o644 }] : []),
+    ],
     ...(spec.dependencyCache
       ? {
           dependencyCache: true,

@@ -1,0 +1,28 @@
+{{- /* The coding proxy's interception CA, issued by cert-manager when codingProxy.tunnel.intercept.certManager is
+enabled. cert-manager reissues a Certificate when its commonName changes but not when its nameConstraints do, so the
+commonName ends in a hash of the rest of the spec: a change to the rule hosts reissues the CA into the same Secret,
+replacing the old key, and the CA always matches the rule hosts. */ -}}
+{{- $t := .Values.codingProxy.tunnel }}
+{{- if and $t.enabled $t.intercept.rules $t.intercept.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: wardby-coding-proxy-intercept-ca-selfsigned
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wardby-coding-proxy-intercept-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "wardby.codingProxy.interceptCaSecret" . }}
+  commonName: wardby coding proxy intercept CA {{ include "wardby.codingProxy.interceptCaSpec" . | sha256sum | trunc 10 }}
+  {{- include "wardby.codingProxy.interceptCaSpec" . | nindent 2 }}
+{{- end }}

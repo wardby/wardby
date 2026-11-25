@@ -392,7 +392,41 @@ services:
 ```
 
 The agent's shells receive `DOCKER_HOST=unix:///wardby/docker/docker.sock`,
-and its instructions gain a short note on how to use the daemon.
+and its instructions gain a short note on how to use the daemon. That socket
+is the only daemon the agent's `docker` CLI can reach: no other catalog entry
+may set `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `DOCKER_TLS`,
+`DOCKER_TLS_VERIFY` or `DOCKER_CERT_PATH` in its `testEnv`
+(`create_service` and `update_service` refuse it).
+
+### Pulling and pushing images
+
+The daemon reaches registries the same way every other HTTPS client in the
+run does: through the coding proxy's [CONNECT tunnel](coding-proxy-tunnel.md).
+It has no registry mirror and no insecure registry. When the control plane has
+`CODING_TUNNEL_PORT` set, the daemon gets:
+
+- `HTTPS_PROXY` and `HTTP_PROXY` (and their lowercase forms): the run's own
+  tunnel URL with its tunnel-only token, the same value the agent's shells
+  get. It comes from the run's Kubernetes Secret, so the token is never in the
+  pod spec.
+- `NO_PROXY`, as the agent's shells have it.
+- With `CODING_TUNNEL_TRUST_CA_CERT(_FILE)` set: the interception CA, mounted
+  read-only from the run's Secret, added beside the image's system roots with
+  `SSL_CERT_DIR`. An intercepted host (such as an Artifactory registry) then
+  gets its credential from the proxy, and the run never holds it: no
+  `docker login`.
+
+So a pull or push works for exactly the hosts in `CODING_TUNNEL_ALLOWED_HOSTS`,
+and is refused for every other. Name images by their full registry host. A
+short name such as `alpine` means Docker Hub (`registry-1.docker.io`, plus its
+auth and blob hosts), which works only if those hosts are allowed. With the
+tunnel off, the run's network policy leaves the daemon no way out, and nothing
+can be pulled.
+
+`docker build` does not hand the proxy to `RUN` steps on its own. A step that
+downloads needs `--build-arg HTTPS_PROXY --build-arg HTTP_PROXY` (the CLI
+takes the values from the shell), and, for an intercepted host, the CA in the
+image being built.
 
 ### With a toolchain
 
@@ -411,7 +445,8 @@ any change to your image:
   not the `PATH` change.
 
 Because `DOCKER_CONFIG` is read-only, `docker login` and other commands that
-write the CLI's configuration fail; pulls and pushes aren't possible anyway.
+write the CLI's configuration fail. Registries reached through the tunnel need
+no login: an intercepted host gets its credential from the proxy.
 The agent image from an earlier release doesn't carry the CLI, so use the
 Claude Code agent and tool runner images from this release.
 
@@ -425,13 +460,10 @@ Claude Code agent and tool runner images from this release.
   cannot reach the run's other services (such as `postgres`) on `127.0.0.1`:
   the daemon's loopback is its own. Run tests that need those services in the
   agent's shell instead.
-- **No image pulls yet.** The daemon is started with
-  `--registry-mirror=http://wardby-proxy:8787`, but the coding proxy does not
-  serve container images in this release, and the run's network policy (which
-  applies to the daemon and every container it starts) blocks every registry.
-  `docker build` and `docker run` of any image the run has not built itself
-  fail to pull.
-- **No pushes.** Images stay inside the run and are discarded with it.
+- **Only the tunnel's hosts.** Pulls and pushes reach only the hosts in
+  `CODING_TUNNEL_ALLOWED_HOSTS` (see [Pulling and pushing
+  images](#pulling-and-pushing-images)); with the tunnel off, none. The run's
+  network policy applies to the daemon and every container it starts.
 - Everything the daemon stores is deleted with the run's pod: no image or
   build cache carries over to the next run.
 
@@ -449,9 +481,14 @@ for why it is the one container with a different security context.
 The daemon's socket gives the agent's shell full control of that daemon: it
 can run any container the daemon can, as user-namespace root inside the run's
 gVisor sandbox. gVisor remains the boundary between the run and the node,
-which is why the `docker` kind requires it. The daemon receives no secret
-value: not the run's capability, no `WARDBY_*` variable and no Kubernetes
-Secret. Its output goes only to its container's log.
+which is why the `docker` kind requires it. With the tunnel on, the daemon
+receives one secret value from the run's Kubernetes Secret: its tunnel URL,
+which carries the run's tunnel-only token (it reaches the allowlisted hosts and
+nothing else). The agent's shells already hold the same token and drive the
+daemon through its socket, so this gives the daemon nothing the agent lacks.
+It never gets the run's capability or a `WARDBY_*` variable. With
+interception, it also mounts the CA certificate, which is public. Its output
+goes only to its container's log.
 
 ## Allowing services for an agent
 
