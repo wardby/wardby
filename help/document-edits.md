@@ -1,7 +1,7 @@
 ---
 id: document-edits
 title: Document edits - version history, inline changes and restore
-summary: The Edits tray lists a document's versions with who made them and how, shows each version's changes inline, and restores an earlier version as a new one; list_document_versions and restore_document_version do the same over MCP.
+summary: The History tab lists a document's versions with who made them and how, shows each version's changes inline, and restores an earlier version as a new one; list_document_versions and restore_document_version do the same over MCP.
 audience: operator
 tags: [documents, edits, versions, history, diff, restore, list_document_versions, restore_document_version]
 appliesTo: ">=0.10.0"
@@ -9,9 +9,9 @@ appliesTo: ">=0.10.0"
 
 # Document edits and restore
 
-## The Edits tray
+## The History tab
 
-The side panel of a document page has a **Comments** tab and an **Edits** tab. Edits lists every version, newest first: who made it, how and when.
+The side panel of a document page has **Comments**, **Review** and **History** tabs, as a design page does. History lists every version, newest first: who made it, how and when.
 
 - Editor saves by the same person, each within 5 minutes of the one before, share one row ("v4–v5 · Name · 2 edits").
 - An agent's version reads "Agent · via <the person who sent the threads>", with "for thread #N" links that open those threads in the Comments tab.

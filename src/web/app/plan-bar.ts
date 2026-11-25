@@ -25,7 +25,7 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
       {
         class: `plan-chip state-${d.reviewState}${d.current ? " current" : ""}`,
         attrs: {
-          ...(d.pagePath ? { href: withTab(d.pagePath, host.dataset.tab) } : {}),
+          ...(d.pagePath ? { href: withTab(d.pagePath, host.dataset.sideTab) } : {}),
           ...(d.current ? { "aria-current": "page" } : {}),
         },
         data: d.pagePath ? { path: d.pagePath } : {},
@@ -66,7 +66,7 @@ function withTab(path: string, tab: string | undefined): string {
 
 /** Records the side-panel tab now open, and points the bar's links at it. */
 export function setPlanBarTab(host: HTMLElement, tab: string): void {
-  host.dataset.tab = tab;
+  host.dataset.sideTab = tab;
   for (const a of host.querySelectorAll<HTMLAnchorElement>("a.plan-chip[data-path]")) {
     a.setAttribute("href", withTab(a.dataset.path!, tab));
   }

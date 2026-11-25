@@ -9,11 +9,11 @@ appliesTo: ">=0.10.0"
 
 # Document version is already the latest
 
-`document_version_is_latest` (HTTP 409). `restore_document_version` (or the Edits tray's **Restore this version**) names the version that is already the newest, so a restore would only add a copy of the current text.
+`document_version_is_latest` (HTTP 409). `restore_document_version` (or the History tab's **Restore this version**) names the version that is already the newest, so a restore would only add a copy of the current text.
 
 What to do:
 
-1. Pick an earlier version from `list_document_versions` (or the Edits tray).
+1. Pick an earlier version from `list_document_versions` (or the History tab).
 2. If someone published since you looked, the call answers [`document_version_conflict`](document-version-conflict.md) instead; reload and choose again.
 
 See [Documents](../documents.md).

@@ -741,22 +741,35 @@ img.ProseMirror-separator {
 }
 
 /* ---- side panel tabs and the Edits tray ---- */
+/* Shared by the document and design pages: one row (scrolling sideways when it can't fit, never
+   wrapping), so the same tabs sit in the same place on every document of a plan. */
 .tray-tabs {
   display: flex;
-  gap: 0.2rem;
-  padding: 0.7rem 0.9rem 0;
+  align-items: stretch;
+  gap: 0;
+  padding: 0.7rem 0.4rem 0;
   border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
 }
 .tray-tabs button {
+  flex: none;
+  white-space: nowrap;
   border: 0;
   border-bottom: 2px solid transparent;
   border-radius: 0;
   background: transparent;
-  padding: 0.3rem 0.5rem;
-  font-size: 0.75rem;
-  letter-spacing: 0.06em;
+  padding: 0.3rem 0.38rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--muted);
+}
+.tray-tabs .tab-sep {
+  flex: none;
+  width: 1px;
+  margin: 0.35rem 0.25rem 0.5rem;
+  background: var(--border);
 }
 .tray-tabs button.on {
   color: var(--text);

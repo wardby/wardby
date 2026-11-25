@@ -4,8 +4,8 @@
  * (editable for members with write) and the comment dialog, and saves edits
  * with a debounced PUT carrying the version they were based on. Live
  * updates (live.ts) refetch threads and newer versions as they happen. The
- * side panel switches between the Comments tray and the Edits tray (version
- * history, edits-ui.ts) and the Review tab (review-ui.ts); the review
+ * side panel switches between the Comments tray, the Review tab (review-ui.ts)
+ * and the History tab (version history, edits-ui.ts); the review
  * banner sits under the header, and an approved or archived document is
  * read only.
  */
@@ -131,15 +131,21 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       ...extra,
     );
   const commentsTab = tab("Comments ", "tray-comments", true, count);
-  const editsTab = tab("Edits", "tray-edits", false);
   const reviewTab = tab("Review", "tray-review", false);
+  const historyTab = tab("History", "tray-edits", false);
   const side = h(
     "aside",
     { class: "side", aria: { label: "Comments, edits and review" } },
-    h("div", { class: "tray-tabs", role: "tablist", aria: { label: "Side panel" } }, commentsTab, editsTab, reviewTab),
+    h(
+      "div",
+      { class: "tray-tabs", role: "tablist", aria: { label: "Side panel" } },
+      commentsTab,
+      reviewTab,
+      historyTab,
+    ),
     panel,
-    editsPanel,
     reviewPanel,
+    editsPanel,
   );
   const bubble = h("button", { type: "button", class: "bubble", hidden: true }, "💬 Comment");
   const toolbar = h("div", { class: "toolbar", role: "toolbar", aria: { label: "Formatting" }, hidden: !canWrite });
@@ -300,7 +306,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     },
     viewer,
   );
-  // ---- the Edits tray ----
+  // ---- the History tab (versions) ----
   const edits = new EditsTray({
     api,
     panel: editsPanel,
@@ -321,8 +327,8 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   });
   const trays = [
     { which: "comments", tab: commentsTab, panel },
-    { which: "edits", tab: editsTab, panel: editsPanel },
     { which: "review", tab: reviewTab, panel: reviewPanel },
+    { which: "history", tab: historyTab, panel: editsPanel },
   ] as const;
   const showTray = (which: (typeof trays)[number]["which"]) => {
     for (const t of trays) {
@@ -332,15 +338,14 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       t.tab.setAttribute("aria-selected", String(on));
     }
     setPlanBarTab(planBar, which);
-    if (which === "edits") void edits.open();
+    if (which === "history") void edits.open();
   };
   commentsTab.addEventListener("click", () => showTray("comments"));
-  editsTab.addEventListener("click", () => showTray("edits"));
   reviewTab.addEventListener("click", () => showTray("review"));
-  // Arriving from another document of the plan: open the tab that was open there (a design's
-  // History is this page's Edits; its Style and Settings have no counterpart here).
-  const askedTray = requestedTab(["comments", "edits", "review"] as const, {
-    history: "edits",
+  historyTab.addEventListener("click", () => showTray("history"));
+  // Arriving from another document of the plan: open the tab that was open there (a design's Style
+  // and Settings have no counterpart here).
+  const askedTray = requestedTab(["comments", "review", "history"] as const, {
     style: "comments",
     settings: "comments",
   });
@@ -528,7 +533,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       panel: reviewPanel,
       showReviewTab: () => showTray("review"),
       showChanges: (from, to) => {
-        showTray("edits");
+        showTray("history");
         void edits.viewChanges(from, to);
       },
       loadLatest: () => refresh(),

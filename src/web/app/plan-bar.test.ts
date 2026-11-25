@@ -58,11 +58,13 @@ describe("renderPlanBar", () => {
 describe("requestedTab", () => {
   it("returns the asked tab, mapped and only if this page has it, and drops it from the address", () => {
     history.replaceState(null, "", "/d/x?tab=review#c1");
-    expect(requestedTab(["comments", "edits", "review"] as const)).toBe("review");
+    expect(requestedTab(["comments", "review", "history"] as const)).toBe("review");
     expect(location.pathname + location.search + location.hash).toBe("/d/x#c1");
     history.replaceState(null, "", "/d/x?tab=history");
-    expect(requestedTab(["comments", "edits", "review"] as const, { history: "edits" })).toBe("edits");
+    expect(requestedTab(["comments", "review", "history"] as const)).toBe("history");
     history.replaceState(null, "", "/d/x?tab=style");
+    expect(requestedTab(["comments", "review", "history"] as const, { style: "comments" })).toBe("comments");
+    history.replaceState(null, "", "/d/x?tab=settings");
     expect(requestedTab(["comments", "review", "history"] as const)).toBeUndefined();
     history.replaceState(null, "", "/d/x");
     expect(requestedTab(["comments"] as const)).toBeUndefined();

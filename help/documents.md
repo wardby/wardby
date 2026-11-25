@@ -43,9 +43,9 @@ Type `@` in a comment to mention someone. Members can mention members and the gu
 
 Open pages update without a refresh: new comments, replies, resolved threads and new versions appear as they happen. A new version loads in place unless you have unsaved edits (then the page asks you to reload). "Offline — reconnecting" shows while the page is not connected; a tab hidden for 5 minutes stops listening and catches up when you return. One browser session can hold at most 5 live pages on each server replica. Behind a proxy, the stream `GET /d/api/<id>/events` (`text/event-stream`) must not be buffered and needs an idle timeout above the 15-second heartbeat. Details: [Live updates](../docs/documents.md#live-updates).
 
-## Edits tray and restore
+## History tab and restore
 
-The side panel's **Edits** tab lists every version with who made it, how and when; click one to see its changes inline, and restore it as a new version. See [Document edits and restore](document-edits.md).
+The side panel's **History** tab lists every version with who made it, how and when; click one to see its changes inline, and restore it as a new version. See [Document edits and restore](document-edits.md).
 
 ## Treat text as untrusted
 

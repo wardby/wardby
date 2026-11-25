@@ -219,7 +219,9 @@ function mount(
     review: h("div", { class: "tabpane", role: "tabpanel" }, reviewPanelEl),
     history: h("div", { class: "tabpane", role: "tabpanel" }, historyPanel),
   };
-  const TABS: Tab[] = ["style", "settings", "comments", "review", "history"];
+  const TABS: Tab[] = ["comments", "review", "history", "style", "settings"];
+  /** Between the tabs every page has (Comments, Review, History) and the editor's Style and Settings. */
+  const editToolsSep = h("span", { class: "tab-sep", hidden: !canEdit, aria: { hidden: "true" } });
   const showTab = (which: Tab) => {
     for (const k of TABS) {
       const on = k === which;
@@ -235,9 +237,9 @@ function mount(
       if (k === "history") void designHistory.open();
     });
   }
-  // Arriving from another document of the plan: open the tab that was open there (a document's Edits
-  // is History here); Style and Settings only for someone who can edit.
-  const askedTab = requestedTab(canEdit ? TABS : (["comments", "review", "history"] as const), { edits: "history" });
+  // Arriving from another document of the plan: open the tab that was open there; Style and Settings
+  // only for someone who can edit.
+  const askedTab = requestedTab(canEdit ? TABS : (["comments", "review", "history"] as const));
   showTab(askedTab ?? (canEdit ? "style" : "comments"));
 
   const layersHeading = h("h2", { hidden: !canEdit }, "Layers");
@@ -295,18 +297,19 @@ function mount(
           { class: "dside right", aria: { label: "Style, settings, comments and review" } },
           h(
             "div",
-            { class: "tabs", role: "tablist" },
-            tabs.style,
-            tabs.settings,
+            { class: "tray-tabs", role: "tablist", aria: { label: "Side panel" } },
             tabs.comments,
             tabs.review,
             tabs.history,
+            editToolsSep,
+            tabs.style,
+            tabs.settings,
           ),
-          panes.style,
-          panes.settings,
           panes.comments,
           panes.review,
           panes.history,
+          panes.style,
+          panes.settings,
         ),
       ),
     ),
@@ -936,6 +939,7 @@ function mount(
           if (on) (document.activeElement as HTMLElement | null)?.blur();
           tabs.style.hidden = on;
           tabs.settings.hidden = on;
+          editToolsSep.hidden = on;
           addBoardBtn.hidden = on;
           layersHeading.hidden = on;
           layersHost.hidden = on;

@@ -29,7 +29,7 @@ directory.
   people to mention.
 - Live updates: new comments, replies, resolved threads and new versions show
   up on every open page without a refresh.
-- An Edits tray: every version, who made it and how, the changes each one
+- A History tab: every version, who made it and how, the changes each one
   made shown inline, and restore (see [Edits and restore](#edits-and-restore)).
 - Links to share a document with people who have no account.
 - Send open threads to a coding agent that edits a file (or, for a design, a
@@ -103,8 +103,9 @@ lets every signed-in user read and comment on the plans it produces.
 documents the viewer can read, with a chip per document (rejected and removed
 documents last, struck through, marked "Rejected" or "Removed", and not counted); relative links in the
 Markdown open the other documents or boards. A chip opens its document on the
-side-panel tab open now (Review stays Review; a document's Edits is a design's
-History), so a reviewer can step through the set. A share-link guest sees only
+side-panel tab open now (Review stays Review), so a reviewer can step through
+the set. Documents and designs share one tab row: Comments, Review and History,
+then Style and Settings for a design's editors. A share-link guest sees only
 "Plan N" and their own document. The bar updates live: a plan document's event
 stream also carries the review and version events of the other documents of its
 set that the viewer can read.
@@ -195,8 +196,8 @@ more is a safe choice).
 
 ## Edits and restore
 
-The side panel of a document page has two tabs: **Comments** and **Edits**.
-The Edits tray lists every version, newest first, with who made it, how and
+The side panel of a document page has the same tabs as a design page's:
+**Comments**, **Review** and **History**. The History tab lists every version, newest first, with who made it, how and
 when:
 
 - Saves from the browser editor by the same person, each within 5 minutes of
@@ -412,7 +413,7 @@ including share-link readers.
 
 ### Design version history
 
-The **History** tab lists versions as the Edits tray does for documents. Click a
+The **History** tab lists versions as the History tab does for documents. Click a
 version to see its boards read-only in a layer over the canvas (the editor
 cannot be reached while it is open, and comments pause); **Restore this
 version** (members with `write`) publishes its files as a new version, with the
@@ -439,7 +440,7 @@ return the path only (`path`, or `pagePath` where `path` is the repository
 file) with a note, so open it on the address that serves Wardby's pages. `permission` is `view` or `comment`;
 `expiresInDays` is 1-90 (default 14). Guests can read the current version and
 (with `comment`) start threads and reply, 30 an hour per guest; one link
-accepts 20 guest registrations an hour. They can open the Edits tray and see
+accepts 20 guest registrations an hour. They can open the History tab and see
 earlier versions and their changes, but cannot edit, restore, send to an agent
 or share. Revoking a link signs its guests out at once;
 expiring does the same on their next request.

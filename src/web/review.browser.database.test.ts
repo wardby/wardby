@@ -352,7 +352,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       expect(await save(later)).toBe("Read only: approved");
       await later.context().close();
       const viewV1 = async (rows: number) => {
-        await o.getByRole("tab", { name: "Edits" }).click();
+        await o.getByRole("tab", { name: "History" }).click();
         await expect.poll(() => o.locator(".ed-row").count()).toBe(rows);
         await o.locator(".ed-row").last().click();
         await expect.poll(() => o.locator(".vbar").textContent()).toContain("Viewing v1");
