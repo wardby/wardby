@@ -129,6 +129,8 @@ import {
   type IssueProjectLink,
   type RunCreationCounter,
 } from "./issue-tracker-tools.js";
+import { DOCUMENT_TOOL_NAMES, documentToolDefsFor, handleDocumentTool } from "./document-tools.js";
+import { parseStoredDocumentTools } from "./documents/tools-setting.js";
 import { completeIssueStatus } from "./issue-status.js";
 import { fileIssue } from "./issue-dedupe.js";
 import { fileSelfDefect } from "./self-defects.js";
@@ -1120,6 +1122,8 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
           toIssueProjectLink,
         )
       : [];
+    // Native agents only: a coding agent's stored value is ignored, so it never gets doc_* tools.
+    const documentTools = agent.kind === "native" ? parseStoredDocumentTools(agent.documentTools) : null;
     const isDispatchedChild = existingRun.parentRunId != null;
     // Appended, never prepended: the loaded systemPrompt's stable prefix
     // stays prompt-cache-eligible across every dispatch, even though the
@@ -1153,6 +1157,7 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
       ...delegateTools,
       ...(repositoryLinks.length > 0 ? REVIEW_HOST_TOOL_DEFS : []),
       ...(issueProjectLinks.length > 0 ? ISSUE_TRACKER_TOOL_DEFS : []),
+      ...documentToolDefsFor(documentTools),
     ];
     // Remote MCP tools (native agents only), offered after every other tool; one whose name
     // another tool already uses is left out (mcp-tools.ts withoutClashingPins).
@@ -1176,6 +1181,8 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
       ...(agent.parallelDelegations ? { parallelDelegations: true } : {}),
       repositoryLinks,
       issueProjectLinks,
+      // Only when on, so another agent's pinned step result is unchanged.
+      ...(documentTools ? { documentToolsAccess: documentTools.access } : {}),
       // Only when there are any, so an agent without MCP servers keeps its pinned step result.
       ...(mcpTools.length > 0 ? { mcpTools } : {}),
       agent: {
@@ -1563,6 +1570,17 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           },
         });
       };
+    }
+    if (DOCUMENT_TOOL_NAMES.has(name) && loaded.documentToolsAccess) {
+      return async (argsJson: string): Promise<string> =>
+        // Live: the handler re-reads the setting and every grant on each call.
+        handleDocumentTool(name, argsJson, {
+          // The document services take the full client; RunnerDb only narrows it for test fakes.
+          db: db as unknown as PrismaClient,
+          cipher: providers.secrets,
+          agentId: loaded.agentId,
+          runId,
+        });
     }
     // `?? []`: a load step replayed from before MCP tools were pinned has none.
     const mcpPin = (loaded.mcpTools ?? []).find((pin) => pin.exposedName === name);
