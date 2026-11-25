@@ -370,6 +370,8 @@ describe("buildMcpServer", () => {
     const { client } = await connectClient(mcp);
     expect(client.getInstructions()).toMatch(/shift.+left/i);
     expect(client.getInstructions()).toContain('read the help article "agent-recipes" with get_help_article');
+    // Points models at the help before they guess how a feature works or why a call failed.
+    expect(client.getInstructions()).toContain("call search_help with the tool name, feature or error code");
     await client.close();
   });
 

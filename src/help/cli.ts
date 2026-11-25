@@ -1,6 +1,6 @@
 import type { HelpCatalog, HelpPage } from "./catalog.js";
 import { loadBundledHelpCatalog } from "./runtime.js";
-import { searchHelp } from "./search.js";
+import { findHelpPage, searchHelp } from "./search.js";
 
 function helpUsage(): string {
   return `usage:
@@ -62,7 +62,7 @@ export async function helpCommand(args: string[]): Promise<void> {
   if (operation === "open") {
     const id = rest[0];
     if (!id || rest.length !== 1) throw new Error("help open requires exactly one article id.\n\n" + helpUsage());
-    const page = catalog.pages.find((candidate) => candidate.id === id);
+    const page = findHelpPage(catalog, id);
     if (!page) throw new Error(`unknown help article "${id}". Run \`wardby help list\` to see available articles.`);
     printPage(page);
     return;

@@ -20,6 +20,13 @@ The grantee is one person, `{"subject": "..."}` or `{"principalId": "..."}`,
 who must have signed in once, or `"everyone"`: any principal signed in to the
 MCP server.
 
+Without a grant, an agent answers "not found", the same as an agent that does
+not exist. The exception is a caller with `admin:view` (the `admin` or `viewer`
+role), who already sees every agent in `list_agents { all: true }`: they get
+"you have no access to this agent (access: none)" instead. That listing gives
+them no access of their own; to read or run the agent they still need a grant
+from its owner.
+
 ## Public agents
 
 Grant `everyone` at `read` or `execute` for an agent anyone can see or run.
