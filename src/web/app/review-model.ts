@@ -139,7 +139,7 @@ export const ASK_TO_REOPEN = "Approved and locked. To change it, ask someone who
 export const PICKER = {
   start: "Start review",
   submit: "Submit for review",
-  edit: "Edit reviewers…",
+  edit: "Edit reviewers",
   save: "Save reviewers",
   find: "Find people",
   onlyYou:

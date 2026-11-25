@@ -284,14 +284,14 @@ nothing and records no event.
   document already out of the plan are refused with
   `document_reject_not_plan_document`. Guests cannot reject.
 - **Choose this option** (alternatives in a plan): on the chosen option's
-  Review tab, **Choose this option…** lists the plan's other undecided or
+  Review tab, **Choose this option** lists the plan's other undecided or
   approved documents, ticking those named like it (`option-b/` beside
   `option-a/`) and leaving the rest (shared screens) unticked. Confirming
   approves the chosen option as the viewer's verdict (a named reviewer; an
   approved option is left as it is) and rejects each ticked document with the
   note "Chose option-a/" (plus an optional note), in one transaction: if any
   part is refused, nothing changes. `choose_plan_option` does the same over MCP.
-  The plan bar's **Pick an option…** starts the same step from any page of the
+  The plan bar's **Pick an option** starts the same step from any page of the
   plan: it offers the alternatives (documents of one name family, not shared
   parts such as `screens/`) and, after confirming, says under the bar what it
   rejected and what the plan still waits for. The Review tab shows a next-step card (the one main button for the

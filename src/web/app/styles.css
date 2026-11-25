@@ -1084,6 +1084,18 @@ img.ProseMirror-separator {
 .rv-card.tone-out {
   border-left-color: var(--muted);
 }
+/* Action icons (icons.ts): before the label, in the text colour. */
+.rv-panel button .icon,
+.plan-pick-open .icon {
+  flex: none;
+  margin-right: 0.25rem;
+  vertical-align: -0.15em;
+}
+.rv-panel button:has(.icon),
+.plan-pick-open {
+  display: inline-flex;
+  align-items: center;
+}
 .rv-section {
   margin: 0.2rem 0 0.7rem;
 }

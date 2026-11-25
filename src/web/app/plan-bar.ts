@@ -10,6 +10,7 @@ import { clear, h } from "./dom.js";
 import { choiceResult, chooseCandidates, planAlternatives, STATE_LABEL } from "./review-model.js";
 import { errorMessage, type ReviewAction, type ReviewState } from "./api.js";
 import { chooseStep, type ChooseStepState } from "./choose-ui.js";
+import { icon } from "./icons.js";
 
 const KIND_ICON = { document: "📄", design: "🎨" } as const;
 
@@ -18,7 +19,7 @@ const stateLabel = (s: string) => STATE_LABEL[s as ReviewState] ?? s;
 /** The plan each bar last rendered, for the Review tab's "Choose this option" checklist. */
 const shown = new WeakMap<HTMLElement, PlanSetPayload | undefined>();
 
-/** Posts a review action to another document of the plan (Api.reviewOf), for "Pick an option…". */
+/** Posts a review action to another document of the plan (Api.reviewOf), for "Pick an option". */
 export type PlanChooser = (documentId: string, body: ReviewAction) => Promise<unknown>;
 
 interface PickState {
@@ -41,7 +42,7 @@ const emptyPick = (): PickState => ({
 });
 const picks = new WeakMap<HTMLElement, PickState>();
 
-/** Turns on "Pick an option…" in this bar (members only: a guest's bar never shows it). */
+/** Turns on "Pick an option" in this bar (members only: a guest's bar never shows it). */
 export function setPlanBarChooser(host: HTMLElement, chooser: PlanChooser): void {
   choosers.set(host, chooser);
   renderPlanBar(host, shown.get(host));
@@ -58,7 +59,7 @@ function pickable(plan: PlanSetPayload): PlanSetPayload["documents"] {
 
 const options = (plan: PlanSetPayload) => planAlternatives(pickable(plan));
 
-/** The plan bar's "Pick an option…" step: which option to build, then the shared choose step for it. */
+/** The plan bar's "Pick an option" step: which option to build, then the shared choose step for it. */
 function pickPanel(host: HTMLElement, plan: PlanSetPayload, pick: PickState, chooser: PlanChooser): HTMLElement {
   const rerender = () => renderPlanBar(host, shown.get(host));
   const choices = options(plan);
@@ -207,7 +208,7 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
     ),
     h("ul", { class: "plan-chips" }, ...plan.documents.map(chip)),
   );
-  // "Pick an option…": for members (a guest sees part of the set) when there are options to choose between.
+  // "Pick an option": for members (a guest sees part of the set) when there are options to choose between.
   const chooser = choosers.get(host);
   const pick = picks.get(host) ?? emptyPick();
   picks.set(host, pick);
@@ -245,7 +246,8 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
           renderPlanBar(host, shown.get(host));
         },
       },
-      "Pick an option…",
+      icon("choose"),
+      "Pick an option",
     ),
   );
   if (pick.open) host.append(pickPanel(host, plan, pick, chooser));

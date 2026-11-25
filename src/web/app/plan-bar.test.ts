@@ -71,7 +71,7 @@ describe("requestedTab", () => {
   });
 });
 
-describe("Pick an option…", () => {
+describe("Pick an option", () => {
   const opt = (id: string, path: string, reviewState = "in_review") => ({
     ...doc(path, reviewState),
     id,
@@ -97,18 +97,18 @@ describe("Pick an option…", () => {
   it("is offered to members with a chooser when there are options, never to a guest's partial bar", () => {
     const host = document.createElement("nav");
     renderPlanBar(host, PLAN);
-    expect(button(host, "Pick an option…")).toBeUndefined();
+    expect(button(host, "Pick an option")).toBeUndefined();
     setPlanBarChooser(host, vi.fn());
-    expect(button(host, "Pick an option…")).toBeDefined();
+    expect(button(host, "Pick an option")).toBeDefined();
     renderPlanBar(host, { ...PLAN, partial: true });
-    expect(button(host, "Pick an option…")).toBeUndefined();
+    expect(button(host, "Pick an option")).toBeUndefined();
     // Decided: one option left beside shared screens; nothing to pick.
     const lone = {
       ...PLAN,
       documents: [opt("pm", "plan.md", "approved"), opt("a", "option-a/"), opt("s", "screens/")],
     };
     renderPlanBar(host, lone);
-    expect(button(host, "Pick an option…")).toBeUndefined();
+    expect(button(host, "Pick an option")).toBeUndefined();
   });
 
   it("picks the option, ticks its siblings to reject, and posts the choice to the chosen option", async () => {
@@ -117,7 +117,7 @@ describe("Pick an option…", () => {
     const chooser = vi.fn(() => Promise.reject(new Error("document_review_forbidden")));
     setPlanBarChooser(host, chooser);
     renderPlanBar(host, PLAN);
-    button(host, "Pick an option…")!.click();
+    button(host, "Pick an option")!.click();
     const radios = [...host.querySelectorAll<HTMLInputElement>('.plan-pick input[type="radio"]')];
     // screens/ is not an alternative (no family): not offered to build, only (unticked) to reject.
     expect(radios.map((r) => r.parentElement!.querySelector("span")!.textContent)).toEqual([
@@ -154,7 +154,7 @@ describe("Pick an option…", () => {
       vi.fn(() => Promise.resolve({ review: { state: "approved" } })),
     );
     renderPlanBar(host, PLAN);
-    button(host, "Pick an option…")!.click();
+    button(host, "Pick an option")!.click();
     const radio = host.querySelectorAll<HTMLInputElement>('.plan-pick input[type="radio"]')[0];
     radio.checked = true;
     radio.dispatchEvent(new Event("change"));

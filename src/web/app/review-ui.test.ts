@@ -134,7 +134,7 @@ describe("ReviewPanel: reopening", () => {
     const { host, panel } = setup(null);
     new ReviewPanel(host, { ...payload(2), state: "approved" }, 2);
     expect(card(panel)?.textContent).toContain("ask someone who can edit it to reopen it");
-    expect(buttons(panel)).not.toContain("Reopen for review…");
+    expect(buttons(panel)).not.toContain("Reopen for review");
   });
 
   it("a writer gets Reopen under Manage (never as the card's action) and no hint; nothing shows before approval", () => {
@@ -142,7 +142,7 @@ describe("ReviewPanel: reopening", () => {
     const p = new ReviewPanel(host, { ...payload(2), state: "approved", can: { ...can, reopen: true } }, 2);
     expect(card(panel)?.textContent).toContain("Nothing to do here.");
     expect(card(panel)?.querySelector("button")).toBeNull();
-    expect(buttons(panel)).toContain("Reopen for review…");
+    expect(buttons(panel)).toContain("Reopen for review");
     expect(card(panel)?.textContent).not.toContain("ask someone");
     p.apply(payload(2));
     expect(panel.textContent).not.toContain("ask someone");
@@ -151,7 +151,7 @@ describe("ReviewPanel: reopening", () => {
   it("Reopen is a confirm step: one click reopens nothing", async () => {
     const { host, panel } = setup(null);
     new ReviewPanel(host, { ...payload(2), state: "approved", can: { ...can, reopen: true } }, 2);
-    [...panel.querySelectorAll("button")].find((b) => b.textContent === "Reopen for review…")!.click();
+    [...panel.querySelectorAll("button")].find((b) => b.textContent === "Reopen for review")!.click();
     expect(host.api.review).not.toHaveBeenCalled();
     expect(panel.querySelector("h3")?.textContent).toBe("Reopen for review");
     expect(panel.textContent).toContain("This starts v3, a copy of v2");
@@ -294,7 +294,7 @@ describe("ReviewPanel: the reviewer picker", () => {
       { ...payload(1), can: { ...payload(1).can, submit: true } },
       1,
     );
-    button(panel, "Edit reviewers…")!.click();
+    button(panel, "Edit reviewers")!.click();
     await vi.waitFor(() => expect(button(panel, "Save reviewers")).toBeDefined());
     expect(button(panel, "Create comment link")).toBeDefined();
   });
@@ -333,14 +333,14 @@ describe("ReviewPanel: Reject", () => {
     [...panel.querySelectorAll<HTMLButtonElement>(".rv-actions button")].find((b) => b.textContent === label);
 
   it("offers Reject only when the server says so", () => {
-    expect(actionButton(mount({ ...payload(1), can: can({}) }).panel, "Reject…")).toBeUndefined();
-    expect(actionButton(mount({ ...payload(1), can: can({ reject: true }) }).panel, "Reject…")).toBeDefined();
+    expect(actionButton(mount({ ...payload(1), can: can({}) }).panel, "Reject")).toBeUndefined();
+    expect(actionButton(mount({ ...payload(1), can: can({ reject: true }) }).panel, "Reject")).toBeDefined();
   });
 
   it("asks for a note before rejecting, then posts the reject action with it", async () => {
     const rejected: ReviewPayload = { ...payload(1), state: "rejected", can: can({ reopen: true }) };
     const { panel, reviewCall } = mount({ ...payload(1), can: can({ reject: true }) }, rejected);
-    actionButton(panel, "Reject…")!.click();
+    actionButton(panel, "Reject")!.click();
     const form = panel.querySelector<HTMLElement>('[role="group"][aria-label="Reject"]')!;
     expect(form.textContent).toContain("takes the document out of the plan");
     const confirm = () =>
@@ -354,7 +354,7 @@ describe("ReviewPanel: Reject", () => {
     expect(confirm().disabled).toBe(false);
     confirm().click();
     await vi.waitFor(() => expect(reviewCall).toHaveBeenCalledWith({ action: "reject", note: "Option B was chosen" }));
-    await vi.waitFor(() => expect(actionButton(panel, "Reopen for review…")).toBeDefined());
+    await vi.waitFor(() => expect(actionButton(panel, "Reopen for review")).toBeDefined());
   });
 
   it("tells someone who can't reopen a rejected document what it means", () => {
@@ -424,31 +424,28 @@ describe("ReviewPanel: Choose this option", () => {
     );
 
   it("is offered only when the server allows it and the plan has something to reject", () => {
-    expect(button(mount({ ...payload(1), can: can({}) }).panel, "Choose this option…")).toBeUndefined();
+    expect(button(mount({ ...payload(1), can: can({}) }).panel, "Choose this option")).toBeUndefined();
     expect(
-      button(mount({ ...payload(1), can: can({ choose: true, review: true }) }).panel, "Choose this option…"),
+      button(mount({ ...payload(1), can: can({ choose: true, review: true }) }).panel, "Choose this option"),
     ).toBeDefined();
     const alone = [doc("pm", "plan.md", "approved"), doc("a", "option-a/", "in_review", { current: true })];
     expect(
-      button(mount({ ...payload(1), can: can({ choose: true, review: true }) }, alone).panel, "Choose this option…"),
+      button(mount({ ...payload(1), can: can({ choose: true, review: true }) }, alone).panel, "Choose this option"),
     ).toBeUndefined();
   });
 
   it("is never offered on a shared part (screens/), only on an alternative", () => {
     const onScreens = PLAN.map((d) => ({ ...d, current: d.path === "screens/" }));
     expect(
-      button(
-        mount({ ...payload(1), can: can({ choose: true, review: true }) }, onScreens).panel,
-        "Choose this option…",
-      ),
+      button(mount({ ...payload(1), can: can({ choose: true, review: true }) }, onScreens).panel, "Choose this option"),
     ).toBeUndefined();
   });
 
   it("lists the other open documents, ticks the same-named options, and posts the ticked ids", async () => {
     const { panel, reviewCall } = mount({ ...payload(1), can: can({ choose: true, review: true }) });
-    button(panel, "Choose this option…")!.click();
+    button(panel, "Choose this option")!.click();
     // A focused step: none of the other actions beside it.
-    expect(button(panel, "Choose this option…")).toBeUndefined();
+    expect(button(panel, "Choose this option")).toBeUndefined();
     expect(button(panel, "Approve")).toBeUndefined();
     expect(panel.querySelector("h3")?.textContent).toBe("Choose option-a-tree/");
     const rows = [...panel.querySelectorAll<HTMLLabelElement>(".rv-choose label")].map((l) => [
@@ -497,7 +494,7 @@ describe("ReviewPanel: Choose this option", () => {
 
   it("says Reject, not Approve, when the option is already approved", () => {
     const { panel } = mount({ ...payload(1), state: "approved", can: can({ choose: true, review: true }) });
-    button(panel, "Choose this option…")!.click();
+    button(panel, "Choose this option")!.click();
     expect(button(panel, /^Reject \d/)?.textContent).toBe("Reject 2");
     expect(panel.querySelector(".ch-summary")!.textContent).toMatch(/^This keeps option-a-tree\/ approved and rejects/);
   });
@@ -510,7 +507,7 @@ describe("ReviewPanel: Choose this option", () => {
       doc("s", "screens/", "approved"),
     ];
     const { panel } = mount({ ...payload(1), can: can({ choose: true, review: true }) }, plan);
-    button(panel, "Choose this option…")!.click();
+    button(panel, "Choose this option")!.click();
     expect(panel.querySelector(".ch-summary")!.textContent).toBe(
       "This approves option-a/ and rejects option-b/. The plan is then ready to build.",
     );
@@ -548,8 +545,8 @@ describe("ReviewPanel: steps have the panel to themselves", () => {
   const labels = (panel: HTMLElement) => [...panel.querySelectorAll("button")].map((b) => b.textContent);
 
   for (const [open, heading, confirm] of [
-    ["Reject…", "Reject this document", "Reject"],
-    ["Force approve…", "Force approve", "Force approve"],
+    ["Reject", "Reject this document", "Reject"],
+    ["Force approve", "Force approve", "Force approve"],
   ] as const) {
     it(`${open}: only its form, then everything back on Cancel`, () => {
       const panel = mount({ ...payload(1), can: can({ review: true, reject: true, force: true, archive: true }) });

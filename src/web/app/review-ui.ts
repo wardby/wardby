@@ -10,6 +10,7 @@ import { relativeTime } from "./comments.js";
 import { append, clear, h } from "./dom.js";
 import type { PlanSetPayload } from "../../core/plans/page-payload.js";
 import { chooseStep, type ChooseStepState } from "./choose-ui.js";
+import { icon, type IconName } from "./icons.js";
 import {
   bannerText,
   EVENT_LABEL,
@@ -211,7 +212,7 @@ export class ReviewPanel {
     }
   }
 
-  /** The note and verdict buttons; with `choose`, "Choose this option…" is the primary action and the verdicts plain. */
+  /** The note and verdict buttons; with `choose`, "Choose this option" is the primary action and the verdicts plain. */
   private verdictBox(choose = false): HTMLElement {
     const r = this.review;
     const box = h("div", { class: "rv-verdict" });
@@ -239,7 +240,7 @@ export class ReviewPanel {
       return box;
     }
     const row = h("div", { class: "rv-actions" });
-    if (choose) row.append(btn("Choose this option…", () => this.open("choose"), "primary"));
+    if (choose) row.append(this.button("Choose this option", () => this.open("choose"), "primary", "choose"));
     if (c.approve) row.append(btn(c.approve, () => void this.verdict("approve"), choose ? "neutral" : "primary"));
     if (c.changes) row.append(btn(c.changes, () => void this.verdict("request_changes"), "neutral"));
     box.append(row);
@@ -255,8 +256,16 @@ export class ReviewPanel {
     this.render();
   }
 
-  private button(label: string, run: () => void, variant: ButtonVariant = "neutral"): HTMLButtonElement {
-    return h("button", { type: "button", class: variant, disabled: this.busy, onClick: run }, label);
+  /** A panel button; `glyph` puts that action's icon before the label (the actions that open a step have one). */
+  private button(
+    label: string,
+    run: () => void,
+    variant: ButtonVariant = "neutral",
+    glyph?: IconName,
+  ): HTMLButtonElement {
+    const b = h("button", { type: "button", class: variant, disabled: this.busy, onClick: run }, label);
+    if (glyph) b.prepend(icon(glyph));
+    return b;
   }
 
   /**
@@ -338,14 +347,15 @@ export class ReviewPanel {
     const plan: HTMLElement[] = [];
     // In review, Choose is the card's primary action; once approved it is one of the plan actions.
     if (can.choose && r.state === "approved" && this.chooseOptions().length > 0)
-      plan.push(this.button("Choose this option…", () => this.open("choose")));
-    if (can.reject) plan.push(this.button("Reject…", () => this.open("reject")));
+      plan.push(this.button("Choose this option", () => this.open("choose"), "neutral", "choose"));
+    if (can.reject) plan.push(this.button("Reject", () => this.open("reject"), "neutral", "reject"));
     section("Plan", plan);
     const manage: HTMLElement[] = [];
-    if (can.submit && r.state !== "draft") manage.push(this.button(PICKER.edit, () => void this.openSubmit()));
-    if (can.force) manage.push(this.button("Force approve…", () => this.open("force")));
-    if (can.reopen) manage.push(this.button("Reopen for review…", () => this.open("reopen")));
-    if (can.archive) manage.push(this.button("Archive…", () => this.open("archive")));
+    if (can.submit && r.state !== "draft")
+      manage.push(this.button(PICKER.edit, () => void this.openSubmit(), "neutral", "reviewers"));
+    if (can.force) manage.push(this.button("Force approve", () => this.open("force"), "neutral", "force"));
+    if (can.reopen) manage.push(this.button("Reopen for review", () => this.open("reopen"), "neutral", "reopen"));
+    if (can.archive) manage.push(this.button("Archive", () => this.open("archive"), "neutral", "archive"));
     section("Manage", manage);
     return out;
   }

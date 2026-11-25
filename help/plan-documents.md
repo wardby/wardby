@@ -103,7 +103,7 @@ does not need, such as a design option that was not chosen, can be **rejected**
 instead: it leaves the plan, so it no longer counts toward approval and the
 builder never gets it, and rejecting the last waiting document approves the plan
 ([Reject](document-review.md#reject)). `plan.md` itself cannot be rejected. When the plan offers
-alternatives, **Pick an option…** in the plan bar (or **Choose this option…** on an option's Review tab) approves the one you pick and rejects the others in one step
+alternatives, **Pick an option** in the plan bar (or **Choose this option** on an option's Review tab) approves the one you pick and rejects the others in one step
 ([Choose this option](document-review.md#choose-this-option)). Sending comment
 threads to the agent
 ([Comment threads and agents](comment-threads-and-agents.md)) starts the plan's
