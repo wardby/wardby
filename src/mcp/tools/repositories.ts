@@ -32,7 +32,7 @@ import {
   requireNotPublicWritable,
 } from "../auth/access.js";
 import { authorizeRepositoryForSet, canonicalLocalRepository } from "../auth/repo-authorization.js";
-import { requireScope } from "../auth/resource-server.js";
+import { authorize } from "../auth/resource-server.js";
 import { McpError, uniqueFields } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -133,7 +133,7 @@ function checkNameTaken(checkName: string, repository: string): McpError {
 export function registerRepositoryTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "link_repository",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Links an agent you own to a repository on a code-review host, with its access, event triggers, and checkName. " +
       "Triggers: pull_request (review each PR push), mention (answer @mentions), push (start on merges to the default branch), " +
@@ -254,7 +254,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
       // everyone else, admins included, links only agents they own.
       let agent;
       if (args.adminOverride === true) {
-        requireScope(ctx, ctx.canonicalUri, "agents:admin");
+        authorize(ctx, "agents:admin");
         agent = await ctx.db.agent.findUnique({
           where: { id: args.agentId },
           include: { codingProfile: { select: { repository: true } } },
@@ -510,7 +510,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "unlink_repository",
-    scope: "agents:write",
+    permission: "agents:write",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -542,7 +542,7 @@ export function registerRepositoryTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_repositories",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       additionalProperties: false,

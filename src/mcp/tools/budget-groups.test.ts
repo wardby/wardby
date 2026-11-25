@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { buildMcpServer } from "../server.js";
 import { registerBudgetGroupTools } from "./budget-groups.js";
 import type { McpRequestContext } from "../context.js";
+import { fakeResourceGrants } from "../../core/grants.test-support.js";
 
 const CANONICAL_URI = "https://host/mcp";
 const fakeProviders = {} as unknown as import("../../providers/index.js").ProviderRegistry;
@@ -22,7 +23,8 @@ function fakeDb(agentsByGroup: Record<string, { id: string; name: string }[]> = 
   const groups = new Map<string, FakeGroupRow>();
   let counter = 0;
 
-  return {
+  const db = {
+    resourceGrant: fakeResourceGrants([]),
     budgetGroup: {
       create: async ({ data }: { data: Partial<FakeGroupRow> & { name: string; ownerId: string | null } }) => {
         const row: FakeGroupRow = {
@@ -43,10 +45,15 @@ function fakeDb(agentsByGroup: Record<string, { id: string; name: string }[]> = 
         groups.set(where.id, updated);
         return updated;
       },
-      findMany: async ({ where }: { where?: { OR?: { ownerId: string | null }[] } } = {}) => {
+      findMany: async ({ where }: { where?: { OR?: { ownerId?: string | null }[] } } = {}) => {
         const all = [...groups.values()];
         if (!where?.OR) return all;
-        return all.filter((g) => where.OR!.some((cond) => g.ownerId === cond.ownerId));
+        return all.filter((g) => where.OR!.some((cond) => "ownerId" in cond && g.ownerId === cond.ownerId));
+      },
+      findUniqueOrThrow: async ({ where }: { where: { id: string } }) => {
+        const row = groups.get(where.id);
+        if (!row) throw new Error("not found");
+        return { ...row, agents: agentsByGroup[where.id] ?? [] };
       },
       findUnique: async ({ where }: { where: { id: string } }) => {
         const row = groups.get(where.id);
@@ -62,7 +69,9 @@ function fakeDb(agentsByGroup: Record<string, { id: string; name: string }[]> = 
     run: {
       findMany: async () => [],
     },
-  } as unknown as import("#prisma").PrismaClient;
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
+  };
+  return db as unknown as import("#prisma").PrismaClient;
 }
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {

@@ -48,6 +48,7 @@ function fakeDb(
         return { count: 0 };
       },
     },
+    resourceGrant: { deleteMany: async () => ({ count: 0 }) },
     runHook: {
       findMany: async () => hooks.map((h) => ({ agent: h.agent })),
       updateMany: async () => ({ count: hooks.filter((h) => h.agent.ownerId !== null).length }),

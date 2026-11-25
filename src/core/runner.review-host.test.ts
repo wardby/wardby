@@ -185,6 +185,7 @@ function harness(opts: {
     },
     // No principal has a linked GitHub identity in this harness.
     hostIdentity: { findUnique: async () => null, updateMany: async () => ({ count: 0 }) },
+    team: { findUnique: async () => null },
     runHostCheck: {
       findUnique: async ({ where }: any) =>
         state.runHostCheck && state.runHostCheck.runId === where.runId ? { ...state.runHostCheck } : null,

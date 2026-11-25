@@ -29,7 +29,7 @@ export function registerHelpTools(mcp: WardbyMcpServer, loadCatalog: HelpCatalog
       "code (id errors/<code>). Call it before guessing how a tool behaves or why a call was refused or a run " +
       "failed. Query by tool name, feature or error code; read a result with get_help_article. Offline fuzzy " +
       "matching over this release's help.",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       properties: { query: { type: "string", minLength: 1, maxLength: 200 } },
@@ -59,7 +59,7 @@ export function registerHelpTools(mcp: WardbyMcpServer, loadCatalog: HelpCatalog
     description:
       "Read one complete Wardby self-hosted help article by its id. An error code's article is errors/<code>; " +
       "underscores in the code may be written as they are (errors/mcp_unavailable finds errors/mcp-unavailable).",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string", minLength: 1, maxLength: 120 } },

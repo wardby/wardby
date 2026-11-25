@@ -46,7 +46,7 @@ export function registerRunTranscriptTool(mcp: WardbyMcpServer, opts: RunTranscr
     name: "get_run_transcript",
     description:
       "Get a short-lived download link for a Claude Code coding run's session transcript, and the command that continues the session locally (npx @wardby/cli@latest resume -, which asks for the link). Give the user the command and the link to run in a terminal inside a clone of the run's repository; do not fetch the link yourself. Same access as get_run. The link works for 10 minutes.",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"] },
     handler: async (args: { runId: string }, ctx) => {
       const run = await findReadableRun(ctx, args.runId);

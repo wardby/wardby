@@ -7,7 +7,7 @@ import {
   accessRank,
   atLeast,
   canDelegate,
-  effectiveAccess,
+  accessFor,
   grantedAccessMap,
   grantedIds,
   isLevel,
@@ -53,8 +53,20 @@ describe("grant levels", () => {
       budget_group: "use",
       mcp_server: "use",
       document: "comment",
+      secret: "read",
+      datastore: "read",
+      webhook: "read",
     });
-    expect(SHAREABLE_TYPES).toEqual(["agent", "mcp_server", "document"]);
+    expect(SHAREABLE_TYPES).toEqual([
+      "agent",
+      "mcp_server",
+      "document",
+      "budget_group",
+      "tool",
+      "secret",
+      "datastore",
+      "webhook",
+    ]);
     expect(LEVELS.mcp_server).toEqual(["read", "use", "write"]);
     expect(LEVELS.document).toEqual(["read", "comment", "write"]);
   });
@@ -71,15 +83,15 @@ describe("grant levels", () => {
   });
 });
 
-describe("effectiveAccess", () => {
+describe("accessFor", () => {
   const agent = { id: "a1", ownerId: "owner" };
 
   it("the owner is owner, with no grant lookup needed", async () => {
-    expect(await effectiveAccess({} as never, "agent", agent, "owner")).toBe("owner");
+    expect(await accessFor({} as never, "agent", agent, "owner")).toBe("owner");
   });
 
   it("a stranger with no grant has none", async () => {
-    expect(await effectiveAccess(db(), "agent", agent, "stranger")).toBe("none");
+    expect(await accessFor(db(), "agent", agent, "stranger")).toBe("none");
   });
 
   it("takes the max of the principal grant and the everyone grant", async () => {
@@ -87,13 +99,13 @@ describe("effectiveAccess", () => {
       { resourceType: "agent", resourceId: "a1", principalId: "p", level: "write" },
       { resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "read" },
     ]);
-    expect(await effectiveAccess(grants, "agent", agent, "p")).toBe("write");
-    expect(await effectiveAccess(grants, "agent", agent, "q")).toBe("read");
+    expect(await accessFor(grants, "agent", agent, "p")).toBe("write");
+    expect(await accessFor(grants, "agent", agent, "q")).toBe("read");
     const low = db([
       { resourceType: "agent", resourceId: "a1", principalId: "p", level: "read" },
       { resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" },
     ]);
-    expect(await effectiveAccess(low, "agent", agent, "p")).toBe("execute");
+    expect(await accessFor(low, "agent", agent, "p")).toBe("execute");
   });
 
   it("ignores grants on other resources and other types", async () => {
@@ -101,19 +113,19 @@ describe("effectiveAccess", () => {
       { resourceType: "agent", resourceId: "a2", principalId: "p", level: "write" },
       { resourceType: "tool", resourceId: "a1", principalId: "p", level: "write" },
     ]);
-    expect(await effectiveAccess(grants, "agent", agent, "p")).toBe("none");
+    expect(await accessFor(grants, "agent", agent, "p")).toBe("none");
   });
 
   it("an owner-less row gets access from grants only; nobody is its owner", async () => {
     const ownerless = { id: "a1", ownerId: null };
     const grants = db([{ resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" }]);
-    expect(await effectiveAccess(grants, "agent", ownerless, "anyone")).toBe("execute");
-    expect(await effectiveAccess(db(), "agent", ownerless, "anyone")).toBe("none");
+    expect(await accessFor(grants, "agent", ownerless, "anyone")).toBe("execute");
+    expect(await accessFor(db(), "agent", ownerless, "anyone")).toBe("none");
   });
 
   it("the stdio operator is owner of everything", async () => {
-    expect(await effectiveAccess(db(), "agent", agent, "stranger", { operator: true })).toBe("owner");
-    expect(await effectiveAccess(db(), "agent", { id: "x", ownerId: null }, "s", { operator: true })).toBe("owner");
+    expect(await accessFor(db(), "agent", agent, "stranger", { operator: true })).toBe("owner");
+    expect(await accessFor(db(), "agent", { id: "x", ownerId: null }, "s", { operator: true })).toBe("owner");
   });
 
   it("an unknown stored level counts as none (fail closed)", async () => {
@@ -121,19 +133,19 @@ describe("effectiveAccess", () => {
       { resourceType: "agent", resourceId: "a1", principalId: "p", level: "admin" },
       { resourceType: "agent", resourceId: "a1", principalId: "q", level: "use" },
     ]);
-    expect(await effectiveAccess(grants, "agent", agent, "p")).toBe("none");
-    expect(await effectiveAccess(grants, "agent", agent, "q")).toBe("none");
+    expect(await accessFor(grants, "agent", agent, "p")).toBe("none");
+    expect(await accessFor(grants, "agent", agent, "q")).toBe("none");
   });
 
   it("an everyone grant stored above EVERYONE_MAX is read as the cap", async () => {
     const grants = db([{ resourceType: "tool", resourceId: "t1", granteeKind: "everyone", level: "write" }]);
-    expect(await effectiveAccess(grants, "tool", { id: "t1", ownerId: "owner" }, "p")).toBe("use");
+    expect(await accessFor(grants, "tool", { id: "t1", ownerId: "owner" }, "p")).toBe("use");
   });
 
   it("a null principal (e.g. a legacy webhook with no creator) only gets everyone grants", async () => {
     const grants = db([{ resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" }]);
-    expect(await effectiveAccess(grants, "agent", { id: "a1", ownerId: null }, null)).toBe("execute");
-    expect(await effectiveAccess(db(), "agent", { id: "a1", ownerId: null }, null)).toBe("none");
+    expect(await accessFor(grants, "agent", { id: "a1", ownerId: null }, null)).toBe("execute");
+    expect(await accessFor(db(), "agent", { id: "a1", ownerId: null }, null)).toBe("none");
   });
 });
 

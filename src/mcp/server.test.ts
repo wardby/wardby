@@ -86,7 +86,7 @@ describe("buildMcpServer", () => {
     let receivedCtx: McpRequestContext | undefined;
     mcp.registerTool({
       name: "echo",
-      scope: "agents:read",
+      permission: "agents:read",
       inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
       handler: async (args: { text: string }, ctx) => {
         receivedCtx = ctx;
@@ -108,7 +108,7 @@ describe("buildMcpServer", () => {
     let calls = 0;
     mcp.registerTool({
       name: "take",
-      scope: "agents:read",
+      permission: "agents:read",
       inputSchema: { type: "object", properties: { items: { type: "array", items: { type: "number" } } } },
       handler: async () => {
         calls += 1;
@@ -145,7 +145,7 @@ describe("buildMcpServer", () => {
     };
     mcp.registerTool({
       name: "media",
-      scope: "agents:read",
+      permission: "agents:read",
       inputSchema: {},
       handler: async () => ({ content: [image, resource, { type: "text", text: "{}" }] }),
     });
@@ -161,7 +161,7 @@ describe("buildMcpServer", () => {
     mcp.setFixedContext(fakeCtx(["agents:write"]));
     mcp.registerTool({
       name: "dup",
-      scope: "agents:write",
+      permission: "agents:write",
       inputSchema: {},
       handler: async () => {
         throw new Prisma.PrismaClientKnownRequestError(
@@ -192,7 +192,7 @@ describe("buildMcpServer", () => {
     mcp.setFixedContext(fakeCtx(["agents:read"]));
     mcp.registerTool({
       name: "needs-write",
-      scope: "agents:write",
+      permission: "agents:write",
       inputSchema: {},
       handler: async () => ({ content: [{ type: "text", text: "should not run" }] }),
     });
@@ -207,7 +207,7 @@ describe("buildMcpServer", () => {
     const mcp = buildMcpServer({ providers: fakeProviders, db: fakeDb, config: { canonicalUri: "https://host/mcp" } });
     mcp.registerTool({
       name: "whoami",
-      scope: "agents:read",
+      permission: "agents:read",
       inputSchema: {},
       handler: async () => ({ content: [{ type: "text", text: "should not run" }] }),
     });
@@ -231,7 +231,7 @@ describe("buildMcpServer", () => {
     let urlVisited: string | undefined;
     mcp.registerTool({
       name: "needs-approval",
-      scope: "agents:read",
+      permission: "agents:read",
       inputSchema: {},
       handler: async (_args, ctx) => {
         const state = ctx.mcpReq.requestState<{ step: string }>();

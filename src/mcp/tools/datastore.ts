@@ -1,7 +1,7 @@
 import { Prisma, type PrismaClient } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import type { DatastoreValue } from "../../providers/index.js";
-import { requireOwnedDatastore, canRead, assertCanMutate } from "../auth/ownership.js";
+import { assertCanMutate, canRead, readableOwnedWhere, requireDatastoreAccess } from "../auth/ownership.js";
 import { isOwnerAll } from "../auth/resource-server.js";
 import { requireAgentAccess, requireBindable, requireBindingOwner } from "../auth/access.js";
 import {
@@ -70,7 +70,7 @@ async function requireMutableSharedDatastore(
 export function registerDatastoreTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_datastore",
-    scope: "datastore:write",
+    permission: "datastore:write",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string" } },
@@ -91,20 +91,22 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_datastores",
-    scope: "datastore:write",
+    permission: "datastore:write",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
-      const datastores = await listDatastores(ctx.principal.id, ctx.db, { all: isOwnerAll(ctx) });
+      const datastores = await listDatastores(ctx.principal.id, ctx.db, {
+        where: await readableOwnedWhere(ctx, "datastore"),
+      });
       return textResult(datastores);
     },
   });
 
   mcp.registerTool({
     name: "delete_datastore",
-    scope: "datastore:write",
+    permission: "datastore:write",
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
     handler: async (args: { id: string }, ctx) => {
-      await requireOwnedDatastore(ctx.db, args.id, ctx.principal.id, isOwnerAll(ctx));
+      await requireDatastoreAccess(ctx, args.id, "owner");
       try {
         await deleteDatastore(args.id, ctx.db);
       } catch (err) {
@@ -119,7 +121,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "attach_datastore",
-    scope: "datastore:write",
+    permission: "datastore:write",
     inputSchema: {
       type: "object",
       properties: {
@@ -135,7 +137,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
       // own agent (A2/S2-2). Not even the stdio operator crosses owners.
       const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
       await requireBindable(ctx, agent);
-      const datastore = await requireOwnedDatastore(ctx.db, args.datastoreId, ctx.principal.id);
+      const datastore = await requireDatastoreAccess(ctx, args.datastoreId, "owner");
       if (datastore.ownerId !== agent.ownerId) {
         throw new McpError(403, "Only a datastore owned by the agent's owner can be attached to it.");
       }
@@ -154,7 +156,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "detach_datastore",
-    scope: "datastore:write",
+    permission: "datastore:write",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, boundName: { type: "string" } },
@@ -172,7 +174,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "datastore_get",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, key: { type: "string" }, boundName: { type: "string" } },
@@ -193,7 +195,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "datastore_list",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, prefix: { type: "string" }, boundName: { type: "string" } },
@@ -214,7 +216,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "datastore_set",
-    scope: "datastore:write",
+    permission: "datastore:write",
     description:
       'Sets a datastore value. Pass "boundName" to write to a shared datastore attached under that name instead of the agent\'s private one. Pass "pii": true to encrypt the value at rest (AES-256-GCM) — opt in only for values that actually carry PII, never inferred automatically.',
     inputSchema: {
@@ -253,7 +255,7 @@ export function registerDatastoreTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "datastore_delete",
-    scope: "datastore:write",
+    permission: "datastore:write",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, key: { type: "string" }, boundName: { type: "string" } },

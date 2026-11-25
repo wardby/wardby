@@ -139,6 +139,7 @@ function fakeDb(agentOwners: Record<string, string | null> = DEFAULT_AGENT_OWNER
   } as unknown as import("#prisma").PrismaClient;
   // The real client runs a transaction on one connection; the fake has a single store.
   Object.assign(fake, {
+    resourceGrant: { deleteMany: async () => ({ count: 0 }) },
     // $queryRaw exists only on the transaction: its presence on the client selects the SQL accessor path.
     $transaction: async (fn: (tx: unknown) => unknown) => fn({ ...fake, $queryRaw: async () => [] }),
   });

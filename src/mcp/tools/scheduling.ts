@@ -9,7 +9,7 @@ import { textResult } from "./text-result.js";
 export function registerSchedulingTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "set_schedule",
-    scope: "agents:write",
+    permission: "agents:write",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, schedule: { type: "string" }, timezone: { type: "string" } },
@@ -47,7 +47,7 @@ export function registerSchedulingTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "disable_schedule",
-    scope: "agents:write",
+    permission: "agents:write",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } }, required: ["agentId"] },
     handler: async (args: { agentId: string }, ctx) => {
       await requireAgentAccess(ctx, args.agentId, "write");

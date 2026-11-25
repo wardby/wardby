@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { atLeast, effectiveAccess } from "../grants.js";
+import { atLeast, accessFor } from "../grants.js";
 import { checkReviewersCanReadAgent, type PlanSettingsDb } from "../plans/settings.js";
 
 export const DOCUMENT_TOOL_PREFIX = "doc_";
@@ -52,7 +52,7 @@ export async function checkDocumentToolsSetting(
       select: { id: true, ownerId: true, codingProfile: { select: { planDocument: true } } },
     });
     if (!planner?.codingProfile?.planDocument) return invalid("plans");
-    if (!atLeast("agent", await effectiveAccess(db, "agent", planner, savedBy), "execute")) invalid("plans");
+    if (!atLeast("agent", await accessFor(db, "agent", planner, savedBy), "execute")) invalid("plans");
   }
   return { access: input.access, reviewers, finalApproverId, maxNewPerRun: input.maxNewPerRun ?? 5, plans };
 }

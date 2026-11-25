@@ -107,6 +107,7 @@ describe.skipIf(!process.env.DATABASE_URL)("viewer documents route (PostgreSQL)"
         const principal = authorization.includes("grantee") ? grantee : owner;
         return {
           principal,
+          canonicalUri: "https://host/mcp",
           scopes: new Set(scopes),
           roles: ["admin"],
           providers: { secrets: cipher },

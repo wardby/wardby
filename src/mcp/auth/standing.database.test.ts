@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../../core/db.js";
 import type { AuthProvider, VerifiedToken } from "../../providers/auth/types.js";
-import { authenticate, requireScope } from "./resource-server.js";
+import { authenticate, authorize } from "./resource-server.js";
 
 const URI = "https://host/mcp";
 
@@ -74,9 +74,9 @@ describe.skipIf(!process.env.DATABASE_URL)("authenticate resolves team standing 
     await login({ subject: s, scopes: [] });
     await sharedTeam("b", s, ["model-manager"]);
     const withScope = await login({ subject: s, scopes: ["models:admin"] });
-    expect(() => requireScope(withScope, URI, "models:admin")).not.toThrow();
+    expect(() => authorize(withScope, "models:admin")).not.toThrow();
     const withoutScope = await login({ subject: s, scopes: ["agents:read"] });
-    expect(() => requireScope(withoutScope, URI, "models:admin")).toThrow();
+    expect(() => authorize(withoutScope, "models:admin")).toThrow();
   });
 
   it("removing a member takes effect on that caller's very next request", async () => {

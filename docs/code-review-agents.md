@@ -595,6 +595,25 @@ requires more than owning the agent:
   that GitHub account has on the repository. A `write` link and a coding
   repository need **write** (push, maintain, or admin); a `read` link needs
   **read**.
+- **A team-owned agent uses its members' GitHub accounts.** A team has no
+  GitHub account of its own, so when the owner is a shared team wardby runs the
+  same lookup for each member's linked account (members with none are skipped)
+  and the check passes when **at least one** current member has the access the
+  repository needs: write for a write link, read for a read link. Membership is
+  read on every check, so a member who is removed stops counting at once; a
+  member who loses their GitHub access stops counting when their cached answer
+  expires (5 minutes). The oldest 20 members are checked. If none passes the
+  use is refused: with `identity_not_linked` when no member has linked GitHub,
+  with `insufficient_permission` when linked members have too little access,
+  and as "could not verify" when GitHub could not be asked for a member and no
+  one else passed. The App still does all the reading and posting. A personal
+  team is the user themself and works as above. Moving an agent to a team
+  (`make_owner`) therefore keeps its `host_permission` links working with no
+  re-linking, as long as one member has the access. To see which members
+  vouched, set `LOG_LEVEL=debug`: each passing check logs one line with the
+  GitHub user id and permission level of every member who passed (and whether
+  each answer came from the cache), plus the members checked and linked. It carries no login, name, email or token, and nothing is logged for
+  it at the default level.
 - **Or an explicit admin approval.** A wardby `admin` (the role, not just the
   `agents:admin` scope) can pass `adminOverride: true` to `link_repository`, or
   `repositoryAdminOverride: true` to `create_agent`/`update_agent`, for a

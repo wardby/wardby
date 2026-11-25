@@ -1,6 +1,6 @@
 import type { PrismaClient } from "#prisma";
 import { codingOverrideAllowed } from "../coding-override.js";
-import { atLeast, effectiveAccess } from "../grants.js";
+import { atLeast, accessFor } from "../grants.js";
 import type { PlanDocument, PlanDocumentInput } from "../../coding/profile.js";
 
 export type PlanSettingsDb = Pick<PrismaClient, "principal" | "agent" | "resourceGrant">;
@@ -20,7 +20,7 @@ export async function checkReviewersCanReadAgent(
   const found = await db.principal.findMany({ where: { id: { in: ids } }, select: { id: true } });
   if (found.length !== ids.length) return false;
   for (const id of ids) {
-    const access = await effectiveAccess(db, "agent", agent, id);
+    const access = await accessFor(db, "agent", agent, id);
     if (!atLeast("agent", access, "read")) return false;
   }
   return true;
@@ -51,14 +51,14 @@ export async function checkPlanDocumentSetting(
     if (!builder || builder.kind !== "coding" || !builder.codingProfile?.buildFromPlan) {
       throw new Error("plan_builder_invalid");
     }
-    const access = await effectiveAccess(db, "agent", builder, agent.ownerId);
+    const access = await accessFor(db, "agent", builder, agent.ownerId);
     if (!atLeast("agent", access, "execute") || !codingOverrideAllowed(agent.ownerId, builder)) {
       throw new Error("plan_builder_invalid");
     }
     // The other direction: the build gate only sees plans whose planner the builder's owner can execute
     // (build.ts newestVisiblePlanSet), so a builder that can't see this planner's plans never builds them.
     if (!builder.ownerId) throw new Error("plan_builder_invalid");
-    const back = await effectiveAccess(db, "agent", { id: agent.id, ownerId: agent.ownerId }, builder.ownerId);
+    const back = await accessFor(db, "agent", { id: agent.id, ownerId: agent.ownerId }, builder.ownerId);
     if (!atLeast("agent", back, "execute")) throw new Error("plan_builder_invalid");
   }
   return { ...setting, reviewers };

@@ -581,8 +581,13 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await page.locator(".cpop textarea").fill("Second");
     await page.locator(".cpop textarea").press(SUBMIT);
     await expect.poll(() => pinNumbered(page, 2).count(), { timeout: 10_000 }).toBe(1);
-    await page.keyboard.press("Escape");
-    await expect.poll(() => page.locator(".cpop").count()).toBe(0);
+    // The new thread's popover can reopen after the first Escape, so press it until the popover is gone.
+    await expect
+      .poll(async () => {
+        await page.keyboard.press("Escape");
+        return page.locator(".cpop").count();
+      })
+      .toBe(0);
     // J and K move between threads, switching boards. An opened thread focuses its reply box, where
     // J and K are typed: focus moves to the popover's close button (not a text field) before each key.
     const head = page.locator(".cpop .quote");
@@ -592,20 +597,38 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect
         .poll(() => page.locator(".cpop textarea").evaluate((el) => el.ownerDocument.activeElement === el))
         .toBe(true);
-      await page.locator(".cpop [data-act=close]").focus();
+      // Focus the close button and make sure it keeps focus (a late re-render of the popover can
+      // hand focus back to the box), so the next key is a navigation key, not typed text.
+      await expect
+        .poll(async () => {
+          await page.locator(".cpop [data-act=close]").focus();
+          await page.waitForTimeout(100);
+          return page.locator(".cpop [data-act=close]").evaluate((el) => el.ownerDocument.activeElement === el);
+        })
+        .toBe(true);
     };
-    await page.keyboard.press("j");
-    await expect.poll(() => head.textContent()).toContain("#1 on");
+    // A key pressed while the previous thread is still being selected is ignored, so press again until it lands.
+    const navigate = async (key: string, expected: string) => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        // Without an open popover no box holds focus, so the key goes to the page.
+        if ((await page.locator(".cpop").count()) > 0) await leaveReplyBox();
+        await page.keyboard.press(key);
+        try {
+          await expect.poll(() => head.textContent(), { timeout: 2_500 }).toContain(expected);
+          return;
+        } catch {
+          // not yet: focus the close button again and retry
+        }
+      }
+      await expect.poll(() => head.textContent()).toContain(expected);
+    };
+    await navigate("j", "#1 on");
     await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Menu");
     await expect.poll(() => pin1.count()).toBe(1);
-    await leaveReplyBox();
-    await page.keyboard.press("j");
-    await expect.poll(() => head.textContent()).toContain("#2 on");
+    await navigate("j", "#2 on");
     await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Home");
     await expect.poll(() => pinNumbered(page, 2).count()).toBe(1);
-    await leaveReplyBox();
-    await page.keyboard.press("k");
-    await expect.poll(() => head.textContent()).toContain("#1 on");
+    await navigate("k", "#1 on");
     await page.keyboard.press("Escape");
 
     // After a reload the pins are back, and the boards list counts open threads per board.

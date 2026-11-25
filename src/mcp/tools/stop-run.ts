@@ -25,7 +25,7 @@ const StopRunSchema = z
 export function registerStopRunTool(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "stop_run",
-    scope: "runs:trigger",
+    permission: "runs:trigger",
     description:
       "Stop a run that is pending, queued, or running, and the sub-agent runs it delegated that are still in " +
       "flight. The run ends as `cancelled`; a coding run's worker is stopped and opens or updates no pull " +

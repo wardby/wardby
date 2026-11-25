@@ -127,6 +127,24 @@ describe.skipIf(!process.env.DATABASE_URL)("team tools (database)", () => {
     );
   });
 
+  it("create_team and list_teams return each team's principalId, shared and personal, for make_owner", async () => {
+    const admin = await ADMIN();
+    const team = await createdTeam(admin, "principal-id");
+    const row = await db.team.findUniqueOrThrow({ where: { id: team.id }, select: { principalId: true } });
+    const created = JSON.parse(text(await call(admin, "create_team", { name: name("principal-id-2") }))) as {
+      id: string;
+      principalId: string;
+    };
+    teamIds.push(created.id);
+    expect(created.principalId).toBe(
+      (await db.team.findUniqueOrThrow({ where: { id: created.id }, select: { principalId: true } })).principalId,
+    );
+    const listed = JSON.parse(text(await call(admin, "list_teams", {}))) as { id: string; principalId: string }[];
+    expect(listed.find((t) => t.id === team.id)?.principalId).toBe(row.principalId);
+    const personal = await db.team.findFirstOrThrow({ where: { principalId: admin.principal.id } });
+    expect(listed.find((t) => t.id === personal.id)?.principalId).toBe(admin.principal.id);
+  });
+
   it("a team-manager manages teams and members but cannot assign roles; an admin can", async () => {
     const mgr = await MANAGER();
     const admin = await ADMIN();
@@ -140,6 +158,13 @@ describe.skipIf(!process.env.DATABASE_URL)("team tools (database)", () => {
     expect(JSON.parse(text(set)).roles).toEqual(["viewer"]);
     expect((await call(mgr, "remove_team_member", { teamId: team.id, subject: target.subject })).isError).toBeFalsy();
     expect(await db.teamMember.count({ where: { teamId: team.id, principalId: target.id } })).toBe(0);
+  });
+
+  it("an admin holding the admin tier scope (not the literal teams:manage) keeps its roles, so it can assign a team's roles", async () => {
+    const tierAdmin = await ctxFor("tier-admin", ["wardby:admin"], ["admin"]);
+    const team = await createdTeam(tierAdmin, "tier");
+    const set = await call(tierAdmin, "set_team_roles", { id: team.id, roles: ["viewer"] });
+    expect(JSON.parse(text(set)).roles).toEqual(["viewer"]);
   });
 
   it("maps failures to statuses: 409 duplicate, 400 invalid or personal, 404 unknown", async () => {

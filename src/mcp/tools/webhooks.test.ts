@@ -28,7 +28,7 @@ function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
   const agentRows = new Map(agents.map((a) => [a.id, a]));
   let counter = 0;
 
-  return {
+  const fake = {
     resourceGrant: fakeResourceGrants(grants),
     webhook: {
       create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
@@ -65,6 +65,8 @@ function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
       findUnique: async ({ where }: { where: { id: string } }) => agentRows.get(where.id) ?? null,
     },
   } as unknown as import("#prisma").PrismaClient;
+  Object.assign(fake, { $transaction: async (fn: (tx: unknown) => unknown) => fn(fake) });
+  return fake;
 }
 
 function fakeCtx(db: ReturnType<typeof fakeDb>, principalId: string, scopes: string[]): McpRequestContext {

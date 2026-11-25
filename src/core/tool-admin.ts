@@ -26,6 +26,7 @@
  */
 import { Prisma, type PrismaClient, type Tool } from "#prisma";
 import { deriveJsonSchema } from "../sandbox/zod-params.js";
+import { deleteGrantsFor } from "./grants.js";
 
 export type AttachedAgent = { id: string; name: string; ownerId: string | null };
 
@@ -178,6 +179,7 @@ export async function deleteToolGuarded(
           await tx.agentTool.deleteMany({ where: { toolId, agentId: { in: own.map((agent) => agent.id) } } });
           await tx.runHook.deleteMany({ where: { toolId, agentId: { in: own.map((agent) => agent.id) } } });
         }
+        await deleteGrantsFor(tx, "tool", toolId);
         await tx.tool.delete({ where: { id: toolId } });
         return own.map((agent) => agent.id);
       },

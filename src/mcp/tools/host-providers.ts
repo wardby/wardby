@@ -70,7 +70,7 @@ const DeleteSchema = z.object({ provider: z.string().min(1).max(40) }).strict();
 export function registerHostProviderTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "register_host_provider",
-    scope: "hosts:admin",
+    permission: "hosts:admin",
     description:
       "Host managers (hosts:admin): register a code host implemented by your custom tools, or replace one. Each tool's code and schema are copied, and only that copy ever runs: update_tool changes nothing until approve_host_provider_tools. Credentials must be your brokered secrets, allowed on every API host and gitHost. Without permissionCredential, trustedAccounts decides who may start runs. No restart is needed today, because agents can't use a provider yet; a new provider will need one once they can.",
     inputSchema: {
@@ -144,7 +144,7 @@ export function registerHostProviderTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "approve_host_provider_tools",
-    scope: "hosts:admin",
+    permission: "hosts:admin",
     description:
       "Host managers (hosts:admin): copy the named operations' current tool code over their approved snapshots. Applies from the next call. Read the change first with get_host_provider and includeCode.",
     inputSchema: {
@@ -166,7 +166,7 @@ export function registerHostProviderTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "get_host_provider",
-    scope: "hosts:admin",
+    permission: "hosts:admin",
     description:
       "Host managers (hosts:admin): a provider's config, active permission mode, secret names (never values), and which tools have unapproved changes. includeCode adds each approved snapshot's code and schema, and any newer code and schema, to review before approving.",
     inputSchema: {
@@ -185,7 +185,7 @@ export function registerHostProviderTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "delete_host_provider",
-    scope: "hosts:admin",
+    permission: "hosts:admin",
     description:
       "Host managers (hosts:admin): remove a provider and its snapshots, freeing its secrets. Refused while an agent links to one of its repositories.",
     inputSchema: {
@@ -204,7 +204,7 @@ export function registerHostProviderTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "test_host_provider",
-    scope: "hosts:admin",
+    permission: "hosts:admin",
     description:
       "Host managers (hosts:admin): run each approved read-only tool against one repository, with its real credential, and report pass, fail or skipped with a fixed code per operation. Changes nothing on the host: write operations are skipped, and a read-only tool can only send GET. Name a pullRequest, headRef, ref and accountId to reach the checks that need them. The report holds no response data, so it can be shared.",
     inputSchema: {

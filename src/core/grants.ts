@@ -10,6 +10,7 @@
  * transition state: nobody is their owner, so access comes from grants only.
  */
 import { Prisma, type PrismaClient } from "#prisma";
+import { resolveStanding } from "./teams/standing.js";
 
 export const LEVELS = {
   agent: ["read", "execute", "write"],
@@ -17,6 +18,10 @@ export const LEVELS = {
   budget_group: ["read", "use", "write"],
   mcp_server: ["read", "use", "write"],
   document: ["read", "comment", "write"],
+  // Metadata only: a grantee sees that the resource exists and its name, never a value, and binds nothing.
+  secret: ["read"],
+  datastore: ["read"],
+  webhook: ["read"],
 } as const;
 
 export type ResourceType = keyof typeof LEVELS;
@@ -36,12 +41,27 @@ export const EVERYONE_MAX = {
   budget_group: "use",
   mcp_server: "use",
   document: "comment",
+  secret: "read",
+  datastore: "read",
+  webhook: "read",
 } as const satisfies {
   [T in ResourceType]: Level<T>;
 };
 
-/** Types grant_access/revoke_access accept today: agents, MCP servers and documents. */
-export const SHAREABLE_TYPES: readonly ResourceType[] = ["agent", "mcp_server", "document"];
+/** Types grant_access/revoke_access accept today. */
+export const SHAREABLE_TYPES: readonly ResourceType[] = [
+  "agent",
+  "mcp_server",
+  "document",
+  "budget_group",
+  "tool",
+  "secret",
+  "datastore",
+  "webhook",
+];
+
+/** Types that cannot be shared with everyone: what they hold is private to their owner and the people named. */
+export const NO_EVERYONE_TYPES: ReadonlySet<ResourceType> = new Set<ResourceType>(["secret", "datastore", "webhook"]);
 
 export const EVERYONE_KEY = "everyone";
 
@@ -95,27 +115,55 @@ function best(type: ResourceType, a: string, b: string): string {
 
 export type GrantDb = Pick<PrismaClient, "resourceGrant">;
 
-function granteeKeys(principalId: string | null): string[] {
-  return principalId ? [principalGranteeKey(principalId), EVERYONE_KEY] : [EVERYONE_KEY];
+/**
+ * Who a grant lookup is for: one principal id, none (everyone grants only), or
+ * every principal id the caller acts for (its own plus its Teams' backing
+ * principals, see core/teams/standing.ts).
+ */
+export type Acting = string | null | readonly string[];
+
+function actingIds(acting: Acting): readonly string[] {
+  if (acting === null) return [];
+  return typeof acting === "string" ? [acting] : acting;
+}
+
+/** True when `ownerId` is one of the principals `acting` stands for. */
+export function actsForOwner(acting: Acting, ownerId: string | null): boolean {
+  return ownerId !== null && actingIds(acting).includes(ownerId);
 }
 
 /**
- * max(owner, principal grant, everyone grant). `principalId` null (e.g. a
- * legacy webhook with no recorded creator) gets everyone grants only.
+ * The Prisma filter for "owned by a principal `acting` stands for". One principal keeps the plain equality, so
+ * a caller with no Team reads the same query as before; a caller with Teams matches any of them.
+ */
+export function ownedByWhere(acting: Acting): { ownerId: string } | { ownerId: { in: string[] } } {
+  const ids = [...actingIds(acting)];
+  return ids.length === 1 ? { ownerId: ids[0] } : { ownerId: { in: ids } };
+}
+
+function granteeKeys(acting: Acting): string[] {
+  return [...actingIds(acting).map(principalGranteeKey), EVERYONE_KEY];
+}
+
+/**
+ * max(owner, principal grant, everyone grant). The caller owns the resource when
+ * its owner is any principal it acts for, and holds a grant made to any of them.
+ * `principal` null (e.g. a legacy webhook with no recorded creator) gets
+ * everyone grants only.
  * `operator` is the stdio local operator (McpRequestContext.operator) or an owner-all caller (isOwnerAll),
  * owner of everything for access checks — never for binding rules.
  */
-export async function effectiveAccess<T extends ResourceType>(
+export async function accessFor<T extends ResourceType>(
   db: GrantDb,
   type: T,
   resource: { id: string; ownerId: string | null },
-  principalId: string | null,
+  principal: Acting,
   opts?: { operator?: boolean },
 ): Promise<Access<T>> {
   if (opts?.operator) return "owner";
-  if (principalId !== null && resource.ownerId !== null && resource.ownerId === principalId) return "owner";
+  if (actsForOwner(principal, resource.ownerId)) return "owner";
   const rows = await db.resourceGrant.findMany({
-    where: { resourceType: type, resourceId: resource.id, granteeKey: { in: granteeKeys(principalId) } },
+    where: { resourceType: type, resourceId: resource.id, granteeKey: { in: granteeKeys(principal) } },
     select: { granteeKey: true, level: true },
   });
   let access = "none";
@@ -131,10 +179,10 @@ export async function effectiveAccess<T extends ResourceType>(
 export async function grantedAccessMap<T extends ResourceType>(
   db: GrantDb,
   type: T,
-  principalId: string | null,
+  principal: Acting,
 ): Promise<Map<string, Level<T>>> {
   const rows = await db.resourceGrant.findMany({
-    where: { resourceType: type, granteeKey: { in: granteeKeys(principalId) } },
+    where: { resourceType: type, granteeKey: { in: granteeKeys(principal) } },
     select: { resourceId: true, granteeKey: true, level: true },
   });
   const map = new Map<string, string>();
@@ -150,10 +198,10 @@ export async function grantedAccessMap<T extends ResourceType>(
 export async function grantedIds<T extends ResourceType>(
   db: GrantDb,
   type: T,
-  principalId: string | null,
+  principal: Acting,
   minLevel: Level<T>,
 ): Promise<string[]> {
-  const map = await grantedAccessMap(db, type, principalId);
+  const map = await grantedAccessMap(db, type, principal);
   return [...map].filter(([, level]) => atLeast(type, level, minLevel)).map(([id]) => id);
 }
 
@@ -170,7 +218,7 @@ export async function canDelegate(
 ): Promise<boolean> {
   if (parent.ownerId === child.ownerId) return true;
   if (parent.ownerId === null) return false;
-  return atLeast("agent", await effectiveAccess(db, "agent", child, parent.ownerId), "execute");
+  return atLeast("agent", await accessFor(db, "agent", child, parent.ownerId), "execute");
 }
 
 /** The create-data for an everyone grant (migration, import, CLI --public). */
@@ -198,7 +246,7 @@ export async function ownerCanUseMcpServer(
   server: { id: string; ownerId: string | null },
 ): Promise<boolean> {
   if (ownerId === null) return false;
-  return atLeast("mcp_server", await effectiveAccess(db, "mcp_server", server, ownerId), "use");
+  return atLeast("mcp_server", await accessFor(db, "mcp_server", server, ownerId), "use");
 }
 
 /** Keeps the items whose server the owner cannot use (see ownerCanUseMcpServer). */
@@ -233,6 +281,115 @@ export async function pruneUnusableMcpAttachments(
     where: { serverId, agentId: { in: unusable.map((row) => row.agentId) } },
   });
   return count;
+}
+
+/**
+ * True when an agent owned by `ownerId` may spend against `group`: the group is public (no owner), or the
+ * owner owns it or holds use (or higher) through a grant. An owner-less agent only reaches public groups.
+ */
+export async function ownerCanUseBudgetGroup(
+  db: GrantDb,
+  ownerId: string | null,
+  group: { id: string; ownerId: string | null },
+): Promise<boolean> {
+  if (group.ownerId === null) return true;
+  if (ownerId === null) return false;
+  return atLeast("budget_group", await accessFor(db, "budget_group", group, ownerId), "use");
+}
+
+/** Remembers the answer per principal, so a prune asks the database once for each distinct owner. */
+function once<K, V>(compute: (key: K) => Promise<V>): (key: K) => Promise<V> {
+  const seen = new Map<K, Promise<V>>();
+  return (key) => {
+    let value = seen.get(key);
+    if (!value) seen.set(key, (value = compute(key)));
+    return value;
+  };
+}
+
+/**
+ * After a grant on a budget group is revoked or lowered: removes the group from the agents whose owner can no
+ * longer use it (their budgetGroupId becomes null), in the caller's transaction. The group owner's own agents
+ * are never touched. Returns how many agents were ungrouped.
+ */
+export async function pruneUnusableBudgetGroupMembers(
+  db: GrantDb & Pick<PrismaClient, "agent" | "budgetGroup">,
+  groupId: string,
+): Promise<number> {
+  const group = await db.budgetGroup.findUnique({ where: { id: groupId }, select: { id: true, ownerId: true } });
+  if (!group) return 0;
+  const members = await db.agent.findMany({ where: { budgetGroupId: groupId }, select: { id: true, ownerId: true } });
+  const canUse = once((ownerId: string | null) => ownerCanUseBudgetGroup(db, ownerId, group));
+  const unusable: string[] = [];
+  for (const member of members) {
+    if (!(await canUse(member.ownerId))) unusable.push(member.id);
+  }
+  if (unusable.length === 0) return 0;
+  const { count } = await db.agent.updateMany({ where: { id: { in: unusable } }, data: { budgetGroupId: null } });
+  return count;
+}
+
+/**
+ * True when an agent owned by `ownerId` may run `tool`: the tool is public (no owner), or the owner owns it or
+ * holds use (or higher) through a grant. An owner-less agent only reaches public tools.
+ */
+export async function ownerCanUseTool(
+  db: GrantDb,
+  ownerId: string | null,
+  tool: { id: string; ownerId: string | null },
+): Promise<boolean> {
+  if (tool.ownerId === null) return true;
+  if (ownerId === null) return false;
+  return atLeast("tool", await accessFor(db, "tool", tool, ownerId), "use");
+}
+
+/**
+ * After a grant on a tool is revoked or lowered: deletes the attachments and run hooks of the tool that are no
+ * longer legitimate, in the caller's transaction. One stays while EITHER the agent's owner can use the tool (a
+ * grant to the owner) OR the principal who attached it can (a write-grantee attaching a tool they own or were
+ * granted); a row with no recorded attacher is left alone. The attacher is judged with their Teams, as they were
+ * when they attached. The tool owner's own agents are never touched. Returns how many were removed.
+ */
+export async function pruneUnusableToolAttachments(
+  db: GrantDb & Pick<PrismaClient, "tool" | "agentTool" | "runHook" | "teamMember">,
+  toolId: string,
+): Promise<number> {
+  const tool = await db.tool.findUnique({ where: { id: toolId }, select: { id: true, ownerId: true } });
+  if (!tool) return 0;
+  const [attachments, hooks] = await Promise.all([
+    db.agentTool.findMany({
+      where: { toolId },
+      select: { agentId: true, attachedById: true, agent: { select: { ownerId: true } } },
+    }),
+    db.runHook.findMany({
+      where: { toolId },
+      select: { id: true, createdById: true, agent: { select: { ownerId: true } } },
+    }),
+  ]);
+  const ownerCanUse = once((ownerId: string | null) => ownerCanUseTool(db, ownerId, tool));
+  const attacherCanUse = once(async (principalId: string) => {
+    const { actsFor } = await resolveStanding(db, principalId);
+    return atLeast("tool", await accessFor(db, "tool", tool, actsFor), "use");
+  });
+  const legitimate = async (ownerId: string | null, attacherId: string | null) =>
+    (await ownerCanUse(ownerId)) || (attacherId !== null && (await attacherCanUse(attacherId)));
+  const unusableAgents: string[] = [];
+  for (const row of attachments) {
+    if (row.attachedById !== null && !(await legitimate(row.agent.ownerId, row.attachedById))) {
+      unusableAgents.push(row.agentId);
+    }
+  }
+  const unusableHooks: string[] = [];
+  for (const row of hooks) {
+    if (!(await legitimate(row.agent.ownerId, row.createdById))) unusableHooks.push(row.id);
+  }
+  const [removedAttachments, removedHooks] = await Promise.all([
+    unusableAgents.length
+      ? db.agentTool.deleteMany({ where: { toolId, agentId: { in: unusableAgents } } })
+      : { count: 0 },
+    unusableHooks.length ? db.runHook.deleteMany({ where: { id: { in: unusableHooks } } }) : { count: 0 },
+  ]);
+  return removedAttachments.count + removedHooks.count;
 }
 
 /** Every resource delete path calls this in the same transaction (no FK on resourceId). */

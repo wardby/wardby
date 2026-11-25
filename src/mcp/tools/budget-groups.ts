@@ -1,8 +1,11 @@
 /** BudgetGroup CRUD with scope checks in server.ts and ownership checks here. */
 import { z } from "zod";
 import { computeGroupSpend } from "../../core/budget-groups.js";
-import { canReadFor, requireOwnedBudgetGroup, visibleTo } from "../auth/ownership.js";
-import { isOwnerAll } from "../auth/resource-server.js";
+import { Prisma } from "#prisma";
+import { atLeast, deleteGrantsFor } from "../../core/grants.js";
+import { withSerializableRetry } from "../../core/serializable-retry.js";
+import { agentAccessResolver } from "../auth/access.js";
+import { readableBudgetGroupsWhere, requireBudgetGroupAccess } from "../auth/ownership.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -61,7 +64,7 @@ const capSchemaProps = {
 export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_budget_group",
-    scope: "budget_groups:write",
+    permission: "budget_groups:write",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -80,7 +83,7 @@ export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "update_budget_group",
-    scope: "budget_groups:write",
+    permission: "budget_groups:write",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -91,7 +94,7 @@ export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
       const result = UpdateBudgetGroupSchema.safeParse(rawArgs);
       if (!result.success) throw invalidArguments("update_budget_group arguments", result.error);
       const { id, ...updates } = result.data;
-      await requireOwnedBudgetGroup(ctx.db, id, ctx.principal.id, isOwnerAll(ctx));
+      await requireBudgetGroupAccess(ctx, id, "write");
       const group = await ctx.db.budgetGroup.update({ where: { id }, data: updates });
       return textResult(group);
     },
@@ -99,17 +102,17 @@ export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_budget_groups",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args: Record<string, never>, ctx) => {
-      const groups = await ctx.db.budgetGroup.findMany({ where: visibleTo(ctx) });
+      const groups = await ctx.db.budgetGroup.findMany({ where: await readableBudgetGroupsWhere(ctx) });
       return textResult(groups);
     },
   });
 
   mcp.registerTool({
     name: "get_budget_group",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -117,21 +120,22 @@ export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
       additionalProperties: false,
     },
     handler: async (args: { id: string }, ctx) => {
-      const group = await ctx.db.budgetGroup.findUnique({
+      await requireBudgetGroupAccess(ctx, args.id, "read");
+      const group = await ctx.db.budgetGroup.findUniqueOrThrow({
         where: { id: args.id },
-        include: { agents: { select: { id: true, name: true, budgetUsd: true } } },
+        include: { agents: { select: { id: true, name: true, budgetUsd: true, ownerId: true } } },
       });
-      if (!group || !canReadFor(ctx, group.ownerId)) {
-        throw new McpError(404, `Budget group "${args.id}" not found.`);
-      }
       const spend = await computeGroupSpend(ctx.db, group, group.agents, new Date());
-      return textResult({ ...group, agents: group.agents.map(({ id, name }) => ({ id, name })), spend });
+      // The group's spend is the group's; the agents in it are listed only when the caller may read them.
+      const canReadAgent = await agentAccessResolver(ctx);
+      const visible = group.agents.filter((agent) => atLeast("agent", canReadAgent(agent), "read"));
+      return textResult({ ...group, agents: visible.map(({ id, name }) => ({ id, name })), spend });
     },
   });
 
   mcp.registerTool({
     name: "delete_budget_group",
-    scope: "budget_groups:write",
+    permission: "budget_groups:write",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -139,10 +143,19 @@ export function registerBudgetGroupTools(mcp: WardbyMcpServer): void {
       additionalProperties: false,
     },
     handler: async (args: { id: string }, ctx) => {
-      await requireOwnedBudgetGroup(ctx.db, args.id, ctx.principal.id, isOwnerAll(ctx));
+      await requireBudgetGroupAccess(ctx, args.id, "owner");
       // Agent.budgetGroupId -> BudgetGroup is ON DELETE SET NULL: member
       // agents are ungrouped automatically, never blocked or cascaded.
-      await ctx.db.budgetGroup.delete({ where: { id: args.id } });
+      // Serializable, so a concurrent grant_access cannot leave a grant row behind a deleted group.
+      await withSerializableRetry(() =>
+        ctx.db.$transaction(
+          async (tx) => {
+            await deleteGrantsFor(tx, "budget_group", args.id);
+            await tx.budgetGroup.delete({ where: { id: args.id } });
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        ),
+      );
       return textResult({ deleted: args.id });
     },
   });

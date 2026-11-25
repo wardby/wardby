@@ -31,7 +31,7 @@ function fakeDb(agentOwners: Record<string, string | null> = DEFAULT_AGENT_OWNER
   const agentDatastores: FakeAgentDatastoreRow[] = [];
   let counter = 0;
 
-  return {
+  const fake = {
     datastore: {
       create: async ({ data }: { data: Partial<FakeDatastoreRow> & { name: string } }) => {
         const now = new Date();
@@ -74,6 +74,12 @@ function fakeDb(agentOwners: Record<string, string | null> = DEFAULT_AGENT_OWNER
       },
     },
   } as unknown as import("#prisma").PrismaClient;
+  // deleteDatastore drops the grants and the row in one transaction; the fake has a single store.
+  Object.assign(fake, {
+    resourceGrant: { deleteMany: async () => ({ count: 0 }) },
+    $transaction: async (fn: (tx: unknown) => unknown) => fn(fake),
+  });
+  return fake;
 }
 
 function fakeDatastoreProvider(): Datastore {

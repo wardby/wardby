@@ -6,6 +6,7 @@ import type { Viewer } from "../core/documents/access.js";
 import { BoardFormatError } from "../core/documents/boards/errors.js";
 import type { ExportDeps } from "../core/documents/exports.js";
 import { resolveShareToken, validateSessionLink } from "../core/documents/share-links.js";
+import { resolveStanding } from "../core/teams/standing.js";
 import { logger } from "../core/logger.js";
 import { RateLimitError, type RateLimiter } from "../mcp/auth/self-hosted/rate-limit.js";
 import type { DocumentStreams } from "./events.js";
@@ -118,13 +119,15 @@ export async function resolveContext(
     });
     if (user?.status === "disabled") return { kind: "none" };
   }
+  // Who the member acts for is read live on every request, so leaving a team bites on the next one.
+  const standing = await resolveStanding(deps.db, session.principalId);
   return {
     kind: "member",
     session,
     csrf,
     principalId: session.principalId,
     // A member's session is principal-only: link elevation is per request (x-wardby-share).
-    viewer: { kind: "principal", principalId: session.principalId },
+    viewer: { kind: "principal", principalId: session.principalId, actsFor: standing.actsFor },
   };
 }
 

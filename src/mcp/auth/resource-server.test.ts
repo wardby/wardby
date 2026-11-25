@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { AuthProvider, VerifiedToken } from "../../providers/auth/types.js";
 import { AudienceError } from "../../providers/auth/types.js";
-import { protectedResourceMetadata, authenticate, requireScope, SCOPES_SUPPORTED } from "./resource-server.js";
+import { protectedResourceMetadata, authenticate, authorize, SCOPES_SUPPORTED } from "./resource-server.js";
 import { McpError } from "../errors.js";
 
 const CANONICAL_URI = "https://host/mcp";
@@ -137,7 +137,7 @@ describe("authenticate", () => {
   });
 });
 
-describe("requireScope", () => {
+describe("authorize", () => {
   it("passes when the context holds the required scope", () => {
     const ctx = {
       principal: {} as never,
@@ -148,7 +148,7 @@ describe("requireScope", () => {
       clientSupportsTasks: false,
       mcpReq: { requestState: () => undefined },
     };
-    expect(() => requireScope(ctx, CANONICAL_URI, "agents:write")).not.toThrow();
+    expect(() => authorize(ctx, "agents:write")).not.toThrow();
   });
 
   it("throws 403 with a WWW-Authenticate challenge listing all required scopes", () => {
@@ -162,8 +162,8 @@ describe("requireScope", () => {
       mcpReq: { requestState: () => undefined },
     };
     try {
-      requireScope(ctx, CANONICAL_URI, "agents:write", "tools:write");
-      expect.unreachable("requireScope should have thrown");
+      authorize(ctx, "agents:write", "tools:write");
+      expect.unreachable("authorize should have thrown");
     } catch (err) {
       expect(err).toBeInstanceOf(McpError);
       const mcpErr = err as McpError;

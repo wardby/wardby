@@ -147,7 +147,7 @@ describe("startHttpServer (delegating mode)", () => {
     let seenClientSupportsTasks: boolean | undefined;
     mcp.registerTool({
       name: "report_tasks_capability",
-      scope: "agents:read",
+      permission: "agents:read",
       inputSchema: { type: "object", properties: {} },
       handler: async (_args, ctx) => {
         seenClientSupportsTasks = ctx.clientSupportsTasks;

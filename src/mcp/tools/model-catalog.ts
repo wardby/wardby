@@ -267,7 +267,7 @@ const setModelProperties = {
 export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatalogToolDeps = {}): void {
   mcp.registerTool({
     name: "list_models",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "The merged model catalog (shipped models overlaid with this deployment's overrides): id, pricing, encoding, effort levels, and whether this deployment can route to it right now (routable).",
     inputSchema: {
@@ -291,7 +291,7 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
 
   mcp.registerTool({
     name: "get_model",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "One catalog entry in full, active or disabled. For an override of a shipped model, also returns the shipped entry it shadows.",
     inputSchema: {
@@ -318,7 +318,7 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
 
   mcp.registerTool({
     name: "set_model",
-    scope: "models:admin",
+    permission: "models:admin",
     description:
       "Model managers (models:admin): add or override a catalog entry. Every field is required — there is no partial update, so the whole entry is always literal and auditable. Refused (409) when the model id belongs to a different provider: a shipped id always belongs to its shipped provider and can never be reassigned; a non-shipped id already claimed by another provider (its row active or disabled) is freed only by reset_model on that id, never by disable_model. Zero rates come back as warnings, not errors.",
     inputSchema: {
@@ -416,7 +416,7 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
 
   mcp.registerTool({
     name: "disable_model",
-    scope: "models:admin",
+    permission: "models:admin",
     description:
       "Model managers (models:admin): remove a model from routing without deleting its history. Keeps a disabled row under its own provider so no other provider can claim the id until reset_model clears it.",
     inputSchema: {
@@ -474,7 +474,7 @@ export function registerModelCatalogTools(mcp: WardbyMcpServer, deps: ModelCatal
 
   mcp.registerTool({
     name: "reset_model",
-    scope: "models:admin",
+    permission: "models:admin",
     description:
       "Model managers (models:admin): remove every catalog row for a model id, reverting to the shipped entry (if any) or removing it entirely. 404 if there is no row to remove (an unmodified shipped model, or an unknown id).",
     inputSchema: {

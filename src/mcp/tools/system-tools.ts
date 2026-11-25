@@ -49,7 +49,7 @@ function requireSlackConfigured(ctx: McpRequestContext): void {
 export function registerSystemToolTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "make_tool_public",
-    scope: "agents:admin",
+    permission: "agents:admin",
     description:
       "Admins (agents:admin with the admin role): makes a tool public, a system tool. It loses its owner: everyone can see and attach it (never read its code), and only an admin (update_tool, delete_tool) or the operator's CLI can change it. Refused while it runs for an agent owned by someone other than its owner, or when a public tool already has its name. Existing attachments and hooks on the former owner's agents keep working. Records who published it.",
     inputSchema: {
@@ -76,7 +76,7 @@ export function registerSystemToolTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "grant_tool_connection",
-    scope: "agents:admin",
+    permission: "agents:admin",
     description:
       'Admins (agents:admin with the admin role): lets a public tool use one of the server\'s own connections from a run hook. "slack": the tool calls slack.post(channel, text, { threadTs }), posting with the server\'s Slack bot; the token never reaches the tool. channels limits where it may post: a list of channel ids, or ["linked"] (any channel with a Slack notification link), or ["*"] (any channel the bot is in). Granting again replaces the channels. Only run hooks get the connection, never an agent\'s own tool calls. See help article system-tools.',
     inputSchema: {
@@ -110,7 +110,7 @@ export function registerSystemToolTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "revoke_tool_connection",
-    scope: "agents:admin",
+    permission: "agents:admin",
     description:
       "Admins (agents:admin with the admin role): removes a server connection from a public tool. Its next hook delivery gets connection_unavailable from slack.post.",
     inputSchema: {

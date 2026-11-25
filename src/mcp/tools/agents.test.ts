@@ -3913,8 +3913,9 @@ describe("coding repository authorization (H5-1/C3-2)", () => {
         arguments: { id: "a1", codingProfile: { repository: "openai/other" }, ...extra },
       });
       expect(result.isError).toBe(true);
-      // Hidden without a grant; with the admin override, refused for having no owner.
-      expect(text(result)).toMatch(/without an owner|not found/);
+      // No access without a grant (an admin sees it through admin:view); with the admin override,
+      // refused for having no owner.
+      expect(text(result)).toMatch(/without an owner|no access to this agent/);
     }
     expect(authorizePrincipal).not.toHaveBeenCalled();
     await client.close();

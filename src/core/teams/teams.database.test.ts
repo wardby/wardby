@@ -66,9 +66,11 @@ describe.skipIf(!process.env.DATABASE_URL)("team management (database)", () => {
 
   it("an admin and a team-manager may create teams; a plain member may not, and leaves nothing behind", async () => {
     await created(await manager(), "by-manager");
-    const before = await db.principal.count({ where: { subject: { startsWith: "team:" } } });
     await rejects(createTeam(db, await member(), { name: name("nope") }), "forbidden");
-    expect(await db.principal.count({ where: { subject: { startsWith: "team:" } } })).toBe(before);
+    // A team and its backing principal are created in one transaction, so no team of that name means no
+    // principal was left. (Not a count of every team principal: other test files create and delete them in
+    // the same database while this one runs.)
+    expect(await db.team.count({ where: { name: name("nope") } })).toBe(0);
   });
 
   it("names are trimmed, unique, and non-empty", async () => {

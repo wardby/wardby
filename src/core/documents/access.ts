@@ -1,5 +1,13 @@
 import type { PrismaClient, Document } from "#prisma";
-import { AGENT_DOCUMENT_GRANT_MAX, accessRank, agentGranteeKey, atLeast, effectiveAccess, isLevel } from "../grants.js";
+import {
+  AGENT_DOCUMENT_GRANT_MAX,
+  accessFor,
+  accessRank,
+  agentGranteeKey,
+  atLeast,
+  isLevel,
+  type Acting,
+} from "../grants.js";
 import { parseStoredDocumentTools } from "./tools-setting.js";
 
 /**
@@ -8,7 +16,14 @@ import { parseStoredDocumentTools } from "./tools-setting.js";
  * link's, and only on the link's document while the link is live.
  */
 export type Viewer =
-  | { kind: "principal"; principalId: string; operator?: boolean; shareLinkId?: string }
+  | {
+      kind: "principal";
+      principalId: string;
+      /** Every principal id the caller acts for (its own, then its Teams'); absent = just `principalId`. */
+      actsFor?: readonly string[];
+      operator?: boolean;
+      shareLinkId?: string;
+    }
   | { kind: "guest"; guestId: string; shareLinkId: string; permission: "view" | "comment" }
   | { kind: "agent"; agentId: string; runId: string };
 
@@ -57,7 +72,7 @@ function higher(a: DocumentAccess, b: DocumentAccess): DocumentAccess {
  * copied: losing the agent loses the plan. Never more than comment. A removed access agent (SetNull) or a
  * document outside a plan set gives nothing here.
  */
-async function planAccess(db: DocumentDb, doc: AccessDoc, principalId: string): Promise<"none" | "comment"> {
+async function planAccess(db: DocumentDb, doc: AccessDoc, principalId: Acting): Promise<"none" | "comment"> {
   if (!doc.planSetId) return "none";
   const plan = await db.document.findUnique({
     where: { id: doc.id },
@@ -65,7 +80,7 @@ async function planAccess(db: DocumentDb, doc: AccessDoc, principalId: string): 
   });
   const agent = plan?.planSet?.accessAgent;
   if (!agent) return "none";
-  return atLeast("agent", await effectiveAccess(db, "agent", agent, principalId), "read") ? "comment" : "none";
+  return atLeast("agent", await accessFor(db, "agent", agent, principalId), "read") ? "comment" : "none";
 }
 
 /**
@@ -126,19 +141,20 @@ async function canExecute(
   agent: { id: string; ownerId: string | null },
   principalId: string,
 ): Promise<boolean> {
-  return atLeast("agent", await effectiveAccess(db, "agent", agent, principalId), "execute");
+  return atLeast("agent", await accessFor(db, "agent", agent, principalId), "execute");
 }
 
 async function accessTo(db: DocumentDb, doc: AccessDoc, viewer: Viewer): Promise<DocumentAccess> {
   if (viewer.kind === "agent") return agentDocumentAccess(db, doc, viewer.agentId);
   if (viewer.kind !== "principal") return linkAccess(db, doc, viewer.shareLinkId);
-  let best: DocumentAccess = await effectiveAccess(db, "document", doc, viewer.principalId, {
+  const acting = viewer.actsFor ?? viewer.principalId;
+  let best: DocumentAccess = await accessFor(db, "document", doc, acting, {
     operator: viewer.operator,
   });
   if (viewer.shareLinkId) best = higher(best, await linkAccess(db, doc, viewer.shareLinkId));
   // The plan lookup runs only for plan documents, and only when the cheaper checks gave less than comment.
   if (accessRank("document", best) < accessRank("document", "comment")) {
-    best = higher(best, await planAccess(db, doc, viewer.principalId));
+    best = higher(best, await planAccess(db, doc, acting));
   }
   return best;
 }

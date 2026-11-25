@@ -3,7 +3,19 @@ id: teams
 title: Manage teams and their roles
 summary: Create teams, add members, and give a team Wardby roles, using the team tools and the teams:manage scope.
 audience: operator
-tags: [teams, members, roles, access-control, admin, team-manager, personal team]
+tags:
+  [
+    teams,
+    members,
+    roles,
+    access-control,
+    admin,
+    team-manager,
+    personal team,
+    make_owner,
+    move agent to team,
+    principalId,
+  ]
 appliesTo: ">=0.10.2"
 ---
 
@@ -22,6 +34,26 @@ one, which cannot be renamed, deleted or given members.
 
 `rename_team`, `delete_team` and `remove_team_member` do the obvious. Deleting
 a team is refused (409) while it owns a resource.
+
+## Teams and what they own
+
+A team can own agents, budget groups, tools, MCP servers, documents, secrets, datastores and webhooks. Every
+member acts as an owner of what their team owns: they can read and change it, and
+grant access to it, with no per-person grant. A grant made to a team reaches every member at the granted level. Removing
+a member takes this away on their next request. A token's scope still caps what a
+member can do, so a member holding only a read scope cannot change a team agent.
+Members bind the team's own secrets and datastores to the team's agents and
+grant tool capabilities as the team; a member's personal secret or datastore
+cannot be bound to a team agent. A stranger can bind nothing. See `sharing-agents`.
+
+A team that owns an agent also stands in for its owner on repository access:
+Wardby checks each member's linked GitHub account (the oldest 20; members
+without one are skipped) and the agent may use a repository when at least one
+current member has the access it needs (write for a write link, read for a read
+link). Moving an agent to a team with `make_owner` keeps its repository links
+working. `make_owner` takes the team's `principalId` (shown by `create_team` and
+`list_teams`) as `ownerId`, not the team id, so to move an agent to a team, read
+that id and pass it. See `errors/repo-access` if a check fails.
 
 ## Give a team roles
 

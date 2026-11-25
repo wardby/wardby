@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import type { PrismaClient } from "#prisma";
 import { McpError } from "../mcp/errors.js";
 import type { McpRequestContext } from "../mcp/context.js";
-import { requireScope } from "../mcp/auth/resource-server.js";
+import { authorize } from "../mcp/auth/resource-server.js";
 import type { ViewerEvent, InfraInfo } from "./api-schema.js";
 import type { ViewerEventBus } from "./event-bus.js";
 
@@ -124,6 +124,7 @@ async function start(
 
 const admin = (): McpRequestContext =>
   ({
+    canonicalUri: URI,
     scopes: new Set(["admin:view"]),
     roles: ["admin"],
     providers: { secrets: SECRETS },
@@ -131,21 +132,33 @@ const admin = (): McpRequestContext =>
 
 describe("viewer api auth", () => {
   it("rejects a caller without the admin role (403) and one without the scope (403 + challenge)", async () => {
-    const noRole = await start({ scopes: new Set(["admin:view"]), roles: [] } as unknown as McpRequestContext);
+    const noRole = await start({
+      canonicalUri: URI,
+      scopes: new Set(["admin:view"]),
+      roles: [],
+    } as unknown as McpRequestContext);
     expect((await fetch(`${noRole.base}/admin/api/graph`)).status).toBe(403);
     await new Promise<void>((r) => server!.close(() => r()));
 
-    const noScope = await start({ scopes: new Set(), roles: ["admin"] } as unknown as McpRequestContext);
+    const noScope = await start({
+      canonicalUri: URI,
+      scopes: new Set(),
+      roles: ["admin"],
+    } as unknown as McpRequestContext);
     const res = await fetch(`${noScope.base}/admin/api/graph`);
     expect(res.status).toBe(403);
     expect(res.headers.get("www-authenticate")).toContain("admin:view");
     expect(loadGraph).not.toHaveBeenCalled();
     // sanity: the same check the handler uses
-    expect(() => requireScope(admin(), URI, "admin:view")).not.toThrow();
+    expect(() => authorize(admin(), "admin:view")).not.toThrow();
   });
 
   it("does not subscribe or touch the db before authorization (events, runs)", async () => {
-    const { base, bus } = await start({ scopes: new Set(), roles: [] } as unknown as McpRequestContext);
+    const { base, bus } = await start({
+      canonicalUri: URI,
+      scopes: new Set(),
+      roles: [],
+    } as unknown as McpRequestContext);
     expect((await fetch(`${base}/admin/api/events`)).status).toBe(403);
     expect((await fetch(`${base}/admin/api/runs/abc`)).status).toBe(403);
     expect(bus.count()).toBe(0);
@@ -163,6 +176,7 @@ describe("viewer api auth", () => {
   it("serves the graph snapshot to a viewer, the read-only role", async () => {
     vi.mocked(loadGraph).mockResolvedValue(SNAPSHOT as never);
     const { base } = await start({
+      canonicalUri: URI,
       scopes: new Set(["admin:view"]),
       roles: ["viewer"],
     } as unknown as McpRequestContext);
@@ -181,7 +195,7 @@ describe("viewer api infra", () => {
   });
 
   it("requires admin:view and GET", async () => {
-    const denied = await start({ scopes: new Set(), roles: [] } as unknown as McpRequestContext);
+    const denied = await start({ canonicalUri: URI, scopes: new Set(), roles: [] } as unknown as McpRequestContext);
     expect((await fetch(`${denied.base}/admin/api/infra`)).status).toBe(403);
     await new Promise<void>((r) => server!.close(() => r()));
     const { base } = await start(admin());

@@ -9,7 +9,7 @@ import { z } from "zod";
 import { Prisma, type PrismaClient } from "#prisma";
 import { loadMcpServersMode, MCP_SERVERS_OFF_MESSAGE } from "../../config/mcp-servers.js";
 import { loadToolMaxTimeoutMs } from "../../config/tool-timeout.js";
-import { atLeast, deleteGrantsFor, effectiveAccess, grantedIds } from "../../core/grants.js";
+import { atLeast, deleteGrantsFor, accessFor, grantedIds } from "../../core/grants.js";
 import { logger } from "../../core/logger.js";
 import { McpClientError, type McpServerInfo, type McpToolEntry } from "../../core/mcp-client/client.js";
 import {
@@ -29,8 +29,15 @@ import { isCodexCoding, isMarkedReadOnly } from "../../core/mcp-tools.js";
 import { REVIEW_HOST_TOOL_NAMES } from "../../core/review-host-tools.js";
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { reservedToolNameReason } from "../../core/tool-names.js";
-import { agentAccessResolver, assertAgentAccess, requireAgentAccess, requireBindable } from "../auth/access.js";
-import { isOwnerAll, requireScope } from "../auth/resource-server.js";
+import {
+  actsForOf,
+  agentAccessResolver,
+  assertAgentAccess,
+  ownsResource,
+  requireAgentAccess,
+  requireBindable,
+} from "../auth/access.js";
+import { isOwnerAll, authorize } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -53,7 +60,7 @@ type ServerRecord = McpServerRow & { toolSnapshot: unknown; serverInfo: unknown;
 function gate(ctx: McpRequestContext, kind: "configure" | "other" | "cleanup"): void {
   const mode = loadMcpServersMode();
   if (mode === "off" && kind !== "cleanup") throw new McpError(403, MCP_SERVERS_OFF_MESSAGE);
-  if (kind === "configure" && mode === "admins") requireScope(ctx, ctx.canonicalUri, "hosts:admin");
+  if (kind === "configure" && mode === "admins") authorize(ctx, "hosts:admin");
 }
 
 function audit(ctx: McpRequestContext, action: string, server: { id: string; name: string; url: string }): void {
@@ -106,7 +113,7 @@ async function requireOwnedServer(
   db: Pick<PrismaClient, "mcpServer"> = ctx.db,
 ): Promise<ServerRecord> {
   const server = await db.mcpServer.findUnique({ where: { id } });
-  if (!server || !(isOwnerAll(ctx) || server.ownerId === ctx.principal.id)) throw serverNotFound(id);
+  if (!server || !(isOwnerAll(ctx) || ownsResource(ctx, server.ownerId))) throw serverNotFound(id);
   return server;
 }
 
@@ -122,7 +129,7 @@ async function requireServerAccess(
 ): Promise<ServerRecord> {
   const server = await db.mcpServer.findUnique({ where: { id } });
   if (!server) throw serverNotFound(id);
-  const access = await effectiveAccess(db, "mcp_server", server, ctx.principal.id, { operator: isOwnerAll(ctx) });
+  const access = await accessFor(db, "mcp_server", server, actsForOf(ctx), { operator: isOwnerAll(ctx) });
   if (access === "none") throw serverNotFound(id);
   if (!atLeast("mcp_server", access, min)) {
     throw new McpError(403, `MCP server "${server.name}": attaching it needs use access (you have ${access}).`);
@@ -233,7 +240,7 @@ const ID_ONLY = {
 export function registerMcpServerTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "register_mcp_server",
-    scope: "tools:write",
+    permission: "tools:write",
     description:
       "Register a remote MCP server (Streamable HTTP, https only) so its tools can be attached to your agents. secretNames are your brokered secrets, each brokered to the URL's host; they are sent on every request and never readable. Wardby calls the server's tools/list and saves the result. With WARDBY_MCP_SERVERS=admins this needs hosts:admin.",
     inputSchema: {
@@ -277,7 +284,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "update_mcp_server",
-    scope: "tools:write",
+    permission: "tools:write",
     description:
       "Owner only: change a server's URL or secretNames. Wardby re-checks the secrets, saves a fresh tool list straight away and returns what changed (diff). With WARDBY_MCP_SERVERS=admins this needs hosts:admin.",
     inputSchema: {
@@ -312,7 +319,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "refresh_mcp_server",
-    scope: "tools:write",
+    permission: "tools:write",
     description:
       "Owner only: fetch the server's tools/list again and save it. Changes apply straight away: an allowed tool the server no longer lists is left out of runs and shown under missingTools by get_agent. Returns the diff (added, removed, changed) and the agents left with missing tools. With WARDBY_MCP_SERVERS=admins this needs hosts:admin.",
     inputSchema: ID_ONLY,
@@ -346,15 +353,15 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_mcp_servers",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "Your registered MCP servers and the ones shared with you: id, name, host, tool count, when the tool list was saved and yours (false for shared ones, which show no secret names).",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (_rawArgs: unknown, ctx) => {
       gate(ctx, "other");
-      const sharedIds = await grantedIds(ctx.db, "mcp_server", ctx.principal.id, "read");
+      const sharedIds = await grantedIds(ctx.db, "mcp_server", actsForOf(ctx), "read");
       const rows = await ctx.db.mcpServer.findMany({
-        where: isOwnerAll(ctx) ? {} : { OR: [{ ownerId: ctx.principal.id }, { id: { in: sharedIds } }] },
+        where: isOwnerAll(ctx) ? {} : { OR: [{ ownerId: { in: [...actsForOf(ctx)] } }, { id: { in: sharedIds } }] },
         orderBy: [{ name: "asc" }, { id: "asc" }],
       });
       return textResult({
@@ -365,9 +372,9 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
           ownerId: s.ownerId,
           toolCount: snapshotOf(s).length,
           snapshotAt: s.snapshotAt,
-          yours: s.ownerId === ctx.principal.id,
+          yours: ownsResource(ctx, s.ownerId),
           // Secret names stay with the owner.
-          ...(s.ownerId === ctx.principal.id ? { secretNames: s.secretNames } : {}),
+          ...(ownsResource(ctx, s.ownerId) ? { secretNames: s.secretNames } : {}),
         })),
       });
     },
@@ -375,7 +382,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "get_mcp_server",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "One of your MCP servers, or one shared with you (read or higher), with its full saved tool list (name, description, inputSchema, annotations). Secret names show for the owner only.",
     inputSchema: ID_ONLY,
@@ -384,7 +391,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
       const { id } = parse(IdSchema, "get_mcp_server arguments", rawArgs);
       const server = await requireServerAccess(ctx, id, "read");
       const view = serverView(server);
-      const yours = server.ownerId === ctx.principal.id;
+      const yours = ownsResource(ctx, server.ownerId);
       // Secret names and the full URL (a query string can carry a token) stay with the owner.
       const { secretNames: _secretNames, url: _url, ...shared } = view;
       void _secretNames;
@@ -400,7 +407,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "delete_mcp_server",
-    scope: "tools:write",
+    permission: "tools:write",
     description:
       "Owner only: delete an MCP server. It is detached from every agent, including agents others attached it to through a grant. Allowed even when WARDBY_MCP_SERVERS=off, so cleanup stays possible.",
     inputSchema: ID_ONLY,
@@ -423,7 +430,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "attach_mcp_server",
-    scope: "tools:write",
+    permission: "tools:write",
     description:
       "Agent owner only: let an agent (native or coding) call the named tools of one of your MCP servers, or of one shared with you at use or higher (its tools then run with the owner's credentials). allowedTools are exact names from the saved tool list (no wildcards); the agent sees each as <server name>__<tool name>. callTimeoutMs (per call, default 30000) is capped by WARDBY_TOOL_MAX_TIMEOUT_MS. Re-attaching replaces the allowlist and time limit. Coding agents get the tools as mcp__wardby_mcp__<name>; Codex agents can use only tools the server marks read-only (readOnlyHint) in the saved tool list.",
     inputSchema: {
@@ -518,7 +525,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "detach_mcp_server",
-    scope: "tools:write",
+    permission: "tools:write",
     description:
       "Agent owner only: remove an MCP server's tools from an agent. Allowed even when WARDBY_MCP_SERVERS=off, so cleanup stays possible.",
     inputSchema: {

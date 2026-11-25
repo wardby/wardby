@@ -27,6 +27,53 @@ role), who already sees every agent in `list_agents { all: true }`: they get
 them no access of their own; to read or run the agent they still need a grant
 from its owner.
 
+## Share a secret, datastore or webhook
+
+`grant_access` also takes `resourceType: "secret"`, `"datastore"` or
+`"webhook"` for one you own (or your team owns). The only level is `read`, and
+`everyone` is refused: name the people it is for.
+
+- A grantee sees that the resource exists, with its name and metadata, in
+  `list_secrets`, `list_datastores` or `list_webhooks`. A secret's value is never
+  shown.
+- A grantee binds, changes and deletes nothing. Only the owner, or a team that
+  owns it, attaches a secret or datastore to an agent, and a bound resource must
+  belong to the agent's owner.
+- A missing resource, and one you cannot see, both answer "not found".
+  Deleting a resource drops its grants.
+
+## Share a tool
+
+`grant_access` with `resourceType: "tool"` shares a tool you own (or your Team
+owns). Levels, lowest first:
+
+- `read`: see the tool's name, description and time limit in `list_tools`, never
+  its code.
+- `use`: also attach it to your own agents (`attach_tool`) and use it in run
+  hooks. The tool's code then runs in your agent with the capabilities you grant
+  it, so read the owner's description and trust them first.
+- `write`: adds nothing beyond `use`. Only the owner updates or deletes a tool,
+  or grants access to it, and not while it is attached to someone else's agent.
+
+`everyone` can hold at most `use`. Lowering a grant below `use`, or revoking it,
+detaches the tool from every agent and run hook whose owner can no longer use
+it; the owner's own agents are never touched.
+
+## Share a budget group
+
+`grant_access` with `resourceType: "budget_group"` shares a budget group you
+own (or your Team owns). Levels, lowest first:
+
+- `read`: see the group and its spend (`get_budget_group`, `list_budget_groups`).
+- `use`: also put your own agents in it with `update_agent` and `budgetGroupId`,
+  so their runs count against the group's caps.
+- `write`: also rename it and change its caps (`update_budget_group`).
+
+Only the owner deletes the group or grants access to it. `everyone` can hold at
+most `use`. Lowering a grant below `use`, or revoking it, takes the group off
+every agent whose owner can no longer use it; the owner's own agents are never
+touched.
+
 ## Public agents
 
 Grant `everyone` at `read` or `execute` for an agent anyone can see or run.

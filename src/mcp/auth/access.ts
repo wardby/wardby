@@ -18,22 +18,40 @@
  */
 import type { Prisma, PrismaClient } from "#prisma";
 import {
+  actsForOwner,
   atLeast,
-  effectiveAccess,
+  accessFor,
   grantedAccessMap,
   grantedIds,
   isPublicWritable,
+  ownedByWhere,
   type Access,
   type Level,
 } from "../../core/grants.js";
+import { check } from "../../authz/index.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
-import { isOwnerAll, scopeAllowed } from "./resource-server.js";
+import { isOwnerAll } from "./resource-server.js";
 
 export type AgentLevel = Level<"agent">;
 export type AgentAccess = Access<"agent">;
 type AgentRef = { id: string; ownerId: string | null };
 type GrantDb = Pick<PrismaClient, "resourceGrant">;
+
+/** The principal ids the caller acts for: its own, then its Teams' (McpRequestContext.actsFor). */
+export function actsForOf(ctx: Pick<McpRequestContext, "principal" | "actsFor">): readonly string[] {
+  return ctx.actsFor ?? [ctx.principal.id];
+}
+
+/** True when the caller owns a resource: its owner is the caller or a Team the caller belongs to. */
+export function ownsResource(ctx: Pick<McpRequestContext, "principal" | "actsFor">, ownerId: string | null): boolean {
+  return actsForOwner(actsForOf(ctx), ownerId);
+}
+
+/** True when the caller owns an agent: its owner is the caller or a Team the caller belongs to. */
+export function ownsAgent(ctx: Pick<McpRequestContext, "principal" | "actsFor">, agent: AgentRef): boolean {
+  return actsForOwner(actsForOf(ctx), agent.ownerId);
+}
 
 export function agentNotFound(id: string): McpError {
   return new McpError(404, `Agent "${id}" not found.`);
@@ -62,7 +80,7 @@ export function insufficientAgentAccess(id: string, required: AgentLevel | "owne
 
 /** The caller's access to an agent row already read. */
 export function agentAccess(ctx: McpRequestContext, agent: AgentRef, db: GrantDb = ctx.db): Promise<AgentAccess> {
-  return effectiveAccess(db, "agent", agent, ctx.principal.id, { operator: ctx.operator === true || isOwnerAll(ctx) });
+  return accessFor(db, "agent", agent, actsForOf(ctx), { operator: ctx.operator === true || isOwnerAll(ctx) });
 }
 
 /** For a row already read (inside a transaction, or with includes): 404 below read, 403 below `required`. */
@@ -78,7 +96,7 @@ export async function assertAgentAccess<A extends AgentRef>(
   if (!atLeast("agent", access, "read")) {
     // An admin:view caller already sees every agent in list_agents { all: true }, so saying it exists
     // leaks nothing; "not found" would contradict that listing.
-    if (scopeAllowed(ctx, "admin:view")) throw noAgentAccess(id);
+    if (check(ctx, ["admin:view"]) === null) throw noAgentAccess(id);
     throw agentNotFound(id);
   }
   if (!atLeast("agent", access, required)) throw insufficientAgentAccess(id, required, access);
@@ -111,7 +129,7 @@ export function requireBindingOwner(ctx: McpRequestContext, agent: AgentRef): vo
       `Agent "${agent.id}" has no owner, so nothing can be bound to it; an admin can assign one with make_owner.`,
     );
   }
-  if (agent.ownerId !== ctx.principal.id) {
+  if (!ownsAgent(ctx, agent)) {
     throw new McpError(403, `Only the owner of agent "${agent.id}" can change its bindings.`);
   }
 }
@@ -141,8 +159,9 @@ export async function readableAgentsWhere(
   db: GrantDb = ctx.db,
 ): Promise<Prisma.AgentWhereInput> {
   if (ctx.operator || isOwnerAll(ctx)) return {};
-  const ids = await grantedIds(db, "agent", ctx.principal.id, "read");
-  return { OR: [{ ownerId: ctx.principal.id }, { id: { in: ids } }] };
+  const acting = actsForOf(ctx);
+  const ids = await grantedIds(db, "agent", acting, "read");
+  return { OR: [ownedByWhere(acting), { id: { in: ids } }] };
 }
 
 /** One grant lookup for a whole listing: returns agent -> the caller's access. */
@@ -151,7 +170,6 @@ export async function agentAccessResolver(
   db: GrantDb = ctx.db,
 ): Promise<(agent: AgentRef) => AgentAccess> {
   if (ctx.operator || isOwnerAll(ctx)) return () => "owner";
-  const granted = await grantedAccessMap(db, "agent", ctx.principal.id);
-  return (agent) =>
-    agent.ownerId !== null && agent.ownerId === ctx.principal.id ? "owner" : (granted.get(agent.id) ?? "none");
+  const granted = await grantedAccessMap(db, "agent", actsForOf(ctx));
+  return (agent) => (ownsAgent(ctx, agent) ? "owner" : (granted.get(agent.id) ?? "none"));
 }

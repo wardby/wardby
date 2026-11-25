@@ -14,7 +14,7 @@ import { normalizeHostedRepository } from "../../coding/code-host.js";
 import { assertPlanFilesWithinLimits, type PlanFile } from "../../coding/plan-files/store.js";
 import { loadContent } from "../documents/files.js";
 import { withHtmlEscapedForms } from "../documents/formats/boards.js";
-import { atLeast, effectiveAccess } from "../grants.js";
+import { atLeast, accessFor } from "../grants.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { wrapUntrusted } from "../untrusted-content.js";
@@ -82,7 +82,7 @@ export async function newestVisiblePlanSet<T extends { agent: { id: string; owne
   builderOwnerId: string,
 ): Promise<T | undefined> {
   for (const candidate of newestFirst) {
-    const access = await effectiveAccess(db, "agent", candidate.agent, builderOwnerId);
+    const access = await accessFor(db, "agent", candidate.agent, builderOwnerId);
     if (atLeast("agent", access, "execute")) return candidate;
   }
   return undefined;

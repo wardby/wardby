@@ -7,7 +7,7 @@ export function registerVersionTool(mcp: WardbyMcpServer, version: () => string 
   mcp.registerTool({
     name: "get_version",
     description: "Return the version of the Wardby server this client is connected to.",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async () => textResult({ version: version() }),
   });

@@ -85,7 +85,7 @@ export function hasFindingMarker(body: string, agentMarker: string): boolean {
 }
 
 export function renderInlineComment(comment: InlineComment, agentMarker: string): string {
-  return `**[${comment.severity}]** ${comment.body}\n\n${findingMarker(agentMarker)}`;
+  return `**${comment.severity}:** ${comment.body}\n\n${findingMarker(agentMarker)}`;
 }
 
 export function renderSummaryComment(input: {

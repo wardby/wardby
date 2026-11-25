@@ -1,7 +1,7 @@
 import { RunStatus, RunTrigger, type NativeExecutionMode, type Prisma } from "#prisma";
 import type { WardbyMcpServer } from "../server.js";
 import { agentAccessResolver, readableAgentsWhere, requireAgentAccess } from "../auth/access.js";
-import { isOwnerAll, requireScope } from "../auth/resource-server.js";
+import { isOwnerAll, authorize } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
 import { loadGraphRuns, type IssueSites } from "../../viewer/graph.js";
 import { loadJiraConfig } from "../../config/providers.js";
@@ -302,7 +302,7 @@ async function runTextField(
 export function registerRunTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_runs",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "Lists runs, newest first. With agentId, that agent's runs; without it, runs across every agent you can see " +
       "(those rows add agentName, agentBudgetUsd, triggerInfo, outcomes, serviceReadiness and lastStep, the run's newest " +
@@ -353,7 +353,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
       const filters = runFilters(args);
       if (args.all === true) {
         if (args.agentId !== undefined) throw new McpError(400, "all lists every agent's runs; leave out agentId");
-        if (!ctx.operator && !isOwnerAll(ctx)) requireScope(ctx, ctx.canonicalUri, "admin:view");
+        if (!ctx.operator && !isOwnerAll(ctx)) authorize(ctx, "admin:view");
       }
       if (args.agentId === undefined) {
         const runs = await listRunsAcrossAgents(ctx, filters, {
@@ -391,7 +391,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "get_run",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "One run in full: status, cost, request, result, errors and budget events, plus triggerInfo (what started it: " +
       "a pull request review or mention, an issue, a schedule or a lead run), outcomes (pull requests opened, comments, " +
@@ -558,7 +558,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "get_run_packages",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "The packages the package registry served a coding run (each ecosystem, name, version, size and any accepted " +
       "advisories), in a stable order: the order the run first fetched them. get_run gives only packageCount. " +
@@ -590,7 +590,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "get_run_text",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "A piece of one of a run's long text fields: request, taskOverride, finalText or error, exactly as get_run " +
       "returns them. get_run returns a long field's first page with <field>More ({ next, total }); call this with " +

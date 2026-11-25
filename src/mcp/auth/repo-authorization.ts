@@ -15,7 +15,7 @@ import { GITHUB_ACCOUNT_NOT_ALLOWED } from "../../config/github-allowed-accounts
 import { requiredLevel, type AuthorizedVia, type RepoAccessKind } from "../../core/repo-access.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
-import { isOwnerAll, requireScope } from "./resource-server.js";
+import { isOwnerAll, authorize } from "./resource-server.js";
 
 export interface RepositoryAuthorization {
   authorizedVia: AuthorizedVia;
@@ -76,7 +76,7 @@ export async function authorizeRepositoryForSet(
   }
   if (input.adminOverride) {
     // Role-gated: the scope alone never suffices (resource-server.ts).
-    if (!isOwnerAll(ctx)) requireScope(ctx, ctx.canonicalUri, "agents:admin");
+    if (!isOwnerAll(ctx)) authorize(ctx, "agents:admin");
     return stamp("admin");
   }
   const gate = ctx.providers.repoAccess;
@@ -101,12 +101,13 @@ export async function authorizeRepositoryForSet(
       throw new McpError(
         403,
         "Link your GitHub account first (link_host_account): wardby checks that your own GitHub account can " +
-          `access ${input.repository} before an agent you own may use it.`,
+          `access ${input.repository} before an agent you own may use it. A team-owned agent passes when any one ` +
+          "member's linked account can.",
       );
     case "insufficient_permission":
       throw new McpError(
         403,
-        `Your linked GitHub account has ${decision.level ?? "no"} access to ${input.repository}; ` +
+        `The best linked GitHub account has ${decision.level ?? "no"} access to ${input.repository}; ` +
           `this needs ${required}. Ask a repository admin for access, or a wardby admin to approve it (adminOverride).`,
       );
     case "github_account_not_allowed":

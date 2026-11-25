@@ -1457,7 +1457,7 @@ model Principal {
 /// AgentRepository.provider, so a new type or level needs no enum migration.
 model ResourceGrant {
   id                 String     @id @default(cuid())
-  /// "agent" | "tool" | "budget_group" | "mcp_server" | "document" (later "secret" | "datastore").
+  /// "agent" | "tool" | "budget_group" | "mcp_server" | "document" | "secret" | "datastore" | "webhook".
   resourceType       String
   resourceId         String
   /// "principal" | "everyone" | "agent" (documents only; later "group").

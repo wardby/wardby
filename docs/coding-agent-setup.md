@@ -49,7 +49,8 @@ which also covers the App's callback URL and client credentials
 
 Every run checks again, before its workspace is prepared, against the agent's
 current owner. A run whose owner has lost write access, unlinked their GitHub
-account, or whose repository was never authorized ends `refused` with failure
+account (for a team-owned agent: when no current member has write access through
+a linked GitHub account), or whose repository was never authorized ends `refused` with failure
 category `repo_access` and nothing cloned. The check is repeated (usually from
 the 5-minute cache) right before the run pushes: access lost while it worked
 fails the run (`repo_access`) with nothing pushed. For a run already under way,
@@ -57,7 +58,10 @@ a transient GitHub error during either check is retried once; if it persists
 the run fails with category `repo_access_unavailable` (GitHub could not be
 asked — not a lost permission; re-run it later). `make_owner` to a different
 owner turns an admin or grandfathered approval into a check of the new owner's
-access. Coding agents must have an owner.
+access. Coding agents must have an owner. A team that owns a coding agent has no GitHub
+account, so wardby checks its members' linked accounts and passes when at least
+one current member has write access; see
+[code-review-agents.md](code-review-agents.md#who-may-give-an-agent-a-repository).
 
 A continuation (`continuePriorRun`) checks separately that the pull request
 it is asked to continue is still open on GitHub; one already merged or closed

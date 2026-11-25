@@ -59,8 +59,10 @@ describe("owner-all callers", () => {
     const noScope = ctx(db, "boss", { roles: ["wardby_owner"] });
     const noRole = ctx(db, "boss", { scopes: new Set(["owner:all"]), roles: ["admin"] });
     expect((await failure(requireAgentAccess(noScope, "a1", "read"))).httpStatus).toBe(404);
-    // owner:all with only the admin role holds no admin:view scope, so the agent stays hidden.
-    expect((await failure(requireAgentAccess(noRole, "a1", "read"))).httpStatus).toBe(404);
+    // The admin role reaches admin:view, so it is told it has no access rather than "not found".
+    const adminNoGrant = await failure(requireAgentAccess(noRole, "a1", "read"));
+    expect(adminNoGrant.httpStatus).toBe(403);
+    expect(adminNoGrant.message).toMatch(/access: none/);
   });
 
   it("lists every agent", async () => {
@@ -96,7 +98,7 @@ describe("requireAgentAccess", () => {
   });
 
   it("tells an admin:view caller it has no access instead of 404ing an agent it can list", async () => {
-    const viewer = ctx(db, "stranger", { scopes: new Set(["admin:view"]), roles: ["viewer"] });
+    const viewer = ctx(db, "stranger", { scopes: new Set(["wardby:viewer"]), roles: ["viewer"] });
     const err = await failure(requireAgentAccess(viewer, "a1", "read"));
     expect(err.httpStatus).toBe(403);
     expect(err.message).toMatch(/no access to this agent \(access: none\)/);
@@ -104,7 +106,7 @@ describe("requireAgentAccess", () => {
     expect((await failure(requireAgentAccess(viewer, "nope", "read"))).httpStatus).toBe(404);
     // The viewer role without a token that reaches admin:view, or the scope without the role: 404.
     const roleOnly = ctx(db, "stranger", { roles: ["viewer"] });
-    const scopeOnly = ctx(db, "stranger", { scopes: new Set(["admin:view"]) });
+    const scopeOnly = ctx(db, "stranger", { scopes: new Set(["wardby:viewer"]) });
     expect((await failure(requireAgentAccess(roleOnly, "a1", "read"))).httpStatus).toBe(404);
     expect((await failure(requireAgentAccess(scopeOnly, "a1", "read"))).httpStatus).toBe(404);
   });
@@ -189,7 +191,7 @@ describe("operator flag", () => {
     );
     mcp.registerTool({
       name: "whoami",
-      scope: "agents:read",
+      permission: "agents:read",
       inputSchema: {},
       handler: async (_args: unknown, c: McpRequestContext) => ({
         content: [

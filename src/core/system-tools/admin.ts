@@ -5,6 +5,7 @@
  * the rules here are the same for both.
  */
 import { Prisma, type PrismaClient, type Tool, type ToolConnectionGrant } from "#prisma";
+import { deleteGrantsFor } from "../grants.js";
 import { attachedAgents, type AttachedAgent } from "../tool-admin.js";
 import type { ToolConnectionName } from "./connections.js";
 
@@ -56,6 +57,8 @@ export async function makeToolPublic(
           others,
         );
       }
+      // A public tool is open to everyone; grants on its private form no longer mean anything.
+      await deleteGrantsFor(tx, "tool", toolId);
       return tx.tool.update({
         where: { id: toolId },
         data: { ownerId: null, publishedById, publishedAt: new Date() },

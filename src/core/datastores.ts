@@ -4,7 +4,8 @@
  * by a per-attachment `boundName` (sharedDatastore.get(boundName, key)) —
  * same boundName convention as AgentSecret.
  */
-import type { PrismaClient, Datastore as DatastoreRow } from "#prisma";
+import type { Prisma, PrismaClient, Datastore as DatastoreRow } from "#prisma";
+import { deleteGrantsFor } from "./grants.js";
 import type { Datastore, DatastoreSetOptions, DatastoreValue } from "../providers/datastore/types.js";
 import { boundedString } from "../sandbox/bounded-json.js";
 
@@ -26,9 +27,9 @@ export async function createDatastore(name: string, ownerId: string, db: PrismaC
 export async function listDatastores(
   ownerId: string,
   db: PrismaClient,
-  opts: { all?: boolean } = {},
+  opts: { all?: boolean; where?: Prisma.DatastoreWhereInput } = {},
 ): Promise<DatastoreMetadata[]> {
-  const rows = await db.datastore.findMany({ where: opts.all ? {} : { ownerId } });
+  const rows = await db.datastore.findMany({ where: opts.where ?? (opts.all ? {} : { ownerId }) });
   return rows.map(({ id, name, ownerId: owner, createdAt, updatedAt }) => ({
     id,
     name,
@@ -39,7 +40,10 @@ export async function listDatastores(
 }
 
 export async function deleteDatastore(datastoreId: string, db: PrismaClient): Promise<void> {
-  await db.datastore.delete({ where: { id: datastoreId } });
+  await db.$transaction(async (tx) => {
+    await deleteGrantsFor(tx, "datastore", datastoreId);
+    await tx.datastore.delete({ where: { id: datastoreId } });
+  });
 }
 
 /** Attaches a datastore (by id — the caller already resolved/verified ownership) to an agent under `boundName`. */

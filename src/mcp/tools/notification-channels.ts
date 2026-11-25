@@ -17,7 +17,7 @@
  */
 import { Prisma } from "#prisma";
 import { requireAgentAccess } from "../auth/access.js";
-import { requireScope } from "../auth/resource-server.js";
+import { authorize } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
@@ -56,7 +56,7 @@ function normalizeChannelId(channel: string): string {
 export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "link_notification_channel",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Links a Slack channel to a Jira project or to an agent (native or coding), so wardby posts that project's or " +
       "agent's workflow updates there: a card picked up, a PR opened, a review verdict, fix rounds, and the merge (one thread per card). " +
@@ -85,7 +85,7 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
       required: ["channel"],
     },
     handler: async (args: LinkArgs, ctx) => {
-      requireScope(ctx, ctx.canonicalUri, "agents:admin");
+      authorize(ctx, "agents:admin");
       const provider = args.provider ?? "slack";
       const chat = ctx.providers.chat?.[provider];
       if (!chat) {
@@ -188,7 +188,7 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "unlink_notification_channel",
-    scope: "agents:write",
+    permission: "agents:write",
     description: "Removes a notification channel link. Admin only (agents:admin with the admin role).",
     inputSchema: {
       type: "object",
@@ -197,7 +197,7 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
       required: ["id"],
     },
     handler: async (args: { id: string }, ctx) => {
-      requireScope(ctx, ctx.canonicalUri, "agents:admin");
+      authorize(ctx, "agents:admin");
       const { count } = await ctx.db.notificationChannel.deleteMany({ where: { id: args.id } });
       return textResult({ unlinked: count > 0 });
     },
@@ -205,7 +205,7 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_notification_channels",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "Lists notification channel links, each with its pending and failed delivery counts. Filter by projectKey, " +
       "agentId, or channel (the Slack channel id). Listing an agent's own links needs read access to that agent; " +
@@ -223,7 +223,7 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
       if (args.agentId !== undefined) {
         await requireAgentAccess(ctx, args.agentId, "read");
       } else {
-        requireScope(ctx, ctx.canonicalUri, "agents:admin");
+        authorize(ctx, "agents:admin");
       }
       const where: Record<string, unknown> = {};
       if (args.agentId !== undefined) where.agentId = args.agentId;
@@ -262,7 +262,7 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "test_notification_channel",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Posts a one-off confirmation message to a linked channel, to prove the bot can write there before relying on it " +
       "for workflow notifications (a private channel needs /invite @<app> first; a channel the bot can't reach " +
@@ -274,7 +274,7 @@ export function registerNotificationChannelTools(mcp: WardbyMcpServer): void {
       required: ["id"],
     },
     handler: async (args: { id: string }, ctx) => {
-      requireScope(ctx, ctx.canonicalUri, "agents:admin");
+      authorize(ctx, "agents:admin");
       const link = await ctx.db.notificationChannel.findUnique({ where: { id: args.id } });
       if (!link) throw new McpError(404, `Notification channel link "${args.id}" not found.`);
       const chat = ctx.providers.chat?.[link.provider as ChatProviderName];
