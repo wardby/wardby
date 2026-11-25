@@ -248,7 +248,7 @@ describe.skipIf(!process.env.DATABASE_URL)("documentTools setting (PostgreSQL)",
     const result = await mcp.call("update_agent", { id: target.id, documentTools: { access: "read" } });
     await mcp.close();
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/documentTools is invalid: only native agents/);
+    expect(result.content[0].text).toMatch(/document_tools_invalid: only native agents/);
   });
 
   it("refuses a reviewer who cannot read the agent", async () => {
@@ -260,7 +260,7 @@ describe.skipIf(!process.env.DATABASE_URL)("documentTools setting (PostgreSQL)",
     });
     await mcp.close();
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/documentTools is invalid: every reviewer/);
+    expect(result.content[0].text).toMatch(/document_tools_invalid: every reviewer/);
   });
 
   it("update_agent with null clears the setting", async () => {

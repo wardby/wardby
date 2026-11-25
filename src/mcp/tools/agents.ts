@@ -618,7 +618,7 @@ async function checkDocumentTools(
       reviewers: "every reviewer and the final approver must exist and be able to read this agent",
       plans: "every plan must name a planner agent you can run",
     };
-    throw new McpError(400, `documentTools is invalid: ${text[String(err.cause)] ?? "check the setting"}.`);
+    throw new McpError(400, `document_tools_invalid: ${text[String(err.cause)] ?? "check the setting"}.`);
   }
 }
 

@@ -9,7 +9,7 @@ appliesTo: ">=0.10.0"
 
 # Document tools setting invalid
 
-`document_tools_invalid` (HTTP 400). The `documentTools` setting is checked when it is saved, and refused when:
+`document_tools_invalid` (HTTP 400). `create_agent` and `update_agent` return it as a message that starts `document_tools_invalid: ` followed by the reason, for example `document_tools_invalid: only native agents take documentTools.` The setting is refused when:
 
 - the agent is not a native agent (a coding agent does not take it);
 - a reviewer or the final approver does not exist or cannot read the agent;
@@ -18,5 +18,7 @@ appliesTo: ">=0.10.0"
 Use a native agent. Share the agent with each reviewer (at least `read`) before naming them, or leave `reviewers` out to use the owner. For `plans`, name planner agents you own or can execute.
 
 An agent that everyone can write is refused with a 409 instead: `documentTools` is an owner-only setting, so revoke or lower the everyone grant first.
+
+Schema-level violations (`maxNewPerRun` out of range, an empty `reviewers` list, unknown fields) are refused earlier, as `Invalid create_agent/update_agent arguments: …`.
 
 See [Documents from native agents](../native-agent-documents.md).

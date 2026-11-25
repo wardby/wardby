@@ -9,7 +9,7 @@ appliesTo: ">=0.10.0"
 
 # Document run limit reached
 
-`document_run_limit` is returned to the agent by `doc_create` when the run has already created `documentTools.maxNewPerRun` documents (1 to 20, default 5). The count is per run and survives a resumed run.
+`document_run_limit` is returned to the agent by `doc_create` (it appears in the run's steps and tool results) when the run has already created `documentTools.maxNewPerRun` documents (1 to 20, default 5). The count is per run and survives a resumed run.
 
 Have the agent publish new versions of the documents it made, or raise `maxNewPerRun` with `update_agent` for later runs.
 

@@ -46,8 +46,7 @@ agent.
 
 `documentTools` is owner-only, like the agent's secrets and tools: it counts as
 an owner binding. An agent that everyone can write cannot have it, and an agent
-that has it cannot be opened to everyone with write. Only owners of a native
-agent can set it.
+that has it cannot be opened to everyone with write.
 
 ## The tools
 
@@ -108,8 +107,9 @@ to anyone the agent picks.
 - A document in review or approved is locked
   ([`document_locked`](errors/document-locked.md)); a design must be a valid
   board set (`board_format_invalid`).
-- `update_agent` refuses a bad setting with
-  [`document_tools_invalid`](errors/document-tools-invalid.md).
+- `create_agent` and `update_agent` refuse a bad setting with a 400 that
+  starts `document_tools_invalid: ` and gives the reason
+  ([details](errors/document-tools-invalid.md)).
 
 Tool failures come back as a JSON result with an `error` code, never as a
 crash, and logs carry only the tool name and the code.

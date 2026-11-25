@@ -456,7 +456,11 @@ owner.
 | `plans`           | Up to 20 planner agents (with `planDocument`) whose plan documents the agent may read and comment on, never publish to. |
 
 Set it with `update_agent` or `create_agent` on a native agent (`null` turns it
-off; an invalid setting is `document_tools_invalid`). It is read again on every
+off; an invalid setting is refused with a 400 starting
+`document_tools_invalid: ` and the reason, e.g. `document_tools_invalid: only native
+agents take documentTools.`; schema-level violations such as an out-of-range
+`maxNewPerRun`, an empty `reviewers` list or unknown fields are refused earlier as
+`Invalid create_agent/update_agent arguments: …`). It is read again on every
 call. It is owner-only and counts as an owner binding: an agent everyone can
 write cannot have it, and an agent that has it cannot be opened to everyone
 with write.
