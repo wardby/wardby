@@ -6,9 +6,10 @@ export const STATE_LABEL: Record<ReviewState, string> = {
   in_review: "In review",
   changes_requested: "Changes requested",
   approved: "Approved",
+  rejected: "Rejected",
   archived: "Archived",
 };
-export const isLockedState = (s: ReviewState) => s === "approved" || s === "archived";
+export const isLockedState = (s: ReviewState) => s === "approved" || s === "rejected" || s === "archived";
 
 export const EVENT_LABEL: Record<string, string> = {
   submitted: "submitted for review",
@@ -16,6 +17,7 @@ export const EVENT_LABEL: Record<string, string> = {
   approved: "approved",
   changes_requested: "requested changes",
   force_approved: "force approved",
+  rejected: "rejected",
   reopened: "reopened for review",
   archived: "archived",
   unarchived: "unarchived",
@@ -25,9 +27,17 @@ export function bannerText(r: ReviewPayload): string {
   if (r.state === "approved" && r.forced)
     return `Approved (forced by ${r.forced.byName}) · ${r.forced.notes.join(" · ")}`;
   const head = `${STATE_LABEL[r.state]} · v${r.currentVersion}`;
-  if (r.state === "draft" || r.state === "archived" || r.progress.total === 0) return head;
+  if (r.state === "draft" || r.state === "archived" || r.state === "rejected" || r.progress.total === 0) return head;
   return `${head} · ${r.progress.approved} of ${r.progress.total} approved`;
 }
+
+/** Shown on a rejected plan document to anyone who can't reopen it. */
+export const REJECTED_NOTE =
+  "Rejected: it is not part of the plan and is not given to a builder. Someone who can edit it can reopen it.";
+
+/** The Reject form's explanation (review-ui.ts). */
+export const REJECT_EXPLAIN =
+  "This takes the document out of the plan: it stops counting toward the plan's approval and is not given to a builder. It stays here, read-only, as the record. Reopen brings it back.";
 
 /** Shown on an approved document to anyone who can't reopen it (a guest, or a member without write access). */
 export const ASK_TO_REOPEN = "Approved and locked. To change it, ask someone who can edit it to reopen it.";

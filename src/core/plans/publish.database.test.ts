@@ -211,6 +211,27 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     expect(await db.documentVersion.count({ where: { documentId: { in: [id("plan.md"), id("api.md")] } } })).toBe(2);
   });
 
+  it("a rejected document stays out of the plan when a later run writes it again", async () => {
+    const agentId = await planner();
+    const first = await makeRun(agentId, [
+      { path: "plan.md", content: "# Plan\n" },
+      { path: "option-a.md", content: "# A\n" },
+    ]);
+    const plan1 = published(await publishPlanFromRun(db, deps, first));
+    const optionA = plan1.documents.find((d) => d.path === "option-a.md")!.id;
+    // As rejectDocument leaves it.
+    await db.document.update({ where: { id: optionA }, data: { reviewState: "rejected", removedFromPlan: true } });
+    const second = await makeRun(agentId, [
+      { path: "plan.md", content: "# Plan\n" },
+      { path: "option-a.md", content: "# A\n\nchanged\n" },
+    ]);
+    const plan2 = published(await publishPlanFromRun(db, deps, second));
+    expect(changes(plan2)["option-a.md"]).toBe("rejected_unchanged");
+    const row = await db.document.findUniqueOrThrow({ where: { id: optionA } });
+    expect(row).toMatchObject({ reviewState: "rejected", removedFromPlan: true });
+    expect(await db.documentVersion.count({ where: { documentId: optionA } })).toBe(1);
+  });
+
   it("a run whose files were not stored publishes nothing and reports the reason", async () => {
     const agentId = await planner();
     const runId = await makeRun(agentId, [], { planFilesStatus: "plan_files_unsupported" });

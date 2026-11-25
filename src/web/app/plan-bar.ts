@@ -27,7 +27,11 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
       },
       h("span", { class: "plan-kind", aria: { hidden: "true" } }, KIND_ICON[d.kind]),
       h("span", { class: "plan-title" }, d.title),
-      h("span", { class: "plan-state" }, d.removed ? "Removed" : stateLabel(d.reviewState)),
+      h(
+        "span",
+        { class: "plan-state" },
+        d.removed ? (d.reviewState === "rejected" ? "Rejected" : "Removed") : stateLabel(d.reviewState),
+      ),
     );
     return h("li", {}, d.removed ? h("s", {}, link) : link);
   };

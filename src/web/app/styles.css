@@ -862,6 +862,11 @@ img.ProseMirror-separator {
   color: var(--ok);
   border-color: var(--ok);
 }
+.review-chip.state-rejected {
+  color: var(--muted);
+  border-color: var(--muted);
+  text-decoration: line-through;
+}
 .chip.verdict-approved {
   color: var(--ok);
   border-color: var(--ok);

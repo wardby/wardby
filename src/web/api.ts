@@ -36,6 +36,7 @@ import { createShareLink } from "../core/documents/share-links.js";
 import { getDocument, publishVersion } from "../core/documents/service.js";
 import {
   forceApprove,
+  rejectDocument,
   getReviewView,
   reopenDocument,
   reviewCandidates,
@@ -288,6 +289,12 @@ export async function postReview(
       const note = str(body, "note");
       if (note.trim() === "") return invalid();
       view = (await forceApprove(deps.db, deps.cipher, { documentId, viewer, note })).view;
+      break;
+    }
+    case "reject": {
+      const note = str(body, "note");
+      if (note.trim() === "") return invalid();
+      view = await rejectDocument(deps.db, deps.cipher, { documentId, viewer, note });
       break;
     }
     case "reopen":

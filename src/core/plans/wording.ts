@@ -34,6 +34,7 @@ const STATE_WORDS: Record<string, string> = {
   in_review: "in review",
   changes_requested: "changes requested",
   approved: "approved",
+  rejected: "rejected",
   archived: "archived",
 };
 
@@ -46,9 +47,11 @@ export function planReplyLines(plan: PublishedPlan): string[] {
     const note =
       doc.change === "approved_unchanged"
         ? "; not changed, reopen it first"
-        : doc.change === "archived_unchanged"
-          ? "; not changed, it is archived"
-          : "";
+        : doc.change === "rejected_unchanged"
+          ? "; not in the plan, reopen it to bring it back"
+          : doc.change === "archived_unchanged"
+            ? "; not changed, it is archived"
+            : "";
     lines.push(`- ${doc.path} (${state}${note}): ${doc.url ?? doc.pagePath}`);
   }
   if (plan.withheld.length > 0) {

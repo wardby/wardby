@@ -12,6 +12,8 @@ import {
   bannerText,
   EVENT_LABEL,
   ASK_TO_REOPEN,
+  REJECT_EXPLAIN,
+  REJECTED_NOTE,
   isLockedState,
   isReopenCopy,
   matchesQuery,
@@ -43,7 +45,7 @@ export interface ReviewHost {
   onState(state: ReviewState): void;
 }
 
-type Form = "none" | "submit" | "force";
+type Form = "none" | "submit" | "force" | "reject";
 
 export class ReviewPanel {
   private review: ReviewPayload;
@@ -51,6 +53,8 @@ export class ReviewPanel {
   private note = "";
   /** The force note as typed: kept across re-renders (a failed force keeps it). */
   private forceNote = "";
+  /** The reject note as typed: kept across re-renders (a failed reject keeps it). */
+  private rejectNote = "";
   private raced: { verdict: "approve" | "request_changes" } | null = null;
   private form: Form = "none";
   private picked = new Set<string>();
@@ -151,6 +155,7 @@ export class ReviewPanel {
     panel.append(this.actions());
     if (this.form === "submit") panel.append(this.submitForm());
     if (this.form === "force") panel.append(this.forceForm());
+    if (this.form === "reject") panel.append(this.rejectForm());
     const list = h("ul", { class: "rv-reviewers", aria: { label: "Reviewers" } });
     for (const x of r.reviewers) {
       list.append(
@@ -240,8 +245,20 @@ export class ReviewPanel {
           "danger",
         ),
       );
+    if (can.reject)
+      bar.append(
+        btn(
+          "Reject",
+          () => {
+            this.form = "reject";
+            this.render();
+          },
+          "danger",
+        ),
+      );
     if (can.reopen) bar.append(btn("Reopen for review", () => void this.act({ action: "reopen" }), "primary"));
     else if (state === "approved") bar.append(h("div", { class: "rv-mine", role: "note" }, ASK_TO_REOPEN));
+    else if (state === "rejected") bar.append(h("div", { class: "rv-mine", role: "note" }, REJECTED_NOTE));
     if (can.archive) bar.append(btn("Archive", () => void this.act({ action: "archive", archived: true })));
     if (can.unarchive)
       bar.append(btn("Unarchive", () => void this.act({ action: "archive", archived: false }), "primary"));
@@ -417,6 +434,51 @@ export class ReviewPanel {
     return form;
   }
 
+  private rejectForm(): HTMLElement {
+    const form = h("div", { class: "rv-form", role: "group", aria: { label: "Reject" } });
+    form.append(h("p", {}, REJECT_EXPLAIN));
+    const note = h("textarea", {
+      attrs: { placeholder: "Why (required), for example: Option B was chosen", rows: "3" },
+      aria: { label: "Reject note" },
+      onInput: () => {
+        this.rejectNote = note.value;
+        confirm.disabled = this.busy || note.value.trim() === "";
+      },
+    });
+    note.value = this.rejectNote;
+    const confirm = h(
+      "button",
+      {
+        type: "button",
+        class: "danger",
+        disabled: this.busy || this.rejectNote.trim() === "",
+        onClick: () => void this.act({ action: "reject", note: this.rejectNote }),
+      },
+      "Reject",
+    );
+    form.append(
+      note,
+      h(
+        "div",
+        { class: "rv-actions" },
+        confirm,
+        h(
+          "button",
+          {
+            type: "button",
+            class: "neutral",
+            onClick: () => {
+              this.form = "none";
+              this.render();
+            },
+          },
+          "Cancel",
+        ),
+      ),
+    );
+    return form;
+  }
+
   private forceForm(): HTMLElement {
     const form = h("div", { class: "rv-form", role: "group", aria: { label: "Force approve" } });
     const lines = pendingLines(this.review);
@@ -477,6 +539,7 @@ export class ReviewPanel {
       this.form = "none";
       this.newLink = null;
       this.forceNote = "";
+      this.rejectNote = "";
       this.busy = false;
       this.apply(out.review);
       return null;

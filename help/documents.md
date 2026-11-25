@@ -26,7 +26,7 @@ A document is a Markdown file (or a [design](designs.md): a set of HTML boards) 
 - Comments: `list_comment_threads`, `get_comment_thread`, `reply_to_thread`, `resolve_thread`.
 - Sharing: `create_share_link`, `list_share_links`, `revoke_share_link`, and `grant_access` / `revoke_access` / `list_access` for people.
 - Export: `export_document` (see [Exports](document-exports.md)).
-- Review: `submit_for_review`, `review_document`, `force_approve_document`, `reopen_document`, `archive_document`, `wait_for_review` (see [Review and approve documents](document-review.md)).
+- Review: `submit_for_review`, `review_document`, `force_approve_document`, `reject_document`, `reopen_document`, `archive_document`, `wait_for_review` (see [Review and approve documents](document-review.md)).
 - Agents: `send_threads_to_agent` (see [Comment threads and agents](comment-threads-and-agents.md)).
 
 They need the `documents:read` and `documents:write` scopes; `send_threads_to_agent` also needs `runs:trigger`. No Wardby role is required. Define the scopes at your identity provider (see [Identity and access](identity-and-access.md)).

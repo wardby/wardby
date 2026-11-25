@@ -72,7 +72,7 @@ export interface DocumentPayload {
 }
 
 /** A document's review state (the page shows it in the banner and the Review tab). */
-export type ReviewState = "draft" | "in_review" | "changes_requested" | "approved" | "archived";
+export type ReviewState = "draft" | "in_review" | "changes_requested" | "approved" | "rejected" | "archived";
 
 export interface ReviewerPayload {
   id: string;
@@ -107,7 +107,16 @@ export interface ReviewPayload {
   finalApprover: { name: string; me: boolean; ref?: string } | null;
   forced: { byName: string; versionNumber: number; notes: string[] } | null;
   events: ReviewEventPayload[];
-  can: { submit: boolean; review: boolean; force: boolean; reopen: boolean; archive: boolean; unarchive: boolean };
+  can: {
+    submit: boolean;
+    review: boolean;
+    force: boolean;
+    reopen: boolean;
+    /** Older servers leave it out: no Reject button. */
+    reject?: boolean;
+    archive: boolean;
+    unarchive: boolean;
+  };
 }
 
 /** One POST /review body. */
@@ -115,6 +124,7 @@ export type ReviewAction =
   | { action: "submit"; reviewers: string[]; finalApproverId?: string | null }
   | { action: "verdict"; verdict: "approve" | "request_changes"; versionNumber: number; note?: string }
   | { action: "force"; note: string }
+  | { action: "reject"; note: string }
   | { action: "reopen" }
   | { action: "archive"; archived: boolean };
 
@@ -397,6 +407,7 @@ const MESSAGES: Record<string, string> = {
   export_not_found: "That export is no longer available. Try again.",
   document_locked: "This document is approved or archived, so it can't be changed. Reopen it for review first.",
   document_review_forbidden: "You can't do that in this review.",
+  document_reject_not_plan_document: "Only a document of a plan can be rejected, and never its plan.md.",
   document_review_state_invalid: "That can't be done in the document's current review state. Reload to see it.",
   network_error: "Can't reach the server. Check your connection.",
 };

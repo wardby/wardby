@@ -91,6 +91,8 @@ export interface ReviewCan {
   review: boolean;
   force: boolean;
   reopen: boolean;
+  /** Reject this plan document (rejectDocument): never plan.md, never outside a plan set. */
+  reject: boolean;
   archive: boolean;
   unarchive: boolean;
 }
@@ -111,6 +113,9 @@ export interface ReviewView {
 const SUBMITTABLE = new Set<string>(["draft", "in_review", "changes_requested"]);
 const REVIEWABLE = new Set<string>(["in_review", "changes_requested", "approved"]);
 const FORCEABLE = new Set<string>(["in_review", "changes_requested"]);
+const REJECTABLE = new Set<string>(["in_review", "changes_requested", "approved"]);
+/** Reopen takes these back to review (a rejected document also back into its plan). */
+const REOPENABLE = new Set<string>(["approved", "rejected"]);
 const invalid = (): never => {
   throw new Error("document_review_state_invalid");
 };
@@ -427,7 +432,62 @@ export async function forceApprove(
 }
 
 /**
- * Reopens an approved document for review by starting its next version: a copy of the approved version N, written
+ * Rejects a document of a plan set: a design option nobody chose, a part the plan no longer needs. The document
+ * becomes `rejected` (locked like an approved one, comments still open) and leaves the plan (`removedFromPlan`),
+ * so it no longer counts toward the plan's approval and is never given to a builder. The plan set's own plan.md
+ * cannot be rejected. Who may: the owner, the final approver, or a named member reviewer; a note is required.
+ * Reopen undoes it. Rejecting the last waiting document completes the plan's approval exactly as an approval
+ * does (the plan review hook).
+ */
+export async function rejectDocument(
+  db: PrismaClient,
+  cipher: Cipher,
+  input: { documentId: string; viewer: Viewer; note: string },
+): Promise<ReviewView> {
+  const viewer = input.viewer;
+  if (viewer.kind !== "principal") throw new Error("document_review_forbidden");
+  const principalId = viewer.principalId;
+  const access = await documentAccess(db, input.documentId, viewer);
+  if (access === "none") throw new Error("document_not_found");
+  const docRow = await db.document.findUnique({ where: { id: input.documentId }, select: { agentId: true } });
+  if (!docRow) throw new Error("document_not_found");
+  if (input.note.trim() === "") invalid();
+  const note = await storedNote(db, cipher, docRow.agentId, input.note);
+  await inReviewTx(db, async (tx) => {
+    const accessNow = await documentAccess(tx, input.documentId, viewer);
+    if (accessNow === "none") throw new Error("document_not_found");
+    const { doc, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
+    const plan = await tx.document.findUnique({
+      where: { id: doc.id },
+      select: { planSetId: true, planPath: true, removedFromPlan: true },
+    });
+    const named = reviewers.some((r) => r.principalId === principalId);
+    const isApprover = doc.finalApproverId === principalId;
+    const allowed = accessNow === "owner" || ((named || isApprover) && atLeast("document", accessNow, "comment"));
+    if (!allowed) throw new Error("document_review_forbidden");
+    if (!plan?.planSetId || plan.planPath === null || plan.planPath === "plan.md" || plan.removedFromPlan) {
+      throw new Error("document_reject_not_plan_document");
+    }
+    if (!REJECTABLE.has(doc.reviewState)) invalid();
+    await record(tx, {
+      documentId: doc.id,
+      viewer,
+      kind: "rejected",
+      from: doc.reviewState,
+      to: "rejected",
+      versionNumber: rule.currentVersion,
+      at: await actionTime(tx, lastEventAt),
+      note,
+      extra: { removedFromPlan: true },
+    });
+  });
+  await notifyDocumentChange(db, input.documentId, "review");
+  await planReviewHook()?.(db, input.documentId, principalId);
+  return getReviewView(db, input.documentId, viewer);
+}
+
+/**
+ * Reopens an approved (or rejected) document for review by starting its next version: a copy of version N, written
  * as N+1 (via "review") in the same transaction as the state change and the `reopened` event, which names N+1.
  * N stays the approved record; nothing given on N counts on N+1, so every review after a reopen is on a new number.
  * The copy goes through the shared version writer but not publishVersion, whose lock check refuses every other
@@ -460,8 +520,8 @@ export async function reopenDocument(
       },
     });
     if (!row?.currentVersion) throw new Error("document_not_found");
-    // Early refusal (the transaction decides): nothing is staged for a document that is not approved.
-    if (row.reviewState !== "approved") invalid();
+    // Early refusal (the transaction decides): nothing is staged for a document that is not approved or rejected.
+    if (!REOPENABLE.has(row.reviewState)) invalid();
     const approved = row.currentVersion;
     const fmt = formatFor(row.kind);
     const secrets = await documentSecretValues(db, cipher, row.agentId);
@@ -471,7 +531,7 @@ export async function reopenDocument(
       await inReviewTx(db, async (tx) => {
         await requireDocumentAccess(tx, input.documentId, input.viewer, "write");
         const { doc, lastEventAt } = await readReview(tx, input.documentId);
-        if (doc.reviewState !== "approved") invalid();
+        if (!REOPENABLE.has(doc.reviewState)) invalid();
         // A conflict means another reopen, publish and approval happened since the copy was staged.
         const written = await writeVersion(tx, doc.id, staged, {
           via: "review",
@@ -483,10 +543,12 @@ export async function reopenDocument(
           documentId: doc.id,
           viewer: input.viewer,
           kind: "reopened",
-          from: "approved",
+          from: doc.reviewState,
           to: "in_review",
           versionNumber: written.number,
           at: await actionTime(tx, lastEventAt),
+          // A rejected document goes back into its plan (rejectDocument took it out).
+          ...(doc.reviewState === "rejected" ? { extra: { removedFromPlan: false } } : {}),
         });
       });
       break;
@@ -640,6 +702,15 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
   const principalId = viewer.kind === "principal" ? viewer.principalId : null;
   const owner = access === "owner";
   const listed = reviewerViews.some((r) => r.me);
+  const placement = await db.document.findUnique({
+    where: { id: documentId },
+    select: { planSetId: true, planPath: true, removedFromPlan: true },
+  });
+  const rejectablePlanDocument =
+    !!placement?.planSetId &&
+    placement.planPath !== null &&
+    placement.planPath !== "plan.md" &&
+    !placement.removedFromPlan;
   return {
     documentId,
     state,
@@ -677,7 +748,14 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
         FORCEABLE.has(state) &&
         (owner ||
           (principalId !== null && principalId === doc.finalApproverId && atLeast("document", access, "comment"))),
-      reopen: principalId !== null && state === "approved" && atLeast("document", access, "write"),
+      reopen: principalId !== null && REOPENABLE.has(state) && atLeast("document", access, "write"),
+      reject:
+        principalId !== null &&
+        rejectablePlanDocument &&
+        REJECTABLE.has(state) &&
+        (owner ||
+          (((listed && viewer.kind === "principal") || doc.finalApproverId === principalId) &&
+            atLeast("document", access, "comment"))),
       archive: owner && state !== "archived",
       unarchive: owner && state === "archived",
     },

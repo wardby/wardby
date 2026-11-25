@@ -54,6 +54,7 @@ import {
 import {
   documentReviewState,
   forceApprove,
+  rejectDocument,
   getReviewView,
   reopenDocument,
   reviewCandidates,
@@ -90,6 +91,7 @@ const EXACT_STATUS: Record<string, number> = {
   document_locked: 409,
   document_review_state_invalid: 409,
   document_review_forbidden: 403,
+  document_reject_not_plan_document: 409,
 };
 
 /** The HTTP status for a documents error code; undefined when it is not one. */
@@ -421,6 +423,7 @@ const verdictArgs = z.object({
   note: z.string().max(MAX_REVIEW_NOTE_CHARS).optional(),
 });
 const forceArgs = z.object({ documentId: id, note: z.string().trim().min(1).max(MAX_REVIEW_NOTE_CHARS) });
+const rejectArgs = forceArgs;
 const archiveArgs = z.object({ documentId: id, archived: z.boolean() });
 const waitArgs = z.object({
   documentId: id,
@@ -1064,6 +1067,29 @@ function registerContentTools(mcp: WardbyMcpServer): void {
   });
 
   mcp.registerTool({
+    name: "reject_document",
+    scope: "documents:write",
+    description:
+      "Rejects a document of a plan (for example a design option that was not chosen): it becomes rejected, read-only like an approved document (comments stay open), and leaves the plan, so it no longer counts toward the plan's approval and is not given to a builder. Rejecting the last waiting document approves the plan as an approval does. Only the owner, the final approver or a named member reviewer; note is required (stored redacted). plan.md itself, and a document outside a plan, are refused with document_reject_not_plan_document. reopen_document undoes it.",
+    inputSchema: {
+      type: "object",
+      properties: { documentId: { type: "string" }, note: { type: "string" } },
+      required: ["documentId", "note"],
+    },
+    handler: async (args: unknown, ctx) => {
+      const input = rejectArgs.parse(args);
+      const view = await mapped(() =>
+        rejectDocument(ctx.db, ctx.providers.secrets, {
+          documentId: input.documentId,
+          viewer: viewerOf(ctx),
+          note: input.note,
+        }),
+      );
+      return textResult(reviewPayload(view));
+    },
+  });
+
+  mcp.registerTool({
     name: "force_approve_document",
     scope: "documents:write",
     description:
@@ -1090,7 +1116,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     name: "reopen_document",
     scope: "documents:write",
     description:
-      "Reopens an approved document for review: creates the next version, a copy of the approved one, and puts it in review (approved → in_review), so new versions can be published and the reviewers approve again. The approved version stays in the history as the approved record. Returns the review; currentVersion is the new version's number. Needs write access.",
+      "Reopens an approved or rejected document for review: creates the next version, a copy of the current one, and puts it in review (approved or rejected → in_review), so new versions can be published and the reviewers approve again. A rejected plan document also goes back into its plan. The earlier version stays in the history as the record. Returns the review; currentVersion is the new version's number. Needs write access.",
     inputSchema: { type: "object", properties: { documentId: { type: "string" } }, required: ["documentId"] },
     handler: async (args: unknown, ctx) => {
       const input = docOnly.parse(args);
