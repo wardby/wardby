@@ -291,6 +291,18 @@ podSelector:
     {{- toYaml .tmpVolume | nindent 4 }}
 {{- end -}}
 
+{{/* Validates codingProxy.tunnel.agentHosts and the server list it may leave empty; renders nothing. */}}
+{{- define "wardby.codingProxy.tunnelAgentHosts" -}}
+{{- $t := .Values.codingProxy.tunnel -}}
+{{- $level := toString (default "off" $t.agentHosts) -}}
+{{- if not (has $level (list "off" "exact" "pattern" "any")) }}
+{{- fail "codingProxy.tunnel.agentHosts must be off, exact, pattern or any" }}
+{{- end }}
+{{- if and (not $t.allowedHosts) (eq $level "off") }}
+{{- fail "codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true and codingProxy.tunnel.agentHosts is off" }}
+{{- end }}
+{{- end -}}
+
 {{/* The coding proxy's chart-derived environment, as a map; codingProxy.env overrides it. */}}
 {{- define "wardby.codingProxy.env" -}}
 {{- $m := .Values.codingProxy.metrics -}}
@@ -300,11 +312,14 @@ METRICS_BIND: {{ printf "0.0.0.0:%d" (int $m.port) | quote }}
 METRICS_ALLOW_NON_LOOPBACK: "true"
 {{- end }}
 {{- if $t.enabled }}
-{{- if not $t.allowedHosts }}
-{{- fail "codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true" }}
-{{- end }}
+{{- include "wardby.codingProxy.tunnelAgentHosts" . }}
 CODING_TUNNEL_PORT: {{ int $t.port | quote }}
+{{- if $t.allowedHosts }}
 CODING_TUNNEL_ALLOWED_HOSTS: {{ join "," $t.allowedHosts | quote }}
+{{- end }}
+{{- if ne (toString (default "off" $t.agentHosts)) "off" }}
+CODING_TUNNEL_AGENT_HOSTS: {{ toString $t.agentHosts | quote }}
+{{- end }}
 {{- if not (kindIs "invalid" $t.maxConnections) }}
 CODING_TUNNEL_MAX_CONNECTIONS: {{ int $t.maxConnections | quote }}
 {{- end }}

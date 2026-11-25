@@ -244,7 +244,37 @@ tests:
       codingProxy.tunnel.enabled: true
     asserts:
       - failedTemplate:
-          errorMessage: codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true
+          errorMessage: codingProxy.tunnel.allowedHosts must list at least one host when codingProxy.tunnel.enabled is true and codingProxy.tunnel.agentHosts is off
+  - it: sets the per-agent hosts ceiling and allows an empty server list with it
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.agentHosts: pattern
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_AGENT_HOSTS, value: pattern }
+        documentIndex: 1
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_ALLOWED_HOSTS, value: "" }
+        documentIndex: 1
+  - it: leaves the per-agent hosts ceiling unset when it is off
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [ghcr.io]
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: CODING_TUNNEL_AGENT_HOSTS, value: "off" }
+        documentIndex: 1
+  - it: refuses an unknown per-agent hosts ceiling
+    set:
+      codingProxy.tunnel.enabled: true
+      codingProxy.tunnel.allowedHosts: [ghcr.io]
+      codingProxy.tunnel.agentHosts: wide
+    asserts:
+      - failedTemplate:
+          errorMessage: codingProxy.tunnel.agentHosts must be off, exact, pattern or any
   - it: leaves every tunnel blind when no interception rule is set
     set:
       codingProxy.tunnel.enabled: true
