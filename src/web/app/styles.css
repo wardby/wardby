@@ -101,10 +101,12 @@ a {
 }
 
 /* ---- page layout ---- */
+/* A column whose editor area (.main) takes what is left: the bars above it (review, plan, banners,
+   warnings, toolbar) come and go, so no fixed row count. */
 .app {
   height: 100%;
-  display: grid;
-  grid-template-rows: auto auto auto 1fr;
+  display: flex;
+  flex-direction: column;
 }
 .topbar {
   display: flex;
@@ -169,6 +171,7 @@ a {
   margin: 0 0.3rem;
 }
 .main {
+  flex: 1;
   display: grid;
   grid-template-columns: 1fr 320px;
   min-height: 0;
