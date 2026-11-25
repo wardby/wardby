@@ -285,7 +285,8 @@ export async function agentOwnerBindings(db: BindingDb, agentId: string): Promis
       db.codingAgentProfile.count({ where: { agentId } }),
       // A server's brokered secrets act for its owner on every call.
       db.agentMcpServer.count({ where: { agentId } }),
-      // The built-in document tools act with the owner's reach on documents.
+      // The built-in document tools create documents owned by the agent's owner and submit them to the owner's
+      // chosen reviewers; they never use the owner's own access to documents.
       db.agent.count({ where: { id: agentId, documentTools: { not: Prisma.DbNull } } }),
     ]);
   return Object.entries({

@@ -4,7 +4,7 @@ title: Document tools setting invalid (document_tools_invalid)
 summary: update_agent or create_agent refused documentTools because the agent is not native, a reviewer cannot read the agent, or a plan is not a planner you can run.
 audience: operator
 tags: [error, documents, native-agents, documentTools, document_tools_invalid]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.10.2"
 ---
 
 # Document tools setting invalid

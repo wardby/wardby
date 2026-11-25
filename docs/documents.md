@@ -463,23 +463,27 @@ agents take documentTools.`; schema-level violations such as an out-of-range
 `Invalid create_agent/update_agent arguments: …`). It is read again on every
 call. It is owner-only and counts as an owner binding: an agent everyone can
 write cannot have it, and an agent that has it cannot be opened to everyone
-with write.
+with write. `make_owner` between two owners turns it off.
 
 **What the agent can reach.** Never its owner's access. Only: a document linked
-to it as writer (`create_document` by the agent through `doc_create`, or
-`link_document` with `agentId` alone for a native agent with `access: "write"`
-that you can execute), agent grants at `read` or `comment`, and the plan
-documents of `plans` at `comment`. Anything else is `document_not_found`.
+to it as writer (`doc_create`, or `create_document` or `link_document` with
+`agentId` alone for a native agent with `access: "write"` that you can
+execute), while the document's owner can still execute the agent; agent grants
+at `read` or `comment`; and the plan documents of `plans` at `comment`, while
+the agent's owner can still execute the planner. Anything else is
+`document_not_found`.
 
 **What it never does.** Approve, force-approve, reopen, archive, share, grant,
 or start comment threads. It replies to and resolves threads, and submits for
-review to the setting's reviewers.
+review to the setting's reviewers, only on documents its owner owns
+(`document_review_forbidden` otherwise). The documents it creates are its
+owner's; an owner-less agent's write tools return `document_agent_unavailable`.
 
 **Limits.** `doc_get` refuses a document or design over 60,000 characters
 (`document_too_large_for_agent`), the same cap as send to agent.
 `doc_publish_version` requires `baseNumber`, the version the agent read; a newer
-version means `document_version_conflict`. A document in review or approved is
-locked. Tool failures are JSON results with an `error` code.
+version means `document_version_conflict`. An approved or archived document is
+locked (`document_locked`). Tool failures are JSON results with an `error` code.
 
 **Send threads to agent.** On a document whose writer is a native agent, a send
 starts a native run with the trigger `comment`. The agent reads the threads,

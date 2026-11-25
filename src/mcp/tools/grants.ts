@@ -243,7 +243,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       "Write lets them rewrite what those runs do: the prompt can make a run use everything the agent can already reach (the capabilities you granted, its memory, its linked repositories), and on a coding agent the prompt is part of every coding task, so write directs work done with your GitHub access. " +
       "MCP servers (resourceType mcp_server): read < use < write; use on an MCP server lets them attach it to their own agents; its tools then run with your server's credentials. Write adds nothing beyond use: only the owner updates, refreshes, deletes or re-grants a server. Lowering a grant to read (including everyone from use to read) detaches the server from every agent whose owner can no longer use it, and their runs' next call to it is refused. " +
       "Documents (resourceType document): read < comment < write; everyone may get at most comment. An agent may be granted read or comment with {agentId}; to make an agent the writer, link it with link_document. Only the owner manages grants. " +
-      "Granting again replaces the level. Everyone may get write only on a native agent with no secrets, datastores, repositories, sub-agents, MCP servers or tool capabilities. The grantee must have signed in once.",
+      "Granting again replaces the level. Everyone may get write only on a native agent with no secrets, datastores, repositories, sub-agents, MCP servers, tool capabilities or document tools. The grantee must have signed in once.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

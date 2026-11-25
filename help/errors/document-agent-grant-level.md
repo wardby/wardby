@@ -4,7 +4,7 @@ title: Agent grant level too high (document_agent_grant_level)
 summary: An agent can be granted read or comment on a document, not write.
 audience: operator
 tags: [error, documents, native-agents, grant_access, document_agent_grant_level]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.10.2"
 ---
 
 # Agent grant level too high

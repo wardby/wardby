@@ -4,7 +4,7 @@ title: Document run limit reached (document_run_limit)
 summary: A native agent's run already created as many documents as documentTools.maxNewPerRun allows.
 audience: operator
 tags: [error, documents, native-agents, doc_create, maxNewPerRun, document_run_limit]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.10.2"
 ---
 
 # Document run limit reached

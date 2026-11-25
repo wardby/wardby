@@ -4,7 +4,7 @@ title: Documents from native agents
 summary: Turn on documentTools for a native agent so a run can list, read, create and revise Wardby documents and designs with doc_* tools, reply to comment threads and submit for review, within the access you give it.
 audience: operator
 tags: [documents, designs, native-agents, doc_create, documentTools, doc_get, doc_publish_version, maxNewPerRun]
-appliesTo: ">=0.10.0"
+appliesTo: ">=0.10.2"
 ---
 
 # Documents from native agents
@@ -46,7 +46,9 @@ agent.
 
 `documentTools` is owner-only, like the agent's secrets and tools: it counts as
 an owner binding. An agent that everyone can write cannot have it, and an agent
-that has it cannot be opened to everyone with write.
+that has it cannot be opened to everyone with write. `make_owner` between two
+owners turns it off (`documentToolsCleared` in the result), for the new owner
+to set again.
 
 ## The tools
 
@@ -72,7 +74,8 @@ An agent never gets its owner's access. Only these give it any:
 - **Linked writer**: a document linked to the agent as its writer
   (`create_document` by the agent itself, or `link_document` with `agentId`
   alone) is writable by it. Link a native agent that has `documentTools` with
-  `write`, and that you can execute.
+  `write`, and that you can execute. The link counts only while the document's
+  owner can still execute the agent.
 - **Grants**: `grant_access` with `grantee: {"agentId": "<id>"}` on a document
   gives the agent `read` or `comment`. You must own the document and be able to
   read the agent. `write` is refused with
@@ -80,7 +83,8 @@ An agent never gets its owner's access. Only these give it any:
   `link_document` to make an agent the writer. Revoking by `agentId` always
   works.
 - **`plans`**: the plan documents of the planners named in the setting, at
-  comment. The agent never publishes to a plan document.
+  comment, while the agent's owner can still execute each planner. The agent
+  never publishes to a plan document.
 
 `access: "read"` caps all of this at read. A document the agent cannot read is
 answered as `document_not_found`.
@@ -90,7 +94,11 @@ answered as `document_not_found`.
 An agent does not approve, force-approve, reopen, archive, share or grant
 access, and does not start comment threads: it replies to and resolves existing
 ones. Submitting for review sends the document to the setting's reviewers, not
-to anyone the agent picks.
+to anyone the agent picks, and only for a document the agent's owner owns: on a
+document someone else linked to it, `doc_submit_for_review` is refused with
+[`document_review_forbidden`](errors/document-review-forbidden.md). The
+documents an agent creates belong to its owner; an agent with no owner cannot
+use the write tools (`document_agent_unavailable`).
 
 ## Limits and errors
 
@@ -104,7 +112,7 @@ to anyone the agent picks.
   newer version exists it fails with
   [`document_version_conflict`](errors/document-version-conflict.md); the agent
   reads again and redoes its edit.
-- A document in review or approved is locked
+- An approved or archived document is locked
   ([`document_locked`](errors/document-locked.md)); a design must be a valid
   board set (`board_format_invalid`).
 - `create_agent` and `update_agent` refuse a bad setting with a 400 that
