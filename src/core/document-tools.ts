@@ -400,14 +400,14 @@ async function handleWrite(
       const a = parse(ReplyArgs);
       if (typeof a === "string") return a;
       // reply redacts the body against the document's agent and this agent's own secret values.
-      const out = await reply(db, cipher, { threadId: a.threadId, viewer, body: a.body });
+      const out = await threadMissingAsDocument(reply(db, cipher, { threadId: a.threadId, viewer, body: a.body }));
       return JSON.stringify({ commentId: out.commentId });
     }
     case "doc_resolve_thread": {
       const a = parse(GetThreadArgs);
       if (typeof a === "string") return a;
       // setThreadStatus needs read on the document, then write for an agent.
-      await setThreadStatus(db, { threadId: a.threadId, viewer, status: "resolved" });
+      await threadMissingAsDocument(setThreadStatus(db, { threadId: a.threadId, viewer, status: "resolved" }));
       return JSON.stringify({ threadId: a.threadId, status: "resolved" });
     }
     default: {
@@ -421,6 +421,17 @@ async function handleWrite(
       });
       return JSON.stringify({ id: a.documentId, reviewState: view.state });
     }
+  }
+}
+
+/** A missing thread answers like an unreadable document, as doc_get_thread does: no way to probe for thread ids. */
+async function threadMissingAsDocument<T>(p: Promise<T>): Promise<T> {
+  try {
+    return await p;
+  } catch (err) {
+    if (err instanceof Error && err.message === "comment_not_found")
+      throw new Error("document_not_found", { cause: err });
+    throw err;
   }
 }
 

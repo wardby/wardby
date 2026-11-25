@@ -421,6 +421,13 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* write tools (database)", () =>
     expect((await db.commentThread.findUniqueOrThrow({ where: { id: t2 } })).status).toBe("resolved");
   });
 
+  it("a missing thread is document_not_found for reply and resolve, as for doc_get_thread", async () => {
+    expect(await call("doc_reply_to_thread", { threadId: "no-such", body: "x" })).toMatchObject({
+      error: "document_not_found",
+    });
+    expect(await call("doc_resolve_thread", { threadId: "no-such" })).toMatchObject({ error: "document_not_found" });
+  });
+
   it("doc_submit_for_review uses the setting's reviewers and takes no reviewers argument", async () => {
     const d = (await createDocument(db, cipher, { ownerId: o.id, title: "Sub", markdown: "x", agentId: W })).id;
     expect(await call("doc_submit_for_review", { documentId: d, reviewers: [o.id] })).toMatchObject({

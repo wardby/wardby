@@ -340,7 +340,11 @@ response) and reassign one with `make_owner`, which removes bindings the new
 owner doesn't own (secrets, datastores and MCP server attachments), suspends tool capabilities the new owner never granted,
 cuts sub-agent edges the new owner can't delegate, and, between two owners,
 resets every grant and turns the agent's document tools (`documentTools`) off
-(`documentToolsCleared` in the result). Adopting an owner-less agent keeps its grants but lowers
+(`documentToolsCleared` in the result), and removes the document grants
+others gave the agent except on documents the new owner owns
+(`documentGrantsRemoved`), so the new owner can't reach documents that were
+shared with the previous owner's agent. Adopting an owner-less agent keeps its
+grants (document grants included) but lowers
 an everyone grant to `read` unless `keepEveryoneExecute` is set.
 `make_owner` no longer releases an agent to owner-less.
 

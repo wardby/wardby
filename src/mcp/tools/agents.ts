@@ -807,7 +807,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         documentTools: {
           type: "object",
           description:
-            "Native agents only: built-in doc_* tools to create, read and revise Wardby documents and designs in a run (see help article native-agent-documents). access read|write; reviewers: 1-50 principal ids who can read this agent (default: the owner); finalApproverId; maxNewPerRun 1-20 (default 5); plans: planner agent ids whose plan documents this agent may read and comment on. null turns it off.",
+            "Native agents only: built-in doc_* tools to create, read and revise Wardby documents and designs in a run (see help article native-agent-documents). access read|write; reviewers: 1-50 principal ids who can read this agent (default: the owner; on create_agent only the owner can be a reviewer: share the agent, then add other reviewers with update_agent); finalApproverId; maxNewPerRun 1-20 (default 5); plans: planner agent ids whose plan documents this agent may read and comment on. null turns it off.",
         },
         effort: {
           type: "string",
@@ -1547,7 +1547,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
     name: "make_owner",
     scope: "agents:admin",
     description:
-      "Admins: gives an agent a new owner (an existing principal id). Secret, datastore and MCP server bindings the new owner doesn't own are removed; tool capabilities the new owner never granted are suspended until they re-run attach_tool; sub-agent edges the new owner can't delegate are removed; between two owners every grant on the agent is reset and its document tools (documentTools) are turned off (adopting an owner-less agent keeps them). Returns what changed.",
+      "Admins: gives an agent a new owner (an existing principal id). Secret, datastore and MCP server bindings the new owner doesn't own are removed; tool capabilities the new owner never granted are suspended until they re-run attach_tool; sub-agent edges the new owner can't delegate are removed; between two owners every grant on the agent is reset, its document tools (documentTools) are turned off, and document grants shared with the agent are removed except on the new owner's own documents (documentGrantsRemoved; adopting an owner-less agent keeps all of these). Returns what changed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1636,6 +1636,27 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             // Document tools name the old owner's reviewers and planners: between two owners they are turned off,
             // like the other owner bindings, for the new owner to set again.
             const documentToolsCleared = transfer && agent.documentTools !== null;
+            // Documents other people shared with this agent were shared with the old owner's agent: between two
+            // owners those grants go too (except on the new owner's own documents), so re-enabling document tools
+            // can't reach them. Adopting an owner-less agent keeps them, as it keeps documentTools.
+            let documentGrantsRemoved = 0;
+            if (transfer) {
+              const docGrants = await tx.resourceGrant.findMany({
+                where: { resourceType: "document", granteeKind: "agent", granteeAgentId: agent.id },
+                select: { id: true, resourceId: true },
+              });
+              if (docGrants.length > 0) {
+                const ownDocs = await tx.document.findMany({
+                  where: { id: { in: docGrants.map((g) => g.resourceId) }, ownerId: newOwner },
+                  select: { id: true },
+                });
+                const keep = new Set(ownDocs.map((d) => d.id));
+                const drop = docGrants.filter((g) => !keep.has(g.resourceId)).map((g) => g.id);
+                if (drop.length > 0) {
+                  documentGrantsRemoved = (await tx.resourceGrant.deleteMany({ where: { id: { in: drop } } })).count;
+                }
+              }
+            }
             const updated = await tx.agent.update({
               where: { id: args.agentId },
               data: { ownerId: newOwner, ...(documentToolsCleared ? { documentTools: Prisma.DbNull } : {}) },
@@ -1747,6 +1768,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               everyoneGrant,
               webhooksInactive,
               documentToolsCleared,
+              documentGrantsRemoved,
             };
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },

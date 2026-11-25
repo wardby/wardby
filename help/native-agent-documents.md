@@ -34,7 +34,9 @@ Set it with `update_agent` (or `create_agent`) on a native agent you own:
 - `access`: `read` offers the read tools only and caps the agent at read on every
   document; `write` also offers the write tools.
 - `reviewers`: 1 to 50 people; the default is the agent's owner. Each must be
-  able to read the agent. A document the agent submits goes to them.
+  able to read the agent. A document the agent submits goes to them. On
+  `create_agent` only the owner can be a reviewer; share the agent and then add
+  other reviewers with `update_agent`.
 - `finalApproverId`: optional; the person who may force an approval.
 - `maxNewPerRun`: 1 to 20 new documents per run; the default is 5.
 - `plans`: up to 20 planner agents (agents with `planDocument`) whose plan
@@ -48,7 +50,22 @@ agent.
 an owner binding. An agent that everyone can write cannot have it, and an agent
 that has it cannot be opened to everyone with write. `make_owner` between two
 owners turns it off (`documentToolsCleared` in the result), for the new owner
-to set again.
+to set again. It also removes the document grants other people gave the agent,
+except on documents the new owner owns (`documentGrantsRemoved`), so the new
+owner cannot reach documents that were shared with the previous owner's agent.
+Adopting an agent that had no owner keeps both the setting and its grants.
+
+### Upgrading: tool names starting with `doc_`
+
+Names starting with `doc_` are reserved for these tools. `create_tool` and
+`wardby tool create` refuse a new tool with such a name, an import skips one
+with a warning, and `attach_mcp_server` refuses a server whose exposed tool
+names start with `doc_`. A tool created under such a name before the upgrade
+keeps working and can still be attached. But if its name is one of the nine
+built-in names below and the agent has `documentTools`, every call to that
+name goes to the built-in document tool and your tool is never reached. Before
+turning `documentTools` on, create the tool again under another name, attach
+it, and detach the old one.
 
 ## The tools
 

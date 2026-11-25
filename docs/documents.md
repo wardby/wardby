@@ -463,7 +463,21 @@ agents take documentTools.`; schema-level violations such as an out-of-range
 `Invalid create_agent/update_agent arguments: …`). It is read again on every
 call. It is owner-only and counts as an owner binding: an agent everyone can
 write cannot have it, and an agent that has it cannot be opened to everyone
-with write. `make_owner` between two owners turns it off.
+with write. On `create_agent` only the owner can be a reviewer; share the agent
+and then add other reviewers with `update_agent`. `make_owner` between two
+owners turns it off and removes the document grants others gave the agent,
+except on documents the new owner owns (`documentGrantsRemoved`); adopting an
+agent that had no owner keeps both.
+
+**Upgrading: `doc_` tool names.** Names starting with `doc_` are reserved for
+these tools: `create_tool` and `wardby tool create` refuse a new one, an import
+skips one with a warning, and `attach_mcp_server` refuses a server whose exposed
+tool names start with `doc_`. A tool created under such a name before the
+upgrade keeps working and can still be attached, but if its name is one of the
+nine built-in names and the agent has `documentTools`, every call to that name
+goes to the built-in tool and yours is never reached. Create it again under
+another name, attach that, and detach the old one before turning
+`documentTools` on.
 
 **What the agent can reach.** Never its owner's access. Only: a document linked
 to it as writer (`doc_create`, or `create_document` or `link_document` with
