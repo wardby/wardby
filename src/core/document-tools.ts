@@ -39,13 +39,17 @@ const MESSAGES: Record<string, string> = {
   unknown_tool: "There is no document tool with that name.",
   document_not_found: "There is no such document, or this agent cannot read it.",
   document_access_denied: "This agent can read that document but not change it.",
-  document_locked: "The document is in review or approved and cannot be changed now.",
+  document_locked: "The document is approved or archived and cannot be changed now.",
   document_version_conflict:
     "The document has a newer version than baseNumber; read it again with doc_get and publish on top of it.",
   document_version_not_found: "The document has no such version.",
   document_format_mismatch:
     "That content does not match the document's kind (Markdown for a document, files for a design).",
   document_too_large_for_agent: "The document is too large for an agent to read in one call.",
+  document_too_large:
+    "The content is too large to save (1 MiB for a document, 2 MiB for all of a design's files); make it smaller.",
+  board_too_large: "A board is too large to save (512 KB at most); split it into smaller boards.",
+  document_kind_unsupported: "That kind is not supported: use kind document (markdown) or design (files).",
   board_format_invalid: "The design files are not a valid design (check manifest.json and the boards).",
   document_run_limit: "This run has already created as many documents as its setting allows.",
   document_agent_unavailable: "The documents are not available to this agent right now.",
@@ -174,7 +178,7 @@ export const DOCUMENT_WRITE_TOOL_DEFS: LoadedTool[] = [
   },
   {
     name: "doc_publish_version",
-    description: `Publishes a new version of a document this agent can write, on top of baseNumber (the latest version you read). If the document has a newer version it fails with document_version_conflict: read it again with doc_get and redo the edit. A document in review or approved is locked. ${DATA_NOTE}`,
+    description: `Publishes a new version of a document this agent can write, on top of baseNumber (the latest version you read). If the document has a newer version it fails with document_version_conflict: read it again with doc_get and redo the edit. An approved or archived document is locked. ${DATA_NOTE}`,
     jsonSchema: {
       type: "object",
       properties: {
@@ -346,8 +350,10 @@ async function handleWrite(
   setting: DocumentToolsSetting | null,
 ): Promise<string> {
   const { db, cipher } = ctx;
-  if (!setting || !ownerId) return errorResult("document_not_found");
+  if (!setting) return errorResult("document_not_found");
   if (setting.access !== "write") return errorResult("document_access_denied");
+  // Documents an agent writes are its owner's: an owner-less agent has no one to write them for.
+  if (!ownerId) return errorResult("document_agent_unavailable");
   switch (name) {
     case "doc_create": {
       const a = parse(CreateArgs);

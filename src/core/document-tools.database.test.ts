@@ -22,7 +22,7 @@ vi.mock("./logger.js", async (importOriginal) => {
 });
 import { Prisma, type Principal } from "#prisma";
 import { createPrismaClient } from "./db.js";
-import { agentGranteeKey } from "./grants.js";
+import { agentGranteeKey, principalGranteeKey } from "./grants.js";
 import type { Viewer } from "./documents/access.js";
 import { attachSecret, createSecret } from "./secrets.js";
 import { createThread, listThreads } from "./documents/comments.js";
@@ -184,6 +184,18 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* read tools (database)", () => 
       })
     ).id;
     expect((await call("doc_get", { documentId: fits })).markdown).toHaveLength(MAX_SEND_MARKDOWN_CHARS);
+  });
+
+  it("doc_get refuses a design whose files total over the agent size cap", async () => {
+    const files = coffee();
+    const total = Object.values(files).reduce((n, f) => n + f.length, 0);
+    files["boards/about.html"] = files["boards/about.html"].replace(
+      "</body>",
+      `<p>${"z".repeat(MAX_SEND_MARKDOWN_CHARS - total + 100)}</p></body>`,
+    );
+    const big = (await createDocument(db, cipher, { kind: "design", ownerId: o.id, title: "Big", files, agentId: A }))
+      .id;
+    expect(await call("doc_get", { documentId: big })).toMatchObject({ error: "document_too_large_for_agent" });
   });
 
   it("doc_get on a design returns its files", async () => {
@@ -420,6 +432,54 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* write tools (database)", () =>
     expect(rows.map((r) => r.principalId)).toEqual([rev.id]);
     const def = documentToolDefsFor(setting("write")).find((t) => t.name === "doc_submit_for_review")!;
     expect(Object.keys(def.jsonSchema.properties as object)).toEqual(["documentId"]);
+  });
+
+  it("doc_submit_for_review on a document someone else owns is document_review_forbidden and grants nothing", async () => {
+    const q = await db.principal.create({ data: { subject: `dw-q-${s}` } });
+    const key = principalGranteeKey(q.id);
+    // q may execute W, so the link gives W write on q's document.
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "agent",
+        resourceId: W,
+        granteeKind: "principal",
+        granteePrincipalId: q.id,
+        granteeKey: key,
+        level: "execute",
+      },
+    });
+    const d = (await createDocument(db, cipher, { ownerId: q.id, title: "Q", markdown: "x", agentId: W })).id;
+    try {
+      expect(await call("doc_publish_version", { documentId: d, baseNumber: 1, markdown: "y" })).toMatchObject({
+        number: 2,
+      });
+      expect(await call("doc_submit_for_review", { documentId: d })).toMatchObject({
+        error: "document_review_forbidden",
+        message: expect.any(String),
+      });
+      expect(await db.documentReviewer.count({ where: { documentId: d } })).toBe(0);
+      expect(await db.resourceGrant.count({ where: { resourceType: "document", resourceId: d } })).toBe(0);
+      expect((await db.document.findUniqueOrThrow({ where: { id: d } })).reviewState).toBe("draft");
+    } finally {
+      await db.resourceGrant.deleteMany({ where: { resourceType: "agent", resourceId: W, granteeKey: key } });
+      await db.document.deleteMany({ where: { id: d } });
+      await db.principal.delete({ where: { id: q.id } });
+    }
+  });
+
+  it("an owner-less agent's write tools are document_agent_unavailable", async () => {
+    const N = `dw-n-${s}`;
+    await db.agent.create({
+      data: { id: N, name: N, systemPrompt: "t", model: "t", budgetUsd: 1, documentTools: setting("write") },
+    });
+    try {
+      expect(await callAs(N, "run-n", "doc_create", { title: "x", markdown: "y" })).toMatchObject({
+        error: "document_agent_unavailable",
+      });
+      expect(await db.document.count({ where: { agentId: N } })).toBe(0);
+    } finally {
+      await db.agent.delete({ where: { id: N } });
+    }
   });
 
   it("offers no approve, force, reopen, archive, share or grant tool", () => {

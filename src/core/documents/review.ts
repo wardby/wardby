@@ -289,6 +289,12 @@ export async function submitForReview(
     const { doc, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
     // Grants made for the reviewers are attributed to the owner when an agent submits.
     const grantedBy = by ?? doc.ownerId;
+    // An agent submits only its own owner's documents: the reviewer grants it makes act on the owner's behalf,
+    // so a document someone else owns (one they linked to the agent) is never shared by it.
+    if (input.viewer.kind === "agent") {
+      const agent = await tx.agent.findUnique({ where: { id: input.viewer.agentId }, select: { ownerId: true } });
+      if (!agent?.ownerId || agent.ownerId !== doc.ownerId) throw new Error("document_review_forbidden");
+    }
     if (!SUBMITTABLE.has(doc.reviewState)) invalid();
     const known = await tx.principal.findMany({
       where: { id: { in: [...principalIds, ...(approver ? [approver] : [])] } },
