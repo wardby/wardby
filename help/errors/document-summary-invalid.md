@@ -9,7 +9,7 @@ appliesTo: ">=0.10.0"
 
 # Document summary not allowed
 
-`document_summary_invalid` (HTTP 400). `publish_version` refuses a `summary` that begins with "Restored v" followed by a number. The Edits tray and `list_document_versions` recognise restores by that text, so only `restore_document_version` may write it.
+`document_summary_invalid` (HTTP 400). `publish_version` refuses a `summary` that begins with "Restored v" followed by a number. The History tab and `list_document_versions` recognise restores by that text, so only `restore_document_version` may write it.
 
 What to do:
 

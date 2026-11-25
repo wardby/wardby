@@ -34,7 +34,7 @@ export type PlanPublishError =
   | "plan_publish_failed"
   | "plan_publish_busy";
 export type PlanDocumentChange =
-  "created" | "updated" | "unchanged" | "removed" | "approved_unchanged" | "archived_unchanged";
+  "created" | "updated" | "unchanged" | "removed" | "approved_unchanged" | "rejected_unchanged" | "archived_unchanged";
 
 /** pagePath is always "/d/<id>"; url only when the server's public origin is known (R10c). */
 export interface PublishedPlanDocument {
@@ -343,9 +343,11 @@ async function sameContent(
 function keptChange(reviewState: string): PlanDocumentChange {
   return reviewState === "approved"
     ? "approved_unchanged"
-    : reviewState === "archived"
-      ? "archived_unchanged"
-      : "unchanged";
+    : reviewState === "rejected"
+      ? "rejected_unchanged"
+      : reviewState === "archived"
+        ? "archived_unchanged"
+        : "unchanged";
 }
 
 const asKind = (kind: string): "document" | "design" => (kind === "design" ? "design" : "document");
@@ -547,6 +549,17 @@ async function publishSet(
       await report(existing.id, doc, keptChange(existing.reviewState));
       return;
     }
+    // A rejected document stays out of the plan, whatever the run wrote: a person reopens it to bring it back.
+    if (existing.reviewState === "rejected") {
+      await report(existing.id, doc, "rejected_unchanged");
+      return;
+    }
+    // An archived document that had left the plan (rejected, or removed by an earlier run, then archived) stays out:
+    // bringing it back would put an archived document in the plan, which then never counts as approved.
+    if (existing.removedFromPlan && existing.reviewState === "archived") {
+      await report(existing.id, doc, "archived_unchanged");
+      return;
+    }
     if (existing.removedFromPlan) {
       await db.document.update({ where: { id: existing.id }, data: { removedFromPlan: false } });
     }
@@ -604,10 +617,10 @@ async function publishSet(
         await report(existing.id, doc, "unchanged");
         return;
       }
-      // Approved or archived since it was read.
+      // Approved, rejected or archived since it was read.
       if (err instanceof Error && err.message === "document_locked") {
         const now = await db.document.findUnique({ where: { id: existing.id }, select: { reviewState: true } });
-        await report(existing.id, doc, now?.reviewState === "archived" ? "archived_unchanged" : "approved_unchanged");
+        await report(existing.id, doc, keptChange(now?.reviewState ?? "approved"));
         return;
       }
       throw err;
@@ -631,8 +644,13 @@ async function publishSet(
     if (given !== null && (given === GIVEN_UNREADABLE || !given.has(gone.planPath!))) continue;
     await hold();
     try {
-      // Never removed: an approved or archived document (read-only), or a revision's threads' document.
-      if (gone.reviewState === "approved" || gone.reviewState === "archived" || gone.id === deps.threadsDocument?.id) {
+      // Never removed: an approved, rejected or archived document (read-only), or a revision's threads' document.
+      if (
+        gone.reviewState === "approved" ||
+        gone.reviewState === "rejected" ||
+        gone.reviewState === "archived" ||
+        gone.id === deps.threadsDocument?.id
+      ) {
         await report(gone.id, { kind: asKind(gone.kind), path: gone.planPath! }, keptChange(gone.reviewState));
         continue;
       }
@@ -717,18 +735,21 @@ export async function planSummaryForRun(
         ? mine === 1
           ? "created"
           : "updated"
-        : row.removedFromPlan
-          ? "removed"
-          : row.reviewState === "approved"
-            ? "approved_unchanged"
-            : row.reviewState === "archived"
-              ? "archived_unchanged"
-              : "unchanged";
+        : row.reviewState === "rejected"
+          ? "rejected_unchanged"
+          : row.removedFromPlan
+            ? "removed"
+            : keptChange(row.reviewState);
     documents.push(describeRow(row, doc, change));
   }
-  // Not in this run's files: removed, unless the publish kept it (approved or archived, never removed).
+  // Not in this run's files: removed, unless the publish kept it (approved, rejected or archived, never removed).
   for (const row of byPath.values()) {
-    const change = row.removedFromPlan ? "removed" : keptChange(row.reviewState);
+    const change =
+      row.reviewState === "rejected"
+        ? "rejected_unchanged"
+        : row.removedFromPlan
+          ? "removed"
+          : keptChange(row.reviewState);
     documents.push(describeRow(row, { kind: asKind(row.kind), path: row.planPath! }, change));
   }
   const { skippedReviewers } = await planReviewers(db, { id: agentId, ownerId }, set.accessAgentId ?? agentId, setting);

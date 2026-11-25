@@ -70,7 +70,7 @@ agent), `publish_version`
 `get_document` (current or a `versionNumber`; the title and Markdown, or a design's files as `--- <path> ---` sections, come in one `documentText` field, wrapped as untrusted tool output) and
 `list_documents` (each with its `kind`). A design version is at most 2 MiB, a board at most 512 KB, and the MCP request body at most 1 MiB. `publish_version` sends the full file set in that one request, so a design over about 1 MiB cannot be updated over MCP: change it in the editor or send its threads to the agent (a larger design can still be created from a repository). `document_format_mismatch` means Markdown was sent for a design or files for a document; `board_format_invalid` and `board_too_large` refuse files that break the board format.
 
-Review tools: `submit_for_review`, `review_document`, `force_approve_document`, `reopen_document`, `archive_document` (scope `documents:write`) and `wait_for_review` (scope `documents:read`); `get_document` and `list_documents` include `reviewState`. See `document-review`.
+Review tools: `submit_for_review`, `review_document`, `force_approve_document`, `reject_document`, `choose_plan_option`, `reopen_document`, `archive_document` (scope `documents:write`) and `wait_for_review` (scope `documents:read`); `get_document` and `list_documents` include `reviewState`. See `document-review`.
 
 `export_document` (scope `documents:read`) exports a design as `board-html`
 (one board), `prototype` (one HTML file with a board switcher), `png` (one

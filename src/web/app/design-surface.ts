@@ -9,6 +9,7 @@
  * placed on events only (frame load, board and device changes, edits, the canvas's scroll and resizes);
  * there is no animation-frame loop.
  */
+import { icon, iconHtml } from "./icons.js";
 import type { Component } from "grapesjs";
 import {
   anchorForElement,
@@ -126,7 +127,7 @@ export class DesignSurface implements AnchorSurface {
       const canComment = !this.els.commentButton.hidden;
       const next =
         canComment && !withComment
-          ? [...kept, { label: "💬", command: COMMENT_COMMAND, attributes: { title: "Comment" } }]
+          ? [...kept, { label: iconHtml("comment"), command: COMMENT_COMMAND, attributes: { title: "Comment" } }]
           : !canComment && withComment
             ? kept.filter((t) => t.command !== COMMENT_COMMAND)
             : kept;
@@ -262,7 +263,7 @@ export class DesignSurface implements AnchorSurface {
   }
 
   emptyHint(): string {
-    return "Press C or 💬 Comment, then click the board.";
+    return "Press C or Comment, then click the board.";
   }
 
   keysHint(): string {
@@ -330,7 +331,10 @@ export class DesignSurface implements AnchorSurface {
       if (!pick) continue;
       pick.querySelector(".bcount")?.remove();
       const n = open.get(li.dataset.board ?? "") ?? 0;
-      if (n) pick.append(h("span", { class: "bcount", title: `${n} open comment${n === 1 ? "" : "s"}` }, `💬 ${n}`));
+      if (n)
+        pick.append(
+          h("span", { class: "bcount", title: `${n} open comment${n === 1 ? "" : "s"}` }, icon("comment"), `${n}`),
+        );
     }
   }
 

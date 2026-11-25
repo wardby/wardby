@@ -98,7 +98,13 @@ files in all. Over a limit, nothing is published
 ## Review and revisions from comments
 
 Each document is submitted for review to the reviewers and approved on its own
-page ([Review and approve documents](document-review.md)). Sending comment
+page ([Review and approve documents](document-review.md)). A document the plan
+does not need, such as a design option that was not chosen, can be **rejected**
+instead: it leaves the plan, so it no longer counts toward approval and the
+builder never gets it, and rejecting the last waiting document approves the plan
+([Reject](document-review.md#reject)). `plan.md` itself cannot be rejected. When the plan offers
+alternatives, **Pick an option** in the plan rail (or **Choose this option** on an option's Review tab) approves the one you pick and rejects the others in one step
+([Choose this option](document-review.md#choose-this-option)). Sending comment
 threads to the agent
 ([Comment threads and agents](comment-threads-and-agents.md)) starts the plan's
 own planner with the current version of every document still in the plan (not
@@ -109,16 +115,28 @@ stored in Wardby: a document of a plan stored in the repository, or any other
 document linked to a planner, is edited like any linked document (an ordinary
 run on its file).
 
-## The plan bar and links
+## The plan rail and links
 
-Every document in a set shows "Plan N · X of Y approved" over the documents the
-viewer can read, with a chip per document. A share-link guest sees only "Plan N"
-and their own document. Relative Markdown links between files of the set open
-the other documents or boards. The bar updates live with the other documents'
-review events.
+Every document in a set shows the plan as an outline on the left: "Plan N · X of Y
+approved", then `plan.md`, one group per set of **options** (the plan's
+alternatives, each set with its own **Pick** button: "Layout options" with **Pick a
+layout**, "Color options" with **Pick a color**), the **Other documents** (shared
+parts such as `screens/`), and what left the plan, folded under **Out of the plan**.
+
+The planner names alternatives `<set>-<letter>-<slug>`: `layout-a-tree/` and
+`layout-b-cards/` are one set, `color-a-light/` and `color-b-dark/` another. That
+is how the page knows which documents are options and which are shared; a
+document named otherwise is never treated as an option.
+On a design page the outline is at the top of the left panel. The page you are on
+is marked. Each row's name opens that document on the side-panel tab you have open
+(on Review, the next document opens on Review too); its state ("In review ›")
+opens it on its Review tab. A share-link guest sees only "Plan N" and their own
+document. Relative Markdown links between files of the set open the other
+documents or boards. The rail updates live with the other documents' review
+events.
 
 A planner run's pull request or issue comment may say "Plan N: being published."
-The publish finishes after the run; the links appear in the plan bar and in later
+The publish finishes after the run; the links appear in the plan rail and in later
 replies.
 
 ## Access

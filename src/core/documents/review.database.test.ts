@@ -694,6 +694,9 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       review: false,
       force: true,
       reopen: false,
+      // Not a plan document: no Reject (reject.database.test.ts covers plan documents).
+      reject: false,
+      choose: false,
       archive: true,
       unarchive: false,
     });
@@ -702,6 +705,8 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       review: true,
       force: false,
       reopen: false,
+      reject: false,
+      choose: false,
       archive: false,
       unarchive: false,
     });

@@ -10,6 +10,14 @@ import {
   reviewerChip,
   verdictControls,
   verdictLabels,
+  EVENT_LABEL,
+  isLockedState,
+  STATE_LABEL,
+  chooseCandidates,
+  optionFamily,
+  optionSets,
+  optionSetWords,
+  planAlternatives,
 } from "./review-model.js";
 
 const rv = (over: Partial<ReviewerPayload>): ReviewerPayload => ({
@@ -60,6 +68,8 @@ describe("review model", () => {
     expect(bannerText(review({ state: "changes_requested" }))).toBe("Changes requested · v4 · 1 of 2 approved");
     expect(bannerText(review({ state: "draft", progress: { approved: 0, total: 0 } }))).toBe("Draft · v4");
     expect(bannerText(review({ state: "archived" }))).toBe("Archived · v4");
+    // Rejected: the state and version only; the reviewers' progress no longer means anything.
+    expect(bannerText(review({ state: "rejected" }))).toBe("Rejected · v4");
     expect(
       bannerText(
         review({
@@ -71,6 +81,13 @@ describe("review model", () => {
     expect(bannerText(review({ state: "approved", progress: { approved: 2, total: 2 } }))).toBe(
       "Approved · v4 · 2 of 2 approved",
     );
+  });
+
+  it("names the rejected state and event, and counts it as locked", () => {
+    expect(STATE_LABEL.rejected).toBe("Rejected");
+    expect(EVENT_LABEL.rejected).toBe("rejected");
+    expect(isLockedState("rejected")).toBe(true);
+    expect(isLockedState("in_review")).toBe(false);
   });
 
   it("words each reviewer's chip", () => {
@@ -182,5 +199,74 @@ describe("review model", () => {
         }
       }
     });
+  });
+});
+
+describe("optionFamily", () => {
+  it("names the family of a one-letter or one-digit variant, and nothing for a word after the dash", () => {
+    expect(["option-a/", "option-b-cards/", "Option-C.md", "design-2.md", "option-a"].map(optionFamily)).toEqual([
+      "option-",
+      "option-",
+      "option-",
+      "design-",
+      "option-",
+    ]);
+    expect(["api-spec.md", "api-client.md", "screens/", "plan.md", "-a/"].map(optionFamily)).toEqual([
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  it("pre-ticks only the chosen option's family, never look-alike names", () => {
+    const d = (id: string, path: string, current = false) => ({
+      id,
+      title: path,
+      path,
+      reviewState: "in_review",
+      removed: false,
+      current,
+    });
+    const ticks = chooseCandidates([
+      d("a", "option-a/", true),
+      d("b", "option-b-cards/"),
+      d("s", "api-spec.md"),
+      d("c", "api-client.md"),
+    ]).map((c) => [c.path, c.ticked]);
+    expect(ticks).toEqual([
+      ["option-b-cards/", true],
+      ["api-spec.md", false],
+      ["api-client.md", false],
+    ]);
+    // Choosing api-spec.md pre-ticks nothing: api-client.md only looks like a sibling.
+    expect(
+      chooseCandidates([d("s", "api-spec.md", true), d("c", "api-client.md"), d("b", "option-b/")]).map(
+        (c) => c.ticked,
+      ),
+    ).toEqual([false, false]);
+    // Two look-alike documents are not alternatives either: Choose is not offered between them.
+    expect(planAlternatives([{ path: "api-spec.md" }, { path: "api-client.md" }, { path: "option-a/" }])).toEqual([]);
+  });
+});
+
+describe("option sets", () => {
+  it("groups alternatives by set, and names nothing an option without a set of two", () => {
+    const docs = ["layout-a/", "color-a/", "layout-b/", "notes.md", "api.md", "color-b/", "solo-a/"].map((path) => ({
+      path,
+    }));
+    expect(optionSets(docs).map((s) => [s.family, s.docs.map((d) => d.path)])).toEqual([
+      ["layout-", ["layout-a/", "layout-b/"]],
+      ["color-", ["color-a/", "color-b/"]],
+    ]);
+    // Documents not named as options are never alternatives, however many there are.
+    expect(planAlternatives([{ path: "notes.md" }, { path: "api.md" }])).toEqual([]);
+  });
+
+  it("words each set", () => {
+    expect(optionSetWords("option-")).toEqual({ title: "Options", noun: "option", pick: "Pick an option" });
+    expect(optionSetWords("layout-")).toEqual({ title: "Layout options", noun: "layout", pick: "Pick a layout" });
+    expect(optionSetWords("icon-").pick).toBe("Pick an icon");
   });
 });

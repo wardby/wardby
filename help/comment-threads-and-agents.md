@@ -42,7 +42,7 @@ A [design](designs.md) links to a repository **directory** instead of a file: `k
 
 ## Sending
 
-A person with `write` access selects open threads in the page and chooses "send to agent", or calls `send_threads_to_agent` with `documentId` and `threadIds` (up to 50). Wardby starts one coding run with trigger `comment`, gives the agent the current Markdown, the threads and the file path (all wrapped as untrusted content), and asks it to edit the file. The task text is redacted against the agent's current secret values at send time. A document that is approved or archived cannot be sent (`document_locked`).
+A person with `write` access selects open threads in the page and chooses "send to agent", or calls `send_threads_to_agent` with `documentId` and `threadIds` (up to 50). Wardby starts one coding run with trigger `comment`, gives the agent the current Markdown, the threads and the file path (all wrapped as untrusted content), and asks it to edit the file. The task text is redacted against the agent's current secret values at send time. A document that is approved, rejected or archived cannot be sent (`document_locked`).
 
 When the run ends:
 
@@ -59,7 +59,7 @@ If someone published a newer version while the run worked, Wardby never overwrit
 2. **One reconcile run.** If a file conflicts, Wardby starts one more coding run (trigger `comment`, as the person who sent the threads) on the latest version, for the threads still open (a thread resolved meanwhile is left out and gets no reply). Its task holds the current content and the agent's earlier edit (for a design, only the files it changed; when those do not fit the coding-task limit, a unified diff of each changed file instead), and asks it to re-apply its change on top of the current version, then reply. Each thread first gets the note "The document changed while the agent worked, so it is re-applying its edit on version 3." The reconcile run is checked like a send: the sender still needs `write`, the agent must still be usable for the document and its repository, the hourly limit counts it, and the task must fit. Its result is published like any send's, merge included.
 3. **The note.** If the edit is too large to send back even as a diff, each thread gets "The document changed after this was sent, and the agent's edit is too large to re-apply automatically, so it was not applied. It is on branch …". If the reconcile run cannot start for another reason, or it too finds a newer version it cannot merge with (only one reconcile run per send), each thread gets "The document changed after this was sent, so the agent's edit was not applied. It is on branch …", naming the branch with the agent's edit. If the reconcile run itself fails (or times out, or is refused), each thread gets "The agent run that re-applied the edit on the newer version failed, so the document was not changed. The earlier edit is on branch …", naming the first run's branch. The threads stay open; send them again to retry.
 
-If the document was approved or archived while the agent worked, the edit is not applied and nothing is merged or re-applied: each thread gets "The document was approved while the agent worked, so its edit was not applied. It is on branch …" (or "archived").
+If the document was approved, rejected or archived while the agent worked, the edit is not applied and nothing is merged or re-applied: each thread gets "The document was approved while the agent worked, so its edit was not applied. It is on branch …" (or "rejected", or "archived").
 
 The same applies to designs and to Codex and Claude Code agents alike.
 
@@ -78,4 +78,4 @@ A native agent can be a document's writer too: see [Documents from native agents
 
 - [Documents](documents.md)
 - [Documents from native agents](native-agent-documents.md) (a native writer takes sends too)
-- [Review and approve documents](document-review.md) (an approved or archived document takes no agent edit)
+- [Review and approve documents](document-review.md) (an approved, rejected or archived document takes no agent edit)

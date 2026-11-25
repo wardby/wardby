@@ -28,6 +28,11 @@ export interface PageBootstrap {
   shareToken?: string;
   loginUrl: string;
   logoutUrl: string;
+  /**
+   * The document as GET /d/api/<id> answers it, so the first frame needs no request (and a view transition
+   * from the previous page lands on the drawn page, not an empty one). Absent: the app fetches it.
+   */
+  initial?: unknown;
 }
 
 export { escapeHtml, scriptJson };
@@ -75,9 +80,11 @@ export function sendDocumentPage(
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     `<title>${escapeHtml(input.title)} · Wardby</title>` +
     (css ? `<link rel="stylesheet" href="${STATIC_PREFIX}${escapeHtml(css)}"${sri(cssDigest)}>` : "") +
-    '</head><body><div id="app"></div>' +
     `<script nonce="${nonce}">window.__WARDBY__ = ${scriptJson(input.bootstrap)};</script>` +
-    (js ? `<script src="${STATIC_PREFIX}${escapeHtml(js)}"${sri(jsDigest)}></script>` : "") +
+    // In the head, deferred and render-blocking: the first paint waits until the app has drawn #app (from the
+    // bootstrap's document), so moving between documents crossfades page to page, never through a blank one.
+    (js ? `<script src="${STATIC_PREFIX}${escapeHtml(js)}"${sri(jsDigest)} defer blocking="render"></script>` : "") +
+    '</head><body><div id="app"></div>' +
     "</body></html>";
   res
     .writeHead(200, {

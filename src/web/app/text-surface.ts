@@ -149,11 +149,11 @@ export class TextSurface implements AnchorSurface {
   }
 
   emptyHint(): string {
-    return "Select some text and click 💬 Comment.";
+    return "Select some text and click Comment.";
   }
 
   keysHint(): string {
-    return "Select text → 💬 Comment (⌘⌥M)";
+    return "Select text, then Comment (⌘⌥M)";
   }
 
   /** Scrolls a thread's highlight into view. */

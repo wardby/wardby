@@ -13,6 +13,7 @@
 import "grapesjs/dist/css/grapes.min.css";
 import "./styles.css";
 import "./designs.css";
+import { icon } from "./icons.js";
 import { warningText, type VersionWarning } from "../../core/documents/warnings.js";
 import { BOARD_ID } from "../../core/documents/boards/ids.js";
 import {
@@ -43,7 +44,14 @@ import {
   statusConnected,
   versionAction,
 } from "./live.js";
-import { planBarHost, renderPlanBar } from "./plan-bar.js";
+import {
+  planBarHost,
+  planDocumentsOf,
+  renderPlanBar,
+  requestedTab,
+  setPlanBarChooser,
+  setPlanBarTab,
+} from "./plan-bar.js";
 import { ReviewPanel } from "./review-ui.js";
 import { isLockedState, isReopenCopy } from "./review-model.js";
 
@@ -78,7 +86,9 @@ async function main(): Promise<void> {
   const api = new Api(boot);
   let payload: DocumentPayload;
   try {
-    payload = await api.load();
+    // The page's own copy first (synchronous, so the first paint is the drawn page); a fetch otherwise.
+    payload = boot.initial ?? (await api.load());
+    delete boot.initial;
   } catch (err) {
     if (err instanceof ApiError && err.code === "web_session_required") {
       location.assign(boot.loginUrl);
@@ -171,6 +181,8 @@ function mount(
   const lockBanner = h("div", { class: "banner lock-banner", hidden: true, role: "note" });
   const reviewBanner = h("div", { class: "review-banner", role: "status" });
   const planBar = planBarHost();
+  // "Pick an option…" posts the choice to the chosen option (a guest's partial bar never offers it).
+  setPlanBarChooser(planBar, (documentId, body) => api.reviewOf(documentId, body));
   renderPlanBar(planBar, payload.planSet);
   const saveBanner = h("div", { class: "banner bad", hidden: true, role: "alert" });
 
@@ -181,15 +193,51 @@ function mount(
       id,
     ),
   );
-  const undoBtn = h("button", { type: "button", title: "Undo" }, "Undo");
-  const redoBtn = h("button", { type: "button", title: "Redo" }, "Redo");
-  const overviewBtn = h("button", { type: "button", data: { action: "overview" } }, "▦ Overview");
-  const playBtn = h("button", { type: "button", data: { action: "play" } }, "▶ Play");
-  const exportBtn = h("button", { type: "button", data: { action: "export" } }, "Export ▾");
-  const commentBtn = h("button", { type: "button", class: "primary", data: { action: "comment" } }, "💬 Comment");
+  // Icon-only, as on the document page: the action is the accessible name, the shortcut is in the tooltip.
+  const undoBtn = h(
+    "button",
+    { type: "button", class: "icon-only", title: "Undo (⌘Z)", aria: { label: "Undo" } },
+    icon("undo"),
+  );
+  const redoBtn = h(
+    "button",
+    { type: "button", class: "icon-only", title: "Redo (⇧⌘Z)", aria: { label: "Redo" } },
+    icon("redo"),
+  );
+  // The top bar's actions carry the same line icons as the review buttons.
+  const overviewBtn = h("button", { type: "button", data: { action: "overview" } }, icon("overview"), "Overview");
+  const playBtn = h("button", { type: "button", data: { action: "play" } }, icon("play"), "Play");
+  const exportBtn = h("button", { type: "button", data: { action: "export" } }, icon("export"), "Export ▾");
+  const commentBtn = h(
+    "button",
+    { type: "button", class: "primary", data: { action: "comment" } },
+    icon("comment"),
+    "Comment",
+  );
 
-  const boardsList = h("ul", { class: "boards", aria: { label: "Boards" } });
-  const addBoardBtn = h("button", { type: "button", class: "add-board", hidden: !canEdit }, "+ Board");
+  // The boards are tabs above the canvas (wrapping to two lines, then "+N more"); the left panel holds the plan
+  // and, for editors, Layers.
+  const boardsList = h("ul", { class: "boards board-tabs", aria: { label: "Boards" } });
+  const addBoardBtn = h(
+    "button",
+    { type: "button", class: "add-board", hidden: !canEdit, title: "Add a board", aria: { label: "Add a board" } },
+    "+",
+  );
+  const moreBoardsBtn = h("button", { type: "button", class: "more-boards-open", aria: { haspopup: "menu" } });
+  const moreBoardsFilter = h("input", {
+    type: "search",
+    attrs: { placeholder: "Filter boards" },
+    aria: { label: "Filter boards" },
+  });
+  const moreBoardsList = h("ul", { class: "more-boards-list" });
+  const moreBoardsMenu = h(
+    "div",
+    { class: "more-boards-menu", role: "menu", hidden: true },
+    moreBoardsFilter,
+    moreBoardsList,
+  );
+  const moreBoardsItem = h("li", { class: "more-boards", hidden: true }, moreBoardsBtn, moreBoardsMenu);
+  const addBoardItem = h("li", { class: "add-board-item", hidden: !canEdit }, addBoardBtn);
   const layersPanel = h("div", { class: "gjs-host layers" });
   const stylesPanel = h("div", { class: "gjs-host styles" });
   const selectorsPanel = h("div", { class: "gjs-host selectors" });
@@ -219,7 +267,9 @@ function mount(
     review: h("div", { class: "tabpane", role: "tabpanel" }, reviewPanelEl),
     history: h("div", { class: "tabpane", role: "tabpanel" }, historyPanel),
   };
-  const TABS: Tab[] = ["style", "settings", "comments", "review", "history"];
+  const TABS: Tab[] = ["comments", "review", "history", "style", "settings"];
+  /** Between the tabs every page has (Comments, Review, History) and the editor's Style and Settings. */
+  const editToolsSep = h("span", { class: "tab-sep", hidden: !canEdit, aria: { hidden: "true" } });
   const showTab = (which: Tab) => {
     for (const k of TABS) {
       const on = k === which;
@@ -227,6 +277,7 @@ function mount(
       tabs[k].setAttribute("aria-selected", String(on));
       panes[k].hidden = !on;
     }
+    setPlanBarTab(planBar, which);
   };
   for (const k of TABS) {
     tabs[k].addEventListener("click", () => {
@@ -234,19 +285,56 @@ function mount(
       if (k === "history") void designHistory.open();
     });
   }
-  showTab(canEdit ? "style" : "comments");
+  // Arriving from another document of the plan: open the tab that was open there; Style and Settings
+  // only for someone who can edit.
+  const askedTab = requestedTab(canEdit ? TABS : (["comments", "review", "history"] as const));
+  showTab(askedTab ?? (canEdit ? "style" : "comments"));
 
-  const layersHeading = h("h2", { hidden: !canEdit }, "Layers");
-  const layersHost = h("div", { hidden: !canEdit }, layersPanel);
+  // Layers: closed until opened (remembered in this browser), anchored at the bottom of the left panel.
+  let layersOpen = false;
+  try {
+    layersOpen = localStorage.getItem("wardby.layersOpen") === "1";
+  } catch {
+    /* no storage: closed */
+  }
+  const layersHeading = h("button", {
+    type: "button",
+    class: "layers-toggle",
+    hidden: !canEdit,
+    aria: { expanded: String(layersOpen), controls: "layers-host" },
+  });
+  const layersHost = h(
+    "div",
+    { class: "layers-host", hidden: !canEdit || !layersOpen, attrs: { id: "layers-host" } },
+    layersPanel,
+  );
+  const showLayersState = () => {
+    layersHeading.textContent = `${layersOpen ? "▾" : "▸"} Layers`;
+    layersHeading.setAttribute("aria-expanded", String(layersOpen));
+  };
+  showLayersState();
+  layersHeading.addEventListener("click", () => {
+    layersOpen = !layersOpen;
+    try {
+      localStorage.setItem("wardby.layersOpen", layersOpen ? "1" : "0");
+    } catch {
+      /* not kept */
+    }
+    layersHost.hidden = !layersOpen;
+    showLayersState();
+  });
   const leftSide = h(
     "aside",
-    { class: "dside left", aria: { label: "Boards and layers" } },
-    h("h2", {}, "Boards"),
-    boardsList,
-    addBoardBtn,
-    layersHeading,
-    layersHost,
+    { class: "dside left", aria: { label: "Plan and layers" } },
+    planBar,
+    h("div", { class: "left-fill" }),
+    h("div", { class: "layers-section" }, layersHeading, layersHost),
   );
+  // Nothing to show on the left (no plan, and not an editor): the canvas takes the room.
+  const syncLeft = () => {
+    leftSide.hidden = planBar.hidden && !canEdit;
+  };
+  syncLeft();
   const undoGroup = h("div", { class: "group", hidden: !canEdit }, undoBtn, redoBtn);
   clear(root);
   append(
@@ -267,16 +355,21 @@ function mount(
           title,
           version,
         ),
-        h("div", { class: "group", role: "group", aria: { label: "Device" } }, ...deviceButtons),
-        undoGroup,
-        h("div", { class: "group" }, overviewBtn, playBtn, exportBtn, commentBtn),
+        // The review status, beside what the page is; then the page's actions.
+        reviewBanner,
+        h("div", { class: "group page-actions" }, overviewBtn, playBtn, exportBtn, commentBtn),
         saveState,
         liveNote,
         who,
         account,
       ),
-      reviewBanner,
-      planBar,
+      // The editing row: what the canvas shows (device width, for everyone) and, for editors, undo and redo.
+      h(
+        "div",
+        { class: "toolbar design-toolbar", role: "toolbar", aria: { label: "Canvas" } },
+        h("div", { class: "group", role: "group", aria: { label: "Device" } }, ...deviceButtons),
+        undoGroup,
+      ),
       banner,
       changedBanner,
       lockBanner,
@@ -285,24 +378,30 @@ function mount(
         "div",
         { class: "design-main" },
         leftSide,
-        canvasWrap,
+        h(
+          "div",
+          { class: "canvas-col" },
+          h("nav", { class: "board-strip", aria: { label: "Boards" } }, boardsList),
+          canvasWrap,
+        ),
         h(
           "aside",
           { class: "dside right", aria: { label: "Style, settings, comments and review" } },
           h(
             "div",
-            { class: "tabs", role: "tablist" },
-            tabs.style,
-            tabs.settings,
+            { class: "tray-tabs", role: "tablist", aria: { label: "Side panel" } },
             tabs.comments,
             tabs.review,
             tabs.history,
+            editToolsSep,
+            tabs.style,
+            tabs.settings,
           ),
-          panes.style,
-          panes.settings,
           panes.comments,
           panes.review,
           panes.history,
+          panes.style,
+          panes.settings,
         ),
       ),
     ),
@@ -445,10 +544,75 @@ function mount(
       }
       boardsList.append(li);
     });
+    boardsList.append(moreBoardsItem, addBoardItem);
+    fitBoardTabs();
     surface?.refreshCounts();
   };
+  /**
+   * Two lines of tabs at most: boards that would start a third line are hidden from the strip (the current one
+   * never is) and listed under "+N more", in their order, with a filter.
+   */
+  const fitBoardTabs = () => {
+    const tabs = Array.from(boardsList.querySelectorAll<HTMLLIElement>(":scope > li[data-board]"));
+    for (const t of tabs) t.hidden = false;
+    moreBoardsItem.hidden = true;
+    const rows = () =>
+      new Set(
+        Array.from(boardsList.children)
+          .filter((c): c is HTMLElement => c instanceof HTMLElement && !c.hidden)
+          .map((c) => c.offsetTop),
+      ).size;
+    const hiddenTabs: HTMLLIElement[] = [];
+    if (rows() > 2) {
+      moreBoardsItem.hidden = false;
+      for (let k = tabs.length - 1; k >= 0 && rows() > 2; k--) {
+        if (tabs[k].classList.contains("on")) continue;
+        tabs[k].hidden = true;
+        hiddenTabs.unshift(tabs[k]);
+      }
+    }
+    moreBoardsBtn.textContent = `+${hiddenTabs.length} more ▾`;
+    const list = boards.manifest().boards.filter((b) => hiddenTabs.some((t) => t.dataset.board === b.id));
+    const renderMore = () => {
+      clear(moreBoardsList);
+      const q = moreBoardsFilter.value.trim().toLowerCase();
+      for (const b of list.filter((x) => !q || x.name.toLowerCase().includes(q))) {
+        moreBoardsList.append(
+          h(
+            "li",
+            {},
+            h(
+              "button",
+              {
+                type: "button",
+                role: "menuitem",
+                disabled: measuring,
+                onClick: () => {
+                  moreBoardsMenu.hidden = true;
+                  if (!measuring) boards.selectBoard(b.id);
+                },
+              },
+              b.name,
+            ),
+          ),
+        );
+      }
+    };
+    moreBoardsFilter.oninput = renderMore;
+    renderMore();
+  };
+  moreBoardsBtn.addEventListener("click", () => {
+    moreBoardsMenu.hidden = !moreBoardsMenu.hidden;
+    if (!moreBoardsMenu.hidden) {
+      moreBoardsFilter.value = "";
+      moreBoardsFilter.dispatchEvent(new Event("input"));
+      moreBoardsFilter.focus();
+    }
+  });
+  window.addEventListener("resize", () => fitBoardTabs());
   document.addEventListener("mousedown", (e) => {
     if (!(e.target as Element).closest?.(".boards li")) closeMenus();
+    if (!(e.target as Element).closest?.(".more-boards")) moreBoardsMenu.hidden = true;
   });
   boards.onBoard(() => renderBoards());
   addBoardBtn.addEventListener("click", () => {
@@ -549,6 +713,8 @@ function mount(
     },
     onRestored: () => void refresh(),
   });
+  // Arriving on History from another document of the plan (?tab=history): load it, as a click on the tab does.
+  if (askedTab === "history") void designHistory.open();
   let historyNumber = baseNumber;
   /** Threads, the boards list and History; the mount shows the first payload's review through the panel itself. */
   const applyThreads = (p: DocumentPayload) => {
@@ -589,9 +755,11 @@ function mount(
   const showSave = (text: string, reload = false) => {
     clear(saveState);
     saveState.className = `save${reload ? " bad" : ""}`;
+    // A fixed-width slot (styles.css): the full text as a tooltip when a long one is cut short.
+    saveState.title = text;
     append(
       saveState,
-      text,
+      h("span", { class: "save-text" }, text),
       reload ? h("button", { type: "button", onClick: () => location.reload() }, "Reload") : null,
     );
   };
@@ -843,6 +1011,7 @@ function mount(
     }
     // The plan bar follows every refetch, also while a newer version waits for unsaved edits.
     renderPlanBar(planBar, next.planSet);
+    syncLeft();
     const act = versionAction({
       shown: baseNumber,
       latest: next.version.number,
@@ -876,6 +1045,7 @@ function mount(
   const refreshPlan = coalesce(async () => {
     try {
       renderPlanBar(planBar, (await api.load()).planSet);
+      syncLeft();
     } catch {
       /* the next event or reconnect tries again */
     }
@@ -901,6 +1071,7 @@ function mount(
     {
       api,
       banner: reviewBanner,
+      planDocuments: () => planDocumentsOf(planBar),
       panel: reviewPanelEl,
       showReviewTab: () => showTab("review"),
       showChanges: (from, to) => {
@@ -932,9 +1103,11 @@ function mount(
           if (on) (document.activeElement as HTMLElement | null)?.blur();
           tabs.style.hidden = on;
           tabs.settings.hidden = on;
+          editToolsSep.hidden = on;
           addBoardBtn.hidden = on;
+          addBoardItem.hidden = on;
           layersHeading.hidden = on;
-          layersHost.hidden = on;
+          layersHost.hidden = on || !layersOpen;
           undoGroup.hidden = on;
           if (on && (!panes.style.hidden || !panes.settings.hidden)) showTab("comments");
           renderBoards();

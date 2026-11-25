@@ -108,7 +108,16 @@ const placeText = (place: EditPlace): string =>
 export function versionConflictReply(place: EditPlace): string {
   return `The document changed after this was sent, so the agent's edit was not applied. It is ${placeText(place)}.`;
 }
-/** The reply when the document was approved or archived while the agent worked: no merge or reconcile is tried. */
+/**
+ * The locked state a reply names, read after a publish was refused: approved, rejected or archived as it is. A state
+ * that is not a locked one (or a document deleted meanwhile, null) reads as approved: the reply must still say the
+ * edit was not applied.
+ */
+export function lockedStateForReply(state: string | null): LockedState {
+  return state !== null && isLocked(state) ? state : "approved";
+}
+
+/** The reply when the document was approved, rejected or archived while the agent worked: no merge or reconcile is tried. */
 export function lockedEditReply(state: LockedState, place: EditPlace): string {
   return `The document was ${state} while the agent worked, so its edit was not applied. It is ${placeText(place)}.`;
 }
@@ -1126,11 +1135,9 @@ async function applyRunEdit(
     }
   };
   // Locked between the read above and a publish: the state at that moment names the reply.
-  // Anything but archived reads as approved, a document deleted meanwhile (null) included: the
-  // reply must still say the edit was not applied, and approved is the only other locked state.
   const locked = async (): Promise<RunEdit> => ({
     kind: "locked",
-    state: (await documentReviewState(db, documentId)) === "archived" ? "archived" : "approved",
+    state: lockedStateForReply(await documentReviewState(db, documentId)),
     place,
   });
 

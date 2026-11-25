@@ -36,6 +36,7 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { logger } from "../core/logger.js";
 import { documentAccess, type Viewer } from "../core/documents/access.js";
 import { notifyDocumentChange } from "../core/documents/events.js";
 import { principalNames } from "../core/documents/comments.js";
@@ -43,6 +44,7 @@ import { registerGuest, resolveShareToken } from "../core/documents/share-links.
 import { readCookie } from "../mcp/auth/self-hosted/cookies.js";
 import {
   describeViewer,
+  documentPayload,
   getDocumentJson,
   getFrames,
   getMentions,
@@ -88,6 +90,8 @@ import {
 } from "./session.js";
 import { openDocumentStream } from "./events.js";
 import { DEFAULT_ASSETS_ROOT, readIntegrity, readManifest, serveStatic, STATIC_PREFIX } from "./static.js";
+
+const routesLog = logger.child({ module: "web" });
 
 export type { WebDeps } from "./context.js";
 
@@ -269,6 +273,18 @@ async function documentPage(req: IncomingMessage, res: ServerResponse, id: strin
     loginUrl: loginUrl(`/d/${id}`),
     logoutUrl: LOGOUT_URL,
   };
+  // The document itself, for the first frame; if building it fails, the page fetches it as before.
+  try {
+    bootstrap.initial = await documentPayload(deps, id, ctx.viewer, false);
+  } catch (err) {
+    // The page still works (it fetches the document); say why the first frame needs a request. Names and fixed
+    // codes only, never a message that could carry content.
+    const code = err instanceof Error && /^[a-z_]{1,64}$/.test(err.message) ? err.message : undefined;
+    routesLog.warn(
+      { errorName: err instanceof Error ? err.name : typeof err, ...(code ? { code } : {}) },
+      "page bootstrap without the document; the page fetches it",
+    );
+  }
   sendDocumentPage(res, { title: doc.title, bootstrap, bundle, ...assets });
 }
 
