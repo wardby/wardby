@@ -347,6 +347,47 @@ describe("grant_access / revoke_access / list_access", () => {
     await client.close();
   });
 
+  it("an agent the grantor cannot read looks like an unknown one; a read grant on it makes it grantable", async () => {
+    const hidden: Row[] = [...agents, { id: "theirs", name: "theirs", ownerId: "alice" }];
+    const db = fakeDb(hidden, people);
+    const { client } = await connect(db, ctx(db, "owner"));
+    const grant = (agentId: string) =>
+      client.callTool({
+        name: "grant_access",
+        arguments: { resourceType: "document", resourceId: "d1", grantee: { agentId }, level: "read" },
+      });
+    const unknown = await grant("nope");
+    const unseen = await grant("theirs");
+    expect(unseen.isError).toBe(true);
+    expect(text(unseen)).toBe(text(unknown));
+    expect(db.resourceGrant.rows).toHaveLength(0);
+    await client.close();
+
+    const db2 = fakeDb(hidden, people, [
+      { resourceType: "agent", resourceId: "theirs", principalId: "owner", level: "read" },
+    ]);
+    const second = await connect(db2, ctx(db2, "owner"));
+    const ok = await second.client.callTool({
+      name: "grant_access",
+      arguments: { resourceType: "document", resourceId: "d1", grantee: { agentId: "theirs" }, level: "read" },
+    });
+    expect(ok.isError).toBeFalsy();
+    expect(db2.resourceGrant.rows.some((r: { granteeKey: string }) => r.granteeKey === "agent:theirs")).toBe(true);
+    await second.client.close();
+  });
+
+  it("revoking an agent grantee that does not exist is idempotent", async () => {
+    const db = fakeDb(agents, people);
+    const { client } = await connect(db, ctx(db, "owner"));
+    const result = await client.callTool({
+      name: "revoke_access",
+      arguments: { resourceType: "document", resourceId: "d1", grantee: { agentId: "deleted" } },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(text(result)).revoked).toBe(false);
+    await client.close();
+  });
+
   it("only the document's owner may grant it to an agent, like a principal grant", async () => {
     const db = fakeDb(agents, people, [
       { resourceType: "document", resourceId: "d1", principalId: "alice", level: "write" },

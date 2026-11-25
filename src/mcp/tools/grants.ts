@@ -86,12 +86,22 @@ function checkAgentGrantee(type: ResourceType, grantee: Grantee, level?: string)
   }
 }
 
-/** The grantee agent of an agent grant (missing looks like an unknown principal), or null. */
-async function resolveGranteeAgent(db: GrantTx, grantee: Grantee): Promise<{ id: string; name: string } | null> {
+/**
+ * The grantee agent of an agent grant, or null. The grantor must hold at least
+ * read on it; an agent they cannot see looks like an unknown principal.
+ */
+async function resolveGranteeAgent(
+  ctx: McpRequestContext,
+  db: GrantTx,
+  grantee: Grantee,
+): Promise<{ id: string; name: string } | null> {
   if (grantee === "everyone" || !("agentId" in grantee)) return null;
-  const agent = await db.agent.findUnique({ where: { id: grantee.agentId }, select: { id: true, name: true } });
-  if (!agent) throw new McpError(404, "Grantee not found: they must have signed in to wardby at least once.");
-  return agent;
+  const agent = await db.agent.findUnique({ where: { id: grantee.agentId } });
+  const visible = agent !== null && atLeast("agent", await agentAccess(ctx, agent, db), "read");
+  if (!agent || !visible) {
+    throw new McpError(404, "Grantee not found: they must have signed in to wardby at least once.");
+  }
+  return { id: agent.id, name: agent.name };
 }
 
 /** The grantee's principal (must have signed in once: never created here), or null for everyone or an agent. */
@@ -257,7 +267,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       checkAgentGrantee(type, args.grantee, args.level);
       const { resource, principal, agent, grant, attachmentsRemoved } = await inSerializable(ctx, async (tx) => {
         const resource = await requireOwnedResource(ctx, tx, type, args.resourceId);
-        const agent = await resolveGranteeAgent(tx, args.grantee);
+        const agent = await resolveGranteeAgent(ctx, tx, args.grantee);
         const principal = await resolveGrantee(tx, args.grantee);
         if (principal && (principal.id === resource.ownerId || principal.id === ctx.principal.id)) {
           throw new McpError(
@@ -339,12 +349,13 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       checkAgentGrantee(type, args.grantee);
       const { count, attachmentsRemoved } = await inSerializable(ctx, async (tx) => {
         const resource = await requireOwnedResource(ctx, tx, type, args.resourceId);
-        const agent = await resolveGranteeAgent(tx, args.grantee);
-        const granteeKey = agent
-          ? agentGranteeKey(agent.id)
-          : args.grantee === "everyone"
-            ? EVERYONE_KEY
-            : principalGranteeKey((await resolveGrantee(tx, args.grantee))!.id);
+        // An agent grantee need not exist or be visible: delete by key, leaking nothing.
+        const granteeKey =
+          args.grantee !== "everyone" && "agentId" in args.grantee
+            ? agentGranteeKey(args.grantee.agentId)
+            : args.grantee === "everyone"
+              ? EVERYONE_KEY
+              : principalGranteeKey((await resolveGrantee(tx, args.grantee))!.id);
         const { count } = await tx.resourceGrant.deleteMany({
           where: { resourceType: type, resourceId: resource.id, granteeKey },
         });
