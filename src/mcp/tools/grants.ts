@@ -16,9 +16,11 @@
 import { z } from "zod";
 import { Prisma, type Principal, type PrismaClient } from "#prisma";
 import {
+  AGENT_DOCUMENT_GRANT_MAX,
   EVERYONE_KEY,
   EVERYONE_MAX,
   LEVELS,
+  agentGranteeKey,
   agentOwnerBindings,
   SHAREABLE_TYPES,
   accessRank,
@@ -42,6 +44,7 @@ const GranteeSchema = z.union([
   z.literal("everyone"),
   z.object({ subject: z.string().min(1).max(512) }).strict(),
   z.object({ principalId: z.string().min(1).max(128) }).strict(),
+  z.object({ agentId: z.string().min(1).max(128) }).strict(),
 ]);
 
 const TargetSchema = z.object({
@@ -71,9 +74,29 @@ function shareableType(value: string): ResourceType {
   return value;
 }
 
-/** The grantee's principal (must have signed in once: never created here), or null for everyone. */
+/** Agent grantees are for documents, at read or comment (write comes from linking the agent: #625). */
+function checkAgentGrantee(type: ResourceType, grantee: Grantee, level?: string): void {
+  if (grantee === "everyone" || !("agentId" in grantee)) return;
+  if (type !== "document") throw new McpError(400, "Agent grantees are for documents only.");
+  if (level !== undefined && accessRank("document", level) > accessRank("document", AGENT_DOCUMENT_GRANT_MAX)) {
+    throw new McpError(
+      400,
+      "document_agent_grant_level: an agent gets read or comment on a document; to make it the writer, link it with link_document.",
+    );
+  }
+}
+
+/** The grantee agent of an agent grant (missing looks like an unknown principal), or null. */
+async function resolveGranteeAgent(db: GrantTx, grantee: Grantee): Promise<{ id: string; name: string } | null> {
+  if (grantee === "everyone" || !("agentId" in grantee)) return null;
+  const agent = await db.agent.findUnique({ where: { id: grantee.agentId }, select: { id: true, name: true } });
+  if (!agent) throw new McpError(404, "Grantee not found: they must have signed in to wardby at least once.");
+  return agent;
+}
+
+/** The grantee's principal (must have signed in once: never created here), or null for everyone or an agent. */
 async function resolveGrantee(db: GrantTx, grantee: Grantee): Promise<Principal | null> {
-  if (grantee === "everyone") return null;
+  if (grantee === "everyone" || "agentId" in grantee) return null;
   const principal =
     "subject" in grantee
       ? await db.principal.findUnique({ where: { subject: grantee.subject } })
@@ -171,7 +194,8 @@ const TYPE_PROPERTIES = {
   resourceId: { type: "string" },
 };
 const GRANTEE_PROPERTY = {
-  description: 'One principal, as {"subject": "<IdP subject>"} or {"principalId": "<id>"}, or "everyone".',
+  description:
+    'One principal, as {"subject": "<IdP subject>"} or {"principalId": "<id>"}, or "everyone". On a document it may also be one agent, as {"agentId": "<id>"}, at read or comment.',
   anyOf: [
     { type: "string", enum: ["everyone"] },
     {
@@ -185,6 +209,12 @@ const GRANTEE_PROPERTY = {
       additionalProperties: false,
       properties: { principalId: { type: "string" } },
       required: ["principalId"],
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: { agentId: { type: "string" } },
+      required: ["agentId"],
     },
   ],
 };
@@ -202,7 +232,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       "Consequences: execute lets them run your agent with your tools, secrets, datastores and repository, and every run shares the agent's memory; they supply no task text unless it's a coding agent with allowWebhookTaskOverride. " +
       "Write lets them rewrite what those runs do: the prompt can make a run use everything the agent can already reach (the capabilities you granted, its memory, its linked repositories), and on a coding agent the prompt is part of every coding task, so write directs work done with your GitHub access. " +
       "MCP servers (resourceType mcp_server): read < use < write; use on an MCP server lets them attach it to their own agents; its tools then run with your server's credentials. Write adds nothing beyond use: only the owner updates, refreshes, deletes or re-grants a server. Lowering a grant to read (including everyone from use to read) detaches the server from every agent whose owner can no longer use it, and their runs' next call to it is refused. " +
-      "Documents (resourceType document): read < comment < write; everyone may get at most comment. Only the owner manages grants. " +
+      "Documents (resourceType document): read < comment < write; everyone may get at most comment. An agent may be granted read or comment with {agentId}; to make an agent the writer, link it with link_document. Only the owner manages grants. " +
       "Granting again replaces the level. Everyone may get write only on a native agent with no secrets, datastores, repositories, sub-agents, MCP servers or tool capabilities. The grantee must have signed in once.",
     inputSchema: {
       type: "object",
@@ -224,8 +254,10 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       if (!isLevel(type, args.level)) {
         throw new McpError(400, `Level "${args.level}" is not valid for ${type} (${LEVELS[type].join(" < ")}).`);
       }
-      const { resource, principal, grant, attachmentsRemoved } = await inSerializable(ctx, async (tx) => {
+      checkAgentGrantee(type, args.grantee, args.level);
+      const { resource, principal, agent, grant, attachmentsRemoved } = await inSerializable(ctx, async (tx) => {
         const resource = await requireOwnedResource(ctx, tx, type, args.resourceId);
+        const agent = await resolveGranteeAgent(tx, args.grantee);
         const principal = await resolveGrantee(tx, args.grantee);
         if (principal && (principal.id === resource.ownerId || principal.id === ctx.principal.id)) {
           throw new McpError(
@@ -233,10 +265,10 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
             "The owner already has full access; a grant to yourself or the owner changes nothing.",
           );
         }
-        if (!principal && accessRank(type, args.level) > accessRank(type, EVERYONE_MAX[type])) {
+        if (!principal && !agent && accessRank(type, args.level) > accessRank(type, EVERYONE_MAX[type])) {
           throw new McpError(400, `An everyone grant can be at most ${EVERYONE_MAX[type]}.`);
         }
-        if (!principal && atLeast(type, args.level, "write")) {
+        if (!principal && !agent && atLeast(type, args.level, "write")) {
           const bindings = await agentOwnerBindings(tx, resource.id);
           if (bindings.length) {
             throw new McpError(
@@ -245,14 +277,19 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
             );
           }
         }
-        const granteeKey = principal ? principalGranteeKey(principal.id) : EVERYONE_KEY;
+        const granteeKey = principal
+          ? principalGranteeKey(principal.id)
+          : agent
+            ? agentGranteeKey(agent.id)
+            : EVERYONE_KEY;
         const grant = await tx.resourceGrant.upsert({
           where: { resourceType_resourceId_granteeKey: { resourceType: type, resourceId: resource.id, granteeKey } },
           create: {
             resourceType: type,
             resourceId: resource.id,
-            granteeKind: principal ? "principal" : "everyone",
+            granteeKind: principal ? "principal" : agent ? "agent" : "everyone",
             granteePrincipalId: principal?.id ?? null,
+            granteeAgentId: agent?.id ?? null,
             granteeKey,
             level: args.level,
             source: "owner",
@@ -265,18 +302,20 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
           type === "mcp_server" && !atLeast(type, args.level, "use")
             ? await pruneUnusableMcpAttachments(tx, resource.id)
             : 0;
-        return { resource, principal, grant, attachmentsRemoved };
+        return { resource, principal, agent, grant, attachmentsRemoved };
       });
       return textResult({
         granted: true,
         resourceType: type,
         resourceId: resource.id,
         // Echo only what the caller supplied: a principalId never reveals a subject (review M4).
-        grantee: !principal
-          ? "everyone"
-          : args.grantee !== "everyone" && "subject" in args.grantee
-            ? { principalId: principal.id, subject: principal.subject }
-            : { principalId: principal.id },
+        grantee: agent
+          ? { agentId: agent.id }
+          : !principal
+            ? "everyone"
+            : args.grantee !== "everyone" && "subject" in args.grantee
+              ? { principalId: principal.id, subject: principal.subject }
+              : { principalId: principal.id },
         level: grant.level,
         ...(attachmentsRemoved > 0 ? { attachmentsRemoved } : {}),
       });
@@ -297,10 +336,13 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
     handler: async (rawArgs: unknown, ctx) => {
       const args = parse(RevokeSchema, "revoke_access", rawArgs);
       const type = shareableType(args.resourceType);
+      checkAgentGrantee(type, args.grantee);
       const { count, attachmentsRemoved } = await inSerializable(ctx, async (tx) => {
         const resource = await requireOwnedResource(ctx, tx, type, args.resourceId);
-        const granteeKey =
-          args.grantee === "everyone"
+        const agent = await resolveGranteeAgent(tx, args.grantee);
+        const granteeKey = agent
+          ? agentGranteeKey(agent.id)
+          : args.grantee === "everyone"
             ? EVERYONE_KEY
             : principalGranteeKey((await resolveGrantee(tx, args.grantee))!.id);
         const { count } = await tx.resourceGrant.deleteMany({
@@ -370,14 +412,21 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
         ? await ctx.db.principal.findMany({ where: { id: { in: principalIds } } })
         : [];
       const subjectOf = new Map(principals.map((p) => [p.id, p.subject]));
+      const agentIds = grants.flatMap((g) => (g.granteeAgentId ? [g.granteeAgentId] : []));
+      const granteeAgents = agentIds.length
+        ? await ctx.db.agent.findMany({ where: { id: { in: agentIds } }, select: { id: true, name: true } })
+        : [];
+      const agentNameOf = new Map(granteeAgents.map((a) => [a.id, a.name]));
       return textResult({
         resourceType: type,
         resourceId: resource.id,
         ownerId: resource.ownerId,
         grants: grants.map((g) => ({
-          grantee: g.granteePrincipalId
-            ? { principalId: g.granteePrincipalId, subject: subjectOf.get(g.granteePrincipalId) ?? null }
-            : "everyone",
+          grantee: g.granteeAgentId
+            ? { agentId: g.granteeAgentId, agentName: agentNameOf.get(g.granteeAgentId) ?? null }
+            : g.granteePrincipalId
+              ? { principalId: g.granteePrincipalId, subject: subjectOf.get(g.granteePrincipalId) ?? null }
+              : "everyone",
           level: g.level,
           source: g.source,
           grantedById: g.grantedById,
