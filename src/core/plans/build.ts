@@ -4,7 +4,8 @@
  * any counted document of which is not approved refuses the run before it starts. The approved
  * versions go to the builder twice: the Markdown as an untrusted section of the stored request (R9,
  * never cut), and every document as files in the plan folder (R14), so the rewritten links name files
- * that exist. All of it is redacted by exact value against the builder's secret values at send time;
+ * that exist. A plan too large for the request whole gets a compact section instead: the approved
+ * versions, a pointer to the plan folder, and the ticket's own section of plan.md (compactTaskSection). All of it is redacted by exact value against the builder's secret values at send time;
  * without them the gate refuses rather than pass unchecked text. Errors name documents by path only.
  */
 import type { PrismaClient } from "#prisma";
@@ -239,15 +240,17 @@ async function composeBuildPlan(
   const entries = documents.map((d) => ({ id: d.id, path: d.path, kind: d.kind }));
   const sections: string[] = [];
   const planInputFiles: PlanFile[] = [];
+  // plan.md as given to the builder (redacted, links rewritten): the source of a ticket's own section.
+  let planText: string | null = null;
   for (const doc of documents) {
     const content = await loadContent(db, doc.version);
     if (content.format === "markdown") {
       const redacted = redact(content.markdown);
       // R14: the file itself, so every rewritten link names a file the builder can open.
       planInputFiles.push({ path: doc.path, content: redacted });
-      sections.push(
-        `--- ${doc.path} (approved v${doc.version.number}) ---\n${rewriteLinksForBuilder(redacted, entries, doc.path)}`,
-      );
+      const rewritten = rewriteLinksForBuilder(redacted, entries, doc.path);
+      if (doc.path === "plan.md") planText = rewritten;
+      sections.push(`--- ${doc.path} (approved v${doc.version.number}) ---\n${rewritten}`);
     } else {
       for (const [inner, text] of Object.entries(content.files)) {
         planInputFiles.push({ path: `${doc.path}${inner}`, content: redact(text) });
@@ -266,27 +269,94 @@ async function composeBuildPlan(
     plan.ticket !== undefined
       ? `Build exactly ticket ${plan.ticket} from this approved plan.`
       : "Build exactly what the request asks (for example ticket 2) from this approved plan.";
-  const taskSection = [
-    `Approved plan ${plan.number}. ${scope} Do not widen the scope.`,
+  const versions = documents.map((d) => ({
+    documentId: d.id,
+    path: d.path,
+    kind: d.kind,
+    versionNumber: d.version.number,
+  }));
+  const header = `Approved plan ${plan.number}. ${scope} Do not widen the scope.`;
+  const fits = (section: string) => byteLength(section) <= MAX_CODING_TASK_BYTES / 2;
+  // R9: what goes in the stored request is never cut. A plan that fits goes in whole.
+  const whole = [
+    header,
     `Every approved document is also a file in ${PLAN_FOLDER_PATH}/ (designs as their board folders).`,
     wrapUntrusted("plan", sections.join("\n\n")),
   ].join("\n");
-  // R9: the section is stored in the request and never cut; a plan that cannot fit is refused.
-  if (byteLength(taskSection) > MAX_CODING_TASK_BYTES / 2) {
-    throw new PlanRefusedError("plan_too_large", "the approved plan does not fit the coding task limit");
+  let taskSection = fits(whole) ? whole : compactTaskSection(header, versions, planText, plan.ticket);
+  // With no ticket, the text before Tickets is a convenience: drop it rather than refuse the build.
+  if (!fits(taskSection) && plan.ticket === undefined) {
+    taskSection = compactTaskSection(header, versions, null, undefined);
   }
-  return {
-    planSetId: plan.planSetId,
-    number: plan.number,
-    versions: documents.map((d) => ({
-      documentId: d.id,
-      path: d.path,
-      kind: d.kind,
-      versionNumber: d.version.number,
-    })),
-    taskSection,
-    planInputFiles,
-  };
+  if (!fits(taskSection)) {
+    throw new PlanRefusedError(
+      "plan_too_large",
+      plan.ticket !== undefined
+        ? `ticket ${plan.ticket} of the approved plan does not fit the coding task limit`
+        : "the approved plan does not fit the coding task limit",
+    );
+  }
+  return { planSetId: plan.planSetId, number: plan.number, versions, taskSection, planInputFiles };
+}
+
+/**
+ * The task section for a plan too large to inline whole (R9 still holds: nothing in it is cut). It
+ * names the approved versions and points at the plan folder, which holds every document in full
+ * (R14), and inlines what the run builds: the ticket's own `### Ticket <t>:` section of plan.md, or,
+ * with no ticket, plan.md's text before `## Tickets`. Without plan.md or a matching section it inlines
+ * nothing more; the builder reads the files.
+ */
+function compactTaskSection(
+  header: string,
+  versions: BuildPlan["versions"],
+  planText: string | null,
+  ticket: number | undefined,
+): string {
+  const listed = versions.map((v) => `${shownPlanPath(v.path)} v${v.versionNumber}`).join(", ");
+  const lines = [
+    header,
+    `The approved plan is too large to include here. Its documents (${listed}) are files in ${PLAN_FOLDER_PATH}/ (designs as their board folders): read ${PLAN_FOLDER_PATH}/plan.md first, then the documents it links.`,
+  ];
+  const part =
+    planText === null ? null : ticket !== undefined ? ticketSection(planText, ticket) : beforeTickets(planText);
+  if (part) {
+    lines.push(
+      ticket !== undefined
+        ? `Ticket ${ticket} as approved in plan.md:`
+        : "plan.md as approved, up to its Tickets section:",
+      wrapUntrusted("plan", part),
+    );
+  }
+  return lines.join("\n");
+}
+
+/** plan.md's `### Ticket <t>:` section under `## Tickets`, up to the next `###` or `##` heading; null when absent. */
+export function ticketSection(planMarkdown: string, ticket: number): string | null {
+  const out: string[] = [];
+  let inTickets = false;
+  let inTicket = false;
+  for (const line of planMarkdown.split("\n")) {
+    if (/^##\s+/.test(line)) {
+      if (inTicket) break;
+      inTickets = /^##\s+Tickets\s*$/i.test(line);
+      continue;
+    }
+    const heading = inTickets ? /^###\s+Ticket\s+(\d{1,4})\s*:/i.exec(line) : null;
+    if (heading || (inTicket && /^###\s+/.test(line))) {
+      if (inTicket) break;
+      inTicket = heading !== null && Number(heading[1]) === ticket;
+    }
+    if (inTicket) out.push(line);
+  }
+  const text = out.join("\n").trimEnd();
+  return text === "" ? null : text;
+}
+
+/** plan.md's text before its `## Tickets` heading (all of it when there is none); null when empty. */
+function beforeTickets(planMarkdown: string): string | null {
+  const at = planMarkdown.search(/^##\s+Tickets\s*$/im);
+  const text = (at === -1 ? planMarkdown : planMarkdown.slice(0, at)).trimEnd();
+  return text === "" ? null : text;
 }
 
 /** CodingRun.planVersions as stored (JSON); null when absent or not in the shape resolveBuildPlan writes. */
