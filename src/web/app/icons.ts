@@ -7,10 +7,21 @@ const SVG = "http://www.w3.org/2000/svg";
 type Shape = ["path", string] | ["circle", number, number, number] | ["rect", number, number, number, number, number];
 
 const SHAPES = {
-  /** Choose this option: pick this one. */
+  /** Choose this option: one picked out of several (a selected radio). */
   choose: [
     ["circle", 12, 12, 9],
-    ["path", "m8 12.5 2.8 2.8L16.5 9.5"],
+    ["circle", 12, 12, 3.5],
+  ],
+  /** Approve. */
+  approve: [["path", "M20 6.5 9.5 17 4 11.5"]],
+  /** Request changes: edit it. */
+  changes: [["path", "M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4zM13.5 6.5l4 4"]],
+  /** Start review: send it to the reviewers. */
+  send: [["path", "M21 3 10 14M21 3l-7 18-4-7-7-4 18-7z"]],
+  /** Unarchive: back out of the archive. */
+  unarchive: [
+    ["rect", 3, 4, 18, 4.5, 1],
+    ["path", "M5 8.5V18a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5M12 17v-5.5M9.5 14 12 11.5l2.5 2.5"],
   ],
   /** Reject: out of the plan. */
   reject: [["path", "M17 7 7 17M7 7l10 10"]],

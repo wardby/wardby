@@ -241,8 +241,9 @@ export class ReviewPanel {
     }
     const row = h("div", { class: "rv-actions" });
     if (choose) row.append(this.button("Choose this option", () => this.open("choose"), "primary", "choose"));
-    if (c.approve) row.append(btn(c.approve, () => void this.verdict("approve"), choose ? "neutral" : "primary"));
-    if (c.changes) row.append(btn(c.changes, () => void this.verdict("request_changes"), "neutral"));
+    if (c.approve)
+      row.append(this.button(c.approve, () => void this.verdict("approve"), choose ? "neutral" : "primary", "approve"));
+    if (c.changes) row.append(this.button(c.changes, () => void this.verdict("request_changes"), "neutral", "changes"));
     box.append(row);
     return box;
   }
@@ -287,7 +288,7 @@ export class ReviewPanel {
               "draft",
               "Not in review yet",
               text("Choose who reviews it to start the review."),
-              this.button(PICKER.start, () => void this.openSubmit(), "primary"),
+              this.button(PICKER.start, () => void this.openSubmit(), "primary", "send"),
             )
           : card("draft", "Not in review yet", text("The owner hasn't asked for reviews yet."));
       case "approved": {
@@ -315,7 +316,12 @@ export class ReviewPanel {
           "Archived",
           text("Read-only, and out of the document lists."),
           can.unarchive
-            ? this.button("Unarchive", () => void this.act({ action: "archive", archived: false }), "primary")
+            ? this.button(
+                "Unarchive",
+                () => void this.act({ action: "archive", archived: false }),
+                "primary",
+                "unarchive",
+              )
             : null,
         );
       default: {
