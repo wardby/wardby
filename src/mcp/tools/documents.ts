@@ -509,12 +509,31 @@ async function checkedLink(
   return { repository, path, baseRef };
 }
 
+/**
+ * When agentId names a native agent, checks it as the document's writer the same way for create_document and
+ * link_document: no repository fields (it edits through its doc_* tools), documentTools write, and execute for
+ * the caller (assertNativeWriter). True when the agent is native; false leaves the link to checkedLink.
+ */
+async function checkedNativeWriter(
+  ctx: McpRequestContext,
+  input: { agentId?: string; repository?: string; path?: string; baseRef?: string },
+): Promise<boolean> {
+  if (input.agentId === undefined) return false;
+  const target = await ctx.db.agent.findUnique({ where: { id: input.agentId }, select: { kind: true } });
+  if (target?.kind !== "native") return false;
+  if (input.repository !== undefined || input.path !== undefined || input.baseRef !== undefined) {
+    throw new McpError(400, "document_repo_link_invalid");
+  }
+  await mapped(() => assertNativeWriter(ctx.db, ctx.principal.id, input.agentId!));
+  return true;
+}
+
 function registerContentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_document",
     scope: "documents:write",
     description:
-      "Creates a Markdown document you own (max 1 MiB) and returns its id and URL. To let a coding agent edit it from comments, link it to a repository file: give repository and path together plus agentId (a coding agent you own, or one whose owner allows others' task text: codingProfile.allowWebhookTaskOverride). path is a repo-relative .md file; baseRef is optional. " +
+      "Creates a Markdown document you own (max 1 MiB) and returns its id and URL. To let a coding agent edit it from comments, link it to a repository file: give repository and path together plus agentId (a coding agent you own, or one whose owner allows others' task text: codingProfile.allowWebhookTaskOverride). path is a repo-relative .md file; baseRef is optional. A native agent with documentTools write that you can execute can be its writer with agentId alone (no repository). " +
       "kind design: files (manifest.json, boards/<id>.html, optional brand.md; board format v1, see help design-boards-format) or, when linked to a repository directory (path) with baseRef, imported from it. Board scripts and event handlers are removed; external references are refused (board_format_invalid). The result lists warnings.",
     inputSchema: {
       type: "object",
@@ -543,7 +562,8 @@ function registerContentTools(mcp: WardbyMcpServer): void {
       if (design && input.files === undefined && input.repository === undefined) {
         throw new McpError(400, "document_format_mismatch");
       }
-      const { repository, path, baseRef } = await checkedLink(ctx, input, design);
+      const native = await checkedNativeWriter(ctx, input);
+      const { repository, path, baseRef } = native ? {} : await checkedLink(ctx, input, design);
       // A linked design with no files is imported from the repository at baseRef.
       let files = input.files;
       let imported = false;
@@ -623,18 +643,9 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         if (design && input.repository !== undefined && input.baseRef === undefined) {
           throw new McpError(400, "document_repo_link_invalid");
         }
-        const target = await ctx.db.agent.findUnique({ where: { id: input.agentId! }, select: { kind: true } });
-        if (target?.kind === "native") {
-          // A native writer edits through its doc_* tools: no repository, and never a plan document.
-          if (input.repository !== undefined || input.path !== undefined || input.baseRef !== undefined) {
-            throw new McpError(400, "document_repo_link_invalid");
-          }
-          const planned = await ctx.db.document.findUnique({
-            where: { id: input.documentId },
-            select: { planSetId: true },
-          });
-          if (planned?.planSetId) throw new McpError(400, "document_agent_unavailable");
-          await mapped(() => assertNativeWriter(ctx.db, ctx.principal.id, input.agentId!));
+        if (await checkedNativeWriter(ctx, input)) {
+          // Never a plan document: checked after the agent, so the answer is the same as for any agent refused.
+          if (doc.planSetId) throw new McpError(400, "document_agent_unavailable");
           link = { agentId: input.agentId!, repository: null, path: null, baseRef: null };
         } else {
           const checked = await checkedLink(ctx, input, design);

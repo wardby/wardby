@@ -734,6 +734,49 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     }
   });
 
+  it("create_document with a native agentId applies link_document's writer rules", async () => {
+    const call = await connect(owner);
+    const setTools = (documentTools: object | null) =>
+      db.agent.update({ where: { id: nativeAgentId }, data: { documentTools: documentTools ?? Prisma.DbNull } });
+    const stranger = await db.principal.create({ data: { subject: `docmcp-native-create-${s}` } });
+    try {
+      await setTools(null);
+      expect((await call("create_document", { title: "C", markdown: "# C\n", agentId: nativeAgentId })).text).toContain(
+        "document_agent_unavailable",
+      );
+      await setTools({ access: "read", reviewers: [owner.id] });
+      expect((await call("create_document", { title: "C", markdown: "# C\n", agentId: nativeAgentId })).text).toContain(
+        "document_agent_unavailable",
+      );
+      await setTools({ access: "write", reviewers: [owner.id] });
+      const withRepo = await call("create_document", {
+        title: "C",
+        markdown: "# C\n",
+        agentId: nativeAgentId,
+        repository: "acme/docs",
+        path: "docs/c.md",
+      });
+      expect(withRepo.text).toContain("document_repo_link_invalid");
+      // A caller without execute on the agent.
+      const refused = await (
+        await connect(stranger)
+      )("create_document", { title: "S", markdown: "# S\n", agentId: nativeAgentId });
+      expect(refused.isError).toBe(true);
+      expect(await db.document.count({ where: { ownerId: stranger.id } })).toBe(0);
+      const ok = await call("create_document", { title: "C", markdown: "# C\n", agentId: nativeAgentId });
+      expect(ok.isError).toBe(false);
+      expect(await db.document.findUniqueOrThrow({ where: { id: ok.json.documentId as string } })).toMatchObject({
+        agentId: nativeAgentId,
+        repository: null,
+        path: null,
+      });
+    } finally {
+      await setTools(null);
+      await db.document.deleteMany({ where: { ownerId: stranger.id } });
+      await db.principal.delete({ where: { id: stranger.id } });
+    }
+  });
+
   it("link_document links, relinks and unlinks a document its owner holds, under create_document's rules", async () => {
     const call = await connect(owner);
     const made = await call("create_document", { title: "L", markdown: "# L\n" });
