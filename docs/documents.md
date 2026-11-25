@@ -67,6 +67,11 @@ as untrusted content: agents must treat it as data, never as instructions.
 ## Access
 
 Documents are a `grant_access` resource type (`resourceType: "document"`).
+A grantee may also be an agent, `{"agentId": "<id>"}`, at `read` or `comment`
+only (`write` is refused with `document_agent_grant_level`; link the agent with
+`link_document` to make it the writer). You must own the document and be able
+to read the agent; revoking by `agentId` always works. Agent grants apply to
+documents only.
 Levels, lowest first: `read` (see), `comment` (add threads and replies), `write`
 (publish versions, resolve any thread, send to an agent). The owner also
 manages grants and share links. Granting to `everyone` is capped at `comment`.
@@ -126,22 +131,21 @@ plan revision.
 | `AUTH_PROVIDER=self-hosted` | Open the document link; the page reuses the Wardby login.                                             |
 | `AUTH_PROVIDER=delegating`  | Sign in through your identity provider with a separate browser (web) client. Set the variables below. |
 
-| Variable                        | Default                | Meaning                                                                                                            |
-| ------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `WEB_OIDC_CLIENT_ID`            | unset (sign-in off)    | The identity provider client for the document pages (authorization code with PKCE).                                |
-| `WEB_OIDC_CLIENT_SECRET`        | unset                  | Only for a confidential client; omit for a public client.                                                          |
-| `WEB_OIDC_SCOPES`               | `openid profile email` | Scopes requested at sign-in; `openid` is always included.                                                          |
-| `WEB_OIDC_SUBJECT_CLAIM`        | `sub`                  | The ID token claim a sign-in's Wardby person is read from.                                                         |
-| `WEB_OIDC_SUBJECT_EMAIL_DOMAIN` | unset                  | Read it from the local part of a verified email at exactly this domain instead. Not with `WEB_OIDC_SUBJECT_CLAIM`. |
+| Variable                 | Default                | Meaning                                                                             |
+| ------------------------ | ---------------------- | ----------------------------------------------------------------------------------- |
+| `WEB_OIDC_CLIENT_ID`     | unset (sign-in off)    | The identity provider client for the document pages (authorization code with PKCE). |
+| `WEB_OIDC_CLIENT_SECRET` | unset                  | Only for a confidential client; omit for a public client.                           |
+| `WEB_OIDC_SCOPES`        | `openid profile email` | Scopes requested at sign-in; `openid` is always included.                           |
+| `WEB_OIDC_SUBJECT_CLAIM` | `sub`                  | The ID token claim a sign-in's Wardby person is read from.                          |
 
 At the provider, register a web client with the redirect URI
 `https://<your-host>/web/callback` (the origin of `MCP_CANONICAL_URI`), and make
 sure its ID tokens carry the same `sub` as the access tokens MCP clients get, so
 both sign-ins are the same Wardby person. If the provider cannot (its ID token
 `sub` is always its own user id), set `WEB_OIDC_SUBJECT_CLAIM` to a claim you
-add carrying the access token's `sub`, or `WEB_OIDC_SUBJECT_EMAIL_DOMAIN` when
-that `sub` is the local part of the user's email. A sign-in without a usable
-value fails with `web_login_failed`; it never falls back to `sub`. The issuer is the existing
+add carrying the access token's `sub`. The claim's value must be a string, and
+only administrators should be able to change it: whoever can set it can sign in
+as that person. A sign-in without a usable value fails with `web_login_failed`; it never falls back to `sub`. The issuer is the existing
 `AUTH_ISSUER`. A sign-in must finish within 10 minutes in the browser that
 started it. A browser session ends after 12 hours idle or 7 days. Without
 `WEB_OIDC_CLIENT_ID`, member pages answer `web_login_not_configured`; share
@@ -469,6 +473,81 @@ network address (it cannot know the real client address behind your load
 balancer); put abuse controls for the `/s/` paths at your edge if the link is
 public.
 
+## Documents from native agents
+
+A native agent whose owner sets `documentTools` gets built-in `doc_*` tools in
+its runs: `doc_list`, `doc_get`, `doc_list_threads` and `doc_get_thread`, and at
+`access: "write"` also `doc_create`, `doc_publish_version`,
+`doc_reply_to_thread`, `doc_resolve_thread` and `doc_submit_for_review`. They run
+in the control plane, never in the sandbox, and act as the agent, not as its
+owner.
+
+| Field             | Meaning                                                                                                                 |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `access`          | `read` (read tools only, and read at most on every document) or `write`.                                                |
+| `reviewers`       | 1 to 50 people who can read the agent; default the owner. A document the agent submits goes to them.                    |
+| `finalApproverId` | Optional person who may force an approval.                                                                              |
+| `maxNewPerRun`    | New documents one run may create, 1 to 20; default 5 (`document_run_limit`). The count survives a resumed run.          |
+| `plans`           | Up to 20 planner agents (with `planDocument`) whose plan documents the agent may read and comment on, never publish to. |
+
+Set it with `update_agent` or `create_agent` on a native agent (`null` turns it
+off; an invalid setting is refused with a 400 starting
+`document_tools_invalid: ` and the reason, e.g. `document_tools_invalid: only native
+agents take documentTools.`; schema-level violations such as an out-of-range
+`maxNewPerRun`, an empty `reviewers` list or unknown fields are refused earlier as
+`Invalid create_agent/update_agent arguments: …`). It is read again on every
+call. It is owner-only and counts as an owner binding: an agent everyone can
+write cannot have it, and an agent that has it cannot be opened to everyone
+with write. On `create_agent` only the owner can be a reviewer; share the agent
+and then add other reviewers with `update_agent`. `make_owner` between two
+owners turns it off and removes the document grants others gave the agent,
+except on documents the new owner owns (`documentGrantsRemoved`); adopting an
+agent that had no owner keeps both.
+
+**Upgrading: `doc_` tool names.** Names starting with `doc_` are reserved for
+these tools: `create_tool` and `wardby tool create` refuse a new one, an import
+skips one with a warning, and `attach_mcp_server` refuses a server whose exposed
+tool names start with `doc_`. A tool created under such a name before the
+upgrade keeps working and can still be attached, but if its name is one of the
+nine built-in names and the agent has `documentTools`, every call to that name
+goes to the built-in tool and yours is never reached. Create it again under
+another name, attach that, and detach the old one before turning
+`documentTools` on.
+
+**What the agent can reach.** Never its owner's access. Only: a document linked
+to it as writer (`doc_create`, or `create_document` or `link_document` with
+`agentId` alone for a native agent with `access: "write"` that you can
+execute), while the document's owner can still execute the agent; agent grants
+at `read` or `comment`; and the plan documents of `plans` at `comment`, while
+the agent's owner can still execute the planner. Anything else is
+`document_not_found`.
+
+**What it never does.** Approve, force-approve, reopen, archive, share, grant,
+or start comment threads. It replies to and resolves threads, and submits for
+review to the setting's reviewers, only on documents its owner owns
+(`document_review_forbidden` otherwise). The documents it creates are its
+owner's; an owner-less agent's write tools return `document_agent_unavailable`.
+
+**Reviewer notes.** `doc_get` includes each reviewer's verdict, the version it
+was given on and their note (`null` when none), and the latest review events
+(kind, version, reviewer name, note; newest first, up to 10), so an agent can act
+on a rejection that has only a note. Reviewers are named, never identified by id
+or email. Notes are redacted by exact secret value when stored, and reach the
+model as untrusted tool-result text.
+
+**Limits.** `doc_get` refuses a document or design over 60,000 characters
+(`document_too_large_for_agent`), the same cap as send to agent.
+`doc_publish_version` requires `baseNumber`, the version the agent read; a newer
+version means `document_version_conflict`. An approved or archived document is
+locked (`document_locked`). Tool failures are JSON results with an `error` code.
+
+**Send threads to agent.** On a document whose writer is a native agent, a send
+starts a native run with the trigger `comment`. The agent reads the threads,
+publishes one revision and replies; threads it leaves unanswered get the usual
+no-reply note. There is no automatic merge. A send is `document_not_agent_linked`
+when the agent has no `documentTools` setting, and `document_agent_unavailable`
+when its setting is no longer `write` or the document's owner lost `execute`.
+
 ## Sending threads to a coding agent
 
 Link a document to a repository file at creation (`create_document` with
@@ -502,7 +581,7 @@ replies on each thread and resolves those it addressed.
 Limits: 30 sends per document per hour, a document up to 60,000 characters,
 one run per thread at a time. The document owner must keep `execute` on the
 agent and remain allowed to give it task text (its owner, or the owner's
-`allowWebhookTaskOverride`); every send checks this again. Native agents do not edit documents in this phase. Documents with
+`allowWebhookTaskOverride`); every send checks this again. A native agent with `documentTools` can be the writer too; see [Documents from native agents](#documents-from-native-agents). Documents with
 images, task lists or raw HTML open comment-only in the page, because the
 editor would rewrite them.
 

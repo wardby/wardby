@@ -26,6 +26,8 @@ import {
   restoreWorkspacePypiLockfiles,
 } from "../coding/registry/pypi-lockfiles/session.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
+import { TUNNEL_CA_RELATIVE_PATH, tunnelProxyEnv, tunnelTrustEnv } from "../coding/tunnel-env.js";
+import { deriveTunnelToken } from "../coding/tunnel-token.js";
 import { registryUrlFor, registryWorkerSetup } from "../coding/registry/worker-config.js";
 import { describeError } from "./debug-trace.js";
 import { placePlanFiles } from "./plan-folder.mjs";
@@ -428,6 +430,13 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     await mkdir(dirname(file.path), { recursive: true });
     await writeFile(file.path, file.content, { mode: file.mode });
   }
+  // The tunnel's CA certificate, when the operator gave one: a public file under the cache root, trusted through the variables below.
+  const tunnelCaCert = options.input.tunnel?.caCert;
+  const tunnelCaFile = tunnelCaCert ? `${workspaceCacheRoot(options.workspace)}/${TUNNEL_CA_RELATIVE_PATH}` : undefined;
+  if (tunnelCaFile && tunnelCaCert) {
+    await mkdir(dirname(tunnelCaFile), { recursive: true });
+    await writeFile(tunnelCaFile, tunnelCaCert, { mode: 0o644 });
+  }
   await mkdir(workspaceTmpDir(options.workspace), { recursive: true, mode: 0o700 });
   // Plan files (a revision, a builder's approved design): in place before the agent exists. A
   // refused path or folder fails the run with a fixed code.
@@ -443,6 +452,15 @@ export async function runCodingWorker(options: WorkerRunOptions): Promise<Coding
     ...serviceEnvironment(options.input.services),
     ...workerEnvironment(options.workspace),
     ...registry.env,
+    // Only when the tunnel is on: the proxy variables, carrying the tunnel-only token (never the capability).
+    ...(options.input.tunnel
+      ? tunnelProxyEnv({
+          proxyHost: new URL(options.proxyBaseUrl).hostname,
+          port: options.input.tunnel.port,
+          token: deriveTunnelToken(options.capability),
+        })
+      : {}),
+    ...(tunnelCaFile ? tunnelTrustEnv(tunnelCaFile) : {}),
   };
   // uv.lock and poetry.lock name their own index, which the sandbox cannot reach: point them at the proxy.
   const pypiLockfiles = await prepareWorkspacePypiLockfiles({

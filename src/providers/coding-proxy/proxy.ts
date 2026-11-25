@@ -4,6 +4,7 @@ import { shippedCatalog } from "../llm/catalog.js";
 import { SHIPPED_CATALOG_VERSION } from "../llm/catalog-shipped.js";
 import type { ThinkingMode } from "../llm/catalog-types.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
+import { deriveTunnelToken } from "../../coding/tunnel-token.js";
 import { capabilityHash } from "./capability-hash.js";
 import { CLAUDE_MCP_TOOL_PREFIX } from "../../coding/mcp-token.js";
 import type { CodingToolPin } from "../../core/coding-native-tools.js";
@@ -1290,6 +1291,7 @@ export class CodingProxy {
     const capability = `rrp_${randomBytes(32).toString("base64url")}`;
     const id = randomUUID();
     const registryTokenHash = capabilityHash(deriveRegistryToken(capability));
+    const tunnelTokenHash = capabilityHash(deriveTunnelToken(capability));
     await this.ledger.createSession({
       id,
       runId: input.runId,
@@ -1300,6 +1302,7 @@ export class CodingProxy {
       deadlineAt: input.deadlineAt,
       budgetUsd: input.budgetUsd,
       registryTokenHash,
+      tunnelTokenHash,
       terms: input.terms,
       ...(mcp ? { mcpTools: input.mcpTools, mcpTokenHash: input.mcpTokenHash } : {}),
       ...(input.runStepsLevel ? { runStepsLevel: input.runStepsLevel } : {}),

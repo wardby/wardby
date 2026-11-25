@@ -15,6 +15,7 @@ describe("Prometheus metrics", () => {
       'wardby_proxy_audit_events_total{event="request.rejected"} 0',
       'wardby_proxy_http_requests_total{protocol="anthropic-messages",status_class="5xx"} 0',
       'wardby_proxy_http_request_duration_seconds_count{protocol="openai-responses",status_class="2xx"} 0',
+      'wardby_proxy_http_requests_total{protocol="tunnel",status_class="4xx"} 0',
       'wardby_proxy_tokens_total{kind="cached_input"} 0',
       'wardby_proxy_lease_errors_total{stage="sweep"} 0',
       'wardby_run_follow_ups_total{outcome="failed"} 0',
@@ -56,8 +57,10 @@ describe("Prometheus metrics", () => {
       reservationUsd: 5,
     });
     metrics.observeProxyRequest({ protocol: "openai-responses", status: 403, durationMs: 250 });
+    metrics.observeProxyRequest({ protocol: "tunnel", status: 407, durationMs: 3 });
 
     const exposition = await metrics.registry.metrics();
+    expect(exposition).toContain('wardby_proxy_http_requests_total{protocol="tunnel",status_class="4xx"} 1');
     expect(exposition).toContain('wardby_coding_lifecycle_events_total{stage="launched"} 1');
     expect(exposition).toContain('wardby_coding_runs_terminal_total{outcome="succeeded"} 1');
     expect(exposition).toContain("wardby_coding_active_jobs 0");

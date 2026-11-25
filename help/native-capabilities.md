@@ -80,6 +80,9 @@ requires the matching MCP scope.
 Native agents can also call tools from remote MCP servers; see
 [Remote MCP servers](../docs/mcp-servers.md) (0.8.0+).
 
+A native agent can also create and revise documents and designs with built-in
+`doc_*` tools; see [Documents from native agents](native-agent-documents.md).
+
 Claude Code coding agents can use attached tools too, with the same grants; see
 [Native tools on Claude Code coding agents](coding-agent-native-tools.md).
 

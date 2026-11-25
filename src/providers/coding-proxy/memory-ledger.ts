@@ -45,6 +45,7 @@ export class MemoryProxyLedger implements ProxyLedger {
   private readonly sessions = new Map<string, ProxySession>();
   private readonly sessionByCapability = new Map<string, string>();
   private readonly sessionByMcpToken = new Map<string, string>();
+  private readonly sessionByTunnelToken = new Map<string, string>();
   private readonly requests = new Map<string, ProxyRequest>();
   private readonly requestBySessionKey = new Map<string, string>();
   private readonly startedAt = new Map<string, Date>();
@@ -64,6 +65,9 @@ export class MemoryProxyLedger implements ProxyLedger {
     if (input.mcpTokenHash !== undefined && this.sessionByMcpToken.has(input.mcpTokenHash)) {
       throw new Error("proxy_mcp_token_collision");
     }
+    if (input.tunnelTokenHash !== undefined && this.sessionByTunnelToken.has(input.tunnelTokenHash)) {
+      throw new Error("proxy_tunnel_token_collision");
+    }
     const session: ProxySession = {
       ...input,
       allowedModels: [...input.allowedModels],
@@ -80,6 +84,20 @@ export class MemoryProxyLedger implements ProxyLedger {
     this.sessions.set(session.id, session);
     this.sessionByCapability.set(session.capabilityHash, session.id);
     if (session.mcpTokenHash !== null) this.sessionByMcpToken.set(session.mcpTokenHash, session.id);
+    if (input.tunnelTokenHash !== undefined) this.sessionByTunnelToken.set(input.tunnelTokenHash, session.id);
+  }
+
+  async findSessionByTunnelTokenHash(tunnelTokenHash: string): Promise<ProxySession | undefined> {
+    const id = this.sessionByTunnelToken.get(tunnelTokenHash);
+    const session = id ? this.sessions.get(id) : undefined;
+    return session ? cloneSession(session) : undefined;
+  }
+
+  async sessionActiveForRun(runId: string): Promise<boolean> {
+    const session = [...this.sessions.values()].find((candidate) => candidate.runId === runId);
+    return (
+      session !== undefined && session.status === "active" && session.deadlineAt.getTime() > this.clock().getTime()
+    );
   }
 
   async findSessionByMcpTokenHash(mcpTokenHash: string): Promise<ProxySession | undefined> {

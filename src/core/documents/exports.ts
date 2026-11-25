@@ -12,7 +12,7 @@
 import type { Document, DocumentVersion, PrismaClient } from "#prisma";
 import { RateLimitError, type RateLimiter } from "../../mcp/auth/self-hosted/rate-limit.js";
 import { logger } from "../logger.js";
-import { requireDocumentAccess, type Viewer } from "./access.js";
+import { refuseAgentViewer, requireDocumentAccess, type Viewer } from "./access.js";
 import { documentHourlyLimiter } from "./agent-loop.js";
 import { exportSlug, prototypeFile } from "./boards/export.js";
 import { MANIFEST_PATH, parseManifest, type Manifest } from "./boards/format.js";
@@ -132,13 +132,17 @@ export async function exportFile(
   };
 }
 
-const owner = (viewer: Viewer) =>
-  viewer.kind === "principal" ? { requestedById: viewer.principalId } : { guestId: viewer.guestId };
+const owner = (viewer: Viewer) => {
+  refuseAgentViewer(viewer);
+  return viewer.kind === "principal" ? { requestedById: viewer.principalId } : { guestId: viewer.guestId };
+};
 
 export async function requestRenderedExport(
   deps: ExportDeps,
   input: { documentId: string; viewer: Viewer; format: RenderedExportFormat; board?: string; versionNumber?: number },
 ): Promise<{ exportId: string }> {
+  // Before anything is counted: an agent never consumes an export rate-limit slot.
+  refuseAgentViewer(input.viewer);
   const { db } = deps;
   const { doc, version, content } = await source(db, input.documentId, input.viewer, input.versionNumber);
   let board: string | undefined;
@@ -251,6 +255,7 @@ export async function runExport(deps: ExportDeps, exportId: string): Promise<voi
 }
 
 async function ownRow(db: PrismaClient, exportId: string, viewer: Viewer) {
+  refuseAgentViewer(viewer);
   const row = await db.documentExport.findUnique({ where: { id: exportId } });
   const mine =
     row &&

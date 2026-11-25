@@ -2000,6 +2000,18 @@ export interface ContainerExecutorOptions {
    * capped per run at its timeoutSec in jobSpec; DEFAULT_CLAUDE_COMMAND_TIMEOUT_MS for both when absent.
    */
   claudeCommandTimeouts?: ClaudeCommandTimeouts;
+  /**
+   * The coding proxy's CONNECT tunnel port (CODING_TUNNEL_PORT), for a Docker or Kubernetes launcher
+   * only; absent when the tunnel is off or the launcher is Substrate. Written into each run's job spec
+   * and task input; never a token.
+   */
+  tunnelPort?: number;
+  /**
+   * The public CA certificate (PEM) the proxy intercepts TLS with (CODING_TUNNEL_TRUST_CA_CERT_FILE), written
+   * into each run's job spec and task input so its tools trust it. Ignored without tunnelPort. Never a key.
+   * A function is called at each launch, so a rotated certificate reaches the next run.
+   */
+  tunnelCaCert?: string | (() => string);
   pollMinMs?: number;
   pollMaxMs?: number;
   /** How often to beat the heartbeat during a long launch; defaults to a third of the reconciler's timeout. */
@@ -5096,6 +5108,9 @@ export class ContainerExecutor implements Executor {
       ...(run.sessionResume && provider === "claude-code" ? { sessionResume: true as const } : {}),
       // Only for a run with MCP tools: the launcher then delivers WARDBY_MCP_TOKEN from the vault.
       ...(options.mcpTools ? { mcpTools: true as const } : {}),
+      // Only when the tunnel is on: every other run's spec stays exactly what it was.
+      ...(this.options.tunnelPort ? { tunnelPort: this.options.tunnelPort } : {}),
+      ...(this.options.tunnelPort && this.options.tunnelCaCert ? { tunnelCaCert: this.tunnelCaCert()! } : {}),
       // Claude Code only: the tool runner's per-command limits, capped so no command outlives the run.
       ...(provider === "claude-code"
         ? {
@@ -5117,6 +5132,12 @@ export class ContainerExecutor implements Executor {
         ? { repositories: jobRepositories(run.repositories, workspaces) }
         : {}),
     };
+  }
+
+  /** The tunnel CA certificate as it is now: a function option is read again at each launch. */
+  private tunnelCaCert(): string | undefined {
+    const caCert = this.options.tunnelCaCert;
+    return typeof caCert === "function" ? caCert() : caCert;
   }
 
   private credentialRef(provider: string): string {
@@ -5260,6 +5281,15 @@ export class ContainerExecutor implements Executor {
           : {}),
         // Only when on: every other run's input stays exactly what older workers expect.
         ...(run.sessionResume && run.provider === "claude-code" ? { sessionResume: true as const } : {}),
+        // Only when the tunnel is on: every other run's input stays exactly what older workers expect.
+        ...(this.options.tunnelPort
+          ? {
+              tunnel: {
+                port: this.options.tunnelPort,
+                ...(this.options.tunnelCaCert ? { caCert: this.tunnelCaCert()! } : {}),
+              },
+            }
+          : {}),
         // Only on a run with git history: every other run's input stays exactly what older workers expect.
         ...(history ? { gitHistory: history.input } : {}),
         // Only on a run with extra repositories: every other run's input stays exactly what older workers expect.

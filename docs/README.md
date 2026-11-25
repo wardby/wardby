@@ -41,6 +41,9 @@
   extend the reviewed worker image contract.
 - [Installing packages in coding runs](coding-packages.md) covers the coding
   package registry: allowlists, safeguards, limits, and error codes.
+- [CONNECT tunnel for coding runs](coding-proxy-tunnel.md) lets a run reach a
+  short allowlist of HTTPS hosts through the coding proxy: settings, the
+  checks and error codes, limits, and audit.
 - [Services for coding runs](coding-services.md) gives coding runs fresh
   PostgreSQL, Redis or MySQL instances declared in `.wardby/services.yaml`:
   the catalog, per-agent permission, variables, and errors.
@@ -55,7 +58,7 @@
   events, such as `run_completed`, to send results to Slack, email or any API.
 - [Documents](documents.md) (0.10.0+) covers Markdown documents with anchored
   comments, share links for guests, browser sign-in and sending comment threads
-  to a coding agent.
+  to a coding agent or a native agent (`documentTools`).
 - [Observability](observability.md) covers Prometheus metrics, Grafana, cloud
   collectors, retention, and production ownership.
 - [Release verification](release-verification.md) lists the automated and live

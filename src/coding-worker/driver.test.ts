@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WORKER_BUDGET_EXHAUSTED_SUMMARY } from "../coding/continuation-wording.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
+import { deriveTunnelToken } from "../coding/tunnel-token.js";
 import { PLAN_FOLDER_PATH, PULL_REQUEST_CHOICE_DESCRIPTION, type CodingTaskInput } from "../coding/protocol.js";
 import { repositoriesTaskNote, workerTaskNote } from "./task-note.js";
 import {
@@ -184,6 +185,72 @@ describe("runCodingWorker", () => {
     expect(JSON.stringify(progress.mock.calls)).not.toContain("npm test");
     expect(JSON.stringify(progress.mock.calls)).not.toContain("SECRET_PROVIDER_STATUS");
     expect(progress).toHaveBeenCalledWith(expect.objectContaining({ type: "activity", kind: "other" }));
+  });
+
+  it("gives every shell the tunnel's proxy variables with the tunnel-only token, only when the tunnel is on", async () => {
+    const run = async (taskInput: CodingTaskInput) => {
+      const workspace = await tempWorkspace();
+      const capture: { config?: WorkerClientConfig } = {};
+      const output = JSON.stringify({
+        schemaVersion: 1,
+        runId: taskInput.runId,
+        outcome: "no_changes",
+        summary: "None.",
+        tests: [],
+      });
+      await runCodingWorker({
+        input: taskInput,
+        workspace,
+        proxyBaseUrl: "http://wardby-proxy:8787",
+        capability: "rrp_worker_capability",
+        signal: new AbortController().signal,
+        createClient: clientFor([{ type: "item.completed", item: { type: "agent_message", text: output } }], capture),
+      });
+      return capture.config!.environment;
+    };
+    const on = await run({ ...input, tunnel: { port: 8789 } });
+    const url = `http://run:${deriveTunnelToken("rrp_worker_capability")}@wardby-proxy:8789`;
+    expect(on).toMatchObject({ HTTPS_PROXY: url, https_proxy: url, HTTP_PROXY: url, http_proxy: url });
+    expect(on.NO_PROXY).toContain("wardby-proxy");
+    expect(JSON.stringify(on)).not.toContain("rrp_worker_capability");
+    const off = await run(input);
+    for (const name of ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"]) {
+      expect(off).not.toHaveProperty(name);
+    }
+  });
+
+  it("places the tunnel's CA certificate in the cache root and points the trust variables at it, only when given", async () => {
+    const caCert = "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n";
+    const run = async (taskInput: CodingTaskInput) => {
+      const workspace = await tempWorkspace();
+      const capture: { config?: WorkerClientConfig } = {};
+      const output = JSON.stringify({
+        schemaVersion: 1,
+        runId: taskInput.runId,
+        outcome: "no_changes",
+        summary: "None.",
+        tests: [],
+      });
+      await runCodingWorker({
+        input: taskInput,
+        workspace,
+        proxyBaseUrl: "http://wardby-proxy:8787",
+        capability: "rrp_worker_capability",
+        signal: new AbortController().signal,
+        createClient: clientFor([{ type: "item.completed", item: { type: "agent_message", text: output } }], capture),
+      });
+      return { workspace, environment: capture.config!.environment };
+    };
+    const on = await run({ ...input, tunnel: { port: 8789, caCert } });
+    const file = `${on.workspace}/.cache/tunnel/ca.crt`;
+    expect(on.environment).toMatchObject({ SSL_CERT_FILE: file, NODE_EXTRA_CA_CERTS: file, PIP_CERT: file });
+    expect(await readFile(file, "utf8")).toBe(caCert);
+    for (const taskInput of [{ ...input, tunnel: { port: 8789 } }, input]) {
+      const off = await run(taskInput);
+      expect(existsSync(`${off.workspace}/.cache/tunnel/ca.crt`)).toBe(false);
+      for (const name of ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "PIP_CERT"])
+        expect(off.environment).not.toHaveProperty(name);
+    }
   });
 
   it("points npm and pip at the proxy with the registry token, never the capability", async () => {

@@ -24,6 +24,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { PrismaClient } from "#prisma";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
+import { deriveTunnelToken } from "../../coding/tunnel-token.js";
 import { capabilityHash } from "../../providers/coding-proxy/capability-hash.js";
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../mcp/transport/http-limits.js";
 import { parseListenAddress, type ListenAddress } from "../listen-address.js";
@@ -99,7 +100,11 @@ async function accept(deps: RunStepIngressDeps, caller: Caller, body: string): P
   if (!post) return { status: 400, body: { error: "invalid_batch" } };
   // A capability names one run: a batch for any other run is refused, never written there.
   if (post.runId !== caller.runId) return { status: 403, body: { error: "run_mismatch" } };
-  await deps.sink.record(caller.runId, post.batch, [caller.capability, deriveRegistryToken(caller.capability)]);
+  await deps.sink.record(caller.runId, post.batch, [
+    caller.capability,
+    deriveRegistryToken(caller.capability),
+    deriveTunnelToken(caller.capability),
+  ]);
   return { status: 202, body: { ok: true } };
 }
 

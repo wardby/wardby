@@ -2257,13 +2257,13 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
 
     it("reports a configured subject source", async () => {
       const p = await freePort();
-      const h = await startServerAt(p, { oidc: { ...fakeOidc, subjectSource: { emailDomain: "example.com" } } });
+      const h = await startServerAt(p, { oidc: { ...fakeOidc, subjectSource: { claim: "wardby_sub" } } });
       try {
         const { jar } = await session(member.id);
         const res = await callAt(`http://127.0.0.1:${p}`, `/web/whoami`, { jar });
         expect(((await res.json()) as { signIn: unknown }).signIn).toEqual({
           mode: "delegating",
-          subjectFrom: { emailDomain: "example.com" },
+          subjectFrom: { claim: "wardby_sub" },
         });
       } finally {
         await h.close();

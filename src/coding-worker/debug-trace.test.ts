@@ -10,6 +10,7 @@ import {
   workerTracerFor,
 } from "./debug-trace.js";
 import { deriveRegistryToken } from "../coding/registry/token.js";
+import { deriveTunnelToken } from "../coding/tunnel-token.js";
 
 import { holdsValueFragment } from "../sandbox/secret-fragments.test-support.js";
 
@@ -289,6 +290,17 @@ describe("workerDebugTracer", () => {
     tracer!.record("event", { a: CAPABILITY, b: `//proxy/registry/npm/:_authToken=${registryToken}` });
     expect(lines[0]).not.toContain(CAPABILITY);
     expect(lines[0]).not.toContain(registryToken.slice(4));
+  });
+});
+
+describe("workerDebugTracer and the tunnel token", () => {
+  it("redacts the tunnel token a shell's proxy variable carries, bare and inside the URL", () => {
+    const lines: string[] = [];
+    const tracer = workerDebugTracer({ runId: "run_123", debugTrace: true }, CAPABILITY, (line) => lines.push(line));
+    const tunnelToken = deriveTunnelToken(CAPABILITY);
+    tracer!.record("event", { a: tunnelToken, b: `HTTPS_PROXY=http://run:${tunnelToken}@wardby-proxy:8789` });
+    expect(lines[0]).not.toContain(tunnelToken);
+    expect(lines[0]).not.toContain(tunnelToken.slice(4));
   });
 });
 

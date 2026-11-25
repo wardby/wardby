@@ -2395,6 +2395,62 @@ describe("ContainerExecutor", () => {
     }
   });
 
+  it("hands the launcher spec and the worker the tunnel port only when the tunnel is on", async () => {
+    const launched = async (extra: Partial<ContainerExecutorOptions>) => {
+      const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, extra);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { input: input!, spec: created.jobs.lastSpec! };
+    };
+    const on = await launched({ tunnelPort: 8789 });
+    expect(on.spec.tunnelPort).toBe(8789);
+    expect(on.input).toMatchObject({ tunnel: { port: 8789 } });
+    expect(on.spec).not.toHaveProperty("tunnelCaCert");
+    expect(on.input.tunnel).not.toHaveProperty("caCert");
+    const off = await launched({});
+    expect(off.spec).not.toHaveProperty("tunnelPort");
+    expect(off.input).not.toHaveProperty("tunnel");
+  });
+
+  it("hands the tunnel's CA certificate to the spec and the worker only with the tunnel on", async () => {
+    const caCert = "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n";
+    const launched = async (extra: Partial<ContainerExecutorOptions>) => {
+      const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, extra);
+      let input: Record<string, unknown> | undefined;
+      created.jobs.onLaunch = () => {
+        input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+      };
+      await created.executor.start("run-1");
+      return { input: input!, spec: created.jobs.lastSpec! };
+    };
+    const on = await launched({ tunnelPort: 8789, tunnelCaCert: caCert });
+    expect(on.spec.tunnelCaCert).toBe(caCert);
+    expect(on.input).toMatchObject({ tunnel: { port: 8789, caCert } });
+    // A certificate without the tunnel is ignored: nothing points a run at the tunnel.
+    const orphan = await launched({ tunnelCaCert: caCert });
+    expect(orphan.spec).not.toHaveProperty("tunnelCaCert");
+    expect(orphan.input).not.toHaveProperty("tunnel");
+  });
+
+  it("reads a function-sourced tunnel CA certificate at each launch, so a rotated one reaches the next run", async () => {
+    let caCert = "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n";
+    const created = await harness({}, IMAGE, new InMemoryCodingRunObserver(), undefined, {
+      tunnelPort: 8789,
+      tunnelCaCert: () => caCert,
+    });
+    let input: Record<string, unknown> | undefined;
+    created.jobs.onLaunch = () => {
+      input = JSON.parse(readFileSync(created.jobs.lastSpec!.inputArtifact, "utf8")) as Record<string, unknown>;
+    };
+    caCert = "-----BEGIN CERTIFICATE-----\ncm90YXRlZA==\n-----END CERTIFICATE-----\n";
+    await created.executor.start("run-1");
+    expect(created.jobs.lastSpec!.tunnelCaCert).toBe(caCert);
+    expect(input).toMatchObject({ tunnel: { port: 8789, caCert } });
+  });
+
   it("hands the worker sessionResume only when the run has it on", async () => {
     const launched = async (overrides: Partial<ContainerRunSnapshot>) => {
       const created = await harness(

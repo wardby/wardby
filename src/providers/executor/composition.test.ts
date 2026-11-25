@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "#prisma";
 import type { Power } from "../../core/power.js";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeKubernetesApi } from "../jobs/fake-kubernetes-api.js";
@@ -101,6 +101,10 @@ describe("JOB_LAUNCHER=substrate", () => {
 
   it("composes a routing executor", () => {
     expect(build({})).toBeInstanceOf(RoutingExecutor);
+  });
+
+  it("leaves the tunnel to Docker and Kubernetes: its settings are not read here", () => {
+    expect(build({ CODING_TUNNEL_PORT: "8789" })).toBeInstanceOf(RoutingExecutor);
   });
 
   it("refuses a Codex node-python worker image that isn't a registry digest", () => {
@@ -361,6 +365,111 @@ describe("buildConfiguredExecutor", () => {
     });
     expect(executor).toBeInstanceOf(RoutingExecutor);
     expect(api.objects.size).toBe(0);
+  });
+
+  it("reads the tunnel's CA certificate at start-up, so a missing or non-certificate file fails there", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tunnel-trust-"));
+    try {
+      const good = join(dir, "ca.crt");
+      writeFileSync(good, "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n");
+      const key = join(dir, "ca.key");
+      writeFileSync(key, "-----BEGIN PRIVATE KEY-----\nZmFrZQ==\n-----END PRIVATE KEY-----\n");
+      const build = (file: string) =>
+        buildConfiguredExecutor({
+          native,
+          db,
+          env: {
+            ...baseEnv,
+            CODING_TUNNEL_PORT: "8789",
+            CODING_TUNNEL_ALLOWED_HOSTS: "github.com",
+            CODING_TUNNEL_TRUST_CA_CERT_FILE: file,
+            JOB_LAUNCHER: "kubernetes",
+            CODING_CLAUDE_WORKER_IMAGE: REGISTRY_IMAGE,
+            CODING_CLAUDE_TOOL_RUNNER_IMAGE: REGISTRY_IMAGE,
+          },
+          kubernetesApi: new FakeKubernetesApi(),
+        });
+      expect(build(good)).toBeInstanceOf(RoutingExecutor);
+      expect(() => build(join(dir, "missing.crt"))).toThrow("tunnel_ca_unreadable");
+      expect(() => build(key)).toThrow("tunnel_ca_invalid");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("takes the tunnel's CA certificate as PEM text, and refuses a key there without echoing it", () => {
+    const keyBody = "ZmFrZS1jYS1rZXktbWFya2VyLTEyMw==";
+    const build = (pem: string) =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: {
+          ...baseEnv,
+          CODING_TUNNEL_PORT: "8789",
+          CODING_TUNNEL_ALLOWED_HOSTS: "github.com",
+          CODING_TUNNEL_TRUST_CA_CERT: pem,
+          JOB_LAUNCHER: "kubernetes",
+          CODING_CLAUDE_WORKER_IMAGE: REGISTRY_IMAGE,
+          CODING_CLAUDE_TOOL_RUNNER_IMAGE: REGISTRY_IMAGE,
+        },
+        kubernetesApi: new FakeKubernetesApi(),
+      });
+    expect(build("-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n")).toBeInstanceOf(RoutingExecutor);
+    let message = "";
+    try {
+      build(`-----BEGIN PRIVATE KEY-----\n${keyBody}\n-----END PRIVATE KEY-----\n`);
+    } catch (error) {
+      message = String(error instanceof Error ? error.message : error);
+    }
+    expect(message).toBe("tunnel_ca_invalid");
+    expect(message).not.toContain(keyBody);
+  });
+
+  it("reads the tunnel settings for Kubernetes and Docker, so an invalid one fails at start-up", () => {
+    const tunnel = { CODING_TUNNEL_PORT: "8789" };
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: {
+          ...baseEnv,
+          ...tunnel,
+          JOB_LAUNCHER: "kubernetes",
+          CODING_CLAUDE_WORKER_IMAGE: REGISTRY_IMAGE,
+          CODING_CLAUDE_TOOL_RUNNER_IMAGE: REGISTRY_IMAGE,
+        },
+        kubernetesApi: new FakeKubernetesApi(),
+      }),
+    ).toThrow("CODING_TUNNEL_ALLOWED_HOSTS");
+    expect(() =>
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: {
+          ...baseEnv,
+          ...tunnel,
+          JOB_LAUNCHER: "docker",
+          CODING_PROXY_CONTAINER: "proxy",
+          CODING_CLAUDE_WORKER_IMAGE: LOCAL_IMAGE,
+          CODING_CLAUDE_TOOL_RUNNER_IMAGE: LOCAL_IMAGE,
+        },
+      }),
+    ).toThrow("CODING_TUNNEL_ALLOWED_HOSTS");
+    const valid = { ...tunnel, CODING_TUNNEL_ALLOWED_HOSTS: "github.com" };
+    expect(
+      buildConfiguredExecutor({
+        native,
+        db,
+        env: {
+          ...baseEnv,
+          ...valid,
+          JOB_LAUNCHER: "kubernetes",
+          CODING_CLAUDE_WORKER_IMAGE: REGISTRY_IMAGE,
+          CODING_CLAUDE_TOOL_RUNNER_IMAGE: REGISTRY_IMAGE,
+        },
+        kubernetesApi: new FakeKubernetesApi(),
+      }),
+    ).toBeInstanceOf(RoutingExecutor);
   });
 
   it("builds for Docker with only the Claude Code images", () => {

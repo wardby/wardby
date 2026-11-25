@@ -2,6 +2,9 @@ import { normalizeHostedRepository } from "../../coding/code-host.js";
 import { isSafeFilePath } from "../../coding/file-path.js";
 import { normalizeGitRef } from "../../coding/protocol.js";
 import { codingOverrideAllowed, type CodingOverrideAgent } from "../coding-override.js";
+import { atLeast, effectiveAccess } from "../grants.js";
+import type { PrismaClient } from "#prisma";
+import { parseStoredDocumentTools } from "./tools-setting.js";
 
 /** The longest repository path a document may be linked to. */
 export const MAX_DOCUMENT_PATH_CHARS = 256;
@@ -124,4 +127,21 @@ export function documentLinkSendable(
   const plan = wardbyPlanLink(doc, set);
   if (plan) return doc.agentId === plan.agentId;
   return !!doc.repository && !!doc.path && (doc.kind !== "design" || !!doc.baseRef);
+}
+
+/** A native writer: the linker may execute it, and its documentTools allow write. Throws document_agent_unavailable. */
+export async function assertNativeWriter(
+  db: Pick<PrismaClient, "agent" | "resourceGrant">,
+  linkerId: string,
+  agentId: string,
+): Promise<void> {
+  const agent = await db.agent.findUnique({
+    where: { id: agentId },
+    select: { id: true, ownerId: true, kind: true, documentTools: true },
+  });
+  const setting = agent?.kind === "native" ? parseStoredDocumentTools(agent.documentTools) : null;
+  if (!agent || setting?.access !== "write") throw new Error("document_agent_unavailable");
+  if (!atLeast("agent", await effectiveAccess(db, "agent", agent, linkerId), "execute")) {
+    throw new Error("document_agent_unavailable");
+  }
 }

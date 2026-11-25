@@ -12,9 +12,12 @@ import {
   type ResolvedToolchainService,
 } from "../../coding/services/catalog.js";
 import type { JobSpec } from "./types.js";
+import { deriveTunnelToken } from "../../coding/tunnel-token.js";
 import {
   CLAUDE_CONFIG_PATH,
   CLAUDE_CONFIG_SCRATCH_MIB,
+  DOCKER_TUNNEL_CA_SECRET_KEY,
+  DOCKER_TUNNEL_PROXY_SECRET_KEY,
   KUBERNETES_ISOLATION_ERROR,
   STORAGE_INIT_CONTAINER,
   STORAGE_ROOT,
@@ -486,6 +489,22 @@ describe("buildRunNetworkPolicy", () => {
         ports: [{ protocol: "TCP", port: 8787 }],
       },
     ]);
+  });
+});
+
+describe("buildRunNetworkPolicy with the tunnel on", () => {
+  it("admits the tunnel port on the proxy pods in the same single egress rule, and nothing else", () => {
+    const policy = buildRunNetworkPolicy({ ...spec, tunnelPort: 8789 }, "wardby-coding");
+    expect(policy.spec?.egress).toEqual([
+      {
+        to: [{ podSelector: { matchLabels: { "app.kubernetes.io/name": "wardby-coding-proxy" } } }],
+        ports: [
+          { protocol: "TCP", port: 8787 },
+          { protocol: "TCP", port: 8789 },
+        ],
+      },
+    ]);
+    expect(policy.spec?.ingress).toEqual([]);
   });
 });
 
@@ -1256,8 +1275,6 @@ describe("buildRunPod with a docker service", () => {
         "--ip6tables=false",
         "--bridge=none",
         "--host=unix:///wardby/docker/docker.sock",
-        "--registry-mirror=http://wardby-proxy:8787",
-        "--insecure-registry=wardby-proxy:8787",
       ],
       env: [
         { name: "DOCKER_IPTABLES_LEGACY", value: "1" },
@@ -1285,6 +1302,92 @@ describe("buildRunPod with a docker service", () => {
         { name: "docker-home", mountPath: "/home/wardby" },
         { name: "docker-tmp", mountPath: "/tmp" },
       ],
+    });
+  });
+
+  describe("with the run's tunnel", () => {
+    const CA = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+    const tunnelled: JobSpec = { ...codex, tunnelPort: 8789 };
+    const trusted: JobSpec = { ...tunnelled, tunnelCaCert: CA };
+    const secretName = (built: V1Pod) =>
+      container(built, "service-docker").env!.find((e) => e.name === "HTTPS_PROXY")!.valueFrom!.secretKeyRef!.name;
+
+    it("points dockerd at the tunnel through the run Secret, never a value in the pod spec, and drops the mirror", () => {
+      const built = buildRunPod(tunnelled, gvisor);
+      const docker = container(built, "service-docker");
+      expect(docker.args).not.toEqual(expect.arrayContaining([expect.stringMatching(/registry/)]));
+      const ref = { secretKeyRef: { name: secretName(built), key: DOCKER_TUNNEL_PROXY_SECRET_KEY } };
+      expect(docker.env).toEqual([
+        { name: "DOCKER_IPTABLES_LEGACY", value: "1" },
+        { name: "HOME", value: "/home/wardby" },
+        { name: "XDG_RUNTIME_DIR", value: "/wardby/xdg" },
+        { name: "HTTPS_PROXY", valueFrom: ref },
+        { name: "https_proxy", valueFrom: ref },
+        { name: "HTTP_PROXY", valueFrom: ref },
+        { name: "http_proxy", valueFrom: ref },
+        { name: "NO_PROXY", value: "localhost,127.0.0.1,::1,wardby-proxy" },
+        { name: "no_proxy", value: "localhost,127.0.0.1,::1,wardby-proxy" },
+      ]);
+      expect(secretName(built)).toBe(kubernetesRunNames(spec.runId).secret);
+      // No CA without one configured.
+      expect(docker.volumeMounts!.some((m) => m.name === "docker-tunnel-ca")).toBe(false);
+      expect(built.spec!.volumes!.some((v) => v.name === "docker-tunnel-ca")).toBe(false);
+    });
+
+    it("puts the run's tunnel proxy URL in the Secret, with the tunnel-only token and never the capability", () => {
+      const capability = "rrp_capability_value_123456";
+      const data = buildCapabilitySecret(tunnelled, "wardby-coding", capability).stringData!;
+      expect(data[DOCKER_TUNNEL_PROXY_SECRET_KEY]).toBe(
+        `http://run:${deriveTunnelToken(capability)}@wardby-proxy:8789`,
+      );
+      expect(data[DOCKER_TUNNEL_PROXY_SECRET_KEY]).not.toContain(capability);
+      expect(data[DOCKER_TUNNEL_CA_SECRET_KEY]).toBeUndefined();
+      const pod = JSON.stringify(buildRunPod(tunnelled, gvisor));
+      expect(pod).not.toContain(deriveTunnelToken(capability));
+    });
+
+    it("trusts the interception CA beside the system roots, mounted read-only from the Secret's CA key alone", () => {
+      const built = buildRunPod(trusted, gvisor);
+      const docker = container(built, "service-docker");
+      expect(docker.env).toContainEqual({ name: "SSL_CERT_DIR", value: "/etc/ssl/certs:/wardby/tunnel-ca" });
+      expect(docker.volumeMounts).toContainEqual({
+        name: "docker-tunnel-ca",
+        mountPath: "/wardby/tunnel-ca",
+        readOnly: true,
+      });
+      expect(built.spec!.volumes!.find((v) => v.name === "docker-tunnel-ca")).toEqual({
+        name: "docker-tunnel-ca",
+        secret: {
+          secretName: kubernetesRunNames(spec.runId).secret,
+          items: [{ key: DOCKER_TUNNEL_CA_SECRET_KEY, path: "tunnel-ca.crt" }],
+          defaultMode: 0o444,
+        },
+      });
+      expect(buildCapabilitySecret(trusted, "wardby-coding", "rrp_x").stringData![DOCKER_TUNNEL_CA_SECRET_KEY]).toBe(
+        CA,
+      );
+      // Only the daemon gets the CA volume.
+      const others = [...built.spec!.containers, ...built.spec!.initContainers!].filter(
+        (c) => c.name !== "service-docker",
+      );
+      expect(others.some((c) => c.volumeMounts?.some((m) => m.name === "docker-tunnel-ca"))).toBe(false);
+    });
+
+    it("adds nothing for the daemon without a docker service, or without the tunnel", () => {
+      const noDocker: JobSpec = { ...spec, services: [POSTGRES], tunnelPort: 8789, tunnelCaCert: CA };
+      for (const s of [noDocker, codex]) {
+        const data = buildCapabilitySecret(s, "wardby-coding", "rrp_x").stringData!;
+        expect(data[DOCKER_TUNNEL_PROXY_SECRET_KEY]).toBeUndefined();
+        expect(data[DOCKER_TUNNEL_CA_SECRET_KEY]).toBeUndefined();
+      }
+      expect(container(buildRunPod(codex, gvisor), "service-docker").env!.some((e) => e.name.endsWith("_PROXY"))).toBe(
+        false,
+      );
+    });
+
+    it("builds a pod that attests against itself", () => {
+      const built = buildRunPod(trusted, gvisor);
+      expect(() => assertRunPodMatches(structuredClone(built), built)).not.toThrow();
     });
   });
 

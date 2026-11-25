@@ -60,6 +60,8 @@ import { assertPlatformConfig, platformProfile } from "../jobs/kubernetes-platfo
 import { preflightCanaryImage, runKubernetesPreflight } from "../jobs/kubernetes-preflight.js";
 import { CODING_WORKER_IMAGES_REQUIRED } from "../../coding/docker-preflight.js";
 import { KubernetesJobLauncher } from "../jobs/kubernetes.js";
+import { loadCodingTunnelConfig } from "../../config/coding-proxy-tunnel.js";
+import { parseTunnelCaCert, tunnelCaCertSource } from "../../coding/tunnel-trust-ca.js";
 import { createSubstrateApiFor } from "../substrate/composition.js";
 import type { SubstrateApi } from "../substrate/api.js";
 import { SubstrateJobLauncher } from "../jobs/substrate/launcher.js";
@@ -515,7 +517,21 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     },
     secretVersions: (agentId) => agentSecretVersions(options.db, agentId),
   });
+  // The tunnel's port, for a launcher whose run network can reach it. Substrate's egress is a gateway
+  // with its own rules, so it gets none (and the tunnel stays unused there).
+  const tunnel = providerConfig.jobs === "substrate" ? undefined : loadCodingTunnelConfig(env);
+  // The CA certificate runs are told to trust (public; read here so a bad file stops start-up, not a run).
+  // A file is read again at each launch, so a rotated CA reaches the next run without a restart.
+  const tunnelCaCert = tunnel?.trustCaCertPem
+    ? parseTunnelCaCert(tunnel.trustCaCertPem)
+    : tunnel?.trustCaCertFile
+      ? tunnelCaCertSource(tunnel.trustCaCertFile, (code) =>
+          compositionLog.warn({ event: "tunnel_ca.reload_failed", code }, "tunnel CA certificate reload failed"),
+        )
+      : undefined;
   const coding = new ContainerExecutor({
+    ...(tunnel ? { tunnelPort: tunnel.port } : {}),
+    ...(tunnelCaCert ? { tunnelCaCert } : {}),
     transcripts,
     planFiles,
     planSummary: async (runId) => {
