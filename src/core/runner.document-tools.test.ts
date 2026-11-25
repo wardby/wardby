@@ -16,7 +16,7 @@ vi.mock("./document-tools.js", async (importOriginal) => {
     }),
   };
 });
-import { createNativeRunTools, executeRun, sandboxWorkerInput, type RunnerDb } from "./runner.js";
+import { createNativeRunTools, executeRun, loadNativeRun, sandboxWorkerInput, type RunnerDb } from "./runner.js";
 
 // The doc_* built-ins in a native run (#625): offered by the stored documentTools setting, native
 // agents only, dispatched live, and served through the sandbox gateway like any other built-in.
@@ -115,6 +115,18 @@ const setting = (access: "read" | "write") => ({
   maxNewPerRun: 5,
   plans: [],
 });
+async function loadStep(h: ReturnType<typeof harness>) {
+  const existingRun = await h.db.run.findUniqueOrThrow({ where: { id: "run1" } });
+  return loadNativeRun({
+    runId: "run1",
+    existingRun,
+    providers: h.providers,
+    db: h.db,
+    step: async (_name: string, fn: () => Promise<any>) => fn(),
+    reviewHosts: undefined,
+    issueTrackers: undefined,
+  }) as Promise<any>;
+}
 const docNames = (names: string[]) => names.filter((n) => n.startsWith("doc_"));
 
 describe("doc_* built-ins in the native run loop", () => {
@@ -131,13 +143,25 @@ describe("doc_* built-ins in the native run loop", () => {
     }
   });
 
-  it("offers no doc_* tools to a coding agent with a stored setting", async () => {
-    const h = harness({ kind: "coding", documentTools: setting("write"), script: [text("done")] });
-    await executeRun("run1", h.providers, h.db).catch(() => undefined);
-    expect(docNames(h.state.offered)).toEqual([]);
+  it("pins documentToolsAccess in the loaded step only when the setting is on", async () => {
+    const off = await loadStep(harness({ documentTools: null, script: [] }));
+    expect("documentToolsAccess" in off).toBe(false);
+    expect(docNames(off.tools.map((t: any) => t.name))).toEqual([]);
+    const write = await loadStep(harness({ documentTools: setting("write"), script: [] }));
+    expect(write.documentToolsAccess).toBe("write");
+    expect(docNames(write.tools.map((t: any) => t.name))).toHaveLength(ALL_NINE);
+    const read = await loadStep(harness({ documentTools: setting("read"), script: [] }));
+    expect(read.documentToolsAccess).toBe("read");
+    expect(docNames(read.tools.map((t: any) => t.name))).toEqual(READ);
   });
 
-  it("dispatches a call to the handler with the run's ids and returns its result", async () => {
+  it("loads no doc_* tools and no access for a coding agent with a stored setting", async () => {
+    const loaded = await loadStep(harness({ kind: "coding", documentTools: setting("write"), script: [] }));
+    expect(docNames(loaded.tools.map((t: any) => t.name))).toEqual([]);
+    expect("documentToolsAccess" in loaded).toBe(false);
+  });
+
+  it("dispatch wiring only (handler mocked): routes a call with the run's ids and returns its result", async () => {
     handled.length = 0;
     const h = harness({
       documentTools: setting("write"),
