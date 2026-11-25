@@ -16,7 +16,7 @@ appliesTo: ">=0.10.0"
 - changing the reviewer list of an approved, rejected or archived document (reopen or unarchive it first);
 - force approving a draft, an approved or an archived document, or without a note;
 - a reviewer's verdict on a document the owner or final approver force approved (a force approval is final; a writer reopens it for review);
-- reopening a document that is not approved;
+- reopening a document that is not approved or rejected;
 - archiving an archived document, or unarchiving one that is not archived.
 
 Read the current state with `get_document` (or reload the page) and try the action that fits it.
