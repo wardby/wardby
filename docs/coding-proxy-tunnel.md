@@ -21,23 +21,33 @@ alone; every other host stays blind.
 - None of those package checks apply to traffic through the tunnel. Whatever a
   tunnelled host serves reaches the run as it is. Keep the allowlist short, and
   prefer hosts you control or mirror.
-- It is not a general internet proxy: allowlisted hostnames, port 443 only.
+- It is not a general internet proxy: allowlisted hostnames, port 443 only. An
+  agent can be given more hosts, or patterns, only if you allow it (see
+  [Per-agent tunnel hosts](#per-agent-tunnel-hosts)).
 - Shared hosts widen the allowlist more than they look. Allowing a host that
   serves many unrelated tenants (an object store, a CDN) allows all of them.
 
 ## Settings
 
-Set these on the coding proxy. Set `CODING_TUNNEL_PORT` and
-`CODING_TUNNEL_ALLOWED_HOSTS` on the control plane too, to the same values: the
-Docker and Kubernetes launchers read them to point each run at the tunnel (see
-[Configuring a run](#configuring-a-run)). The limits matter only to the proxy.
+Set these on the coding proxy. Set `CODING_TUNNEL_PORT`,
+`CODING_TUNNEL_ALLOWED_HOSTS` and `CODING_TUNNEL_AGENT_HOSTS` on the control plane
+too, to the same values: the Docker and Kubernetes launchers read them to point
+each run at the tunnel (see [Configuring a run](#configuring-a-run)), and the
+control plane checks agents' tunnel hosts against the ceiling. The limits matter
+only to the proxy.
 
 - `CODING_TUNNEL_PORT`: the port the tunnel listens on. Unset turns the tunnel
   off. It must differ from the proxy's own port (8787) and its deny port (8788).
-- `CODING_TUNNEL_ALLOWED_HOSTS`: comma-separated hostnames a run may tunnel to.
-  Required when the tunnel is on. Bare hostnames only: no IP addresses,
-  wildcards, ports, schemes or paths. A name matches exactly, so allowing
-  `example.com` does not allow `sub.example.com`.
+- `CODING_TUNNEL_ALLOWED_HOSTS`: comma-separated hostnames every run may tunnel
+  to. Required when the tunnel is on and `CODING_TUNNEL_AGENT_HOSTS` is `off`;
+  may be empty otherwise. Bare hostnames only: no IP addresses, wildcards, ports,
+  schemes or paths. A name matches exactly, so allowing `example.com` does not
+  allow `sub.example.com`.
+- `CODING_TUNNEL_AGENT_HOSTS`: the ceiling on hosts an agent's owner may add for
+  that agent's runs alone (`codingProfile.tunnelHosts`): `off` (the default: only
+  the server list applies), `exact` (exact hosts), `pattern` (also `*.domain`) or
+  `any` (also `*`, any public host). See
+  [Per-agent tunnel hosts](#per-agent-tunnel-hosts).
 - `CODING_TUNNEL_MAX_CONNECTIONS`: open tunnels per run. Default 16.
 - `CODING_TUNNEL_MAX_BYTES`: bytes per run, both directions together, across all
   its tunnels. Default 4 GiB.
@@ -78,8 +88,100 @@ Kubernetes launchers read it):
   missing or the value holds anything but certificate blocks.
 
 The proxy, and the control plane when it launches coding runs, refuse to start on an invalid combination: a bad port or limit, an
-empty or malformed allowlist, or any `CODING_TUNNEL_*` setting without the port.
+empty allowlist while `CODING_TUNNEL_AGENT_HOSTS` is `off`, a malformed allowlist,
+a `CODING_TUNNEL_AGENT_HOSTS` other than the four levels, or any `CODING_TUNNEL_*`
+setting without the port.
 The error names the setting and never repeats its value.
+
+## Per-agent tunnel hosts
+
+The server list applies to every run. When one agent needs more, for example an
+agent that drives a headless browser through a web app's screens and needs the
+app's whole domain, its owner can list hosts for that agent's runs alone, in
+`codingProfile.tunnelHosts` (`create_agent` or `update_agent`). No other agent's
+runs get them.
+
+Each entry is one of:
+
+- `api.example.com`: that exact host;
+- `*.example.com`: any subdomain of `example.com`, at any depth
+  (`a.example.com`, `a.b.example.com`), but not `example.com` itself. List it too
+  if the run needs it;
+- `*`: any public host.
+
+An agent may list 1 to 50 entries; `[]` removes them. Entries are matched
+case-insensitively, after a trailing dot is dropped and an international name is
+converted to its ASCII form. The match is on a label boundary, so
+`*.example.com` does not match `evilexample.com`.
+
+The entries an agent may hold depend on `CODING_TUNNEL_AGENT_HOSTS`:
+
+| `CODING_TUNNEL_AGENT_HOSTS` | Exact hosts | `*.domain` | `*`               |
+| --------------------------- | ----------- | ---------- | ----------------- |
+| `off` (default)             | no          | no         | no                |
+| `exact`                     | yes         | no         | no                |
+| `pattern`                   | yes         | yes        | no                |
+| `any`                       | yes         | yes        | with admin review |
+
+Saving the agent refuses, with `tunnel_hosts_invalid`:
+
+- any entry while the ceiling is `off` (or the tunnel itself is off), and an
+  entry above the ceiling;
+- IP addresses, ports, schemes, paths, user names and queries;
+- `*` anywhere but alone or as the whole first label (`ex*.com`, `a.*.example.com`);
+- a top-level domain or public suffix, checked against the public suffix list:
+  `com`, `*.com`, `*.co.uk`, and, for patterns, the list's shared-hosting
+  suffixes too (`*.github.io`, `*.s3.amazonaws.com`), which would cover every
+  tenant on them. An exact host on such a suffix (`s3.amazonaws.com`) is
+  accepted.
+
+Patterns at or below the ceiling need only ownership of the agent. `*` also needs
+an admin: the caller needs `agents:admin` with the admin role, as for
+`repositoryAdminOverride`. The profile records who approved it and when
+(`tunnelAnyHostAuthorizedById`, `tunnelAnyHostAuthorizedAt`). The approval stays
+while `*` stays on the list, and is cleared when `*` is removed; adding it again
+needs an admin again.
+
+### How a run gets them
+
+1. When a run is dispatched, the control plane reads the agent's hosts, keeps
+   those the ceiling allows at that moment (and `*` only with its recorded
+   approval), and pins them on the run's proxy session, next to its tunnel token.
+   An edit to the agent after that does not change the running run; the next run
+   gets the new list. Codex and Claude Code runs are handled the same way.
+2. The tunnel allows a target that is on the server list, or that matches one of
+   the run's pinned entries. The proxy applies its own `CODING_TUNNEL_AGENT_HOSTS`
+   too, so set it on both: an entry above the proxy's ceiling is ignored.
+3. Everything else is unchanged and applies to every tunnel, whatever allowed the
+   host: port 443 only, the public-address check (`tunnel_destination_blocked` for
+   private, loopback, link-local and metadata addresses, so `*` never reaches an
+   internal network, even through a name that resolves to one), the per-run
+   connection, byte and duration limits, and the session checks.
+4. TLS interception rules stay exact and server-wide. A host allowed only by an
+   agent's entry is always a blind tunnel.
+
+If you lower the ceiling later, agents keep their stored entries, and edits that
+leave `tunnelHosts` alone still save. Runs are given only what the new ceiling
+allows, and `get_agent` warns which entries runs no longer get.
+
+### Seeing who has what
+
+- `get_agent` shows `codingProfile.tunnelHosts` and the approval of `*`.
+- `get_run` shows `tunnelHosts`, the entries the run was given at dispatch.
+- `list_agent_links` notes `tunnel:<entry>` on every agent that has entries
+  (`tunnel:*` for any public host), so a reviewer can see which agents can reach
+  the internet.
+- Each `audit.tunnel` record says what allowed the host (`matchedBy`, below).
+
+### Security
+
+`*` adds one risk: exfiltration. A run holds repository code and acts on content it
+reads, and `*` lets it send that anywhere public. That is why `*` is off unless you
+choose `any`, needs an admin on each agent, and is listed per agent. Exact hosts
+and `*.domain` patterns keep the server list's posture, per agent instead of per
+server. Patterns are matched on the `CONNECT` target's name before any DNS lookup;
+a name that resolves, or later rebinds, to a private address is refused by the
+address check. Tunnel tokens, logging and redaction are unchanged.
 
 ## How a request is handled
 
@@ -93,7 +195,8 @@ answers with a fixed JSON error and closes the connection:
 2. The session is still active, and its deadline has not passed: otherwise `403`
    (`tunnel_session_ended`).
 3. The target reads as `host:port`: otherwise `400` (`tunnel_bad_target`).
-4. The host is not an IP address and is on the allowlist: otherwise `403`
+4. The host is not an IP address, and is on the allowlist or matches one of the
+   run's [own entries](#per-agent-tunnel-hosts): otherwise `403`
    (`tunnel_host_not_allowed`).
 5. The port is 443: otherwise `403` (`tunnel_port_not_allowed`).
 6. The run is under its connection and byte limits: otherwise `429`
@@ -314,30 +417,73 @@ Things to know when you set a run up yourself or debug one:
 - A run's job records the tunnel port it started with. Change the setting between
   runs, not during one.
 
+## From a coding service
+
+A [coding service](coding-services.md) (a database, or a headless Chromium the
+agent drives) shares the run's network but not its environment: it is not given
+`HTTPS_PROXY` or the tunnel token. A service that needs the internet gets them
+from the agent, at the moment it is used.
+
+For example, an agent that drives a headless Chromium service over the Chrome
+DevTools Protocol with Playwright passes the run's tunnel to each browser
+context:
+
+```js
+import { chromium } from "playwright-core";
+
+// The run's own tunnel URL: http://run:<token>@<proxy host>:<port>. Never print it.
+const tunnel = new URL(process.env.HTTPS_PROXY);
+const browser = await chromium.connectOverCDP("http://127.0.0.1:9222");
+const context = await browser.newContext({
+  proxy: {
+    server: `${tunnel.protocol}//${tunnel.host}`,
+    username: decodeURIComponent(tunnel.username),
+    password: decodeURIComponent(tunnel.password),
+  },
+});
+const page = await context.newPage();
+await page.goto("https://app.example.com/");
+```
+
+The browser then sends `CONNECT` for every HTTPS host a page loads, and each is
+allowed or refused like any other tunnel: an agent that browses a web app usually
+needs `*.example.com` (app, sign-in, API and asset hosts) in its
+[tunnel hosts](#per-agent-tunnel-hosts). A page's plain `http://` requests are
+refused (`tunnel_connect_only`). Loopback addresses, where the run's services
+listen, are not sent to the proxy. The token is a credential for the tunnel:
+pass it only to the process that needs it, and keep it out of logs and
+screenshots of settings pages.
+
 ## Limits, audit and metrics
 
 - The connection and byte limits are per run and are counted by each proxy
   process separately, so with several proxy replicas a run can use up to the
   limit on each.
 - Every tunnel that reaches an authenticated run writes one audit record to the
-  proxy log (`audit.tunnel`): run id, host, bytes in and out, start, duration
-  and outcome, where the outcome is how it ended or the code it was refused with.
+  proxy log (`audit.tunnel`): run id, host, `matchedBy`, bytes in and out, start,
+  duration and outcome, where the outcome is how it ended or the code it was
+  refused with. `matchedBy` is `server` for a host on the server list, or the
+  run's entry that allowed it (`api.example.com`, `*.example.com`, `*`).
   A tunnel the proxy decrypted also records `intercepted.requests`, the number of
   requests it relayed; never a path, header, credential or body.
-  A refused host that is not on the allowlist is left out of the record, because
-  it is text the run chose. No token, header value or payload is ever written to
-  a log, a record or a metric.
+- The host is recorded only when you or the agent's owner wrote it out in full:
+  a server-list host, or an exact entry. A host allowed by `*.domain` or `*`, and a
+  refused host, are left out of the record (only `matchedBy` is kept), because the
+  run chose that text and could put anything it holds in it. No token, header
+  value or payload is ever written to a log, a record or a metric.
 - Metrics count each answer under `protocol="tunnel"` in
   `wardby_proxy_http_requests_total` and the matching duration histogram.
   Tunnels are counted when they end, with the time they were open.
 
 ## Helm
 
-Under `codingProxy.tunnel` in the chart: `enabled`, `port`, `allowedHosts`, and
-optionally `maxConnections`, `maxBytes`, `idleMs` and `maxDurationMs`. Enabling
-it adds the port to the Service and the container, and to the NetworkPolicy rule
-that admits coding-run pods, and gives the control plane the port and hosts so it
-can point runs at the tunnel. Rendering fails when it is enabled with no hosts.
+Under `codingProxy.tunnel` in the chart: `enabled`, `port`, `allowedHosts`,
+`agentHosts` (`off`, `exact`, `pattern` or `any`; default `off`), and optionally
+`maxConnections`, `maxBytes`, `idleMs` and `maxDurationMs`. Enabling it adds the
+port to the Service and the container, and to the NetworkPolicy rule that admits
+coding-run pods, and gives the control plane the port, hosts and `agentHosts` so it
+can point runs at the tunnel and check agents' entries. Rendering fails when it is
+enabled with no hosts while `agentHosts` is `off`, or with an unknown `agentHosts`.
 Public egress from the proxy stays on port 443.
 
 For interception, `codingProxy.tunnel.intercept.rules` takes the rule objects above
@@ -380,3 +526,10 @@ Runs that started before the tunnel was enabled were launched without the proxy
 variables, and do not use it.
 
 TLS interception adds no migration and is off unless its settings are set.
+
+Per-agent tunnel hosts add three columns to the coding agent profile
+(`tunnelHosts`, empty by default, and the approval of `*`) and one to the proxy's
+session table (`tunnelHosts`, the entries pinned on a run). All are additive and
+applied by the normal migration step. Nothing changes until you set
+`CODING_TUNNEL_AGENT_HOSTS`; with it `off`, only the server list applies, as
+before. Runs dispatched before the upgrade have no pinned entries.

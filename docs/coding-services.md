@@ -416,7 +416,8 @@ It has no registry mirror and no insecure registry. When the control plane has
   gets its credential from the proxy, and the run never holds it: no
   `docker login`.
 
-So a pull or push works for exactly the hosts in `CODING_TUNNEL_ALLOWED_HOSTS`,
+So a pull or push works for exactly the hosts in `CODING_TUNNEL_ALLOWED_HOSTS`
+and the agent's own [tunnel hosts](coding-proxy-tunnel.md#per-agent-tunnel-hosts),
 and is refused for every other. Name images by their full registry host. A
 short name such as `alpine` means Docker Hub (`registry-1.docker.io`, plus its
 auth and blob hosts), which works only if those hosts are allowed. With the
@@ -461,8 +462,8 @@ Claude Code agent and tool runner images from this release.
   the daemon's loopback is its own. Run tests that need those services in the
   agent's shell instead.
 - **Only the tunnel's hosts.** Pulls and pushes reach only the hosts in
-  `CODING_TUNNEL_ALLOWED_HOSTS` (see [Pulling and pushing
-  images](#pulling-and-pushing-images)); with the tunnel off, none. The run's
+  `CODING_TUNNEL_ALLOWED_HOSTS` and the agent's own tunnel hosts (see [Pulling
+  and pushing images](#pulling-and-pushing-images)); with the tunnel off, none. The run's
   network policy applies to the daemon and every container it starts.
 - Everything the daemon stores is deleted with the run's pod: no image or
   build cache carries over to the next run.
@@ -513,6 +514,46 @@ driver v11 or later to run with services; an agent whose `workerImageRef`
 predates driver v11 rejects the run input once services are on it. For a
 Claude Code agent, build the custom image `FROM` the tool runner image of the
 same wardby release.
+
+## Services that reach the internet (a headless browser)
+
+A service shares the run's network, but not the agent's environment: it is not
+given `HTTPS_PROXY`, `HTTP_PROXY` or the run's tunnel token, so on its own it
+reaches only the run's other services on `127.0.0.1`. A service that must load
+outside pages, such as a headless Chromium the agent drives to check a web app's
+screens, gets the run's [CONNECT tunnel](coding-proxy-tunnel.md) from the agent at
+use time.
+
+1. Add a catalog entry for the browser (with `create_service`, as in
+   [Adding your own entry](#adding-your-own-entry)), for example an image that
+   serves the Chrome DevTools Protocol on `127.0.0.1:9222` with a TCP readiness
+   check on that port, and allow it on the agent (`codingProfile.services`).
+2. Give the agent the hosts the app uses, usually a pattern such as
+   `*.example.com`, in `codingProfile.tunnelHosts`, within the operator's
+   `CODING_TUNNEL_AGENT_HOSTS` (see
+   [Per-agent tunnel hosts](coding-proxy-tunnel.md#per-agent-tunnel-hosts)).
+3. In the agent's script, connect over CDP and give each browser context the
+   tunnel, taken from the agent's own `HTTPS_PROXY`:
+
+   ```js
+   import { chromium } from "playwright-core";
+
+   const tunnel = new URL(process.env.HTTPS_PROXY); // never print it: it carries the token
+   const browser = await chromium.connectOverCDP("http://127.0.0.1:9222");
+   const context = await browser.newContext({
+     proxy: {
+       server: `${tunnel.protocol}//${tunnel.host}`,
+       username: decodeURIComponent(tunnel.username),
+       password: decodeURIComponent(tunnel.password),
+     },
+   });
+   await (await context.newPage()).goto("https://app.example.com/");
+   ```
+
+Every host a page loads then goes through the tunnel's checks: hosts outside the
+server list and the agent's entries are refused (`tunnel_host_not_allowed`), plain
+`http://` is refused, and private addresses stay blocked. A browser launched with
+no proxy has no way out of the run's network.
 
 ## Running the agent's commands in your own image (toolchain)
 
