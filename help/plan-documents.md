@@ -118,9 +118,15 @@ run on its file).
 ## The plan rail and links
 
 Every document in a set shows the plan as an outline on the left: "Plan N · X of Y
-approved", then `plan.md`, the **Options** (the plan's alternatives, such as
-`option-a/`, `option-b/`, with **Pick an option**), the **Other documents** (shared
+approved", then `plan.md`, one group per set of **options** (the plan's
+alternatives, each set with its own **Pick** button: "Layout options" with **Pick a
+layout**, "Color options" with **Pick a color**), the **Other documents** (shared
 parts such as `screens/`), and what left the plan, folded under **Out of the plan**.
+
+The planner names alternatives `<set>-<letter>-<slug>`: `layout-a-tree/` and
+`layout-b-cards/` are one set, `color-a-light/` and `color-b-dark/` another. That
+is how the page knows which documents are options and which are shared; a
+document named otherwise is never treated as an option.
 On a design page the outline is at the top of the left panel. The page you are on
 is marked. Each row's name opens that document on the side-panel tab you have open
 (on Review, the next document opens on Review too); its state ("In review ›")

@@ -108,9 +108,10 @@ lets every signed-in user read and comment on the plans it produces.
 
 **Plan rail.** Each page of a set shows the plan as an outline (left of a
 document; at the top of a design's left panel): "Plan N · X of Y approved" over
-the documents the viewer can read, grouped as `plan.md`, **Options** (documents
-of one name family, such as `option-a/` and `option-b/`, with **Pick an
-option**), **Other documents**, and **Out of the plan** (rejected and removed
+the documents the viewer can read, grouped as `plan.md`, one group per option
+set (alternatives the planner names `<set>-<letter>-<slug>`, such as
+`layout-a-tree/` and `layout-b-cards/`; each set with its own **Pick** button,
+"Pick a layout"), **Other documents**, and **Out of the plan** (rejected and removed
 documents, folded, struck through, marked "Rejected" or "Removed", and not
 counted). Relative links in the Markdown open the other documents or boards. A
 row's name opens its document on the side-panel tab open now (Review stays

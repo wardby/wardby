@@ -74,7 +74,8 @@ export function optionFamily(path: string): string | null {
 
 /**
  * The alternatives among a plan's open documents: those named in one option family (optionFamily) with at least one
- * other; shared parts such as screens/ are not alternatives. With no family-style names at all, every one of them. (A lone option-a/ beside screens/ is a choice already made.)
+ * other; shared parts such as screens/, and documents not named as options at all, are not alternatives (the planner
+ * names alternatives <set>-<letter>-<slug>, PLAN_LAYOUT_RULES). (A lone option-a/ beside screens/ is a choice already made.)
  */
 export function planAlternatives<T extends { path: string }>(docs: T[]): T[] {
   const sizes = new Map<string, number>();
@@ -82,8 +83,25 @@ export function planAlternatives<T extends { path: string }>(docs: T[]): T[] {
     const f = optionFamily(d.path);
     if (f) sizes.set(f, (sizes.get(f) ?? 0) + 1);
   }
-  if (sizes.size === 0) return docs;
   return docs.filter((d) => (sizes.get(optionFamily(d.path) ?? "") ?? 0) >= 2);
+}
+
+/** The plan's option sets (planAlternatives grouped by family), in the order their first document comes. */
+export function optionSets<T extends { path: string }>(docs: T[]): Array<{ family: string; docs: T[] }> {
+  const sets = new Map<string, T[]>();
+  for (const d of planAlternatives(docs)) {
+    const f = optionFamily(d.path)!;
+    sets.set(f, [...(sets.get(f) ?? []), d]);
+  }
+  return [...sets].map(([family, list]) => ({ family, docs: list }));
+}
+
+/** How a set is named on the page: "option-" is just Options; "layout-" is Layout options, picked as "a layout". */
+export function optionSetWords(family: string): { title: string; noun: string; pick: string } {
+  const noun = family.replace(/-$/, "").toLowerCase();
+  if (noun === "option") return { title: "Options", noun, pick: "Pick an option" };
+  const article = /^[aeiou]/.test(noun) ? "an" : "a";
+  return { title: `${noun[0].toUpperCase()}${noun.slice(1)} options`, noun, pick: `Pick ${article} ${noun}` };
 }
 
 /** What a choice did, said after it lands: rejected, and what the plan still waits for (or that it is ready). */

@@ -237,3 +237,69 @@ describe("the plan rail's outline", () => {
     expect(review.querySelector(".plan-state")!.textContent).toBe("In review");
   });
 });
+
+describe("several option sets", () => {
+  const d = (id: string, path: string, reviewState = "in_review") => ({
+    ...doc(path, reviewState),
+    id,
+    versionNumber: 2,
+  });
+  const PLAN = {
+    number: 8,
+    approved: 0,
+    counted: 6,
+    documents: [
+      d("pm", "plan.md"),
+      d("la", "layout-a-tree/"),
+      d("lb", "layout-b-cards/"),
+      d("ca", "color-a-light/"),
+      d("cb", "color-b-dark/"),
+      d("s", "screens/"),
+    ],
+  };
+  const buttons = (host: HTMLElement) => [...host.querySelectorAll<HTMLButtonElement>("button.plan-pick-open")];
+
+  it("groups each set on its own, with its own Pick button", () => {
+    const host = document.createElement("nav");
+    setPlanBarChooser(host, vi.fn());
+    renderPlanBar(host, PLAN);
+    const groups = [...host.querySelectorAll(".plan-group")].map((g) => [
+      g.querySelector("h3")?.textContent ?? "",
+      [...g.querySelectorAll(".plan-title")].map((t) => t.textContent),
+    ]);
+    expect(groups).toEqual([
+      ["", ["plan.md"]],
+      ["Layout options", ["layout-a-tree/", "layout-b-cards/"]],
+      ["Color options", ["color-a-light/", "color-b-dark/"]],
+      ["Other documents", ["screens/"]],
+    ]);
+    expect(buttons(host).map((b) => b.textContent)).toEqual(["Pick a layout", "Pick a color"]);
+  });
+
+  it("a set's pick asks about that set only, and rejects only within it", async () => {
+    const host = document.createElement("nav");
+    document.body.replaceChildren(host);
+    const chooser = vi.fn(() => Promise.resolve({ review: { state: "approved" } }));
+    setPlanBarChooser(host, chooser);
+    renderPlanBar(host, PLAN);
+    buttons(host)[1].click();
+    const panel = host.querySelector(".plan-pick")!;
+    expect(panel.querySelector("h3")!.textContent).toBe("Which color should be built?");
+    const radios = [...panel.querySelectorAll<HTMLInputElement>('input[type="radio"]')];
+    expect(radios.map((r) => r.parentElement!.querySelector("span")!.textContent)).toEqual([
+      "color-a-light/",
+      "color-b-dark/",
+    ]);
+    radios[1].checked = true;
+    radios[1].dispatchEvent(new Event("change"));
+    const ticked = [...host.querySelectorAll<HTMLInputElement>('.plan-pick input[type="checkbox"]')]
+      .filter((b) => b.checked)
+      .map((b) => b.parentElement!.querySelector("span")!.textContent);
+    expect(ticked).toEqual(["color-a-light/"]);
+    [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((b) => /^Approve and reject/.test(b.textContent ?? ""))!
+      .click();
+    await vi.waitFor(() => expect(chooser).toHaveBeenCalled());
+    expect(chooser).toHaveBeenCalledWith("cb", { action: "choose", versionNumber: 2, reject: ["ca"] });
+  });
+});

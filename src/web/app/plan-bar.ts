@@ -7,7 +7,7 @@
  */
 import type { PlanSetPayload } from "../../core/plans/page-payload.js";
 import { append, clear, h } from "./dom.js";
-import { choiceResult, chooseCandidates, planAlternatives, STATE_LABEL } from "./review-model.js";
+import { choiceResult, chooseCandidates, optionSets, optionSetWords, STATE_LABEL } from "./review-model.js";
 import { errorMessage, type ReviewAction, type ReviewState } from "./api.js";
 import { chooseStep, type ChooseStepState } from "./choose-ui.js";
 import { icon } from "./icons.js";
@@ -21,7 +21,8 @@ const shown = new WeakMap<HTMLElement, PlanSetPayload | undefined>();
 export type PlanChooser = (documentId: string, body: ReviewAction) => Promise<unknown>;
 
 interface PickState {
-  open: boolean;
+  /** The option set whose pick step is open (its family, as "layout-"), or none. */
+  set: string | null;
   chosenId: string | null;
   step: ChooseStepState;
   busy: boolean;
@@ -31,7 +32,7 @@ interface PickState {
 }
 const choosers = new WeakMap<HTMLElement, PlanChooser>();
 const emptyPick = (): PickState => ({
-  open: false,
+  set: null,
   chosenId: null,
   step: { ticks: new Set(), note: "" },
   busy: false,
@@ -55,22 +56,30 @@ function pickable(plan: PlanSetPayload): PlanSetPayload["documents"] {
   );
 }
 
-const options = (plan: PlanSetPayload) => planAlternatives(pickable(plan));
+/** The option sets a pick can choose in (two or more of a set still open). */
+const pickableSets = (plan: PlanSetPayload) => optionSets(pickable(plan));
 
-/** The plan bar's "Pick an option" step: which option to build, then the shared choose step for it. */
-function pickPanel(host: HTMLElement, plan: PlanSetPayload, pick: PickState, chooser: PlanChooser): HTMLElement {
+/** The rail's pick step for one option set: which of the set to build, then the shared choose step for it. */
+function pickPanel(
+  host: HTMLElement,
+  plan: PlanSetPayload,
+  pick: PickState,
+  chooser: PlanChooser,
+  family: string,
+): HTMLElement {
   const rerender = () => renderPlanBar(host, shown.get(host));
-  const choices = options(plan);
+  const choices = pickableSets(plan).find((s) => s.family === family)?.docs ?? [];
+  const words = optionSetWords(family);
   const panel = h(
     "div",
-    { class: "plan-pick rv-form", role: "group", aria: { label: "Pick an option" } },
-    h("h3", {}, "Which option should be built?"),
+    { class: "plan-pick rv-form", role: "group", aria: { label: words.pick } },
+    h("h3", {}, `Which ${words.noun} should be built?`),
   );
   const radios = h("fieldset", { class: "rv-choose" }, h("legend", {}, "Build"));
   for (const d of choices) {
     const radio = h("input", {
       type: "radio",
-      attrs: { name: "plan-pick" },
+      attrs: { name: `plan-pick-${family}` },
       onChange: () => {
         pick.chosenId = d.id;
         const asChosen = plan.documents.map((x) => ({ ...x, current: x.id === d.id }));
@@ -106,7 +115,7 @@ function pickPanel(host: HTMLElement, plan: PlanSetPayload, pick: PickState, cho
 
   if (!chosen) {
     panel.append(
-      h("p", { class: "muted" }, "Pick the option to build; the others can then be rejected in the same step."),
+      h("p", { class: "muted" }, `Pick the ${words.noun} to build; the others can then be rejected in the same step.`),
       h("div", { class: "rv-actions" }, h("button", { type: "button", class: "neutral", onClick: cancel }, "Cancel")),
     );
     return panel;
@@ -210,8 +219,10 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
   // what left the plan, folded away.
   const live = plan.documents.filter((d) => !d.removed);
   const planMd = live.filter((d) => d.path === "plan.md");
-  const alternatives = new Set(options(plan).length >= 2 ? options(plan).map((d) => d.id) : []);
-  const others = live.filter((d) => d.path !== "plan.md" && !alternatives.has(d.id));
+  // One group per option set (layout-a/, layout-b/ apart from color-a/, color-b/), each picked on its own.
+  const sets = optionSets(live.filter((d) => d.path !== "plan.md"));
+  const inSets = new Set(sets.flatMap((s) => s.docs.map((d) => d.id)));
+  const others = live.filter((d) => d.path !== "plan.md" && !inSets.has(d.id));
   const out = plan.documents.filter((d) => d.removed);
   const group = (title: string | null, docs: PlanSetPayload["documents"], extra?: HTMLElement) =>
     docs.length === 0
@@ -229,16 +240,12 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
       plan.partial ? `Plan ${plan.number}` : `Plan ${plan.number} · ${plan.approved} of ${plan.counted} approved`,
     ),
   );
-  const pickButton = h("span", { class: "plan-pick-slot" });
+  const pickSlots = new Map(sets.map((s) => [s.family, h("span", { class: "plan-pick-slot" })]));
   append(
     host,
     group(null, planMd),
-    group(
-      "Options",
-      live.filter((d) => alternatives.has(d.id)),
-      pickButton,
-    ),
-    group(alternatives.size ? "Other documents" : "Documents", others),
+    ...sets.map((s) => group(optionSetWords(s.family).title, s.docs, pickSlots.get(s.family))),
+    group(sets.length ? "Other documents" : "Documents", others),
   );
   if (out.length) {
     const fold = h(
@@ -276,25 +283,31 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
       ),
     );
   }
-  if (!chooser || plan.partial || options(plan).length < 2) return;
-  pickButton.append(
-    h(
-      "button",
-      {
-        type: "button",
-        class: "plan-pick-open",
-        attrs: { "aria-expanded": String(pick.open) },
-        onClick: () => {
-          pick.open = !pick.open;
-          renderPlanBar(host, shown.get(host));
+  if (!chooser || plan.partial) return;
+  // "Pick a layout" (or an option, a color…) on each set that still has two or more open; its step opens under it.
+  for (const set of pickableSets(plan)) {
+    const slot = pickSlots.get(set.family);
+    if (!slot) continue;
+    const open = pick.set === set.family;
+    slot.append(
+      h(
+        "button",
+        {
+          type: "button",
+          class: "plan-pick-open",
+          attrs: { "aria-expanded": String(open) },
+          onClick: () => {
+            const next = open ? null : set.family;
+            picks.set(host, { ...emptyPick(), set: next, result: pick.result });
+            renderPlanBar(host, shown.get(host));
+          },
         },
-      },
-      icon("choose"),
-      "Pick an option",
-    ),
-  );
-  // The step opens under the Options group, inside the rail.
-  if (pick.open) pickButton.closest(".plan-group")!.after(pickPanel(host, plan, pick, chooser));
+        icon("choose"),
+        optionSetWords(set.family).pick,
+      ),
+    );
+    if (open) slot.closest(".plan-group")!.after(pickPanel(host, plan, pick, chooser, set.family));
+  }
 }
 
 /** A `<nav>` for the bar, hidden until rendered with a plan. */

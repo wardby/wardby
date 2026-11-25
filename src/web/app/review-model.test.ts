@@ -15,6 +15,8 @@ import {
   STATE_LABEL,
   chooseCandidates,
   optionFamily,
+  optionSets,
+  optionSetWords,
   planAlternatives,
 } from "./review-model.js";
 
@@ -246,5 +248,25 @@ describe("optionFamily", () => {
     ).toEqual([false, false]);
     // Two look-alike documents are not alternatives either: Choose is not offered between them.
     expect(planAlternatives([{ path: "api-spec.md" }, { path: "api-client.md" }, { path: "option-a/" }])).toEqual([]);
+  });
+});
+
+describe("option sets", () => {
+  it("groups alternatives by set, and names nothing an option without a set of two", () => {
+    const docs = ["layout-a/", "color-a/", "layout-b/", "notes.md", "api.md", "color-b/", "solo-a/"].map((path) => ({
+      path,
+    }));
+    expect(optionSets(docs).map((s) => [s.family, s.docs.map((d) => d.path)])).toEqual([
+      ["layout-", ["layout-a/", "layout-b/"]],
+      ["color-", ["color-a/", "color-b/"]],
+    ]);
+    // Documents not named as options are never alternatives, however many there are.
+    expect(planAlternatives([{ path: "notes.md" }, { path: "api.md" }])).toEqual([]);
+  });
+
+  it("words each set", () => {
+    expect(optionSetWords("option-")).toEqual({ title: "Options", noun: "option", pick: "Pick an option" });
+    expect(optionSetWords("layout-")).toEqual({ title: "Layout options", noun: "layout", pick: "Pick a layout" });
+    expect(optionSetWords("icon-").pick).toBe("Pick an icon");
   });
 });
