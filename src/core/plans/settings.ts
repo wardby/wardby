@@ -11,6 +11,21 @@ export function planFolderFor(setting: Pick<PlanDocument, "path">, n: number): s
   return setting.path.replace("{n}", String(n));
 }
 
+/** True when every id is an existing principal that can read the agent. */
+export async function checkReviewersCanReadAgent(
+  db: PlanSettingsDb,
+  agent: { id: string; ownerId: string },
+  ids: string[],
+): Promise<boolean> {
+  const found = await db.principal.findMany({ where: { id: { in: ids } }, select: { id: true } });
+  if (found.length !== ids.length) return false;
+  for (const id of ids) {
+    const access = await effectiveAccess(db, "agent", agent, id);
+    if (!atLeast("agent", access, "read")) return false;
+  }
+  return true;
+}
+
 /**
  * Save-time check of an agent's planDocument setting: every reviewer (and the
  * final approver) exists and can read the agent; a build hand-off names a
@@ -25,11 +40,8 @@ export async function checkPlanDocumentSetting(
   if (!agent.ownerId) throw new Error("plan_reviewer_invalid");
   const reviewers = [...new Set(setting.reviewers ?? [agent.ownerId])];
   const named = [...new Set([...reviewers, ...(setting.finalApproverId ? [setting.finalApproverId] : [])])];
-  const found = await db.principal.findMany({ where: { id: { in: named } }, select: { id: true } });
-  if (found.length !== named.length) throw new Error("plan_reviewer_invalid");
-  for (const id of named) {
-    const access = await effectiveAccess(db, "agent", { id: agent.id, ownerId: agent.ownerId }, id);
-    if (!atLeast("agent", access, "read")) throw new Error("plan_reviewer_invalid");
+  if (!(await checkReviewersCanReadAgent(db, { id: agent.id, ownerId: agent.ownerId }, named))) {
+    throw new Error("plan_reviewer_invalid");
   }
   if (setting.onApproved === "build") {
     const builder = await db.agent.findUnique({

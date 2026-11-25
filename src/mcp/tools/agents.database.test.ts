@@ -247,3 +247,77 @@ describe.skipIf(!process.env.DATABASE_URL)("codingProfile.tunnelHosts (PostgreSQ
     });
   });
 });
+
+describe.skipIf(!process.env.DATABASE_URL)("documentTools setting (PostgreSQL)", () => {
+  let owner: Principal;
+  let stranger: Principal;
+
+  beforeAll(async () => {
+    owner = await principal();
+    stranger = await principal();
+  });
+
+  afterAll(async () => {
+    await db.resourceGrant.deleteMany({ where: { resourceId: { in: agentIds } } });
+    await db.agent.deleteMany({ where: { id: { in: agentIds } } });
+    await db.principal.deleteMany({ where: { id: { in: principalIds } } });
+    await db.$disconnect();
+  });
+
+  it("create_agent on a native agent stores the defaults and get_agent shows them", async () => {
+    const mcp = await connect(owner);
+    const created = await mcp.call("create_agent", {
+      name: `dt-${randomUUID()}`,
+      systemPrompt: "x",
+      model: "gpt-5.6-luna",
+      budgetUsd: 1,
+      documentTools: { access: "write" },
+    });
+    expect(created.isError).toBeFalsy();
+    const made = JSON.parse(created.content[0].text);
+    agentIds.push(made.id);
+    expect(made.documentTools).toEqual({
+      access: "write",
+      reviewers: [owner.id],
+      finalApproverId: null,
+      maxNewPerRun: 5,
+      plans: [],
+    });
+    const got = JSON.parse((await mcp.call("get_agent", { id: made.id })).content[0].text);
+    await mcp.close();
+    expect(got.documentTools.access).toBe("write");
+  });
+
+  it("refuses documentTools on a coding agent with a 400 naming the setting", async () => {
+    const target = await codingAgent(owner.id);
+    const mcp = await connect(owner);
+    const result = await mcp.call("update_agent", { id: target.id, documentTools: { access: "read" } });
+    await mcp.close();
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/document_tools_invalid: only native agents/);
+  });
+
+  it("refuses a reviewer who cannot read the agent", async () => {
+    const target = await agent(owner.id);
+    const mcp = await connect(owner);
+    const result = await mcp.call("update_agent", {
+      id: target.id,
+      documentTools: { access: "write", reviewers: [stranger.id] },
+    });
+    await mcp.close();
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/document_tools_invalid: every reviewer/);
+  });
+
+  it("update_agent with null clears the setting", async () => {
+    const target = await agent(owner.id);
+    const mcp = await connect(owner);
+    const set = await mcp.call("update_agent", { id: target.id, documentTools: { access: "read" } });
+    expect(JSON.parse(set.content[0].text).documentTools.access).toBe("read");
+    const cleared = await mcp.call("update_agent", { id: target.id, documentTools: null });
+    await mcp.close();
+    expect(cleared.isError).toBeFalsy();
+    expect(JSON.parse(cleared.content[0].text).documentTools).toBeNull();
+    expect((await db.agent.findUnique({ where: { id: target.id } }))?.documentTools).toBeNull();
+  });
+});

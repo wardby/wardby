@@ -7,6 +7,7 @@ import type { PlanRefusedError } from "./refusal.js";
 export const PLAN_LAYOUT_RULES = [
   "Layout: each top-level `*.md` file is one document; `plan.md` comes first, and a document's title is its first heading.",
   "Each subfolder in the board format (`manifest.json` plus `boards/*.html`) is one design. Anything else is ignored.",
+  "Alternatives the reviewer picks one of are named `<set>-<letter>-<slug>`, one set per choice: `layout-a-tree/`, `layout-b-cards/`; `color-a-light/`, `color-b-dark/`. Name nothing else that way (shared parts are `screens/`, `api.md`): the review page offers each set as one choice and rejects the ones not picked.",
   "`plan.md` ends with a `## Tickets` section with one `### Ticket <t>: <title>` heading per ticket, numbered from 1.",
   "At most 20 documents and 8 MiB in all; each Markdown document at most 60,000 characters.",
 ].join("\n");
@@ -34,6 +35,7 @@ const STATE_WORDS: Record<string, string> = {
   in_review: "in review",
   changes_requested: "changes requested",
   approved: "approved",
+  rejected: "rejected",
   archived: "archived",
 };
 
@@ -46,9 +48,11 @@ export function planReplyLines(plan: PublishedPlan): string[] {
     const note =
       doc.change === "approved_unchanged"
         ? "; not changed, reopen it first"
-        : doc.change === "archived_unchanged"
-          ? "; not changed, it is archived"
-          : "";
+        : doc.change === "rejected_unchanged"
+          ? "; not in the plan, reopen it to bring it back"
+          : doc.change === "archived_unchanged"
+            ? "; not changed, it is archived"
+            : "";
     lines.push(`- ${doc.path} (${state}${note}): ${doc.url ?? doc.pagePath}`);
   }
   if (plan.withheld.length > 0) {

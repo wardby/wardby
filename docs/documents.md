@@ -19,7 +19,8 @@ directory.
 - Create designs (boards of HTML, up to 2 MiB a version), edit them visually in
   the browser, view all boards at once (Overview), click through them as a
   prototype (Play), and export them (see [Designs](#designs)).
-- Select text to start a comment thread; threads anchor to the quoted text and
+- Select text and choose **Comment** (beside the selection, in the top bar, or
+  ⌘⌥M) to start a comment thread; threads anchor to the quoted text and
   follow it across versions. If the text is deleted, the thread is marked
   outdated; it still takes replies.
 - Replies, resolve and reopen, edit and delete your own comments, and
@@ -29,7 +30,7 @@ directory.
   people to mention.
 - Live updates: new comments, replies, resolved threads and new versions show
   up on every open page without a refresh.
-- An Edits tray: every version, who made it and how, the changes each one
+- A History tab: every version, who made it and how, the changes each one
   made shown inline, and restore (see [Edits and restore](#edits-and-restore)).
 - Links to share a document with people who have no account.
 - Send open threads to a coding agent that edits a file (or, for a design, a
@@ -38,26 +39,28 @@ directory.
 
 ## Tools
 
-| Tool                                                         | Scope             | Purpose                                                                                         |
-| ------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------------------------------- |
-| `create_document`                                            | `documents:write` | Create a document or a design (`kind`); optionally link it to a repository and coding agent     |
-| `link_document`                                              | `documents:write` | Link a document you own to a repository and coding agent, or change or clear the link           |
-| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files` (needs `write`)                  |
-| `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                                        |
-| `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered                    |
-| `restore_document_version`                                   | `documents:write` | Publish an earlier version's content as a new version (needs `write`)                           |
-| `list_documents`                                             | `documents:read`  | Documents you own or were granted (200 newest; `truncated` past that)                           |
-| `list_comment_threads`, `get_comment_thread`                 | `documents:read`  | Read threads (`open`, `resolved`, `sent`, `mine`, `all`)                                        |
-| `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                                                |
-| `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                                                 |
-| `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                                      |
-| `submit_for_review`                                          | `documents:write` | Submit a document you own for review, or replace its reviewers (`reviewers`, `finalApproverId`) |
-| `review_document`                                            | `documents:write` | Give a verdict as a named reviewer (`approve` or `request_changes`, on `versionNumber`)         |
-| `force_approve_document`                                     | `documents:write` | Owner or final approver approves the current version over missing verdicts (`note` required)    |
-| `reopen_document`                                            | `documents:write` | Reopen an approved document for review as a new version, a copy of the approved one (`write`)   |
-| `archive_document`                                           | `documents:write` | Archive or unarchive a document you own                                                         |
-| `wait_for_review`                                            | `documents:read`  | Wait for a state change, a comment by someone else, or a timeout (default 300 s, max 600 s)     |
-| `export_document`                                            | `documents:read`  | Export a design (board HTML, prototype HTML, PNG, PDF) or a document as PDF                     |
+| Tool                                                         | Scope             | Purpose                                                                                                           |
+| ------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `create_document`                                            | `documents:write` | Create a document or a design (`kind`); optionally link it to a repository and coding agent                       |
+| `link_document`                                              | `documents:write` | Link a document you own to a repository and coding agent, or change or clear the link                             |
+| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files` (needs `write`)                                    |
+| `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                                                          |
+| `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered                                      |
+| `restore_document_version`                                   | `documents:write` | Publish an earlier version's content as a new version (needs `write`)                                             |
+| `list_documents`                                             | `documents:read`  | Documents you own or were granted (200 newest; `truncated` past that)                                             |
+| `list_comment_threads`, `get_comment_thread`                 | `documents:read`  | Read threads (`open`, `resolved`, `sent`, `mine`, `all`)                                                          |
+| `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                                                                  |
+| `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                                                                   |
+| `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                                                        |
+| `submit_for_review`                                          | `documents:write` | Submit a document you own for review, or replace its reviewers (`reviewers`, `finalApproverId`)                   |
+| `review_document`                                            | `documents:write` | Give a verdict as a named reviewer (`approve` or `request_changes`, on `versionNumber`)                           |
+| `force_approve_document`                                     | `documents:write` | Owner or final approver approves the current version over missing verdicts (`note` required)                      |
+| `reject_document`                                            | `documents:write` | Reject a plan document (never `plan.md`): it leaves the plan; owner, final approver or reviewer (`note` required) |
+| `choose_plan_option`                                         | `documents:write` | Approve one option of a plan and reject the listed others, in one transaction (`versionNumber`, `reject`)         |
+| `reopen_document`                                            | `documents:write` | Reopen an approved or rejected document for review as a new version, a copy of the current one (`write`)          |
+| `archive_document`                                           | `documents:write` | Archive or unarchive a document you own                                                                           |
+| `wait_for_review`                                            | `documents:read`  | Wait for a state change, a comment by someone else, or a timeout (default 300 s, max 600 s)                       |
+| `export_document`                                            | `documents:read`  | Export a design (board HTML, prototype HTML, PNG, PDF) or a document as PDF                                       |
 
 Text people wrote (titles, Markdown, comment bodies, names) comes back wrapped
 as untrusted content: agents must treat it as data, never as instructions.
@@ -65,6 +68,11 @@ as untrusted content: agents must treat it as data, never as instructions.
 ## Access
 
 Documents are a `grant_access` resource type (`resourceType: "document"`).
+A grantee may also be an agent, `{"agentId": "<id>"}`, at `read` or `comment`
+only (`write` is refused with `document_agent_grant_level`; link the agent with
+`link_document` to make it the writer). You must own the document and be able
+to read the agent; revoking by `agentId` always works. Agent grants apply to
+documents only.
 Levels, lowest first: `read` (see), `comment` (add threads and replies), `write`
 (publish versions, resolve any thread, send to an agent). The owner also
 manages grants and share links. Granting to `everyone` is capped at `comment`.
@@ -84,8 +92,10 @@ agent publishes its plan as a plan set: one document per top-level `*.md` file
 (`plan.md` first, titled by its first heading or else its file name), one design
 per board subfolder (titled by its folder name), up to 20 in all. Other files
 are ignored and listed. Later runs version changed files, add new documents and
-mark a removed file `removedFromPlan`; approved or archived documents are never
-changed by a run. Removed documents stay listed, and are read-only to agents.
+mark a removed file `removedFromPlan`; approved, rejected or archived documents
+are never changed by a run (a rejected document stays out of the plan even when a
+run writes its file again; the reply says "not in the plan, reopen it to bring it
+back"). Removed documents stay listed, and are read-only to agents.
 `get_document` on a plan document returns the set's documents, and
 `list_documents` takes a `planNumber` filter.
 
@@ -96,9 +106,18 @@ plan. It never gives more than comment; explicit grants and share links add on
 top, and naming someone as reviewer adds no grant. Sharing an agent with everyone
 lets every signed-in user read and comment on the plans it produces.
 
-**Plan bar.** Each page of a set shows "Plan N · X of Y approved" over the
-documents the viewer can read, with a chip per document; relative links in the
-Markdown open the other documents or boards. A share-link guest sees only
+**Plan rail.** Each page of a set shows the plan as an outline (left of a
+document; at the top of a design's left panel): "Plan N · X of Y approved" over
+the documents the viewer can read, grouped as `plan.md`, one group per option
+set (alternatives the planner names `<set>-<letter>-<slug>`, such as
+`layout-a-tree/` and `layout-b-cards/`; each set with its own **Pick** button,
+"Pick a layout"), **Other documents**, and **Out of the plan** (rejected and removed
+documents, folded, struck through, marked "Rejected" or "Removed", and not
+counted). Relative links in the Markdown open the other documents or boards. A
+row's name opens its document on the side-panel tab open now (Review stays
+Review), so a reviewer can step through the set; its state opens it on the
+Review tab. Documents and designs share one tab row: Comments, Review and History,
+then Style and Settings for a design's editors. A share-link guest sees only
 "Plan N" and their own document. The bar updates live: a plan document's event
 stream also carries the review and version events of the other documents of its
 set that the viewer can read.
@@ -188,8 +207,8 @@ more is a safe choice).
 
 ## Edits and restore
 
-The side panel of a document page has two tabs: **Comments** and **Edits**.
-The Edits tray lists every version, newest first, with who made it, how and
+The side panel of a document page has the same tabs as a design page's:
+**Comments**, **Review** and **History**. The History tab lists every version, newest first, with who made it, how and
 when:
 
 - Saves from the browser editor by the same person, each within 5 minutes of
@@ -237,7 +256,7 @@ with `{"baseNumber": <n>}` (CSRF and `Origin` as for every change).
 
 A whole document or design has a review state, separate from its comment
 threads: **draft** (the default), **in review**, **changes requested**,
-**approved** and **archived**. The owner submits it for review (`submit_for_review`,
+**approved**, **rejected** (plan documents only) and **archived**. The owner submits it for review (`submit_for_review`,
 or **Start review** on the page's Review tab) and names the reviewers: members
 with access to the document, or guests of this document's live comment share
 links who gave a name. Naming a member gives them comment access if they lack
@@ -264,9 +283,36 @@ nothing and records no event.
   version over missing verdicts and requested changes. A note is required and
   the history lists who was overridden. It is only possible in review or with
   changes requested.
-- **Reopen**: a writer reopens an approved document. Reopen for review creates a
-  new version (a copy of the approved one) and puts it in review; the approved
-  version stays in History as the approved record. Every reviewer then reviews
+- **Reject** (documents of a plan only): the owner, the final approver or a
+  named member reviewer rejects a document the plan does not need, such as a
+  design option that was not chosen (`reject_document`, or **Reject** on the
+  Review tab). A note is required. It works in review, with changes requested
+  or approved. The document becomes rejected: locked like an approved one, and
+  out of the plan, so it no longer counts toward the plan's approval and a
+  builder never gets it; rejecting the last document the plan waited for
+  approves the plan. A plan's own `plan.md`, a document outside a plan, and a
+  document already out of the plan are refused with
+  `document_reject_not_plan_document`. Guests cannot reject.
+- **Choose this option** (alternatives in a plan): on the chosen option's
+  Review tab, **Choose this option** lists the plan's other undecided or
+  approved documents, ticking those named like it (`option-b/` beside
+  `option-a/`) and leaving the rest (shared screens) unticked. Confirming
+  approves the chosen option as the viewer's verdict (a named reviewer; an
+  approved option is left as it is) and rejects each ticked document with the
+  note "Chose option-a/" (plus an optional note), in one transaction: if any
+  part is refused, nothing changes. `choose_plan_option` does the same over MCP.
+  The plan rail's **Pick an option** starts the same step from any page of the
+  plan: it offers the alternatives (documents of one name family, not shared
+  parts such as `screens/`) and, after confirming, says under the bar what it
+  rejected and what the plan still waits for. The Review tab shows a next-step card (the one main button for the
+  state: review, choose, or nothing once approved) and, below it, the other
+  actions under Plan and Manage. Each of those (choose, reject, force approve,
+  reviewers, reopen, archive) is a confirm step that has the Review tab to
+  itself until it is confirmed or cancelled.
+- **Reopen**: a writer reopens an approved or rejected document. Reopen for
+  review creates a new version (a copy of the current one) and puts it in
+  review, and a rejected document goes back into its plan; the earlier version
+  stays in History as the record. Every reviewer then reviews
   the new version. A named reviewer can
   also request changes on a document every reviewer approved, which moves it to
   changes requested and unlocks it. A force approval is final: reviewers cannot
@@ -274,7 +320,7 @@ nothing and records no event.
   and a writer reopens it for review.
 - **Archive**: the owner archives and unarchives; unarchive returns the state it
   had before.
-- **The lock**: an approved or archived document takes no new version by any
+- **The lock**: an approved, rejected or archived document takes no new version by any
   route (editor, board saves, `publish_version`, restore, agent edits), and its
   threads cannot be sent to an agent: all are refused with `document_locked`. A
   document its planner removed from the plan is read-only to agents too: its
@@ -287,8 +333,8 @@ nothing and records no event.
   read-only must be reloaded to edit. An agent edit that finishes after the lock
   is not applied; each thread gets a reply naming the branch with the edit.
 
-Open pages update live (the `review` event). The page shows a banner with the
-state and approval count and a **Review** tab with reviewers, verdicts, history
+Open pages update live (the `review` event). The top bar shows the state and
+approval count beside the title (it opens the Review tab), and a **Review** tab with reviewers, verdicts, history
 and the actions you may take. The desktop Viewer's Documents tab shows the state
 as a chip. An agent session can wait for approval with `wait_for_review`: create
 the document, submit it, send reviewers a comment link if they have no account,
@@ -297,7 +343,8 @@ returns when someone else comments (`reason: "comment"`); many MCP clients time
 out a request after 60 seconds, so pass `timeoutSeconds` of 50 or less and call
 again. Errors:
 `document_locked` (409), `document_review_forbidden` (403),
-`document_review_state_invalid` (409) and `document_version_conflict` (409). See
+`document_review_state_invalid` (409), `document_reject_not_plan_document` (409)
+and `document_version_conflict` (409). See
 [Review and approve documents](../help/document-review.md) for the details and
 the per-code help articles.
 
@@ -346,11 +393,15 @@ agent follows them without extra setup.
 ### Editing designs
 
 The design page edits the current version in a visual editor (GrapesJS, bundled
-with Wardby, no CDN). Everyone sees the **Boards** list (left), the canvas, the
-Desktop, Tablet and Phone widths for checking the responsive layout, and the
-**Comments** and **History** tabs. People with `write` access also get:
+with Wardby, no CDN). Everyone sees the boards as tabs above the canvas (wrapping
+to two lines, then "+N more" with a filter; the current board's tab always
+shows), the canvas, the Desktop, Tablet and Phone widths (on the row under the
+top bar) for checking the responsive layout, and the **Comments** and
+**History** tabs. People with `write` access also get:
 
-- Board actions (add, rename, move up and down, delete) and a **Layers** tree.
+- Board actions (**+** to add; rename, move up and down, delete in each tab's ⋯
+  menu) and a **Layers** tree at the bottom of the left panel, closed until
+  opened (remembered in the browser).
 - **Style** and **Settings** tabs (right) for the selected element, with Undo
   and Redo.
 
@@ -393,7 +444,7 @@ including share-link readers.
 
 ### Design version history
 
-The **History** tab lists versions as the Edits tray does for documents. Click a
+The **History** tab lists versions as the History tab does for documents. Click a
 version to see its boards read-only in a layer over the canvas (the editor
 cannot be reached while it is open, and comments pause); **Restore this
 version** (members with `write`) publishes its files as a new version, with the
@@ -420,7 +471,7 @@ return the path only (`path`, or `pagePath` where `path` is the repository
 file) with a note, so open it on the address that serves Wardby's pages. `permission` is `view` or `comment`;
 `expiresInDays` is 1-90 (default 14). Guests can read the current version and
 (with `comment`) start threads and reply, 30 an hour per guest; one link
-accepts 20 guest registrations an hour. They can open the Edits tray and see
+accepts 20 guest registrations an hour. They can open the History tab and see
 earlier versions and their changes, but cannot edit, restore, send to an agent
 or share. Revoking a link signs its guests out at once;
 expiring does the same on their next request.
@@ -431,6 +482,81 @@ sensitive material out of shared documents. Wardby does not rate-limit by
 network address (it cannot know the real client address behind your load
 balancer); put abuse controls for the `/s/` paths at your edge if the link is
 public.
+
+## Documents from native agents
+
+A native agent whose owner sets `documentTools` gets built-in `doc_*` tools in
+its runs: `doc_list`, `doc_get`, `doc_list_threads` and `doc_get_thread`, and at
+`access: "write"` also `doc_create`, `doc_publish_version`,
+`doc_reply_to_thread`, `doc_resolve_thread` and `doc_submit_for_review`. They run
+in the control plane, never in the sandbox, and act as the agent, not as its
+owner.
+
+| Field             | Meaning                                                                                                                 |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `access`          | `read` (read tools only, and read at most on every document) or `write`.                                                |
+| `reviewers`       | 1 to 50 people who can read the agent; default the owner. A document the agent submits goes to them.                    |
+| `finalApproverId` | Optional person who may force an approval.                                                                              |
+| `maxNewPerRun`    | New documents one run may create, 1 to 20; default 5 (`document_run_limit`). The count survives a resumed run.          |
+| `plans`           | Up to 20 planner agents (with `planDocument`) whose plan documents the agent may read and comment on, never publish to. |
+
+Set it with `update_agent` or `create_agent` on a native agent (`null` turns it
+off; an invalid setting is refused with a 400 starting
+`document_tools_invalid: ` and the reason, e.g. `document_tools_invalid: only native
+agents take documentTools.`; schema-level violations such as an out-of-range
+`maxNewPerRun`, an empty `reviewers` list or unknown fields are refused earlier as
+`Invalid create_agent/update_agent arguments: …`). It is read again on every
+call. It is owner-only and counts as an owner binding: an agent everyone can
+write cannot have it, and an agent that has it cannot be opened to everyone
+with write. On `create_agent` only the owner can be a reviewer; share the agent
+and then add other reviewers with `update_agent`. `make_owner` between two
+owners turns it off and removes the document grants others gave the agent,
+except on documents the new owner owns (`documentGrantsRemoved`); adopting an
+agent that had no owner keeps both.
+
+**Upgrading: `doc_` tool names.** Names starting with `doc_` are reserved for
+these tools: `create_tool` and `wardby tool create` refuse a new one, an import
+skips one with a warning, and `attach_mcp_server` refuses a server whose exposed
+tool names start with `doc_`. A tool created under such a name before the
+upgrade keeps working and can still be attached, but if its name is one of the
+nine built-in names and the agent has `documentTools`, every call to that name
+goes to the built-in tool and yours is never reached. Create it again under
+another name, attach that, and detach the old one before turning
+`documentTools` on.
+
+**What the agent can reach.** Never its owner's access. Only: a document linked
+to it as writer (`doc_create`, or `create_document` or `link_document` with
+`agentId` alone for a native agent with `access: "write"` that you can
+execute), while the document's owner can still execute the agent; agent grants
+at `read` or `comment`; and the plan documents of `plans` at `comment`, while
+the agent's owner can still execute the planner. Anything else is
+`document_not_found`.
+
+**What it never does.** Approve, force-approve, reopen, archive, share, grant,
+or start comment threads. It replies to and resolves threads, and submits for
+review to the setting's reviewers, only on documents its owner owns
+(`document_review_forbidden` otherwise). The documents it creates are its
+owner's; an owner-less agent's write tools return `document_agent_unavailable`.
+
+**Reviewer notes.** `doc_get` includes each reviewer's verdict, the version it
+was given on and their note (`null` when none), and the latest review events
+(kind, version, reviewer name, note; newest first, up to 10), so an agent can act
+on a rejection that has only a note. Reviewers are named, never identified by id
+or email. Notes are redacted by exact secret value when stored, and reach the
+model as untrusted tool-result text.
+
+**Limits.** `doc_get` refuses a document or design over 60,000 characters
+(`document_too_large_for_agent`), the same cap as send to agent.
+`doc_publish_version` requires `baseNumber`, the version the agent read; a newer
+version means `document_version_conflict`. An approved or archived document is
+locked (`document_locked`). Tool failures are JSON results with an `error` code.
+
+**Send threads to agent.** On a document whose writer is a native agent, a send
+starts a native run with the trigger `comment`. The agent reads the threads,
+publishes one revision and replies; threads it leaves unanswered get the usual
+no-reply note. There is no automatic merge. A send is `document_not_agent_linked`
+when the agent has no `documentTools` setting, and `document_agent_unavailable`
+when its setting is no longer `write` or the document's owner lost `execute`.
 
 ## Sending threads to a coding agent
 
@@ -465,7 +591,7 @@ replies on each thread and resolves those it addressed.
 Limits: 30 sends per document per hour, a document up to 60,000 characters,
 one run per thread at a time. The document owner must keep `execute` on the
 agent and remain allowed to give it task text (its owner, or the owner's
-`allowWebhookTaskOverride`); every send checks this again. Native agents do not edit documents in this phase. Documents with
+`allowWebhookTaskOverride`); every send checks this again. A native agent with `documentTools` can be the writer too; see [Documents from native agents](#documents-from-native-agents). Documents with
 images, task lists or raw HTML open comment-only in the page, because the
 editor would rewrite them.
 
@@ -713,7 +839,7 @@ Each error code has an article under `help/errors/`: `document_not_found`,
 `document_agent_unavailable`, `document_repo_link_invalid`,
 `document_send_failed`, `document_send_not_available`,
 `document_too_large_for_agent`, `document_format_mismatch`,
-`board_format_invalid`, `board_too_large`, `comment_anchor_invalid`, `comment_too_long`,
+`document_reject_not_plan_document`, `board_format_invalid`, `board_too_large`, `comment_anchor_invalid`, `comment_too_long`,
 `comment_thread_closed`, `comment_thread_already_sent`,
 `comment_send_rate_limited`, `comment_not_found`, `comment_edit_forbidden`,
 `guest_name_invalid`, `guest_email_invalid`, `share_link_invalid`,

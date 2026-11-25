@@ -12,7 +12,7 @@
  */
 import type { ServerResponse } from "node:http";
 import { atLeast } from "../core/grants.js";
-import { documentAccess, requireDocumentAccess, type Viewer } from "../core/documents/access.js";
+import { documentAccess, refuseAgentViewer, requireDocumentAccess, type Viewer } from "../core/documents/access.js";
 import {
   createThread,
   deleteComment,
@@ -35,7 +35,10 @@ import { loadContent } from "../core/documents/files.js";
 import { createShareLink } from "../core/documents/share-links.js";
 import { getDocument, publishVersion } from "../core/documents/service.js";
 import {
+  chooseOption,
   forceApprove,
+  MAX_CHOOSE_REJECTS,
+  rejectDocument,
   getReviewView,
   reopenDocument,
   reviewCandidates,
@@ -79,6 +82,7 @@ export async function describeViewer(
   viewer: Viewer,
   anonymous = false,
 ): Promise<PageViewer> {
+  refuseAgentViewer(viewer);
   const access = await documentAccess(deps.db, documentId, viewer);
   if (viewer.kind === "principal") {
     const names = await principalNames(deps.db, [viewer.principalId]);
@@ -96,6 +100,14 @@ export async function getDocumentJson(
   viewer: Viewer,
   anonymous: boolean,
 ): Promise<void> {
+  sendWebJson(res, 200, await documentPayload(deps, documentId, viewer, anonymous));
+}
+
+/**
+ * What GET /d/api/<id> answers: the document, its current version, the viewer, threads, review and plan. The
+ * document page also carries it in its bootstrap, so the app draws its first frame without a request.
+ */
+export async function documentPayload(deps: WebDeps, documentId: string, viewer: Viewer, anonymous: boolean) {
   await requireDocumentAccess(deps.db, documentId, viewer, "read");
   const { document, version, content } = await getDocument(deps.db, documentId);
   const me = await describeViewer(deps, documentId, viewer, anonymous);
@@ -122,7 +134,7 @@ export async function getDocumentJson(
         content.format === "markdown" ? content.markdown : null,
       )
     : null;
-  sendWebJson(res, 200, {
+  return {
     document: {
       id: document.id,
       kind: design ? "design" : "document",
@@ -146,7 +158,7 @@ export async function getDocumentJson(
     mentionedGuests,
     review: reviewJson(review),
     ...(plan ? plan : {}),
-  });
+  };
 }
 
 /**
@@ -176,6 +188,7 @@ async function planPayload(
       path: d.path,
       removed: d.removed,
       current: d.id === documentId,
+      versionNumber: d.versionNumber,
       pagePath: guest ? "" : `/d/${d.id}`,
     }));
   const planSet: PlanSetPayload = {
@@ -288,6 +301,31 @@ export async function postReview(
       const note = str(body, "note");
       if (note.trim() === "") return invalid();
       view = (await forceApprove(deps.db, deps.cipher, { documentId, viewer, note })).view;
+      break;
+    }
+    case "reject": {
+      const note = str(body, "note");
+      if (note.trim() === "") return invalid();
+      view = await rejectDocument(deps.db, deps.cipher, { documentId, viewer, note });
+      break;
+    }
+    case "choose": {
+      // Approve this option and reject the listed documents of its plan, in one transaction (chooseOption).
+      const n = body.versionNumber;
+      const reject = body.reject;
+      if (typeof n !== "number" || !Number.isInteger(n) || n < 1) return invalid();
+      if (!Array.isArray(reject) || reject.length > MAX_CHOOSE_REJECTS) return invalid();
+      if (!reject.every((r): r is string => typeof r === "string" && r !== "")) return invalid();
+      if (body.note !== undefined && typeof body.note !== "string") return invalid();
+      view = (
+        await chooseOption(deps.db, deps.cipher, {
+          documentId,
+          viewer,
+          versionNumber: n,
+          reject,
+          ...(typeof body.note === "string" ? { note: body.note } : {}),
+        })
+      ).view;
       break;
     }
     case "reopen":

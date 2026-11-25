@@ -188,6 +188,7 @@ const STATUS = {
   web_session_required: 401,
   document_access_denied: 403,
   document_review_forbidden: 403,
+  document_reject_not_plan_document: 409,
   document_agent_unavailable: 403,
   comment_edit_forbidden: 403,
   web_csrf_failed: 403,

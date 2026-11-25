@@ -27,13 +27,14 @@ A whole [document](documents.md) or [design](designs.md) has a review state. Com
 
 ## States
 
-| State             | Meaning                                                                                        |
-| ----------------- | ---------------------------------------------------------------------------------------------- |
-| Draft             | New and existing documents. Not in review.                                                     |
-| In review         | Submitted; waiting for the reviewers' verdicts on the current version.                         |
-| Changes requested | A reviewer requested changes on the current version.                                           |
-| Approved          | Every reviewer approved the current version, or the owner or final approver forced it. Locked. |
-| Archived          | Set aside by the owner. Locked. Unarchive returns it to the state it had before.               |
+| State             | Meaning                                                                                         |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| Draft             | New and existing documents. Not in review.                                                      |
+| In review         | Submitted; waiting for the reviewers' verdicts on the current version.                          |
+| Changes requested | A reviewer requested changes on the current version.                                            |
+| Approved          | Every reviewer approved the current version, or the owner or final approver forced it. Locked.  |
+| Rejected          | A document of a plan that was turned down (see [Reject](#reject)). Locked, and out of the plan. |
+| Archived          | Set aside by the owner. Locked. Unarchive returns it to the state it had before.                |
 
 Only verdicts on the **current version** count, so publishing a new version while the document is in review or has changes requested recomputes the state: earlier verdicts show as "on an older version" and nobody has approved yet (changes requested on v3 becomes in review on v4).
 
@@ -56,11 +57,30 @@ A named reviewer can also request changes on a document every reviewer approved:
 
 **Force approve**: while the document is in review or has changes requested, the owner or the final approver approves the current version over missing verdicts and requested changes. A note is required, and the history records who was overridden.
 
+## Reject
+
+A document of a [plan](plan-documents.md) can be **rejected** instead of approved, for example a design option nobody chose. The owner, the final approver or a named member reviewer chooses **Reject** in the Review tab (or calls `reject_document`) and gives a note, such as "Option B was chosen". The document becomes Rejected:
+
+- It is read-only, like an approved document. Comments stay open.
+- It leaves the plan: it no longer counts toward the plan's approval, and a builder never gets it. The plan rail still lists it, struck through, as "Rejected", under **Out of the plan**.
+- Rejecting the last document the plan was waiting for approves the plan, the same as an approval does (with `onApproved: "build"`, ticket 1 starts).
+- A later planner run does not change it or bring it back.
+
+### Choose this option
+
+When a plan offers alternatives, such as `option-a/`, `option-b/` and `option-c/`, **Choose this option** on the chosen option's Review tab does the approve and the rejects in one step. It lists the plan's other documents that are still undecided or approved, with the ones named like the chosen option ticked (`option-b/` and `option-c/` beside `option-a/`) and anything else, such as shared screens, unticked. Untick or tick any of them, add a note if you like, and confirm: the chosen option gets your approval (you must be one of its reviewers; an already approved option stays as it is) and each ticked document is rejected with the note "Chose option-a/". A sentence under the list says exactly what confirming does, and whether the plan is then ready to build. Everything happens together or not at all: if one document can't be rejected (you can't see it, or it isn't in this plan), nothing changes. Agents use `choose_plan_option`.
+
+You can also start from the plan: each set of options in the plan rail has its own **Pick** button (**Pick an option**, or **Pick a layout** for `layout-a/`, `layout-b/`). It asks "Which layout should be built?", lists that set's alternatives (the planner names them `<set>-<letter>-<slug>`; shared parts such as `screens/` are not offered, and other sets are untouched), and then shows the same step for the one you pick. After confirming, the rail says what was rejected and what the plan still waits for. Each set's button is shown while at least two of its alternatives are still open.
+
+The top bar shows the review status beside the title; clicking it opens the Review tab. The Review tab starts with what to do next (give your review, or on a plan option choose it), then the plan and management actions you may use. Choose, Reject, Force approve, editing reviewers, Reopen and Archive each ask you to confirm first, so no single click reopens, rejects or archives anything. After a choice, the page says what it rejected and what the plan still waits for.
+
+A writer reopens a rejected document for review to bring it back into the plan: like reopening an approved one, it starts a new version and every reviewer gives their verdict again. A plan's own `plan.md`, and a document that is not part of a plan, cannot be rejected ([`document_reject_not_plan_document`](errors/document-reject-not-plan-document.md)).
+
 ## The lock
 
-An approved or archived document takes no new version by any route: the editor, board saves, `publish_version`, restore, and agent edits are refused with [`document_locked`](errors/document-locked.md), and threads cannot be sent to the agent. Comments stay open in every state.
+An approved, rejected or archived document takes no new version by any route: the editor, board saves, `publish_version`, restore, and agent edits are refused with [`document_locked`](errors/document-locked.md), and threads cannot be sent to the agent. Comments stay open in every state.
 
-A document or design page that is open when the document is approved or archived becomes read-only in place, with no reload; comments still work. To change an approved document, a writer **reopens** it: Reopen for review creates a new version (a copy of the approved one) and puts it in review, with every reviewer waiting again; the approved version stays in History as the approved record. The writer then publishes changes and the reviewers approve again. Open pages move to the new version. Edits not yet saved when the lock lands are kept: while locked the page says so ("Read only: approved · unsaved changes"), and after a reopen they show as "Unsaved changes" and are saved with your next edit, never on a timer. A Markdown page becomes editable again in place; a design page that was opened read-only must be reloaded to edit it. An agent edit that finishes after approval is not applied; its threads get a reply naming the branch that holds it.
+A document or design page that is open when the document is approved, rejected or archived becomes read-only in place, with no reload; comments still work. To change an approved document, a writer **reopens** it: Reopen for review creates a new version (a copy of the approved one) and puts it in review, with every reviewer waiting again; the approved version stays in History as the approved record. The writer then publishes changes and the reviewers approve again. Open pages move to the new version. Edits not yet saved when the lock lands are kept: while locked the page says so ("Read only: approved · unsaved changes"), and after a reopen they show as "Unsaved changes" and are saved with your next edit, never on a timer. A Markdown page becomes editable again in place; a design page that was opened read-only must be reloaded to edit it. An agent edit that finishes after approval is not applied; its threads get a reply naming the branch that holds it.
 
 ## The page and the Viewer
 
@@ -76,14 +96,16 @@ Every document and design page shows a banner with the state and the approval co
 
 ## MCP tools
 
-| Tool                     | Who                     | Does                                                                                                                                                                |
-| ------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `submit_for_review`      | owner                   | `reviewers` (principal ids and/or `guest:<id>`, 1 to 50), optional `finalApproverId`; draft to in review, or replaces the list while in review or changes requested |
-| `review_document`        | a named reviewer        | `verdict` `approve` or `request_changes`, `versionNumber` (required), optional `note`                                                                               |
-| `force_approve_document` | owner or final approver | `note` required; the result lists `overridden`                                                                                                                      |
-| `reopen_document`        | writers                 | approved to in review on a new version, a copy of the approved one; `currentVersion` in the result is the new version's number                                      |
-| `archive_document`       | owner                   | `archived: true` or `false`                                                                                                                                         |
-| `wait_for_review`        | `documents:read`        | waits until the state differs from `state`, someone else comments, or `timeoutSeconds` (default 300, at most 600) passes; returns `changed` and `reason`            |
+| Tool                     | Who                                                                     | Does                                                                                                                                                                               |
+| ------------------------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `submit_for_review`      | owner                                                                   | `reviewers` (principal ids and/or `guest:<id>`, 1 to 50), optional `finalApproverId`; draft to in review, or replaces the list while in review or changes requested                |
+| `review_document`        | a named reviewer                                                        | `verdict` `approve` or `request_changes`, `versionNumber` (required), optional `note`                                                                                              |
+| `force_approve_document` | owner or final approver                                                 | `note` required; the result lists `overridden`                                                                                                                                     |
+| `reject_document`        | owner, final approver or a named member reviewer                        | a plan document (never `plan.md`) to rejected and out of the plan; `note` required                                                                                                 |
+| `choose_plan_option`     | a named reviewer of the chosen option, with reject rights on the others | `documentId` (the chosen option), `versionNumber`, `reject` (ids of other documents of the same plan), optional `note`; approves the one and rejects the others in one transaction |
+| `reopen_document`        | writers                                                                 | approved or rejected to in review on a new version, a copy of the current one; `currentVersion` in the result is the new version's number                                          |
+| `archive_document`       | owner                                                                   | `archived: true` or `false`                                                                                                                                                        |
+| `wait_for_review`        | `documents:read`                                                        | waits until the state differs from `state`, someone else comments, or `timeoutSeconds` (default 300, at most 600) passes; returns `changed` and `reason`                           |
 
 `get_document` and `list_documents` include `reviewState`; `get_document` also returns the reviewers, the final approver and the last 20 review events. Only the owner gets the ids of people: each reviewer's `ref`, each event's `actorRef`, `finalApproverId`, and `reviewCandidates` (the people and guests that can be named); everyone else gets names and verdicts. Names and review notes come back only in `reviewText`, wrapped as untrusted tool output. Review notes are stored with the linked agent's secret values redacted.
 
@@ -98,11 +120,12 @@ Every document and design page shows a banner with the state and the approval co
 
 ## Errors
 
-- [`document_locked`](errors/document-locked.md) (409): approved or archived.
+- [`document_locked`](errors/document-locked.md) (409): approved, rejected or archived.
+- [`document_reject_not_plan_document`](errors/document-reject-not-plan-document.md) (409): Reject on `plan.md`, or on a document that is not part of a plan.
 - [`document_review_forbidden`](errors/document-review-forbidden.md) (403): not a reviewer, not the owner or final approver, or a reopen without write access.
 - [`document_review_state_invalid`](errors/document-review-state-invalid.md) (409): the action does not fit the current state or its input.
 - [`document_version_conflict`](errors/document-version-conflict.md) (409): a newer version was published before the verdict.
 
 ## Related
 
-[Documents](documents.md) · [Designs](designs.md) · [Share links](document-share-links.md) · [Comment threads and agents](comment-threads-and-agents.md) · [Plan documents](plan-documents.md)
+[Documents](documents.md) · [Designs](designs.md) · [Share links](document-share-links.md) · [Comment threads and agents](comment-threads-and-agents.md) · [Plan documents](plan-documents.md) · [Documents from native agents](native-agent-documents.md)

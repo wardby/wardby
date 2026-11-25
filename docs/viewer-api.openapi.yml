@@ -1728,6 +1728,7 @@ components:
                   - in_review
                   - changes_requested
                   - approved
+                  - rejected
                   - archived
               pagePath:
                 type: string

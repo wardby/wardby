@@ -20,6 +20,11 @@ describe("reservedToolNameReason", () => {
     }
   });
 
+  it("reserves the doc_ prefix, not docs_", () => {
+    expect(reservedToolNameReason("doc_get")).toMatch(/reserved/);
+    expect(reservedToolNameReason("docs_get")).toBeUndefined();
+  });
+
   it("rejects the jira_* issue-tracker built-in names", () => {
     for (const name of [
       "jira_get_issue",

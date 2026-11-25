@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HelpCatalog, HelpPage } from "./catalog.js";
-import { searchHelp } from "./search.js";
+import { findHelpPage, searchHelp } from "./search.js";
 
 function page(overrides: Partial<HelpPage>): HelpPage {
   return {
@@ -716,5 +716,46 @@ describe("coding workflows help (#582)", () => {
     for (const q of ["branch only", "no pull request", "pullRequest none", "push branch without pull request"]) {
       expect(top3(q), q).toContain("coding-branch-only");
     }
+  });
+});
+
+describe("native agent documents help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["native agent documents", "doc_create", "documentTools"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("native-agent-documents");
+    }
+  });
+
+  it.each(["document_tools_invalid", "document_agent_grant_level", "document_run_limit"])(
+    "finds the article for %s",
+    async (code) => {
+      const { buildHelpCatalog } = await import("./catalog.js");
+      const { fileURLToPath } = await import("node:url");
+      const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+      expect(searchHelp(catalog, code)[0]?.page.id, code).toBe(`errors/${code.replaceAll("_", "-")}`);
+    },
+  );
+});
+
+describe("findHelpPage", () => {
+  const errors: HelpCatalog = {
+    schemaVersion: 1,
+    pages: [page({ id: "errors/mcp-unavailable" }), page({ id: "deploy-gke" })],
+  };
+
+  it("finds an exact id", () => {
+    expect(findHelpPage(errors, "deploy-gke")?.id).toBe("deploy-gke");
+  });
+
+  it("reads underscores as hyphens, so an error code as written finds its article", () => {
+    expect(findHelpPage(errors, "errors/mcp_unavailable")?.id).toBe("errors/mcp-unavailable");
+  });
+
+  it("finds nothing for an id that matches neither way", () => {
+    expect(findHelpPage(errors, "errors/no_such_code")).toBeUndefined();
+    expect(findHelpPage(errors, "missing")).toBeUndefined();
   });
 });

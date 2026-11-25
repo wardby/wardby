@@ -25,11 +25,12 @@ const input = (over: Partial<RuleInput>): RuleInput => ({
 });
 
 describe("review state rule", () => {
-  it("locks approved and archived only", () => {
-    expect(["draft", "in_review", "changes_requested", "approved", "archived"].map(isLocked)).toEqual([
+  it("locks approved, rejected and archived only", () => {
+    expect(["draft", "in_review", "changes_requested", "approved", "rejected", "archived"].map(isLocked)).toEqual([
       false,
       false,
       false,
+      true,
       true,
       true,
     ]);

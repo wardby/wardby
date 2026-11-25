@@ -126,24 +126,38 @@ describe("ReviewPanel: the verdicts offered", () => {
 
 describe("ReviewPanel: reopening", () => {
   const can = payload(2).can;
-  const bar = (el: HTMLElement) => el.querySelector(".rv-actions");
+
+  const card = (el: HTMLElement) => el.querySelector(".rv-card");
+  const buttons = (el: HTMLElement) => [...el.querySelectorAll("button")].map((b) => b.textContent);
 
   it("on an approved document, someone who can't reopen it is told to ask an editor", () => {
     const { host, panel } = setup(null);
     new ReviewPanel(host, { ...payload(2), state: "approved" }, 2);
-    expect(bar(panel)?.textContent).toContain("ask someone who can edit it to reopen it");
-    expect([...panel.querySelectorAll(".rv-actions button")].map((b) => b.textContent)).not.toContain(
-      "Reopen for review",
-    );
+    expect(card(panel)?.textContent).toContain("ask someone who can edit it to reopen it");
+    expect(buttons(panel)).not.toContain("Reopen for review");
   });
 
-  it("a writer gets the Reopen button and no hint; nothing shows before approval", () => {
+  it("a writer gets Reopen under Manage (never as the card's action) and no hint; nothing shows before approval", () => {
     const { host, panel } = setup(null);
     const p = new ReviewPanel(host, { ...payload(2), state: "approved", can: { ...can, reopen: true } }, 2);
-    expect([...panel.querySelectorAll(".rv-actions button")].map((b) => b.textContent)).toContain("Reopen for review");
-    expect(bar(panel)?.textContent).not.toContain("ask someone");
+    expect(card(panel)?.textContent).toContain("Nothing to do here.");
+    expect(card(panel)?.querySelector("button")).toBeNull();
+    expect(buttons(panel)).toContain("Reopen for review");
+    expect(card(panel)?.textContent).not.toContain("ask someone");
     p.apply(payload(2));
     expect(panel.textContent).not.toContain("ask someone");
+  });
+
+  it("Reopen is a confirm step: one click reopens nothing", async () => {
+    const { host, panel } = setup(null);
+    new ReviewPanel(host, { ...payload(2), state: "approved", can: { ...can, reopen: true } }, 2);
+    [...panel.querySelectorAll("button")].find((b) => b.textContent === "Reopen for review")!.click();
+    expect(host.api.review).not.toHaveBeenCalled();
+    expect(panel.querySelector("h3")?.textContent).toBe("Reopen for review");
+    expect(panel.textContent).toContain("This starts v3, a copy of v2");
+    expect(buttons(panel)).toEqual(["Reopen", "Cancel"]);
+    [...panel.querySelectorAll("button")].find((b) => b.textContent === "Reopen")!.click();
+    await vi.waitFor(() => expect(host.api.review).toHaveBeenCalledWith({ action: "reopen" }));
   });
 });
 
@@ -201,7 +215,8 @@ describe("ReviewPanel: the reviewer picker", () => {
     button(panel, "Start review")!.click();
     await vi.waitFor(() => expect(names(panel)).toEqual(["Owner", "Bo", "Gail (guest)"]));
     expect(panel.textContent).not.toContain("Only people with access");
-    expect(button(panel, "Start review")).toBeDefined();
+    // The picker is a focused step: the other actions are hidden while it is open.
+    expect(button(panel, "Start review")).toBeUndefined();
     panel.querySelector<HTMLInputElement>('input[aria-label="Bo"]')!.click();
     button(panel, "Submit for review")!.click();
     await vi.waitFor(() =>
@@ -283,4 +298,265 @@ describe("ReviewPanel: the reviewer picker", () => {
     await vi.waitFor(() => expect(button(panel, "Save reviewers")).toBeDefined());
     expect(button(panel, "Create comment link")).toBeDefined();
   });
+});
+
+describe("ReviewPanel: Reject", () => {
+  const can = (over: Partial<ReviewPayload["can"]>): ReviewPayload["can"] => ({
+    submit: false,
+    review: false,
+    force: false,
+    reopen: false,
+    archive: false,
+    unarchive: false,
+    ...over,
+  });
+  function mount(review: ReviewPayload, answer?: ReviewPayload) {
+    document.body.replaceChildren();
+    const banner = document.createElement("div");
+    const panel = document.createElement("div");
+    document.body.append(banner, panel);
+    const reviewCall = vi.fn((_body: unknown) => Promise.resolve({ review: answer ?? review }));
+    const host: ReviewHost = {
+      api: { review: reviewCall } as unknown as Api,
+      banner,
+      panel,
+      showReviewTab: vi.fn(),
+      showChanges: vi.fn(),
+      loadLatest: vi.fn(() => Promise.resolve()),
+      onLock: vi.fn(),
+      onState: vi.fn(),
+    };
+    new ReviewPanel(host, review, review.currentVersion);
+    return { panel, reviewCall };
+  }
+  const actionButton = (panel: HTMLElement, label: string) =>
+    [...panel.querySelectorAll<HTMLButtonElement>(".rv-actions button")].find((b) => b.textContent === label);
+
+  it("offers Reject only when the server says so", () => {
+    expect(actionButton(mount({ ...payload(1), can: can({}) }).panel, "Reject")).toBeUndefined();
+    expect(actionButton(mount({ ...payload(1), can: can({ reject: true }) }).panel, "Reject")).toBeDefined();
+  });
+
+  it("asks for a note before rejecting, then posts the reject action with it", async () => {
+    const rejected: ReviewPayload = { ...payload(1), state: "rejected", can: can({ reopen: true }) };
+    const { panel, reviewCall } = mount({ ...payload(1), can: can({ reject: true }) }, rejected);
+    actionButton(panel, "Reject")!.click();
+    const form = panel.querySelector<HTMLElement>('[role="group"][aria-label="Reject"]')!;
+    expect(form.textContent).toContain("takes the document out of the plan");
+    const confirm = () =>
+      [...panel.querySelectorAll<HTMLButtonElement>('[aria-label="Reject"] button')].find(
+        (b) => b.textContent === "Reject",
+      )!;
+    expect(confirm().disabled).toBe(true);
+    const note = form.querySelector<HTMLTextAreaElement>('textarea[aria-label="Reject note"]')!;
+    note.value = "Option B was chosen";
+    note.dispatchEvent(new Event("input"));
+    expect(confirm().disabled).toBe(false);
+    confirm().click();
+    await vi.waitFor(() => expect(reviewCall).toHaveBeenCalledWith({ action: "reject", note: "Option B was chosen" }));
+    await vi.waitFor(() => expect(actionButton(panel, "Reopen for review")).toBeDefined());
+  });
+
+  it("tells someone who can't reopen a rejected document what it means", () => {
+    const { panel } = mount({ ...payload(1), state: "rejected", can: can({}) });
+    expect(panel.textContent).toContain("Rejected: it is not part of the plan");
+  });
+});
+
+describe("ReviewPanel: Choose this option", () => {
+  const can = (over: Partial<ReviewPayload["can"]>): ReviewPayload["can"] => ({
+    submit: false,
+    review: false,
+    force: false,
+    reopen: false,
+    archive: false,
+    unarchive: false,
+    ...over,
+  });
+  const doc = (
+    id: string,
+    path: string,
+    reviewState = "in_review",
+    over: { removed?: boolean; current?: boolean } = {},
+  ) => ({
+    id,
+    title: path,
+    kind: "design" as const,
+    reviewState,
+    path,
+    removed: over.removed ?? false,
+    current: over.current ?? false,
+    pagePath: `/d/${id}`,
+  });
+  const PLAN = [
+    doc("pm", "plan.md", "approved"),
+    doc("a", "option-a-tree/", "in_review", { current: true }),
+    doc("b", "option-b-cards/"),
+    doc("c", "option-c-lanes/", "approved"),
+    doc("s", "screens/"),
+    doc("x", "option-x/", "rejected", { removed: true }),
+  ];
+  function mount(review: ReviewPayload, documents = PLAN) {
+    document.body.replaceChildren();
+    const banner = document.createElement("div");
+    const panel = document.createElement("div");
+    document.body.append(banner, panel);
+    const reviewCall = vi.fn((_body: unknown) =>
+      Promise.resolve({ review: { ...review, state: "approved" as const } }),
+    );
+    const host: ReviewHost = {
+      api: { review: reviewCall } as unknown as Api,
+      banner,
+      panel,
+      showReviewTab: vi.fn(),
+      showChanges: vi.fn(),
+      loadLatest: vi.fn(() => Promise.resolve()),
+      onLock: vi.fn(),
+      onState: vi.fn(),
+      planDocuments: () => documents,
+    };
+    new ReviewPanel(host, review, review.currentVersion);
+    return { panel, reviewCall };
+  }
+  const button = (panel: HTMLElement, label: string | RegExp) =>
+    [...panel.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      typeof label === "string" ? b.textContent === label : label.test(b.textContent ?? ""),
+    );
+
+  it("is offered only when the server allows it and the plan has something to reject", () => {
+    expect(button(mount({ ...payload(1), can: can({}) }).panel, "Choose this option")).toBeUndefined();
+    expect(
+      button(mount({ ...payload(1), can: can({ choose: true, review: true }) }).panel, "Choose this option"),
+    ).toBeDefined();
+    const alone = [doc("pm", "plan.md", "approved"), doc("a", "option-a/", "in_review", { current: true })];
+    expect(
+      button(mount({ ...payload(1), can: can({ choose: true, review: true }) }, alone).panel, "Choose this option"),
+    ).toBeUndefined();
+  });
+
+  it("is never offered on a shared part (screens/), only on an alternative", () => {
+    const onScreens = PLAN.map((d) => ({ ...d, current: d.path === "screens/" }));
+    expect(
+      button(mount({ ...payload(1), can: can({ choose: true, review: true }) }, onScreens).panel, "Choose this option"),
+    ).toBeUndefined();
+  });
+
+  it("lists the other open documents, ticks the same-named options, and posts the ticked ids", async () => {
+    const { panel, reviewCall } = mount({ ...payload(1), can: can({ choose: true, review: true }) });
+    button(panel, "Choose this option")!.click();
+    // A focused step: none of the other actions beside it.
+    expect(button(panel, "Choose this option")).toBeUndefined();
+    expect(button(panel, "Approve")).toBeUndefined();
+    expect(panel.querySelector("h3")?.textContent).toBe("Choose option-a-tree/");
+    const rows = [...panel.querySelectorAll<HTMLLabelElement>(".rv-choose label")].map((l) => [
+      l.querySelector("input")!.checked,
+      [...l.querySelectorAll("span")]
+        .filter((x) => !x.hidden)
+        .map((x) => x.textContent)
+        .join(""),
+    ]);
+    // plan.md, the chosen one and the already rejected option are not offered; screens/ starts unticked and
+    // says it stays in the plan.
+    expect(rows).toEqual([
+      [true, "option-b-cards/ · In review"],
+      [true, "option-c-lanes/ · Approved"],
+      [false, "screens/ · In reviewstays in the plan"],
+    ]);
+    const summary = () => panel.querySelector(".ch-summary")!.textContent;
+    expect(summary()).toBe(
+      "This approves option-a-tree/ and rejects option-b-cards/ and option-c-lanes/. Other documents still need approval before the plan can be built.",
+    );
+    const confirm = button(panel, /^Approve and reject/)!;
+    expect(confirm.textContent).toBe("Approve and reject 2");
+    // Unticking all disables it; ticking one back enables it.
+    const boxes = [...panel.querySelectorAll<HTMLInputElement>(".rv-choose input")];
+    for (const box of boxes.slice(0, 2)) {
+      box.checked = false;
+      box.dispatchEvent(new Event("change"));
+    }
+    expect([confirm.disabled, confirm.textContent]).toEqual([true, "Approve and reject 0"]);
+    expect(summary()).toBe("Tick at least one document to reject.");
+    boxes[1].checked = true;
+    boxes[1].dispatchEvent(new Event("change"));
+    expect([confirm.disabled, confirm.textContent]).toEqual([false, "Approve and reject 1"]);
+    const note = panel.querySelector<HTMLInputElement>('input[aria-label="Choice note"]')!;
+    note.value = "cleanest";
+    note.dispatchEvent(new Event("input"));
+    confirm.click();
+    await vi.waitFor(() => expect(reviewCall).toHaveBeenCalled());
+    expect(reviewCall.mock.calls[0][0]).toEqual({
+      action: "choose",
+      versionNumber: 1,
+      reject: ["c"],
+      note: "cleanest",
+    });
+  });
+
+  it("says Reject, not Approve, when the option is already approved", () => {
+    const { panel } = mount({ ...payload(1), state: "approved", can: can({ choose: true, review: true }) });
+    button(panel, "Choose this option")!.click();
+    expect(button(panel, /^Reject \d/)?.textContent).toBe("Reject 2");
+    expect(panel.querySelector(".ch-summary")!.textContent).toMatch(/^This keeps option-a-tree\/ approved and rejects/);
+  });
+
+  it("says the plan is ready to build when everything left is approved after the choice", () => {
+    const plan = [
+      doc("pm", "plan.md", "approved"),
+      doc("a", "option-a/", "in_review", { current: true }),
+      doc("b", "option-b/"),
+      doc("s", "screens/", "approved"),
+    ];
+    const { panel } = mount({ ...payload(1), can: can({ choose: true, review: true }) }, plan);
+    button(panel, "Choose this option")!.click();
+    expect(panel.querySelector(".ch-summary")!.textContent).toBe(
+      "This approves option-a/ and rejects option-b/. The plan is then ready to build.",
+    );
+  });
+});
+
+describe("ReviewPanel: steps have the panel to themselves", () => {
+  const can = (over: Partial<ReviewPayload["can"]>): ReviewPayload["can"] => ({
+    submit: false,
+    review: false,
+    force: false,
+    reopen: false,
+    archive: false,
+    unarchive: false,
+    ...over,
+  });
+  function mount(review: ReviewPayload) {
+    document.body.replaceChildren();
+    const banner = document.createElement("div");
+    const panel = document.createElement("div");
+    document.body.append(banner, panel);
+    const host: ReviewHost = {
+      api: { review: vi.fn() } as unknown as Api,
+      banner,
+      panel,
+      showReviewTab: vi.fn(),
+      showChanges: vi.fn(),
+      loadLatest: vi.fn(() => Promise.resolve()),
+      onLock: vi.fn(),
+      onState: vi.fn(),
+    };
+    new ReviewPanel(host, review, review.currentVersion);
+    return panel;
+  }
+  const labels = (panel: HTMLElement) => [...panel.querySelectorAll("button")].map((b) => b.textContent);
+
+  for (const [open, heading, confirm] of [
+    ["Reject", "Reject this document", "Reject"],
+    ["Force approve", "Force approve", "Force approve"],
+  ] as const) {
+    it(`${open}: only its form, then everything back on Cancel`, () => {
+      const panel = mount({ ...payload(1), can: can({ review: true, reject: true, force: true, archive: true }) });
+      const before = labels(panel);
+      [...panel.querySelectorAll("button")].find((b) => b.textContent === open)!.click();
+      expect(panel.querySelector("h3")?.textContent).toBe(heading);
+      expect(labels(panel)).toEqual([confirm, "Cancel"]);
+      expect(panel.querySelector(".rv-events, .rv-reviewers")).toBeNull();
+      [...panel.querySelectorAll("button")].find((b) => b.textContent === "Cancel")!.click();
+      expect(labels(panel)).toEqual(before);
+    });
+  }
 });

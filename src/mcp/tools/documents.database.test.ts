@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
-import type { Principal } from "#prisma";
+import { Prisma, type Principal } from "#prisma";
 import { createPrismaClient } from "../../core/db.js";
 import { requestRenderedExport, runExport, type ExportDeps } from "../../core/documents/exports.js";
 import type { McpProviders, McpRequestContext } from "../context.js";
@@ -656,6 +656,127 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     expect(mine.isError).toBe(false);
   });
 
+  it("link_document links a native agent with documentTools write as the writer, and refuses the rest", async () => {
+    const call = await connect(owner);
+    const documentId = (await call("create_document", { title: "N", markdown: "# N\n" })).json.documentId as string;
+    const setTools = (documentTools: object | null) =>
+      db.agent.update({ where: { id: nativeAgentId }, data: { documentTools: documentTools ?? Prisma.DbNull } });
+    try {
+      // No setting, or read-only: unavailable.
+      await setTools(null);
+      expect((await call("link_document", { documentId, agentId: nativeAgentId })).text).toContain(
+        "document_agent_unavailable",
+      );
+      await setTools({ access: "read", reviewers: [owner.id] });
+      expect((await call("link_document", { documentId, agentId: nativeAgentId })).text).toContain(
+        "document_agent_unavailable",
+      );
+      await setTools({ access: "write", reviewers: [owner.id] });
+      // Repository fields are coding-only.
+      const withRepo = await call("link_document", {
+        documentId,
+        agentId: nativeAgentId,
+        repository: "acme/docs",
+        path: "docs/n.md",
+      });
+      expect(withRepo.text).toContain("document_repo_link_invalid");
+      // A linker without execute on the agent.
+      const stranger = await db.principal.create({ data: { subject: `docmcp-native-stranger-${s}` } });
+      try {
+        const strangerDoc = (await (await connect(stranger))("create_document", { title: "S", markdown: "# S\n" })).json
+          .documentId as string;
+        expect(
+          (await (await connect(stranger))("link_document", { documentId: strangerDoc, agentId: nativeAgentId }))
+            .isError,
+        ).toBe(true);
+        const fresh = await db.agent.findUniqueOrThrow({ where: { id: nativeAgentId } });
+        expect(fresh.ownerId).toBe(owner.id);
+      } finally {
+        await db.document.deleteMany({ where: { ownerId: stranger.id } });
+        await db.principal.delete({ where: { id: stranger.id } });
+      }
+      const ok = await call("link_document", { documentId, agentId: nativeAgentId });
+      expect(ok.isError).toBe(false);
+      expect(ok.json).toMatchObject({ linked: true, agentId: nativeAgentId, repository: null, path: null });
+      expect(await db.document.findUniqueOrThrow({ where: { id: documentId } })).toMatchObject({
+        agentId: nativeAgentId,
+        repository: null,
+        path: null,
+      });
+      // A plan document cannot take a native writer.
+      const lead = await db.planSet.create({
+        data: {
+          agentId: codingAgentId,
+          accessAgentId: nativeAgentId,
+          repository: `acme/nplan-${s}`,
+          number: 91,
+          store: "wardby",
+          createdByRunId: "run-nplan",
+        },
+      });
+      try {
+        await db.document.update({
+          where: { id: documentId },
+          data: { planSetId: lead.id, planPath: "p.md", agentId: null },
+        });
+        expect((await call("link_document", { documentId, agentId: nativeAgentId })).text).toContain(
+          "document_agent_unavailable",
+        );
+      } finally {
+        await db.document.update({ where: { id: documentId }, data: { planSetId: null, planPath: null } });
+        await db.planSet.delete({ where: { id: lead.id } });
+      }
+      // Unlinking stays as before.
+      await call("link_document", { documentId, agentId: nativeAgentId });
+      expect((await call("link_document", { documentId, unlink: true })).json).toMatchObject({ linked: false });
+    } finally {
+      await setTools(null);
+    }
+  });
+
+  it("create_document with a native agentId applies link_document's writer rules", async () => {
+    const call = await connect(owner);
+    const setTools = (documentTools: object | null) =>
+      db.agent.update({ where: { id: nativeAgentId }, data: { documentTools: documentTools ?? Prisma.DbNull } });
+    const stranger = await db.principal.create({ data: { subject: `docmcp-native-create-${s}` } });
+    try {
+      await setTools(null);
+      expect((await call("create_document", { title: "C", markdown: "# C\n", agentId: nativeAgentId })).text).toContain(
+        "document_agent_unavailable",
+      );
+      await setTools({ access: "read", reviewers: [owner.id] });
+      expect((await call("create_document", { title: "C", markdown: "# C\n", agentId: nativeAgentId })).text).toContain(
+        "document_agent_unavailable",
+      );
+      await setTools({ access: "write", reviewers: [owner.id] });
+      const withRepo = await call("create_document", {
+        title: "C",
+        markdown: "# C\n",
+        agentId: nativeAgentId,
+        repository: "acme/docs",
+        path: "docs/c.md",
+      });
+      expect(withRepo.text).toContain("document_repo_link_invalid");
+      // A caller without execute on the agent.
+      const refused = await (
+        await connect(stranger)
+      )("create_document", { title: "S", markdown: "# S\n", agentId: nativeAgentId });
+      expect(refused.isError).toBe(true);
+      expect(await db.document.count({ where: { ownerId: stranger.id } })).toBe(0);
+      const ok = await call("create_document", { title: "C", markdown: "# C\n", agentId: nativeAgentId });
+      expect(ok.isError).toBe(false);
+      expect(await db.document.findUniqueOrThrow({ where: { id: ok.json.documentId as string } })).toMatchObject({
+        agentId: nativeAgentId,
+        repository: null,
+        path: null,
+      });
+    } finally {
+      await setTools(null);
+      await db.document.deleteMany({ where: { ownerId: stranger.id } });
+      await db.principal.delete({ where: { id: stranger.id } });
+    }
+  });
+
   it("link_document links, relinks and unlinks a document its owner holds, under create_document's rules", async () => {
     const call = await connect(owner);
     const made = await call("create_document", { title: "L", markdown: "# L\n" });
@@ -984,6 +1105,134 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       expect(
         (await readOnly("wait_for_review", { documentId: id, state: "draft", timeoutSeconds: 1 })).json.changed,
       ).toBe(true);
+    }, 60_000);
+
+    it("choose_plan_option approves one option and rejects the others in one call", async () => {
+      const callOwner = await connect(owner);
+      const callOther = await connect(other);
+      const planner = await db.agent.create({
+        data: {
+          name: `choose-mcp-${randomUUID().slice(0, 8)}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const set = await db.planSet.create({
+        data: {
+          agentId: planner.id,
+          repository: "o/choose-mcp",
+          number: 1,
+          store: "wardby",
+          createdByRunId: "fixture",
+        },
+      });
+      const make = async (title: string, planPath: string) => {
+        const id = (await callOwner("create_document", { title, markdown: `# ${title}` })).json.documentId as string;
+        await db.document.update({ where: { id }, data: { planSetId: set.id, planPath } });
+        await callOwner("submit_for_review", { documentId: id, reviewers: [other.id] });
+        return id;
+      };
+      const planMd = await make("Plan", "plan.md");
+      const [a, b, c] = [
+        await make("A", "option-a.md"),
+        await make("B", "option-b.md"),
+        await make("C", "option-c.md"),
+      ];
+      try {
+        // Refused as a whole: plan.md in the list; nothing changes.
+        const refused = await callOther("choose_plan_option", { documentId: a, versionNumber: 1, reject: [b, planMd] });
+        expect(refused.text).toContain("document_reject_not_plan_document");
+        expect((await db.document.findUniqueOrThrow({ where: { id: a } })).reviewState).toBe("in_review");
+        expect((await db.document.findUniqueOrThrow({ where: { id: b } })).reviewState).toBe("in_review");
+        // The named reviewer chooses A over B and C.
+        const out = await callOther("choose_plan_option", {
+          documentId: a,
+          versionNumber: 1,
+          reject: [b, c],
+          note: "fits the phone",
+        });
+        expect(out.isError).toBe(false);
+        expect(out.json.reviewState).toBe("approved");
+        expect(out.json.rejected).toEqual([b, c]);
+        for (const id of [b, c]) {
+          const row = await db.document.findUniqueOrThrow({ where: { id } });
+          expect(row).toMatchObject({ reviewState: "rejected", removedFromPlan: true });
+          const ev = await db.documentReviewEvent.findFirstOrThrow({ where: { documentId: id, kind: "rejected" } });
+          expect(ev.note).toBe("Chose option-a.md: fits the phone");
+        }
+        // Read-only scope cannot.
+        const readOnly = await connect(other, ["documents:read"]);
+        expect((await readOnly("choose_plan_option", { documentId: a, versionNumber: 1, reject: [b] })).isError).toBe(
+          true,
+        );
+      } finally {
+        await db.document.updateMany({ where: { planSetId: set.id }, data: { planSetId: null } });
+        await db.planSet.delete({ where: { id: set.id } });
+        await db.agent.delete({ where: { id: planner.id } });
+      }
+    }, 60_000);
+
+    it("reject_document takes a plan option out of its plan; plan.md and loose documents are refused", async () => {
+      const callOwner = await connect(owner);
+      const callOther = await connect(other);
+      const planner = await db.agent.create({
+        data: {
+          name: `reject-mcp-${randomUUID().slice(0, 8)}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const set = await db.planSet.create({
+        data: {
+          agentId: planner.id,
+          repository: "o/reject-mcp",
+          number: 1,
+          store: "wardby",
+          createdByRunId: "fixture",
+        },
+      });
+      const make = async (title: string, planPath: string | null) => {
+        const id = (await callOwner("create_document", { title, markdown: `# ${title}` })).json.documentId as string;
+        if (planPath) await db.document.update({ where: { id }, data: { planSetId: set.id, planPath } });
+        await callOwner("submit_for_review", { documentId: id, reviewers: [other.id] });
+        return id;
+      };
+      const planMd = await make("Plan", "plan.md");
+      const option = await make("Option C", "option-c.md");
+      const loose = await make("Loose", null);
+      try {
+        // Refused: plan.md, a document outside a plan, a missing note, and someone who is not a reviewer's peer.
+        expect((await callOwner("reject_document", { documentId: planMd, note: "no" })).text).toContain(
+          "document_reject_not_plan_document",
+        );
+        expect((await callOwner("reject_document", { documentId: loose, note: "no" })).text).toContain(
+          "document_reject_not_plan_document",
+        );
+        expect((await callOwner("reject_document", { documentId: option, note: "  " })).isError).toBe(true);
+        const readOnly = await connect(owner, ["documents:read"]);
+        expect((await readOnly("reject_document", { documentId: option, note: "no" })).isError).toBe(true);
+        // A named reviewer rejects with a note: rejected, out of the plan.
+        const rejected = await callOther("reject_document", { documentId: option, note: "Option B was chosen" });
+        expect(rejected.isError).toBe(false);
+        expect(rejected.json.reviewState).toBe("rejected");
+        expect(rejected.json.events[0]).toMatchObject({ kind: "rejected", toState: "rejected" });
+        expect((await db.document.findUniqueOrThrow({ where: { id: option } })).removedFromPlan).toBe(true);
+        // Locked: no new version; reopen brings it back on v2.
+        expect((await callOwner("publish_version", { documentId: option, markdown: "# C v2" })).text).toContain(
+          "document_locked",
+        );
+        const reopened = await callOwner("reopen_document", { documentId: option });
+        expect([reopened.json.reviewState, reopened.json.currentVersion]).toEqual(["in_review", 2]);
+        expect((await db.document.findUniqueOrThrow({ where: { id: option } })).removedFromPlan).toBe(false);
+      } finally {
+        await db.document.updateMany({ where: { planSetId: set.id }, data: { planSetId: null } });
+        await db.planSet.delete({ where: { id: set.id } });
+        await db.agent.delete({ where: { id: planner.id } });
+      }
     }, 60_000);
 
     it("gives the owner the review candidates, guests included, and no one else", async () => {

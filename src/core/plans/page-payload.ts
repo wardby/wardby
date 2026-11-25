@@ -19,6 +19,8 @@ export interface PlanSetPayload {
     path: string;
     removed: boolean;
     current: boolean;
+    /** The current version number (what a choice made from the plan bar approves). */
+    versionNumber?: number;
     pagePath: string; // "/d/<id>"; empty for a guest (member routes): the chip has no link
   }>;
 }

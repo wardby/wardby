@@ -266,6 +266,15 @@ function holdsScope(ctx: McpRequestContext, scope: string): boolean {
 }
 
 /**
+ * Whether the caller may use `scope` now: the token holds it (owner:all holds every privileged
+ * scope) and, for a privileged scope, a role grants it. The same rule requireScope enforces, as a
+ * yes or no, for answers such as whoami's.
+ */
+export function scopeAllowed(ctx: McpRequestContext, scope: string): boolean {
+  return holdsScope(ctx, scope) && (!PRIVILEGED_SCOPES.includes(scope) || permissionsOf(ctx.roles).has(scope));
+}
+
+/**
  * Throws a 403 insufficient_scope McpError listing every scope this
  * operation needs (not just the ones the caller is missing) — so a client
  * can re-auth once with the full required set instead of round-tripping

@@ -59,6 +59,7 @@ describe("owner-all callers", () => {
     const noScope = ctx(db, "boss", { roles: ["wardby_owner"] });
     const noRole = ctx(db, "boss", { scopes: new Set(["owner:all"]), roles: ["admin"] });
     expect((await failure(requireAgentAccess(noScope, "a1", "read"))).httpStatus).toBe(404);
+    // owner:all with only the admin role holds no admin:view scope, so the agent stays hidden.
     expect((await failure(requireAgentAccess(noRole, "a1", "read"))).httpStatus).toBe(404);
   });
 
@@ -92,6 +93,20 @@ describe("requireAgentAccess", () => {
     expect(missing.httpStatus).toBe(404);
     expect(hidden.httpStatus).toBe(404);
     expect(hidden.message).toBe(missing.message.replace("nope", "a1"));
+  });
+
+  it("tells an admin:view caller it has no access instead of 404ing an agent it can list", async () => {
+    const viewer = ctx(db, "stranger", { scopes: new Set(["admin:view"]), roles: ["viewer"] });
+    const err = await failure(requireAgentAccess(viewer, "a1", "read"));
+    expect(err.httpStatus).toBe(403);
+    expect(err.message).toMatch(/no access to this agent \(access: none\)/);
+    // A row that does not exist is still a plain 404, for viewers too.
+    expect((await failure(requireAgentAccess(viewer, "nope", "read"))).httpStatus).toBe(404);
+    // The viewer role without a token that reaches admin:view, or the scope without the role: 404.
+    const roleOnly = ctx(db, "stranger", { roles: ["viewer"] });
+    const scopeOnly = ctx(db, "stranger", { scopes: new Set(["admin:view"]) });
+    expect((await failure(requireAgentAccess(roleOnly, "a1", "read"))).httpStatus).toBe(404);
+    expect((await failure(requireAgentAccess(scopeOnly, "a1", "read"))).httpStatus).toBe(404);
   });
 
   it("403s at read or above but below the required level, naming both levels", async () => {

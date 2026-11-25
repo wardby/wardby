@@ -365,8 +365,11 @@ export function createBoardsEditor(opts: {
     um.stop();
     try {
       current = id;
-      editor.setComponents(parts.bodyHtml);
+      // The stylesheet first: parsing the body turns each inline style="" into a rule for that element,
+      // and setStyle replaces every rule, so styling after the components dropped those (and a save
+      // then wrote the elements without them).
       setBoardStyle(state.parts.baseCss, parts.editsCss);
+      editor.setComponents(parts.bodyHtml);
       const root = wrapper();
       if (root) {
         root.setAttributes({ ...parts.bodyAttrs });

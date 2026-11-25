@@ -106,6 +106,18 @@ function excerpt(queries: string[], page: HelpPage): string {
   return truncate(best?.candidate ?? page.summary);
 }
 
+/**
+ * The page with this id. Article ids use hyphens while error codes use underscores
+ * (errors/mcp-unavailable for mcp_unavailable), so an id that matches no page exactly is
+ * tried again with underscores read as hyphens. No article id contains an underscore.
+ */
+export function findHelpPage(catalog: HelpCatalog, id: string): HelpPage | undefined {
+  const exact = catalog.pages.find((page) => page.id === id);
+  if (exact || !id.includes("_")) return exact;
+  const hyphenated = id.replaceAll("_", "-");
+  return catalog.pages.find((page) => page.id === hyphenated);
+}
+
 /** Added when the whole query equals one of a page's tags; above the 12 a single title word can add. */
 const EXACT_TAG_BONUS = 15;
 

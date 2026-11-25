@@ -6,13 +6,14 @@
  *   2. any reviewer's current changes_requested → changes_requested;
  *   3. every reviewer's current verdict is approved → approved;
  *   4. else in_review.
- * Reopening an approved document starts a new version (a copy of the approved one), so nothing given before a
- * reopen is on the current version and none of it counts.
+ * Reopening an approved or rejected document starts a new version (a copy of the current one), so nothing given
+ * before a reopen is on the current version and none of it counts. `rejected` is set only by an explicit action
+ * on a document of a plan set (review.ts rejectDocument): it is locked like `approved` and leaves the plan.
  */
-export const REVIEW_STATES = ["draft", "in_review", "changes_requested", "approved", "archived"] as const;
+export const REVIEW_STATES = ["draft", "in_review", "changes_requested", "approved", "rejected", "archived"] as const;
 export type ReviewState = (typeof REVIEW_STATES)[number];
 export type ComputedState = "in_review" | "changes_requested" | "approved";
-export type LockedState = "approved" | "archived";
+export type LockedState = "approved" | "rejected" | "archived";
 export type Verdict = "none" | "approved" | "changes_requested";
 
 export const REVIEW_EVENT_KINDS = [
@@ -21,6 +22,7 @@ export const REVIEW_EVENT_KINDS = [
   "approved",
   "changes_requested",
   "force_approved",
+  "rejected",
   "reopened",
   "archived",
   "unarchived",
@@ -32,13 +34,15 @@ export const STATE_LABELS: Record<ReviewState, string> = {
   in_review: "In review",
   changes_requested: "Changes requested",
   approved: "Approved",
+  rejected: "Rejected",
   archived: "Archived",
 };
 
 export const isReviewState = (v: string): v is ReviewState => (REVIEW_STATES as readonly string[]).includes(v);
 
-/** Approved and archived documents take no new version by any route. */
-export const isLocked = (state: string): state is LockedState => state === "approved" || state === "archived";
+/** Approved, rejected and archived documents take no new version by any route. */
+export const isLocked = (state: string): state is LockedState =>
+  state === "approved" || state === "rejected" || state === "archived";
 
 export interface Mark {
   versionNumber: number;

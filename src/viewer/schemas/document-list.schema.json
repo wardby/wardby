@@ -73,6 +73,7 @@
                   "in_review",
                   "changes_requested",
                   "approved",
+                  "rejected",
                   "archived"
                 ]
               },

@@ -56,9 +56,33 @@ describe("whoami", () => {
       token: { sub: "ada", uid: "00u-fake", cid: "https://client.example/metadata" },
       roles: ["admin", "viewer"],
       scopes: ["agents:read", "documents:read"],
+      // Both tokens' scopes are reader tier: admin and viewer roles add nothing a reader token reaches.
+      permissions: expect.arrayContaining(["agents:read", "documents:read"]) as unknown,
+      ownerAll: false,
       teamIds: ["team-1"],
       operator: false,
     });
+  });
+
+  it("reports the permissions scopes and roles allow together, not either alone", async () => {
+    // Admin scopes on the token, but only the viewer role: admin:view applies, agents:admin doesn't.
+    const viewer = JSON.parse(
+      await call({ roles: ["viewer"], scopes: new Set(["agents:read", "agents:write", "admin:view", "agents:admin"]) }),
+    ) as { permissions: string[]; ownerAll: boolean };
+    expect(viewer.permissions).toContain("admin:view");
+    expect(viewer.permissions).toContain("agents:write");
+    expect(viewer.permissions).not.toContain("agents:admin");
+    expect(viewer.permissions).not.toContain("owner:all");
+    expect(viewer.ownerAll).toBe(false);
+
+    const owner = JSON.parse(
+      await call({ roles: ["wardby_owner"], scopes: new Set(["agents:read", "owner:all"]) }),
+    ) as {
+      permissions: string[];
+      ownerAll: boolean;
+    };
+    expect(owner.permissions).toContain("owner:all");
+    expect(owner.ownerAll).toBe(true);
   });
 
   it("reports no token claims for the stdio operator", async () => {

@@ -91,6 +91,10 @@ export interface ReviewCan {
   review: boolean;
   force: boolean;
   reopen: boolean;
+  /** Reject this plan document (rejectDocument): never plan.md, never outside a plan set. */
+  reject: boolean;
+  /** Choose this plan document over others (chooseOption): approve it (or it is approved) and reject them. */
+  choose: boolean;
   archive: boolean;
   unarchive: boolean;
 }
@@ -111,6 +115,9 @@ export interface ReviewView {
 const SUBMITTABLE = new Set<string>(["draft", "in_review", "changes_requested"]);
 const REVIEWABLE = new Set<string>(["in_review", "changes_requested", "approved"]);
 const FORCEABLE = new Set<string>(["in_review", "changes_requested"]);
+const REJECTABLE = new Set<string>(["in_review", "changes_requested", "approved"]);
+/** Reopen takes these back to review (a rejected document also back into its plan). */
+const REOPENABLE = new Set<string>(["approved", "rejected"]);
 const invalid = (): never => {
   throw new Error("document_review_state_invalid");
 };
@@ -129,6 +136,11 @@ async function inReviewTx<T>(db: PrismaClient, fn: (tx: Tx) => Promise<T>): Prom
   );
 }
 
+/** A document Reject applies to: one of a plan set, still in it, and not the set's plan.md. */
+function rejectablePlacement(doc: { planSetId: string | null; planPath: string | null; removedFromPlan: boolean }) {
+  return doc.planSetId !== null && doc.planPath !== null && doc.planPath !== "plan.md" && !doc.removedFromPlan;
+}
+
 /** Everything the state rule reads, inside the caller's transaction. */
 async function readReview(tx: Tx, documentId: string) {
   const doc = await tx.document.findUnique({
@@ -140,6 +152,10 @@ async function readReview(tx: Tx, documentId: string) {
       reviewState: true,
       reviewStateBeforeArchive: true,
       finalApproverId: true,
+      // Plan placement, for Reject (rejectDocument and the view's can.reject read it in the same snapshot).
+      planSetId: true,
+      planPath: true,
+      removedFromPlan: true,
     },
   });
   if (!doc) throw new Error("document_not_found");
@@ -203,6 +219,7 @@ async function record(
       documentId: input.documentId,
       actorPrincipalId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
       actorGuestId: input.viewer.kind === "guest" ? input.viewer.guestId : null,
+      actorRunId: input.viewer.kind === "agent" ? input.viewer.runId : null,
       kind: input.kind,
       fromState: input.from,
       toState: input.to,
@@ -259,13 +276,24 @@ async function ensureCommentAccess(tx: Tx, doc: { id: string; ownerId: string },
   });
 }
 
+/**
+ * An agent never approves, force-approves, reopens or archives. The document check runs first, so an agent
+ * with no access to the document sees document_not_found, not a refusal that confirms it exists.
+ */
+async function denyAgent(db: PrismaClient, documentId: string, viewer: Viewer): Promise<never> {
+  await requireDocumentAccess(db, documentId, viewer, "read");
+  throw new Error("document_access_denied");
+}
+
 export async function submitForReview(
   db: PrismaClient,
   input: { documentId: string; viewer: Viewer; reviewers: string[]; finalApproverId?: string | null },
 ): Promise<ReviewView> {
-  await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
-  if (input.viewer.kind !== "principal") throw new Error("document_access_denied");
-  const by = input.viewer.principalId;
+  // An agent needs write on the document; a person needs to own it.
+  const need = input.viewer.kind === "agent" ? "write" : "owner";
+  await requireDocumentAccess(db, input.documentId, input.viewer, need);
+  if (input.viewer.kind === "guest") throw new Error("document_access_denied");
+  const by = input.viewer.kind === "principal" ? input.viewer.principalId : null;
   const refs = [...new Set(input.reviewers)];
   if (refs.length === 0 || refs.length > MAX_REVIEWERS) invalid();
   const parsed = refs.map(parseRef);
@@ -273,8 +301,16 @@ export async function submitForReview(
   const guestIds = parsed.flatMap((r) => ("guestId" in r ? [r.guestId] : []));
   const approver = input.finalApproverId;
   await inReviewTx(db, async (tx) => {
-    await requireDocumentAccess(tx, input.documentId, input.viewer, "owner");
+    await requireDocumentAccess(tx, input.documentId, input.viewer, need);
     const { doc, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
+    // Grants made for the reviewers are attributed to the owner when an agent submits.
+    const grantedBy = by ?? doc.ownerId;
+    // An agent submits only its own owner's documents: the reviewer grants it makes act on the owner's behalf,
+    // so a document someone else owns (one they linked to the agent) is never shared by it.
+    if (input.viewer.kind === "agent") {
+      const agent = await tx.agent.findUnique({ where: { id: input.viewer.agentId }, select: { ownerId: true } });
+      if (!agent?.ownerId || agent.ownerId !== doc.ownerId) throw new Error("document_review_forbidden");
+    }
     if (!SUBMITTABLE.has(doc.reviewState)) invalid();
     const known = await tx.principal.findMany({
       where: { id: { in: [...principalIds, ...(approver ? [approver] : [])] } },
@@ -297,14 +333,14 @@ export async function submitForReview(
       if (!keep.some((r) => r.principalId === principalId)) {
         await tx.documentReviewer.create({ data: { documentId: doc.id, principalId } });
       }
-      await ensureCommentAccess(tx, doc, principalId, by);
+      await ensureCommentAccess(tx, doc, principalId, grantedBy);
     }
     for (const guestId of guestIds) {
       if (!keep.some((r) => r.guestId === guestId)) {
         await tx.documentReviewer.create({ data: { documentId: doc.id, guestId } });
       }
     }
-    if (approver) await ensureCommentAccess(tx, doc, approver, by);
+    if (approver) await ensureCommentAccess(tx, doc, approver, grantedBy);
     const next = await readReview(tx, doc.id);
     await record(tx, {
       documentId: doc.id,
@@ -322,6 +358,85 @@ export async function submitForReview(
   return getReviewView(db, input.documentId, input.viewer);
 }
 
+/**
+ * One reviewer's verdict, inside the caller's transaction (reviewDocument, chooseOption). Returns false when it
+ * changes nothing: the same verdict already counts now.
+ */
+async function applyVerdict(
+  tx: Tx,
+  input: { documentId: string; viewer: Viewer; verdict: Verdict; versionNumber: number; note: string | null },
+): Promise<boolean> {
+  // Live access decides inside the transaction: a grant or link revoked since the early check is seen here.
+  await requireDocumentAccess(tx, input.documentId, input.viewer, "comment");
+  const { doc: row, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
+  const { viewer, verdict, note } = input;
+  if (viewer.kind === "agent") throw new Error("document_access_denied");
+  const mine = reviewers.find((r) =>
+    viewer.kind === "principal" ? r.principalId === viewer.principalId : r.guestId === viewer.guestId,
+  );
+  if (!mine) throw new Error("document_review_forbidden");
+  if (!REVIEWABLE.has(row.reviewState)) invalid();
+  // A force approval is final: only a writer's reopen takes the document back to review.
+  if (row.reviewState === "approved" && forceCounts(rule)) invalid();
+  if (input.versionNumber !== rule.currentVersion) throw new ReviewVersionConflictError(rule.currentVersion);
+  // A repeat of the verdict that counts now changes nothing: no row update, no event (a new note is dropped).
+  const counted = rule.reviewers.find((r) => r.id === mine.id);
+  if (counted && counted.verdict === verdict && reviewerCounts(counted, rule)) return false;
+  // One clock for the verdict and its event (see the file header).
+  const at = await actionTime(tx, lastEventAt);
+  await tx.documentReviewer.update({
+    where: { id: mine.id },
+    data: { verdict, versionNumber: rule.currentVersion, note, verdictAt: at },
+  });
+  const next = await readReview(tx, row.id);
+  await record(tx, {
+    documentId: row.id,
+    viewer,
+    kind: verdict === "approved" ? "approved" : "changes_requested",
+    from: row.reviewState,
+    to: computeReviewState(next.rule),
+    versionNumber: rule.currentVersion,
+    at,
+    note,
+  });
+  return true;
+}
+
+/**
+ * Rejects one plan document inside the caller's transaction (rejectDocument, chooseOption): live access and the
+ * reject rights (owner, or a named member reviewer or the final approver with comment access), its placement in
+ * a plan set (`planSetId`, when given, must match) and its state are checked here.
+ */
+async function applyReject(
+  tx: Tx,
+  input: { documentId: string; viewer: Viewer & { kind: "principal" }; note: string | null; planSetId?: string },
+): Promise<void> {
+  const { viewer } = input;
+  const principalId = viewer.principalId;
+  const accessNow = await documentAccess(tx, input.documentId, viewer);
+  if (accessNow === "none") throw new Error("document_not_found");
+  const { doc, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
+  const named = reviewers.some((r) => r.principalId === principalId);
+  const isApprover = doc.finalApproverId === principalId;
+  const allowed = accessNow === "owner" || ((named || isApprover) && atLeast("document", accessNow, "comment"));
+  if (!allowed) throw new Error("document_review_forbidden");
+  if (!rejectablePlacement(doc) || (input.planSetId !== undefined && doc.planSetId !== input.planSetId)) {
+    throw new Error("document_reject_not_plan_document");
+  }
+  if (!REJECTABLE.has(doc.reviewState)) invalid();
+  await record(tx, {
+    documentId: doc.id,
+    viewer,
+    kind: "rejected",
+    from: doc.reviewState,
+    to: "rejected",
+    versionNumber: rule.currentVersion,
+    at: await actionTime(tx, lastEventAt),
+    note: input.note,
+    extra: { removedFromPlan: true },
+  });
+}
+
 export async function reviewDocument(
   db: PrismaClient,
   cipher: Cipher,
@@ -333,44 +448,20 @@ export async function reviewDocument(
     note?: string;
   },
 ): Promise<ReviewView> {
-  const doc = await requireDocumentAccess(db, input.documentId, input.viewer, "comment");
+  const viewer = input.viewer;
+  if (viewer.kind === "agent") return denyAgent(db, input.documentId, viewer);
+  const doc = await requireDocumentAccess(db, input.documentId, viewer, "comment");
   const note = await storedNote(db, cipher, doc.agentId, input.note);
   const verdict: Verdict = input.verdict === "approve" ? "approved" : "changes_requested";
-  const changed = await inReviewTx(db, async (tx) => {
-    // Live access decides inside the transaction: a grant or link revoked since the early check is seen here.
-    await requireDocumentAccess(tx, input.documentId, input.viewer, "comment");
-    const { doc: row, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
-    const viewer = input.viewer;
-    const mine = reviewers.find((r) =>
-      viewer.kind === "principal" ? r.principalId === viewer.principalId : r.guestId === viewer.guestId,
-    );
-    if (!mine) throw new Error("document_review_forbidden");
-    if (!REVIEWABLE.has(row.reviewState)) invalid();
-    // A force approval is final: only a writer's reopen takes the document back to review.
-    if (row.reviewState === "approved" && forceCounts(rule)) invalid();
-    if (input.versionNumber !== rule.currentVersion) throw new ReviewVersionConflictError(rule.currentVersion);
-    // A repeat of the verdict that counts now changes nothing: no row update, no event (a new note is dropped).
-    const counted = rule.reviewers.find((r) => r.id === mine.id);
-    if (counted && counted.verdict === verdict && reviewerCounts(counted, rule)) return false;
-    // One clock for the verdict and its event (see the file header).
-    const at = await actionTime(tx, lastEventAt);
-    await tx.documentReviewer.update({
-      where: { id: mine.id },
-      data: { verdict, versionNumber: rule.currentVersion, note, verdictAt: at },
-    });
-    const next = await readReview(tx, row.id);
-    await record(tx, {
-      documentId: row.id,
-      viewer,
-      kind: verdict === "approved" ? "approved" : "changes_requested",
-      from: row.reviewState,
-      to: computeReviewState(next.rule),
-      versionNumber: rule.currentVersion,
-      at,
+  const changed = await inReviewTx(db, (tx) =>
+    applyVerdict(tx, {
+      documentId: input.documentId,
+      viewer: input.viewer,
+      verdict,
+      versionNumber: input.versionNumber,
       note,
-    });
-    return true;
-  });
+    }),
+  );
   if (changed) {
     await notifyDocumentChange(db, input.documentId, "review");
     // Spec §7b: the verdict that approves a plan set's last document notifies or starts a build.
@@ -385,6 +476,7 @@ export async function forceApprove(
   input: { documentId: string; viewer: Viewer; note: string },
 ): Promise<{ view: ReviewView; overridden: string[] }> {
   const viewer = input.viewer;
+  if (viewer.kind === "agent") return denyAgent(db, input.documentId, viewer);
   if (viewer.kind !== "principal") throw new Error("document_review_forbidden");
   const principalId = viewer.principalId;
   const access = await documentAccess(db, input.documentId, input.viewer);
@@ -427,7 +519,99 @@ export async function forceApprove(
 }
 
 /**
- * Reopens an approved document for review by starting its next version: a copy of the approved version N, written
+ * Rejects a document of a plan set: a design option nobody chose, a part the plan no longer needs. The document
+ * becomes `rejected` (locked like an approved one, comments still open) and leaves the plan (`removedFromPlan`),
+ * so it no longer counts toward the plan's approval and is never given to a builder. The plan set's own plan.md
+ * cannot be rejected. Who may: the owner, the final approver, or a named member reviewer; a note is required.
+ * Reopen undoes it. Rejecting the last waiting document completes the plan's approval exactly as an approval
+ * does (the plan review hook).
+ */
+export async function rejectDocument(
+  db: PrismaClient,
+  cipher: Cipher,
+  input: { documentId: string; viewer: Viewer; note: string },
+): Promise<ReviewView> {
+  const viewer = input.viewer;
+  // An agent never rejects (as it never approves): document_not_found without access, else access denied.
+  if (viewer.kind === "agent") return denyAgent(db, input.documentId, viewer);
+  if (viewer.kind !== "principal") throw new Error("document_review_forbidden");
+  const principalId = viewer.principalId;
+  const access = await documentAccess(db, input.documentId, viewer);
+  if (access === "none") throw new Error("document_not_found");
+  const docRow = await db.document.findUnique({ where: { id: input.documentId }, select: { agentId: true } });
+  if (!docRow) throw new Error("document_not_found");
+  if (input.note.trim() === "") invalid();
+  const note = await storedNote(db, cipher, docRow.agentId, input.note);
+  await inReviewTx(db, (tx) => applyReject(tx, { documentId: input.documentId, viewer, note }));
+  await notifyDocumentChange(db, input.documentId, "review");
+  await planReviewHook()?.(db, input.documentId, principalId);
+  return getReviewView(db, input.documentId, viewer);
+}
+
+/** The most documents one choice may reject. */
+export const MAX_CHOOSE_REJECTS = 50;
+
+/** The note a choice stores on each document it rejects. */
+export const choiceNote = (chosenPath: string, note: string | null) =>
+  note ? `Chose ${chosenPath}: ${note}` : `Chose ${chosenPath}`;
+
+/**
+ * Chooses one option of a plan set: the viewer's approval of `documentId` (as Approve, so only a named reviewer,
+ * on `versionNumber`; skipped when it is already approved) and a reject of each document in `reject` (as Reject:
+ * the same rights, the same plan set, never plan.md), all in ONE transaction, so either every change lands or none
+ * does. Each rejected document gets the note "Chose <path>" (plus the viewer's note, when given). The plan review
+ * hook runs once, after the commit, so a choice that decides the plan's last waiting documents completes its
+ * approval the way the last single action would.
+ */
+export async function chooseOption(
+  db: PrismaClient,
+  cipher: Cipher,
+  input: { documentId: string; viewer: Viewer; versionNumber: number; reject: string[]; note?: string },
+): Promise<{ view: ReviewView; rejected: string[] }> {
+  const viewer = input.viewer;
+  // An agent never chooses (it would approve): denied as approve denies it.
+  if (viewer.kind === "agent") return denyAgent(db, input.documentId, viewer);
+  if (viewer.kind !== "principal") throw new Error("document_review_forbidden");
+  const rejectIds = [...new Set(input.reject)];
+  if (rejectIds.length === 0 || rejectIds.length > MAX_CHOOSE_REJECTS || rejectIds.includes(input.documentId)) {
+    invalid();
+  }
+  await requireDocumentAccess(db, input.documentId, viewer, "comment");
+  const rows = await db.document.findMany({
+    where: { id: { in: [input.documentId, ...rejectIds] } },
+    select: { id: true, agentId: true, planPath: true },
+  });
+  const chosenRow = rows.find((r) => r.id === input.documentId);
+  if (!chosenRow) throw new Error("document_not_found");
+  if (rows.length !== rejectIds.length + 1) throw new Error("document_not_found");
+  const userNote = input.note === undefined || input.note.trim() === "" ? null : input.note.trim();
+  const text = choiceNote(chosenRow.planPath ?? "", userNote);
+  // Each rejected document's note is redacted against its own agent's secret values, before the transaction.
+  const notes = new Map<string, string | null>();
+  for (const r of rows) if (r.id !== input.documentId) notes.set(r.id, await storedNote(db, cipher, r.agentId, text));
+  await inReviewTx(db, async (tx) => {
+    const { doc: chosen } = await readReview(tx, input.documentId);
+    if (!rejectablePlacement(chosen) || chosen.planSetId === null) throw new Error("document_reject_not_plan_document");
+    if (chosen.reviewState !== "approved") {
+      await applyVerdict(tx, {
+        documentId: chosen.id,
+        viewer,
+        verdict: "approved",
+        versionNumber: input.versionNumber,
+        note: null,
+      });
+    }
+    for (const id of rejectIds) {
+      await applyReject(tx, { documentId: id, viewer, note: notes.get(id) ?? null, planSetId: chosen.planSetId });
+    }
+  });
+  for (const id of [input.documentId, ...rejectIds]) await notifyDocumentChange(db, id, "review");
+  await planReviewHook()?.(db, input.documentId, viewer.principalId);
+  return { view: await getReviewView(db, input.documentId, viewer), rejected: rejectIds };
+}
+
+/**
+ * Reopens an approved (or rejected) document for review by starting its next version: a copy of version N, written
  * as N+1 (via "review") in the same transaction as the state change and the `reopened` event, which names N+1.
  * N stays the approved record; nothing given on N counts on N+1, so every review after a reopen is on a new number.
  * The copy goes through the shared version writer but not publishVersion, whose lock check refuses every other
@@ -440,6 +624,7 @@ export async function reopenDocument(
   cipher: Cipher,
   input: { documentId: string; viewer: Viewer },
 ): Promise<ReviewView> {
+  if (input.viewer.kind === "agent") return denyAgent(db, input.documentId, input.viewer);
   // Anyone who can open the document but not write it (a guest included) is refused as a review action, so
   // they are told to ask someone who can edit it to reopen it.
   const access = await documentAccess(db, input.documentId, input.viewer);
@@ -460,8 +645,8 @@ export async function reopenDocument(
       },
     });
     if (!row?.currentVersion) throw new Error("document_not_found");
-    // Early refusal (the transaction decides): nothing is staged for a document that is not approved.
-    if (row.reviewState !== "approved") invalid();
+    // Early refusal (the transaction decides): nothing is staged for a document that is not approved or rejected.
+    if (!REOPENABLE.has(row.reviewState)) invalid();
     const approved = row.currentVersion;
     const fmt = formatFor(row.kind);
     const secrets = await documentSecretValues(db, cipher, row.agentId);
@@ -471,7 +656,7 @@ export async function reopenDocument(
       await inReviewTx(db, async (tx) => {
         await requireDocumentAccess(tx, input.documentId, input.viewer, "write");
         const { doc, lastEventAt } = await readReview(tx, input.documentId);
-        if (doc.reviewState !== "approved") invalid();
+        if (!REOPENABLE.has(doc.reviewState)) invalid();
         // A conflict means another reopen, publish and approval happened since the copy was staged.
         const written = await writeVersion(tx, doc.id, staged, {
           via: "review",
@@ -483,10 +668,12 @@ export async function reopenDocument(
           documentId: doc.id,
           viewer: input.viewer,
           kind: "reopened",
-          from: "approved",
+          from: doc.reviewState,
           to: "in_review",
           versionNumber: written.number,
           at: await actionTime(tx, lastEventAt),
+          // A rejected document goes back into its plan (rejectDocument took it out).
+          ...(doc.reviewState === "rejected" ? { extra: { removedFromPlan: false } } : {}),
         });
       });
       break;
@@ -511,6 +698,7 @@ export async function setArchived(
   db: PrismaClient,
   input: { documentId: string; viewer: Viewer; archived: boolean },
 ): Promise<ReviewView> {
+  if (input.viewer.kind === "agent") return denyAgent(db, input.documentId, input.viewer);
   await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
   await inReviewTx(db, async (tx) => {
     await requireDocumentAccess(tx, input.documentId, input.viewer, "owner");
@@ -599,7 +787,9 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
   const nameOf = (p: string | null, g: string | null) =>
     p ? (names.get(p) ?? "Former member") : g ? (guests.get(g) ?? "Guest") : "Someone";
   const isMe = (p: string | null, g: string | null) =>
-    viewer.kind === "principal" ? p !== null && p === viewer.principalId : g !== null && g === viewer.guestId;
+    viewer.kind === "principal"
+      ? p !== null && p === viewer.principalId
+      : viewer.kind === "guest" && g !== null && g === viewer.guestId;
   const state = isReviewState(doc.reviewState) ? doc.reviewState : "draft";
   // Whether each reviewer's verdict counts now: the view and the force banner use the same answer.
   const counts = new Map(rule.reviewers.map((r) => [r.id, reviewerCounts(r, rule)]));
@@ -640,6 +830,19 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
   const principalId = viewer.kind === "principal" ? viewer.principalId : null;
   const owner = access === "owner";
   const listed = reviewerViews.some((r) => r.me);
+  const rejectablePlanDocument = rejectablePlacement(doc);
+  const canReview =
+    listed &&
+    REVIEWABLE.has(state) &&
+    !(state === "approved" && forceCounts(rule)) &&
+    atLeast("document", access, "comment");
+  const canReject =
+    principalId !== null &&
+    rejectablePlanDocument &&
+    REJECTABLE.has(state) &&
+    (owner ||
+      (((listed && viewer.kind === "principal") || doc.finalApproverId === principalId) &&
+        atLeast("document", access, "comment")));
   return {
     documentId,
     state,
@@ -658,7 +861,7 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
       id: e.id,
       kind: e.kind as ReviewEventKind,
       actorRef: e.actorPrincipalId ?? (e.actorGuestId ? `guest:${e.actorGuestId}` : null),
-      actorName: nameOf(e.actorPrincipalId, e.actorGuestId),
+      actorName: e.actorRunId ? "Agent" : nameOf(e.actorPrincipalId, e.actorGuestId),
       fromState: e.fromState as ReviewState,
       toState: e.toState as ReviewState,
       versionNumber: e.versionNumber,
@@ -667,17 +870,15 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
       createdAt: e.createdAt,
     })),
     can: {
-      submit: owner && SUBMITTABLE.has(state),
-      review:
-        listed &&
-        REVIEWABLE.has(state) &&
-        !(state === "approved" && forceCounts(rule)) &&
-        atLeast("document", access, "comment"),
+      submit: (owner || (viewer.kind === "agent" && atLeast("document", access, "write"))) && SUBMITTABLE.has(state),
+      review: canReview,
       force:
         FORCEABLE.has(state) &&
         (owner ||
           (principalId !== null && principalId === doc.finalApproverId && atLeast("document", access, "comment"))),
-      reopen: principalId !== null && state === "approved" && atLeast("document", access, "write"),
+      reopen: principalId !== null && REOPENABLE.has(state) && atLeast("document", access, "write"),
+      reject: canReject,
+      choose: canReject && (state === "approved" || canReview),
       archive: owner && state !== "archived",
       unarchive: owner && state === "archived",
     },

@@ -129,6 +129,9 @@ import {
   type IssueProjectLink,
   type RunCreationCounter,
 } from "./issue-tracker-tools.js";
+import { DOCUMENT_TOOL_NAMES, documentToolDefsFor, handleDocumentTool } from "./document-tools.js";
+import { onDocumentRunFinished } from "./documents/agent-loop.js";
+import { parseStoredDocumentTools } from "./documents/tools-setting.js";
 import { completeIssueStatus } from "./issue-status.js";
 import { fileIssue } from "./issue-dedupe.js";
 import { fileSelfDefect } from "./self-defects.js";
@@ -1120,6 +1123,8 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
           toIssueProjectLink,
         )
       : [];
+    // Native agents only: a coding agent's stored value is ignored, so it never gets doc_* tools.
+    const documentTools = agent.kind === "native" ? parseStoredDocumentTools(agent.documentTools) : null;
     const isDispatchedChild = existingRun.parentRunId != null;
     // Appended, never prepended: the loaded systemPrompt's stable prefix
     // stays prompt-cache-eligible across every dispatch, even though the
@@ -1153,6 +1158,7 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
       ...delegateTools,
       ...(repositoryLinks.length > 0 ? REVIEW_HOST_TOOL_DEFS : []),
       ...(issueProjectLinks.length > 0 ? ISSUE_TRACKER_TOOL_DEFS : []),
+      ...documentToolDefsFor(documentTools),
     ];
     // Remote MCP tools (native agents only), offered after every other tool; one whose name
     // another tool already uses is left out (mcp-tools.ts withoutClashingPins).
@@ -1176,6 +1182,8 @@ export async function loadNativeRun(options: LoadNativeRunOptions) {
       ...(agent.parallelDelegations ? { parallelDelegations: true } : {}),
       repositoryLinks,
       issueProjectLinks,
+      // Only when on, so another agent's pinned step result is unchanged.
+      ...(documentTools ? { documentToolsAccess: documentTools.access } : {}),
       // Only when there are any, so an agent without MCP servers keeps its pinned step result.
       ...(mcpTools.length > 0 ? { mcpTools } : {}),
       agent: {
@@ -1563,6 +1571,17 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
           },
         });
       };
+    }
+    if (DOCUMENT_TOOL_NAMES.has(name) && loaded.documentToolsAccess) {
+      return async (argsJson: string): Promise<string> =>
+        // Live: the handler re-reads the setting and every grant on each call.
+        handleDocumentTool(name, argsJson, {
+          // The document services take the full client; RunnerDb only narrows it for test fakes.
+          db: db as unknown as PrismaClient,
+          cipher: providers.secrets,
+          agentId: loaded.agentId,
+          runId,
+        });
     }
     // `?? []`: a load step replayed from before MCP tools were pinned has none.
     const mcpPin = (loaded.mcpTools ?? []).find((pin) => pin.exposedName === name);
@@ -2155,6 +2174,18 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
   if (claimed) await fileSelfDefect(db, issueTrackers, finished);
   // Only the finalizer that made the row terminal notifies. Never throws.
   if (claimed) await emitRunFinishedEvents(db, finished);
+  // Threads sent from a document to this native writer: the failure reply, or the no-reply note on a
+  // thread it left unanswered (agent-loop.ts; claimed once per run, so the reconciler's sweep, which
+  // also covers a deployment with no executor here, never answers twice). A native run's answer
+  // starts no run. Never throws.
+  if (claimed && finished.trigger === "comment" && providers.executor && providers.secrets) {
+    await onDocumentRunFinished(
+      // The document services take the full client; RunnerDb only narrows it for test fakes.
+      db as unknown as PrismaClient,
+      { executor: providers.executor, cipher: providers.secrets, selfDefects: { db, issueTrackers } },
+      runId,
+    );
+  }
   // A lead's end posts the `wardby merge order` check on each open pull request of its set,
   // once every delegated coding run has opened its PR (#261); last, after the release above (so
   // no review waits on it) and after the follow-ups and notifications (so none is delayed by its

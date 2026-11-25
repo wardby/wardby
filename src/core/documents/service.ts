@@ -48,6 +48,10 @@ export async function createDocument(
     path?: string;
     baseRef?: string;
     via?: PublishVia;
+    /** The run that wrote version 1 (an agent creating a document). */
+    runId?: string;
+    /** Who version 1 is credited to; defaults to the owner (an agent creates for its owner). */
+    createdById?: string;
   },
 ): Promise<{ id: string; versionId: string; warnings: VersionWarning[] }> {
   const fmt = formatFor(input.kind ?? "document");
@@ -74,7 +78,8 @@ export async function createDocument(
         number: 1,
         ...versionColumns(fmt.format, prepared),
         via: input.via ?? "editor",
-        createdById: input.ownerId,
+        createdById: input.createdById ?? input.ownerId,
+        runId: input.runId ?? null,
       },
     });
     if (prepared.content.format === "boards-v1") {

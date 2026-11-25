@@ -1,6 +1,6 @@
 import type { HelpCatalog, HelpPage } from "../../help/catalog.js";
 import { loadBundledHelpCatalog } from "../../help/runtime.js";
-import { searchHelp } from "../../help/search.js";
+import { findHelpPage, searchHelp } from "../../help/search.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -24,7 +24,11 @@ function publicArticle(page: HelpPage) {
 export function registerHelpTools(mcp: WardbyMcpServer, loadCatalog: HelpCatalogLoader = loadBundledHelpCatalog): void {
   mcp.registerTool({
     name: "search_help",
-    description: "Search Wardby's bundled self-hosted documentation with offline fuzzy matching.",
+    description:
+      "Search Wardby's bundled help: how each feature works, setup procedures, and an article for every error " +
+      "code (id errors/<code>). Call it before guessing how a tool behaves or why a call was refused or a run " +
+      "failed. Query by tool name, feature or error code; read a result with get_help_article. Offline fuzzy " +
+      "matching over this release's help.",
     scope: "agents:read",
     inputSchema: {
       type: "object",
@@ -52,7 +56,9 @@ export function registerHelpTools(mcp: WardbyMcpServer, loadCatalog: HelpCatalog
 
   mcp.registerTool({
     name: "get_help_article",
-    description: "Read one complete Wardby self-hosted help article by its id.",
+    description:
+      "Read one complete Wardby self-hosted help article by its id. An error code's article is errors/<code>; " +
+      "underscores in the code may be written as they are (errors/mcp_unavailable finds errors/mcp-unavailable).",
     scope: "agents:read",
     inputSchema: {
       type: "object",
@@ -63,7 +69,7 @@ export function registerHelpTools(mcp: WardbyMcpServer, loadCatalog: HelpCatalog
     handler: async (args: { id: string }) => {
       const id = args.id.trim();
       if (!id) throw new McpError(400, "get_help_article requires a non-empty id.");
-      const page = (await loadCatalog()).pages.find((candidate) => candidate.id === id);
+      const page = findHelpPage(await loadCatalog(), id);
       if (!page) throw new McpError(404, `Help article "${id}" not found.`);
       return textResult(publicArticle(page));
     },

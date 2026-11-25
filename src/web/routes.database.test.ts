@@ -254,7 +254,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(csp).toContain(`'nonce-${nonce}'`);
       expect(html).toContain('<div id="app"></div>');
       expect(html).toContain(
-        `<script src="/web/static/${JS}" integrity="${sri(ASSET_TEXT[JS])}" crossorigin="anonymous"></script>`,
+        `<script src="/web/static/${JS}" integrity="${sri(ASSET_TEXT[JS])}" crossorigin="anonymous" defer blocking="render"></script>`,
       );
       expect(html).toContain(
         `<link rel="stylesheet" href="/web/static/${CSS}" integrity="${sri(ASSET_TEXT[CSS])}" crossorigin="anonymous">`,
@@ -275,10 +275,26 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         viewer: { kind: "member", name: "Mel Member", access: "write" },
         loginUrl: `/web/login?returnTo=${encodeURIComponent(`/d/${docId}`)}`,
       });
+      // The page carries its document (so the first frame needs no request): what GET /d/api/<id> answers.
+      const api = (await (await call(`/d/api/${docId}`, { jar })).json()) as Record<string, unknown>;
+      expect(boot.initial).toEqual(api);
+      expect((boot.initial as { document: { title: string } }).document.title).toBe("Plan <script>alert(1)</script>");
       // The bootstrap JSON never carries a raw "<" (it cannot close the script element).
       const raw = /window\.__WARDBY__ = (.*?);<\/script>/s.exec(html)![1];
       expect(raw).not.toContain("<");
       expect(html).not.toContain(OWNER_EMAIL);
+    });
+
+    it("still serves the page when its document cannot be put in the bootstrap: the app fetches it", async () => {
+      const broken = (await createDocument(db, cipher, { ownerId: owner.id, title: "No version", markdown: "x" })).id;
+      // A document whose current version is gone: building the page's copy fails (document_not_found).
+      await db.document.update({ where: { id: broken }, data: { currentVersionId: null } });
+      const { jar } = await session(owner.id);
+      const res = await call(`/d/${broken}`, { jar });
+      expect(res.status).toBe(200);
+      const boot = bootstrapOf(await res.text());
+      expect(boot.documentId).toBe(broken);
+      expect(boot).not.toHaveProperty("initial");
     });
 
     it("answers 404 to a signed-in principal without access", async () => {
@@ -323,7 +339,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
           const res = await call(`/d/${docId}`, { jar });
           expect(res.status).toBe(200);
           const html = await res.text();
-          expect(html).toContain(`<script src="/web/static/${JS}"></script>`);
+          expect(html).toContain(`<script src="/web/static/${JS}" defer blocking="render"></script>`);
           expect(html).not.toContain("integrity=");
           const warnings = logged.slice(before).filter((l) => l.includes("web asset integrity"));
           // Logged once per process per bundle: the first render warns, later renders stay quiet.
@@ -1246,7 +1262,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(res.status).toBe(200);
       const html = await res.text();
       expect(html).toContain(
-        `<script src="/web/static/${DJS}" integrity="${sri(ASSET_TEXT[DJS])}" crossorigin="anonymous"></script>`,
+        `<script src="/web/static/${DJS}" integrity="${sri(ASSET_TEXT[DJS])}" crossorigin="anonymous" defer blocking="render"></script>`,
       );
       expect(html).toContain(
         `<link rel="stylesheet" href="/web/static/${DCSS}" integrity="${sri(ASSET_TEXT[DCSS])}" crossorigin="anonymous">`,
@@ -1812,6 +1828,98 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(
         (await call(`/d/api/${id}/review`, { method: "POST", jar: o.jar, body: { action: "reopen" } })).status,
       ).toBe(403);
+    });
+
+    it("rejects a plan option through the page API; a blank note is 400, a loose document 409", async () => {
+      const id = await newDoc();
+      const o = await session(owner.id);
+      await post(id, o, { action: "submit", reviewers: [member.id] });
+      expect((await post(id, o, { action: "reject", note: "  " })).status).toBe(400);
+      const loose = await post(id, o, { action: "reject", note: "no" });
+      expect([loose.status, await loose.json()]).toEqual([409, { error: "document_reject_not_plan_document" }]);
+      const planner = await db.agent.create({
+        data: {
+          name: `reject-web-${randomUUID().slice(0, 8)}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const set = await db.planSet.create({
+        data: {
+          agentId: planner.id,
+          repository: "o/reject-web",
+          number: 1,
+          store: "wardby",
+          createdByRunId: "fixture",
+        },
+      });
+      try {
+        await db.document.update({ where: { id }, data: { planSetId: set.id, planPath: "option-c.md" } });
+        const before = ((await (await call(`/d/api/${id}`, { jar: o.jar })).json()) as any).review;
+        expect(before.can.reject).toBe(true);
+        const res = await post(id, o, { action: "reject", note: "Option B was chosen" });
+        expect(res.status).toBe(200);
+        const review = ((await res.json()) as any).review;
+        expect(review.state).toBe("rejected");
+        expect(review.can).toMatchObject({ reject: false, reopen: true });
+        expect((await db.document.findUniqueOrThrow({ where: { id } })).removedFromPlan).toBe(true);
+      } finally {
+        await db.document.update({ where: { id }, data: { planSetId: null } });
+        await db.planSet.delete({ where: { id: set.id } });
+        await db.agent.delete({ where: { id: planner.id } });
+      }
+    });
+
+    it("chooses a plan option through the page API: one approved, the listed ones rejected", async () => {
+      const o = await session(owner.id);
+      const planner = await db.agent.create({
+        data: {
+          name: `choose-web-${randomUUID().slice(0, 8)}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const set = await db.planSet.create({
+        data: {
+          agentId: planner.id,
+          repository: "o/choose-web",
+          number: 1,
+          store: "wardby",
+          createdByRunId: "fixture",
+        },
+      });
+      const option = async (planPath: string) => {
+        const id = await newDoc();
+        await db.document.update({ where: { id }, data: { planSetId: set.id, planPath } });
+        await post(id, o, { action: "submit", reviewers: [owner.id] });
+        return id;
+      };
+      const [a, b, c] = [await option("option-a.md"), await option("option-b.md"), await option("option-c.md")];
+      try {
+        // Malformed: no list, a non-string entry, no version.
+        expect((await post(a, o, { action: "choose", versionNumber: 1 })).status).toBe(400);
+        expect((await post(a, o, { action: "choose", versionNumber: 1, reject: [b, 7] })).status).toBe(400);
+        expect((await post(a, o, { action: "choose", reject: [b] })).status).toBe(400);
+        const before = ((await (await call(`/d/api/${a}`, { jar: o.jar })).json()) as any).review;
+        expect(before.can.choose).toBe(true);
+        const res = await post(a, o, { action: "choose", versionNumber: 1, reject: [b, c] });
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as any).review.state).toBe("approved");
+        for (const id of [b, c]) {
+          expect(await db.document.findUniqueOrThrow({ where: { id } })).toMatchObject({
+            reviewState: "rejected",
+            removedFromPlan: true,
+          });
+        }
+      } finally {
+        await db.document.updateMany({ where: { planSetId: set.id }, data: { planSetId: null } });
+        await db.planSet.delete({ where: { id: set.id } });
+        await db.agent.delete({ where: { id: planner.id } });
+      }
     });
 
     it("lets a guest reviewer on a comment link approve through the page API", async () => {

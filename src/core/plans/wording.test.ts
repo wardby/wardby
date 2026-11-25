@@ -90,6 +90,32 @@ describe("plan reply lines", () => {
     expect(lines.join("\n")).not.toContain("p9");
   });
 
+  it("says a rejected document is out of the plan and how to bring it back", () => {
+    const lines = planReplyLines({
+      number: 7,
+      planSetId: "ps1",
+      documents: [
+        {
+          id: "d3",
+          pagePath: "/d/d3",
+          url: "https://x/d/d3",
+          kind: "design",
+          path: "option-a/",
+          reviewState: "rejected",
+          versionNumber: 1,
+          change: "rejected_unchanged",
+        },
+      ],
+      ignored: [],
+      withheld: [],
+      skippedReviewers: [],
+    });
+    expect(lines).toEqual([
+      "Plan 7:",
+      "- option-a/ (rejected; not in the plan, reopen it to bring it back): https://x/d/d3",
+    ]);
+  });
+
   it("the skipped-reviewers line is singular for one person", () => {
     const base = { number: 12, planSetId: "ps1", documents: [], ignored: [], withheld: [] };
     expect(planReplyLines({ ...base, skippedReviewers: ["p9"] }).at(-1)).toBe(

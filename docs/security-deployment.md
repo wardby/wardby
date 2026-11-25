@@ -293,12 +293,13 @@ would hand every run's data to another agent.
 **Everyone** (any signed-in principal) can be granted up to `write`, a
 public agent anyone can list, run and edit, but only while the agent holds
 none of its owner's bindings: secrets, datastores, repositories, sub-agents,
-tool capabilities, or a coding repository (so a coding agent is never
+tool capabilities, document tools (`documentTools`), or a coding repository (so a coding agent is never
 public-write). `grant_access` refuses everyone-`write` on an agent that has
 any, and the binding tools (`attach_secret`, `attach_datastore`,
 `link_repository` including an admin's `adminOverride`, `attach_subagent`,
 and `attach_tool` with capabilities) refuse to add one to an agent everyone
-can write, as `update_agent` refuses making it a coding agent. Otherwise anyone could
+can write, as `update_agent` refuses making it a coding agent or setting
+`documentTools`. Otherwise anyone could
 rewrite the prompt of an agent that uses your secrets. Detach the bindings
 first, or grant everyone `execute` instead.
 
@@ -338,7 +339,12 @@ implicit access to others' agents: they can `list_access` any agent (incident
 response) and reassign one with `make_owner`, which removes bindings the new
 owner doesn't own (secrets, datastores and MCP server attachments), suspends tool capabilities the new owner never granted,
 cuts sub-agent edges the new owner can't delegate, and, between two owners,
-resets every grant. Adopting an owner-less agent keeps its grants but lowers
+resets every grant and turns the agent's document tools (`documentTools`) off
+(`documentToolsCleared` in the result), and removes the document grants
+others gave the agent except on documents the new owner owns
+(`documentGrantsRemoved`), so the new owner can't reach documents that were
+shared with the previous owner's agent. Adopting an owner-less agent keeps its
+grants (document grants included) but lowers
 an everyone grant to `read` unless `keepEveryoneExecute` is set.
 `make_owner` no longer releases an agent to owner-less.
 

@@ -49,11 +49,15 @@ import {
   validDocumentBaseRef,
   validDocumentPath,
   assertAgentRepository,
+  assertNativeWriter,
   validDocumentRepository,
 } from "../../core/documents/agent-link.js";
 import {
+  chooseOption,
   documentReviewState,
   forceApprove,
+  MAX_CHOOSE_REJECTS,
+  rejectDocument,
   getReviewView,
   reopenDocument,
   reviewCandidates,
@@ -90,6 +94,7 @@ const EXACT_STATUS: Record<string, number> = {
   document_locked: 409,
   document_review_state_invalid: 409,
   document_review_forbidden: 403,
+  document_reject_not_plan_document: 409,
 };
 
 /** The HTTP status for a documents error code; undefined when it is not one. */
@@ -421,6 +426,13 @@ const verdictArgs = z.object({
   note: z.string().max(MAX_REVIEW_NOTE_CHARS).optional(),
 });
 const forceArgs = z.object({ documentId: id, note: z.string().trim().min(1).max(MAX_REVIEW_NOTE_CHARS) });
+const rejectArgs = forceArgs;
+const chooseArgs = z.object({
+  documentId: id,
+  versionNumber: z.number().int().min(1),
+  reject: z.array(id).min(1).max(MAX_CHOOSE_REJECTS),
+  note: z.string().max(MAX_REVIEW_NOTE_CHARS).optional(),
+});
 const archiveArgs = z.object({ documentId: id, archived: z.boolean() });
 const waitArgs = z.object({
   documentId: id,
@@ -508,12 +520,31 @@ async function checkedLink(
   return { repository, path, baseRef };
 }
 
+/**
+ * When agentId names a native agent, checks it as the document's writer the same way for create_document and
+ * link_document: no repository fields (it edits through its doc_* tools), documentTools write, and execute for
+ * the caller (assertNativeWriter). True when the agent is native; false leaves the link to checkedLink.
+ */
+async function checkedNativeWriter(
+  ctx: McpRequestContext,
+  input: { agentId?: string; repository?: string; path?: string; baseRef?: string },
+): Promise<boolean> {
+  if (input.agentId === undefined) return false;
+  const target = await ctx.db.agent.findUnique({ where: { id: input.agentId }, select: { kind: true } });
+  if (target?.kind !== "native") return false;
+  if (input.repository !== undefined || input.path !== undefined || input.baseRef !== undefined) {
+    throw new McpError(400, "document_repo_link_invalid");
+  }
+  await mapped(() => assertNativeWriter(ctx.db, ctx.principal.id, input.agentId!));
+  return true;
+}
+
 function registerContentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_document",
     scope: "documents:write",
     description:
-      "Creates a Markdown document you own (max 1 MiB) and returns its id and URL. To let a coding agent edit it from comments, link it to a repository file: give repository and path together plus agentId (a coding agent you own, or one whose owner allows others' task text: codingProfile.allowWebhookTaskOverride). path is a repo-relative .md file; baseRef is optional. " +
+      "Creates a Markdown document you own (max 1 MiB) and returns its id and URL. To let a coding agent edit it from comments, link it to a repository file: give repository and path together plus agentId (a coding agent you own, or one whose owner allows others' task text: codingProfile.allowWebhookTaskOverride). path is a repo-relative .md file; baseRef is optional. A native agent with documentTools write that you can execute can be its writer with agentId alone (no repository). " +
       "kind design: files (manifest.json, boards/<id>.html, optional brand.md; board format v1, see help design-boards-format) or, when linked to a repository directory (path) with baseRef, imported from it. Board scripts and event handlers are removed; external references are refused (board_format_invalid). The result lists warnings.",
     inputSchema: {
       type: "object",
@@ -542,7 +573,8 @@ function registerContentTools(mcp: WardbyMcpServer): void {
       if (design && input.files === undefined && input.repository === undefined) {
         throw new McpError(400, "document_format_mismatch");
       }
-      const { repository, path, baseRef } = await checkedLink(ctx, input, design);
+      const native = await checkedNativeWriter(ctx, input);
+      const { repository, path, baseRef } = native ? {} : await checkedLink(ctx, input, design);
       // A linked design with no files is imported from the repository at baseRef.
       let files = input.files;
       let imported = false;
@@ -584,7 +616,8 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     scope: "documents:write",
     description:
       "Links a document or design you own to a coding agent and a repository file, or changes or clears that link, so " +
-      "comment threads can be sent to the agent. The same rules as create_document: give agentId (a coding agent you own, " +
+      "comment threads can be sent to the agent. A native agent with documentTools write (and execute for you) can be linked as the " +
+      "document's writer with agentId alone: no repository (a plan document cannot have one). The same rules as create_document: give agentId (a coding agent you own, " +
       "or one whose owner allows others' task text) with repository and path; for a Markdown document path is a " +
       "repo-relative .md file and baseRef is optional; for a design path is the boards directory (. for the root) and " +
       "baseRef is required. agentId alone links the agent without a repository. unlink: true clears the link. The " +
@@ -621,13 +654,19 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         if (design && input.repository !== undefined && input.baseRef === undefined) {
           throw new McpError(400, "document_repo_link_invalid");
         }
-        const checked = await checkedLink(ctx, input, design);
-        link = {
-          agentId: input.agentId!,
-          repository: checked.repository ?? null,
-          path: checked.path ?? null,
-          baseRef: checked.baseRef ?? null,
-        };
+        if (await checkedNativeWriter(ctx, input)) {
+          // Never a plan document: checked after the agent, so the answer is the same as for any agent refused.
+          if (doc.planSetId) throw new McpError(400, "document_agent_unavailable");
+          link = { agentId: input.agentId!, repository: null, path: null, baseRef: null };
+        } else {
+          const checked = await checkedLink(ctx, input, design);
+          link = {
+            agentId: input.agentId!,
+            repository: checked.repository ?? null,
+            path: checked.path ?? null,
+            baseRef: checked.baseRef ?? null,
+          };
+        }
       }
       await mapped(() => linkDocument(ctx.db, { documentId: input.documentId, viewer, link }));
       return textResult({
@@ -1064,6 +1103,59 @@ function registerContentTools(mcp: WardbyMcpServer): void {
   });
 
   mcp.registerTool({
+    name: "reject_document",
+    scope: "documents:write",
+    description:
+      "Rejects a document of a plan (for example a design option that was not chosen): it becomes rejected, read-only like an approved document (comments stay open), and leaves the plan, so it no longer counts toward the plan's approval and is not given to a builder. Rejecting the last waiting document approves the plan as an approval does. Only the owner, the final approver or a named member reviewer; note is required (stored redacted). plan.md itself, and a document outside a plan, are refused with document_reject_not_plan_document. reopen_document undoes it.",
+    inputSchema: {
+      type: "object",
+      properties: { documentId: { type: "string" }, note: { type: "string" } },
+      required: ["documentId", "note"],
+    },
+    handler: async (args: unknown, ctx) => {
+      const input = rejectArgs.parse(args);
+      const view = await mapped(() =>
+        rejectDocument(ctx.db, ctx.providers.secrets, {
+          documentId: input.documentId,
+          viewer: viewerOf(ctx),
+          note: input.note,
+        }),
+      );
+      return textResult(reviewPayload(view));
+    },
+  });
+
+  mcp.registerTool({
+    name: "choose_plan_option",
+    scope: "documents:write",
+    description:
+      'Chooses one option of a plan in a single step: approves documentId as your verdict (as review_document approve: you must be a named reviewer; versionNumber is the version you read; skipped when it is already approved) and rejects every document in reject (as reject_document: the same rights, documents of the same plan, never plan.md), all in one transaction, so if any part is refused nothing changes. Each rejected document gets the note "Chose <path>" plus your note when given. Use it when a plan offers alternatives (for example option-a/, option-b/, option-c/) and one is picked; leave out documents that are not alternatives (shared screens). Returns the chosen document\'s review and the rejected ids.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        documentId: { type: "string" },
+        versionNumber: { type: "integer", minimum: 1 },
+        reject: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_CHOOSE_REJECTS },
+        note: { type: "string" },
+      },
+      required: ["documentId", "versionNumber", "reject"],
+    },
+    handler: async (args: unknown, ctx) => {
+      const input = chooseArgs.parse(args);
+      const out = await mapped(() =>
+        chooseOption(ctx.db, ctx.providers.secrets, {
+          documentId: input.documentId,
+          viewer: viewerOf(ctx),
+          versionNumber: input.versionNumber,
+          reject: input.reject,
+          ...(input.note !== undefined ? { note: input.note } : {}),
+        }),
+      );
+      return textResult({ ...reviewPayload(out.view), rejected: out.rejected });
+    },
+  });
+
+  mcp.registerTool({
     name: "force_approve_document",
     scope: "documents:write",
     description:
@@ -1090,7 +1182,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     name: "reopen_document",
     scope: "documents:write",
     description:
-      "Reopens an approved document for review: creates the next version, a copy of the approved one, and puts it in review (approved → in_review), so new versions can be published and the reviewers approve again. The approved version stays in the history as the approved record. Returns the review; currentVersion is the new version's number. Needs write access.",
+      "Reopens an approved or rejected document for review: creates the next version, a copy of the current one, and puts it in review (approved or rejected → in_review), so new versions can be published and the reviewers approve again. A rejected plan document also goes back into its plan. The earlier version stays in the history as the record. Returns the review; currentVersion is the new version's number. Needs write access.",
     inputSchema: { type: "object", properties: { documentId: { type: "string" } }, required: ["documentId"] },
     handler: async (args: unknown, ctx) => {
       const input = docOnly.parse(args);
