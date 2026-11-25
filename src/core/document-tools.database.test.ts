@@ -1,12 +1,31 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+const logged = vi.hoisted(() => [] as string[]);
+vi.mock("./logger.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./logger.js")>();
+  const child = real.logger.child.bind(real.logger);
+  vi.spyOn(real.logger, "child").mockImplementation((bindings, options) => {
+    const log = child(bindings, options);
+    if (bindings.module === "document-tools") {
+      for (const level of ["info", "warn", "error", "debug"] as const) {
+        vi.spyOn(log, level).mockImplementation((...args: unknown[]) => {
+          logged.push(JSON.stringify(args));
+        });
+      }
+    }
+    return log;
+  });
+  return real;
+});
 import { Prisma, type Principal } from "#prisma";
 import { createPrismaClient } from "./db.js";
 import { agentGranteeKey } from "./grants.js";
 import type { Viewer } from "./documents/access.js";
-import { createThread } from "./documents/comments.js";
+import { attachSecret, createSecret } from "./secrets.js";
+import { createThread, listThreads } from "./documents/comments.js";
 import { anchorForElement, type ElementLike } from "./documents/element-anchors.js";
 import { reviewDocument, submitForReview } from "./documents/review.js";
 import { MAX_SEND_MARKDOWN_CHARS } from "./documents/agent-formats.js";
@@ -220,6 +239,256 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* read tools (database)", () => 
     expect(await call("doc_get", {})).toMatchObject({ error: "invalid_arguments", fields: ["documentId"] });
     expect(await call("doc_get", { documentId: linked, extra: 1 })).toMatchObject({ error: "invalid_arguments" });
     expect(await call("doc_nope", {})).toMatchObject({ error: "unknown_tool" });
-    expect(await call("doc_create", { title: "x" })).toMatchObject({ error: "unknown_tool" });
+    expect(await call("doc_create", { title: "x", bogus: 1 })).toMatchObject({ error: "invalid_arguments" });
+  });
+});
+
+describe.skipIf(!process.env.DATABASE_URL)("doc_* write tools (database)", () => {
+  const db = createPrismaClient();
+  const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
+  const SECRET = "sk-fake-625-secret";
+  const s = randomUUID();
+  const [W, R, B] = [`dw-w-${s}`, `dw-r-${s}`, `dw-b-${s}`];
+  let o: Principal;
+  let rev: Principal;
+  let linked: string;
+  let granted: string;
+  let readOnly: string;
+  const owner = (): Viewer => ({ kind: "principal", principalId: o.id });
+  const callAs = async (agentId: string, runId: string, name: string, args: unknown) =>
+    JSON.parse(await handleDocumentTool(name, JSON.stringify(args), { db, cipher, agentId, runId }));
+  const call = (name: string, args: unknown, runId = "run-w") => callAs(W, runId, name, args);
+  const anchor = { type: "text", quote: "hello", prefix: "", suffix: " world" };
+  const grant = (documentId: string, agentId: string, level: string) =>
+    db.resourceGrant.create({
+      data: {
+        resourceType: "document",
+        resourceId: documentId,
+        granteeKind: "agent",
+        granteeAgentId: agentId,
+        granteeKey: agentGranteeKey(agentId),
+        level,
+      },
+    });
+
+  beforeAll(async () => {
+    o = await db.principal.create({ data: { subject: `dw-o-${s}` } });
+    rev = await db.principal.create({ data: { subject: `dw-r-${s}` } });
+    const base = { systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: o.id };
+    await db.agent.create({
+      data: { id: W, name: W, ...base, documentTools: { ...setting("write"), reviewers: [rev.id] } },
+    });
+    await db.agent.create({ data: { id: R, name: R, ...base, documentTools: setting("read") } });
+    await db.agent.create({ data: { id: B, name: B, ...base, documentTools: setting("write") } });
+    await createSecret(`DW_KEY_${s.slice(0, 8)}`, SECRET, o.id, cipher, db);
+    await attachSecret(W, `DW_KEY_${s.slice(0, 8)}`, o.id, db);
+    linked = (await createDocument(db, cipher, { ownerId: o.id, title: "L", markdown: "hello world", agentId: W })).id;
+    granted = (await createDocument(db, cipher, { ownerId: o.id, title: "G", markdown: "hello world" })).id;
+    readOnly = (await createDocument(db, cipher, { ownerId: o.id, title: "RO", markdown: "hello world" })).id;
+    await grant(granted, W, "comment");
+    await grant(readOnly, W, "read");
+  });
+  afterAll(async () => {
+    await db.resourceGrant.deleteMany({ where: { resourceId: { in: [granted, readOnly] } } });
+    await db.document.deleteMany({ where: { ownerId: o.id } });
+    await db.planSet.deleteMany({ where: { agentId: W } });
+    await db.agentSecret.deleteMany({ where: { agentId: W } });
+    await db.agent.deleteMany({ where: { id: { in: [W, R, B] } } });
+    await db.secret.deleteMany({ where: { name: `DW_KEY_${s.slice(0, 8)}` } });
+    await db.principal.deleteMany({ where: { id: { in: [o.id, rev.id] } } });
+    await db.$disconnect();
+  });
+
+  it("doc_create makes a document for the owner, linked to the agent, version 1 credited to the run", async () => {
+    const out = await call("doc_create", { title: "  New doc  ", markdown: "# Hi" }, "run-create");
+    expect(out).toMatchObject({ number: 1, warnings: [] });
+    const doc = await db.document.findUniqueOrThrow({ where: { id: out.id } });
+    expect(doc).toMatchObject({ ownerId: o.id, agentId: W, kind: "document" });
+    // The title is stored as given by the model, redacted (not trimmed away by createDocument).
+    expect(doc.title.trim()).toBe("New doc");
+    const v1 = await db.documentVersion.findFirstOrThrow({ where: { documentId: out.id, number: 1 } });
+    expect(v1).toMatchObject({ via: "agent", runId: "run-create" });
+    expect(await call("doc_create", { title: "   ", markdown: "x" })).toMatchObject({ error: "invalid_arguments" });
+  });
+
+  it("doc_create on a design refuses a bad board and strips a script with a warning; pins survive on unchanged boards", async () => {
+    expect(await call("doc_create", { kind: "design", title: "Bad", files: { "manifest.json": "{}" } })).toMatchObject({
+      error: "board_format_invalid",
+    });
+    const files = coffee();
+    files["boards/about.html"] = files["boards/about.html"].replace("</body>", "<script>alert(1)</script></body>");
+    const made = await call("doc_create", { kind: "design", title: "Coffee", files }, "run-design");
+    expect(made.error).toBeUndefined();
+    expect(JSON.stringify(made.warnings)).toMatch(/script/i);
+    const stored = await db.documentContent.findMany({ where: { documentId: made.id }, select: { text: true } });
+    expect(stored.some((r) => r.text.includes("alert(1)"))).toBe(false);
+
+    const pin = async (board: string) => {
+      const dom = new JSDOM(coffee()[`boards/${board}.html`], { virtualConsole: new VirtualConsole() });
+      const h1 = dom.window.document.querySelector("h1") as unknown as ElementLike;
+      const a = anchorForElement(board, h1, 0.5, 0.5, dom.window.document.body, new Set());
+      return (await createThread(db, cipher, { documentId: made.id, viewer: owner(), anchor: a, body: "pin" }))
+        .threadId;
+    };
+    const onHome = await pin("home");
+    const onMenu = await pin("menu");
+    const next = { ...files, "boards/menu.html": files["boards/menu.html"].replace("</h1>", " Changed</h1>") };
+    const pub = await call("doc_publish_version", { documentId: made.id, baseNumber: 1, files: next });
+    expect(pub).toMatchObject({ number: 2 });
+    const threads = await listThreads(db, { documentId: made.id, viewer: owner(), filter: "all" });
+    const home = threads.find((t) => t.id === onHome)!;
+    expect(home.status).toBe("open");
+    expect(home.anchor).toMatchObject({ board: "home" });
+    expect(threads.find((t) => t.id === onMenu)).toBeDefined();
+  });
+
+  it("limits new documents per run, including a resumed attempt of the same run", async () => {
+    await db.agent.update({ where: { id: B }, data: { documentTools: { ...setting("write"), maxNewPerRun: 2 } } });
+    const make = (runId: string) => callAs(B, runId, "doc_create", { title: "N", markdown: "x" });
+    expect((await make("run-lim")).id).toBeDefined();
+    expect((await make("run-lim")).id).toBeDefined();
+    expect(await make("run-lim")).toMatchObject({ error: "document_run_limit" });
+    // A resumed attempt builds a new handler context with the same runId.
+    expect(await make("run-lim")).toMatchObject({ error: "document_run_limit" });
+    expect((await make("run-other")).id).toBeDefined();
+  });
+
+  it("doc_publish_version needs the base number and refuses a stale one", async () => {
+    expect(await call("doc_publish_version", { documentId: linked, baseNumber: 1, markdown: "v2 text" })).toMatchObject(
+      { number: 2 },
+    );
+    expect(await call("doc_publish_version", { documentId: linked, baseNumber: 1, markdown: "again" })).toMatchObject({
+      error: "document_version_conflict",
+    });
+    expect(await call("doc_publish_version", { documentId: linked, markdown: "x" })).toMatchObject({
+      error: "invalid_arguments",
+    });
+    const v2 = await db.documentVersion.findFirstOrThrow({ where: { documentId: linked, number: 2 } });
+    expect(v2).toMatchObject({ via: "agent", runId: "run-w", createdById: o.id });
+  });
+
+  it("an approved document is locked; a plan document linked to the agent is not writable", async () => {
+    const locked = (await createDocument(db, cipher, { ownerId: o.id, title: "Lk", markdown: "x", agentId: W })).id;
+    await db.document.update({ where: { id: locked }, data: { reviewState: "approved" } });
+    expect(await call("doc_publish_version", { documentId: locked, baseNumber: 1, markdown: "y" })).toMatchObject({
+      error: "document_locked",
+    });
+    const plan = await db.planSet.create({
+      data: { agentId: B, repository: "o/r", number: s.length, store: "wardby", createdByRunId: "r" },
+    });
+    const pd = (await createDocument(db, cipher, { ownerId: o.id, title: "Plan", markdown: "x", agentId: W })).id;
+    await db.document.update({ where: { id: pd }, data: { planSetId: plan.id } });
+    expect(await call("doc_publish_version", { documentId: pd, baseNumber: 1, markdown: "y" })).toMatchObject({
+      error: "document_access_denied",
+    });
+    expect(await call("doc_submit_for_review", { documentId: pd })).toMatchObject({ error: "document_access_denied" });
+  });
+
+  it("doc_reply_to_thread works at comment access and is refused at read access", async () => {
+    const t1 = (await createThread(db, cipher, { documentId: granted, viewer: owner(), anchor, body: "q" })).threadId;
+    const ok = await call("doc_reply_to_thread", { threadId: t1, body: "an answer" });
+    expect(ok.commentId).toBeDefined();
+    const t2 = (await createThread(db, cipher, { documentId: readOnly, viewer: owner(), anchor, body: "q" })).threadId;
+    expect(await call("doc_reply_to_thread", { threadId: t2, body: "no" })).toMatchObject({
+      error: "document_access_denied",
+    });
+  });
+
+  it("doc_resolve_thread needs write", async () => {
+    const t1 = (await createThread(db, cipher, { documentId: granted, viewer: owner(), anchor, body: "q" })).threadId;
+    expect(await call("doc_resolve_thread", { threadId: t1 })).toMatchObject({ error: "document_access_denied" });
+    const t2 = (
+      await createThread(db, cipher, {
+        documentId: linked,
+        viewer: owner(),
+        anchor: { ...anchor, quote: "v2" },
+        body: "q",
+      })
+    ).threadId;
+    expect(await call("doc_resolve_thread", { threadId: t2 })).toMatchObject({ status: "resolved" });
+    expect((await db.commentThread.findUniqueOrThrow({ where: { id: t2 } })).status).toBe("resolved");
+  });
+
+  it("doc_submit_for_review uses the setting's reviewers and takes no reviewers argument", async () => {
+    const d = (await createDocument(db, cipher, { ownerId: o.id, title: "Sub", markdown: "x", agentId: W })).id;
+    expect(await call("doc_submit_for_review", { documentId: d, reviewers: [o.id] })).toMatchObject({
+      error: "invalid_arguments",
+    });
+    const out = await call("doc_submit_for_review", { documentId: d });
+    expect(out.error).toBeUndefined();
+    const rows = await db.documentReviewer.findMany({ where: { documentId: d } });
+    expect(rows.map((r) => r.principalId)).toEqual([rev.id]);
+    const def = documentToolDefsFor(setting("write")).find((t) => t.name === "doc_submit_for_review")!;
+    expect(Object.keys(def.jsonSchema.properties as object)).toEqual(["documentId"]);
+  });
+
+  it("offers no approve, force, reopen, archive, share or grant tool", () => {
+    for (const n of DOCUMENT_TOOL_NAMES) expect(n).not.toMatch(/approve|force|reopen|archive|share|grant/);
+  });
+
+  it("a read-access agent calling a write tool is refused", async () => {
+    expect(await callAs(R, "run-r", "doc_create", { title: "x", markdown: "y" })).toMatchObject({
+      error: "document_access_denied",
+    });
+    expect(await callAs(R, "run-r", "doc_resolve_thread", { threadId: "t" })).toMatchObject({
+      error: "document_access_denied",
+    });
+  });
+
+  it("keeps the agent's secret out of stored content, title, summary, reply, results and logs", async () => {
+    logged.length = 0;
+    const text = `unique-doc-text-625 ${SECRET}`;
+    const made = await call("doc_create", { title: `T ${SECRET}`, markdown: text }, "run-sec");
+    const pub = await call("doc_publish_version", {
+      documentId: made.id,
+      baseNumber: 1,
+      markdown: `${text} v2`,
+      summary: `sum ${SECRET}`,
+    });
+    const t = (
+      await createThread(db, cipher, {
+        documentId: made.id,
+        viewer: owner(),
+        anchor: { ...anchor, quote: "unique" },
+        body: "q",
+      })
+    ).threadId;
+    const rep = await call("doc_reply_to_thread", { threadId: t, body: `reply ${SECRET}` });
+    expect(JSON.stringify([made, pub, rep])).not.toContain(SECRET);
+    const doc = await db.document.findUniqueOrThrow({ where: { id: made.id } });
+    expect(doc.title).not.toContain(SECRET);
+    const versions = await db.documentVersion.findMany({ where: { documentId: made.id } });
+    expect(JSON.stringify(versions)).not.toContain(SECRET);
+    const contents = await db.documentContent.findMany({ where: { documentId: made.id }, select: { text: true } });
+    expect(JSON.stringify(contents)).not.toContain(SECRET);
+    const comments = await db.comment.findMany({ where: { threadId: t } });
+    expect(JSON.stringify(comments)).not.toContain(SECRET);
+    const got = await handleDocumentTool("doc_get", JSON.stringify({ documentId: made.id }), {
+      db,
+      cipher,
+      agentId: W,
+      runId: "run-sec",
+    });
+    expect(got).not.toContain(SECRET);
+    // A failure inside a tool logs the tool and code only, never the error text or the document text.
+    const failing = {
+      ...cipher,
+      decrypt: async () => {
+        throw new Error(`boom ${SECRET}`);
+      },
+    };
+    const failed = await handleDocumentTool("doc_create", JSON.stringify({ title: "F", markdown: text }), {
+      db,
+      cipher: failing,
+      agentId: W,
+      runId: "run-sec-2",
+    });
+    expect(JSON.parse(failed).error).toBe("document_tool_failed");
+    expect(failed).not.toContain(SECRET);
+    expect(logged.length).toBeGreaterThan(0);
+    for (const line of logged) {
+      expect(line).not.toContain(SECRET);
+      expect(line).not.toContain("unique-doc-text-625");
+    }
   });
 });
