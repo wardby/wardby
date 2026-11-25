@@ -137,7 +137,7 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* read tools (database)", () => 
     expect(row).toMatchObject({ title: "Linked", kind: "document", access: "write", reviewState: "draft" });
   });
 
-  it("doc_get returns markdown, a chosen version, and reviewer names with verdicts only", async () => {
+  it("doc_get returns markdown, a chosen version, and reviewer names, verdicts and notes", async () => {
     const got = await call("doc_get", { documentId: linked });
     expect(got).toMatchObject({ id: linked, title: "Linked", kind: "document", number: 1, markdown: "hello world" });
     expect(got.verdicts).toEqual([]);
@@ -157,8 +157,10 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* read tools (database)", () => 
     const raw = await handleDocumentTool("doc_get", JSON.stringify({ documentId: linked }), ctx());
     const after = JSON.parse(raw);
     expect(after.reviewState).toBe("changes_requested");
-    expect(after.verdicts).toEqual([{ reviewer: "Rita Reviewer", verdict: "changes_requested" }]);
-    expect(raw).not.toContain("private note");
+    expect(after.verdicts).toEqual([
+      { reviewer: "Rita Reviewer", verdict: "changes_requested", versionNumber: 1, note: "private note" },
+    ]);
+    expect(after.reviewEvents[0]).toMatchObject({ kind: "changes_requested", versionNumber: 1, note: "private note" });
     expect(raw).not.toContain(r.id);
   });
 
@@ -309,6 +311,37 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* write tools (database)", () =>
     await db.secret.deleteMany({ where: { name: `DW_KEY_${s.slice(0, 8)}` } });
     await db.principal.deleteMany({ where: { id: { in: [o.id, rev.id] } } });
     await db.$disconnect();
+  });
+
+  it("doc_get returns reviewer notes with secret values removed and no principal ids", async () => {
+    await db.principalProfile.create({
+      data: { principalId: rev.id, displayName: "Rex Reviewer", source: "operator" },
+    });
+    const id = (await createDocument(db, cipher, { ownerId: o.id, title: "N", markdown: "hello", agentId: W })).id;
+    await submitForReview(db, { documentId: id, viewer: owner(), reviewers: [rev.id] });
+    await reviewDocument(db, cipher, {
+      documentId: id,
+      viewer: { kind: "principal", principalId: rev.id },
+      verdict: "request_changes",
+      versionNumber: 1,
+      note: `Use key ${SECRET} less, and shorten the intro`,
+    });
+    const raw = await handleDocumentTool("doc_get", JSON.stringify({ documentId: id }), {
+      db,
+      cipher,
+      agentId: W,
+      runId: "run-n",
+    });
+    const out = JSON.parse(raw);
+    expect(out.reviewState).toBe("changes_requested");
+    expect(out.verdicts).toHaveLength(1);
+    expect(out.verdicts[0]).toMatchObject({ reviewer: "Rex Reviewer", verdict: "changes_requested", versionNumber: 1 });
+    expect(out.verdicts[0].note).toContain("shorten the intro");
+    expect(out.reviewEvents[0]).toMatchObject({ kind: "changes_requested", versionNumber: 1 });
+    expect(out.reviewEvents[0].note).toContain("shorten the intro");
+    expect(raw).not.toContain(SECRET);
+    expect(raw).not.toContain(rev.id);
+    expect(raw).not.toContain(o.id);
   });
 
   it("doc_create makes a document for the owner, linked to the agent, version 1 credited to the run", async () => {

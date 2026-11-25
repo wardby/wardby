@@ -493,6 +493,13 @@ review to the setting's reviewers, only on documents its owner owns
 (`document_review_forbidden` otherwise). The documents it creates are its
 owner's; an owner-less agent's write tools return `document_agent_unavailable`.
 
+**Reviewer notes.** `doc_get` includes each reviewer's verdict, the version it
+was given on and their note (`null` when none), and the latest review events
+(kind, version, reviewer name, note; newest first, up to 10), so an agent can act
+on a rejection that has only a note. Reviewers are named, never identified by id
+or email. Notes are redacted by exact secret value when stored, and reach the
+model as untrusted tool-result text.
+
 **Limits.** `doc_get` refuses a document or design over 60,000 characters
 (`document_too_large_for_agent`), the same cap as send to agent.
 `doc_publish_version` requires `baseNumber`, the version the agent read; a newer

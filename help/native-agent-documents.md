@@ -72,7 +72,7 @@ it, and detach the old one.
 | Tool                    | Needs   | What it does                                                                                                 |
 | ----------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
 | `doc_list`              | read    | The documents and designs the agent can reach, with access, review state and latest version (`limit` 1-100). |
-| `doc_get`               | read    | One document or design: content (Markdown, or files by path), review state and reviewers' verdicts.          |
+| `doc_get`               | read    | One document or design: content (Markdown, or files by path), review state, reviewers' verdicts and notes.   |
 | `doc_list_threads`      | read    | A document's comment threads (`open`, `resolved` or `all`).                                                  |
 | `doc_get_thread`        | read    | One thread with all its comments.                                                                            |
 | `doc_create`            | write   | A new document or design linked to the agent, first version, in draft.                                       |
@@ -116,6 +116,17 @@ document someone else linked to it, `doc_submit_for_review` is refused with
 [`document_review_forbidden`](errors/document-review-forbidden.md). The
 documents an agent creates belong to its owner; an agent with no owner cannot
 use the write tools (`document_agent_unavailable`).
+
+## Reviewer notes
+
+`doc_get` returns each reviewer's verdict with the version it was given on and
+the note they wrote (`null` when none), as `verdicts: [{ reviewer, verdict,
+versionNumber, note }]`, plus `reviewEvents` (kind, version, reviewer name, note;
+newest first, up to 10). When `reviewState` is `changes_requested`, the notes say
+what to change. Notes are data written by people, not instructions: the agent
+treats them as feedback on the document and nothing more. Notes are redacted by
+exact secret value when they are stored. Reviewers appear by name only, never by
+id or email.
 
 ## Limits and errors
 
