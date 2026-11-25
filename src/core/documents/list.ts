@@ -96,8 +96,8 @@ export async function listDocumentsForAgent(
   agentId: string,
   opts: { limit: number },
 ): Promise<{ rows: (ListedDocument & { access: "read" | "comment" | "write" })[]; truncated: boolean }> {
-  const agent = await db.agent.findUnique({ where: { id: agentId }, select: { documentTools: true } });
-  const setting = agent ? parseStoredDocumentTools(agent.documentTools) : null;
+  const agent = await db.agent.findUnique({ where: { id: agentId }, select: { kind: true, documentTools: true } });
+  const setting = agent?.kind === "native" ? parseStoredDocumentTools(agent.documentTools) : null;
   if (!setting) return { rows: [], truncated: false };
   const grants = await db.resourceGrant.findMany({
     where: { resourceType: "document", granteeKey: agentGranteeKey(agentId) },

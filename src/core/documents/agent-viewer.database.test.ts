@@ -80,6 +80,16 @@ describe.skipIf(!process.env.DATABASE_URL)("document services accept the agent v
     expect(others[0].comments.find((c) => c.id === res.commentId)!.mine).toBe(false);
   });
 
+  it("redacts the viewer agent's own secret on a document not linked to it", async () => {
+    const t = (await createThread(db, cipher, { documentId: dRead, viewer: owner(), anchor, body: "q" })).threadId;
+    const res = await reply(db, cipher, { threadId: t, viewer: agentViewer(), body: `key ${SECRET}` });
+    const row = await db.comment.findUniqueOrThrow({ where: { id: res.commentId } });
+    expect(row.body).not.toContain(SECRET);
+    expect(row.body).toContain("key ");
+    const threads = await listThreads(db, { documentId: dRead, viewer: owner(), filter: "all" });
+    expect(JSON.stringify(threads)).not.toContain(SECRET);
+  });
+
   it("refuses to open a thread, and to edit or delete comments", async () => {
     await expect(createThread(db, cipher, { documentId: d, viewer: agentViewer(), anchor, body: "x" })).rejects.toThrow(
       "document_access_denied",
@@ -185,6 +195,21 @@ describe.skipIf(!process.env.DATABASE_URL)("document services accept the agent v
 
   it("lists a plan document of a planner named in plans", async () => {
     const P = `agv-p-${s}`;
+    const K = `agv-k-${s}`;
+    await db.agent.create({
+      data: {
+        id: K,
+        name: K,
+        systemPrompt: "t",
+        model: "t",
+        budgetUsd: 1,
+        ownerId: o.id,
+        kind: "coding",
+        documentTools: setting,
+      },
+    });
+    expect((await listDocumentsForAgent(db, K, { limit: 50 })).rows).toEqual([]);
+    await db.agent.delete({ where: { id: K } });
     await db.agent.create({
       data: { id: P, name: P, systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: o.id, kind: "coding" },
     });
