@@ -100,6 +100,35 @@ a {
   color: var(--muted);
 }
 
+/* ---- moving between documents: the browser crossfades page to page (view transitions); the top bar, the review
+   banner, the plan rail and the side panel's tabs are matched across pages, so they hold still. ---- */
+@view-transition {
+  navigation: auto;
+}
+.topbar {
+  view-transition-name: page-topbar;
+}
+.review-banner {
+  view-transition-name: review-banner;
+}
+.plan-rail {
+  view-transition-name: plan-rail;
+}
+.tray-tabs {
+  view-transition-name: side-tabs;
+}
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 140ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}
+
 /* ---- page layout ---- */
 /* A column whose editor area (.main) takes what is left: the bars above it (review, plan, banners,
    warnings, toolbar) come and go, so no fixed row count. */
@@ -144,8 +173,24 @@ a {
   align-items: center;
   gap: 0.4rem;
 }
+/* The save state keeps one width ("Saved", "Saving…", "Unsaved changes" alike), so the top bar never shifts as it
+   changes; a longer read-only note is cut with an ellipsis (full text on hover). An error with Reload may grow. */
+.topbar .save {
+  flex: none;
+  width: 10.5rem;
+  justify-content: flex-end;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.topbar .save .save-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .save.bad {
   color: var(--bad);
+}
+.topbar .save.bad {
+  width: auto;
 }
 .live-note {
   font-size: 0.82rem;
@@ -855,6 +900,89 @@ img.ProseMirror-separator {
   background: var(--surface);
   font-size: 0.9rem;
 }
+/* In the top bar the review status is compact: a dot in the state's colour, then the state and progress on one
+   line (cut short, full text on hover). It opens the Review tab. */
+.topbar .review-banner {
+  position: relative;
+  flex-wrap: nowrap;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 0.85rem;
+}
+.rb-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  max-width: 22rem;
+  padding: 0.15rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+}
+.rb-status:hover {
+  border-color: var(--accent);
+}
+.rb-status::before {
+  content: "";
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.review-banner.state-in_review .rb-status::before {
+  background: var(--accent);
+}
+.review-banner.state-changes_requested .rb-status::before {
+  background: var(--warn);
+}
+.review-banner.state-approved .rb-status::before {
+  background: var(--ok);
+}
+.rb-status .rb-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar .rb-newer {
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+/* A lost race drops down under the status: the message, the note as typed and the relabelled buttons. */
+.rb-drop {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  z-index: 40;
+  width: 22rem;
+  padding: 0.6rem 0.7rem;
+  background: var(--surface);
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 12%);
+}
+/* The page's actions sit together on the right of the top bar; editing tools are on the row below. */
+.topbar .group {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0 0.4rem;
+  border-left: 1px solid var(--border);
+}
+.topbar .page-actions {
+  margin-left: auto;
+}
+.design-toolbar .group {
+  display: flex;
+  gap: 0.25rem;
+}
+.design-toolbar .group + .group {
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--border);
+}
 .review-banner .rb-newer,
 .review-banner .rb-race {
   font-weight: 600;
@@ -895,65 +1023,135 @@ img.ProseMirror-separator {
   color: var(--muted);
   border-color: var(--border);
 }
-/* ---- the plan bar (a plan set's documents, under the review banner) ---- */
-.plan-bar {
+/* ---- the plan rail: a plan set's documents as an outline, left of the page (or atop a design's left panel) ---- */
+.plan-rail {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-  align-items: center;
-  padding: 0.3rem 1rem;
-  border-bottom: 1px solid var(--border);
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.8rem 0.6rem 1rem;
   background: var(--surface);
-  font-size: 0.85rem;
+  font-size: 0.88rem;
+  min-height: 0;
+  overflow-y: auto;
 }
-.plan-bar[hidden] {
+.plan-rail[hidden] {
   display: none;
 }
 .plan-count {
   font-weight: 600;
+  padding: 0 0.35rem 0.4rem;
+}
+.plan-group {
+  margin-top: 0.35rem;
+}
+.plan-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0 0.35rem;
+}
+.plan-group h3,
+.plan-out summary {
+  margin: 0.2rem 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.plan-out summary {
+  cursor: pointer;
+  padding: 0 0.35rem;
 }
 .plan-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
   margin: 0;
   padding: 0;
   list-style: none;
 }
+/* A row: the name (opens the document) and its state (opens it on the Review tab). */
+.plan-row {
+  display: flex;
+  align-items: baseline;
+  border-radius: 6px;
+}
+.plan-row:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+/* You are here: a bar on the left edge and a tint, not a second border style. */
+.plan-row.current {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
 .plan-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 0.05rem 0.55rem;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.28rem 0 0.28rem 0.35rem;
   color: var(--text);
   text-decoration: none;
 }
-.plan-chip:hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+.plan-chip .plan-kind {
+  align-self: center;
+  display: inline-flex;
 }
-.plan-chip.current {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+.plan-chip .plan-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.plan-chip .plan-state {
-  color: var(--muted);
+.plan-review {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.2rem;
+  padding: 0.28rem 0.35rem;
+  border-radius: 6px;
+  text-decoration: none;
   font-size: 0.75rem;
+  color: var(--muted);
 }
-.plan-chip.state-in_review .plan-state {
+a.plan-review:hover .plan-state {
+  text-decoration: underline;
+}
+.plan-review .plan-more {
+  color: var(--muted);
+}
+.plan-row.state-in_review .plan-state {
   color: var(--accent);
 }
-.plan-chip.state-changes_requested .plan-state {
+.plan-row.state-changes_requested .plan-state {
   color: var(--warn);
 }
-.plan-chip.state-approved .plan-state {
+.plan-row.state-approved .plan-state {
   color: var(--ok);
 }
-.plan-chips s .plan-chip {
+.plan-chips s .plan-chip,
+.plan-chips s .plan-review {
   color: var(--muted);
-  /* The chip is a link (text-decoration: none), so the <s> line has to be set on it. */
+  /* Links (text-decoration: none), so the <s> line has to be set on them. */
   text-decoration: line-through;
+}
+.plan-rail .plan-pick-open {
+  font-size: 0.78rem;
+  padding: 0.15rem 0.5rem;
+}
+.plan-rail .plan-pick {
+  max-width: none;
+  padding: 0.4rem 0.35rem 0.6rem;
+}
+.plan-rail .plan-result {
+  flex-direction: column;
+  gap: 0.25rem;
+}
+/* The document page: rail | page | side panel when the document is in a plan. */
+.main:has(> .plan-rail:not([hidden])) {
+  grid-template-columns: 230px 1fr 320px;
+}
+.main > .plan-rail {
+  border-right: 1px solid var(--border);
 }
 .plan-link-missing {
   border-bottom: 1px dotted var(--warn);
@@ -1118,7 +1316,6 @@ img.ProseMirror-separator {
 }
 /* The plan bar's "Pick an option…": its button, and the step that opens under the chips. */
 .plan-pick-open {
-  margin-left: auto;
   font-size: 0.82rem;
 }
 .plan-pick {
@@ -1254,4 +1451,92 @@ img.ProseMirror-separator {
   flex-basis: 100%;
   color: var(--muted);
   font-size: 13px;
+}
+
+/* The top bar's review status: right after the title (the page actions take the free space), and quieter than the
+   review buttons it would otherwise inherit their pill style from. */
+.topbar .crumbs {
+  margin-right: 0;
+}
+.review-banner button.rb-status {
+  height: 28px;
+  padding: 0 0.7rem;
+  gap: 0.45rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 500;
+  font-size: 0.82rem;
+}
+.review-banner button.rb-status:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+/* The top bar stacks above the page, so what drops down from it (a lost race, a hint) is never under the document. */
+.topbar {
+  position: relative;
+  z-index: 30;
+}
+.topbar .page-actions {
+  position: relative;
+}
+.btn-hint {
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  right: 0;
+  width: 15rem;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.82rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 12%);
+}
+
+.rb-status .rb-more {
+  flex: none;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+}
+/* Icon-only toolbar buttons (Undo, Redo): square, the icon centred. */
+button.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+}
+button.icon-only .icon {
+  margin: 0;
+}
+
+/* Every button with an icon: the icon before the label, one gap (top bar, steps, plan rail, bubble). */
+.topbar button:has(.icon),
+.rv-form button:has(.icon),
+button.bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.topbar button .icon,
+.rv-form button .icon,
+button.bubble .icon {
+  margin: 0;
+}
+.bcount {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+.bcount .icon {
+  width: 12px;
+  height: 12px;
+}
+/* Step notes (force approve, reject) in the page font, not the browser's monospace. */
+.rv-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
 }

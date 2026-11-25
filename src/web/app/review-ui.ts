@@ -128,21 +128,30 @@ export class ReviewPanel {
     const { banner } = this.host;
     clear(banner);
     banner.className = `review-banner state-${r.state}`;
+    // The review status sits in the top bar beside the title: the state and its progress, opening the Review tab.
     append(
       banner,
-      h("span", { class: `chip review-chip state-${r.state}` }, STATE_LABEL[r.state]),
-      h("span", { class: "rb-text" }, bannerText(r)),
+      h(
+        "button",
+        { type: "button", class: "rb-status", title: "Open the Review tab", onClick: () => this.host.showReviewTab() },
+        // A dot in the state's colour (CSS), then the state and progress as one line, cut short with the full text on hover.
+        h("span", { class: "rb-text", title: bannerText(r) }, bannerText(r)),
+        h("span", { class: "rb-more", aria: { hidden: "true" } }, "›"),
+      ),
       r.can.review && r.currentVersion !== this.read && !this.raced
         ? h("span", { class: "rb-newer", role: "status" }, newerNote(this.read, r.currentVersion))
         : null,
-      h("button", { type: "button", class: "link", onClick: () => this.host.showReviewTab() }, "Review details"),
     );
-    // A lost race is answered here, beside the changes the Edits tray / History tab now shows:
-    // the message, the note as typed and the relabelled buttons (the Review tab shows the same).
+    // A lost race is answered here, beside the changes the History tab now shows: the message, the note as typed
+    // and the relabelled buttons (the Review tab shows the same), dropping down under the status.
     if (this.raced && r.can.review) {
       banner.append(
-        h("div", { class: "rb-race", role: "alert" }, raceNote(this.raced.verdict, this.read)),
-        this.verdictBox(),
+        h(
+          "div",
+          { class: "rb-drop" },
+          h("div", { class: "rb-race", role: "alert" }, raceNote(this.raced.verdict, this.read)),
+          this.verdictBox(),
+        ),
       );
     }
   }
@@ -367,7 +376,14 @@ export class ReviewPanel {
   }
 
   /** A confirm step: a heading, what confirming does, and Confirm / Cancel. */
-  private confirmStep(label: string, heading: string, explain: string, confirm: string, run: () => void): HTMLElement {
+  private confirmStep(
+    label: string,
+    heading: string,
+    explain: string,
+    confirm: string,
+    run: () => void,
+    glyph: IconName,
+  ): HTMLElement {
     return h(
       "div",
       { class: "rv-form", role: "group", aria: { label } },
@@ -376,7 +392,7 @@ export class ReviewPanel {
       h(
         "div",
         { class: "rv-actions" },
-        this.button(confirm, run, "primary"),
+        this.button(confirm, run, "primary", glyph),
         this.button("Cancel", () => {
           this.form = "none";
           this.render();
@@ -395,6 +411,7 @@ export class ReviewPanel {
       } v${n} stays in History as the record.`,
       "Reopen",
       () => void this.act({ action: "reopen" }),
+      "reopen",
     );
   }
 
@@ -405,6 +422,7 @@ export class ReviewPanel {
       "It becomes read-only and leaves the document lists. You can unarchive it later.",
       "Archive",
       () => void this.act({ action: "archive", archived: true }),
+      "archive",
     );
   }
 
@@ -542,7 +560,8 @@ export class ReviewPanel {
           { class: "rv-actions" },
           h(
             "button",
-            { type: "button", class: "tonal", disabled: this.busy, onClick: () => void this.createLink() },
+            { type: "button", class: "neutral", disabled: this.busy, onClick: () => void this.createLink() },
+            icon("link"),
             PICKER.createLink,
           ),
         ),
@@ -569,6 +588,7 @@ export class ReviewPanel {
             onClick: () =>
               void this.act({ action: "submit", reviewers: [...this.picked], finalApproverId: this.approver || null }),
           },
+          icon(this.review.state === "draft" ? "send" : "reviewers"),
           this.review.state === "draft" ? PICKER.submit : PICKER.save,
         ),
         h("button", { type: "button", class: "neutral", onClick: () => this.closeForm() }, "Cancel"),
@@ -657,6 +677,7 @@ export class ReviewPanel {
         disabled: this.busy || this.rejectNote.trim() === "",
         onClick: () => void this.act({ action: "reject", note: this.rejectNote }),
       },
+      icon("reject"),
       "Reject",
     );
     form.append(
@@ -707,6 +728,7 @@ export class ReviewPanel {
         disabled: this.busy || this.forceNote.trim() === "",
         onClick: () => void this.act({ action: "force", note: this.forceNote }),
       },
+      icon("force"),
       "Force approve",
     );
     form.append(

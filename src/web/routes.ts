@@ -43,6 +43,7 @@ import { registerGuest, resolveShareToken } from "../core/documents/share-links.
 import { readCookie } from "../mcp/auth/self-hosted/cookies.js";
 import {
   describeViewer,
+  documentPayload,
   getDocumentJson,
   getFrames,
   getMentions,
@@ -269,6 +270,12 @@ async function documentPage(req: IncomingMessage, res: ServerResponse, id: strin
     loginUrl: loginUrl(`/d/${id}`),
     logoutUrl: LOGOUT_URL,
   };
+  // The document itself, for the first frame; if building it fails, the page fetches it as before.
+  try {
+    bootstrap.initial = await documentPayload(deps, id, ctx.viewer, false);
+  } catch {
+    /* the app loads it */
+  }
   sendDocumentPage(res, { title: doc.title, bootstrap, bundle, ...assets });
 }
 

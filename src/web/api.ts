@@ -100,6 +100,14 @@ export async function getDocumentJson(
   viewer: Viewer,
   anonymous: boolean,
 ): Promise<void> {
+  sendWebJson(res, 200, await documentPayload(deps, documentId, viewer, anonymous));
+}
+
+/**
+ * What GET /d/api/<id> answers: the document, its current version, the viewer, threads, review and plan. The
+ * document page also carries it in its bootstrap, so the app draws its first frame without a request.
+ */
+export async function documentPayload(deps: WebDeps, documentId: string, viewer: Viewer, anonymous: boolean) {
   await requireDocumentAccess(deps.db, documentId, viewer, "read");
   const { document, version, content } = await getDocument(deps.db, documentId);
   const me = await describeViewer(deps, documentId, viewer, anonymous);
@@ -126,7 +134,7 @@ export async function getDocumentJson(
         content.format === "markdown" ? content.markdown : null,
       )
     : null;
-  sendWebJson(res, 200, {
+  return {
     document: {
       id: document.id,
       kind: design ? "design" : "document",
@@ -150,7 +158,7 @@ export async function getDocumentJson(
     mentionedGuests,
     review: reviewJson(review),
     ...(plan ? plan : {}),
-  });
+  };
 }
 
 /**

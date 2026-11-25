@@ -28,6 +28,8 @@ export interface Bootstrap {
   shareToken?: string;
   loginUrl: string;
   logoutUrl: string;
+  /** The document as load() would answer it, written into the page: the first frame is drawn without a request. */
+  initial?: DocumentPayload;
 }
 
 export interface CommentView {

@@ -254,7 +254,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(csp).toContain(`'nonce-${nonce}'`);
       expect(html).toContain('<div id="app"></div>');
       expect(html).toContain(
-        `<script src="/web/static/${JS}" integrity="${sri(ASSET_TEXT[JS])}" crossorigin="anonymous"></script>`,
+        `<script src="/web/static/${JS}" integrity="${sri(ASSET_TEXT[JS])}" crossorigin="anonymous" defer blocking="render"></script>`,
       );
       expect(html).toContain(
         `<link rel="stylesheet" href="/web/static/${CSS}" integrity="${sri(ASSET_TEXT[CSS])}" crossorigin="anonymous">`,
@@ -323,7 +323,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
           const res = await call(`/d/${docId}`, { jar });
           expect(res.status).toBe(200);
           const html = await res.text();
-          expect(html).toContain(`<script src="/web/static/${JS}"></script>`);
+          expect(html).toContain(`<script src="/web/static/${JS}" defer blocking="render"></script>`);
           expect(html).not.toContain("integrity=");
           const warnings = logged.slice(before).filter((l) => l.includes("web asset integrity"));
           // Logged once per process per bundle: the first render warns, later renders stay quiet.
@@ -1246,7 +1246,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(res.status).toBe(200);
       const html = await res.text();
       expect(html).toContain(
-        `<script src="/web/static/${DJS}" integrity="${sri(ASSET_TEXT[DJS])}" crossorigin="anonymous"></script>`,
+        `<script src="/web/static/${DJS}" integrity="${sri(ASSET_TEXT[DJS])}" crossorigin="anonymous" defer blocking="render"></script>`,
       );
       expect(html).toContain(
         `<link rel="stylesheet" href="/web/static/${DCSS}" integrity="${sri(ASSET_TEXT[DCSS])}" crossorigin="anonymous">`,

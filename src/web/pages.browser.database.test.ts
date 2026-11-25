@@ -384,7 +384,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     const seen = watch(page, server.origin);
     await page.goto(`${server.origin}/d/${documentId}`);
     await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
-    await page.getByRole("button", { name: "+ Board" }).click();
+    await page.getByRole("button", { name: "Add a board" }).click();
     await page.locator("dialog input").fill("Opening Hours");
     await page.locator("dialog").getByRole("button", { name: "Add board" }).click();
     await expect.poll(() => page.locator(".boards li.on .name").textContent()).toBe("Opening Hours");
@@ -395,12 +395,18 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     expect(Object.keys(sent[0]).sort()).toEqual(["boards/opening-hours.html", "manifest.json"]);
     // Rename and move up, then delete the About board.
     const row = (name: string) => page.locator(".boards li", { hasText: name });
+    // Only the current tab shows its ⋯ until hovered.
+    await row("Opening Hours").hover();
     await row("Opening Hours").locator(".more").click();
     await row("Opening Hours").getByRole("menuitem", { name: "Rename…" }).click();
     await page.locator("dialog input").fill("Hours");
     await page.locator("dialog").getByRole("button", { name: "Rename" }).click();
+    // Only the current tab shows its ⋯ until hovered.
+    await row("Hours").hover();
     await row("Hours").locator(".more").click();
     await row("Hours").getByRole("menuitem", { name: "Move up" }).click();
+    // Only the current tab shows its ⋯ until hovered.
+    await row("About").hover();
     await row("About").locator(".more").click();
     await row("About").getByRole("menuitem", { name: "Delete…" }).click();
     await page.locator("dialog").getByRole("button", { name: "Delete" }).click();
@@ -416,7 +422,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     ]);
     expect(await page.locator(".boards li .name").allTextContents()).toEqual(["Home", "Menu", "Hours", "Visit"]);
     // A new board's name is cut to 80 characters, as a rename is (even past the input's maxlength).
-    await page.getByRole("button", { name: "+ Board" }).click();
+    await page.getByRole("button", { name: "Add a board" }).click();
     await page.locator("dialog input").evaluate((el) => el.removeAttribute("maxlength"));
     await page.locator("dialog input").fill("N".repeat(100));
     await page.locator("dialog").getByRole("button", { name: "Add board" }).click();
@@ -441,6 +447,8 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await page.goto(`${server.origin}/d/${documentId}`);
     await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
     const about = page.locator(".boards li", { hasText: "About" });
+    // Only the current tab shows its ⋯ until hovered.
+    await about.hover();
     await about.locator(".more").click();
     await expect.poll(() => about.getByRole("menuitem", { name: "Rename…" }).isVisible()).toBe(true);
     // Another writer publishes v2: the page loads it in place and rebuilds the boards list.
@@ -604,8 +612,8 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await page.reload();
     await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
     const count = (name: string) => page.locator(".boards li", { hasText: name }).locator(".bcount");
-    await expect.poll(() => count("Menu").textContent()).toBe("💬 1");
-    expect(await count("Home").textContent()).toBe("💬 1");
+    await expect.poll(() => count("Menu").textContent()).toBe("1");
+    expect(await count("Home").textContent()).toBe("1");
     await expect.poll(() => pinNumbered(page, 2).count(), { timeout: 10_000 }).toBe(1);
     expect(await pin1.count()).toBe(0); // another board's pin is not drawn
     // Both threads are found: neither row says "outdated" (the panel was first listed before the canvas loaded).
@@ -1106,7 +1114,9 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect
         .poll(() => bar.locator(".plan-count").textContent(), { timeout: 20_000 })
         .toBe("Plan 12 · 0 of 2 approved");
-      expect(await bar.locator("a").count()).toBe(2);
+      // Each row: its name (the document) and its state (the document's Review tab).
+      expect(await bar.locator("a.plan-chip").count()).toBe(2);
+      expect(await bar.locator("a.plan-review").count()).toBe(2);
       const current = bar.locator('a[aria-current="page"]');
       expect(await current.count()).toBe(1);
       expect(await current.getAttribute("href")).toBe(`/d/${plan.documentId}`);
@@ -1127,7 +1137,9 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect
         .poll(() => bar.locator(".plan-count").textContent(), { timeout: 20_000 })
         .toBe("Plan 12 · 1 of 2 approved");
-      expect(await bar.locator(`a[href="/d/${api}"] .plan-state`).textContent()).toBe("Approved");
+      expect(await bar.locator(`a.plan-review[href="/d/${api}?tab=review"] .plan-state`).textContent()).toBe(
+        "Approved",
+      );
       expect(seen.violations).toEqual([]);
       expect(seen.errors).toEqual([]);
       await context.close();

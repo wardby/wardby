@@ -8,13 +8,7 @@
   display: flex;
   flex-direction: column;
 }
-.topbar .group {
-  display: flex;
-  gap: 0.25rem;
-  padding: 0 0.4rem;
-  border-left: 1px solid var(--border);
-}
-.topbar .group button.on {
+.design-toolbar .group button.on {
   background: var(--text);
   color: var(--surface);
   border-color: var(--text);
@@ -36,6 +30,53 @@
 }
 .dside.left {
   border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* The plan scrolls on its own; Layers stays anchored at the bottom. */
+.dside.left > .plan-rail {
+  flex: 0 1 auto;
+}
+.dside.left > .left-fill {
+  flex: 1 1 0;
+}
+.layers-section {
+  flex: none;
+  max-height: 55%;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+}
+.layers-toggle {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 0.55rem 0.9rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.layers-host {
+  overflow: auto;
+  min-height: 0;
+}
+.design-main:has(> .dside.left[hidden]) {
+  grid-template-columns: 1fr 320px;
+}
+/* The canvas column: the board tabs, then the canvas. */
+.canvas-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.canvas-col > .canvas-wrap {
+  flex: 1;
+}
+.board-strip {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
 }
 .dside.right {
   overflow-x: hidden;
@@ -69,8 +110,71 @@
   gap: 0.2rem;
   border-radius: 6px;
 }
-.boards li.on {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+/* Board tabs: wrap to two lines (fitBoardTabs moves the rest under "+N more"); the current one is underlined. */
+.board-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.15rem;
+  padding: 0.25rem 0.5rem 0;
+}
+.board-tabs li {
+  border-radius: 6px 6px 0 0;
+  border-bottom: 2px solid transparent;
+}
+.board-tabs li.on {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-bottom-color: var(--accent);
+}
+.board-tabs .name {
+  max-width: 13rem;
+}
+/* A tab's ⋯ shows on the current tab, and on hover or keyboard focus, not on every tab at once. */
+.board-tabs li:not(.on):not(:hover):not(:focus-within) .more {
+  visibility: hidden;
+}
+.board-tabs li[hidden] {
+  display: none;
+}
+.more-boards-open,
+.add-board {
+  border: 0;
+  background: transparent;
+  padding: 0.3rem 0.55rem;
+  color: var(--accent);
+}
+.more-boards-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 30;
+  min-width: 14rem;
+  max-height: 20rem;
+  overflow: auto;
+  padding: 0.4rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 12%);
+}
+.more-boards-menu input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 0.3rem;
+}
+.more-boards-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.more-boards-list button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 0.3rem 0.4rem;
+}
+.more-boards-list button:hover {
+  background: var(--bg);
 }
 .boards .pick {
   flex: 1;
@@ -117,9 +221,6 @@
 }
 .boards .bmenu button:hover:not(:disabled) {
   background: var(--bg);
-}
-.add-board {
-  margin: 0.4rem 0.9rem;
 }
 
 /* ---- canvas ---- */

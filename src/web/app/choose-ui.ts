@@ -6,6 +6,7 @@
  * re-renders. Text is set as text (dom.ts).
  */
 import { h } from "./dom.js";
+import { icon } from "./icons.js";
 import { chooseSummary, STATE_LABEL, type ChooseCandidate } from "./review-model.js";
 import type { ReviewState } from "./api.js";
 
@@ -42,7 +43,7 @@ export function chooseStep(input: ChooseStepInput): HTMLElement {
       rejectPaths: ticked.map((c) => c.path),
       ready: input.readyAfter(state.ticks),
     });
-    confirm.textContent = input.chosenApproved ? `Reject ${n}` : `Approve and reject ${n}`;
+    confirm.replaceChildren(icon("choose"), input.chosenApproved ? `Reject ${n}` : `Approve and reject ${n}`);
     confirm.disabled = input.busy || n === 0;
     for (const [id, el] of keepNotes) el.hidden = state.ticks.has(id);
   };

@@ -6,13 +6,11 @@
  * keeps the reviewer on Review (or whichever tab they were on); the next page opens it if it has it.
  */
 import type { PlanSetPayload } from "../../core/plans/page-payload.js";
-import { clear, h } from "./dom.js";
+import { append, clear, h } from "./dom.js";
 import { choiceResult, chooseCandidates, planAlternatives, STATE_LABEL } from "./review-model.js";
 import { errorMessage, type ReviewAction, type ReviewState } from "./api.js";
 import { chooseStep, type ChooseStepState } from "./choose-ui.js";
 import { icon } from "./icons.js";
-
-const KIND_ICON = { document: "📄", design: "🎨" } as const;
 
 const stateLabel = (s: string) => STATE_LABEL[s as ReviewState] ?? s;
 
@@ -178,11 +176,12 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
   shown.set(host, plan);
   host.hidden = !plan;
   if (!plan) return;
-  const chip = (d: PlanSetPayload["documents"][number]) => {
+  // A row: the name opens the document (on the side-panel tab open now); the state opens it on its Review tab.
+  const row = (d: PlanSetPayload["documents"][number]) => {
     const link = h(
       d.pagePath ? "a" : "span",
       {
-        class: `plan-chip state-${d.reviewState}${d.current ? " current" : ""}`,
+        class: "plan-chip",
         attrs: {
           ...(d.pagePath ? { href: withTab(d.pagePath, host.dataset.sideTab) } : {}),
           ...(d.current ? { "aria-current": "page" } : {}),
@@ -190,24 +189,68 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
         data: d.pagePath ? { path: d.pagePath } : {},
         title: `${d.path} (${d.kind})`,
       },
-      h("span", { class: "plan-kind", aria: { hidden: "true" } }, KIND_ICON[d.kind]),
+      h("span", { class: "plan-kind", aria: { hidden: "true" } }, icon(d.kind === "design" ? "design" : "page")),
       h("span", { class: "plan-title" }, d.title),
-      h(
-        "span",
-        { class: "plan-state" },
-        d.removed ? (d.reviewState === "rejected" ? "Rejected" : "Removed") : stateLabel(d.reviewState),
-      ),
     );
-    return h("li", {}, d.removed ? h("s", {}, link) : link);
+    const stateText = d.removed ? (d.reviewState === "rejected" ? "Rejected" : "Removed") : stateLabel(d.reviewState);
+    const state = h(
+      d.pagePath ? "a" : "span",
+      {
+        class: "plan-review",
+        attrs: d.pagePath ? { href: withTab(d.pagePath, "review") } : {},
+        title: d.pagePath ? `Review of ${d.path}` : "",
+      },
+      h("span", { class: "plan-state" }, stateText),
+      d.pagePath ? h("span", { class: "plan-more", aria: { hidden: "true" } }, "›") : null,
+    );
+    const body = h("div", { class: `plan-row state-${d.reviewState}${d.current ? " current" : ""}` }, link, state);
+    return h("li", {}, d.removed ? h("s", {}, body) : body);
   };
+  // The plan as an outline: plan.md, the alternatives (when the plan offers some), the other documents, and
+  // what left the plan, folded away.
+  const live = plan.documents.filter((d) => !d.removed);
+  const planMd = live.filter((d) => d.path === "plan.md");
+  const alternatives = new Set(options(plan).length >= 2 ? options(plan).map((d) => d.id) : []);
+  const others = live.filter((d) => d.path !== "plan.md" && !alternatives.has(d.id));
+  const out = plan.documents.filter((d) => d.removed);
+  const group = (title: string | null, docs: PlanSetPayload["documents"], extra?: HTMLElement) =>
+    docs.length === 0
+      ? null
+      : h(
+          "div",
+          { class: "plan-group" },
+          title ? h("div", { class: "plan-group-head" }, h("h3", {}, title), extra ?? null) : null,
+          h("ul", { class: "plan-chips" }, ...docs.map(row)),
+        );
   host.append(
     h(
-      "span",
+      "div",
       { class: "plan-count" },
       plan.partial ? `Plan ${plan.number}` : `Plan ${plan.number} · ${plan.approved} of ${plan.counted} approved`,
     ),
-    h("ul", { class: "plan-chips" }, ...plan.documents.map(chip)),
   );
+  const pickButton = h("span", { class: "plan-pick-slot" });
+  append(
+    host,
+    group(null, planMd),
+    group(
+      "Options",
+      live.filter((d) => alternatives.has(d.id)),
+      pickButton,
+    ),
+    group(alternatives.size ? "Other documents" : "Documents", others),
+  );
+  if (out.length) {
+    const fold = h(
+      "details",
+      { class: "plan-group plan-out" },
+      h("summary", {}, `Out of the plan (${out.length})`),
+      h("ul", { class: "plan-chips" }, ...out.map(row)),
+    );
+    // Open while the current page is one of them, so "you are here" is never folded away.
+    fold.open = out.some((d) => d.current);
+    host.append(fold);
+  }
   // "Pick an option": for members (a guest sees part of the set) when there are options to choose between.
   const chooser = choosers.get(host);
   const pick = picks.get(host) ?? emptyPick();
@@ -234,7 +277,7 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
     );
   }
   if (!chooser || plan.partial || options(plan).length < 2) return;
-  host.append(
+  pickButton.append(
     h(
       "button",
       {
@@ -250,12 +293,13 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
       "Pick an option",
     ),
   );
-  if (pick.open) host.append(pickPanel(host, plan, pick, chooser));
+  // The step opens under the Options group, inside the rail.
+  if (pick.open) pickButton.closest(".plan-group")!.after(pickPanel(host, plan, pick, chooser));
 }
 
 /** A `<nav>` for the bar, hidden until rendered with a plan. */
 export function planBarHost(): HTMLElement {
-  return h("nav", { class: "plan-bar", hidden: true, aria: { label: "Plan" } });
+  return h("nav", { class: "plan-bar plan-rail", hidden: true, aria: { label: "Plan" } });
 }
 
 /** `path` with `?tab=<tab>` (or as is with no tab). */

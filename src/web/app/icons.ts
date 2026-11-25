@@ -43,9 +43,55 @@ const SHAPES = {
     ["rect", 3, 4, 18, 4.5, 1],
     ["path", "M5 8.5V18a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5M10 12.5h4"],
   ],
+  /** Comment: a speech bubble. */
+  comment: [["path", "M20 11.5a7.5 7.5 0 0 1-10.9 6.7L4 19.5l1.3-4.6A7.5 7.5 0 1 1 20 11.5z"]],
+  /** A comment link: two links of a chain. */
+  link: [
+    ["path", "M10 14a4 4 0 0 0 5.7 0l3.1-3.1a4 4 0 0 0-5.7-5.7l-1 1"],
+    ["path", "M14 10a4 4 0 0 0-5.7 0l-3.1 3.1a4 4 0 0 0 5.7 5.7l1-1"],
+  ],
+  /** Overview: every board at once. */
+  overview: [
+    ["rect", 4, 4, 6.5, 6.5, 1],
+    ["rect", 13.5, 4, 6.5, 6.5, 1],
+    ["rect", 4, 13.5, 6.5, 6.5, 1],
+    ["rect", 13.5, 13.5, 6.5, 6.5, 1],
+  ],
+  /** Play: the prototype. */
+  play: [["path", "M7 4.5v15l12-7.5z"]],
+  /** Export: out of the page. */
+  export: [["path", "M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"]],
+  /** Undo: back one step. */
+  undo: [
+    ["path", "M9 14 4 9l5-5"],
+    ["path", "M4 9h10.5a5.5 5.5 0 0 1 0 11H11"],
+  ],
+  /** Redo: forward one step. */
+  redo: [
+    ["path", "m15 14 5-5-5-5"],
+    ["path", "M20 9H9.5a5.5 5.5 0 0 0 0 11H13"],
+  ],
+  /** A document (Markdown): a page with a folded corner. */
+  page: [
+    ["path", "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"],
+    ["path", "M14 3v5h5"],
+  ],
+  /**
+   * A design: a set square (drafting triangle) with its inner cut-out, both outlines, the inner one centred on the
+   * outer's incentre (8.27, 15.73) at 0.4 scale, so the band between them is even on all three sides.
+   */
+  design: [
+    ["path", "M3 21V3l18 18z"],
+    ["path", "M6.2 10.6v7.2h7.2z"],
+  ],
 } satisfies Record<string, Shape[]>;
 
 export type IconName = keyof typeof SHAPES;
+
+/** The icon as markup, for places that take an HTML label (GrapesJS's component toolbar). */
+export function iconHtml(name: IconName): string {
+  return icon(name).outerHTML;
+}
 
 export function icon(name: IconName): SVGSVGElement {
   const svg = document.createElementNS(SVG, "svg");
@@ -55,7 +101,7 @@ export function icon(name: IconName): SVGSVGElement {
     height: "15",
     fill: "none",
     stroke: "currentColor",
-    "stroke-width": "1.75",
+    "stroke-width": name === "design" ? "1.5" : "1.75",
     "stroke-linecap": "round",
     "stroke-linejoin": "round",
     "aria-hidden": "true",

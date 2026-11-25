@@ -10,6 +10,7 @@
  * read only.
  */
 import "./styles.css";
+import { icon, type IconName } from "./icons.js";
 import {
   Api,
   ApiError,
@@ -74,7 +75,9 @@ async function main(): Promise<void> {
   const api = new Api(boot);
   let payload: DocumentPayload;
   try {
-    payload = await api.load();
+    // The page's own copy first (synchronous, so the first paint is the drawn page); a fetch otherwise.
+    payload = boot.initial ?? (await api.load());
+    delete boot.initial;
   } catch (err) {
     if (err instanceof ApiError && err.code === "web_session_required") {
       location.assign(boot.loginUrl);
@@ -156,7 +159,21 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     reviewPanel,
     editsPanel,
   );
-  const bubble = h("button", { type: "button", class: "bubble", hidden: true }, "💬 Comment");
+  const bubble = h("button", { type: "button", class: "bubble", hidden: true }, icon("comment"), "Comment");
+  // 💬 Comment in the top bar, as on a design page: it comments on the selected text, like the bubble and ⌘⌥M
+  // (with nothing selected, the panel says to select some first). Pressing it keeps the selection.
+  const commentBtn = h(
+    "button",
+    {
+      type: "button",
+      class: "primary",
+      hidden: !atLeast(viewer.access, "comment"),
+      title: "Comment on the selected text (⌘⌥M)",
+    },
+    icon("comment"),
+    "Comment",
+  );
+  commentBtn.addEventListener("mousedown", (e) => e.preventDefault());
   const toolbar = h("div", { class: "toolbar", role: "toolbar", aria: { label: "Formatting" }, hidden: !canWrite });
   clear(root);
   append(
@@ -177,21 +194,22 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
           title,
           version,
         ),
-        exportPdfBtn,
+        // The review status, beside what the page is; then the page's actions.
+        reviewBanner,
+        h("div", { class: "group page-actions" }, exportPdfBtn, commentBtn),
         exportNote,
         saveState,
         liveNote,
         who,
         account,
       ),
-      reviewBanner,
-      planBar,
       banner,
       changedBanner,
       lossyNotice,
       planWarnings,
       toolbar,
-      h("div", { class: "main" }, stage, side),
+      // The plan rail (shown only on a plan's documents) is the first column, beside the page.
+      h("div", { class: "main" }, planBar, stage, side),
     ),
   );
   document.body.append(bubble);
@@ -227,6 +245,14 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   };
   if (!lossless) lockLossy();
 
+  /** An icon-only toolbar button: the icon, the action as its accessible name, the shortcut in the tooltip. */
+  const iconTb = (glyph: IconName, tip: string, aria: string, run: () => boolean) => {
+    const b = tb("", aria, run);
+    b.title = tip;
+    b.classList.add("icon-only");
+    b.append(icon(glyph));
+    return b;
+  };
   const tb = (label: string, aria: string, run: () => boolean) =>
     h(
       "button",
@@ -250,8 +276,8 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     tb("1. List", "Numbered list", () => editor.chain().focus().toggleOrderedList().run()),
     tb("❝", "Quote", () => editor.chain().focus().toggleBlockquote().run()),
     h("span", { class: "sep" }),
-    tb("Undo", "Undo", () => editor.chain().focus().undo().run()),
-    tb("Redo", "Redo", () => editor.chain().focus().redo().run()),
+    iconTb("undo", "Undo (⌘Z)", "Undo", () => editor.chain().focus().undo().run()),
+    iconTb("redo", "Redo (⇧⌘Z)", "Redo", () => editor.chain().focus().redo().run()),
   );
 
   // ---- who is viewing ----
@@ -315,6 +341,25 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     },
     viewer,
   );
+  // With nothing selected in the document, say so under the button rather than starting nothing.
+  const commentHint = h(
+    "div",
+    { class: "btn-hint", role: "status", hidden: true },
+    "Select the text you want to comment on, then click Comment.",
+  );
+  commentBtn.after(commentHint);
+  let hintTimer: ReturnType<typeof setTimeout> | undefined;
+  commentBtn.addEventListener("click", () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !editorEl.contains(sel.anchorNode)) {
+      commentHint.hidden = false;
+      clearTimeout(hintTimer);
+      hintTimer = setTimeout(() => (commentHint.hidden = true), 3500);
+      return;
+    }
+    commentHint.hidden = true;
+    comments.startComment();
+  });
   // ---- the History tab (versions) ----
   const edits = new EditsTray({
     api,
@@ -379,9 +424,11 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const showSave = (text: string, reload = false) => {
     clear(saveState);
     saveState.className = `save${reload ? " bad" : ""}`;
+    // A fixed-width slot (styles.css): the full text as a tooltip when a long one is cut short.
+    saveState.title = text;
     append(
       saveState,
-      text,
+      h("span", { class: "save-text" }, text),
       reload ? h("button", { type: "button", onClick: () => location.reload() }, "Reload") : null,
     );
   };
