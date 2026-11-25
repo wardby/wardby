@@ -26,6 +26,12 @@
  *
  * An approved or archived document takes no edit: each thread gets the locked reply (lockedEditReply)
  * and no merge or reconcile is tried.
+ *
+ * A document linked to a native writer (spec §3) is sent the same way (same checks, limiter and
+ * claim), but its task is fixed text naming the threads (nativeSendTask): the agent reads them and
+ * the document, publishes and replies with its own doc_* tools. When its run ends Wardby publishes,
+ * merges and resolves nothing: a failed run gets the failure reply, a thread it left unanswered the
+ * no-reply note.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -57,6 +63,7 @@ import {
 import {
   assertAgentRepository,
   assertDocumentAgentOverride,
+  assertNativeWriter,
   validDocumentBaseRef,
   wardbyPlanLink,
 } from "./agent-link.js";
@@ -231,8 +238,18 @@ async function stillSent(
   return { running, unanswered: runs.filter((r) => TERMINAL.has(r.status)).map((r) => r.id) };
 }
 
-/** A document whose agent link a sender may use now (sendableLink). */
-type SendableLink = {
+/** A document whose agent link a sender may use now (sendableLink): a coding agent's or a native writer's. */
+type SendableLink = CodingSendableLink | NativeSendableLink;
+
+/** A native writer (spec §3): it reads and edits the document itself with its doc_* tools, so no repository. */
+type NativeSendableLink = {
+  kind: "native";
+  doc: Awaited<ReturnType<typeof requireDocumentAccess>> & { agentId: string };
+  senderId: string;
+};
+
+type CodingSendableLink = {
+  kind: "coding";
   doc: Awaited<ReturnType<typeof requireDocumentAccess>> & { repository: string; path: string; agentId: string };
   senderId: string;
   agent: { systemPrompt: string };
@@ -247,6 +264,8 @@ type SendableLink = {
  * Everything a send checks before it reads the document, and a reconcile run re-checks as the
  * original sender: write access, a linked coding agent the document's owner still holds execute on
  * (and may give task text), the agent still authorised for the repository, and a safe stored link.
+ * A native writer: its documentTools still "write" and the owner still holding execute on it
+ * (assertNativeWriter, the link's own rule). No task-text check: its task is fixed Wardby text.
  */
 async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer): Promise<SendableLink> {
   const doc = await requireDocumentAccess(db, documentId, viewer, "write");
@@ -261,6 +280,10 @@ async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer
       })
     : null;
   const plan = wardbyPlanLink(doc, set);
+  if (doc.agentId) {
+    const native = await nativeSendableLink(db, doc, doc.agentId, viewer.principalId);
+    if (native) return native;
+  }
   const repository = plan ? plan.repository : doc.repository;
   if (!doc.agentId || !repository || (!plan && !doc.path)) throw new Error("document_not_agent_linked");
   // A revision is the set's planner's run: a document linked to any other agent is not sendable.
@@ -294,6 +317,7 @@ async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer
   const path = ef.validLinkPath(plan ? doc.planPath! : doc.path!);
   const baseRef = plan || doc.baseRef === null ? null : validDocumentBaseRef(doc.baseRef);
   return {
+    kind: "coding",
     doc: { ...doc, agentId: doc.agentId, repository, path },
     senderId: viewer.principalId,
     agent,
@@ -302,6 +326,35 @@ async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer
     baseRef,
     plan: plan ? { planSetId: plan.id, number: plan.number } : null,
   };
+}
+
+/**
+ * The native-writer link of a document linked to a native agent, else null (a coding agent, or none).
+ * A native agent with no documentTools setting was never a writer: not linked. One whose setting is
+ * no longer "write", or whose execute the owner lost, is unavailable. A plan document cannot have a
+ * native writer (link_document refuses one); one found anyway is not linked.
+ */
+async function nativeSendableLink(
+  db: PrismaClient,
+  doc: Awaited<ReturnType<typeof requireDocumentAccess>>,
+  agentId: string,
+  senderId: string,
+): Promise<NativeSendableLink | null> {
+  const agent = await db.agent.findUnique({ where: { id: agentId }, select: { kind: true, documentTools: true } });
+  if (agent?.kind !== "native") return null;
+  if (doc.planSetId || agent.documentTools === null) throw new Error("document_not_agent_linked");
+  await assertNativeWriter(db, doc.ownerId, agentId);
+  return { kind: "native", doc: { ...doc, agentId }, senderId };
+}
+
+/** A native writer's task (spec §3): fixed, trusted text naming the threads; no comment text. */
+export function nativeSendTask(documentId: string, versionNumber: number, threadIds: string[]): string {
+  return [
+    `Address the comment threads ${threadIds.join(", ")} on document ${documentId} (version ${versionNumber}).`,
+    "Read each thread with doc_get_thread and the document with doc_get.",
+    "Publish one revision with doc_publish_version (baseNumber = the version you read), then reply to each thread with doc_reply_to_thread.",
+    "If doc_publish_version reports document_version_conflict, read the document again and retry once; if it still fails, say so in your replies.",
+  ].join("\n");
 }
 
 /**
@@ -333,18 +386,21 @@ async function startDocumentRun(
   const { doc, senderId } = link;
   // A plan revision (spec §5): every counted document of the set goes in the plan folder, redacted
   // against the planner's current secret values at send time, and the run's plan folder is collected.
-  const planOptions: Partial<DispatchRunOptions> = link.plan
-    ? {
-        planInputFiles: await planSetInputFiles(
-          db,
-          link.plan.planSetId,
-          await taskSecretValues(db, deps.cipher, doc.agentId),
-        ),
-        collectPlanFiles: true,
-        planNumber: link.plan.number,
-      }
-    : // Not a plan revision: the agent's plan setting (if any) does not make this a planner run.
-      { withoutPlanDocument: true };
+  const planOptions: Partial<DispatchRunOptions> =
+    link.kind === "native"
+      ? {}
+      : link.plan
+        ? {
+            planInputFiles: await planSetInputFiles(
+              db,
+              link.plan.planSetId,
+              await taskSecretValues(db, deps.cipher, doc.agentId),
+            ),
+            collectPlanFiles: true,
+            planNumber: link.plan.number,
+          }
+        : // Not a plan revision: the agent's plan setting (if any) does not make this a planner run.
+          { withoutPlanDocument: true };
 
   // Counted last: a send refused for any other reason uses none of the hourly allowance.
   try {
@@ -365,9 +421,14 @@ async function startDocumentRun(
       agentId: doc.agentId,
       trigger: "comment",
       triggeredById: senderId,
-      codingTask: input.task,
-      codingRepository: doc.repository,
-      ...(link.baseRef ? { codingBaseRef: link.baseRef } : {}),
+      // A native writer's task rides as its task override (appended to its system prompt).
+      ...(link.kind === "native"
+        ? { taskOverride: input.task }
+        : {
+            codingTask: input.task,
+            codingRepository: link.doc.repository,
+            ...(link.baseRef ? { codingBaseRef: link.baseRef } : {}),
+          }),
       // In the run's own transaction: the threads are marked sent only with the run.
       afterPersist: async (tx, run) => {
         let marked: { count: number };
@@ -436,7 +497,7 @@ export async function sendThreadsToAgent(
   input: { documentId: string; viewer: Viewer; threadIds: string[] },
 ): Promise<{ runId: string; status: string }> {
   const link = await sendableLink(db, input.documentId, input.viewer);
-  const { doc, ef, path, baseRef } = link;
+  const { doc } = link;
 
   const ids = [...new Set(input.threadIds)];
   if (ids.length === 0 || ids.length > MAX_THREADS_PER_SEND) throw new Error("comment_not_found");
@@ -461,13 +522,30 @@ export async function sendThreadsToAgent(
     idSet.has(t.id),
   );
   if (threads.length !== ids.length) throw new Error("comment_thread_closed");
-  const context = await ef.sendContext(
-    deps,
-    { repository: doc.repository, path, baseRef },
-    { number: version.number, content },
-  );
+  // A native writer reads the threads and the document itself with its doc_* tools.
+  const task =
+    link.kind === "native"
+      ? nativeSendTask(doc.id, version.number, ids)
+      : await codingSendTask(db, deps, link, { number: version.number, content }, threads);
+
+  const run = await startDocumentRun(db, deps, { link, ids, versionNumber: version.number, task, reconcileOf: null });
+  // Refused or failed at dispatch: the run is already over, so the threads get their reply now.
+  if (TERMINAL.has(run.status)) await onDocumentRunFinished(db, deps, run.id);
+  return { runId: run.id, status: run.status };
+}
+
+/** A coding agent's send task: the adapter's instructions, the document part and the threads (buildTask). */
+async function codingSendTask(
+  db: PrismaClient,
+  deps: DocumentAgentDeps,
+  link: CodingSendableLink,
+  version: { number: number; content: VersionContent },
+  threads: Awaited<ReturnType<typeof listThreads>>,
+): Promise<string> {
+  const { doc, ef, path, baseRef } = link;
+  const context = await ef.sendContext(deps, { repository: doc.repository, path, baseRef }, version);
   const secretValues = await taskSecretValues(db, deps.cipher, doc.agentId);
-  const task = buildTask(
+  return buildTask(
     ef.instructions(
       { path, baseRef },
       version.number,
@@ -480,11 +558,6 @@ export async function sendThreadsToAgent(
     link.agent.systemPrompt,
     (text) => redactExactSecretValues(text, secretValues),
   );
-
-  const run = await startDocumentRun(db, deps, { link, ids, versionNumber: version.number, task, reconcileOf: null });
-  // Refused or failed at dispatch: the run is already over, so the threads get their reply now.
-  if (TERMINAL.has(run.status)) await onDocumentRunFinished(db, deps, run.id);
-  return { runId: run.id, status: run.status };
 }
 
 /** The note posted on each thread when a reconcile run starts on version `n`. */
@@ -530,6 +603,8 @@ export async function startReconcileRun(
     senderId = sender;
     const viewer: Viewer = { kind: "principal", principalId: senderId };
     const link = await sendableLink(db, documentId, viewer);
+    // A native writer's run is never reconciled (onDocumentRunFinished): it publishes its own edit.
+    if (link.kind !== "coding") return "refused";
     const { doc, ef, path, baseRef } = link;
     const { version, content } = await getDocument(db, documentId);
     versionNumber = version.number;
@@ -660,7 +735,13 @@ export async function onDocumentRunFinished(db: PrismaClient, deps: DocumentAgen
   try {
     const run = await db.run.findUnique({
       where: { id: runId },
-      select: { status: true, finalText: true, agentId: true, codingRun: { select: { result: true } } },
+      select: {
+        status: true,
+        finalText: true,
+        agentId: true,
+        agent: { select: { kind: true } },
+        codingRun: { select: { result: true } },
+      },
     });
     if (!run || !TERMINAL.has(run.status)) return;
     const threads = await claimThreads(db, runId);
@@ -668,6 +749,11 @@ export async function onDocumentRunFinished(db: PrismaClient, deps: DocumentAgen
     const secretValues = (await loadAgentSecretValues(db, deps.cipher, run.agentId)).flatMap((e) => e.values);
     const reply = (t: ClaimedThread, body: string) =>
       postAgentReply(db, { threadId: t.id, runId, viaId: t.sentById, body, secretValues });
+
+    if (run.agent.kind === "native") {
+      await answerNativeRun(db, { runId, status: run.status, threads, reply });
+      return;
+    }
 
     if (run.status !== "succeeded") {
       // A reconcile run's threads: the conflicted run's edit is still on its branch, so say where.
@@ -710,6 +796,35 @@ export async function onDocumentRunFinished(db: PrismaClient, deps: DocumentAgen
   } catch (err) {
     log.warn({ runId, code: codeOf(err) }, "could not finish the document send for this run");
   }
+}
+
+/**
+ * A native writer's run (spec §3): it published and replied with its own doc_* tools, so Wardby
+ * publishes, merges and reconciles nothing and resolves no thread. A run that did not succeed gets
+ * the failure reply on each thread; one that did, the no-reply note on each thread it left unanswered
+ * (no comment of this run).
+ */
+async function answerNativeRun(
+  db: PrismaClient,
+  input: {
+    runId: string;
+    status: string;
+    threads: ClaimedThread[];
+    reply: (t: ClaimedThread, body: string) => Promise<unknown>;
+  },
+): Promise<void> {
+  const { runId, threads, reply } = input;
+  if (input.status !== "succeeded") {
+    for (const t of threads) await reply(t, AGENT_RUN_FAILED_REPLY);
+    return;
+  }
+  const replied = await db.comment.findMany({
+    where: { runId, threadId: { in: threads.map((t) => t.id) } },
+    select: { threadId: true },
+    distinct: ["threadId"],
+  });
+  const answered = new Set(replied.map((c) => c.threadId));
+  for (const t of threads) if (!answered.has(t.id)) await reply(t, AGENT_NO_REPLY);
 }
 
 /** The set of a document in a "wardby" plan set (its revisions publish from the run's plan files), else null. */

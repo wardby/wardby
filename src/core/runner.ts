@@ -130,6 +130,7 @@ import {
   type RunCreationCounter,
 } from "./issue-tracker-tools.js";
 import { DOCUMENT_TOOL_NAMES, documentToolDefsFor, handleDocumentTool } from "./document-tools.js";
+import { onDocumentRunFinished } from "./documents/agent-loop.js";
 import { parseStoredDocumentTools } from "./documents/tools-setting.js";
 import { completeIssueStatus } from "./issue-status.js";
 import { fileIssue } from "./issue-dedupe.js";
@@ -2173,6 +2174,18 @@ async function settleFinishedNativeRun(ctx: NativeRunFinishContext, finished: Ru
   if (claimed) await fileSelfDefect(db, issueTrackers, finished);
   // Only the finalizer that made the row terminal notifies. Never throws.
   if (claimed) await emitRunFinishedEvents(db, finished);
+  // Threads sent from a document to this native writer: the failure reply, or the no-reply note on a
+  // thread it left unanswered (agent-loop.ts; claimed once per run, so the reconciler's sweep, which
+  // also covers a deployment with no executor here, never answers twice). A native run's answer
+  // starts no run. Never throws.
+  if (claimed && finished.trigger === "comment" && providers.executor && providers.secrets) {
+    await onDocumentRunFinished(
+      // The document services take the full client; RunnerDb only narrows it for test fakes.
+      db as unknown as PrismaClient,
+      { executor: providers.executor, cipher: providers.secrets, selfDefects: { db, issueTrackers } },
+      runId,
+    );
+  }
   // A lead's end posts the `wardby merge order` check on each open pull request of its set,
   // once every delegated coding run has opened its PR (#261); last, after the release above (so
   // no review waits on it) and after the follow-ups and notifications (so none is delayed by its
