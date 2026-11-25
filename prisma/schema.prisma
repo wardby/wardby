@@ -2770,6 +2770,8 @@ model DocumentVersion {
   currentOf   Document?      @relation("CurrentVersion")
 
   @@unique([documentId, number])
+  /// doc_create counts a run's new documents by runId (#625).
+  @@index([runId])
 }
 
 /// A design file's text, stored once per document and content hash.
