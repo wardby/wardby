@@ -554,6 +554,12 @@ async function publishSet(
       await report(existing.id, doc, "rejected_unchanged");
       return;
     }
+    // An archived document that had left the plan (rejected, or removed by an earlier run, then archived) stays out:
+    // bringing it back would put an archived document in the plan, which then never counts as approved.
+    if (existing.removedFromPlan && existing.reviewState === "archived") {
+      await report(existing.id, doc, "archived_unchanged");
+      return;
+    }
     if (existing.removedFromPlan) {
       await db.document.update({ where: { id: existing.id }, data: { removedFromPlan: false } });
     }

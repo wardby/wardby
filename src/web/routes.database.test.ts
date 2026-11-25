@@ -275,6 +275,10 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
         viewer: { kind: "member", name: "Mel Member", access: "write" },
         loginUrl: `/web/login?returnTo=${encodeURIComponent(`/d/${docId}`)}`,
       });
+      // The page carries its document (so the first frame needs no request): what GET /d/api/<id> answers.
+      const api = (await (await call(`/d/api/${docId}`, { jar })).json()) as Record<string, unknown>;
+      expect(boot.initial).toEqual(api);
+      expect((boot.initial as { document: { title: string } }).document.title).toBe("Plan <script>alert(1)</script>");
       // The bootstrap JSON never carries a raw "<" (it cannot close the script element).
       const raw = /window\.__WARDBY__ = (.*?);<\/script>/s.exec(html)![1];
       expect(raw).not.toContain("<");

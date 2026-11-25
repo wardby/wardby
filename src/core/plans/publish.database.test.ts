@@ -232,6 +232,30 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     expect(await db.documentVersion.count({ where: { documentId: optionA } })).toBe(1);
   });
 
+  it("a rejected document that was then archived stays out of the plan when a later run writes it again", async () => {
+    const agentId = await planner();
+    const first = await makeRun(agentId, [
+      { path: "plan.md", content: "# Plan\n" },
+      { path: "option-b.md", content: "# B\n" },
+    ]);
+    const plan1 = published(await publishPlanFromRun(db, deps, first));
+    const optionB = plan1.documents.find((d) => d.path === "option-b.md")!.id;
+    // Rejected, then archived (setArchived keeps removedFromPlan).
+    await db.document.update({
+      where: { id: optionB },
+      data: { reviewState: "archived", reviewStateBeforeArchive: "rejected", removedFromPlan: true },
+    });
+    const second = await makeRun(agentId, [
+      { path: "plan.md", content: "# Plan\n" },
+      { path: "option-b.md", content: "# B\n\nchanged\n" },
+    ]);
+    const plan2 = published(await publishPlanFromRun(db, deps, second));
+    expect(changes(plan2)["option-b.md"]).toBe("archived_unchanged");
+    const row = await db.document.findUniqueOrThrow({ where: { id: optionB } });
+    expect(row).toMatchObject({ reviewState: "archived", removedFromPlan: true });
+    expect(await db.documentVersion.count({ where: { documentId: optionB } })).toBe(1);
+  });
+
   it("a rejected document a later run leaves out is reported rejected_unchanged, not removed", async () => {
     const agentId = await planner();
     const first = await makeRun(agentId, [

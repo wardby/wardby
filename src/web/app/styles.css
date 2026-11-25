@@ -1540,3 +1540,29 @@ button.bubble .icon {
   box-sizing: border-box;
   font: inherit;
 }
+
+/* Narrow screens (phones, narrow windows): one column. The plan rail sits above the page (a short, scrolling
+   outline), the side panel below it; the top bar wraps instead of squeezing. */
+@media (max-width: 900px) {
+  .main:has(> .plan-rail:not([hidden])) {
+    grid-template-columns: 1fr;
+  }
+  .main {
+    overflow-y: auto;
+  }
+  .main > .plan-rail {
+    max-height: 38vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
+  }
+  .topbar .save {
+    width: auto;
+  }
+  .rb-status {
+    max-width: 100%;
+  }
+}

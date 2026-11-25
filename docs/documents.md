@@ -19,7 +19,8 @@ directory.
 - Create designs (boards of HTML, up to 2 MiB a version), edit them visually in
   the browser, view all boards at once (Overview), click through them as a
   prototype (Play), and export them (see [Designs](#designs)).
-- Select text to start a comment thread; threads anchor to the quoted text and
+- Select text and choose **Comment** (beside the selection, in the top bar, or
+  ⌘⌥M) to start a comment thread; threads anchor to the quoted text and
   follow it across versions. If the text is deleted, the thread is marked
   outdated; it still takes replies.
 - Replies, resolve and reopen, edit and delete your own comments, and
@@ -105,12 +106,16 @@ plan. It never gives more than comment; explicit grants and share links add on
 top, and naming someone as reviewer adds no grant. Sharing an agent with everyone
 lets every signed-in user read and comment on the plans it produces.
 
-**Plan bar.** Each page of a set shows "Plan N · X of Y approved" over the
-documents the viewer can read, with a chip per document (rejected and removed
-documents last, struck through, marked "Rejected" or "Removed", and not counted); relative links in the
-Markdown open the other documents or boards. A chip opens its document on the
-side-panel tab open now (Review stays Review), so a reviewer can step through
-the set. Documents and designs share one tab row: Comments, Review and History,
+**Plan rail.** Each page of a set shows the plan as an outline (left of a
+document; at the top of a design's left panel): "Plan N · X of Y approved" over
+the documents the viewer can read, grouped as `plan.md`, **Options** (documents
+of one name family, such as `option-a/` and `option-b/`, with **Pick an
+option**), **Other documents**, and **Out of the plan** (rejected and removed
+documents, folded, struck through, marked "Rejected" or "Removed", and not
+counted). Relative links in the Markdown open the other documents or boards. A
+row's name opens its document on the side-panel tab open now (Review stays
+Review), so a reviewer can step through the set; its state opens it on the
+Review tab. Documents and designs share one tab row: Comments, Review and History,
 then Style and Settings for a design's editors. A share-link guest sees only
 "Plan N" and their own document. The bar updates live: a plan document's event
 stream also carries the review and version events of the other documents of its
@@ -295,7 +300,7 @@ nothing and records no event.
   approved option is left as it is) and rejects each ticked document with the
   note "Chose option-a/" (plus an optional note), in one transaction: if any
   part is refused, nothing changes. `choose_plan_option` does the same over MCP.
-  The plan bar's **Pick an option** starts the same step from any page of the
+  The plan rail's **Pick an option** starts the same step from any page of the
   plan: it offers the alternatives (documents of one name family, not shared
   parts such as `screens/`) and, after confirming, says under the bar what it
   rejected and what the plan still waits for. The Review tab shows a next-step card (the one main button for the
@@ -327,8 +332,8 @@ nothing and records no event.
   read-only must be reloaded to edit. An agent edit that finishes after the lock
   is not applied; each thread gets a reply naming the branch with the edit.
 
-Open pages update live (the `review` event). The page shows a banner with the
-state and approval count and a **Review** tab with reviewers, verdicts, history
+Open pages update live (the `review` event). The top bar shows the state and
+approval count beside the title (it opens the Review tab), and a **Review** tab with reviewers, verdicts, history
 and the actions you may take. The desktop Viewer's Documents tab shows the state
 as a chip. An agent session can wait for approval with `wait_for_review`: create
 the document, submit it, send reviewers a comment link if they have no account,
@@ -387,11 +392,15 @@ agent follows them without extra setup.
 ### Editing designs
 
 The design page edits the current version in a visual editor (GrapesJS, bundled
-with Wardby, no CDN). Everyone sees the **Boards** list (left), the canvas, the
-Desktop, Tablet and Phone widths for checking the responsive layout, and the
-**Comments** and **History** tabs. People with `write` access also get:
+with Wardby, no CDN). Everyone sees the boards as tabs above the canvas (wrapping
+to two lines, then "+N more" with a filter; the current board's tab always
+shows), the canvas, the Desktop, Tablet and Phone widths (on the row under the
+top bar) for checking the responsive layout, and the **Comments** and
+**History** tabs. People with `write` access also get:
 
-- Board actions (add, rename, move up and down, delete) and a **Layers** tree.
+- Board actions (**+** to add; rename, move up and down, delete in each tab's ⋯
+  menu) and a **Layers** tree at the bottom of the left panel, closed until
+  opened (remembered in the browser).
 - **Style** and **Settings** tabs (right) for the selected element, with Undo
   and Redo.
 

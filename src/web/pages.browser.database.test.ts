@@ -852,6 +852,64 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await context.close();
   }, 60_000);
 
+  it("shows the boards as tabs: two lines, then +N more with a filter; the chosen board's tab stays in view", async () => {
+    const names = Array.from({ length: 14 }, (_, i) => `Screen number ${i + 1}`);
+    const ids = names.map((_, i) => `s${i + 1}`);
+    const many: Record<string, string> = {
+      "manifest.json": JSON.stringify({
+        title: "Many",
+        boards: ids.map((id, i) => ({ id, name: names[i], file: `boards/${id}.html` })),
+      }),
+      ...Object.fromEntries(
+        ids.map((id, i) => [`boards/${id}.html`, `<!doctype html><html><body><h1>${names[i]}</h1></body></html>`]),
+      ),
+    };
+    const { documentId, cookie } = await server.design({ title: "Many", files: many, access: "write" });
+    const context = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    await page.goto(`${server.origin}/d/${documentId}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 60_000 }).toBe(1);
+    const tabs = page.locator(".board-tabs > li[data-board]");
+    type Tab = { hidden: boolean; offsetTop: number };
+    const shown = () => tabs.evaluateAll((ls) => ls.filter((l) => !(l as unknown as Tab).hidden).length);
+    // Two lines at most: the tabs' tops take two values.
+    const rows = await tabs.evaluateAll(
+      (ls) => new Set(ls.filter((l) => !(l as unknown as Tab).hidden).map((l) => (l as unknown as Tab).offsetTop)).size,
+    );
+    expect(rows).toBeLessThanOrEqual(2);
+    const visible = await shown();
+    expect(visible).toBeLessThan(14);
+    const more = page.locator(".more-boards-open");
+    expect(await more.textContent()).toBe(`+${14 - visible} more ▾`);
+    await more.click();
+    await page.locator(".more-boards-menu input").fill("14");
+    await expect.poll(() => page.locator(".more-boards-list button").allTextContents()).toEqual(["Screen number 14"]);
+    await page.locator(".more-boards-list button").click();
+    await expect.poll(() => page.locator(".board-tabs li.on .name").textContent()).toBe("Screen number 14");
+    expect(await page.locator(".board-tabs li.on").isVisible()).toBe(true);
+    await context.close();
+  }, 120_000);
+
+  it("keeps Layers closed until opened, and remembers it in this browser", async () => {
+    const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "write" });
+    const context = await browser.newContext();
+    await context.addCookies([cookie]);
+    const page = await context.newPage();
+    await page.goto(`${server.origin}/d/${documentId}`);
+    await expect.poll(() => page.locator("[data-fidelity-done]").count(), { timeout: 20_000 }).toBe(1);
+    const toggle = page.locator(".layers-toggle");
+    expect(await toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(await page.locator(".layers-host").isVisible()).toBe(false);
+    await toggle.click();
+    expect(await page.locator(".layers-host").isVisible()).toBe(true);
+    await page.reload();
+    await expect
+      .poll(() => page.locator(".layers-toggle").getAttribute("aria-expanded"), { timeout: 20_000 })
+      .toBe("true");
+    await context.close();
+  }, 60_000);
+
   it("lets a reader see the history but not restore", async () => {
     const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "read" });
     const context = await browser.newContext();
@@ -1038,6 +1096,38 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         .toBe("PNG and PDF export isn't set up on this server.");
       await page.waitForTimeout(500);
       expect(downloads).toBe(0);
+      await context.close();
+    }, 60_000);
+
+    it("Comment in the top bar: with nothing selected it says to select text; with text selected it opens the comment", async () => {
+      const { documentId, cookie } = await server.design({
+        title: "Weekly Notes",
+        kind: "document",
+        markdown: "# Weekly\n\nHello there.\n",
+        access: "write",
+      });
+      const context = await browser.newContext();
+      await context.addCookies([cookie]);
+      const page = await context.newPage();
+      await page.goto(`${server.origin}/d/${documentId}`);
+      await expect
+        .poll(() => page.locator(".editor p").first().textContent(), { timeout: 20_000 })
+        .toBe("Hello there.");
+      const comment = page.locator(".topbar").getByRole("button", { name: "Comment" });
+      await comment.click();
+      expect(await page.locator(".btn-hint").isVisible()).toBe(true);
+      expect(await page.locator(".btn-hint").textContent()).toContain("Select the text you want to comment on");
+      // Select "Hello" with the keyboard (a selection the editor holds), then the top bar's Comment.
+      await page
+        .locator(".editor p")
+        .first()
+        .click({ position: { x: 3, y: 8 } });
+      await page.keyboard.press("Home");
+      await page.keyboard.down("Shift");
+      for (let i = 0; i < 5; i++) await page.keyboard.press("ArrowRight");
+      await page.keyboard.up("Shift");
+      await comment.click();
+      await expect.poll(() => page.locator(".cpop").count()).toBe(1);
       await context.close();
     }, 60_000);
 

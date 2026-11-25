@@ -598,3 +598,33 @@
     grid-template-columns: 200px 1fr 280px;
   }
 }
+
+/* Phones: the left panel (plan, layers), the canvas and the side panel stack in one scrolling column, each with a
+   set share of the height (a grid row would let the canvas squeeze the panel to nothing). */
+@media (max-width: 760px) {
+  .design-main {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .design-main > * {
+    flex: none;
+  }
+  .dside.left {
+    max-height: 38vh;
+    overflow-y: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .dside.left > .left-fill {
+    display: none;
+  }
+  .canvas-col {
+    height: 70vh;
+  }
+  .dside.right {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    min-height: 50vh;
+  }
+}

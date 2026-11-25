@@ -168,3 +168,72 @@ describe("Pick an option", () => {
     expect(host.querySelector(".plan-result")).toBeNull();
   });
 });
+
+describe("the plan rail's outline", () => {
+  const d = (
+    id: string,
+    path: string,
+    reviewState = "in_review",
+    over: { removed?: boolean; current?: boolean } = {},
+  ) => ({
+    ...doc(path, reviewState, over.removed ?? false),
+    id,
+    current: over.current ?? false,
+    versionNumber: 1,
+  });
+  const groups = (host: HTMLElement) =>
+    [...host.querySelectorAll(".plan-group")].map((g) => [
+      g.querySelector("h3, summary")?.textContent ?? "",
+      [...g.querySelectorAll(".plan-title")].map((t) => t.textContent),
+    ]);
+
+  it("groups plan.md, the alternatives, the other documents, and what left the plan (folded)", () => {
+    const host = document.createElement("nav");
+    renderPlanBar(host, {
+      number: 3,
+      approved: 1,
+      counted: 5,
+      documents: [
+        d("pm", "plan.md", "approved"),
+        d("a", "option-a/"),
+        d("b", "option-b/", "in_review", { current: true }),
+        d("s", "screens/"),
+        d("c", "option-c/", "rejected", { removed: true }),
+      ],
+    });
+    expect(groups(host)).toEqual([
+      ["", ["plan.md"]],
+      ["Options", ["option-a/", "option-b/"]],
+      ["Other documents", ["screens/"]],
+      ["Out of the plan (1)", ["option-c/"]],
+    ]);
+    expect(host.querySelector<HTMLDetailsElement>("details.plan-out")!.open).toBe(false);
+    expect(host.querySelector(".plan-row.current .plan-title")?.textContent).toBe("option-b/");
+  });
+
+  it("calls them Documents when the plan offers no alternatives, and opens the fold on a page that left the plan", () => {
+    const host = document.createElement("nav");
+    renderPlanBar(host, {
+      number: 4,
+      approved: 0,
+      counted: 2,
+      documents: [
+        d("pm", "plan.md"),
+        d("n", "notes.md"),
+        d("x", "old.md", "rejected", { removed: true, current: true }),
+      ],
+    });
+    expect(groups(host).map(([title]) => title)).toEqual(["", "Documents", "Out of the plan (1)"]);
+    expect(host.querySelector<HTMLDetailsElement>("details.plan-out")!.open).toBe(true);
+  });
+
+  it("links a row's name to the document (on the open tab) and its state to the document's Review tab", () => {
+    const host = document.createElement("nav");
+    setPlanBarTab(host, "history");
+    renderPlanBar(host, { number: 5, approved: 0, counted: 1, documents: [d("pm", "plan.md")] });
+    expect(host.querySelector("a.plan-chip")!.getAttribute("href")).toBe("/d/plan.md?tab=history");
+    const review = host.querySelector("a.plan-review")!;
+    expect(review.getAttribute("href")).toBe("/d/plan.md?tab=review");
+    expect(review.querySelector(".plan-state")!.textContent).toBe("In review");
+  });
+});
