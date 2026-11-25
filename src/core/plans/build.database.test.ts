@@ -12,6 +12,7 @@ import {
   planPullRequestLine,
   resolveBuildPlan,
   resolveRecordedBuildPlan,
+  ticketSection,
   ticketTitles,
   type BuildPlan,
 } from "./build.js";
@@ -226,13 +227,53 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveBuildPlan (database)", () => 
     await expect(attempt).rejects.toThrow(/^plan_not_approved: secret values unavailable/);
   });
 
-  it("refuses with plan_too_large when the plan does not fit the task", async () => {
+  const LARGE_PLAN =
+    `# Plan\n\n${"Context. ".repeat(MAX_CODING_TASK_BYTES / 12)}\n\n## Tickets\n\n` +
+    "### Ticket 1: Fixture\n\nAdd the graph fixture. See [screens](screens/).\n\n- [ ] it validates\n\n" +
+    `### Ticket 2: Model\n\n${"Model detail. ".repeat(200)}\n\n## Risks\n\nNone.\n`;
+
+  it("builds a plan too large to inline from the files: versions, a pointer and the ticket's own section", async () => {
+    const { number } = await planSet([
+      { path: "plan.md", content: LARGE_PLAN, version: 2 },
+      { path: "screens/", content: SCREENS, version: 1 },
+    ]);
+    const plan = ok(await resolve(number, { ticket: 1 }));
+    expect(Buffer.byteLength(plan.taskSection)).toBeLessThanOrEqual(MAX_CODING_TASK_BYTES / 2);
+    expect(
+      plan.taskSection.startsWith(`Approved plan ${number}. Build exactly ticket 1 from this approved plan.`),
+    ).toBe(true);
+    expect(plan.taskSection).toContain("plan.md v2, screens v1");
+    expect(plan.taskSection).toContain("read /tmp/wardby-plan/plan.md first");
+    expect(plan.taskSection).toContain("### Ticket 1: Fixture");
+    expect(plan.taskSection).toContain("[screens](/tmp/wardby-plan/screens/)");
+    expect(plan.taskSection).not.toContain("### Ticket 2");
+    expect(plan.taskSection).not.toContain("Context. Context.");
+    // The whole plan is still there, as a file.
+    expect(plan.planInputFiles.find((f) => f.path === "plan.md")!.content).toBe(LARGE_PLAN);
+  });
+
+  it("without a ticket, gives a too-large plan as versions and a pointer only", async () => {
     const { number } = await planSet([
       { path: "plan.md", content: `# Plan\n\n${"x".repeat(MAX_CODING_TASK_BYTES / 2)}\n`, version: 1 },
     ]);
-    const attempt = resolve(number);
+    const plan = ok(await resolve(number));
+    expect(Buffer.byteLength(plan.taskSection)).toBeLessThanOrEqual(MAX_CODING_TASK_BYTES / 2);
+    expect(plan.taskSection).toContain("plan.md v1");
+    expect(plan.taskSection).toContain("read /tmp/wardby-plan/plan.md first");
+    expect(plan.taskSection).not.toContain("xxxx");
+  });
+
+  it("refuses with plan_too_large, naming the ticket, when the ticket's own section does not fit", async () => {
+    const { number } = await planSet([
+      {
+        path: "plan.md",
+        content: `# Plan\n\n## Tickets\n\n### Ticket 1: Huge\n\n${"x".repeat(MAX_CODING_TASK_BYTES / 2)}\n`,
+        version: 1,
+      },
+    ]);
+    const attempt = resolve(number, { ticket: 1 });
     await expect(attempt).rejects.toBeInstanceOf(PlanRefusedError);
-    await expect(attempt).rejects.toThrow(/^plan_too_large:/);
+    await expect(attempt).rejects.toThrow(/^plan_too_large: ticket 1 of the approved plan/);
   });
 
   it("names the ticket to build", async () => {
@@ -384,6 +425,15 @@ describe.skipIf(!process.env.DATABASE_URL)("resolveBuildPlan (database)", () => 
     ]);
     expect(line).toBe("Plan 12: @\u200boctocat-notes.md v1, seehttps\u200b://example.com v2");
     expect(line).not.toMatch(/@octocat/);
+  });
+
+  it("reads one ticket's section from the Tickets section only, up to the next heading", () => {
+    const md =
+      "# P\n\n### Ticket 1: Not here\n\n## Tickets\n\n### Ticket 1: Login\n\nScope A\n\n#### Notes\n\nn\n\n" +
+      "### Ticket 2: Feed\n\nScope B\n\n## Risks\n\nR\n";
+    expect(ticketSection(md, 1)).toBe("### Ticket 1: Login\n\nScope A\n\n#### Notes\n\nn");
+    expect(ticketSection(md, 2)).toBe("### Ticket 2: Feed\n\nScope B");
+    expect(ticketSection(md, 3)).toBeNull();
   });
 
   it("reads ticket titles from the Tickets section only", () => {
