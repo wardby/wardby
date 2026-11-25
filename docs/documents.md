@@ -291,6 +291,11 @@ nothing and records no event.
   approved option is left as it is) and rejects each ticked document with the
   note "Chose option-a/" (plus an optional note), in one transaction: if any
   part is refused, nothing changes. `choose_plan_option` does the same over MCP.
+  The plan bar's **Pick an option…** starts the same step from any page of the
+  plan: it offers the alternatives (documents of one name family, not shared
+  parts such as `screens/`) and opens the chosen option's Review tab after
+  confirming. A step (choose, reject, force approve, reviewers) has the Review
+  tab to itself until it is confirmed or cancelled.
 - **Reopen**: a writer reopens an approved or rejected document. Reopen for
   review creates a new version (a copy of the current one) and puts it in
   review, and a rejected document goes back into its plan; the earlier version

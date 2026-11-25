@@ -39,9 +39,28 @@ export const REJECTED_NOTE =
 export const REJECT_EXPLAIN =
   "This takes the document out of the plan: it stops counting toward the plan's approval and is not given to a builder. It stays here, read-only, as the record. Reopen brings it back.";
 
-/** "Choose this option": what it does, for the option at `path`. */
-export const chooseExplain = (path: string) =>
-  `Approves this option and rejects the documents you tick, in one step. Each rejected one leaves the plan with the note “Chose ${path}”; Reopen brings one back.`;
+const listOf = (items: string[]) =>
+  items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+
+/**
+ * The sentence under a choice: what confirming does. `ready` is whether the plan is then fully approved (null when
+ * the page cannot tell, as for an option picked from the plan bar whose other reviewers it does not know).
+ */
+export function chooseSummary(input: {
+  chosenPath: string;
+  chosenApproved: boolean;
+  rejectPaths: string[];
+  ready: boolean | null;
+}): string {
+  if (input.rejectPaths.length === 0) return "Tick at least one document to reject.";
+  const first = input.chosenApproved
+    ? `This keeps ${input.chosenPath} approved and rejects ${listOf(input.rejectPaths)}.`
+    : `This approves ${input.chosenPath} and rejects ${listOf(input.rejectPaths)}.`;
+  if (input.ready === null) return first;
+  return input.ready
+    ? `${first} The plan is then ready to build.`
+    : `${first} Other documents still need approval before the plan can be built.`;
+}
 
 /** One document the "Choose this option" checklist offers. */
 export interface ChooseCandidate {

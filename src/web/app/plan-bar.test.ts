@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PlanSetPayload } from "../../core/plans/page-payload.js";
-import { renderPlanBar, requestedTab, setPlanBarTab } from "./plan-bar.js";
+import { renderPlanBar, requestedTab, setPlanBarChooser, setPlanBarTab } from "./plan-bar.js";
 
 const doc = (path: string, reviewState: string, removed = false): PlanSetPayload["documents"][number] => ({
   id: path,
@@ -68,5 +68,81 @@ describe("requestedTab", () => {
     expect(requestedTab(["comments", "review", "history"] as const)).toBeUndefined();
     history.replaceState(null, "", "/d/x");
     expect(requestedTab(["comments"] as const)).toBeUndefined();
+  });
+});
+
+describe("Pick an option…", () => {
+  const opt = (id: string, path: string, reviewState = "in_review") => ({
+    ...doc(path, reviewState),
+    id,
+    versionNumber: 3,
+  });
+  const PLAN = {
+    number: 9,
+    approved: 1,
+    counted: 5,
+    documents: [
+      opt("pm", "plan.md", "approved"),
+      opt("a", "option-a/"),
+      opt("b", "option-b/"),
+      opt("c", "option-c/"),
+      opt("s", "screens/"),
+    ],
+  };
+  const button = (host: HTMLElement, label: string | RegExp) =>
+    [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      typeof label === "string" ? b.textContent === label : label.test(b.textContent ?? ""),
+    );
+
+  it("is offered to members with a chooser when there are options, never to a guest's partial bar", () => {
+    const host = document.createElement("nav");
+    renderPlanBar(host, PLAN);
+    expect(button(host, "Pick an option…")).toBeUndefined();
+    setPlanBarChooser(host, vi.fn());
+    expect(button(host, "Pick an option…")).toBeDefined();
+    renderPlanBar(host, { ...PLAN, partial: true });
+    expect(button(host, "Pick an option…")).toBeUndefined();
+    // Decided: one option left beside shared screens; nothing to pick.
+    const lone = {
+      ...PLAN,
+      documents: [opt("pm", "plan.md", "approved"), opt("a", "option-a/"), opt("s", "screens/")],
+    };
+    renderPlanBar(host, lone);
+    expect(button(host, "Pick an option…")).toBeUndefined();
+  });
+
+  it("picks the option, ticks its siblings to reject, and posts the choice to the chosen option", async () => {
+    const host = document.createElement("nav");
+    document.body.replaceChildren(host);
+    const chooser = vi.fn(() => Promise.reject(new Error("document_review_forbidden")));
+    setPlanBarChooser(host, chooser);
+    renderPlanBar(host, PLAN);
+    button(host, "Pick an option…")!.click();
+    const radios = [...host.querySelectorAll<HTMLInputElement>('.plan-pick input[type="radio"]')];
+    // screens/ is not an alternative (no family): not offered to build, only (unticked) to reject.
+    expect(radios.map((r) => r.parentElement!.querySelector("span")!.textContent)).toEqual([
+      "option-a/",
+      "option-b/",
+      "option-c/",
+    ]);
+    radios[1].checked = true;
+    radios[1].dispatchEvent(new Event("change"));
+    const ticks = [...host.querySelectorAll<HTMLInputElement>('.plan-pick input[type="checkbox"]')].map((b) => [
+      b.parentElement!.querySelector("span")!.textContent,
+      b.checked,
+    ]);
+    expect(ticks).toEqual([
+      ["option-a/", true],
+      ["option-c/", true],
+      ["screens/", false],
+    ]);
+    expect(host.querySelector(".ch-summary")!.textContent).toBe(
+      "This approves option-b/ and rejects option-a/ and option-c/.",
+    );
+    button(host, /^Approve and reject/)!.click();
+    await vi.waitFor(() => expect(chooser).toHaveBeenCalled());
+    expect(chooser).toHaveBeenCalledWith("b", { action: "choose", versionNumber: 3, reject: ["a", "c"] });
+    // A refusal is shown in the step, which stays open.
+    await vi.waitFor(() => expect(host.querySelector(".plan-pick [role=alert]")).not.toBeNull());
   });
 });

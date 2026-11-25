@@ -9,13 +9,13 @@ import { ApiError, errorMessage, type Api, type ReviewAction, type ReviewPayload
 import { relativeTime } from "./comments.js";
 import { append, clear, h } from "./dom.js";
 import type { PlanSetPayload } from "../../core/plans/page-payload.js";
+import { chooseStep, type ChooseStepState } from "./choose-ui.js";
 import {
   bannerText,
   EVENT_LABEL,
   ASK_TO_REOPEN,
   REJECT_EXPLAIN,
   REJECTED_NOTE,
-  chooseExplain,
   chooseCandidates,
   type ChooseCandidate,
   isLockedState,
@@ -62,8 +62,7 @@ export class ReviewPanel {
   /** The reject note as typed: kept across re-renders (a failed reject keeps it). */
   private rejectNote = "";
   /** The documents ticked in the "Choose this option" checklist (ids), and its optional note. */
-  private chooseTicks = new Set<string>();
-  private chooseNote = "";
+  private chooseState: ChooseStepState = { ticks: new Set(), note: "" };
   private raced: { verdict: "approve" | "request_changes" } | null = null;
   private form: Form = "none";
   private picked = new Set<string>();
@@ -160,12 +159,19 @@ export class ReviewPanel {
     if (this.error) panel.append(h("div", { class: "err tp-err", role: "alert" }, this.error));
     if (this.raced)
       panel.append(h("div", { class: "rv-race", role: "alert" }, raceNote(this.raced.verdict, this.read)));
+    // A step (editing reviewers, force approve, reject, choose) has the panel to itself until it is confirmed or
+    // cancelled: no verdict buttons, other actions, reviewers or history beside it.
+    if (this.form !== "none") {
+      panel.classList.add("rv-focused");
+      if (this.form === "submit") panel.append(this.submitForm());
+      if (this.form === "force") panel.append(this.forceForm());
+      if (this.form === "reject") panel.append(this.rejectForm());
+      if (this.form === "choose") panel.append(this.chooseForm());
+      return;
+    }
+    panel.classList.remove("rv-focused");
     if (r.can.review) panel.append(this.verdictBox());
     panel.append(this.actions());
-    if (this.form === "submit") panel.append(this.submitForm());
-    if (this.form === "force") panel.append(this.forceForm());
-    if (this.form === "reject") panel.append(this.rejectForm());
-    if (this.form === "choose") panel.append(this.chooseForm());
     const list = h("ul", { class: "rv-reviewers", aria: { label: "Reviewers" } });
     for (const x of r.reviewers) {
       list.append(
@@ -260,12 +266,8 @@ export class ReviewPanel {
         btn(
           "Choose this option…",
           () => {
-            this.chooseTicks = new Set(
-              this.chooseOptions()
-                .filter((c) => c.ticked)
-                .map((c) => c.id),
-            );
-            this.chooseNote = "";
+            const ticked = this.chooseOptions().filter((c) => c.ticked);
+            this.chooseState = { ticks: new Set(ticked.map((c) => c.id)), note: "" };
             this.form = "choose";
             this.render();
           },
@@ -467,92 +469,38 @@ export class ReviewPanel {
   }
 
   private chooseForm(): HTMLElement {
+    const documents = this.host.planDocuments?.() ?? [];
+    const path = documents.find((d) => d.current)?.path ?? "this option";
+    const r = this.review;
+    const approved = r.state === "approved";
+    // This option ends approved when it is, or when the viewer's approval is the last one it needs.
+    const chosenEndsApproved = approved || r.progress.total - r.progress.approved <= 1;
     const form = h("div", { class: "rv-form", role: "group", aria: { label: "Choose this option" } });
-    const mine = this.host.planDocuments?.().find((d) => d.current);
-    form.append(h("p", {}, chooseExplain(mine?.path ?? "this option")));
-    const list = h("fieldset", { class: "rv-choose" }, h("legend", {}, "Reject"));
-    const candidates = this.chooseOptions();
-    // Ticks for documents no longer offered (decided meanwhile) are dropped.
-    for (const id of [...this.chooseTicks]) if (!candidates.some((c) => c.id === id)) this.chooseTicks.delete(id);
-    const approved = this.review.state === "approved";
-    const confirmLabel = () => {
-      const n = this.chooseTicks.size;
-      const what = `${n} other${n === 1 ? "" : "s"}`;
-      return approved ? `Reject ${what}` : `Approve and reject ${what}`;
-    };
-    const confirm = h(
-      "button",
-      {
-        type: "button",
-        class: "primary",
-        disabled: this.busy || this.chooseTicks.size === 0,
-        onClick: () =>
-          void this.act({
-            action: "choose",
-            versionNumber: this.read,
-            reject: candidates.filter((c) => this.chooseTicks.has(c.id)).map((c) => c.id),
-            ...(this.chooseNote.trim() ? { note: this.chooseNote } : {}),
-          }),
-      },
-      confirmLabel(),
-    );
-    for (const c of candidates) {
-      const box = h("input", {
-        type: "checkbox",
-        onChange: () => {
-          if (box.checked) this.chooseTicks.add(c.id);
-          else this.chooseTicks.delete(c.id);
-          confirm.textContent = confirmLabel();
-          confirm.disabled = this.busy || this.chooseTicks.size === 0;
-        },
-      });
-      box.checked = this.chooseTicks.has(c.id);
-      list.append(
-        h(
-          "label",
-          { class: "rv-pick" },
-          box,
-          h("span", {}, c.path),
-          h("span", { class: "muted" }, ` · ${STATE_LABEL[c.reviewState as ReviewState] ?? c.reviewState}`),
-        ),
-      );
-    }
-    const note = h("input", {
-      type: "text",
-      attrs: { placeholder: "Why (optional), added to each reject note" },
-      aria: { label: "Choice note" },
-      onInput: () => {
-        this.chooseNote = note.value;
-      },
-    });
-    note.value = this.chooseNote;
     form.append(
-      list,
-      note,
-      h(
-        "div",
-        { class: "rv-actions" },
-        confirm,
-        h(
-          "button",
-          {
-            type: "button",
-            class: "neutral",
-            onClick: () => {
-              this.form = "none";
-              this.render();
-            },
-          },
-          "Cancel",
-        ),
-      ),
+      h("h3", {}, `Choose ${path}`),
+      chooseStep({
+        chosenPath: path,
+        chosenApproved: approved,
+        candidates: this.chooseOptions(),
+        readyAfter: (rejectIds) =>
+          chosenEndsApproved &&
+          documents.every((d) => d.current || d.removed || rejectIds.has(d.id) || d.reviewState === "approved"),
+        state: this.chooseState,
+        busy: this.busy,
+        onConfirm: (reject, note) =>
+          void this.act({ action: "choose", versionNumber: this.read, reject, ...(note ? { note } : {}) }),
+        onCancel: () => {
+          this.form = "none";
+          this.render();
+        },
+      }),
     );
     return form;
   }
 
   private rejectForm(): HTMLElement {
     const form = h("div", { class: "rv-form", role: "group", aria: { label: "Reject" } });
-    form.append(h("p", {}, REJECT_EXPLAIN));
+    form.append(h("h3", {}, "Reject this document"), h("p", {}, REJECT_EXPLAIN));
     const note = h("textarea", {
       attrs: { placeholder: "Why (required), for example: Option B was chosen", rows: "3" },
       aria: { label: "Reject note" },
@@ -597,6 +545,7 @@ export class ReviewPanel {
 
   private forceForm(): HTMLElement {
     const form = h("div", { class: "rv-form", role: "group", aria: { label: "Force approve" } });
+    form.append(h("h3", {}, "Force approve"));
     const lines = pendingLines(this.review);
     form.append(
       h("p", {}, "This approves the current version over:"),
@@ -656,8 +605,7 @@ export class ReviewPanel {
       this.newLink = null;
       this.forceNote = "";
       this.rejectNote = "";
-      this.chooseTicks.clear();
-      this.chooseNote = "";
+      this.chooseState = { ticks: new Set(), note: "" };
       this.busy = false;
       this.apply(out.review);
       return null;

@@ -323,6 +323,11 @@ export class Api {
     return this.request("POST", this.doc("/review"), body);
   }
 
+  /** A review action on another document (a choice made from the plan bar posts to the chosen option). */
+  reviewOf(documentId: string, body: ReviewAction): Promise<{ review: ReviewPayload }> {
+    return this.request("POST", `/d/api/${encodeURIComponent(documentId)}/review`, body);
+  }
+
   /** Whom the owner may name as reviewers: members with access and this document's comment-link guests. */
   reviewCandidates(): Promise<{
     members: { principalId: string; name: string }[];

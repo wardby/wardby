@@ -43,7 +43,14 @@ import {
   statusConnected,
   versionAction,
 } from "./live.js";
-import { planBarHost, planDocumentsOf, renderPlanBar, requestedTab, setPlanBarTab } from "./plan-bar.js";
+import {
+  planBarHost,
+  planDocumentsOf,
+  renderPlanBar,
+  requestedTab,
+  setPlanBarChooser,
+  setPlanBarTab,
+} from "./plan-bar.js";
 import { ReviewPanel } from "./review-ui.js";
 import { isLockedState, isReopenCopy } from "./review-model.js";
 
@@ -171,6 +178,8 @@ function mount(
   const lockBanner = h("div", { class: "banner lock-banner", hidden: true, role: "note" });
   const reviewBanner = h("div", { class: "review-banner", role: "status" });
   const planBar = planBarHost();
+  // "Pick an option…" posts the choice to the chosen option (a guest's partial bar never offers it).
+  setPlanBarChooser(planBar, (documentId, body) => api.reviewOf(documentId, body));
   renderPlanBar(planBar, payload.planSet);
   const saveBanner = h("div", { class: "banner bad", hidden: true, role: "alert" });
 

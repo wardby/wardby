@@ -179,6 +179,7 @@ async function planPayload(
       path: d.path,
       removed: d.removed,
       current: d.id === documentId,
+      versionNumber: d.versionNumber,
       pagePath: guest ? "" : `/d/${d.id}`,
     }));
   const planSet: PlanSetPayload = {

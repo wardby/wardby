@@ -36,7 +36,14 @@ import {
 } from "./live.js";
 import { isReopenCopy } from "./review-model.js";
 import { planLinkTargets } from "./extensions.js";
-import { planBarHost, planDocumentsOf, renderPlanBar, requestedTab, setPlanBarTab } from "./plan-bar.js";
+import {
+  planBarHost,
+  planDocumentsOf,
+  renderPlanBar,
+  requestedTab,
+  setPlanBarChooser,
+  setPlanBarTab,
+} from "./plan-bar.js";
 import { ReviewPanel } from "./review-ui.js";
 import { unresolvedLinksText } from "../../core/plans/page-payload.js";
 import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
@@ -103,6 +110,8 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   const banner = h("div", { class: "banner", hidden: true, role: "note" });
   const lossyNotice = h("div", { class: "banner", hidden: true, role: "note" }, LOSSY_NOTICE);
   const planBar = planBarHost();
+  // "Pick an option…" posts the choice to the chosen option (a guest's partial bar never offers it).
+  setPlanBarChooser(planBar, (documentId, body) => api.reviewOf(documentId, body));
   const planWarnings = h("div", { class: "plan-warnings", hidden: true, role: "note" });
   const changedBanner = h(
     "div",
