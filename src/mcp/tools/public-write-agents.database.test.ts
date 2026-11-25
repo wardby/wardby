@@ -196,6 +196,58 @@ describe.skipIf(!process.env.DATABASE_URL)("agents everyone can write hold no ow
     expect(await db.codingAgentProfile.count({ where: { agentId: target.id } })).toBe(0);
   });
 
+  it("refuses documentTools from a write-grantee, and on an agent everyone can write", async () => {
+    const writer = await principal();
+    const target = await agent(owner.id);
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "agent",
+        resourceId: target.id,
+        granteeKind: "principal",
+        granteePrincipalId: writer.id,
+        granteeKey: `principal:${writer.id}`,
+        level: "write",
+      },
+    });
+    const asWriter = await connect(writer);
+    const refused = await asWriter.call("update_agent", { id: target.id, documentTools: { access: "read" } });
+    await asWriter.close();
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toMatch(/only its owner/);
+    expect((await db.agent.findUnique({ where: { id: target.id } }))?.documentTools).toBeNull();
+
+    const open = await agent(owner.id);
+    await everyoneWrite(open.id);
+    const asOwner = await connect(owner);
+    const onPublic = await asOwner.call("update_agent", { id: open.id, documentTools: { access: "read" } });
+    await asOwner.close();
+    expect(onPublic.isError).toBe(true);
+    expect(onPublic.content[0].text).toMatch(/writable by everyone/);
+    expect((await db.agent.findUnique({ where: { id: open.id } }))?.documentTools).toBeNull();
+  });
+
+  it("counts documentTools as an owner binding and refuses everyone write while it is set", async () => {
+    const target = await agent(owner.id);
+    const mcp = await connect(owner);
+    const set = await mcp.call("update_agent", { id: target.id, documentTools: { access: "read" } });
+    expect(set.isError).toBeFalsy();
+    const listed = JSON.parse((await mcp.call("list_agents", {})).content[0].text) as {
+      id: string;
+      documentTools: unknown;
+    }[];
+    expect(listed.find((a) => a.id === target.id)?.documentTools).toMatchObject({ access: "read" });
+    expect(await agentOwnerBindings(db, target.id)).toEqual(["document tools"]);
+    const granted = await mcp.call("grant_access", {
+      resourceType: "agent",
+      resourceId: target.id,
+      grantee: "everyone",
+      level: "write",
+    });
+    await mcp.close();
+    expect(granted.isError).toBe(true);
+    expect(granted.content[0].text).toMatch(/document tools/);
+  });
+
   it("refuses everyone write on a coding agent, and counts only capability-granted tools", async () => {
     const coding = await agent(owner.id, {
       kind: "coding",

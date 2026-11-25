@@ -5,7 +5,7 @@ import { atLeast } from "../grants.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { cutUntrustedText } from "../untrusted-content.js";
-import { documentAccess, requireDocumentAccess } from "./access.js";
+import { documentAccess, refuseAgentViewer, requireDocumentAccess } from "./access.js";
 import type { Viewer } from "./access.js";
 import { DOCUMENT_WRITE_ATTEMPTS, MAX_COMMENT_CHARS } from "./limits.js";
 import { parseGuestMentions, parseMentionRefs } from "./mentions.js";
@@ -101,10 +101,10 @@ async function mentionsWithoutAccess(db: CommentDb, documentId: string, body: st
   return missing;
 }
 
-function authorFields(viewer: Viewer): { authorId: string | null; guestId: string | null } {
-  return viewer.kind === "principal"
-    ? { authorId: viewer.principalId, guestId: null }
-    : { authorId: null, guestId: viewer.guestId };
+function authorFields(viewer: Viewer): { authorId: string | null; guestId: string | null; runId?: string } {
+  if (viewer.kind === "principal") return { authorId: viewer.principalId, guestId: null };
+  if (viewer.kind === "agent") return { authorId: null, guestId: null, runId: viewer.runId };
+  return { authorId: null, guestId: viewer.guestId };
 }
 
 export async function createThread(
@@ -113,6 +113,8 @@ export async function createThread(
   input: { documentId: string; viewer: Viewer; anchor: unknown; body: string },
 ): Promise<{ threadId: string; number: number; mentionsWithoutAccess: string[] }> {
   const doc = await requireDocumentAccess(db, input.documentId, input.viewer, "comment");
+  // Agents reply to threads, they never open them. Checked after access, so an agent without access sees not found.
+  if (input.viewer.kind === "agent") throw new Error("document_access_denied");
   const fmt = formatFor(doc.kind);
   const parsed = fmt.parseAnchor(input.anchor);
   checkBody(input.body);
@@ -161,7 +163,11 @@ export async function reply(
   checkBody(input.body);
   // Open and outdated threads take replies (an outdated one lost its anchor, not its discussion).
   if (thread.status !== "open" && thread.status !== "outdated") throw new Error("comment_thread_closed");
-  const body = await redactForDocumentAgent(db, cipher, doc.agentId, input.body);
+  let body = await redactForDocumentAgent(db, cipher, doc.agentId, input.body);
+  // An agent viewer's own secret values stay out too, whichever agent the document is linked to.
+  if (input.viewer.kind === "agent" && input.viewer.agentId !== doc.agentId) {
+    body = await redactForDocumentAgent(db, cipher, input.viewer.agentId, body);
+  }
   const c = await db.comment.create({ data: { threadId: thread.id, body, ...authorFields(input.viewer) } });
   await notifyDocumentChange(db, doc.id, "comment");
   return { commentId: c.id, mentionsWithoutAccess: await mentionsWithoutAccess(db, doc.id, input.body) };
@@ -183,6 +189,7 @@ export async function commentByOthersSince(
   viewer: Viewer,
   since: Date,
 ): Promise<boolean> {
+  refuseAgentViewer(viewer);
   const others: Prisma.CommentWhereInput =
     viewer.kind === "principal"
       ? { OR: [{ authorId: null }, { authorId: { not: viewer.principalId } }, { runId: { not: null } }] }
@@ -207,6 +214,7 @@ export async function setThreadStatus(
   const first = thread.comments[0];
   const isAuthor =
     !!first &&
+    input.viewer.kind !== "agent" &&
     (input.viewer.kind === "principal"
       ? first.authorId === input.viewer.principalId && first.runId === null
       : first.guestId === input.viewer.guestId);
@@ -228,6 +236,8 @@ async function ownComment(db: CommentDb, commentId: string, viewer: Viewer) {
   const c = await db.comment.findUnique({ where: { id: commentId }, include: { thread: true } });
   if (!c || c.deletedAt) throw new Error("comment_not_found");
   const doc = await requireDocumentAccess(db, c.thread.documentId, viewer, "comment");
+  // An agent never edits or deletes a comment (its own included).
+  if (viewer.kind === "agent") throw new Error("comment_edit_forbidden");
   const own =
     c.runId === null &&
     (viewer.kind === "principal" ? c.authorId === viewer.principalId : c.guestId === viewer.guestId);
@@ -257,7 +267,8 @@ export async function listThreads(
   db: CommentDb,
   input: { documentId: string; viewer: Viewer; filter: ThreadFilter },
 ): Promise<ThreadView[]> {
-  const doc = await requireDocumentAccess(db, input.documentId, input.viewer, "read");
+  const viewer = input.viewer;
+  const doc = await requireDocumentAccess(db, input.documentId, viewer, "read");
   const threads = await db.commentThread.findMany({
     where: {
       documentId: input.documentId,
@@ -285,8 +296,10 @@ export async function listThreads(
   ]);
   const guestName = new Map(guests.map((g) => [g.id, g.name]));
   const isMine = (c: { authorId: string | null; guestId: string | null; runId: string | null }) =>
-    c.runId === null &&
-    (input.viewer.kind === "principal" ? c.authorId === input.viewer.principalId : c.guestId === input.viewer.guestId);
+    viewer.kind === "agent"
+      ? c.runId === viewer.runId
+      : c.runId === null &&
+        (viewer.kind === "principal" ? c.authorId === viewer.principalId : c.guestId === viewer.guestId);
 
   const fmt = formatFor(doc.kind);
   const views: ThreadView[] = threads.flatMap((t) => {

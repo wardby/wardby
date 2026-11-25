@@ -72,9 +72,10 @@ The same applies to designs and to Codex and Claude Code agents alike.
 - The document owner needs `execute` on the agent and must own it, or the agent's owner must allow others' task text (`document_agent_unavailable`).
 - `path` must be a safe repository-relative `.md` path and `baseRef` a valid branch name (`document_repo_link_invalid`).
 
-Native agents do not edit documents yet. See [Documents](documents.md) and [Coding agent setup](../docs/coding-agent-setup.md).
+A native agent can be a document's writer too: see [Documents from native agents](native-agent-documents.md). For coding agents, see [Documents](documents.md) and [Coding agent setup](../docs/coding-agent-setup.md).
 
 ## Related
 
 - [Documents](documents.md)
+- [Documents from native agents](native-agent-documents.md) (a native writer takes sends too)
 - [Review and approve documents](document-review.md) (an approved or archived document takes no agent edit)

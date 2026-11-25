@@ -8,12 +8,13 @@ import type { McpProviders } from "../context.js";
 import { buildMcpServer } from "../server.js";
 import { registerAgentTools } from "./agents.js";
 import { buildSecretsAccessor } from "../../core/secrets.js";
-import { principalGranteeKey } from "../../core/grants.js";
+import { agentGranteeKey, principalGranteeKey } from "../../core/grants.js";
 import { defaultRepositoryName } from "../../coding/repository-names.js";
 
 const db = createPrismaClient();
 const agentIds: string[] = [];
 const principalIds: string[] = [];
+const documentIds: string[] = [];
 
 async function principal(): Promise<Principal> {
   const p = await db.principal.create({ data: { subject: `make-owner-${randomUUID()}` } });
@@ -28,7 +29,8 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
     await db.agentTool.deleteMany({ where: { agentId: { in: agentIds } } });
     await db.agentSecret.deleteMany({ where: { agentId: { in: agentIds } } });
     await db.agentDatastore.deleteMany({ where: { agentId: { in: agentIds } } });
-    await db.resourceGrant.deleteMany({ where: { resourceId: { in: agentIds } } });
+    await db.resourceGrant.deleteMany({ where: { resourceId: { in: [...agentIds, ...documentIds] } } });
+    await db.document.deleteMany({ where: { id: { in: documentIds } } });
     await db.mcpServer.deleteMany({ where: { ownerId: { in: principalIds } } });
     await db.resourceGrant.deleteMany({
       where: { resourceType: "mcp_server", granteePrincipalId: { in: principalIds } },
@@ -320,6 +322,105 @@ describe.skipIf(!process.env.DATABASE_URL)("make_owner re-stamps repository appr
     );
     // The server itself is untouched.
     expect(await db.mcpServer.count({ where: { id: aServer.id } })).toBe(1);
+  });
+
+  it("between two owners make_owner turns document tools off and says so", async () => {
+    const [admin, a, b] = [await principal(), await principal(), await principal()];
+    const agent = await db.agent.create({
+      data: {
+        name: `make-owner-${randomUUID()}`,
+        systemPrompt: "x",
+        model: "m",
+        budgetUsd: 1,
+        ownerId: a.id,
+        documentTools: { access: "write", reviewers: [a.id], finalApproverId: null, maxNewPerRun: 5, plans: [] },
+      },
+    });
+    agentIds.push(agent.id);
+    const providers = {} as McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: "https://host/mcp" } });
+    mcp.setFixedContext({
+      principal: admin,
+      scopes: new Set(["agents:admin"]),
+      roles: ["admin"],
+      canonicalUri: "https://host/mcp",
+      providers,
+      db,
+      clientSupportsTasks: false,
+      mcpReq: { requestState: () => undefined },
+    });
+    registerAgentTools(mcp);
+    const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "t", version: "1" }, { versionNegotiation: { mode: "auto" } });
+    await server.connect(st);
+    await client.connect(ct);
+    const call = async (ownerId: string) =>
+      (await client.callTool({ name: "make_owner", arguments: { agentId: agent.id, ownerId } })) as {
+        isError?: boolean;
+        content: { text: string }[];
+      };
+    const result = await call(b.id);
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(result.content[0].text).documentToolsCleared).toBe(true);
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).documentTools).toBeNull();
+    // Nothing left to clear: the next transfer says false.
+    const again = await call(a.id);
+    await client.close();
+    expect(JSON.parse(again.content[0].text).documentToolsCleared).toBe(false);
+  });
+
+  it("between two owners make_owner removes document grants to the agent except on the new owner's documents", async () => {
+    const [admin, a, b, third] = [await principal(), await principal(), await principal(), await principal()];
+    const agent = await db.agent.create({
+      data: { name: `make-owner-${randomUUID()}`, systemPrompt: "x", model: "m", budgetUsd: 1, ownerId: a.id },
+    });
+    agentIds.push(agent.id);
+    const thirdDoc = await db.document.create({ data: { title: "Third", ownerId: third.id } });
+    const newOwnerDoc = await db.document.create({ data: { title: "New owner's", ownerId: b.id } });
+    documentIds.push(thirdDoc.id, newOwnerDoc.id);
+    for (const doc of [thirdDoc, newOwnerDoc]) {
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "document",
+          resourceId: doc.id,
+          granteeKind: "agent",
+          granteeAgentId: agent.id,
+          granteeKey: agentGranteeKey(agent.id),
+          level: "comment",
+        },
+      });
+    }
+    const providers = {} as McpProviders;
+    const mcp = buildMcpServer({ providers, db, config: { canonicalUri: "https://host/mcp" } });
+    mcp.setFixedContext({
+      principal: admin,
+      scopes: new Set(["agents:admin"]),
+      roles: ["admin"],
+      canonicalUri: "https://host/mcp",
+      providers,
+      db,
+      clientSupportsTasks: false,
+      mcpReq: { requestState: () => undefined },
+    });
+    registerAgentTools(mcp);
+    const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "t", version: "1" }, { versionNegotiation: { mode: "auto" } });
+    await server.connect(st);
+    await client.connect(ct);
+    const result = (await client.callTool({ name: "make_owner", arguments: { agentId: agent.id, ownerId: b.id } })) as {
+      isError?: boolean;
+      content: { text: string }[];
+    };
+    await client.close();
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(result.content[0].text).documentGrantsRemoved).toBe(1);
+    const left = await db.resourceGrant.findMany({
+      where: { resourceType: "document", granteeAgentId: agent.id },
+      select: { resourceId: true },
+    });
+    expect(left.map((g) => g.resourceId)).toEqual([newOwnerDoc.id]);
   });
 
   it("adopting an owner-less agent keeps its grants", async () => {

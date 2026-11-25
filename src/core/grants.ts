@@ -9,7 +9,7 @@
  * owner is above every level. Owner-less rows (ownerId null) are a
  * transition state: nobody is their owner, so access comes from grants only.
  */
-import type { PrismaClient } from "#prisma";
+import { Prisma, type PrismaClient } from "#prisma";
 
 export const LEVELS = {
   agent: ["read", "execute", "write"],
@@ -48,6 +48,13 @@ export const EVERYONE_KEY = "everyone";
 export function principalGranteeKey(principalId: string): string {
   return `principal:${principalId}`;
 }
+
+export function agentGranteeKey(agentId: string): string {
+  return `agent:${agentId}`;
+}
+
+/** Agents never hold write on a document through a grant: write comes from Document.agentId (#625). */
+export const AGENT_DOCUMENT_GRANT_MAX = "comment";
 
 export function isResourceType(value: string): value is ResourceType {
   return Object.hasOwn(LEVELS, value);
@@ -243,6 +250,7 @@ type BindingDb = Pick<
   | "agentTool"
   | "codingAgentProfile"
   | "agentMcpServer"
+  | "agent"
 >;
 
 /**
@@ -254,8 +262,8 @@ type BindingDb = Pick<
  * coding task.
  */
 export async function agentOwnerBindings(db: BindingDb, agentId: string): Promise<string[]> {
-  const [secrets, datastores, repositories, subagents, capabilityTools, codingProfiles, mcpServers] = await Promise.all(
-    [
+  const [secrets, datastores, repositories, subagents, capabilityTools, codingProfiles, mcpServers, documentTools] =
+    await Promise.all([
       db.agentSecret.count({ where: { agentId } }),
       db.agentDatastore.count({ where: { agentId } }),
       db.agentRepository.count({ where: { agentId } }),
@@ -277,8 +285,10 @@ export async function agentOwnerBindings(db: BindingDb, agentId: string): Promis
       db.codingAgentProfile.count({ where: { agentId } }),
       // A server's brokered secrets act for its owner on every call.
       db.agentMcpServer.count({ where: { agentId } }),
-    ],
-  );
+      // The built-in document tools create documents owned by the agent's owner and submit them to the owner's
+      // chosen reviewers; they never use the owner's own access to documents.
+      db.agent.count({ where: { id: agentId, documentTools: { not: Prisma.DbNull } } }),
+    ]);
   return Object.entries({
     secrets,
     datastores,
@@ -287,6 +297,7 @@ export async function agentOwnerBindings(db: BindingDb, agentId: string): Promis
     "tool capabilities": capabilityTools,
     "a coding repository": codingProfiles,
     "MCP servers": mcpServers,
+    "document tools": documentTools,
   })
     .filter(([, count]) => count > 0)
     .map(([kind]) => kind);

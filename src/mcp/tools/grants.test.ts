@@ -46,7 +46,9 @@ function fakeDb(
     codingAgentProfile: { count: async () => bindings.codingAgentProfile ?? 0 },
     agentMcpServer: { count: async () => bindings.agentMcpServer ?? 0 },
     agent: {
-      findMany: async () => [],
+      count: async () => 0,
+      findMany: async ({ where }: { where?: { id?: { in: string[] } } } = {}) =>
+        where?.id ? agents.filter((r) => where.id!.in.includes(r.id)).map((r) => ({ id: r.id, name: r.name })) : [],
       findUnique: async ({ where }: { where: { id: string } }) => {
         const row = byId.get(where.id);
         return row ? { kind: "native", codingProfile: null, budgetUsd: 1, model: "m", ...row } : null;
@@ -285,6 +287,120 @@ describe("grant_access / revoke_access / list_access", () => {
     expect(refused.isError).toBe(true);
     expect(text(refused)).toMatch(/owner/);
     await reader.client.close();
+  });
+
+  it("shares a document with an agent at read or comment, lists it with the agent's name, and revokes it", async () => {
+    const db = fakeDb(agents, people);
+    const { client } = await connect(db, ctx(db, "owner"));
+    const call = (name: string, args: Record<string, unknown>) =>
+      client.callTool({ name, arguments: { resourceType: "document", resourceId: "d1", ...args } });
+
+    const ok = await call("grant_access", { grantee: { agentId: "a1" }, level: "read" });
+    expect(ok.isError).toBeFalsy();
+    expect(JSON.parse(text(ok)).grantee).toEqual({ agentId: "a1" });
+    expect(db.resourceGrant.rows).toMatchObject([
+      { granteeKind: "agent", granteeAgentId: "a1", granteeKey: "agent:a1", level: "read" },
+    ]);
+    // Granting again replaces the level.
+    await call("grant_access", { grantee: { agentId: "a1" }, level: "comment" });
+    expect(db.resourceGrant.rows).toHaveLength(1);
+    expect(db.resourceGrant.rows[0].level).toBe("comment");
+
+    const listed = JSON.parse(text(await call("list_access", {})));
+    expect(listed.grants[0].grantee).toEqual({ agentId: "a1", agentName: "mine" });
+
+    const revoked = JSON.parse(text(await call("revoke_access", { grantee: { agentId: "a1" } })));
+    expect(revoked.revoked).toBe(true);
+    expect(db.resourceGrant.rows).toHaveLength(0);
+    await client.close();
+  });
+
+  it("refuses an agent write grant, agent grantees on other types, and an unknown agent", async () => {
+    const db = fakeDb(agents, people);
+    const { client } = await connect(db, ctx(db, "owner"));
+    const grant = (args: Record<string, unknown>) =>
+      client.callTool({ name: "grant_access", arguments: { resourceType: "document", resourceId: "d1", ...args } });
+
+    const write = await grant({ grantee: { agentId: "a1" }, level: "write" });
+    expect(write.isError).toBe(true);
+    expect(text(write)).toMatch(/document_agent_grant_level/);
+    expect(text(write)).toMatch(/link_document/);
+
+    const wrongType = await grant({
+      resourceType: "agent",
+      resourceId: "a1",
+      grantee: { agentId: "child" },
+      level: "read",
+    });
+    expect(wrongType.isError).toBe(true);
+    expect(text(wrongType)).toMatch(/agent grantees are for documents only/i);
+    const wrongRevoke = await client.callTool({
+      name: "revoke_access",
+      arguments: { resourceType: "agent", resourceId: "a1", grantee: { agentId: "child" } },
+    });
+    expect(text(wrongRevoke)).toMatch(/agent grantees are for documents only/i);
+
+    const unknown = await grant({ grantee: { agentId: "nope" }, level: "read" });
+    expect(unknown.isError).toBe(true);
+    expect(text(unknown)).toMatch(/Grantee not found/);
+    expect(db.resourceGrant.rows).toHaveLength(0);
+    await client.close();
+  });
+
+  it("an agent the grantor cannot read looks like an unknown one; a read grant on it makes it grantable", async () => {
+    const hidden: Row[] = [...agents, { id: "theirs", name: "theirs", ownerId: "alice" }];
+    const db = fakeDb(hidden, people);
+    const { client } = await connect(db, ctx(db, "owner"));
+    const grant = (agentId: string) =>
+      client.callTool({
+        name: "grant_access",
+        arguments: { resourceType: "document", resourceId: "d1", grantee: { agentId }, level: "read" },
+      });
+    const unknown = await grant("nope");
+    const unseen = await grant("theirs");
+    expect(unseen.isError).toBe(true);
+    expect(text(unseen)).toBe(text(unknown));
+    expect(db.resourceGrant.rows).toHaveLength(0);
+    await client.close();
+
+    const db2 = fakeDb(hidden, people, [
+      { resourceType: "agent", resourceId: "theirs", principalId: "owner", level: "read" },
+    ]);
+    const second = await connect(db2, ctx(db2, "owner"));
+    const ok = await second.client.callTool({
+      name: "grant_access",
+      arguments: { resourceType: "document", resourceId: "d1", grantee: { agentId: "theirs" }, level: "read" },
+    });
+    expect(ok.isError).toBeFalsy();
+    expect(db2.resourceGrant.rows.some((r: { granteeKey: string }) => r.granteeKey === "agent:theirs")).toBe(true);
+    await second.client.close();
+  });
+
+  it("revoking an agent grantee that does not exist is idempotent", async () => {
+    const db = fakeDb(agents, people);
+    const { client } = await connect(db, ctx(db, "owner"));
+    const result = await client.callTool({
+      name: "revoke_access",
+      arguments: { resourceType: "document", resourceId: "d1", grantee: { agentId: "deleted" } },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(text(result)).revoked).toBe(false);
+    await client.close();
+  });
+
+  it("only the document's owner may grant it to an agent, like a principal grant", async () => {
+    const db = fakeDb(agents, people, [
+      { resourceType: "document", resourceId: "d1", principalId: "alice", level: "write" },
+    ]);
+    const alice = await connect(db, ctx(db, "alice"));
+    const refused = await alice.client.callTool({
+      name: "grant_access",
+      arguments: { resourceType: "document", resourceId: "d1", grantee: { agentId: "a1" }, level: "read" },
+    });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toMatch(/only its owner/);
+    expect(db.resourceGrant.rows).toHaveLength(1);
+    await alice.client.close();
   });
 
   it("a principal who reaches a plan document only through its access agent gets 403, like other non-owners", async () => {

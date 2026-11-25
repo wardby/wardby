@@ -64,4 +64,5 @@ Codes such as `document_not_found`, `document_access_denied`, `document_too_larg
 - [Plan documents](plan-documents.md)
 - [Share a document by link](document-share-links.md)
 - [Send comment threads to a coding agent](comment-threads-and-agents.md)
+- [Documents from native agents](native-agent-documents.md)
 - [Browser sign-in for document pages](web-sign-in.md)

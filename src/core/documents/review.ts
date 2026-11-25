@@ -203,6 +203,7 @@ async function record(
       documentId: input.documentId,
       actorPrincipalId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
       actorGuestId: input.viewer.kind === "guest" ? input.viewer.guestId : null,
+      actorRunId: input.viewer.kind === "agent" ? input.viewer.runId : null,
       kind: input.kind,
       fromState: input.from,
       toState: input.to,
@@ -259,13 +260,24 @@ async function ensureCommentAccess(tx: Tx, doc: { id: string; ownerId: string },
   });
 }
 
+/**
+ * An agent never approves, force-approves, reopens or archives. The document check runs first, so an agent
+ * with no access to the document sees document_not_found, not a refusal that confirms it exists.
+ */
+async function denyAgent(db: PrismaClient, documentId: string, viewer: Viewer): Promise<never> {
+  await requireDocumentAccess(db, documentId, viewer, "read");
+  throw new Error("document_access_denied");
+}
+
 export async function submitForReview(
   db: PrismaClient,
   input: { documentId: string; viewer: Viewer; reviewers: string[]; finalApproverId?: string | null },
 ): Promise<ReviewView> {
-  await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
-  if (input.viewer.kind !== "principal") throw new Error("document_access_denied");
-  const by = input.viewer.principalId;
+  // An agent needs write on the document; a person needs to own it.
+  const need = input.viewer.kind === "agent" ? "write" : "owner";
+  await requireDocumentAccess(db, input.documentId, input.viewer, need);
+  if (input.viewer.kind === "guest") throw new Error("document_access_denied");
+  const by = input.viewer.kind === "principal" ? input.viewer.principalId : null;
   const refs = [...new Set(input.reviewers)];
   if (refs.length === 0 || refs.length > MAX_REVIEWERS) invalid();
   const parsed = refs.map(parseRef);
@@ -273,8 +285,16 @@ export async function submitForReview(
   const guestIds = parsed.flatMap((r) => ("guestId" in r ? [r.guestId] : []));
   const approver = input.finalApproverId;
   await inReviewTx(db, async (tx) => {
-    await requireDocumentAccess(tx, input.documentId, input.viewer, "owner");
+    await requireDocumentAccess(tx, input.documentId, input.viewer, need);
     const { doc, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
+    // Grants made for the reviewers are attributed to the owner when an agent submits.
+    const grantedBy = by ?? doc.ownerId;
+    // An agent submits only its own owner's documents: the reviewer grants it makes act on the owner's behalf,
+    // so a document someone else owns (one they linked to the agent) is never shared by it.
+    if (input.viewer.kind === "agent") {
+      const agent = await tx.agent.findUnique({ where: { id: input.viewer.agentId }, select: { ownerId: true } });
+      if (!agent?.ownerId || agent.ownerId !== doc.ownerId) throw new Error("document_review_forbidden");
+    }
     if (!SUBMITTABLE.has(doc.reviewState)) invalid();
     const known = await tx.principal.findMany({
       where: { id: { in: [...principalIds, ...(approver ? [approver] : [])] } },
@@ -297,14 +317,14 @@ export async function submitForReview(
       if (!keep.some((r) => r.principalId === principalId)) {
         await tx.documentReviewer.create({ data: { documentId: doc.id, principalId } });
       }
-      await ensureCommentAccess(tx, doc, principalId, by);
+      await ensureCommentAccess(tx, doc, principalId, grantedBy);
     }
     for (const guestId of guestIds) {
       if (!keep.some((r) => r.guestId === guestId)) {
         await tx.documentReviewer.create({ data: { documentId: doc.id, guestId } });
       }
     }
-    if (approver) await ensureCommentAccess(tx, doc, approver, by);
+    if (approver) await ensureCommentAccess(tx, doc, approver, grantedBy);
     const next = await readReview(tx, doc.id);
     await record(tx, {
       documentId: doc.id,
@@ -333,14 +353,15 @@ export async function reviewDocument(
     note?: string;
   },
 ): Promise<ReviewView> {
-  const doc = await requireDocumentAccess(db, input.documentId, input.viewer, "comment");
+  const viewer = input.viewer;
+  if (viewer.kind === "agent") return denyAgent(db, input.documentId, viewer);
+  const doc = await requireDocumentAccess(db, input.documentId, viewer, "comment");
   const note = await storedNote(db, cipher, doc.agentId, input.note);
   const verdict: Verdict = input.verdict === "approve" ? "approved" : "changes_requested";
   const changed = await inReviewTx(db, async (tx) => {
     // Live access decides inside the transaction: a grant or link revoked since the early check is seen here.
     await requireDocumentAccess(tx, input.documentId, input.viewer, "comment");
     const { doc: row, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
-    const viewer = input.viewer;
     const mine = reviewers.find((r) =>
       viewer.kind === "principal" ? r.principalId === viewer.principalId : r.guestId === viewer.guestId,
     );
@@ -385,6 +406,7 @@ export async function forceApprove(
   input: { documentId: string; viewer: Viewer; note: string },
 ): Promise<{ view: ReviewView; overridden: string[] }> {
   const viewer = input.viewer;
+  if (viewer.kind === "agent") return denyAgent(db, input.documentId, viewer);
   if (viewer.kind !== "principal") throw new Error("document_review_forbidden");
   const principalId = viewer.principalId;
   const access = await documentAccess(db, input.documentId, input.viewer);
@@ -440,6 +462,7 @@ export async function reopenDocument(
   cipher: Cipher,
   input: { documentId: string; viewer: Viewer },
 ): Promise<ReviewView> {
+  if (input.viewer.kind === "agent") return denyAgent(db, input.documentId, input.viewer);
   // Anyone who can open the document but not write it (a guest included) is refused as a review action, so
   // they are told to ask someone who can edit it to reopen it.
   const access = await documentAccess(db, input.documentId, input.viewer);
@@ -511,6 +534,7 @@ export async function setArchived(
   db: PrismaClient,
   input: { documentId: string; viewer: Viewer; archived: boolean },
 ): Promise<ReviewView> {
+  if (input.viewer.kind === "agent") return denyAgent(db, input.documentId, input.viewer);
   await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
   await inReviewTx(db, async (tx) => {
     await requireDocumentAccess(tx, input.documentId, input.viewer, "owner");
@@ -599,7 +623,9 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
   const nameOf = (p: string | null, g: string | null) =>
     p ? (names.get(p) ?? "Former member") : g ? (guests.get(g) ?? "Guest") : "Someone";
   const isMe = (p: string | null, g: string | null) =>
-    viewer.kind === "principal" ? p !== null && p === viewer.principalId : g !== null && g === viewer.guestId;
+    viewer.kind === "principal"
+      ? p !== null && p === viewer.principalId
+      : viewer.kind === "guest" && g !== null && g === viewer.guestId;
   const state = isReviewState(doc.reviewState) ? doc.reviewState : "draft";
   // Whether each reviewer's verdict counts now: the view and the force banner use the same answer.
   const counts = new Map(rule.reviewers.map((r) => [r.id, reviewerCounts(r, rule)]));
@@ -658,7 +684,7 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
       id: e.id,
       kind: e.kind as ReviewEventKind,
       actorRef: e.actorPrincipalId ?? (e.actorGuestId ? `guest:${e.actorGuestId}` : null),
-      actorName: nameOf(e.actorPrincipalId, e.actorGuestId),
+      actorName: e.actorRunId ? "Agent" : nameOf(e.actorPrincipalId, e.actorGuestId),
       fromState: e.fromState as ReviewState,
       toState: e.toState as ReviewState,
       versionNumber: e.versionNumber,
@@ -667,7 +693,7 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
       createdAt: e.createdAt,
     })),
     can: {
-      submit: owner && SUBMITTABLE.has(state),
+      submit: (owner || (viewer.kind === "agent" && atLeast("document", access, "write"))) && SUBMITTABLE.has(state),
       review:
         listed &&
         REVIEWABLE.has(state) &&
