@@ -15,6 +15,8 @@ import type { PrismaClient } from "#prisma";
 import type { LoadedTool } from "../providers/engine/types.js";
 import { logger } from "./logger.js";
 import { requireDocumentAccess, type Viewer } from "./documents/access.js";
+import { MAX_SEND_MARKDOWN_CHARS } from "./documents/agent-formats.js";
+import { MAX_COMMENT_CHARS } from "./documents/limits.js";
 import { listThreads } from "./documents/comments.js";
 import { listDocumentsForAgent } from "./documents/list.js";
 import type { Cipher } from "./documents/review.js";
@@ -43,7 +45,7 @@ const MESSAGES: Record<string, string> = {
   document_version_not_found: "The document has no such version.",
   document_format_mismatch:
     "That content does not match the document's kind (Markdown for a document, files for a design).",
-  document_too_large_for_agent: "The document is too large to hand to an agent.",
+  document_too_large_for_agent: "The document is too large for an agent to read in one call.",
   board_format_invalid: "The design files are not a valid design (check manifest.json and the boards).",
   document_run_limit: "This run has already created as many documents as its setting allows.",
   document_agent_unavailable: "The documents are not available to this agent right now.",
@@ -80,6 +82,7 @@ const DATA_NOTE =
 const idProp = (what: string) => ({ type: "string", minLength: 1, maxLength: 128, description: what });
 const filesProp = {
   type: "object",
+  propertyNames: { maxLength: 300 },
   additionalProperties: { type: "string" },
   description:
     'A design\'s files by path ("manifest.json" and "boards/<id>.html"). Use this for designs, markdown for documents; never both.',
@@ -141,6 +144,7 @@ export const DOCUMENT_WRITE_TOOL_DEFS: LoadedTool[] = [
       type: "object",
       properties: {
         kind: { type: "string", enum: ["document", "design"], description: "Default document." },
+        // Task 7's zod should trim the title before min(1), as the MCP create_document does.
         title: { type: "string", minLength: 1, maxLength: 200 },
         markdown: { type: "string", description: "The content of a document." },
         files: filesProp,
@@ -170,7 +174,10 @@ export const DOCUMENT_WRITE_TOOL_DEFS: LoadedTool[] = [
     description: `Replies to a comment thread on a document this agent can comment on. Agents reply to threads; they do not open new ones. ${DATA_NOTE}`,
     jsonSchema: {
       type: "object",
-      properties: { threadId: idProp("The thread id."), body: { type: "string", minLength: 1, maxLength: 20000 } },
+      properties: {
+        threadId: idProp("The thread id."),
+        body: { type: "string", minLength: 1, maxLength: MAX_COMMENT_CHARS },
+      },
       required: ["threadId", "body"],
       additionalProperties: false,
     },
@@ -263,6 +270,11 @@ export async function handleDocumentTool(name: string, argsJson: string, ctx: Do
             ? await getDocument(db, doc.id).then((r) => ({ number: r.version.number, content: r.content }))
             : await getVersion(db, { documentId: doc.id, viewer, number: a.version });
         const review = await getReviewView(db, doc.id, viewer);
+        const size =
+          read.content.format === "markdown"
+            ? read.content.markdown.length
+            : Object.values(read.content.files).reduce((n, f) => n + f.length, 0);
+        if (size > MAX_SEND_MARKDOWN_CHARS) return errorResult("document_too_large_for_agent");
         const body =
           read.content.format === "markdown" ? { markdown: read.content.markdown } : { files: read.content.files };
         return JSON.stringify({
