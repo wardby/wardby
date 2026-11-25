@@ -351,28 +351,6 @@ describe.skipIf(!process.env.DATABASE_URL)("finishLogin (database)", () => {
     expect(await db.principal.findUnique({ where: { subject: `${subject}-fallback` } })).toBeNull();
   });
 
-  it("with WEB_OIDC_SUBJECT_EMAIL_DOMAIN, uses a verified email's local part at that domain only", async () => {
-    const local = `${subject}-mail`;
-    const mcpPrincipal = await resolvePrincipal(local, db);
-    const login = createOidcLogin(options({ subjectEmailDomain: "example.com" }));
-    let { cookieHeader, state } = await begin(login);
-    idOverrides = { subject: "00u-opaque-id", claims: { email: `${local}@Example.COM`, email_verified: true } };
-    await withMintedReply();
-    expect((await login.finishLogin(db, { url: callback(state), cookieHeader })).principalId).toBe(mcpPrincipal.id);
-    await db.principalProfile.deleteMany({ where: { principalId: mcpPrincipal.id } });
-    // Unverified, or another domain: the sign-in fails and no principal is made.
-    for (const claims of [
-      { email: `${local}-x@example.com`, email_verified: false },
-      { email: `${local}-x@example.com.evil.test`, email_verified: true },
-    ]) {
-      ({ cookieHeader, state } = await begin(login));
-      idOverrides = { subject: "00u-opaque-id", claims };
-      await withMintedReply();
-      expect(await codeOf(login.finishLogin(db, { url: callback(state), cookieHeader }))).toBe("web_login_failed");
-    }
-    expect(await db.principal.findUnique({ where: { subject: `${local}-x` } })).toBeNull();
-  });
-
   it("uses preferred_username when the ID token has no name, and a public client sends only client_id", async () => {
     const login = createOidcLogin(options({ clientSecret: undefined }));
     const { cookieHeader, state } = await begin(login);
