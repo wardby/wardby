@@ -173,11 +173,9 @@ access tokens MCP clients receive, so both sign-ins map to the same Wardby
 principal. Some providers cannot do this: their ID token `sub` is always the
 provider's own user id (Okta's `00u…`), while the access token's `sub` can be a
 username. Then set `WEB_OIDC_SUBJECT_CLAIM` to an ID token claim you add at the
-provider carrying the access token's `sub` value. If the access token's `sub`
-is the local part of the user's email address, you can instead set
-`WEB_OIDC_SUBJECT_EMAIL_DOMAIN` to that email domain: Wardby then uses the local
-part of a verified email at exactly that domain. A sign-in without a usable
-value fails with `web_login_failed` and never falls back to `sub`.
+provider carrying the access token's `sub` value. The claim's value must be a
+string, and only administrators should be able to change it: whoever can set it
+can sign in as that person. A sign-in without a usable value fails with `web_login_failed` and never falls back to `sub`.
 
 Wardby looks up `AUTH_ROLE_CLAIM` in two steps:
 
@@ -313,11 +311,9 @@ access tokens MCP clients receive, so both sign-ins map to the same Wardby
 principal. Some providers cannot do this: their ID token `sub` is always the
 provider's own user id (Okta's `00u…`), while the access token's `sub` can be a
 username. Then set `WEB_OIDC_SUBJECT_CLAIM` to an ID token claim you add at the
-provider carrying the access token's `sub` value. If the access token's `sub`
-is the local part of the user's email address, you can instead set
-`WEB_OIDC_SUBJECT_EMAIL_DOMAIN` to that email domain: Wardby then uses the local
-part of a verified email at exactly that domain. A sign-in without a usable
-value fails with `web_login_failed` and never falls back to `sub`.
+provider carrying the access token's `sub` value. The claim's value must be a
+string, and only administrators should be able to change it: whoever can set it
+can sign in as that person. A sign-in without a usable value fails with `web_login_failed` and never falls back to `sub`.
 
 Copy `AUTH_ISSUER` exactly from the token's `iss` claim or the provider's
 metadata. Copy `AUTH_JWKS_URI` from the provider's metadata rather than
