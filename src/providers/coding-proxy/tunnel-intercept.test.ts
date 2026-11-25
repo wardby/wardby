@@ -35,6 +35,7 @@ const publicResolver: Resolver = async () => [{ address: PUBLIC_ADDRESS, family:
 
 const config: CodingTunnelConfig = {
   port: 0,
+  agentHosts: "off",
   allowedHosts: [HOST, BLIND_HOST],
   maxConnections: 16,
   maxBytes: 1024 * 1024,

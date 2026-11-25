@@ -79,6 +79,11 @@ export interface ProxySession {
    * returns it; null on sessions from before the tunnel.
    */
   tunnelTokenHash?: string | null;
+  /**
+   * The tunnel host patterns the run was given at dispatch (codingProfile.tunnelHosts within the ceiling then).
+   * Only findSessionByTunnelTokenHash reads them; empty when the run has none, and on older sessions.
+   */
+  tunnelHosts?: string[];
   /** When the ledger first refused a request of this session for budget. */
   budgetExhaustedAt?: Date | null;
   /** The numbers behind the first budget refusal, set with budgetExhaustedAt. */
@@ -162,6 +167,8 @@ export interface CreateProxySessionInput {
   registryTokenHash: string;
   /** SHA-256 (base64url) of the run's tunnel token; absent when the session cannot open tunnels. */
   tunnelTokenHash?: string;
+  /** The run's tunnel host patterns, pinned at dispatch (normalised, at most MAX_TUNNEL_HOSTS); absent = none. */
+  tunnelHosts?: string[];
   terms?: ProxyModelTerms;
   /** The run's pinned MCP tools; set together with mcpTokenHash, and only when there is at least one. */
   mcpTools?: CodingToolPin[];

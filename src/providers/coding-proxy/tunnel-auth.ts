@@ -10,6 +10,8 @@ import type { ProxyLedger } from "./types.js";
 export interface TunnelIdentity {
   runId: string;
   deadlineAt: Date;
+  /** The tunnel host patterns the run was given at dispatch (its agent's codingProfile.tunnelHosts); empty when none. */
+  tunnelHosts: string[];
 }
 
 export type TunnelAuthResult =
@@ -41,7 +43,10 @@ export class LedgerTunnelAuthenticator implements TunnelAuthenticator {
     if (session.status !== "active" || session.deadlineAt.getTime() <= this.now().getTime()) {
       return { ok: false, reason: "inactive" };
     }
-    return { ok: true, identity: { runId: session.runId, deadlineAt: session.deadlineAt } };
+    return {
+      ok: true,
+      identity: { runId: session.runId, deadlineAt: session.deadlineAt, tunnelHosts: [...(session.tunnelHosts ?? [])] },
+    };
   }
 
   isActive(runId: string): Promise<boolean> {

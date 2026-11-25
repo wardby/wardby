@@ -27,6 +27,7 @@ function cloneSession(session: ProxySession): ProxySession {
       ? { version: session.terms.version, entry: { ...session.terms.entry, efforts: [...session.terms.entry.efforts] } }
       : null,
     mcpTools: session.mcpTools ? structuredClone(session.mcpTools) : null,
+    ...(session.tunnelHosts ? { tunnelHosts: [...session.tunnelHosts] } : {}),
   };
 }
 
@@ -71,6 +72,7 @@ export class MemoryProxyLedger implements ProxyLedger {
     const session: ProxySession = {
       ...input,
       allowedModels: [...input.allowedModels],
+      tunnelHosts: [...(input.tunnelHosts ?? [])],
       status: "active",
       terms: input.terms ? normalizeProxyModelTerms(input.terms) : null,
       // As the Prisma ledger reads it back: a native pin's code and grants never reach the proxy.

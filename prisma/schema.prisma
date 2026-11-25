@@ -557,6 +557,15 @@ model CodingAgentProfile {
   /// The principal whose GitHub access (or admin approval) authorized it. Audit only, no FK.
   repositoryAuthorizedById String?
   repositoryAuthorizedAt   DateTime?
+
+  /// Per-agent CONNECT tunnel hosts (docs/coding-proxy-tunnel.md): exact hosts, `*.domain` or `*`, normalised,
+  /// at most 50. Owner-set within the operator's CODING_TUNNEL_AGENT_HOSTS ceiling; pinned onto each run's
+  /// proxy session at dispatch. Empty = none (only the server list applies).
+  tunnelHosts                 String[]  @default([])
+  /// Who approved `*` in tunnelHosts (an admin: agents:admin with the admin role), and when. Audit only, no
+  /// FK. Null when tunnelHosts has no `*`; a run is given `*` only while this is set.
+  tunnelAnyHostAuthorizedById String?
+  tunnelAnyHostAuthorizedAt   DateTime?
 }
 
 /// Phase 5: immutable dispatch inputs plus opaque execution/result state for
@@ -1114,6 +1123,9 @@ model CodingProxySession {
   mcpTools                  Json?
   /// SHA-256 (base64url) of the run's MCP token; null when the run has no MCP tools.
   mcpTokenHash              String?                  @unique
+  /// The run's tunnel host patterns (its agent's codingProfile.tunnelHosts within the ceiling at dispatch),
+  /// fixed for the session: a later edit to the agent does not change them. Empty = none.
+  tunnelHosts               String[]                 @default([])
   /// The run's Run.runStepsLevel, copied at session creation: the proxy sends a tool result's
   /// output tail to the run-steps listener only at detail. Null on older sessions (= summary).
   runStepsLevel             RunStepsLevel?

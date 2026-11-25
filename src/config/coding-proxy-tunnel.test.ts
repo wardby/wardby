@@ -15,6 +15,7 @@ describe("loadCodingTunnelConfig", () => {
     expect(loadCodingTunnelConfig(valid)).toEqual({
       port: 8789,
       allowedHosts: ["registry.example.com"],
+      agentHosts: "off",
       maxConnections: 16,
       maxBytes: 4096 * MIB,
       idleMs: 120_000,
@@ -52,12 +53,44 @@ describe("loadCodingTunnelConfig", () => {
     );
   });
 
-  it("refuses an empty allowlist", () => {
+  it("refuses an empty allowlist while per-agent hosts are off", () => {
     for (const hosts of [undefined, "", " , "]) {
-      expect(() => loadCodingTunnelConfig({ CODING_TUNNEL_PORT: "8789", CODING_TUNNEL_ALLOWED_HOSTS: hosts })).toThrow(
-        "CODING_TUNNEL_ALLOWED_HOSTS must list at least one host.",
-      );
+      for (const agentHosts of [undefined, "off"]) {
+        expect(() =>
+          loadCodingTunnelConfig({
+            CODING_TUNNEL_PORT: "8789",
+            CODING_TUNNEL_ALLOWED_HOSTS: hosts,
+            CODING_TUNNEL_AGENT_HOSTS: agentHosts,
+          }),
+        ).toThrow("CODING_TUNNEL_ALLOWED_HOSTS must list at least one host while CODING_TUNNEL_AGENT_HOSTS is off.");
+      }
     }
+  });
+
+  it.each(["exact", "pattern", "any"])(
+    "reads CODING_TUNNEL_AGENT_HOSTS=%s and then allows an empty server list",
+    (level) => {
+      expect(loadCodingTunnelConfig({ CODING_TUNNEL_PORT: "8789", CODING_TUNNEL_AGENT_HOSTS: level })).toMatchObject({
+        allowedHosts: [],
+        agentHosts: level,
+      });
+      expect(loadCodingTunnelConfig({ ...valid, CODING_TUNNEL_AGENT_HOSTS: level })).toMatchObject({
+        allowedHosts: ["registry.example.com"],
+        agentHosts: level,
+      });
+    },
+  );
+
+  it("refuses an unknown CODING_TUNNEL_AGENT_HOSTS without echoing it", () => {
+    expect(() => loadCodingTunnelConfig({ ...valid, CODING_TUNNEL_AGENT_HOSTS: "wide-open" })).toThrow(
+      /^CODING_TUNNEL_AGENT_HOSTS must be "off", "exact", "pattern" or "any"\.$/,
+    );
+  });
+
+  it("needs the port for CODING_TUNNEL_AGENT_HOSTS too", () => {
+    expect(() => loadCodingTunnelConfig({ CODING_TUNNEL_AGENT_HOSTS: "pattern" })).toThrow(
+      "CODING_TUNNEL_PORT is required when another CODING_TUNNEL_* setting is set.",
+    );
   });
 
   it.each([

@@ -5,6 +5,7 @@ import { SHIPPED_CATALOG_VERSION } from "../llm/catalog-shipped.js";
 import type { ThinkingMode } from "../llm/catalog-types.js";
 import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { deriveTunnelToken } from "../../coding/tunnel-token.js";
+import { MAX_TUNNEL_HOSTS, parseTunnelHostPattern } from "../../coding/tunnel-hosts.js";
 import { capabilityHash } from "./capability-hash.js";
 import { CLAUDE_MCP_TOOL_PREFIX } from "../../coding/mcp-token.js";
 import type { CodingToolPin } from "../../core/coding-native-tools.js";
@@ -158,6 +159,11 @@ export interface CreateCodingProxySession {
   workflow?: boolean;
   /** Native mode with repository skills (#582): its requests may use the Skill tool. Absent = false. */
   skills?: boolean;
+  /**
+   * The run's tunnel host patterns (its agent's codingProfile.tunnelHosts, within the ceiling at dispatch),
+   * normalised. Fixed for the session: a later edit to the agent does not change them. Absent = none.
+   */
+  tunnelHosts?: string[];
 }
 
 export interface CreatedCodingProxySession {
@@ -1288,6 +1294,17 @@ export class CodingProxy {
     if (input.runStepsLevel !== undefined && !RUN_STEPS_LEVELS.includes(input.runStepsLevel)) {
       throw new Error("invalid_proxy_run_steps_level");
     }
+    const tunnelHosts = input.tunnelHosts ?? [];
+    if (
+      tunnelHosts.length > MAX_TUNNEL_HOSTS ||
+      new Set(tunnelHosts).size !== tunnelHosts.length ||
+      tunnelHosts.some((pattern) => {
+        const parsed = parseTunnelHostPattern(pattern);
+        return !parsed.ok || parsed.pattern !== pattern;
+      })
+    ) {
+      throw new Error("invalid_proxy_tunnel_hosts");
+    }
     const capability = `rrp_${randomBytes(32).toString("base64url")}`;
     const id = randomUUID();
     const registryTokenHash = capabilityHash(deriveRegistryToken(capability));
@@ -1303,6 +1320,7 @@ export class CodingProxy {
       budgetUsd: input.budgetUsd,
       registryTokenHash,
       tunnelTokenHash,
+      ...(tunnelHosts.length > 0 ? { tunnelHosts: [...tunnelHosts] } : {}),
       terms: input.terms,
       ...(mcp ? { mcpTools: input.mcpTools, mcpTokenHash: input.mcpTokenHash } : {}),
       ...(input.runStepsLevel ? { runStepsLevel: input.runStepsLevel } : {}),

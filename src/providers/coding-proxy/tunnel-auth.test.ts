@@ -30,7 +30,58 @@ describe("LedgerTunnelAuthenticator", () => {
   it("accepts the tunnel token derived from the run's capability", async () => {
     const { ledger, session } = await setup();
     const result = await new LedgerTunnelAuthenticator(ledger).authenticate(deriveTunnelToken(session.capability));
-    expect(result).toEqual({ ok: true, identity: { runId: "run-1", deadlineAt: session.deadlineAt } });
+    expect(result).toEqual({ ok: true, identity: { runId: "run-1", deadlineAt: session.deadlineAt, tunnelHosts: [] } });
+  });
+
+  it("returns the tunnel host patterns pinned on the session", async () => {
+    const ledger = new MemoryProxyLedger();
+    const proxy = new CodingProxy({
+      ledger,
+      credentials: { resolve: async () => "UNUSED" },
+      pricing: () => ({ encoding: "o200k_base", inputPerMTok: 1, outputPerMTok: 1 }),
+    });
+    const session = await proxy.createSession({
+      runId: "run-p",
+      credentialRef: "openai/test",
+      protocol: "openai-responses",
+      allowedModels: ["test-model"],
+      deadlineAt: new Date(Date.now() + 60_000),
+      budgetUsd: 1,
+      tunnelHosts: ["api.example.com", "*.example.org", "*"],
+    });
+    const result = await new LedgerTunnelAuthenticator(ledger).authenticate(deriveTunnelToken(session.capability));
+    expect(result).toEqual({
+      ok: true,
+      identity: {
+        runId: "run-p",
+        deadlineAt: session.deadlineAt,
+        tunnelHosts: ["api.example.com", "*.example.org", "*"],
+      },
+    });
+  });
+
+  it.each([
+    ["a pattern that does not parse", ["*.com"]],
+    ["an unnormalised pattern", ["API.example.com"]],
+    ["a duplicate", ["a.example.com", "a.example.com"]],
+    ["too many patterns", Array.from({ length: 51 }, (_, i) => `h${i}.example.com`)],
+  ])("refuses to create a session with %s", async (_name, tunnelHosts) => {
+    const proxy = new CodingProxy({
+      ledger: new MemoryProxyLedger(),
+      credentials: { resolve: async () => "UNUSED" },
+      pricing: () => ({ encoding: "o200k_base", inputPerMTok: 1, outputPerMTok: 1 }),
+    });
+    await expect(
+      proxy.createSession({
+        runId: "run-x",
+        credentialRef: "openai/test",
+        protocol: "openai-responses",
+        allowedModels: ["test-model"],
+        deadlineAt: new Date(Date.now() + 60_000),
+        budgetUsd: 1,
+        tunnelHosts,
+      }),
+    ).rejects.toThrow("invalid_proxy_tunnel_hosts");
   });
 
   it("refuses every other credential of the same run", async () => {

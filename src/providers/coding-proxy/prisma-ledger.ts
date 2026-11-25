@@ -4,6 +4,7 @@ import { RUN_STEPS_LEVELS, type RunStepsLevel } from "../../core/run-steps/confi
 import { logger } from "../../core/logger.js";
 import type { CodingToolPin } from "../../core/coding-native-tools.js";
 import { listedToolPins, normalizeProxyModelTerms } from "./types.js";
+import { parseTunnelHostPattern } from "../../coding/tunnel-hosts.js";
 import type {
   CreateProxySessionInput,
   ExpiredRequest,
@@ -53,6 +54,7 @@ interface SessionRow {
   registryTokenHash: string | null;
   /** Selected by findSessionByTunnelTokenHash only. */
   tunnelTokenHash?: string | null;
+  tunnelHosts?: unknown;
   budgetExhaustedAt?: Date | null;
   upstreamFailure?: string | null;
   requestRefusal?: string | null;
@@ -102,6 +104,19 @@ function isRunStepsLevel(value: unknown): value is RunStepsLevel {
   return typeof value === "string" && (RUN_STEPS_LEVELS as readonly string[]).includes(value);
 }
 
+/** The stored patterns, re-checked on read: a malformed row gives the run none rather than a widened list. */
+function sessionTunnelHosts(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const patterns: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") return [];
+    const parsed = parseTunnelHostPattern(entry);
+    if (!parsed.ok || parsed.pattern !== entry) return [];
+    patterns.push(entry);
+  }
+  return patterns;
+}
+
 function sessionFromRow(row: SessionRow): ProxySession {
   if (!Array.isArray(row.allowedModels) || !row.allowedModels.every((model) => typeof model === "string")) {
     throw new Error("invalid_proxy_session_models");
@@ -121,6 +136,7 @@ function sessionFromRow(row: SessionRow): ProxySession {
     status: row.status as ProxySessionStatus,
     registryTokenHash: row.registryTokenHash,
     ...(row.tunnelTokenHash !== undefined ? { tunnelTokenHash: row.tunnelTokenHash } : {}),
+    ...(row.tunnelHosts !== undefined ? { tunnelHosts: sessionTunnelHosts(row.tunnelHosts) } : {}),
     budgetExhaustedAt: row.budgetExhaustedAt ?? null,
     upstreamFailure: row.upstreamFailure ?? null,
     requestRefusal: row.requestRefusal ?? null,
@@ -235,11 +251,12 @@ export class PrismaProxyLedger implements ProxyLedger {
     await this.db.$executeRaw`
       INSERT INTO "CodingProxySession"
         ("id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt",
-         "budgetUsd", "status", "registryTokenHash", "tunnelTokenHash", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "runStepsLevel",
+         "budgetUsd", "status", "registryTokenHash", "tunnelTokenHash", "tunnelHosts", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "runStepsLevel",
          "workflow", "skills", "createdAt", "updatedAt")
       VALUES
         (${input.id}, ${input.runId}, ${input.capabilityHash}, ${input.credentialRef}, ${input.protocol}, ${models}::jsonb,
          ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash}, ${input.tunnelTokenHash ?? null},
+         ${input.tunnelHosts ?? []}::text[],
          ${terms?.version ?? null}, ${terms ? JSON.stringify(terms.entry) : null}::jsonb,
          ${input.mcpTools ? JSON.stringify(input.mcpTools) : null}::jsonb, ${input.mcpTokenHash ?? null},
          ${input.runStepsLevel ?? null}::"RunStepsLevel",
@@ -268,7 +285,7 @@ export class PrismaProxyLedger implements ProxyLedger {
   async findSessionByTunnelTokenHash(tunnelTokenHash: string): Promise<ProxySession | undefined> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
       SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
-             "tunnelTokenHash", "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel"
+             "tunnelTokenHash", "tunnelHosts", "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel"
       FROM "CodingProxySession" WHERE "tunnelTokenHash" = ${tunnelTokenHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : undefined;
