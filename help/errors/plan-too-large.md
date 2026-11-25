@@ -19,7 +19,10 @@ The limits:
 - 200 files, 1 MiB per file and 8 MiB in all in the plan folder;
 - 20 documents per plan;
 - 60,000 characters per Markdown document;
-- 1 MiB for one design's files in all.
+- 1 MiB for one design's files in all;
+- when building from an approved plan, 32 KiB for the ticket being built (its
+  `### Ticket <t>:` section of `plan.md`). A larger plan is still built: the
+  builder reads it from `/tmp/wardby-plan`.
 
 A scheduled planner commits a refused run; any other caller is refused with no
 run.
@@ -30,5 +33,6 @@ run.
   files from the plan folder.
 - Shorten the planner note or the issue text, and send the request again.
 - Keep large designs to fewer or smaller boards.
+- For a build refused on a ticket, split that ticket into smaller tickets.
 
 See [Plan documents](../plan-documents.md).

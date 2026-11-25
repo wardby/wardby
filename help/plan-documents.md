@@ -154,10 +154,15 @@ is not gated.
   path. That reply is posted even when mention explanations are off.
 - The builder has no owner, or its secret values cannot be read: refused with
   `plan_not_approved` too (the plan is never sent unchecked).
-- Every document approved: the builder gets the approved Markdown in its request
-  and every approved document as files in `/tmp/wardby-plan`, with links between
-  them rewritten to those files. The text is redacted against the builder's
-  secret values.
+- Every document approved: the builder gets every approved document as files
+  in `/tmp/wardby-plan`, and the approved Markdown in its request, with links
+  between them rewritten to those files. The text is redacted against the
+  builder's secret values.
+- A plan whose Markdown is too large for the request (over 32 KiB in all) is
+  still built. The request then names the approved versions, points the builder
+  at `/tmp/wardby-plan/plan.md`, and holds only the ticket being built (its
+  `### Ticket <t>:` section of `plan.md`). Only a ticket section that is itself
+  over 32 KiB is refused, with `plan_too_large` naming the ticket.
 
 A continuation of a build (a fix round, a follow-up on its pull request) builds
 from exactly the versions the build was given, so reopening a document never

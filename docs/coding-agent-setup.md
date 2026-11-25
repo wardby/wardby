@@ -522,10 +522,13 @@ in it must be approved, or the run is refused with `plan_not_approved` and
 nothing starts; when it was asked for on an issue (a GitHub mention or a Jira
 trigger), Wardby replies there with the waiting documents by path, even when
 mention explanations are off. An ownerless builder, or one whose secret values
-cannot be read, is refused the same way. Otherwise the builder gets the approved
-Markdown in its request and every approved document as files in
-`/tmp/wardby-plan`, redacted against its secret values, and its pull request
-body gets a line such as `Plan 12: plan.md v3, screens v2`. A fix round or
+cannot be read, is refused the same way. Otherwise the builder gets every
+approved document as files in `/tmp/wardby-plan` and the approved Markdown in its
+request, redacted against its secret values, and its pull request body gets a
+line such as `Plan 12: plan.md v3, screens v2`. When the Markdown is over 32 KiB
+in all, the request holds only the approved versions, a pointer to
+`/tmp/wardby-plan/plan.md` and the ticket being built (its `### Ticket <t>:`
+section); a ticket section over 32 KiB is refused with `plan_too_large`. A fix round or
 follow-up of a build uses exactly the versions that build was given.
 
 **When the plan is approved** (the review event that leaves every document
