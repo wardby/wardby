@@ -53,12 +53,15 @@ describe("Gemini CLI coding worker image policy", () => {
       expect(text, target).toContain("USER 10001:10001");
       expect(text, target).toContain('ENTRYPOINT ["node", "/opt/wardby/gemini-coding-worker/main.js"]');
       expect(text, target).toContain("HOME=/home/wardby");
-      // The driver's leftover-process sweep runs only with this set (leftovers.ts).
-      expect(text, target).toMatch(/^ENV [^\n]*\bWARDBY_WORKER_PID_NAMESPACE=1\b/m);
       for (const executable of ["ssh", "curl", "wget", "sudo", "gcc", "make"]) {
         expect(text, `${target} ${executable}`).toContain(`test ! -e /usr/bin/${executable}`);
       }
     }
+    // The leftover-process sweep's marker (leftovers.ts): a root-owned regular file, in the base stage.
+    const base = stage(dockerfile, "base");
+    expect(base).toContain("touch /opt/wardby/worker-pid-namespace");
+    expect(base).toContain("chown root:root /opt/wardby /opt/wardby/worker-pid-namespace");
+    expect(base).toContain("chmod 0644 /opt/wardby/worker-pid-namespace");
     for (const line of [
       "COPY src/coding-worker/npm-shim.mjs ./bin/npm-shim.mjs",
       "ln -s npm-shim.mjs /opt/wardby/bin/pnpm",
@@ -71,6 +74,14 @@ describe("Gemini CLI coding worker image policy", () => {
     ]) {
       expect(dockerfile).toContain(line);
     }
+  });
+
+  it("bakes no WARDBY_* variable (the launchers attest the worker's exact WARDBY_* environment)", async () => {
+    const dockerfile = await read("./Dockerfile");
+    const env = dockerfile.split("\n").filter((line) => /^(ENV|ARG) /.test(line));
+    expect(env.length).toBeGreaterThan(0);
+    expect(env.filter((line) => /\bWARDBY_/.test(line))).toEqual([]);
+    expect(dockerfile).not.toMatch(/^ENV [^\n]*WARDBY_/m);
   });
 
   it("pins the Python layer exactly as the Codex node-python image does", async () => {

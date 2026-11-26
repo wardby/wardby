@@ -1,8 +1,12 @@
-import { readdir, readFile } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-/** The worker image sets this to "1": the driver runs in the image's own pid namespace (Dockerfile ENV). */
-export const WORKER_PID_NAMESPACE_ENV = "WARDBY_WORKER_PID_NAMESPACE";
+/**
+ * The worker image bakes this empty, root-owned file (Dockerfile): the driver runs in the image's own
+ * pid namespace. A file, not an environment variable: the launchers attest the worker's exact WARDBY_*
+ * environment, and /opt/wardby is root-owned, so the agent cannot create it.
+ */
+export const WORKER_PID_NAMESPACE_MARKER = "/opt/wardby/worker-pid-namespace";
 /** Stop-then-kill rounds: a process forked while a round ran is caught by the next one. */
 const SWEEP_ROUNDS = 5;
 const ROUND_PAUSE_MS = 50;
@@ -59,6 +63,16 @@ async function targets(procRoot: string, keep: Set<number>): Promise<number[]> {
   return found;
 }
 
+/** The marker is a regular file (not a link) owned by `uid` (root in the image). */
+async function markerPresent(path: string, uid: number): Promise<boolean> {
+  try {
+    const metadata = await lstat(path);
+    return metadata.isFile() && metadata.uid === uid;
+  } catch {
+    return false;
+  }
+}
+
 /** Sends a signal; false when the process is not ours to signal (another uid). Gone already is fine. */
 function signal(kill: (pid: number, signal: NodeJS.Signals) => void, pid: number, name: NodeJS.Signals): boolean {
   try {
@@ -76,8 +90,8 @@ function signal(kill: (pid: number, signal: NodeJS.Signals) => void, pid: number
  * workspace would race the diff, or change the CLI's state before the next turn. Runs before and
  * after every CLI run.
  *
- * Only inside the worker image's own pid namespace: the image sets WORKER_PID_NAMESPACE_ENV, and
- * PID 1 (the container's init) must be one of the driver's ancestors. Anywhere else (a developer
+ * Only inside the worker image's own pid namespace: the image bakes WORKER_PID_NAMESPACE_MARKER (a
+ * regular file owned by root), and PID 1 (the container's init) must be one of the driver's ancestors. Anywhere else (a developer
  * machine, a namespace shared with other processes, no /proc) it signals nothing and returns
  * "skipped".
  *
@@ -91,7 +105,10 @@ export async function killLeftoverProcesses(
   options: {
     procRoot?: string;
     self?: number;
-    env?: NodeJS.ProcessEnv;
+    /** WORKER_PID_NAMESPACE_MARKER by default. */
+    markerPath?: string;
+    /** Tests only: the marker's expected owner (root by default). */
+    markerUid?: number;
     pauseMs?: number;
     /** KILLED_EXIT_WAIT_MS by default. */
     exitWaitMs?: number;
@@ -100,8 +117,9 @@ export async function killLeftoverProcesses(
     kill?: (pid: number, signal: NodeJS.Signals) => void;
   } = {},
 ): Promise<SweepResult> {
-  const env = options.env ?? process.env;
-  if (env[WORKER_PID_NAMESPACE_ENV] !== "1") return "skipped";
+  if (!(await markerPresent(options.markerPath ?? WORKER_PID_NAMESPACE_MARKER, options.markerUid ?? 0))) {
+    return "skipped";
+  }
   const procRoot = options.procRoot ?? "/proc";
   const kill = options.kill ?? ((pid, name) => process.kill(pid, name));
   const pause = options.pauseMs ?? ROUND_PAUSE_MS;

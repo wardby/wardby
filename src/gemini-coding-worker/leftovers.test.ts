@@ -1,9 +1,9 @@
 import { rmSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { killLeftoverProcesses, WORKER_PID_NAMESPACE_ENV } from "./leftovers.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { killLeftoverProcesses, WORKER_PID_NAMESPACE_MARKER } from "./leftovers.js";
 
 let root: string | undefined;
 afterEach(async () => {
@@ -11,7 +11,17 @@ afterEach(async () => {
   root = undefined;
 });
 
-const ENV = { [WORKER_PID_NAMESPACE_ENV]: "1" };
+let markers: string;
+/** The image's marker, stood in for by a regular file this test's user owns. */
+let ENV: { markerPath: string; markerUid: number };
+beforeAll(async () => {
+  markers = await mkdtemp(join(tmpdir(), "wardby-pid-marker-"));
+  await writeFile(join(markers, "marker"), "");
+  ENV = { markerPath: join(markers, "marker"), markerUid: process.getuid!() };
+});
+afterAll(async () => {
+  await rm(markers, { recursive: true, force: true });
+});
 
 async function addProcess(proc: string, pid: number, ppid: number, state = "S", comm = "sh"): Promise<void> {
   await mkdir(join(proc, String(pid)));
@@ -43,7 +53,7 @@ describe("killLeftoverProcesses", () => {
     const result = await killLeftoverProcesses({
       procRoot: proc,
       self: 7,
-      env: ENV,
+      ...ENV,
       pauseMs: 1,
       kill: (pid, signal) => {
         signals.push([pid, signal]);
@@ -72,7 +82,7 @@ describe("killLeftoverProcesses", () => {
     const result = await killLeftoverProcesses({
       procRoot: proc,
       self: 7,
-      env: ENV,
+      ...ENV,
       pauseMs: 1,
       kill: (pid, signal) => {
         // A running forker makes a new child on every signal it sees; a stopped one cannot.
@@ -101,7 +111,7 @@ describe("killLeftoverProcesses", () => {
       killLeftoverProcesses({
         procRoot: proc,
         self: 7,
-        env: ENV,
+        ...ENV,
         pauseMs: 5,
         kill: (pid, signal) => {
           if (signal !== "SIGKILL") return;
@@ -125,7 +135,7 @@ describe("killLeftoverProcesses", () => {
     const result = await killLeftoverProcesses({
       procRoot: proc,
       self: 7,
-      env: ENV,
+      ...ENV,
       pauseMs: 5,
       exitWaitMs: 2_000,
       kill: (_pid, signal) => void signals.push(signal),
@@ -147,7 +157,7 @@ describe("killLeftoverProcesses", () => {
     ]);
     const started = Date.now();
     await expect(
-      killLeftoverProcesses({ procRoot: proc, self: 7, env: ENV, pauseMs: 5, exitWaitMs: 100, kill: () => {} }),
+      killLeftoverProcesses({ procRoot: proc, self: 7, ...ENV, pauseMs: 5, exitWaitMs: 100, kill: () => {} }),
     ).rejects.toThrow("coding_stream_failed");
     expect(Date.now() - started).toBeGreaterThanOrEqual(100);
   });
@@ -162,7 +172,7 @@ describe("killLeftoverProcesses", () => {
       killLeftoverProcesses({
         procRoot: proc,
         self: 1,
-        env: ENV,
+        ...ENV,
         pauseMs: 1,
         kill: (_pid, signal) => {
           signals.push(signal);
@@ -182,12 +192,39 @@ describe("killLeftoverProcesses", () => {
     ]);
     const calls: number[] = [];
     const kill = (pid: number) => void calls.push(pid);
-    expect(await killLeftoverProcesses({ procRoot: proc, self: 7, env: ENV, pauseMs: 1, kill })).toBe("skipped");
+    expect(await killLeftoverProcesses({ procRoot: proc, self: 7, ...ENV, pauseMs: 1, kill })).toBe("skipped");
     // Without the image's marker, even a namespace that looks right is left alone.
-    expect(await killLeftoverProcesses({ procRoot: proc, self: 30, env: {}, pauseMs: 1, kill })).toBe("skipped");
+    expect(await killLeftoverProcesses({ procRoot: proc, self: 30, pauseMs: 1, kill })).toBe("skipped");
     expect(
-      await killLeftoverProcesses({ procRoot: join(tmpdir(), "wardby-no-such-proc"), self: 1, env: ENV, kill }),
+      await killLeftoverProcesses({ procRoot: join(tmpdir(), "wardby-no-such-proc"), self: 1, ...ENV, kill }),
     ).toBe("skipped");
+    expect(calls).toEqual([]);
+  });
+
+  it("runs only when the marker is a regular file owned by root (the expected owner)", async () => {
+    expect(WORKER_PID_NAMESPACE_MARKER).toBe("/opt/wardby/worker-pid-namespace");
+    const proc = await fakeProc([
+      [1, 0, "S", "docker-init"],
+      [7, 1, "S", "node"],
+      [30, 1, "S", "sleep"],
+    ]);
+    const calls: number[] = [];
+    const kill = (pid: number) => void calls.push(pid);
+    await symlink(ENV.markerPath, join(markers, "link"));
+    await mkdir(join(markers, "dir"));
+    const sweep = (markerPath: string, markerUid = ENV.markerUid) =>
+      killLeftoverProcesses({ procRoot: proc, self: 7, markerPath, markerUid, pauseMs: 1, exitWaitMs: 50, kill });
+    // A link to the marker, a directory, a missing path, or another owner: all skipped.
+    expect(await sweep(join(markers, "link"))).toBe("skipped");
+    expect(await sweep(join(markers, "dir"))).toBe("skipped");
+    expect(await sweep(join(markers, "missing"))).toBe("skipped");
+    expect(await sweep(ENV.markerPath, ENV.markerUid + 1)).toBe("skipped");
+    // The default owner is root: this test's file (not root's) does not count.
+    if (ENV.markerUid !== 0) {
+      expect(
+        await killLeftoverProcesses({ procRoot: proc, self: 7, markerPath: ENV.markerPath, pauseMs: 1, kill }),
+      ).toBe("skipped");
+    }
     expect(calls).toEqual([]);
   });
 });

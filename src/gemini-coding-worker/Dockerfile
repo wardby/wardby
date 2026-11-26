@@ -101,6 +101,13 @@ RUN node --input-type=module -e 'await Promise.all(["agent-state", "cli", "conte
     && test "$(HOME=/tmp/gemini-version node /opt/wardby/node_modules/@google/gemini-cli/bundle/gemini.js --version)" = "0.70.0" \
     && rm -rf /tmp/gemini-version
 COPY --from=command-agent /wardby-cmd /opt/wardby/bin/wardby-cmd
+# The leftover-process sweep's marker (leftovers.ts): the driver is in this image's own pid namespace. A
+# root-owned file under the root-owned /opt/wardby, not an ENV: the launchers attest the worker's exact
+# WARDBY_* environment, so the image bakes no WARDBY_* variable.
+RUN touch /opt/wardby/worker-pid-namespace \
+    && chown root:root /opt/wardby /opt/wardby/worker-pid-namespace \
+    && chmod 0755 /opt/wardby \
+    && chmod 0644 /opt/wardby/worker-pid-namespace
 RUN /opt/wardby/bin/wardby-cmd --version | grep -q "protocol 1"
 
 # node-python (build with --target node-python): Python, pytest, ruff, uv and poetry, exactly as
@@ -153,9 +160,7 @@ RUN test ! -e /usr/bin/docker \
         "$python" -m pip --version | grep -q '^pip 26.2.2 ' || exit 1; \
     done
 USER 10001:10001
-# WARDBY_WORKER_PID_NAMESPACE: the driver is in this image's own pid namespace, so its leftover-process
-# sweep may run (leftovers.ts).
-ENV NODE_ENV=production HOME=/home/wardby WARDBY_WORKER_PID_NAMESPACE=1 UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never
+ENV NODE_ENV=production HOME=/home/wardby UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_PYTHON_DOWNLOADS=never
 WORKDIR /workspace
 ENTRYPOINT ["node", "/opt/wardby/gemini-coding-worker/main.js"]
 
@@ -169,7 +174,6 @@ RUN test ! -e /usr/bin/docker \
     && test ! -e /usr/bin/gcc \
     && test ! -e /usr/bin/make
 USER 10001:10001
-# As in node-python: the leftover-process sweep runs only with WARDBY_WORKER_PID_NAMESPACE=1.
-ENV NODE_ENV=production HOME=/home/wardby WARDBY_WORKER_PID_NAMESPACE=1
+ENV NODE_ENV=production HOME=/home/wardby
 WORKDIR /workspace
 ENTRYPOINT ["node", "/opt/wardby/gemini-coding-worker/main.js"]
