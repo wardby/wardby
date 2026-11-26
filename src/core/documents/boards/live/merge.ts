@@ -465,7 +465,8 @@ export function applyBoardMerge(maps: BoardMaps, ops: MergeOp[], newId: () => st
       detach(op.id);
       place(op.parent, op.after, [op.id]);
     } else if (op.kind === "insert") {
-      const parsed = nodesFromHtml(op.html, newId);
+      const parentType = nodes.get(op.parent)?.get(F.type);
+      const parsed = nodesFromHtml(op.html, newId, { inSvg: parentType === "svg" || parentType === "svg-in" });
       // Placeholders of kept elements: the existing element takes the placeholder's place.
       const swap = new Map<string, string>();
       for (const [pid, init] of parsed.nodes) {

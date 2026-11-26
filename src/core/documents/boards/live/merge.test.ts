@@ -257,6 +257,21 @@ const findNode = (doc: Y.Doc, test: (n: Y.Map<unknown>) => boolean) => {
   return id;
 };
 
+/** Elements inside an `<svg>` whose type is not svg-in (a canvas would create them as HTML and never draw them). */
+function untypedInSvg(doc: Y.Doc): string[] {
+  const { nodes } = boardMaps(doc, "home");
+  const bad: string[] = [];
+  const walk = (id: string, inSvg: boolean) => {
+    const n = nodes.get(id);
+    if (!n) return;
+    if (inSvg && n.get(F.type) !== "svg-in" && n.get(F.type) !== "textnode") bad.push(`${text(n.get(F.tag))}#${id}`);
+    for (const c of (n.get(F.children) as Y.Array<string> | undefined)?.toArray() ?? [])
+      walk(c, inSvg || n.get(F.type) === "svg");
+  };
+  walk("root", false);
+  return bad;
+}
+
 /** A body's shape for comparing boards: elements, attributes (made-up ids dropped, classes sorted) and text. */
 function shape(html: string): string[] {
   const b = new JSDOM(`<body>${html}</body>`).window.document.body;
@@ -305,6 +320,7 @@ describe("merging an agent's board into its live copy", () => {
       const out = writeBoard(boardMaps(doc, "home"));
       const css = `${out.baseCss ?? ""}\n${out.css}`;
       for (const [name, fact] of sc.facts) expect(fact(out.body, css), name).toBe(true);
+      expect(untypedInSvg(doc), "elements inside an svg are svg-in").toEqual([]);
       const [x, y] = [shape(out.body), shape(fileParts(agent).bodyHtml)];
       const at = x.findIndex((v, i) => v !== y[i]);
       expect(
@@ -396,5 +412,26 @@ describe("a board built after the version the agent read", () => {
     expect(() => boardOps(boardMaps(doc, "home"), unrelated, unrelated.replace("other", "changed"), false)).toThrow(
       "version_map_mismatch",
     );
+  });
+});
+
+describe("new elements inside an svg", () => {
+  it("are SVG elements typed svg-in, whether the agent adds one shape or a group", () => {
+    const original = normalizeDesign(coffeeFiles()).files["boards/home.html"];
+    const doc = new Y.Doc();
+    buildBoard(doc, "home", original);
+    const stored = normalizeDesign({ ...coffeeFiles(), "boards/home.html": writeBoardFile(boardMaps(doc, "home")) })
+      .files["boards/home.html"];
+    const dom = new JSDOM(stored);
+    const svg = dom.window.document.querySelector(".cup-art svg")!;
+    svg.insertAdjacentHTML(
+      "beforeend",
+      '<circle cx="30" cy="30" r="6" fill="#D9A441"></circle><g><rect width="4" height="4"></rect></g>',
+    );
+    const agent = normalizeDesign({ ...coffeeFiles(), "boards/home.html": dom.serialize() }).files["boards/home.html"];
+    const maps = boardMaps(doc, "home");
+    doc.transact(() => applyBoardMerge(maps, boardOps(maps, stored, agent), newId));
+    expect(writeBoard(maps).body).toContain('r="6"');
+    expect(untypedInSvg(doc)).toEqual([]);
   });
 });

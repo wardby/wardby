@@ -203,9 +203,19 @@ function parseNodes(parent: DomNode, inSvg: boolean): Model[] {
 const escText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const escAttr = (s: string) => escText(s).replace(/"/g, "&quot;");
 
-export function nodesFromHtml(html: string, newId: () => string): ParsedElements {
-  const body = window.document.createElement("body");
-  body.innerHTML = html;
+export function nodesFromHtml(
+  html: string,
+  newId: () => string,
+  /**
+   * The elements go inside an `<svg>` (a merge inserting into one): they are parsed inside an `<svg>`, so they are
+   * SVG elements typed svg-in, as GrapesJS gives them. Parsed on their own, a `<path>` would be an unknown HTML
+   * element, which a canvas creates in the HTML namespace and never draws.
+   */
+  opts: { inSvg?: boolean } = {},
+): ParsedElements {
+  const outer = window.document.createElement("body");
+  outer.innerHTML = opts.inSvg ? `<svg>${html}</svg>` : html;
+  const body = opts.inSvg ? (outer.children[0] ?? outer) : outer;
   const nodes = new Map<string, NodeInit>();
   const rules: InlineRule[] = [];
 
@@ -266,7 +276,7 @@ export function nodesFromHtml(html: string, newId: () => string): ParsedElements
     return id;
   };
 
-  const roots = parseNodes(body, false).map(put);
+  const roots = parseNodes(body, !!opts.inSvg).map(put);
   return { roots, nodes, rules };
 }
 
