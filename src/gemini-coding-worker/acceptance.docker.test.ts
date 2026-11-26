@@ -223,6 +223,13 @@ describe.skipIf(!GEMINI_DOCKER_ENABLED)("Gemini CLI worker under the Docker laun
         };
         expect(served.filter((s) => s.agent === runId).map((s) => s.turn)).toEqual([0, 1, 2]);
         expect(audit.filter((e) => e.type === "request.rejected")).toEqual([]);
+        // The worker's own log (the launcher's local log driver), before the container is removed:
+        // it ran (progress lines), its process sweep ran in the image's pid namespace, no secret.
+        const logs = await execute("docker", ["logs", isolationNames(runId).workerContainer], { encoding: "utf8" });
+        const logText = `${logs.stdout}${logs.stderr}`;
+        expect(logText.trim()).not.toBe("");
+        expect(logText).not.toContain("gemini_process_sweep_skipped");
+        expect(logText).not.toContain(session.capability);
         await launcher.remove(handle);
       } finally {
         await server.close();
