@@ -43,6 +43,7 @@ import {
   safeUpstreamErrorCode,
   terminalUsageFromSseFrame,
 } from "./metering.js";
+import { geminiSubAgentRef } from "./gemini-sub-agent.js";
 import { conversationKey, estimateHold } from "./hold.js";
 import { estimateInterrupted, previousInput, type InterruptedEstimate } from "./interrupted.js";
 import { createPinnedProxyFetch } from "./secure-fetch.js";
@@ -1730,11 +1731,14 @@ export class CodingProxy {
     }
 
     try {
-      // A workflow session's sub-agent (#582): a well-formed id tags this reply's steps; any other value is ignored.
+      // A workflow session's sub-agent (#582): a well-formed id tags this reply's steps; any other value is
+      // ignored. A Gemini CLI sub-agent sends no id; its request's shape gives it one (gemini-sub-agent.ts).
       const agent =
         session.workflow === true && input.agentId !== undefined && STEP_AGENT_REF.test(input.agentId)
           ? input.agentId
-          : undefined;
+          : session.protocol === "gemini-generate-content"
+            ? geminiSubAgentRef(parsed.body)
+            : undefined;
       // The credential sent upstream (and its JSON-escaped forms): everything relayed to the client, and
       // everything read for run steps, is redacted by exact value. The control plane does not know this value.
       const secrets = withEscapedForms([target.secret]);

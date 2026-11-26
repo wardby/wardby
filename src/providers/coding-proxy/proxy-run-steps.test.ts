@@ -290,6 +290,45 @@ describe("CodingProxy run steps", () => {
     expect(lines.join("")).not.toContain(FAKE_SAID);
   });
 
+  it("labels a Gemini CLI sub-agent's steps with its own agent id, and leaves the main loop's untagged", async () => {
+    const reply = `data: ${JSON.stringify({
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [{ functionCall: { name: "run_shell_command", args: { command: "wc -l a" } } }],
+          },
+          finishReason: "STOP",
+        },
+      ],
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 2 },
+    })}\r\n\r\n`;
+    const h = await harness("gemini-generate-content", sse(reply), {
+      runStepsLevel: "detail",
+      runStepsCeiling: "detail",
+    });
+    const decl = (...names: string[]) => [{ functionDeclarations: names.map((name) => ({ name })) }];
+    await h.execute(
+      JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "<session_context>cwd</session_context>" }] }],
+        tools: decl("run_shell_command", "invoke_agent"),
+        generationConfig: { maxOutputTokens: 10 },
+      }),
+      "main",
+    );
+    await h.execute(
+      JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Count lines." }] }],
+        tools: decl("run_shell_command", "complete_task"),
+        generationConfig: { maxOutputTokens: 10 },
+      }),
+      "sub",
+    );
+    const [mainSteps, subSteps] = h.stepBatches().map((s) => s.batch.steps);
+    expect(mainSteps.every((step) => step.agent === undefined)).toBe(true);
+    expect(subSteps.map((step) => step.agent)).toEqual([expect.stringMatching(/^gemini-[A-Za-z0-9_-]{16}$/)]);
+  });
+
   it("gives a Gemini helper call (no function declarations) no steps", async () => {
     const reply = `data: ${JSON.stringify({
       candidates: [{ content: { parts: [{ text: '{"next_speaker":"user"}' }] }, finishReason: "STOP" }],
