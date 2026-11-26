@@ -50,6 +50,16 @@ env_b64() {
   ' "$1"
 }
 
+# The same, for an optional key: prints nothing (and succeeds) when .env.local does not set it.
+optional_env_b64() {
+  node -e '
+    const name = process.argv[1];
+    require("dotenv-flow").config({ silent: true });
+    const value = process.env[name];
+    if (value) process.stdout.write(Buffer.from(value, "utf8").toString("base64"));
+  ' "$1"
+}
+
 b64() {
   printf '%s' "$1" | base64 | tr -d '\n'
 }
@@ -88,6 +98,8 @@ fi
 SECRET_APP_KEY_B64="$(env_b64 SECRET_APP_KEY)"
 OPENAI_API_KEY_B64="$(env_b64 OPENAI_API_KEY)"
 ANTHROPIC_API_KEY_B64="$(env_b64 ANTHROPIC_API_KEY)"
+# Optional: Google AI Studio (Gemini) models for native agents run in the control plane.
+GEMINI_API_KEY_B64="$(optional_env_b64 GEMINI_API_KEY)"
 GITHUB_APP_ID_B64="$(env_b64 GITHUB_APP_ID)"
 GITHUB_APP_PRIVATE_KEY_B64="$(env_b64 GITHUB_APP_PRIVATE_KEY)"
 
@@ -103,6 +115,7 @@ GITHUB_APP_PRIVATE_KEY_B64="$(env_b64 GITHUB_APP_PRIVATE_KEY)"
   printf '  SECRET_APP_KEY: %s\n' "$SECRET_APP_KEY_B64"
   printf '  OPENAI_API_KEY: %s\n' "$OPENAI_API_KEY_B64"
   printf '  ANTHROPIC_API_KEY: %s\n' "$ANTHROPIC_API_KEY_B64"
+  [[ -z "$GEMINI_API_KEY_B64" ]] || printf '  GEMINI_API_KEY: %s\n' "$GEMINI_API_KEY_B64"
   printf '  GITHUB_APP_ID: %s\n' "$GITHUB_APP_ID_B64"
   printf '  GITHUB_APP_PRIVATE_KEY: %s\n' "$GITHUB_APP_PRIVATE_KEY_B64"
   printf '  AUTH_PROVIDER: %s\n' "$(b64 self-hosted)"
@@ -110,7 +123,7 @@ GITHUB_APP_PRIVATE_KEY_B64="$(env_b64 GITHUB_APP_PRIVATE_KEY)"
   printf '  AUTH_CREDENTIAL_HASH_KEY: %s\n' "$AUTH_CREDENTIAL_HASH_KEY_B64"
 } | kubectl --context "$KUBE_CONTEXT" apply -f -
 
-unset DATABASE_URL_B64 SECRET_APP_KEY_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64 \
+unset DATABASE_URL_B64 SECRET_APP_KEY_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64 GEMINI_API_KEY_B64 \
   GITHUB_APP_ID_B64 GITHUB_APP_PRIVATE_KEY_B64 AUTH_SIGNING_KEY_B64 AUTH_CREDENTIAL_HASH_KEY_B64
 
 echo "==> wardby-control-plane-env applied to ${NAMESPACE}"

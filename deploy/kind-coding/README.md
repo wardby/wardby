@@ -224,7 +224,8 @@ sandbox-mode native agents run as pods in this cluster
   `ANTHROPIC_API_KEY`, and `SECRET_APP_KEY`, which is **required** in
   `.env.local`: the gateway will not start without it), plus `GITHUB_APP_ID`
   and `GITHUB_APP_PRIVATE_KEY` when set, so sandboxed runs get the repository
-  built-ins;
+  built-ins, and `GEMINI_API_KEY` when set, for Google AI Studio (Gemini)
+  models;
 - applies the native gateway from `manifests/base/native-gateway.yaml`: a Deployment
   running `wardby native-gateway` with no service-account token and no RBAC, a
   ClusterIP Service exposing both the gateway port `8790` and the deny port
