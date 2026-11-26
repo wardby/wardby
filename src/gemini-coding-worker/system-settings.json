@@ -34,9 +34,14 @@
     "auth": {
       "enforcedType": "$WARDBY_GEMINI_AUTH_TYPE"
     },
+    "enableConseca": false,
     "environmentVariableRedaction": {
       "enabled": false
     }
+  },
+  "telemetry": {
+    "enabled": false,
+    "logPrompts": false
   },
   "tools": {
     "exclude": ["enter_plan_mode", "list_background_processes", "read_background_output"]

@@ -14,7 +14,7 @@ export const GEMINI_CLI_ENTRY = "/opt/wardby/node_modules/@google/gemini-cli/bun
 /** The CLI's system settings folder; the image bakes settings.json and policies/wardby.toml there, root-owned. */
 export const GEMINI_SYSTEM_DIR = "/etc/gemini-cli";
 /** SHA-256 of src/gemini-coding-worker/system-settings.json (system-check.test.ts keeps it current). */
-export const GEMINI_SYSTEM_SETTINGS_SHA256 = "1c469de4cffea71de50f979cc0ccc7ae84e339b1366aa507cbf0e8b939dc6c65";
+export const GEMINI_SYSTEM_SETTINGS_SHA256 = "4462e173b28c2708f49f3bc54facec37a2567fb7d65d77aa33e6b70e004c7bd2";
 /** SHA-256 of src/gemini-coding-worker/policies/wardby.toml. */
 export const GEMINI_SYSTEM_POLICY_SHA256 = "1c8a5aa1777e054ed51463bb6549afb9f8e7f1859e88395e50c2071a502b69a8";
 /** The variable the system file's `security.auth.enforcedType` reference reads (environment.ts sets it). */
