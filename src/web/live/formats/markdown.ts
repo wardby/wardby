@@ -44,7 +44,8 @@ export function markdownFormat(db: WebDeps["db"]): LiveFormat {
       return { update: merged.update, versionState: merged.versionState, text: v.markdown };
     },
 
-    refuse(scratch, secretValues) {
+    refuse(scratch, apply, secretValues) {
+      apply();
       return showsSecret(scratch, secretValues) ? "secret_value" : null;
     },
 

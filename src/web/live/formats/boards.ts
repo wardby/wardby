@@ -11,14 +11,24 @@
  * waiting page is told to build. A board that already has a live copy answers `role: "join"`.
  */
 import * as Y from "yjs";
+import { checkCss } from "../../../core/documents/boards/css-check.js";
 import {
+  BOARD_MAX_BYTES,
   normalizeDesign,
   parseManifest,
   serializeManifest,
   type Manifest,
 } from "../../../core/documents/boards/format.js";
-import { BOARD_ROOT, boardMaps, manifestOf } from "../../../core/documents/boards/live/model.js";
-import { writeBoardFile } from "../../../core/documents/boards/live/writer.js";
+import { sanitizeFragment } from "../../../core/documents/boards/sanitize.js";
+import {
+  BOARD_ROOT,
+  boardMaps,
+  manifestOf,
+  orderedPairs,
+  R,
+  type BoardMaps,
+} from "../../../core/documents/boards/live/model.js";
+import { writeBoard, writeBoardFile, writeElement } from "../../../core/documents/boards/live/writer.js";
 import { loadVersionFiles } from "../../../core/documents/files.js";
 import type { WebDeps } from "../../context.js";
 import type { LiveFormat, LiveVersion } from "./types.js";
@@ -67,6 +77,119 @@ export function liveStrings(doc: Y.Doc): string[] {
   walk(doc.getMap("boards"));
   walk(manifestOf(doc));
   walk(doc.getMap(DESIGN_META));
+  return out;
+}
+
+/** What one edit touched, per board: everything (a new board), or these elements and rules, and the base layer. */
+interface Touched {
+  all: boolean;
+  nodes: Set<string>;
+  rules: Set<string>;
+  meta: boolean;
+}
+
+/** Applies an edit to `scratch` and returns what it touched in the boards (the board list is small: always checked). */
+export function watchEdit(scratch: Y.Doc, apply: () => void): Map<string, Touched> {
+  const touched = new Map<string, Touched>();
+  const mark = (board: string): Touched => {
+    let t = touched.get(board);
+    if (!t) touched.set(board, (t = { all: false, nodes: new Set(), rules: new Set(), meta: false }));
+    return t;
+  };
+  const boards = scratch.getMap<unknown>("boards");
+  const handler = (events: Y.YEvent<Y.AbstractType<unknown>>[]) => {
+    for (const e of events) {
+      const path = e.path.map(String);
+      const keys = [...e.changes.keys.keys()];
+      if (path.length === 0) {
+        for (const k of keys) mark(k).all = true;
+        continue;
+      }
+      const t = mark(path[0]);
+      if (path.length === 1) {
+        t.all = true;
+        continue;
+      }
+      const into = path[1] === "nodes" ? t.nodes : path[1] === "rules" ? t.rules : null;
+      if (into) {
+        if (path.length >= 3) into.add(path[2]);
+        else for (const k of keys) into.add(k);
+      } else if (path[1] === "meta") t.meta = true;
+    }
+  };
+  boards.observeDeep(handler);
+  try {
+    apply();
+  } finally {
+    boards.unobserveDeep(handler);
+  }
+  return touched;
+}
+
+/** Every string under a live-copy map (text, attributes, CSS values). */
+function stringsIn(v: unknown, out: string[]): string[] {
+  if (typeof v === "string") out.push(v);
+  else if (v instanceof Y.Map) for (const x of (v as Y.Map<unknown>).values()) stringsIn(x, out);
+  else if (v instanceof Y.Array) for (const x of (v as Y.Array<unknown>).toArray()) stringsIn(x, out);
+  return out;
+}
+
+/** One rule as CSS text (for the CSS check). */
+function ruleCss(maps: BoardMaps, key: string): string {
+  const y = maps.rules.get(key);
+  if (!y) return "";
+  const decl = orderedPairs(y.get(R.style) as Y.Map<string>, y.get(R.props) as Y.Array<string>)
+    .map(([p, v]) => `${p}:${v};`)
+    .join("");
+  const at = typeof y.get(R.atRule) === "string" ? (y.get(R.atRule) as string) : "";
+  const sel = typeof y.get(R.sel) === "string" ? (y.get(R.sel) as string) : "";
+  if (y.get(R.single)) return `${at}{${decl}}`;
+  return at ? `${at}{${sel}{${decl}}}` : `${sel}{${decl}}`;
+}
+
+/**
+ * Why an edit is refused, checking only what it touched with the board format's own rules: the elements through
+ * the board sanitizer's allow-list (no scripts, event handlers, javascript: URLs or external references), the rules
+ * and the base layer through the CSS check, the board's size, and secret values in the touched text.
+ */
+export function checkEdit(scratch: Y.Doc, touched: Map<string, Touched>, secretValues: string[]): string | null {
+  const strings = liveStringsOutsideBoards(scratch);
+  for (const [board, t] of touched) {
+    if (!(scratch.getMap<unknown>("boards").get(board) instanceof Y.Map)) continue;
+    const maps = boardMaps(scratch, board);
+    const ids = t.all ? [...maps.nodes.keys()] : [...t.nodes].filter((id) => maps.nodes.has(id));
+    const keys = t.all ? [...maps.rules.keys()] : [...t.rules].filter((k) => maps.rules.has(k));
+    for (const id of ids) stringsIn(maps.nodes.get(id), strings);
+    for (const k of keys) stringsIn(maps.rules.get(k), strings);
+    if (t.all || t.meta) stringsIn(maps.meta, strings);
+
+    const html = ids.map((id) => writeElement(maps, id)).join("");
+    if (html) {
+      const clean = sanitizeFragment(html, { images: "refuse" });
+      const r = clean.removed;
+      if (clean.problems.length || r.scripts || r.handlers || r.jsUrls) return "board_format";
+    }
+    const css = keys.map((k) => ruleCss(maps, k)).join("");
+    if (css && checkCss(css).length) return "board_format";
+    const base = maps.meta.get("baseCss");
+    if ((t.all || t.meta) && typeof base === "string" && checkCss(base).length) return "board_format";
+    if (ids.length || keys.length) {
+      const out = writeBoard(maps);
+      if (Buffer.byteLength(out.body) + Buffer.byteLength(out.css) > BOARD_MAX_BYTES) return "board_too_large";
+    }
+  }
+  if (secretValues.length) {
+    const all = strings.join("\n");
+    if (secretValues.some((v) => v.length > 0 && all.includes(v))) return "secret_value";
+  }
+  return null;
+}
+
+/** The board list and the design's title (always small, always checked). */
+function liveStringsOutsideBoards(doc: Y.Doc): string[] {
+  const out: string[] = [];
+  stringsIn(manifestOf(doc), out);
+  stringsIn(doc.getMap(DESIGN_META), out);
   return out;
 }
 
@@ -158,10 +281,9 @@ export function boardsFormat(db: WebDeps["db"]): LiveFormat & {
       return "reset";
     },
 
-    refuse(scratch, secretValues) {
-      if (secretValues.length === 0) return null;
-      const all = liveStrings(scratch).join("\n");
-      return secretValues.some((v) => v.length > 0 && all.includes(v)) ? "secret_value" : null;
+    refuse(scratch, apply, secretValues) {
+      const touched = watchEdit(scratch, apply);
+      return checkEdit(scratch, touched, secretValues);
     },
 
     async refreshAnchors() {

@@ -159,6 +159,32 @@ export function writeBoard(maps: BoardMaps): WrittenBoard {
   return { body, css, spots, baseCss: typeof base === "string" ? base : null };
 }
 
+/**
+ * One element on its own, as the writer prints it (attributes, class, a text box's HTML; no children): what an
+ * edit to that element puts in the board, for the per-edit format check. Empty for text and unknown ids.
+ */
+export function writeElement(maps: BoardMaps, id: string): string {
+  const n = maps.nodes.get(id);
+  if (!n || n.get(F.type) === "textnode" || n.get(F.type) === "comment" || id === BOARD_ROOT) return "";
+  const out: string[] = [];
+  const attrs = n.get(F.attrs) as Y.Map<unknown> | undefined;
+  const listed = orderedPairs(attrs, n.get(F.attrKeys) as Y.Array<string>);
+  // Every attribute, listed or not: this is what checks run on, and an attribute left out of the order list must
+  // still be seen (the writer leaves it out, but another page's copy may not).
+  const extra = attrs ? [...attrs.entries()].filter(([k]) => !listed.some(([l]) => l === k)) : [];
+  for (const [k, v] of [...listed, ...extra]) {
+    if (typeof v === "boolean") {
+      if (v) out.push(k);
+    } else out.push(`${k}="${escAttr(typeof v === "string" ? v : JSON.stringify(v))}"`);
+  }
+  const classes = str(n.get(F.classes)).split(" ").filter(Boolean);
+  if (classes.length) out.push(`class="${escAttr(classes.join(" "))}"`);
+  const tag = str(n.get(F.tag), "div");
+  const inner = typeof n.get(F.html) === "string" ? (n.get(F.html) as string) : "";
+  const attrText = out.length ? ` ${out.join(" ")}` : "";
+  return !inner && n.get(F.void) ? `<${tag}${attrText}/>` : `<${tag}${attrText}>${inner}</${tag}>`;
+}
+
 /** The board's file parts the builder stored in its meta (`parts`: title, language, body attributes). */
 export function storedParts(maps: BoardMaps): Pick<BoardParts, "lang" | "title" | "bodyAttrs"> | null {
   const raw = maps.meta.get("parts");

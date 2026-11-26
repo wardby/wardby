@@ -283,7 +283,15 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
       if ((type !== 1 && type !== 2) || connection.readOnly) return;
       const scratch = new Y.Doc();
       Y.applyUpdate(scratch, Y.encodeStateAsUpdate(document));
-      Y.applyUpdate(scratch, payload);
+      const format = loaded.get(documentName)?.format;
+      let applied = false;
+      const apply = () => {
+        if (applied) return;
+        applied = true;
+        Y.applyUpdate(scratch, payload);
+      };
+      const why = format ? format.refuse(scratch, apply, await secretValues(documentName)) : "not_loaded";
+      apply();
       // The history's epoch and the editor record are the server's: a browser that changes them is refused
       // (another browser's copy would otherwise be refused as stale, or a version credited to someone else).
       if (!sameEntries(scratch.getMap(LIVE_META), document.getMap(LIVE_META))) {
@@ -291,8 +299,6 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
         connection.sendStateless(JSON.stringify({ type: "edit_refused", reason: "server_data" }));
         throw refusal("edit_refused");
       }
-      const format = loaded.get(documentName)?.format;
-      const why = format ? format.refuse(scratch, await secretValues(documentName)) : "not_loaded";
       if (why) {
         log.warn({ documentId: documentName, why }, "live edit refused");
         connection.sendStateless(JSON.stringify({ type: "edit_refused", reason: why }));

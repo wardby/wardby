@@ -33,8 +33,11 @@ export interface LiveFormat {
     base: Uint8Array,
     v: LiveVersion,
   ): Promise<{ update: Uint8Array; versionState: Uint8Array; text: string } | "reset">;
-  /** Why an incoming edit is refused (scratch = the live document with the edit applied), or null. */
-  refuse(scratch: Y.Doc, secretValues: string[]): string | null;
+  /**
+   * Why an incoming edit is refused, or null. `scratch` is a copy of the live document before the edit; `apply`
+   * applies the edit to it (the format may watch what it changes, to check only that). Must call `apply` once.
+   */
+  refuse(scratch: Y.Doc, apply: () => void, secretValues: string[]): string | null;
   /** Comment anchors follow the live document after a merge or before a checkpoint. */
   refreshAnchors(documentId: string, doc: Y.Doc): Promise<void>;
 }
