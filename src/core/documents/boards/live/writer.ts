@@ -49,7 +49,8 @@ const queryLength = (q: string): number => {
 
 export function writeBoard(maps: BoardMaps): WrittenBoard {
   const { nodes, rules, ruleOrder, meta } = maps;
-  const order = ruleOrder.toArray().filter((k) => rules.has(k));
+  // Two pages may add the same rule at once: its key then appears twice in the order; the first counts.
+  const order = [...new Set(ruleOrder.toArray())].filter((k) => rules.has(k));
   const spots: Spot[] = [];
 
   const idRules = new Set<string>();
@@ -167,12 +168,8 @@ export function writeElement(maps: BoardMaps, id: string): string {
   const n = maps.nodes.get(id);
   if (!n || n.get(F.type) === "textnode" || n.get(F.type) === "comment" || id === BOARD_ROOT) return "";
   const out: string[] = [];
-  const attrs = n.get(F.attrs) as Y.Map<unknown> | undefined;
-  const listed = orderedPairs(attrs, n.get(F.attrKeys) as Y.Array<string>);
-  // Every attribute, listed or not: this is what checks run on, and an attribute left out of the order list must
-  // still be seen (the writer leaves it out, but another page's copy may not).
-  const extra = attrs ? [...attrs.entries()].filter(([k]) => !listed.some(([l]) => l === k)) : [];
-  for (const [k, v] of [...listed, ...extra]) {
+  // Every attribute, listed in the order or not (orderedPairs keeps both): this is what checks run on.
+  for (const [k, v] of orderedPairs(n.get(F.attrs) as Y.Map<unknown>, n.get(F.attrKeys) as Y.Array<string>)) {
     if (typeof v === "boolean") {
       if (v) out.push(k);
     } else out.push(`${k}="${escAttr(typeof v === "string" ? v : JSON.stringify(v))}"`);

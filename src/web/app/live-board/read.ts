@@ -111,20 +111,6 @@ export function syncArray(a: Y.Array<string>, want: string[]): boolean {
   return true;
 }
 
-/** Makes map + key order equal `want`. */
-function syncPairs(m: Y.Map<unknown>, keys: Y.Array<string>, want: [string, unknown][]): boolean {
-  let changed = false;
-  const wantKeys = want.map(([k]) => k);
-  for (const [k, v] of want) changed = setIf(m, k, v) || changed;
-  for (const k of [...m.keys()]) {
-    if (!wantKeys.includes(k)) {
-      m.delete(k);
-      changed = true;
-    }
-  }
-  return syncArray(keys, wantKeys) || changed;
-}
-
 export interface ReadOptions {
   /** A text box being typed in: its HTML comes from the page (GrapesJS updates its model when it closes). */
   editing?: { id: string; el: HTMLElement } | null;
@@ -134,54 +120,177 @@ export interface ReadOptions {
   parts?: { lang: string; title: string; bodyAttrs: Record<string, string> };
   /** The origin the transaction carries (the connector's, so it does not apply its own changes back). */
   origin?: unknown;
+  /**
+   * What GrapesJS held when it was last in step with the live copy (snapshotBoard). Given, only what changed in
+   * GrapesJS since then is written: a field the live copy has from someone else, not yet applied here, is left alone,
+   * and an element or rule is deleted only if this page had it and no longer does. Without it, everything is written.
+   */
+  since?: Snapshot;
+  /** Rules this call creates in the live copy, recorded here (another page may create the same rule at once). */
+  created?: Map<string, Y.Map<unknown>>;
+  /**
+   * When given, new rules are created (and added to the rule order) in a transaction of their own with this origin,
+   * before the properties are written: an undo then removes this page's properties, never a rule someone else has
+   * since added properties to.
+   */
+  structureOrigin?: unknown;
 }
 
-/** Writes what differs between GrapesJS and the live copy into the live copy. Returns the number of changes. */
+/** GrapesJS's board, field by field, as the live copy holds it (keys: `n|id|field`, `a|id|attr`, `c|id`, `r|key|prop` ...). */
+export type Snapshot = Map<string, string>;
+
+const enc = (v: unknown): string => JSON.stringify(v ?? null);
+
+/** Visits GrapesJS's board field by field, in the live copy's terms. */
+function visit(editor: Editor, editing: ReadOptions["editing"], put: (key: string, value: unknown) => void): void {
+  const root = editor.getWrapper();
+  if (!root) return;
+  const node = (c: Component, id: string) => {
+    put(`n|${id}|${F.tag}`, c.get("tagName") ?? "div");
+    put(`n|${id}|${F.type}`, c.get("type") ?? "default");
+    if (c.is("textnode")) {
+      put(`n|${id}|${F.content}`, c.get("content") ?? "");
+      return;
+    }
+    put(`n|${id}|${F.void}`, !!c.get("void"));
+    put(`n|${id}|${F.ownId}`, ownsId(c));
+    if (id === BOARD_ROOT) put(`n|${id}|${F.gid}`, c.getId());
+    const attrs = attrsOf(c);
+    for (const [k, v] of attrs) put(`a|${id}|${k}`, v);
+    put(
+      `ak|${id}`,
+      attrs.map(([k]) => k),
+    );
+    put(`n|${id}|${F.classes}`, classesOf(c));
+    if (isTextBox(c) && id !== BOARD_ROOT) {
+      put(`n|${id}|${F.html}`, editing?.id === id ? editing.el.innerHTML : c.getInnerHTML());
+      put(`n|${id}|${F.names}`, JSON.stringify(namesInside(c)));
+      return;
+    }
+    const kids = c.components().models;
+    for (const k of kids) node(k, k.getId());
+    put(
+      `c|${id}`,
+      kids.map((k) => k.getId()),
+    );
+  };
+  node(root, BOARD_ROOT);
+  const live = rulesInOrder(editor);
+  for (const [key, r] of live) {
+    put(`rk|${key}`, true);
+    const style = styleOf(r);
+    for (const [p, v] of style) put(`r|${key}|${p}`, v);
+    put(
+      `rp|${key}`,
+      style.map(([p]) => p),
+    );
+  }
+  put(
+    "ro",
+    live.map(([k]) => k),
+  );
+}
+
+/** The snapshot `readBoard` compares against next time. */
+export function snapshotBoard(editor: Editor, editing?: ReadOptions["editing"]): Snapshot {
+  const out: Snapshot = new Map();
+  visit(editor, editing, (k, v) => out.set(k, enc(v)));
+  return out;
+}
+
+/** Writes what changed in GrapesJS (since `opts.since`, or everything) into the live copy. Returns the number of changes. */
 export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {}): number {
   const root = editor.getWrapper();
   if (!root) return 0;
   const { nodes, rules, ruleOrder, meta } = maps;
+  const now = snapshotBoard(editor, opts.editing);
+  const since = opts.since;
+  /** Whether this page changed `key` since the last snapshot (always, without one). */
+  const mine = (key: string) => !since || since.get(key) !== now.get(key);
+  /** Whether this page had `key` and no longer does (a local deletion). */
+  const gone = (key: string) => (since ? since.has(key) && !now.has(key) : !now.has(key));
   let changes = 0;
-  const writeNode = (c: Component, id: string, seen: Set<string>) => {
-    seen.add(id);
+  const set = (m: Y.Map<unknown>, field: string, key: string, value: unknown) => {
+    if (mine(key) && setIf(m, field, value)) changes++;
+  };
+  const writeNode = (c: Component, id: string) => {
+    // Gone from the live copy although this page had it: someone else deleted it (not applied here yet). Writing
+    // it would bring it back; leave it to the reconcile that follows.
+    if (!nodes.has(id) && since?.has(`n|${id}|${F.type}`)) return;
     const n = child(nodes as unknown as Y.Map<unknown>, id, () => new Y.Map<unknown>());
-    let d = 0;
-    d += +setIf(n, F.tag, c.get("tagName") ?? "div");
-    d += +setIf(n, F.type, c.get("type") ?? "default");
+    set(n, F.tag, `n|${id}|${F.tag}`, c.get("tagName") ?? "div");
+    set(n, F.type, `n|${id}|${F.type}`, c.get("type") ?? "default");
     if (c.is("textnode")) {
-      d += +setIf(n, F.content, c.get("content") ?? "");
-      changes += d;
+      set(n, F.content, `n|${id}|${F.content}`, c.get("content") ?? "");
       return;
     }
-    d += +setIf(n, F.void, !!c.get("void"));
-    d += +setIf(n, F.ownId, ownsId(c));
-    if (id === BOARD_ROOT) d += +setIf(n, F.gid, c.getId());
-    d += +syncPairs(
-      child(n, F.attrs, () => new Y.Map<unknown>()),
-      child(n, F.attrKeys, () => new Y.Array<string>()),
-      attrsOf(c),
-    );
-    d += +setIf(n, F.classes, classesOf(c));
+    set(n, F.void, `n|${id}|${F.void}`, !!c.get("void"));
+    set(n, F.ownId, `n|${id}|${F.ownId}`, ownsId(c));
+    if (id === BOARD_ROOT) set(n, F.gid, `n|${id}|${F.gid}`, c.getId());
+    const attrs = child(n, F.attrs, () => new Y.Map<unknown>());
+    const attrKeys = child(n, F.attrKeys, () => new Y.Array<string>());
+    const want = attrsOf(c);
+    for (const [k, v] of want) if (mine(`a|${id}|${k}`) && setIf(attrs, k, v)) changes++;
+    for (const k of [...attrs.keys()]) {
+      if (!want.some(([w]) => w === k) && gone(`a|${id}|${k}`)) {
+        attrs.delete(k);
+        changes++;
+      }
+    }
+    if (
+      mine(`ak|${id}`) &&
+      syncArray(
+        attrKeys,
+        want.map(([k]) => k),
+      )
+    )
+      changes++;
+    set(n, F.classes, `n|${id}|${F.classes}`, classesOf(c));
     if (isTextBox(c) && id !== BOARD_ROOT) {
-      const html = opts.editing?.id === id ? opts.editing.el.innerHTML : c.getInnerHTML();
-      d += +setIf(n, F.html, html);
-      d += +setIf(n, F.names, JSON.stringify(namesInside(c)));
-      changes += d;
+      set(n, F.html, `n|${id}|${F.html}`, opts.editing?.id === id ? opts.editing.el.innerHTML : c.getInnerHTML());
+      set(n, F.names, `n|${id}|${F.names}`, JSON.stringify(namesInside(c)));
       return;
     }
     const kids = c.components().models;
-    for (const k of kids) writeNode(k, k.getId(), seen);
-    d += +syncArray(
-      child(n, F.children, () => new Y.Array<string>()),
-      kids.map((k) => k.getId()),
-    );
-    changes += d;
+    for (const k of kids) writeNode(k, k.getId());
+    const ch = child(n, F.children, () => new Y.Array<string>());
+    if (
+      mine(`c|${id}`) &&
+      syncArray(
+        ch,
+        kids.map((k) => k.getId()),
+      )
+    )
+      changes++;
   };
+  /** A new rule's map, with what never changes for its key. */
+  const newRule = (key: string, r: CssRule): Y.Map<unknown> => {
+    const y = new Y.Map<unknown>();
+    rules.set(key, y);
+    opts.created?.set(key, y);
+    const { style: _style, ...def } = r.toJSON() as Record<string, unknown>;
+    y.set(R.def, JSON.stringify(def));
+    for (const [k, v] of Object.entries(ruleFacts(r))) y.set(k, v);
+    y.set(R.style, new Y.Map());
+    y.set(R.props, new Y.Array());
+    return y;
+  };
+  if (opts.structureOrigin !== undefined) {
+    const fresh = rulesInOrder(editor).filter(([key]) => !rules.has(key) && !since?.has(`rk|${key}`));
+    if (fresh.length) {
+      nodes.doc!.transact(() => {
+        for (const [key, r] of fresh) {
+          newRule(key, r);
+          ruleOrder.push([key]);
+          changes++;
+        }
+      }, opts.structureOrigin);
+    }
+  }
   nodes.doc!.transact(() => {
     if (opts.baseCss !== undefined && setIf(meta, "baseCss", opts.baseCss)) changes++;
     if (opts.parts && setIf(meta, "parts", JSON.stringify(opts.parts))) changes++;
-    const seen = new Set<string>();
-    writeNode(root, BOARD_ROOT, seen);
+    writeNode(root, BOARD_ROOT);
     // Parts a merge parked (detached) wait to be placed again: never deleted here.
     const parked = new Set<string>();
     const park = (id: string) => {
@@ -190,7 +299,7 @@ export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {
     };
     for (const [id, n] of nodes) if (n.get(F.detached)) park(id);
     for (const id of [...nodes.keys()]) {
-      if (!seen.has(id) && !parked.has(id)) {
+      if (!parked.has(id) && gone(`n|${id}|${F.type}`)) {
         nodes.delete(id);
         changes++;
       }
@@ -198,26 +307,44 @@ export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {
     const live = rulesInOrder(editor);
     for (const [key, r] of live) {
       let y = rules.get(key);
+      // Deleted by someone else since this page last caught up: not brought back.
+      if (!y && since?.has(`rk|${key}`)) continue;
       if (!y) {
-        y = new Y.Map();
-        rules.set(key, y);
-        const { style: _style, ...def } = r.toJSON() as Record<string, unknown>;
-        y.set(R.def, JSON.stringify(def));
-        for (const [k, v] of Object.entries(ruleFacts(r))) y.set(k, v);
-        y.set(R.style, new Y.Map());
-        y.set(R.props, new Y.Array());
+        y = newRule(key, r);
         changes++;
       }
-      if (syncPairs(y.get(R.style) as Y.Map<unknown>, y.get(R.props) as Y.Array<string>, styleOf(r))) changes++;
+      const style = y.get(R.style) as Y.Map<unknown>;
+      const want = styleOf(r);
+      for (const [p, v] of want) if (mine(`r|${key}|${p}`) && setIf(style, p, v)) changes++;
+      for (const p of [...style.keys()]) {
+        if (!want.some(([w]) => w === p) && gone(`r|${key}|${p}`)) {
+          style.delete(p);
+          changes++;
+        }
+      }
+      if (
+        mine(`rp|${key}`) &&
+        syncArray(
+          y.get(R.props) as Y.Array<string>,
+          want.map(([p]) => p),
+        )
+      )
+        changes++;
     }
-    const keys = live.map(([k]) => k);
     for (const key of [...rules.keys()]) {
-      if (!keys.includes(key)) {
+      if (gone(`rk|${key}`)) {
         rules.delete(key);
         changes++;
       }
     }
-    if (syncArray(ruleOrder, keys)) changes++;
+    if (
+      mine("ro") &&
+      syncArray(
+        ruleOrder,
+        live.map(([k]) => k),
+      )
+    )
+      changes++;
   }, opts.origin);
   return changes;
 }

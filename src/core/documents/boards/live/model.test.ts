@@ -13,18 +13,20 @@ describe("live copy model", () => {
     expect(BOARD_ROOT).toBe("root");
   });
 
-  it("reads ordered pairs in key order and skips keys missing from either side", () => {
+  it("reads ordered pairs in key order, skips listed keys the map lacks, and keeps unlisted ones at the end", () => {
     const doc = new Y.Doc();
     const m = doc.getMap<string>("m");
     const k = doc.getArray<string>("k");
     doc.transact(() => {
       m.set("b", "2");
       m.set("a", "1");
-      k.push(["a", "gone", "b"]);
+      m.set("c", "3");
+      k.push(["a", "gone", "b", "a"]);
     });
     expect(orderedPairs(m, k)).toEqual([
       ["a", "1"],
       ["b", "2"],
+      ["c", "3"],
     ]);
     expect(orderedPairs(undefined, k)).toEqual([]);
   });

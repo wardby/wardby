@@ -88,9 +88,13 @@ export function boardMaps(doc: Y.Doc, boardId: string): BoardMaps {
 /** The design's board list: entries `{ id, name, file, width }`, in order. */
 export const manifestOf = (doc: Y.Doc): Y.Array<Y.Map<unknown>> => doc.getArray<Y.Map<unknown>>("manifest");
 
-/** A map's entries in the order `keys` gives, skipping keys missing from either side. */
+/**
+ * A map's entries in the order `keys` gives, then any the order does not list (in the map's own order), so nothing
+ * stored is ever dropped: two pages writing one rule at once can leave its order list short of a property.
+ */
 export function orderedPairs<V>(m: Y.Map<V> | undefined, keys: Y.Array<string> | undefined): [string, V][] {
   if (!m) return [];
-  const order = keys?.toArray() ?? [...m.keys()];
-  return order.filter((k) => m.has(k)).map((k) => [k, m.get(k) as V]);
+  const listed = [...new Set(keys?.toArray() ?? [])].filter((k) => m.has(k));
+  const rest = [...m.keys()].filter((k) => !listed.includes(k));
+  return [...listed, ...rest].map((k) => [k, m.get(k) as V]);
 }
