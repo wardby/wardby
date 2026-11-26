@@ -6,9 +6,14 @@
  * DATABASE_URL or Playwright's Chromium.
  */
 import { existsSync, readFileSync } from "node:fs";
+import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import { JSDOM } from "jsdom";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import WebSocket from "ws";
+import * as Y from "yjs";
+import { BOARD_ROOT, boardMaps, htmlOf } from "../core/documents/boards/live/model.js";
+import { buildBoard } from "./live/design.test-support.js";
 import { loadVersionFiles } from "../core/documents/files.js";
 import { startTestWebServer, type BrowserCookie, type TestWebServer } from "./test-server.test-support.js";
 
@@ -360,6 +365,82 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         await expect.poll(async () => (await para()) ?? "", { timeout: 10_000 }).toContain("BO-SAME-BOX");
       }
       expect([...a.errors, ...b.errors]).toEqual([]);
+    }, 120_000);
+
+    it("while a page waits for someone else to build a board, the board is not editable; then it is, and typing goes out", async () => {
+      const { documentId, cookie, secondCookie } = await server.design({
+        title: "Coffee",
+        files: files(),
+        access: "write",
+      });
+      // Bo (a scripted page) is told to build Menu and holds off.
+      class Sock extends WebSocket {
+        constructor(url: string, protocols?: string | string[]) {
+          super(url, protocols, { headers: { cookie: `${secondCookie.name}=${secondCookie.value}` } });
+        }
+      }
+      const ydoc = new Y.Doc();
+      const roles: string[] = [];
+      const socket = new HocuspocusProviderWebsocket({
+        url: `${server.origin.replace(/^http/, "ws")}/d/live/${documentId}`,
+        WebSocketPolyfill: Sock,
+        maxAttempts: 1,
+      });
+      const bo = new HocuspocusProvider({
+        websocketProvider: socket,
+        name: documentId,
+        document: ydoc,
+        token: () => JSON.stringify({ epoch: ydoc.getMap("wardby-meta").get("epoch") }),
+        onStateless: ({ payload }) => {
+          const m = JSON.parse(payload) as { type?: string; board?: string; role?: string };
+          if (m.type === "board" && m.board === "menu" && m.role) roles.push(m.role);
+        },
+      });
+      bo.attach();
+      await expect.poll(() => bo.synced, { timeout: 10_000 }).toBe(true);
+      bo.sendStateless(JSON.stringify({ type: "open-board", board: "menu" }));
+      await expect.poll(() => roles[0], { timeout: 10_000 }).toBe("build");
+      try {
+        const a = await open(cookie, documentId);
+        await a.locator(".boards .pick", { hasText: "Menu" }).first().click();
+        const heading = () => a.frameLocator(CANVAS).locator("h1, h2").first();
+        await expect
+          .poll(async () => (await heading().textContent()) ?? "", { timeout: 10_000 })
+          .toMatch(/short list/i);
+        await a.waitForTimeout(800);
+        // Waiting: a double-click opens no text box.
+        await heading().dblclick();
+        await a.waitForTimeout(300);
+        expect(await heading().evaluate((n) => !!n.closest("[contenteditable=true]"))).toBe(false);
+        // Bo builds Menu: Ann's page reads it and can edit; her typing reaches Bo.
+        buildBoard(ydoc, "menu", files()["boards/menu.html"]);
+        await a.waitForTimeout(1500);
+        for (let tries = 0; tries < 4; tries++) {
+          await heading().dblclick();
+          await a.waitForTimeout(200);
+          if (await heading().evaluate((n) => !!n.closest("[contenteditable=true]"))) break;
+        }
+        await heading().evaluate((node) => {
+          const r = node.ownerDocument.createRange();
+          r.selectNodeContents(node);
+          r.collapse(false);
+          const sel = node.ownerDocument.getSelection()!;
+          sel.removeAllRanges();
+          sel.addRange(r);
+        });
+        await a.keyboard.type(" AFTER-WAIT", { delay: 30 });
+        await a
+          .frameLocator(CANVAS)
+          .locator("body")
+          .click({ position: { x: 5, y: 5 } });
+        const menuText = () => [...boardMaps(ydoc, "menu").nodes.values()].map((n) => htmlOf(n) ?? "").join(" ");
+        await expect.poll(menuText, { timeout: 10_000 }).toContain("AFTER-WAIT");
+        expect(boardMaps(ydoc, "menu").nodes.has(BOARD_ROOT)).toBe(true);
+        expect(a.errors).toEqual([]);
+      } finally {
+        bo.destroy();
+        socket.destroy();
+      }
     }, 120_000);
   },
 );

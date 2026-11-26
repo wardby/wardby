@@ -71,9 +71,27 @@ export function startDesignSession(o: {
   const listeners: (() => void)[] = [];
   const notify = () => listeners.forEach((cb) => cb());
 
+  /**
+   * Whether this page locked the canvas while a board had no live copy yet: what is typed before the connector is
+   * attached never goes out (and the canvas is rebuilt from the live copy when it arrives), so nothing is editable
+   * until then.
+   */
+  let lockedForWait = false;
+  const lockWhileWaiting = () => {
+    if (lockedForWait || !o.editable()) return;
+    lockedForWait = true;
+    void boards.setEditable(false);
+  };
+  const unlockAfterWait = () => {
+    if (!lockedForWait) return;
+    lockedForWait = false;
+    if (o.editable()) void boards.setEditable(true);
+  };
+
   const bind = (id: string, build: boolean) => {
     if (shown !== id) return;
     binding?.destroy();
+    unlockAfterWait();
     const parts = boards.parts(id);
     binding = bindBoard(editor, boardMaps(ydoc, id), {
       build,
@@ -153,7 +171,9 @@ export function startDesignSession(o: {
       binding = null;
       setPresence();
       if (built(ydoc, id)) return bind(id, false);
-      // Not built yet: the server picks one page to build it (a read-only page never does).
+      // Not built yet: the server picks one page to build it (a read-only page never does); until this page is
+      // told whether it builds or reads, the board is not editable here.
+      lockWhileWaiting();
       provider.sendStateless(JSON.stringify({ type: "open-board", board: id }));
     },
 
