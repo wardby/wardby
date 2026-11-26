@@ -64,11 +64,13 @@ disabled) is freed only by `reset_model` — it takes only the `modelId` and
 clears every row for it, whichever provider owns it; `disable_model` alone
 never frees it, since the disabled row still reserves the id.
 
-`thinkingMode` (`adaptive`, `manual`, or `none`) must match what the exact
+`thinkingMode` (`adaptive`, `manual`, `level` or `none`) must match what the exact
 model accepts. Getting it wrong doesn't fail at `set_model` — it fails later,
 when a run calls the model, with `unsupported_anthropic_feature`.
 For Claude Code coding runs, `efforts` is also the exact set of levels a run
 may send, so always include the model's default effort level.
+
+Gemini models use `level`: the agent's effort sets Gemini's thinking level.
 
 OpenAI models keep `thinkingMode` `none`; `efforts` alone drives
 `reasoning.effort` on native agents, which call OpenAI's Responses API

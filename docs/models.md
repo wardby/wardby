@@ -50,7 +50,7 @@ Fields on a returned entry:
 | `modelId`                                                                  | Exact string an agent's `model` must equal.                                                           |
 | `inputPerMTok`, `outputPerMTok`, `cachedInputPerMTok`, `cacheWritePerMTok` | USD per million tokens.                                                                               |
 | `efforts`                                                                  | Reasoning-effort levels this model accepts; empty means never send one.                               |
-| `thinkingMode`                                                             | `adaptive`, `manual`, or `none` — see below.                                                          |
+| `thinkingMode`                                                             | `adaptive`, `manual`, `level` or `none` — see below.                                                  |
 | `origin`                                                                   | `shipped` (came with this release) or `override` (an admin's row).                                    |
 | `priceVersion`                                                             | `shipped:<release version>` for a shipped entry, or the override row's last-updated timestamp.        |
 | `routable`                                                                 | Whether this deployment can actually route to it right now (its provider has credentials configured). |
@@ -122,7 +122,8 @@ reserves it.
 
 ## Thinking mode and effort
 
-`thinkingMode` tells wardby how to ask a model for thinking, and must match what that exact model actually accepts:
+`thinkingMode` tells wardby how to ask a model for thinking, and must match
+what that exact model actually accepts:
 
 - `adaptive` — effort-based thinking (`{"type": "adaptive"}` plus an effort
   level from `efforts`). Most current Claude models.
@@ -208,7 +209,7 @@ image.
 
 **Errors.** A non-200 response ends the call with
 `Gemini API error: HTTP <status> <GOOGLE_STATUS>: <message>`. A `403
-PERMISSION_DENIED` on Vertex means the identity lacks `roles/aiplatform.user`
+PERMISSION_DENIED` on Vertex means the identity wardby runs as (its service account) lacks `roles/aiplatform.user`
 or the API is not enabled. `vertex_auth_unavailable` means no Google Cloud
 credentials could be found. A `402 RESOURCE_EXHAUSTED` from AI Studio means
 the project is out of prepaid credit.

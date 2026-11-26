@@ -41,8 +41,8 @@ need the worker image that ships with this release.
 
 - `Gemini API error: HTTP 402 RESOURCE_EXHAUSTED` — the AI Studio project has
   run out of prepaid credit. Add credit in AI Studio's billing settings.
-- `Gemini API error: HTTP 403 PERMISSION_DENIED` (Vertex) — the service account
-  lacks `roles/aiplatform.user`, or the Vertex AI API is not enabled on the project.
+- `Gemini API error: HTTP 403 PERMISSION_DENIED` (Vertex) — the identity wardby runs as
+  (its service account) lacks `roles/aiplatform.user`, or the Vertex AI API is not enabled on the project.
 - `vertex_auth_unavailable` — wardby could not get Google Cloud credentials. Check
   Workload Identity on GKE, or run `gcloud auth application-default login` locally.
 
