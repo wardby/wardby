@@ -2694,10 +2694,6 @@ model Document {
   exports                  DocumentExport[]
   reviewers                DocumentReviewer[]
   reviewEvents             DocumentReviewEvent[]
-  liveState                DocumentLiveState?
-  liveVersionStates        DocumentLiveVersionState[]
-  liveLease                DocumentLiveLease?
-  liveTickets              DocumentLiveTicket[]
   planSetId                String?
   planSet                  PlanSet?              @relation(fields: [planSetId], references: [id], onDelete: SetNull)
   planPath                 String?
@@ -2785,62 +2781,12 @@ model DocumentVersion {
   createdById String?
   runId       String?
   summary     String?
-  /// The version the writer read (its expectedNumber); null for version 1 and writes without one.
-  /// Live editing merges a publish into the live document from this version's state.
-  baseNumber  Int?
   createdAt   DateTime       @default(now())
   currentOf   Document?      @relation("CurrentVersion")
 
   @@unique([documentId, number])
   /// doc_create counts a run's new documents by runId (#625).
   @@index([runId])
-}
-
-/// A document's live (co-editing) state: the Yjs document people edit together. Created from the latest
-/// version on first open and always loaded from here after that, never rebuilt from Markdown while it exists.
-model DocumentLiveState {
-  documentId    String   @id
-  document      Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  /// The history's id: a browser holding another epoch's state is refused (live_state_stale) and reloads.
-  epoch         String
-  /// The whole Yjs state (an update encoding everything), rewritten on each save.
-  state         Bytes
-  /// The newest version merged into (or saved from) this state: versions after it are merged in on load.
-  versionNumber Int      @default(0)
-  updatedAt     DateTime @updatedAt
-}
-
-/// The live state that is exactly a version, so a publish based on that version can be merged in.
-model DocumentLiveVersionState {
-  documentId    String
-  document      Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  versionNumber Int
-  state         Bytes
-  createdAt     DateTime @default(now())
-
-  @@id([documentId, versionNumber])
-}
-
-/// Which control-plane replica leads a live document (creates its state, merges publishes, saves versions).
-model DocumentLiveLease {
-  documentId String   @id
-  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  /// The leader's advertise address (host:port).
-  owner      String
-  expiresAt  DateTime
-}
-
-/// A single-use, 60-second ticket that lets a member join a live document with the access a share link gives
-/// them (a browser cannot send the share header on a WebSocket). Only its hash is stored.
-model DocumentLiveTicket {
-  tokenHash   String   @id
-  documentId  String
-  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  principalId String
-  readOnly    Boolean
-  expiresAt   DateTime
-
-  @@index([documentId])
 }
 
 /// A design file's text, stored once per document and content hash.
