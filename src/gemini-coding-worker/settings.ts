@@ -57,6 +57,11 @@ export interface GeminiUserSettingsInput {
   outputSchema: Record<string, unknown>;
   /** Set only on a run with MCP tools. Header mode: Substrate's gateway placeholder in its own header. */
   mcp?: { proxyBaseUrl: string; headerMode: boolean };
+  /**
+   * The run's extra repositories (/repos/<name>), which the CLI's file tools refuse outside its
+   * workspace unless included. Absent or empty on a one-repository run.
+   */
+  includeDirectories?: readonly string[];
 }
 
 /** Why a run that asked for sub-agents runs without them, for the driver to record; undefined when it has them. */
@@ -97,6 +102,10 @@ export function geminiUserSettings(input: GeminiUserSettingsInput): Record<strin
       shell: { inactivityTimeout: Math.ceil(input.commandTimeoutMs / 1000) },
     },
     skills: input.repoSkills ? { enabled: true, disabled: [...GEMINI_BUILTIN_SKILLS] } : { enabled: false },
+    // Trusted roots for the file tools and context-file loading (context-files.ts scans the same
+    // roots). Policies, commands, skills, agents and workspace settings still come only from the
+    // workspace's .gemini (0.70.0 reads those from the target directory alone).
+    ...(input.includeDirectories?.length ? { context: { includeDirectories: [...input.includeDirectories] } } : {}),
     modelConfigs: {
       customOverrides: [
         { match: { model: input.googleModel }, modelConfig: { generateContentConfig: cap } },

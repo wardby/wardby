@@ -96,6 +96,14 @@ describe("geminiUserSettings", () => {
     );
   });
 
+  it("gives the CLI each extra repository as an included directory, and none on a one-repository run", () => {
+    expect(geminiUserSettings(base)).not.toHaveProperty("context");
+    expect(geminiUserSettings({ ...base, includeDirectories: [] })).not.toHaveProperty("context");
+    expect(geminiUserSettings({ ...base, includeDirectories: ["/repos/api", "/repos/web"] }).context).toEqual({
+      includeDirectories: ["/repos/api", "/repos/web"],
+    });
+  });
+
   it("sets the final-answer schema on the run model's own replies only", () => {
     const last = overrides(geminiUserSettings(base)).at(-1)!;
     expect(last).toEqual({

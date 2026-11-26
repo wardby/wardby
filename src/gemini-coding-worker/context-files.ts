@@ -11,7 +11,7 @@ export const MAX_CONTEXT_SCAN_ENTRIES = 1_000_000;
 const NAMES: ReadonlySet<string> = new Set(GEMINI_CONTEXT_FILE_NAMES);
 
 /**
- * Refuses the run when any entry named GEMINI.md, AGENTS.md or CLAUDE.md anywhere in the workspace
+ * Refuses the run when any entry named GEMINI.md, AGENTS.md or CLAUDE.md anywhere under the roots
  * (exact names, as 0.70.0 matches them on Linux) is not a regular file. The CLI follows symlinks
  * when it loads them: at start for the workspace root, and later for any subdirectory a tool touches
  * (its "JIT" memory). A committed `GEMINI.md -> /proc/self/environ` would put the CLI's environment,
@@ -22,15 +22,19 @@ const NAMES: ReadonlySet<string> = new Set(GEMINI_CONTEXT_FILE_NAMES);
  * Run before each CLI start (the first turn and the repair). A symlink the agent creates mid-run is
  * shell trust (decision 13): its shells can already read /proc/self/environ.
  *
+ * `roots` are every directory the CLI trusts: the workspace and each extra repository it is given
+ * as an included directory (the CLI loads context files under each, at start and JIT; settings.ts).
+ *
  * Never follows a link (Dirent types come from the directory listing, not stat), skips `.git`, and
- * fails closed past `maxEntries`. A missing workspace has nothing to load.
+ * fails closed past `maxEntries` (counted across all roots). A missing root has nothing to load.
  */
 export async function assertGeminiContextFilesRegular(
-  workspace: string,
+  roots: string | readonly string[],
   options: { maxEntries?: number } = {},
 ): Promise<void> {
   const maxEntries = options.maxEntries ?? MAX_CONTEXT_SCAN_ENTRIES;
-  const pending = [workspace];
+  const rootSet = new Set(typeof roots === "string" ? [roots] : roots);
+  const pending = [...rootSet];
   let seen = 0;
   while (pending.length > 0) {
     const dir = pending.pop()!;
@@ -39,7 +43,7 @@ export async function assertGeminiContextFilesRegular(
       handle = await opendir(dir);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (dir === workspace && code === "ENOENT") return;
+      if (rootSet.has(dir) && code === "ENOENT") continue;
       throw new Error(CONTEXT_FILE_REFUSED, { cause: error });
     }
     for await (const entry of handle) {

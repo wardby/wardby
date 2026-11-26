@@ -54,6 +54,19 @@ describe("assertGeminiContextFilesRegular", () => {
     await expect(assertGeminiContextFilesRegular(root, { maxEntries: 2 })).rejects.toThrow(CONTEXT_FILE_REFUSED);
   });
 
+  it("scans every root the CLI trusts: a link in an extra repository refuses the run", async () => {
+    const workspace = await repo({ "GEMINI.md": "ok" });
+    const clean = await repo({ "AGENTS.md": "ok" });
+    const linked = await repo({ "README.md": "r" });
+    await symlink("/proc/self/environ", join(linked, "GEMINI.md"));
+    await expect(assertGeminiContextFilesRegular([workspace, clean])).resolves.toBeUndefined();
+    await expect(assertGeminiContextFilesRegular([workspace, clean, linked])).rejects.toThrow(CONTEXT_FILE_REFUSED);
+    // A missing extra root has nothing to load either.
+    await expect(
+      assertGeminiContextFilesRegular([workspace, join(tmpdir(), "no-such-gemini-repo")]),
+    ).resolves.toBeUndefined();
+  });
+
   it("passes a missing workspace", async () => {
     await expect(assertGeminiContextFilesRegular(join(tmpdir(), "no-such-gemini-ws"))).resolves.toBeUndefined();
   });

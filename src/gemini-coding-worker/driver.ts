@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import {
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
   DEFAULT_CLAUDE_MAX_TURNS,
@@ -54,6 +55,8 @@ export interface GeminiRunOptions extends RunFrameOptions {
 }
 
 const VERSION_TIMEOUT_MS = 30_000;
+/** Where the extra repositories are mounted when the options do not say (run-frame.ts's default). */
+const DEFAULT_REPOS_ROOT = "/repos";
 /**
  * The CLI is stopped this long before the run's deadline, so the worker still reports a fixed
  * code (coding_stream_timeout) before the launcher stops the container.
@@ -142,6 +145,10 @@ export async function runGeminiCodingWorker(options: GeminiRunOptions): Promise<
   const signal = runSignal(options.signal, options.input.deadlineAt);
   const run = await prepareWorkerRun(options);
   const schema = geminiOutputJsonSchema(Boolean(options.input.repositories));
+  // The extra repositories, where they are mounted: the CLI's trusted roots besides the workspace.
+  const includeDirectories = (options.input.repositories ?? []).map((repository) =>
+    join(options.reposRoot ?? DEFAULT_REPOS_ROOT, repository.name),
+  );
   const settingsInput: Omit<GeminiUserSettingsInput, "repoAgentNames" | "repoAgentsUnpinnable"> = {
     backend: model.backend,
     googleModel: model.googleModel,
@@ -152,6 +159,7 @@ export async function runGeminiCodingWorker(options: GeminiRunOptions): Promise<
     webTools: options.runSettings.webTools,
     repoSkills: options.input.repoSkills !== false,
     outputSchema: schema,
+    includeDirectories,
     ...(options.mcpToken
       ? { mcp: { proxyBaseUrl: options.proxyBaseUrl, headerMode: Boolean(options.mcpTokenHeader) } }
       : {}),
@@ -174,8 +182,8 @@ export async function runGeminiCodingWorker(options: GeminiRunOptions): Promise<
   const prepareTurn = async (): Promise<void> => {
     await sweep();
     await resetGeminiAgentState(home);
-    // The CLI follows a symlinked GEMINI.md/AGENTS.md/CLAUDE.md (context-files.ts): refuse the run first.
-    await assertGeminiContextFilesRegular(options.workspace);
+    // The CLI follows a symlinked GEMINI.md/AGENTS.md/CLAUDE.md under any root it trusts (context-files.ts): refuse the run first.
+    await assertGeminiContextFilesRegular([options.workspace, ...includeDirectories]);
     const agents = options.runSettings.subAgents
       ? await readRepoAgents(options.workspace)
       : { names: [], unpinnable: false };

@@ -233,6 +233,36 @@ describe("runGeminiCodingWorker", () => {
     expect(cli.calls).toHaveLength(2);
   });
 
+  it("includes each extra repository for the CLI's file tools and refuses a linked context file in one", async () => {
+    const repositories = [
+      { name: "api", path: "/repos/api", access: "write" as const, repository: "your-org/api", commit: "a".repeat(40) },
+      { name: "web", path: "/repos/web", access: "read" as const, repository: "your-org/web", commit: "b".repeat(40) },
+    ];
+    const cli = fakeCli("prose-final", "repair-json");
+    const o = await options({ spawnCli: cli.spawnCli, input: { ...input, repositories } });
+    const reposRoot = join(root!, "repos");
+    o.reposRoot = reposRoot;
+    for (const r of repositories) await mkdir(join(reposRoot, r.name), { recursive: true });
+    const included: unknown[] = [];
+    cli.hooks.before = async () => {
+      included.push(
+        (JSON.parse(await readFile(join(o.home!, ".gemini", "settings.json"), "utf8")) as { context?: unknown })
+          .context,
+      );
+    };
+    await runGeminiCodingWorker(o);
+    // The repair turn gets the same directories.
+    const context = { includeDirectories: [join(reposRoot, "api"), join(reposRoot, "web")] };
+    expect(included).toEqual([context, context]);
+
+    await symlink("/proc/self/environ", join(reposRoot, "web", "GEMINI.md"));
+    const refused = fakeCli("success-tools");
+    expect(
+      safeWorkerErrorCode(await runGeminiCodingWorker({ ...o, spawnCli: refused.spawnCli }).catch((e: unknown) => e)),
+    ).toBe("coding_context_file_refused");
+    expect(refused.calls.map((c) => c.args[0])).toEqual(["--version"]);
+  });
+
   it("stops leftover processes after every CLI run, before the next turn and before finishing", async () => {
     const order: string[] = [];
     const cli = fakeCli("prose-final", "repair-json");

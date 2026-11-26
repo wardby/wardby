@@ -3,7 +3,7 @@
 // model key, nothing leaves the machine). WARDBY_GEMINI_DOCKER_TEST=1 runs it (npm run
 // test:gemini-docker, after npm run gemini:images:local); GEMINI_RECORD=1 also writes the request
 // fixture the proxy's own test replays.
-import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -568,6 +568,70 @@ describe.skipIf(!GEMINI_DOCKER_ENABLED)("Gemini CLI worker image against the cod
     for (const request of stack.requests) expect(bodyText(request)).not.toContain(stack.capability);
     expect(run.stdout + run.stderr).not.toContain(stack.capability);
   }, 300_000);
+
+  describe("extra repositories (/repos/<name>)", () => {
+    const tools = {
+      name: "tools",
+      path: "/repos/tools",
+      access: "write" as const,
+      repository: "your-org/tools",
+      commit: "b".repeat(40),
+    };
+    const multiFinal = (runId: string) =>
+      JSON.stringify({ ...(JSON.parse(finalJson(runId)) as Record<string, unknown>), pullRequests: null });
+    const repoDir = async (files: Record<string, string> = {}) => {
+      const dir = await workspace();
+      for (const [path, content] of Object.entries(files)) await writeFile(join(dir, path), content);
+      await chmod(dir, 0o777);
+      return dir;
+    };
+
+    it("the file tools read and write a writable extra repository, and the run answers", async () => {
+      const fake: FakeModel = (request) => {
+        if (request.kind === "helper") return sseReply([text("ok")]);
+        if (request.kind === "sub") return subDone();
+        if (request.turn === 0) {
+          return sseReply([call("write_file", { file_path: "/repos/tools/hello.txt", content: "hello\n" })]);
+        }
+        if (request.turn === 1) return sseReply([call("read_file", { file_path: "/repos/tools/README.md" })]);
+        return sseReply([text(multiFinal("run_compat"))]);
+      };
+      const stack = await startStack({ model: STUDIO, fakeModel: fake });
+      stacks.push(stack);
+      const repo = await repoDir({ "README.md": "MARK_TOOLS_README\n", "GEMINI.md": "MARK_TOOLS_GEMINI_MD\n" });
+      const run = await runWorker({
+        input: taskInput(STUDIO, { repositories: [tools] }),
+        workspace: await workspace(),
+        env: workerEnv(stack),
+        extraArgs: ["-v", `${repo}:/repos/tools`],
+      });
+      expect(run.result?.outcome, run.stderr).toBe("changes_ready");
+      expect(await readFile(join(repo, "hello.txt"), "utf8")).toBe("hello\n");
+      const outputs = stack.requests.filter((r) => r.kind === "main").flatMap(toolOutputs);
+      expect(outputs.join("\n")).not.toMatch(/Path not in workspace|outside the allowed workspace/);
+      expect(outputs.some((o) => o.includes("MARK_TOOLS_README"))).toBe(true);
+      note(
+        `extra repository context file in a request: ${stack.requests.some((r) => bodyText(r).includes("MARK_TOOLS_GEMINI_MD"))}`,
+      );
+    }, 300_000);
+
+    it("a GEMINI.md in an extra repository that links to /proc/self/environ refuses the run", async () => {
+      const stack = await startStack({ model: STUDIO, fakeModel: happy("run_compat") });
+      stacks.push(stack);
+      const repo = await repoDir({ "README.md": "r\n" });
+      await symlink("/proc/self/environ", join(repo, "GEMINI.md"));
+      const run = await runWorker({
+        input: taskInput(STUDIO, { repositories: [tools] }),
+        workspace: await workspace(),
+        env: workerEnv(stack),
+        extraArgs: ["-v", `${repo}:/repos/tools`],
+      });
+      expect(run.exitCode).not.toBe(0);
+      expect(run.stderr).toContain('"error":"coding_context_file_refused"');
+      expect(stack.requests).toEqual([]);
+      expect(run.stdout + run.stderr).not.toContain(stack.capability);
+    }, 300_000);
+  });
 
   it.runIf(RECORD)("writes the driver-configured request fixture for the proxy", async () => {
     const sanitize = (value: unknown) => JSON.parse(JSON.stringify(value).replaceAll(tmpdir(), "/tmp"));
