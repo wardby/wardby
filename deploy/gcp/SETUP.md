@@ -157,6 +157,18 @@ apply where it changes — see `migration-job.tf`.
 
 ## 8. Plan and apply
 
+To let native agents use Google Gemini models through Google AI Studio, also set
+`gemini_api_key_value` in `terraform.tfvars`; it reaches the container as
+`GEMINI_API_KEY`. It is optional, like the other provider keys.
+
+To use Gemini models through Vertex AI instead (or as well), set
+`vertex_ai_enabled = true`. Terraform then enables the Vertex AI API
+(`aiplatform.googleapis.com`), grants the Cloud Run service's own service
+account `roles/aiplatform.user`, and sets `VERTEX_PROJECT` to `project_id` on
+the service. No key is stored: the service calls Vertex as its service account.
+A dedicated Terraform service account (step 6) also needs
+`roles/serviceusage.serviceUsageAdmin` to enable the API. See [docs/models.md](../../docs/models.md#google-gemini).
+
 ```bash
 cd deploy/gcp
 cp terraform.tfvars.example terraform.tfvars   # fill in your values from the steps above

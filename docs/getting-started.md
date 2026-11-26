@@ -257,7 +257,10 @@ accept, including when you later change the model (clear it with
 it and to the OpenAI reasoning models (`gpt-5.6-sol`, `gpt-5.6-terra`,
 `gpt-5.6-luna`, `gpt-6-astra`), which accept `low` through `max`; the older
 OpenAI models (`gpt-4o`, `gpt-4o-mini`, and the `gpt-4.1` family) and Bedrock
-models accept no effort setting. Coding agents do not use it.
+models accept no effort setting. Google Gemini 4 models take `low` through
+`xhigh` (Carbon stops at `high`); they need `GEMINI_API_KEY` (Google AI Studio)
+or `VERTEX_PROJECT` with Application Default Credentials (Vertex AI), as
+described in [Models and pricing](models.md#google-gemini). Coding agents do not use it.
 
 ## Coding agents
 

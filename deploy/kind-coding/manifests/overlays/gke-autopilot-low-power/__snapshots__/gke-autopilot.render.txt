@@ -420,6 +420,8 @@ spec:
           value: wardby_github_allowed_accounts
         - name: WARDBY_MOBILE_ENABLED
           value: wardby_mobile_enabled
+        - name: VERTEX_PROJECT
+          value: wardby-vertex-project
         - name: MCP_TRANSPORT
           value: http
         - name: MCP_HTTP_BIND
@@ -513,6 +515,9 @@ spec:
             optional: true
         - secretRef:
             name: wardby-live-redis-env
+            optional: true
+        - secretRef:
+            name: wardby-gemini-env
             optional: true
         image: wardby-runtime
         lifecycle:
@@ -684,6 +689,8 @@ spec:
           value: wardby-gateway-database-url
         - name: WARDBY_GITHUB_ALLOWED_ACCOUNTS
           value: wardby_github_allowed_accounts
+        - name: VERTEX_PROJECT
+          value: wardby-vertex-project
         - name: NODE_ENV
           value: production
         - name: NATIVE_GATEWAY_LISTEN
@@ -695,6 +702,9 @@ spec:
             name: wardby-native-gateway-env
         - secretRef:
             name: wardby-jira-env
+            optional: true
+        - secretRef:
+            name: wardby-gemini-env
             optional: true
         image: wardby-runtime
         name: gateway

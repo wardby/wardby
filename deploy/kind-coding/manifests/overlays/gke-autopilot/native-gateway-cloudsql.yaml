@@ -66,3 +66,7 @@ spec:
             # agent's repo tools run here, so without it only the App's owner's repositories work.
             - name: WARDBY_GITHUB_ALLOWED_ACCOUNTS
               value: wardby_github_allowed_accounts
+            # Set by up.sh: the project id when vertex_ai_enabled in terraform.tfvars, else
+            # empty (Vertex AI Gemini models off).
+            - name: VERTEX_PROJECT
+              value: wardby-vertex-project

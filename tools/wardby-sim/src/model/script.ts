@@ -1,23 +1,25 @@
 // TEST ONLY (wardby-sim). Scripted model mode: per-agent turn scripts replayed as model
 // responses, $0 and deterministic, in the two wire protocols wardby's coding proxy and native
-// gateway speak (OpenAI Responses, Anthropic Messages), always streamed.
+// gateway speak (OpenAI Responses, Anthropic Messages) plus Gemini generateContent, always streamed.
 //
 // A script (tools/wardby-sim/scripts/flow-g/<agent>.<codex|claude>.json):
 //   {
 //     "agent": "builder",
-//     "protocol": "openai-responses" | "anthropic-messages",
+//     "protocol": "openai-responses" | "anthropic-messages" | "gemini-generate-content",
 //     "match": "a substring every request of this agent carries (its prompt)",
 //     "turns": [ { "items": [...] } | { "content": [...], "stop_reason": "tool_use" }, ... ]
 //   }
 // OpenAI turns carry Responses output items as the API sends them (message, function_call,
 // custom_tool_call, reasoning); Anthropic turns carry content blocks (text, tool_use) and a stop
-// reason. Each request of a matching agent takes the next turn; after the last, the last repeats.
+// reason; Gemini turns carry parts (text, functionCall), and the first functionCall of a turn is
+// signed (thoughtSignature) as the real API does, so a request that replays it unsigned is refused.
+// Each request of a matching agent takes the next turn; after the last, the last repeats.
 //
 // Templates in any string: {{runId}} (the coding worker's "The final JSON runId must be X."),
 // {{prior}} (the run a continuation hint names: "originally opened by wardby run <id>"),
 // {{last:<field>}} (the last value of a JSON string field named <field> anywhere in the request,
 // e.g. a tool result's headSha), {{lastNumber:<field>}} for a number field.
-export type ScriptProtocol = "openai-responses" | "anthropic-messages";
+export type ScriptProtocol = "openai-responses" | "anthropic-messages" | "gemini-generate-content";
 
 export interface ResponsesTurn {
   items: unknown[];
@@ -28,11 +30,15 @@ export interface MessagesTurn {
   stop_reason?: "end_turn" | "tool_use" | "max_tokens";
   usage?: { input_tokens?: number; output_tokens?: number };
 }
+export interface GeminiTurn {
+  parts: ({ text: string } | { functionCall: { id: string; name: string; args: unknown } })[];
+  usage?: { promptTokenCount?: number; candidatesTokenCount?: number };
+}
 export interface TurnScript {
   agent: string;
   protocol: ScriptProtocol;
   match: string;
-  turns: (ResponsesTurn | MessagesTurn)[];
+  turns: (ResponsesTurn | MessagesTurn | GeminiTurn)[];
 }
 
 const RUN_ID = /The final JSON runId must be ([A-Za-z0-9][A-Za-z0-9_-]*)\./;
@@ -174,6 +180,29 @@ export function renderMessages(turn: MessagesTurn, id: string, model: string): s
   return out;
 }
 
+/** A Gemini streamGenerateContent body: one chunk per part, the first functionCall signed, usage last. */
+export function renderGemini(turn: GeminiTurn, seq: number): string {
+  type Chunk = { candidates: { content: unknown; finishReason?: string }[]; usageMetadata?: unknown };
+  let signed = false;
+  const chunks: Chunk[] = turn.parts.map((part, index) => {
+    const out: Record<string, unknown> = { ...part };
+    if ("functionCall" in part && !signed) {
+      out.thoughtSignature = `sim-sig-${seq}-${index}`;
+      signed = true;
+    }
+    return { candidates: [{ content: { role: "model", parts: [out] } }] };
+  });
+  if (chunks.length === 0) chunks.push({ candidates: [{ content: { role: "model", parts: [] } }] });
+  const last = chunks[chunks.length - 1];
+  last.candidates[0].finishReason = "STOP";
+  last.usageMetadata = {
+    promptTokenCount: turn.usage?.promptTokenCount ?? 1200,
+    candidatesTokenCount: turn.usage?.candidatesTokenCount ?? 80,
+    thoughtsTokenCount: 0,
+  };
+  return chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("");
+}
+
 export interface ServedTurn {
   agent: string;
   protocol: ScriptProtocol;
@@ -192,7 +221,11 @@ export class ScriptedModel {
       if (!script.agent || !script.match || !Array.isArray(script.turns) || script.turns.length === 0) {
         throw new Error("a script needs agent, match and at least one turn");
       }
-      if (script.protocol !== "openai-responses" && script.protocol !== "anthropic-messages") {
+      if (
+        script.protocol !== "openai-responses" &&
+        script.protocol !== "anthropic-messages" &&
+        script.protocol !== "gemini-generate-content"
+      ) {
         throw new Error(`unknown protocol ${String(script.protocol)}`);
       }
     }
@@ -206,15 +239,35 @@ export class ScriptedModel {
     this.seq = 0;
   }
 
+  /**
+   * Like `answer` for Gemini, but refuses (as the real API does) a request whose model turn replays
+   * a functionCall without its thoughtSignature: a content with function calls where none is signed.
+   */
+  answerGemini(body: string): string | { error: "missing_thought_signature" } | null {
+    try {
+      const parsed = JSON.parse(body) as { contents?: { role?: string; parts?: Record<string, unknown>[] }[] };
+      for (const content of parsed.contents ?? []) {
+        if (content.role !== "model") continue;
+        const calls = (content.parts ?? []).filter((part) => "functionCall" in part);
+        if (calls.length > 0 && !calls.some((part) => typeof part.thoughtSignature === "string")) {
+          return { error: "missing_thought_signature" };
+        }
+      }
+    } catch {
+      // not JSON: nothing to check
+    }
+    return this.answer("gemini-generate-content", body);
+  }
+
   /** The SSE body answering `body`, or null when no script of `protocol` matches it. */
   answer(protocol: ScriptProtocol, body: string): string | null {
     // A lead's later requests carry its sub-agent's marker too (in the delegation it made), so the
-    // system prompt (Anthropic `system`, OpenAI `instructions`) decides first; then the marker that
+    // system prompt (Anthropic `system`, OpenAI `instructions`, Gemini `systemInstruction`) decides first; then the marker that
     // comes first anywhere in the request.
     let head = "";
     try {
-      const parsed = JSON.parse(body) as { system?: unknown; instructions?: unknown };
-      head = JSON.stringify(parsed.system ?? parsed.instructions ?? "");
+      const parsed = JSON.parse(body) as { system?: unknown; instructions?: unknown; systemInstruction?: unknown };
+      head = JSON.stringify(parsed.system ?? parsed.instructions ?? parsed.systemInstruction ?? "");
     } catch {
       // not JSON: the whole body decides
     }
@@ -239,6 +292,7 @@ export class ScriptedModel {
     const model = /"model"\s*:\s*"([^"]+)"/.exec(body)?.[1] ?? "scripted";
     const turn = fillTemplates(script.turns[index], body);
     this.seq += 1;
+    if (protocol === "gemini-generate-content") return renderGemini(turn as GeminiTurn, this.seq);
     return protocol === "openai-responses"
       ? renderResponses(turn as ResponsesTurn, `resp_sim_${this.seq}`, model)
       : renderMessages(turn as MessagesTurn, `msg_sim_${this.seq}`, model);

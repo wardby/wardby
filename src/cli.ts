@@ -156,7 +156,9 @@ function fail(message: string): never {
 function buildLlmProvider(): ProviderRegistry["llm"] {
   const result = resolveLlmRegistrations();
   if (result.kind === "no-credentials") {
-    fail("No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, and/or BEDROCK_REGION (or AWS_REGION).");
+    fail(
+      "No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, BEDROCK_REGION (or AWS_REGION), GEMINI_API_KEY, and/or VERTEX_PROJECT (or GOOGLE_CLOUD_PROJECT).",
+    );
   }
   return new RoutingLlmProvider(result.registrations);
 }

@@ -25,6 +25,8 @@ locals {
     "slack-bot-token",
     # Optional: left empty without Redis for live editing (documents are pinned instead).
     "live-redis-url",
+    # Optional: left empty when Gemini models are unused.
+    "gemini-api-key",
   ])
 }
 

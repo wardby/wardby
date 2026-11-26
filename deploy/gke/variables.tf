@@ -169,6 +169,12 @@ variable "dependency_cache_max_age_days" {
   }
 }
 
+variable "vertex_ai_enabled" {
+  description = "Grant the control plane and native gateway service accounts roles/aiplatform.user so native agents can use Vertex AI Gemini models (provider vertex-gemini). Also enable the aiplatform.googleapis.com API on the project. Off by default."
+  type        = bool
+  default     = false
+}
+
 variable "session_transcripts_enabled" {
   description = "Create the session transcripts bucket (for agents with sessionResume) and let the control plane (only) use it. Off by default. Storing transcripts also needs WARDBY_SESSION_TRANSCRIPTS=true on deploy/gke/up.sh."
   type        = bool

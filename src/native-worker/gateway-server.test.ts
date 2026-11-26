@@ -549,6 +549,43 @@ describe("streamModel run steps", () => {
     }
   });
 
+  it("forwards a Gemini thought signature on the event but never records it in the run steps", async () => {
+    const signature = "sig-FAKE-123";
+    const geminiLlm = {
+      countTokens: vi.fn(async () => 10),
+      priceUsd: vi.fn(() => 0.001),
+      async *stream(): AsyncIterable<LlmStreamEvent> {
+        yield { type: "tool_call", id: "t1", name: "lookup", argsJson: '{"query":"x"}', providerData: signature };
+        yield { type: "done", stopReason: "tool_calls", usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.001 } };
+      },
+    } as unknown as LlmProvider;
+    const geminiCtx = { ...ctx, llm: geminiLlm };
+    const replay = {
+      request: {
+        model: MODEL,
+        messages: [
+          {
+            role: "assistant" as const,
+            content: "",
+            toolCalls: [{ id: "t0", name: "lookup", argsJson: "{}", providerData: signature }],
+          },
+          { role: "tool" as const, toolCallId: "t0", content: "fine" },
+        ],
+      },
+    } as Parameters<typeof streamModel>[3];
+    const record = vi.fn(async (_runId: string, _batch: RunStepBatch, _extra?: readonly string[]) => undefined);
+    const forwarded: LlmStreamEvent[] = [];
+    for await (const event of streamModel(geminiCtx, fakeLedger() as unknown as Ledger, "call_9", replay, { record })) {
+      forwarded.push(event);
+    }
+    expect(forwarded[0]).toMatchObject({ type: "tool_call", id: "t1", providerData: signature });
+    expect(record).toHaveBeenCalledTimes(1);
+    const batch = record.mock.calls[0][1];
+    expect(batch.steps).toMatchObject([{ kind: "tool", callId: "t1", tool: "lookup" }]);
+    expect(batch.results).toMatchObject([{ callId: "t0", output: "fine" }]);
+    expect(JSON.stringify(record.mock.calls)).not.toContain(signature);
+  });
+
   it("ends the stream normally when the sink throws", async () => {
     const steps: RunStepSink = {
       record: () => {

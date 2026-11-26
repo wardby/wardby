@@ -49,6 +49,7 @@
   "KUBERNETES_SERVICE_HOST" $cp.kubernetesApi.host
   "KUBERNETES_SERVICE_PORT" (ternary $cp.kubernetesApi.port "" (not (empty $cp.kubernetesApi.host)))
   "WARDBY_MODEL_CATALOG_REFRESH_SECONDS" .Values.models.catalogRefreshSeconds
+  "VERTEX_PROJECT" .Values.models.vertexProject
   "AUTH_PROVIDER" $cp.auth.provider
   "AUTH_ISSUER" $cp.auth.issuer
   "AUTH_JWKS_URI" $cp.auth.jwksUri

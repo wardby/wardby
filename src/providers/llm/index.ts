@@ -3,6 +3,8 @@ export * from "./pricing-core.js";
 export * from "./openai.js";
 export { AnthropicLlmProvider, anthropicCredentialsPresent } from "./anthropic.js";
 export { BedrockClaudeLlmProvider, bedrockCredentialsPresent } from "./bedrock.js";
+export { VertexGeminiLlmProvider, vertexGeminiCredentialsPresent } from "./vertex-gemini.js";
+export { GoogleAiStudioLlmProvider, googleAiStudioCredentialsPresent } from "./google-ai-studio.js";
 export { ClaudeLlmProvider, type ClaudeMessagesClient } from "./claude-provider.js";
 export { openaiCredentialsPresent } from "./openai.js";
 export {

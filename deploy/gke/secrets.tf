@@ -38,6 +38,8 @@ locals {
     "slack-bot-token",
     # Optional (seed-secrets.mjs): left empty without Redis for live editing (documents are pinned instead).
     "live-redis-url",
+    # Optional (seed-secrets.mjs): left empty when Gemini models are unused.
+    "gemini-api-key",
   ])
 
   # The namespace and service account are fixed by the manifests in

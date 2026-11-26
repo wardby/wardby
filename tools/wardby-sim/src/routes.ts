@@ -332,6 +332,21 @@ export const ROUTES: readonly RouteEntry[] = [
       "native Anthropic client in Flow G; the real API's full event set is not modelled.",
   ),
 
+  unverified(
+    "model",
+    "POST",
+    "/gemini/v1beta/models/{model}",
+    "Streams scripted Gemini parts (text, functionCall); the first functionCall of a turn carries a " +
+      "thoughtSignature and an unsigned replay answers 400 INVALID_ARGUMENT. Replayed by wardby's native Gemini " +
+      "client (gemini-sim.test.ts); the real API's full chunk set is not modelled.",
+  ),
+  unverified(
+    "model",
+    "POST",
+    "/vertex/v1/projects/{project}/locations/{location}/publishers/google/models/{model}",
+    "The same scripted Gemini stream on the Vertex AI path shape. Replayed by wardby's native Vertex client.",
+  ),
+
   // --- Bitbucket Cloud REST 2.0 (bitbucket/service.ts): Bearer repository or workspace token ---
   bitbucket(
     "GET",

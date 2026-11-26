@@ -49,3 +49,8 @@ connector_enforcement = "REQUIRED"
 # session_transcripts_enabled        = true
 # session_transcripts_bucket_name    = "your-unique-session-transcripts-bucket"
 # session_transcripts_retention_days = 30
+
+# Vertex AI Gemini models for native agents (off by default). Enables the
+# aiplatform API and grants the control plane and native gateway service
+# accounts roles/aiplatform.user; up.sh then sets VERTEX_PROJECT on both.
+# vertex_ai_enabled = true

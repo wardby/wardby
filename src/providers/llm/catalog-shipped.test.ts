@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { SHIPPED_CATALOG, SHIPPED_CATALOG_VERSION } from "./catalog-shipped.js";
+import { parseStoredEntry } from "./catalog-types.js";
 
 const byProvider = (provider: string) => SHIPPED_CATALOG.filter((e) => e.provider === provider);
 
 describe("shipped model catalog", () => {
   it("has a dated version", () => {
-    expect(SHIPPED_CATALOG_VERSION).toBe("2026-10-08");
+    expect(SHIPPED_CATALOG_VERSION).toBe("2026-11-25");
   });
 
   it.each([
@@ -36,8 +37,8 @@ describe("shipped model catalog", () => {
     ]);
   });
 
-  it("lists exactly these 17 models", () => {
-    expect(SHIPPED_CATALOG).toHaveLength(17);
+  it("lists exactly these 29 models", () => {
+    expect(SHIPPED_CATALOG).toHaveLength(29);
   });
 
   it("keeps the anthropic opus/sonnet/fable effort ladder, and no efforts for haiku or Bedrock", () => {
@@ -85,5 +86,43 @@ describe("shipped model catalog", () => {
   it("has unique model ids across providers (routing is by model id)", () => {
     const ids = SHIPPED_CATALOG.map((e) => e.modelId);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+const GEMINI: [string, string, number, number, number, number, string[]][] = [
+  // provider, modelId, input, output, cacheRead, cacheWrite, efforts
+  ["google-ai-studio", "google-ai-studio.gemini-4-neon", 3.0, 15.0, 0.15, 3.0, ["low", "medium", "high", "xhigh"]],
+  ["google-ai-studio", "google-ai-studio.gemini-4-hydrogen", 1.5, 7.5, 0.075, 1.5, ["low", "medium", "high", "xhigh"]],
+  ["google-ai-studio", "google-ai-studio.gemini-4-carbon", 4.0, 20.0, 0.2, 4.0, ["low", "medium", "high"]],
+  ["vertex-gemini", "gemini-4-neon", 3.0, 15.0, 0.15, 3.0, ["low", "medium", "high", "xhigh"]],
+  ["vertex-gemini", "gemini-4-hydrogen", 1.5, 7.5, 0.075, 1.5, ["low", "medium", "high", "xhigh"]],
+  ["vertex-gemini", "gemini-4-carbon", 4.0, 20.0, 0.2, 4.0, ["low", "medium", "high"]],
+  ["vertex-gemini", "us.gemini-4-neon", 3.3, 16.5, 0.165, 3.3, ["low", "medium", "high", "xhigh"]],
+  ["vertex-gemini", "eu.gemini-4-neon", 3.3, 16.5, 0.165, 3.3, ["low", "medium", "high", "xhigh"]],
+  ["vertex-gemini", "us.gemini-4-hydrogen", 1.65, 8.25, 0.0825, 1.65, ["low", "medium", "high", "xhigh"]],
+  ["vertex-gemini", "eu.gemini-4-hydrogen", 1.65, 8.25, 0.0825, 1.65, ["low", "medium", "high", "xhigh"]],
+  ["vertex-gemini", "us.gemini-4-carbon", 4.4, 22.0, 0.22, 4.4, ["low", "medium", "high"]],
+  ["vertex-gemini", "eu.gemini-4-carbon", 4.4, 22.0, 0.22, 4.4, ["low", "medium", "high"]],
+];
+
+describe("shipped Gemini entries", () => {
+  it.each(GEMINI)("%s %s has its exact published rates", (provider, modelId, i, o, r, w, efforts) => {
+    const entry = SHIPPED_CATALOG.find((e) => e.modelId === modelId);
+    expect(entry).toEqual({
+      provider,
+      modelId,
+      encoding: "o200k_base",
+      inputPerMTok: i,
+      outputPerMTok: o,
+      cachedInputPerMTok: r,
+      cacheWritePerMTok: w,
+      efforts,
+      thinkingMode: "level",
+    });
+  });
+
+  it("parseStoredEntry accepts a level-mode vertex-gemini entry", () => {
+    const entry = SHIPPED_CATALOG.find((e) => e.modelId === "gemini-4-neon");
+    expect(parseStoredEntry(entry)).toEqual(entry);
   });
 });

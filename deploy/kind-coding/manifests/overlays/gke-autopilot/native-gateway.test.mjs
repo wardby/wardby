@@ -92,6 +92,7 @@ describe("native gateway on GKE Autopilot", () => {
     expect(spec.containers[0].env).toEqual([
       { name: "DATABASE_URL", value: "wardby-gateway-database-url" },
       { name: "WARDBY_GITHUB_ALLOWED_ACCOUNTS", value: "wardby_github_allowed_accounts" },
+      { name: "VERTEX_PROJECT", value: "wardby-vertex-project" },
     ]);
     expect(spec.priorityClassName).toBe("wardby-control-plane");
   });

@@ -156,6 +156,13 @@ GITHUB_APP_CLIENT_ID="..."
 GITHUB_APP_CLIENT_SECRET="..."
 ```
 
+To let native agents use Google Gemini models, optionally add a Google AI
+Studio key as `GEMINI_API_KEY="..."`; `up.sh` seeds it as `gemini-api-key` and
+syncs it into a separate Secret, `wardby-gemini-env`, that only the control
+plane and native gateway read. For Vertex AI instead, set
+`vertex_ai_enabled = true` in `terraform.tfvars` (see
+[Google Gemini](models.md#google-gemini)).
+
 `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` are the App's OAuth
 Client ID (not the App ID) and a client secret generated under the App's
 **Client secrets**. Users link their GitHub accounts with them, which is how

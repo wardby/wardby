@@ -13,6 +13,7 @@ import {
   simulatorHostFetch,
   SIMULATOR_PLACEHOLDER_API_KEY,
   simulatorModelClientOptions,
+  simulatorGeminiOptions,
   isLocalSimulatorHost,
   loadTestSimulators,
   SIMULATOR_GITHUB_APP_KEY_FINGERPRINT,
@@ -299,6 +300,29 @@ describe("model requests under the switch carry no credential", () => {
     expect(seen[0].headers).toEqual({ "x-stainless-lang": "js" });
     await expect(free("https://api.openai.com/v1/responses", {})).rejects.toThrow("blocked");
     await expect(free(`${BASE.replace("8080", "9999")}/x`, {})).rejects.toThrow("blocked");
+  });
+
+  it("the Gemini adapters get the scripted model's base, a placeholder key, and a fetch that drops credentials", async () => {
+    expect(simulatorGeminiOptions("google-ai-studio", {})).toBeNull();
+    expect(simulatorGeminiOptions("vertex-gemini", {})).toBeNull();
+    const studio = simulatorGeminiOptions("google-ai-studio", ON)!;
+    const vertex = simulatorGeminiOptions("vertex-gemini", ON)!;
+    expect(studio.baseUrl).toBe(`${BASE}/model/gemini/v1beta`);
+    expect(vertex.baseUrl).toBe(`${BASE}/model/vertex`);
+    expect(studio.apiKey).toBe(SIMULATOR_PLACEHOLDER_API_KEY);
+    expect(vertex.apiKey).toBe(SIMULATOR_PLACEHOLDER_API_KEY);
+    const { seen, fetch } = capture();
+    const free = createCredentialFreeFetch(sims, blocked, fetch);
+    await free(`${studio.baseUrl}/models/m:streamGenerateContent?alt=sse`, {
+      method: "POST",
+      headers: {
+        "x-goog-api-key": "AIza-FAKE-key",
+        authorization: `Bearer ${SIMULATOR_PLACEHOLDER_API_KEY}`,
+        "content-type": "application/json",
+      },
+      body: "{}",
+    });
+    expect(seen[0].headers).toEqual({ "content-type": "application/json" });
   });
 
   it("refuses Bedrock under the switch, and only under it", () => {
