@@ -7,11 +7,11 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:24:27.356Z }
 sources:
   - id: swap
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/jobs/workspace-swap.ts#L16-L51
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/providers/jobs/workspace-swap.ts#L20-L55
   - id: docker
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/jobs/docker.ts#L385-L400
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/providers/jobs/docker.ts#L390-L426
   - id: kubernetes
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/jobs/kubernetes.ts#L738-L750
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/providers/jobs/kubernetes.ts#L981-L1010
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -20,24 +20,24 @@ wardby:
     - id: swap
       repo: github:wardby/wardby
       path: src/providers/jobs/workspace-swap.ts
-      lines: [16, 51]
+      lines: [20, 55]
       symbol: replaceDirectoryFromStaging
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
       spanHash: sha256:0d7e951e15553a190b064604ec72c49998f79ebff84b8983aae37b212cc56069
     - id: docker
       repo: github:wardby/wardby
       path: src/providers/jobs/docker.ts
-      lines: [385, 400]
+      lines: [390, 426]
       symbol: DockerJobLauncher.materializeWorkspace
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:3e9525156cbd3c0791e79ff7ce86b16c92b0d62d8acc92a104b604fc6f54c08f
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:49548da40452dd43841a74f0a3aa7df6e203646f661a22e09118f3ebd9ff4d33
     - id: kubernetes
       repo: github:wardby/wardby
       path: src/providers/jobs/kubernetes.ts
-      lines: [738, 750]
+      lines: [981, 1010]
       symbol: KubernetesJobLauncher.materializeWorkspace
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:44a85cadf23fdb1d77c0f4e1738873327756c029ce114c4efb47276d18abac84
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:66fe0bd365254d827cc647327c6f472ccb757dd790d45af53e6e8af2cda5da8b
   confidence: high
 ---
 
@@ -47,8 +47,8 @@ The swap keeps the original workspace until filling and validation succeed, then
 
 **What to do:** keep fill, validation and replacement in that order. Never catch a collection error and continue validating or publishing the partial tree. Preserve cleanup that unlinks symlinks rather than traversing them. This complements [descriptor-bound reads](bounded-file-descriptor.md) at the directory boundary; see [coding execution](overview-coding.md).
 
-[^swap]: src/providers/jobs/workspace-swap.ts, lines 16-51.
+[^swap]: src/providers/jobs/workspace-swap.ts, lines 20-55.
 
-[^docker]: src/providers/jobs/docker.ts, lines 385-400.
+[^docker]: src/providers/jobs/docker.ts, lines 390-426.
 
-[^kubernetes]: src/providers/jobs/kubernetes.ts, lines 738-750.
+[^kubernetes]: src/providers/jobs/kubernetes.ts, lines 981-1010.

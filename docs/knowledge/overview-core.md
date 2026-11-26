@@ -7,13 +7,13 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:22:13.475Z }
 sources:
   - id: schedule
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/scheduler.ts#L55-L82
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/core/scheduler.ts#L57-L92
   - id: dispatch
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/dispatch.ts#L634-L684
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/core/dispatch.ts#L1356-L1384
   - id: engine
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/engine-native.ts#L90-L156
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/core/engine-native.ts#L97-L163
   - id: finish
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/core/runner.ts#L499-L516
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/core/runner.ts#L640-L657
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -22,30 +22,30 @@ wardby:
     - id: schedule
       repo: github:wardby/wardby
       path: src/core/scheduler.ts
-      lines: [55, 82]
+      lines: [57, 92]
       symbol: claimDueRun
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:73b642e5042e6553e4585eed6577d243f772826f7cf84a63a3b57a85d28318f5
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:0933bb6ff885ba839afc76019f33acf903715109da05ed11cf575e82c34829e1
     - id: dispatch
       repo: github:wardby/wardby
       path: src/core/dispatch.ts
-      lines: [634, 684]
+      lines: [1356, 1384]
       symbol: dispatchRun
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:2e9f0d8d431b6e7d2571f0126a39763be2f87f8ff2f0147a17c7fb69f144054e
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:25f897ce9b0821e73d2ad952cc71ea0ae183a6054f26419c522ea6149624971f
     - id: engine
       repo: github:wardby/wardby
       path: src/core/engine-native.ts
-      lines: [90, 156]
+      lines: [97, 163]
       symbol: NativeEngine.run
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
       spanHash: sha256:c38a58677db93241b5ddb7ffd85cae0af88d69903f018d47ca6282c9bb402070
     - id: finish
       repo: github:wardby/wardby
       path: src/core/runner.ts
-      lines: [499, 516]
+      lines: [640, 657]
       symbol: finishRunClaimed
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
       spanHash: sha256:258b0ccb1bf328fef95a5e459858eb3f02ecc3d600f6ff4a7aae562a6416936c
   confidence: high
 ---
@@ -63,10 +63,10 @@ Core orchestrates Run, delegation edges, budget reservations and integration sta
 
 **What to do:** consult [schedule claims](schedule-claim-transaction.md), [delegation admission](delegation-admission-slots.md), [terminal-state ownership](terminal-run-first-writer.md) and [pricing races](run-pricing-first-writer.md) before changing admission or resume paths.
 
-[^schedule]: src/core/scheduler.ts, lines 55-82.
+[^schedule]: src/core/scheduler.ts, lines 57-92.
 
-[^dispatch]: src/core/dispatch.ts, lines 634-684.
+[^dispatch]: src/core/dispatch.ts, lines 1356-1384.
 
-[^engine]: src/core/engine-native.ts, lines 90-156.
+[^engine]: src/core/engine-native.ts, lines 97-163.
 
-[^finish]: src/core/runner.ts, lines 499-516.
+[^finish]: src/core/runner.ts, lines 640-657.

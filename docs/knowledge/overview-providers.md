@@ -4,16 +4,16 @@ title: Provider composition and routing
 description: Interfaces separate orchestration from concrete model, execution, identity, persistence and source-control adapters.
 tags: [providers, routing, composition]
 status: stable
-generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:22:57.805Z }
+generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-11-23T06:06:02.167Z }
 sources:
   - id: registry
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/index.ts#L33-L47
   - id: execution
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/executor/composition.ts#L87-L126
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/providers/executor/composition.ts#L360-L389
   - id: model
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/llm/routing.ts#L67-L79
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/providers/llm/routing.ts#L75-L87
   - id: vcs
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/providers/vcs/routing.ts#L26-L53
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/providers/vcs/routing.ts#L34-L90
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -46,24 +46,24 @@ wardby:
     - id: execution
       repo: github:wardby/wardby
       path: src/providers/executor/composition.ts
-      lines: [87, 126]
+      lines: [360, 389]
       symbol: buildConfiguredExecutor
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:68bdd107cd1d591a2ac700c253fa8449e7316347e48e23055fca286612685275
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:b265ba126716a7efbe8a78da568e664baed2a98444b89aaaffa9586a9a2fc9fe
     - id: model
       repo: github:wardby/wardby
       path: src/providers/llm/routing.ts
-      lines: [67, 79]
+      lines: [75, 87]
       symbol: RoutingLlmProvider.entryFor / forRun
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
       spanHash: sha256:4b757bc28723803469e6625fb8ba7f9ca6d48cb496b669193d3fa4fb3023d475
     - id: vcs
       repo: github:wardby/wardby
       path: src/providers/vcs/routing.ts
-      lines: [26, 53]
+      lines: [34, 90]
       symbol: RoutingVcsProvider.target
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:338d5bc2f7ab53f490045d41a6db1639351fc50d958887c77afee4855d46cc6e
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:1f6edeacdb969d3d47a9b15ef316b92cbb7b74512728844473167cbb83a7ef33
   confidence: high
 ---
 
@@ -73,7 +73,7 @@ Composition and execution proceed through these steps:
 
 1. [Configuration](overview-config.md) chooses adapter kinds; composition roots construct implementations and hand them to core.
 2. Executor composition routes persisted run kinds between native execution, optional native sandbox execution and container execution. Coding launchers require a usable worker-image configuration.
-3. Model routing resolves a catalog entry for new work, then can bind an adapter to a run's stored entry. Source-control routing selects local or GitHub implementations from repository kind and refuses unconfigured kinds at use time.
+3. Model routing resolves a catalog entry for new work, then can bind an adapter to a run's stored entry. Source-control routing selects local, GitHub or a named hosted implementation from repository kind and refuses unconfigured kinds at use time. A hosted repository never falls back to GitHub; workspace remote links must resolve to the same adapter.
 4. Jobs isolate [coding workers](overview-coding.md); model credentials and VCS finalization remain on the trusted side, while the [coding proxy](overview-coding-proxy.md) meters worker model traffic.[^execution][^model][^vcs]
 
 Adapters own external API translation, lifecycle handles and error semantics. [Prisma](overview-prisma.md) holds durable accounting and workflow state, while storage adapters hold blobs. [Deployment modules](overview-deploy.md) supply infrastructure and identities.
@@ -82,8 +82,8 @@ Adapters own external API translation, lifecycle handles and error semantics. [P
 
 [^registry]: src/providers/index.ts, lines 33-47.
 
-[^execution]: src/providers/executor/composition.ts, lines 87-126.
+[^execution]: src/providers/executor/composition.ts, lines 360-389.
 
-[^model]: src/providers/llm/routing.ts, lines 67-79.
+[^model]: src/providers/llm/routing.ts, lines 75-87.
 
-[^vcs]: src/providers/vcs/routing.ts, lines 26-53.
+[^vcs]: src/providers/vcs/routing.ts, lines 34-90.

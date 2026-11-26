@@ -7,13 +7,13 @@ status: stable
 generated: { by: wardby-architect/gpt-6.1-sol, at: 2026-10-17T08:23:52.509Z }
 sources:
   - id: config
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/quickstart/index.ts#L433-L484
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/quickstart/index.ts#L436-L487
   - id: seed
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/quickstart/index.ts#L484-L507
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/quickstart/index.ts#L487-L505
   - id: import
     url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/import/index.ts#L72-L106
   - id: serve
-    url: https://github.com/wardby/wardby/blob/f4ac917fb05fd1118053462c98379c51289fed46/src/cli.ts#L1013-L1030
+    url: https://github.com/wardby/wardby/blob/1853f87cef0b4afbf5e5227635a1f1275c7ad68a/src/cli.ts#L1207-L1224
 wardby:
   schema: 1
   roles: [planner, builder, reviewer]
@@ -22,17 +22,17 @@ wardby:
     - id: config
       repo: github:wardby/wardby
       path: src/quickstart/index.ts
-      lines: [433, 484]
+      lines: [436, 487]
       symbol: quickstartCommand
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
       spanHash: sha256:b37adfe4a639a53624a0ce50e771657129e6998d27f655b4f7c40d3f31aa7c8f
     - id: seed
       repo: github:wardby/wardby
       path: src/quickstart/index.ts
-      lines: [484, 507]
+      lines: [487, 505]
       symbol: quickstartCommand
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
-      spanHash: sha256:f4cf2db2dd78a46baa7b60419db278165a5784c6b1b644010e4c4784930966b2
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
+      spanHash: sha256:432108339625a19b55aa70f0fe810703e8d88659a91ca5ab142afa17b972abcf
     - id: import
       repo: github:wardby/wardby
       path: src/import/index.ts
@@ -43,9 +43,9 @@ wardby:
     - id: serve
       repo: github:wardby/wardby
       path: src/cli.ts
-      lines: [1013, 1030]
+      lines: [1207, 1224]
       symbol: serve
-      sha: f4ac917fb05fd1118053462c98379c51289fed46
+      sha: 1853f87cef0b4afbf5e5227635a1f1275c7ad68a
       spanHash: sha256:b2e4a9d5adf84699138e39a87b134e8eb8bbec07ceaf842e54ba3bcabef18116
   confidence: high
 ---
@@ -65,10 +65,10 @@ This area owns local state files, command orchestration and import reports. Dura
 
 **What to do:** preserve [rename-target validation](import-rename-target.md) and [ownerless tool uniqueness checks](nullable-tool-uniqueness.md) when changing creation. See [getting started](../getting-started.md) for operator setup.
 
-[^config]: src/quickstart/index.ts, lines 433-484.
+[^config]: src/quickstart/index.ts, lines 436-487.
 
-[^seed]: src/quickstart/index.ts, lines 484-507.
+[^seed]: src/quickstart/index.ts, lines 487-505.
 
 [^import]: src/import/index.ts, lines 72-106.
 
-[^serve]: src/cli.ts, lines 1013-1030.
+[^serve]: src/cli.ts, lines 1207-1224.
