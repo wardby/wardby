@@ -6,6 +6,8 @@ export const WORKER_PID_NAMESPACE_ENV = "WARDBY_WORKER_PID_NAMESPACE";
 /** Stop-then-kill rounds: a process forked while a round ran is caught by the next one. */
 const SWEEP_ROUNDS = 5;
 const ROUND_PAUSE_MS = 50;
+/** How long a killed process may take to exit (a D-state wait, a large process) before it counts as a survivor. */
+export const KILLED_EXIT_WAIT_MS = 5_000;
 
 export type SweepResult = "swept" | "skipped";
 
@@ -79,9 +81,10 @@ function signal(kill: (pid: number, signal: NodeJS.Signals) => void, pid: number
  * machine, a namespace shared with other processes, no /proc) it signals nothing and returns
  * "skipped".
  *
- * Each round SIGSTOPs every target first (a stopped process cannot fork), then SIGKILLs them, then
- * looks again. A process that is still there after the last round throws coding_stream_failed:
- * the run never goes on with the agent's processes alive. Processes it may not signal (another
+ * Each round SIGSTOPs every new target first (a stopped process cannot fork), then SIGKILLs them,
+ * then looks again. A killed process gets KILLED_EXIT_WAIT_MS to exit (become a zombie or vanish);
+ * new pids after the last round, or a killed one still alive after the wait, throw
+ * coding_stream_failed: the run never goes on with the agent's processes alive. Processes it may not signal (another
  * uid) are not the agent's and are left alone.
  */
 export async function killLeftoverProcesses(
@@ -90,6 +93,10 @@ export async function killLeftoverProcesses(
     self?: number;
     env?: NodeJS.ProcessEnv;
     pauseMs?: number;
+    /** KILLED_EXIT_WAIT_MS by default. */
+    exitWaitMs?: number;
+    /** Tests only: called before each scan of the loop. */
+    onScan?: () => void;
     kill?: (pid: number, signal: NodeJS.Signals) => void;
   } = {},
 ): Promise<SweepResult> {
@@ -102,14 +109,31 @@ export async function killLeftoverProcesses(
   const keep = await protectedPids(procRoot, options.self ?? process.pid);
   if (!keep.has(1)) return "skipped";
   const notOurs = new Set<number>();
+  const killed = new Set<number>();
+  const exitWait = options.exitWaitMs ?? KILLED_EXIT_WAIT_MS;
   const left = async () => (await targets(procRoot, keep)).filter((pid) => !notOurs.has(pid));
-  for (let round = 0; round < SWEEP_ROUNDS; round += 1) {
+  let rounds = 0;
+  let lastKill = 0;
+  for (;;) {
+    options.onScan?.();
     const found = await left();
     if (found.length === 0) return "swept";
-    for (const pid of found) if (!signal(kill, pid, "SIGSTOP")) notOurs.add(pid);
-    for (const pid of found) if (!notOurs.has(pid)) signal(kill, pid, "SIGKILL");
+    const fresh = found.filter((pid) => !killed.has(pid));
+    if (fresh.length > 0) {
+      // New pids (forked before they were stopped): another stop-then-kill round, a bounded number of times.
+      if (rounds >= SWEEP_ROUNDS) throw new Error("coding_stream_failed");
+      rounds += 1;
+      for (const pid of fresh) if (!signal(kill, pid, "SIGSTOP")) notOurs.add(pid);
+      for (const pid of fresh) {
+        if (notOurs.has(pid)) continue;
+        signal(kill, pid, "SIGKILL");
+        killed.add(pid);
+      }
+      lastKill = Date.now();
+    } else if (Date.now() - lastKill >= exitWait) {
+      // Only processes already killed are left, and they had their time to exit.
+      throw new Error("coding_stream_failed");
+    }
     await sleep(pause);
   }
-  if ((await left()).length > 0) throw new Error("coding_stream_failed");
-  return "swept";
 }

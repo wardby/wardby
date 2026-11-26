@@ -201,20 +201,29 @@ export async function runGeminiCodingWorker(options: GeminiRunOptions): Promise<
   /** One CLI run: every line to `onLine`; afterwards, leftover processes stopped whatever happened. */
   const cli = async (args: string[], onLine: (line: string) => void): Promise<GeminiCliDone> => {
     const started = spawnCli(args, { cwd: options.workspace, env, signal });
-    let done: GeminiCliDone;
+    let done: GeminiCliDone | undefined;
+    let failure: unknown;
     try {
       for await (const line of started.lines) onLine(line);
       done = await started.done;
-    } finally {
+    } catch (error) {
+      failure = error;
+    }
+    // Leftovers stopped whatever happened; a sweep failure outranks the run's own.
+    try {
       await sweep();
+    } catch (error) {
+      failure = error;
     }
     // The tail goes only to the operator-asked debug trace (redacted by exact value), never elsewhere.
-    options.trace?.record("cli_stderr", done.stderrTail);
-    // Cancellation and the deadline come from the signal itself: without the relaunch the CLI
-    // handles SIGTERM and may exit with any code, 0 included.
+    if (done) options.trace?.record("cli_stderr", done.stderrTail);
+    // Cancellation and the deadline come from the signal itself, before any other failure: without
+    // the relaunch the CLI handles SIGTERM and may exit with any code, 0 included.
     if (signal.aborted) {
+      if (failure !== undefined) options.trace?.record("cli_after_abort_error", describeError(failure));
       throw new Error(options.signal.aborted ? "worker_cancelled" : "coding_stream_timeout");
     }
+    if (failure !== undefined || !done) throw failure;
     // A dropped event could have been the answer or the failure: never read the rest as success.
     if (done.oversizedLines > 0) {
       options.trace?.record("cli_stdout_oversized", { lines: done.oversizedLines });

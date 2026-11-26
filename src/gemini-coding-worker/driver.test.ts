@@ -337,6 +337,34 @@ describe("runGeminiCodingWorker", () => {
     expect(safeWorkerErrorCode(error)).toBe("coding_stream_timeout");
   });
 
+  it("reports the deadline even when the sweep after the stopped CLI fails", async () => {
+    const spawnCli: GeminiCliSpawner = (args, run) => {
+      if (args[0] === "--version") return versionRun();
+      return {
+        lines: (async function* () {
+          await new Promise((resolve) => run.signal.addEventListener("abort", resolve, { once: true }));
+          yield* [];
+        })(),
+        done: Promise.resolve({ code: 143, signal: null, stderrTail: "", oversizedLines: 0 }),
+      };
+    };
+    let sweeps = 0;
+    const deadlineAt = new Date(Date.now() + GEMINI_DEADLINE_MARGIN_MS + 300).toISOString();
+    const error = await runGeminiCodingWorker(
+      await options({
+        spawnCli,
+        input: { ...input, deadlineAt },
+        sweepProcesses: async () => {
+          sweeps += 1;
+          if (sweeps > 1) throw new Error("coding_stream_failed");
+          return "swept" as const;
+        },
+      }),
+    ).catch((e: unknown) => e);
+    expect(sweeps).toBe(2);
+    expect(safeWorkerErrorCode(error)).toBe("coding_stream_timeout");
+  });
+
   it("refuses to start on a changed system file or another CLI version, before any model call", async () => {
     const o = await options();
     await chmod(join(o.systemCheck!.root!, "settings.json"), 0o666);

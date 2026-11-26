@@ -68,6 +68,7 @@ describe("killLeftoverProcesses", () => {
     const stopped = new Set<number>();
     let next = 100;
     let forked = 0;
+    const pending: Promise<void>[] = [];
     const result = await killLeftoverProcesses({
       procRoot: proc,
       self: 7,
@@ -77,13 +78,13 @@ describe("killLeftoverProcesses", () => {
         // A running forker makes a new child on every signal it sees; a stopped one cannot.
         if (!stopped.has(pid) && forked < 3) {
           forked += 1;
-          rmSync(join(proc, String(next)), { recursive: true, force: true });
-          void addProcess(proc, next++, pid);
+          pending.push(addProcess(proc, next++, pid));
         }
         if (signal === "SIGSTOP") stopped.add(pid);
         if (signal === "SIGKILL") gone(proc, pid);
       },
     });
+    await Promise.all(pending);
     expect(result).toBe("swept");
     expect(forked).toBeGreaterThan(0);
   });
@@ -111,6 +112,44 @@ describe("killLeftoverProcesses", () => {
       }),
     ).rejects.toThrow("coding_stream_failed");
     await Promise.all(pending);
+  });
+
+  it("waits for a killed process that takes a while to exit", async () => {
+    const proc = await fakeProc([
+      [1, 0, "S", "init"],
+      [7, 1, "S", "node"],
+      [30, 1, "D", "slow"],
+    ]);
+    let scansAfterKill = 0;
+    const signals: NodeJS.Signals[] = [];
+    const result = await killLeftoverProcesses({
+      procRoot: proc,
+      self: 7,
+      env: ENV,
+      pauseMs: 5,
+      exitWaitMs: 2_000,
+      kill: (_pid, signal) => void signals.push(signal),
+      // Counts scans: the process vanishes on the fourth look after its SIGKILL.
+      onScan: () => {
+        if (signals.includes("SIGKILL") && ++scansAfterKill === 4) gone(proc, 30);
+      },
+    });
+    expect(result).toBe("swept");
+    expect(signals).toEqual(["SIGSTOP", "SIGKILL"]);
+    expect(scansAfterKill).toBeGreaterThanOrEqual(4);
+  });
+
+  it("throws when a killed process never exits within the wait", async () => {
+    const proc = await fakeProc([
+      [1, 0, "S", "init"],
+      [7, 1, "S", "node"],
+      [30, 1, "D", "stuck"],
+    ]);
+    const started = Date.now();
+    await expect(
+      killLeftoverProcesses({ procRoot: proc, self: 7, env: ENV, pauseMs: 5, exitWaitMs: 100, kill: () => {} }),
+    ).rejects.toThrow("coding_stream_failed");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(100);
   });
 
   it("leaves processes it may not signal (another uid) alone", async () => {
