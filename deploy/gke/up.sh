@@ -704,6 +704,8 @@ JIRA_ENABLED=0
 grep -qx jira "$SEED_GROUPS_FILE" && JIRA_ENABLED=1
 SLACK_ENABLED=0
 grep -qx slack "$SEED_GROUPS_FILE" && SLACK_ENABLED=1
+LIVE_REDIS_ENABLED=0
+grep -qx live-redis "$SEED_GROUPS_FILE" && LIVE_REDIS_ENABLED=1
 rm -f "$SEED_GROUPS_FILE"
 
 echo "==> 6/${TOTAL_STEPS} External Secrets Operator ${ESO_CHART_VERSION}, scoped to ${NAMESPACE}"
@@ -767,6 +769,17 @@ if ((SLACK_ENABLED)); then
   SYNCED_SECRETS+=(wardby-slack-env)
 else
   kubectl -n "$NAMESPACE" delete externalsecret wardby-slack-env --ignore-not-found >/dev/null
+fi
+# Redis for live editing is optional the same way (wardby-live-redis-env, optional: true).
+if ((LIVE_REDIS_ENABLED)); then
+  echo "    Live-editing Redis is configured; syncing wardby-live-redis-env"
+  if ! render_secrets external-secrets-live-redis.yaml | kubectl apply -f - >/dev/null; then
+    echo "up.sh: applying the live-editing Redis ExternalSecret failed; running pods are unaffected." >&2
+    exit 1
+  fi
+  SYNCED_SECRETS+=(wardby-live-redis-env)
+else
+  kubectl -n "$NAMESPACE" delete externalsecret wardby-live-redis-env --ignore-not-found >/dev/null
 fi
 if ! wait_external_secrets_synced 180s "${SYNCED_SECRETS[@]}"; then
   echo "up.sh: the Secrets did not sync from Secret Manager; nothing else was applied." >&2

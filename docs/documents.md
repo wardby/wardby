@@ -253,6 +253,10 @@ no one is locked out by someone else's save. The save state reads **Live**.
   [`live_unavailable`](../help/errors/live-unavailable.md)), it saves
   versions the usual way: each save names the version it started from and is
   refused with `document_version_conflict` if someone published since.
+- **Several copies of the control plane.** Each document is served by one
+  copy at a time (the others hand its connections to it), or, with
+  `WARDBY_LIVE_REDIS_URL`, by every copy through Redis. See
+  [Availability](availability.md#why-the-control-plane-can-run-more-than-one-copy).
 - **History.** The live copy is kept in PostgreSQL and continues across
   restarts. A page holding a copy from a history the server no longer has
   (the live copy was reset) is refused

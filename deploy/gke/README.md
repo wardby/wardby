@@ -324,7 +324,12 @@ leaves them empty when `.env.local` has none of them, and `up.sh` then skips
 `wardby-jira-env`, with `optional: true`. The Slack bot token
 (`slack-bot-token`) is optional the same way: without it `up.sh` skips
 `secrets/external-secrets-slack.yaml`, and the control plane reads
-`wardby-slack-env` with `optional: true`.
+`wardby-slack-env` with `optional: true`. Redis for live editing
+(`live-redis-url`, from `WARDBY_LIVE_REDIS_URL`) is optional the same way:
+without it `up.sh` skips `secrets/external-secrets-live-redis.yaml`, the
+control plane reads `wardby-live-redis-env` with `optional: true`, and each
+document is served by one control-plane copy (see
+[Availability](../../docs/availability.md)).
 
 `verify-eso-kind.sh` proves the manifests, the scoping and the handover on a
 throwaway kind cluster. Run it after changing any of them or the chart version.

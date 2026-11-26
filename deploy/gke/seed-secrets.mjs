@@ -47,6 +47,10 @@ export const SECRETS = [
   // the wardby-slack-env ExternalSecret. WARDBY_SLACK_CUSTOMIZE and
   // WARDBY_SLACK_API_BASE_URL are not secrets and are not seeded.
   { id: "slack-bot-token", env: "WARDBY_SLACK_BOT_TOKEN", source: "optional", group: "slack" },
+  // Redis for live editing across control-plane copies (docs/availability.md). Optional: without it each
+  // document is pinned to one copy, and up.sh skips the wardby-live-redis-env ExternalSecret. The URL may carry
+  // a password: it is a secret like the others, seeded over stdin.
+  { id: "live-redis-url", env: "WARDBY_LIVE_REDIS_URL", source: "optional", group: "live-redis" },
 ];
 
 const CONTROL_PLANE_SECRET = "wardby-control-plane-env";

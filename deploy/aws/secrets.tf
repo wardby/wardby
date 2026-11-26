@@ -23,6 +23,8 @@ locals {
     "jira-webhook-secret",
     # Optional: left empty when Slack notifications are unused.
     "slack-bot-token",
+    # Optional: left empty without Redis for live editing (documents are pinned instead).
+    "live-redis-url",
   ])
 }
 
