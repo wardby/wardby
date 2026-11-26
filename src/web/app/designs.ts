@@ -443,8 +443,24 @@ function mount(
   const boardNames = () => new Map(boards.manifest().boards.map((b) => [b.id, b.name]));
 
   // ---- live editing: the server saves versions; this page keeps its board in step with everyone's ----
+  /** Live: boards with no live copy take their file from version `v` (a newer version than the page shows). */
+  const refreshUnbuilt = (v: DocumentPayload["version"]) => {
+    if (!session || v.format !== "boards-v1") return;
+    for (const b of boards.manifest().boards) {
+      const text = v.files[b.file];
+      if (!session.isBuilt(b.id) && typeof text === "string") boards.setBoardFile(b.id, text);
+    }
+  };
   const session: DesignSession | null = join
-    ? startDesignSession({ join, boards, editable: () => canEdit && !lockedNow })
+    ? startDesignSession({
+        join,
+        boards,
+        editable: () => canEdit && !lockedNow,
+        beforeBuild: async () => {
+          const latest = await api.load();
+          if (latest.version.number > baseNumber) refreshUnbuilt(latest.version);
+        },
+      })
     : null;
   /** Who else is on each board: a dot in their colour per person, their names as the tooltip. */
   const presenceMarks = (board: string): HTMLElement[] => {
@@ -1044,6 +1060,7 @@ function mount(
     // Live: the boards already show it (the live copy is what versions are saved from); only the version's number,
     // checks and threads change.
     if (session) {
+      refreshUnbuilt(next.version);
       baseNumber = next.version.number;
       version.textContent = `design · v${baseNumber}`;
       warnings = next.version.warnings ?? [];

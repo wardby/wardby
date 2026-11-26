@@ -29,6 +29,8 @@ export interface DesignSession {
   message(msg: Record<string, unknown>): void;
   undo(): void;
   redo(): void;
+  /** Whether a board has a live copy (its file then comes from the live copy, never from a version). */
+  isBuilt(id: string): boolean;
   /** Other people on this design. */
   peers(): Peer[];
   /** Called when someone else's presence or the board list changes. */
@@ -52,6 +54,11 @@ export function startDesignSession(o: {
   join: LiveJoin;
   boards: BoardsEditor;
   editable: () => boolean;
+  /**
+   * Before building a board: bring the page's copy of boards nobody has built up to the newest version (an agent
+   * may have changed one since this page loaded), so the live copy starts from it.
+   */
+  beforeBuild?: () => Promise<void>;
 }): DesignSession {
   const { ydoc, provider } = o.join;
   const { boards } = o;
@@ -140,8 +147,9 @@ export function startDesignSession(o: {
 
     message(msg) {
       if (msg.type !== "board" || typeof msg.board !== "string" || msg.board !== shown) return;
-      if (msg.role === "build" && o.editable()) bind(msg.board, true);
-      else whenBuilt(msg.board);
+      const board = msg.board;
+      if (msg.role !== "build" || !o.editable()) return whenBuilt(board);
+      void (o.beforeBuild ? o.beforeBuild().catch(() => undefined) : Promise.resolve()).then(() => bind(board, true));
     },
 
     pushManifest() {
@@ -160,6 +168,7 @@ export function startDesignSession(o: {
       }, LOCAL);
     },
 
+    isBuilt: (id) => built(ydoc, id),
     undo: () => binding?.undo(),
     redo: () => binding?.redo(),
 

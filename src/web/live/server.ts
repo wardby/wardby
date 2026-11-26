@@ -376,7 +376,7 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
     for (const v of versions) {
       const base = await getVersionState(db, documentId, v.baseNumber ?? v.number - 1);
       if (!base) return reset(documentId, l, "base_not_held");
-      const merged = await l.format.merge(documentId, base, v);
+      const merged = await l.format.merge(documentId, base, v, doc);
       if (merged === "reset") return reset(documentId, l, "not_mergeable");
       Y.applyUpdate(doc, merged.update, MERGE_ORIGIN);
       await putVersionState(db, { documentId, versionNumber: v.number, state: merged.versionState });

@@ -27,6 +27,9 @@ import { createLiveServer, LIVE_META, type LiveServer } from "./server.js";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 import { buildBoard, coffee, coffeeFiles } from "./design.test-support.js";
 
+/** A live-copy field as text. */
+const text = (v: unknown): string => (typeof v === "string" ? v : "");
+
 describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)", () => {
   const db = createPrismaClient();
   const cipher = { keyId: () => "test", encrypt: async (s: string) => s, decrypt: async (s: string) => s };
@@ -367,37 +370,102 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
     a.close();
   });
 
-  it("a version published by someone else meanwhile starts the design's live copy again (until merges land)", async () => {
-    const id = await design(ann);
-    const a = await client(ann, id);
-    a.open("home");
-    expect(await a.roleFor("home")).toBe("build");
-    buildBoard(a.ydoc, "home", coffee("boards/home.html"));
-    await sleep(400);
-    const files = coffeeFiles();
-    files["boards/menu.html"] = files["boards/menu.html"].replace("</main>", "<p>New</p></main>");
-    // A checkpoint may land between reading the latest number and publishing: retry, as the agent loop does.
+  /** The latest version's files once `test` holds for them (checkpoints are timed). */
+  async function savedWhen(id: string, test: (files: Record<string, string>) => boolean) {
+    for (let i = 0; i < 100; i++) {
+      const latest = await db.document.findUniqueOrThrow({ where: { id }, select: { currentVersionId: true } });
+      const files = await loadVersionFiles(db, latest.currentVersionId!);
+      if (test(files)) return files;
+      await sleep(100);
+    }
+    throw new Error("never saved");
+  }
+
+  /** Publishes as an agent does: from the latest version (retrying when a checkpoint lands in between). */
+  async function publishAsAgent(id: string, change: (files: Record<string, string>) => void): Promise<number> {
     for (let tries = 0; ; tries++) {
       const latest = await db.document.findUniqueOrThrow({
         where: { id },
-        select: { currentVersion: { select: { number: true } } },
+        select: { currentVersion: { select: { id: true, number: true } } },
       });
+      const files = await loadVersionFiles(db, latest.currentVersion!.id);
+      change(files);
       try {
-        await publishVersion(db, cipher, {
+        const v = await publishVersion(db, cipher, {
           documentId: id,
           files,
           via: "agent",
           expectedNumber: latest.currentVersion!.number,
         });
-        break;
+        emit({ kind: "version", documentId: id });
+        return v.number;
       } catch (err) {
         if (tries >= 5 || (err as Error).message !== "document_version_conflict") throw err;
       }
     }
-    emit({ kind: "version", documentId: id });
-    for (let i = 0; i < 40 && !a.closed(); i++) await sleep(50);
-    expect(a.closed()).toBe(true);
-    expect(await db.documentLiveState.findUnique({ where: { documentId: id } })).toBeNull();
+  }
+
+  it("an agent's version is merged into the live design: its changes arrive, people's edits made meanwhile stay", async () => {
+    const id = await design(ann, [bo]);
+    const a = await client(ann, id);
+    a.open("home");
+    expect(await a.roleFor("home")).toBe("build");
+    buildBoard(a.ydoc, "home", coffee("boards/home.html"));
+    const b = await client(bo, id);
+    for (let i = 0; i < 40 && !boardMaps(b.ydoc, "home").nodes.has(BOARD_ROOT); i++) await sleep(50);
+    // A checkpoint saves the built board, so the agent reads a version written from the live copy.
+    await savedWhen(id, (f) => f["boards/home.html"] !== normalizeDesign(coffeeFiles()).files["boards/home.html"]);
+    // Bo edits the heading while the agent works on the hero paragraph and an unopened board.
+    b.ydoc.transact(() => h1Of(b.ydoc).set(F.html, `${String(h1Of(b.ydoc).get(F.html))} BO-LIVE`));
+    await sleep(300);
+    await publishAsAgent(id, (files) => {
+      files["boards/home.html"] = files["boards/home.html"].replace("small on purpose", "small, on purpose");
+      files["boards/menu.html"] = files["boards/menu.html"].replace("</main>", "<p>AGENT-MENU</p></main>");
+    });
+    const heroP = (d: Y.Doc) =>
+      [...boardMaps(d, "home").nodes.values()].find((n) => text(n.get(F.html)).includes("on purpose"));
+    for (let i = 0; i < 60 && !text(heroP(a.ydoc)?.get(F.html)).includes("small, on purpose"); i++) await sleep(50);
+    for (const c of [a, b]) {
+      expect(c.closed()).toBe(false);
+      expect(String(heroP(c.ydoc)?.get(F.html))).toContain("small, on purpose");
+      expect(String(h1Of(c.ydoc).get(F.html))).toContain("BO-LIVE");
+    }
+    // The next checkpoint saves both: the agent's changes (the unopened board as it published it) and Bo's edit.
+    const saved = await savedWhen(
+      id,
+      (f) => f["boards/home.html"].includes("BO-LIVE") && f["boards/home.html"].includes("small, on purpose"),
+    );
+    expect(saved["boards/home.html"]).toContain("small, on purpose");
+    expect(saved["boards/home.html"]).toContain("BO-LIVE");
+    expect(saved["boards/menu.html"]).toContain("AGENT-MENU");
+    a.close();
+    b.close();
+  });
+
+  it("a board added meanwhile stays when an agent's version changes the board list", async () => {
+    const id = await design(ann);
+    const a = await client(ann, id);
+    // Ann adds a board in the page (the board list is live); the agent renames another one.
+    a.ydoc.transact(() => {
+      const m = new Y.Map<unknown>();
+      for (const [k, v] of Object.entries({ id: "events", name: "Events", file: "boards/events.html", width: 1280 }))
+        m.set(k, v);
+      a.ydoc.getArray<Y.Map<unknown>>("manifest").push([m]);
+    });
+    await sleep(300);
+    await publishAsAgent(id, (files) => {
+      const m = JSON.parse(files["manifest.json"]) as { boards: { id: string; name: string }[] };
+      m.boards.find((x) => x.id === "menu")!.name = "Our menu";
+      files["manifest.json"] = JSON.stringify(m);
+    });
+    const names = () =>
+      a.ydoc
+        .getArray<Y.Map<unknown>>("manifest")
+        .toArray()
+        .map((x) => String(x.get("name")));
+    for (let i = 0; i < 60 && !names().includes("Our menu"); i++) await sleep(50);
+    expect(names()).toContain("Our menu");
+    expect(names()).toContain("Events");
     a.close();
   });
 });

@@ -28,6 +28,7 @@ import {
   R,
   type BoardMaps,
 } from "../../../core/documents/boards/live/model.js";
+import { applyBoardMerge, boardOps, type MergeOp } from "../../../core/documents/boards/live/merge.js";
 import { writeBoard, writeBoardFile, writeElement } from "../../../core/documents/boards/live/writer.js";
 import { loadVersionFiles } from "../../../core/documents/files.js";
 import type { WebDeps } from "../../context.js";
@@ -56,6 +57,51 @@ export function liveManifest(doc: Y.Doc): Manifest {
     .filter((b) => b.id && b.file);
   const title = doc.getMap(DESIGN_META).get("title");
   return { title: typeof title === "string" ? title : "", boards };
+}
+
+/** Puts a board list into the live document (its title too); boards no longer listed lose their live copies. */
+function setLiveManifest(doc: Y.Doc, m: Manifest): void {
+  const arr = manifestOf(doc);
+  arr.delete(0, arr.length);
+  arr.push(
+    m.boards.map((b) => {
+      const entry = new Y.Map<unknown>();
+      for (const [k, v] of Object.entries(b)) entry.set(k, v);
+      return entry;
+    }),
+  );
+  doc.getMap(DESIGN_META).set("title", m.title);
+  const listed = new Set(m.boards.map((b) => b.id));
+  const boards = doc.getMap<unknown>("boards");
+  for (const id of [...boards.keys()]) if (!listed.has(id)) boards.delete(id);
+}
+
+/**
+ * The board list after a version: its changes from its base list (boards added, removed, renamed, resized,
+ * reordered) applied to the list as it is now, so a board someone added meanwhile stays (after the new version's).
+ */
+export function mergeManifest(before: Manifest | null, next: Manifest, now: Manifest): Manifest {
+  if (!before) return next;
+  const was = new Map(before.boards.map((b) => [b.id, b]));
+  const inNext = new Set(next.boards.map((b) => b.id));
+  const nowById = new Map(now.boards.map((b) => [b.id, b]));
+  const boards: Manifest["boards"] = [];
+  for (const b of next.boards) {
+    const old = was.get(b.id);
+    const cur = nowById.get(b.id);
+    if (!old) boards.push({ ...b });
+    else if (!cur)
+      continue; // someone deleted it meanwhile
+    else
+      boards.push({
+        ...cur,
+        name: b.name !== old.name ? b.name : cur.name,
+        width: b.width !== old.width ? b.width : cur.width,
+      });
+  }
+  // Boards added meanwhile (not in the base list), kept at the end.
+  for (const b of now.boards) if (!was.has(b.id) && !inNext.has(b.id)) boards.push({ ...b });
+  return { title: next.title !== before.title ? next.title : now.title, boards };
 }
 
 /** Whether a board has a live copy yet (its builder has written it). */
@@ -291,9 +337,72 @@ export function boardsFormat(
       return text === since ? null : { content: { files: normal }, text };
     },
 
-    // Part 4 merges agents' versions into the live copies; until then a version published meanwhile starts again.
-    async merge() {
-      return "reset";
+    /**
+     * A version published while people edit (an agent, MCP, a page's fallback save) is merged into the live copies
+     * board by board, as changes by element from the version it was based on (core/documents/boards/live/merge.ts).
+     * The changes are worked out once and applied twice: to a copy of the live document as it is now, so they land
+     * after everyone's edits (a text box someone changed meanwhile merges word by word, never by whoever wrote last),
+     * and to the base state, which then writes the new version (the next merge's base). A board nobody has opened
+     * takes the new file as it is; the board list takes the new version's changes, keeping boards added meanwhile.
+     */
+    async merge(documentId, base, v, live) {
+      if (v.format !== "boards-v1") return "reset";
+      const next = await filesOf(documentId, v);
+      const before = await filesOf(documentId, { ...v, number: v.baseNumber ?? v.number - 1 });
+      if (typeof next[MANIFEST] !== "string") return "reset";
+      const nextManifest = parseManifest(next[MANIFEST]);
+      const beforeManifest = typeof before[MANIFEST] === "string" ? parseManifest(before[MANIFEST]) : null;
+      const scratch = new Y.Doc();
+      Y.applyUpdate(scratch, base);
+      const now = new Y.Doc();
+      Y.applyUpdate(now, Y.encodeStateAsUpdate(live));
+      const vector = Y.encodeStateVector(now);
+      // New elements get the same ids in both copies: made once, then replayed.
+      const taken = new Set<string>();
+      const made: string[] = [];
+      const newId = () => {
+        for (;;) {
+          const id = `i${Math.random().toString(36).slice(2, 8)}`;
+          if (taken.has(id)) continue;
+          taken.add(id);
+          made.push(id);
+          return id;
+        }
+      };
+      const replay = () => {
+        let i = 0;
+        return () => made[i++] ?? newId();
+      };
+      try {
+        const plans: { board: string; ops: MergeOp[] }[] = [];
+        for (const b of nextManifest.boards) {
+          if (typeof next[b.file] !== "string" || before[b.file] === next[b.file]) continue;
+          // The board's live copy at the base, or (built since by someone who opened it) now.
+          const atBase = isBuilt(scratch, b.id);
+          if (!atBase && !isBuilt(now, b.id)) continue;
+          const maps = boardMaps(atBase ? scratch : now, b.id);
+          for (const doc of [scratch, now]) {
+            if (isBuilt(doc, b.id)) for (const id of boardMaps(doc, b.id).nodes.keys()) taken.add(id);
+          }
+          plans.push({ board: b.id, ops: boardOps(maps, before[b.file], next[b.file]) });
+        }
+        const apply = (doc: Y.Doc, ids: () => string) =>
+          doc.transact(() => {
+            if (beforeManifest === null || before[MANIFEST] !== next[MANIFEST]) {
+              setLiveManifest(doc, mergeManifest(beforeManifest, nextManifest, liveManifest(doc)));
+            }
+            for (const p of plans) if (isBuilt(doc, p.board)) applyBoardMerge(boardMaps(doc, p.board), p.ops, ids);
+          }, SERVER_ORIGIN);
+        apply(now, newId);
+        apply(scratch, replay());
+      } catch {
+        return "reset";
+      }
+      return {
+        update: Y.encodeStateAsUpdate(now, vector),
+        versionState: Y.encodeStateAsUpdate(scratch),
+        text: filesText(next),
+      };
     },
 
     refuse(scratch, apply, secretValues) {

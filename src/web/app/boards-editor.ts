@@ -156,6 +156,11 @@ export interface BoardsEditor {
    * deleted a board). A new board starts from the first board's layout until its live copy arrives.
    */
   applyManifest(next: Manifest): void;
+  /**
+   * Live editing: a board's file from a newer version, for a board with no live copy yet (its next builder must
+   * start from it, not from the file this page loaded). Shown again when it is in the canvas.
+   */
+  setBoardFile(id: string, text: string): void;
 }
 
 interface BoardState {
@@ -588,6 +593,17 @@ export function createBoardsEditor(opts: {
         if (manifest.boards[0]) loadBoard(manifest.boards[0].id);
       }
       changed();
+    },
+    setBoardFile(id, text) {
+      const state = boards.get(id);
+      if (!state) return;
+      state.parts = parseBoardFile(text);
+      state.pending = null;
+      state.baseline = null;
+      if (current === id) {
+        current = "";
+        loadBoard(id);
+      }
     },
   };
   return api;

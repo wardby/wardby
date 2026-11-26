@@ -30,11 +30,16 @@ export interface LiveFormat {
    * `since`. Runs synchronously from the state it is given, so the version is exactly that state.
    */
   snapshot(doc: Y.Doc, since: string): { content: LiveContent; text: string } | null;
-  /** Version `v` merged into the live document from its base state, or "reset" when it cannot be. */
+  /**
+   * Version `v` merged into the live document from its base state, or "reset" when it cannot be. `live` is the live
+   * document as it is now (read only): a format whose changes are not all CRDT merges (a design's text boxes are
+   * whole strings) builds its update on a copy of it, so the changes land after everyone's edits.
+   */
   merge(
     documentId: string,
     base: Uint8Array,
     v: LiveVersion,
+    live: Y.Doc,
   ): Promise<{ update: Uint8Array; versionState: Uint8Array; text: string } | "reset">;
   /**
    * Why an incoming edit is refused, or null. `scratch` is a copy of the live document before the edit; `apply`
