@@ -9,11 +9,16 @@ import { MAX_TUNNEL_HOSTS, parseTunnelHostPattern } from "../../coding/tunnel-ho
 import { capabilityHash } from "./capability-hash.js";
 import { isWebTools, type WebTools } from "../../coding/google-web-tools.js";
 import {
+  GEMINI_UPSTREAM_HOSTS,
+  GeminiUpstreamUnavailable,
+  geminiUpstreamUrl,
   isGeminiProvider,
+  vertexAccessTokenSource,
   VERTEX_CREDENTIAL_REF,
-  type GeminiProxyOptions,
-  type GeminiRequestTarget,
+  type GeminiUpstreamOptions,
 } from "./gemini-upstream.js";
+import { GeminiRequestRefused, parseGeminiRequest, type GeminiParseContext } from "./gemini-request.js";
+import type { GeminiRoute } from "./gemini-route.js";
 import { CLAUDE_MCP_TOOL_PREFIX } from "../../coding/mcp-token.js";
 import type { CodingToolPin } from "../../core/coding-native-tools.js";
 import {
@@ -28,8 +33,10 @@ import {
   AnthropicSseUsageTracker,
   actualCostUsd,
   fingerprintRequest,
+  GeminiSseUsageTracker,
   parseAnthropicAuthoritativeUsage,
   parseAuthoritativeUsage,
+  parseGeminiAuthoritativeUsage,
   pricingSnapshot,
   safeUpstreamErrorCode,
   terminalUsageFromSseFrame,
@@ -139,8 +146,8 @@ export interface ExecuteProxyRequest {
   anthropicBeta?: string;
   /** Claude Code's x-claude-code-agent-id: on a workflow session, the sub-agent its steps belong to (#582). */
   agentId?: string;
-  /** The Gemini request line parsed from the path (gemini-generate-content only). */
-  gemini?: GeminiRequestTarget;
+  /** gemini-generate-content: the route the server read from the path (surface, Google model, method). */
+  gemini?: GeminiRoute;
 }
 
 /** The protocols whose replies and requests are read for run steps (a Gemini session has none yet). */
@@ -229,8 +236,8 @@ export interface CodingProxyOptions {
   steps?: RunStepSubmitter;
   /** The proxy's own WARDBY_RUN_STEPS: a session captures detail only when this is detail too. Default summary. */
   runStepsCeiling?: RunStepsLevel;
-  /** Gemini upstream settings (gemini-generate-content sessions). */
-  gemini?: GeminiProxyOptions;
+  /** Gemini upstreams: Vertex project and token source; bases for tests. */
+  gemini?: GeminiUpstreamOptions;
   /** Tests only: replaces the stream step extractor. */
   createStepExtractor?: (protocol: ProxyProtocol, options?: StepCaptureOptions) => StreamStepExtractor;
 }
@@ -267,6 +274,8 @@ interface RelayProgress {
   relayedOutputBytes: number;
   /** The Anthropic stream's usage tracker, once a stream is being relayed. */
   anthropic?: AnthropicSseUsageTracker;
+  /** The Gemini stream's usage tracker, once a stream is being relayed. */
+  gemini?: GeminiSseUsageTracker;
   /** Set once the request is marked uncertain: a later failure must not mark (and audit) it again. */
   marked?: boolean;
 }
@@ -1179,15 +1188,21 @@ function parseRequest(
   mcpTools: ReadonlySet<string>,
   workflow = false,
   skills = false,
+  gemini?: GeminiParseContext,
 ): ParsedRequest {
   if (protocol !== "anthropic-messages" && anthropicBeta !== undefined) {
     throw new CodingProxyError(400, "invalid_anthropic_beta");
   }
   try {
+    if (protocol === "gemini-generate-content") {
+      if (!gemini) throw new CodingProxyError(400, "gemini_route_required");
+      return parseGeminiRequest(rawBody, gemini);
+    }
     return protocol === "anthropic-messages"
       ? parseAnthropicRequest(rawBody, anthropicBeta, shape, mcpTools, workflow, skills)
       : parseOpenAiRequest(rawBody);
   } catch (error) {
+    if (error instanceof GeminiRequestRefused) throw new CodingProxyError(error.status, error.code);
     // JSON nested deeply enough (inside a free-form tool schema, say) overflows
     // the stack when re-encoded. It is the client's request, not a proxy fault.
     if (error instanceof RangeError) throw new CodingProxyError(400, "request_nesting_too_deep");
@@ -1229,7 +1244,8 @@ async function readBoundedBody(body: ReadableStream<Uint8Array> | null, maxBytes
 export class CodingProxy {
   private readonly ledger: ProxyLedger;
   private readonly credentials: CredentialResolver;
-  private readonly upstreamUrls: Record<StepWireProtocol, string>;
+  private readonly upstreamUrls: Record<"openai-responses" | "anthropic-messages", string>;
+  private readonly gemini: GeminiUpstreamOptions & { vertexToken: () => Promise<string> };
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly now: () => Date;
   private readonly audit: ProxyAuditSink;
@@ -1265,7 +1281,11 @@ export class CodingProxy {
       "openai-responses": options.upstreamUrl ?? "https://api.openai.com/v1/responses",
       "anthropic-messages": options.anthropicUpstreamUrl ?? "https://api.anthropic.com/v1/messages?beta=true",
     };
-    const upstreamHosts = Object.values(this.upstreamUrls).map((url) => new URL(url).hostname);
+    this.gemini = { ...options.gemini, vertexToken: options.gemini?.vertexToken ?? vertexAccessTokenSource() };
+    const upstreamHosts = [
+      ...Object.values(this.upstreamUrls).map((url) => new URL(url).hostname),
+      ...GEMINI_UPSTREAM_HOSTS,
+    ];
     this.fetchImpl =
       options.fetch ??
       createPinnedProxyFetch({
@@ -1408,14 +1428,28 @@ export class CodingProxy {
       this.audit({ type: "request.rejected", runId: session.runId, reason: "protocol_mismatch" });
       throw new CodingProxyError(403, "protocol_mismatch");
     }
-    // The Gemini forwarding path is not built yet: a session can exist, but nothing is relayed.
-    if (session.protocol === "gemini-generate-content") throw new CodingProxyError(404, "gemini_not_supported");
     // A session from before the model catalog has no stored entry: take the shape from the shipped one.
     const entry = session.terms?.entry ?? shippedCatalog().get(session.allowedModels[0]);
     const shape: AnthropicModelShape = {
       thinkingMode: entry?.thinkingMode ?? "adaptive",
       efforts: entry?.efforts ?? [],
     };
+    const geminiEntry = session.terms?.entry;
+    const geminiContext: GeminiParseContext | undefined =
+      session.protocol === "gemini-generate-content" &&
+      input.gemini &&
+      geminiEntry &&
+      isGeminiProvider(geminiEntry.provider)
+        ? {
+            route: input.gemini,
+            backend: geminiEntry.provider,
+            allowedModels: session.allowedModels,
+            efforts: geminiEntry.efforts,
+            webTools: session.webTools ?? "off",
+            maxBodyBytes: PROXY_MAX_BODY_BYTES,
+            maxOutputTokens: PROXY_MAX_OUTPUT_TOKENS,
+          }
+        : undefined;
     let parsed: ParsedRequest;
     try {
       parsed = parseRequest(
@@ -1426,6 +1460,7 @@ export class CodingProxy {
         claudeMcpToolNames(session.mcpTools),
         session.workflow === true,
         session.skills === true,
+        geminiContext,
       );
     } catch (error) {
       // The session is already authenticated and no credential has been
@@ -1574,11 +1609,10 @@ export class CodingProxy {
       }));
     }
 
-    let key: string;
+    let target: { url: string; headers: Record<string, string> };
     try {
-      key = await this.credentials.resolve(session.credentialRef);
-      if (!key) throw new Error();
-    } catch {
+      target = await this.upstreamTarget(session, parsed, request.id, input.gemini);
+    } catch (error) {
       // Out of the set first: if the release below fails, the lease runs out and the row is swept.
       this.openRequests.delete(request.id);
       await this.ledger.release(request.id, 503);
@@ -1587,7 +1621,7 @@ export class CodingProxy {
         runId: session.runId,
         requestId: request.id,
         status: 503,
-        reason: "credential_unavailable",
+        reason: error instanceof GeminiUpstreamUnavailable ? error.code : "credential_unavailable",
       });
       throw new CodingProxyError(503, "upstream_unavailable");
     }
@@ -1627,16 +1661,9 @@ export class CodingProxy {
         accept: parsed.stream ? "text/event-stream" : "application/json",
         // The pinned fetch never decompresses, and the response is relayed as-is.
         "accept-encoding": "identity",
+        ...target.headers,
       };
-      if (session.protocol === "anthropic-messages") {
-        headers["x-api-key"] = key;
-        headers["anthropic-version"] = "2023-06-01";
-        if (parsed.anthropicBeta) headers["anthropic-beta"] = parsed.anthropicBeta;
-      } else {
-        headers.authorization = `Bearer ${key}`;
-        headers["idempotency-key"] = `${session.id}:${request.id}`;
-      }
-      upstream = await this.fetchImpl(this.upstreamUrls[session.protocol], {
+      upstream = await this.fetchImpl(target.url, {
         method: "POST",
         headers,
         body: parsed.encoded,
@@ -1698,6 +1725,51 @@ export class CodingProxy {
     } finally {
       cleanupActive();
     }
+  }
+
+  /** Where a request goes and the credential it carries; the credential never appears in the URL. */
+  private async upstreamTarget(
+    session: ProxySession,
+    parsed: ParsedRequest,
+    requestId: string,
+    route: GeminiRoute | undefined,
+  ): Promise<{ url: string; headers: Record<string, string> }> {
+    if (session.protocol === "gemini-generate-content") {
+      const entry = session.terms?.entry;
+      if (!entry || !isGeminiProvider(entry.provider) || !route) throw new Error("gemini_session_invalid");
+      const url = geminiUpstreamUrl(entry.provider, parsed.model, route.method, this.gemini);
+      if (entry.provider === "vertex-gemini") {
+        if (session.credentialRef !== VERTEX_CREDENTIAL_REF) throw new Error("gemini_session_invalid");
+        let token: string;
+        try {
+          token = await this.gemini.vertexToken();
+        } catch {
+          // Never the source's own error: it can name credential files or carry token detail.
+          throw new GeminiUpstreamUnavailable("vertex_auth_unavailable");
+        }
+        if (!token) throw new GeminiUpstreamUnavailable("vertex_auth_unavailable");
+        return { url, headers: { authorization: `Bearer ${token}` } };
+      }
+      const key = await this.credentials.resolve(session.credentialRef);
+      if (!key) throw new Error("credential_unavailable");
+      return { url, headers: { "x-goog-api-key": key } };
+    }
+    const key = await this.credentials.resolve(session.credentialRef);
+    if (!key) throw new Error("credential_unavailable");
+    if (session.protocol === "anthropic-messages") {
+      return {
+        url: this.upstreamUrls["anthropic-messages"],
+        headers: {
+          "x-api-key": key,
+          "anthropic-version": "2023-06-01",
+          ...(parsed.anthropicBeta ? { "anthropic-beta": parsed.anthropicBeta } : {}),
+        },
+      };
+    }
+    return {
+      url: this.upstreamUrls["openai-responses"],
+      headers: { authorization: `Bearer ${key}`, "idempotency-key": `${session.id}:${requestId}` },
+    };
   }
 
   /** A session's model terms: its stored catalog entry, or the fallback for sessions from before the catalog. */
@@ -1894,10 +1966,13 @@ export class CodingProxy {
     } catch {
       throw new Error("invalid_upstream_json");
     }
+    const record = value as Record<string, unknown> | null;
     const usage =
       session.protocol === "anthropic-messages"
-        ? parseAnthropicAuthoritativeUsage((value as Record<string, unknown>)?.usage)
-        : parseAuthoritativeUsage((value as Record<string, unknown>)?.usage);
+        ? parseAnthropicAuthoritativeUsage(record?.usage)
+        : session.protocol === "gemini-generate-content"
+          ? parseGeminiAuthoritativeUsage(record?.usageMetadata)
+          : parseAuthoritativeUsage(record?.usage);
     await this.complete(session, request, usage, upstream.status);
     sink.start(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
     await safeWrite(sink, bytes, { value: true });
@@ -1941,6 +2016,40 @@ export class CodingProxy {
         steps = undefined;
       }
     };
+    const geminiUsage =
+      session.protocol === "gemini-generate-content" ? (progress.gemini = new GeminiSseUsageTracker()) : undefined;
+    // Gemini streams have no terminal event: each frame goes out when the next arrives, and the last one only
+    // after the reply is settled, so a client never sees a reply end before the ledger has it.
+    let held: string | undefined;
+    const relay = async (frame: string) => {
+      progress.relayedOutputBytes += relayedTextBytes(frame, session.protocol);
+      await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
+      observe(frame);
+    };
+    const geminiFrame = async (frame: string) => {
+      const seen = geminiUsage!.consume(frame);
+      if (held !== undefined) await relay(held);
+      held = undefined;
+      if (!seen.failure) {
+        held = frame;
+        return;
+      }
+      // An error frame: Google failed the reply. Pass it on so the client sees the real error; the
+      // reservation stays held (uncertain), and only the error's fixed code is recorded.
+      await this.recordUpstreamFailure(session, seen.failure);
+      if (!failedWithoutUsage) {
+        await this.markUncertain(
+          session,
+          request,
+          upstream.status,
+          `upstream_failed:${seen.failure}`,
+          responseHeadersOf(upstream),
+          progress,
+        );
+      }
+      failedWithoutUsage = true;
+      await relay(frame);
+    };
     const body = upstream.body as unknown as AsyncIterable<Uint8Array>;
     try {
       for await (const chunk of body) {
@@ -1952,6 +2061,10 @@ export class CodingProxy {
           if (boundary < 0) break;
           const frame = buffer.slice(0, boundary);
           buffer = buffer.slice(boundary + 2);
+          if (geminiUsage) {
+            await geminiFrame(frame);
+            continue;
+          }
           const terminal = anthropicUsage ? anthropicUsage.consume(frame) : terminalUsageFromSseFrame(frame);
           if (!terminal.terminal) {
             progress.relayedOutputBytes += relayedTextBytes(frame, session.protocol);
@@ -1986,6 +2099,18 @@ export class CodingProxy {
         }
       }
       buffer = (buffer + decoder.decode()).replaceAll("\r\n", "\n");
+      if (geminiUsage) {
+        if (buffer.trim()) await geminiFrame(buffer.trim());
+        buffer = "";
+        if (!failedWithoutUsage) {
+          const usage = geminiUsage.usage();
+          if (!usage) throw new Error("terminal_usage_missing");
+          await this.complete(session, request, usage, upstream.status);
+          completed = true;
+        }
+        if (held !== undefined) await relay(held);
+        held = undefined;
+      }
       if (!completed && !failedWithoutUsage) throw new Error("terminal_usage_missing");
       if (buffer) await safeWrite(sink, Buffer.from(buffer), connected);
       if (connected.value) sink.end();
@@ -2092,6 +2217,7 @@ export class CodingProxy {
       const estimate = estimateInterrupted(
         {
           ...progress.anthropic?.partial(),
+          ...progress.gemini?.partial(),
           beforeResponse: progress.stream && !progress.responseStarted,
           relayedOutputBytes: progress.relayedOutputBytes,
           ...hints,
@@ -2171,6 +2297,7 @@ const ANTHROPIC_OUTPUT_DELTAS: Record<string, string> = {
  * reasoning deltas, which are most of a coding agent's output.
  */
 function relayedTextBytes(frame: string, protocol: ProxyProtocol): number {
+  if (protocol === "gemini-generate-content") return geminiRelayedTextBytes(frame);
   if (!frame.includes(protocol === "anthropic-messages" ? "content_block_delta" : ".delta")) return 0;
   try {
     const data = frame
@@ -2190,6 +2317,28 @@ function relayedTextBytes(frame: string, protocol: ProxyProtocol): number {
     const field = typeof delta?.type === "string" ? ANTHROPIC_OUTPUT_DELTAS[delta.type] : undefined;
     const text = field ? delta?.[field] : undefined;
     return typeof text === "string" ? Buffer.byteLength(text) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** UTF-8 bytes of a Gemini frame's generated output: its first candidate's text and function-call arguments. */
+function geminiRelayedTextBytes(frame: string): number {
+  if (!frame.includes('"text"') && !frame.includes('"functionCall"')) return 0;
+  try {
+    const data = frame
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    const value = JSON.parse(data) as { candidates?: { content?: { parts?: Record<string, unknown>[] } }[] } | null;
+    let bytes = 0;
+    for (const part of value?.candidates?.[0]?.content?.parts ?? []) {
+      if (typeof part.text === "string") bytes += Buffer.byteLength(part.text);
+      const call = part.functionCall as { args?: unknown } | undefined;
+      if (call) bytes += Buffer.byteLength(JSON.stringify(call.args ?? {}));
+    }
+    return bytes;
   } catch {
     return 0;
   }

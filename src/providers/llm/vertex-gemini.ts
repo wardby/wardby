@@ -21,7 +21,8 @@ export function vertexLocation(modelId: string): { location: "global" | "us" | "
   return { location: "global", googleModel: modelId };
 }
 
-const defaultBase = (location: string) =>
+/** Vertex AI's endpoint for a location: the global host, or a multi-region's `rep` host. */
+export const vertexBaseUrl = (location: string) =>
   location === "global" ? "https://aiplatform.googleapis.com" : `https://aiplatform.${location}.rep.googleapis.com`;
 
 export class VertexGeminiLlmProvider extends GeminiLlmProvider {
@@ -46,7 +47,7 @@ export class VertexGeminiLlmProvider extends GeminiLlmProvider {
         if (!value) throw new Error("no token");
         return value;
       });
-    const base = sim ? () => sim.baseUrl : (options.baseUrl ?? defaultBase);
+    const base = sim ? () => sim.baseUrl : (options.baseUrl ?? vertexBaseUrl);
     super(
       {
         url: (_googleModel, modelId) => {
