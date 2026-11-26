@@ -22,13 +22,18 @@ is never billed twice by accident. The code names the earlier request's state:
 | `duplicate_completed`  | Finished; its cost is recorded                                       | The reply is not replayed or resent.                                                                          |
 | `duplicate_uncertain`  | Its stream broke under a running proxy, or no estimate could be made | Nobody can say what it cost, so it is not resent.                                                             |
 | `duplicate_reserved`   | Reserved with no lease                                               | Reserved before leases existed; it cannot be told from a live request, so it is neither swept nor taken over. |
-| `duplicate_released`   | Refused or failed before the provider billed it                      | Released without cost.                                                                                        |
 | `idempotency_conflict` | Any state, with a different body                                     | The same key was used for a different request.                                                                |
 
 A request whose earlier try was `reserved` with a lease is not a duplicate: it
 gets `503 wardby_request_in_progress` while the lease runs, and takes over as a
 new attempt once it has run out (see `errors/request-in-progress` and
 `troubleshooting/stopped-proxy-holds`).
+
+A request whose earlier try was released (the provider refused it, or it failed
+before it was sent, so it was never billed and holds nothing) is not a duplicate
+either: the same body is sent again as a new attempt, up to three attempts per
+request key, then `422 wardby_request_attempts_exhausted`. A different body
+under the same key is still `idempotency_conflict`.
 
 ## What to do
 

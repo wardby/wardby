@@ -211,15 +211,16 @@ stopped, resending the same body. The proxy recognises the retry by its request
 key (the `Idempotency-Key` header if the client sends one, otherwise a hash of
 the body) and answers by the state of the earlier request:
 
-| The earlier request                                              | The retry gets                                                                                                                   |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Reserved, lease still running                                    | `503 wardby_request_in_progress`, with `Retry-After` set to the lease's remaining time plus one second. Nothing is sent upstream |
-| Reserved with its lease run out, or already settled by the sweep | A new attempt: the earlier request is settled at its estimate, and the retry is reserved with its own hold and sent upstream     |
-| Attempts used up (three per request key)                         | `422 wardby_request_attempts_exhausted`, which clients do not retry                                                              |
-| Completed                                                        | `409 duplicate_completed`: a finished reply is never sent twice                                                                  |
-| Uncertain after a stream broke under a running proxy             | `409 duplicate_uncertain`                                                                                                        |
-| Reserved before leases existed (no lease)                        | `409 duplicate_reserved`: it cannot be told from a live request                                                                  |
-| Same request key, different body                                 | `409 idempotency_conflict`                                                                                                       |
+| The earlier request                                               | The retry gets                                                                                                                   |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Reserved, lease still running                                     | `503 wardby_request_in_progress`, with `Retry-After` set to the lease's remaining time plus one second. Nothing is sent upstream |
+| Reserved with its lease run out, or already settled by the sweep  | A new attempt: the earlier request is settled at its estimate, and the retry is reserved with its own hold and sent upstream     |
+| Released: the provider refused it, or it failed before being sent | A new attempt with its own hold, sent upstream. The released request was never billed and holds nothing                          |
+| Attempts used up (three per request key)                          | `422 wardby_request_attempts_exhausted`, which clients do not retry                                                              |
+| Completed                                                         | `409 duplicate_completed`: a finished reply is never sent twice                                                                  |
+| Uncertain after a stream broke under a running proxy              | `409 duplicate_uncertain`                                                                                                        |
+| Reserved before leases existed (no lease)                         | `409 duplicate_reserved`: it cannot be told from a live request                                                                  |
+| Same request key, different body                                  | `409 idempotency_conflict`                                                                                                       |
 
 A takeover settles the earlier request and reserves the new one in one
 database transaction under the run's lock, so two retries arriving together
