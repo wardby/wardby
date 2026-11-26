@@ -1,0 +1,16 @@
+{
+  "cli": "0.70.0",
+  "args": [
+    "-m",
+    "gemini-4-neon",
+    "--approval-mode",
+    "yolo",
+    "--skip-trust",
+    "--output-format",
+    "stream-json",
+    "-p",
+    "Run echo."
+  ],
+  "exit": 1,
+  "stderrTail": "Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended for a better visual experience.\nYOLO mode is enabled. All tool calls will be automatically approved.\nYOLO mode is enabled. All tool calls will be automatically approved.\nRipgrep is not available. Falling back to GrepTool.\n[STARTUP] Phase 'cleanup_ops' was started but never ended. Skipping metrics.\n[STARTUP] Cannot measure phase 'cleanup_ops': start mark 'startup:cleanup_ops:start' not found (likely cleared by reset).\nError generating content via API. Full report available at: /tmp/gemini-client-error-generateContent-api-2026-11-26T19-50-56-585Z.json _ApiError: {\"error\":{\"code\":403,\"status\":\"PERMISSION_DENIED\",\"message\":\"coding_proxy_refused\"}}\n    at throwErrorIfNotOK (file:///opt/wardby/node_modules/@google/gemini-cli/bundle/chunk-UF44X63P.js:279140:24)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async file:///opt/wardby/node_modules/@google/gemini-cli/bundle/chunk-UF44X63P.js:278891:7\n    at async Models.generateContent (file:///opt/wardby/node_modules/@google/gemini-cli/bundle/chunk-UF44X63P.js:279950:16)\n    at async file:///opt/wardby/node_modules/@google/gemini-cli/bundle/chunk-UF44X63P.js:332888:26\n    at async file:///opt/wardby/node_modules/@google/gemini-cli/bundle/chunk-UF44X63P.js:300609:22\n    at async retryWithBackoff (file:///opt/wardby/node_modules/@google/gemini-cli/bundle/chunk-UF44X63P.js:329180:22)\n    at async BaseLlmClient._generateWithRetry (file:///opt/wardby/node_modules/@google/gemini-cli/bundle/chunk-UF44X63P.js:329499:14)\n    at async ChatCompressionService.compress (file:///opt/wardby/node_modules/@google/gemini-cli/bundle/chunk-UF44X63P.js:355160:29)\n    at async GeminiClient.tryCompressChat (file:///opt/wardby/node_modules/@google/gemini-cli/bundle/chunk-UF44X63P.js:367108:41) {\n  status: 403\n}\n"
+}

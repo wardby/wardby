@@ -1,0 +1,16 @@
+{
+  "cli": "0.70.0",
+  "args": [
+    "-m",
+    "gemini-4-neon",
+    "--approval-mode",
+    "yolo",
+    "--skip-trust",
+    "--output-format",
+    "stream-json",
+    "-p",
+    "Fix it."
+  ],
+  "exit": 0,
+  "stderrTail": "Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended for a better visual experience.\nYOLO mode is enabled. All tool calls will be automatically approved.\nYOLO mode is enabled. All tool calls will be automatically approved.\nRipgrep is not available. Falling back to GrepTool.\n[STARTUP] Phase 'cleanup_ops' was started but never ended. Skipping metrics.\n"
+}

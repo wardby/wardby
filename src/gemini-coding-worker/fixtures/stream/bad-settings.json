@@ -1,0 +1,16 @@
+{
+  "cli": "0.70.0",
+  "args": [
+    "-m",
+    "gemini-4-neon",
+    "--approval-mode",
+    "yolo",
+    "--skip-trust",
+    "--output-format",
+    "stream-json",
+    "-p",
+    "Hi."
+  ],
+  "exit": 52,
+  "stderrTail": "\u001b[31mError in /home/wardby/.gemini/settings.json: Unexpected end of JSON input\nPlease fix the configuration file(s) and try again.\u001b[0m\n"
+}

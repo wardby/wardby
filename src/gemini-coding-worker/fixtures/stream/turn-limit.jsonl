@@ -1,0 +1,7 @@
+{"type":"init","timestamp":"2026-11-26T19:50:49.061Z","session_id":"3899c88d-c725-43d3-92fb-a9e4a4cc9579","model":"gemini-4-neon"}
+{"type":"message","timestamp":"2026-11-26T19:50:49.061Z","role":"user","content":"Loop."}
+{"type":"tool_use","timestamp":"2026-11-26T19:50:49.106Z","tool_name":"run_shell_command","tool_id":"run_shell_command__run_shell_command_1795722649088_0","parameters":{"command":"echo hi","description":"echo"}}
+{"type":"tool_result","timestamp":"2026-11-26T19:50:49.149Z","tool_id":"run_shell_command__run_shell_command_1795722649088_0","status":"success","output":"hi"}
+{"type":"tool_use","timestamp":"2026-11-26T19:50:49.156Z","tool_name":"run_shell_command","tool_id":"run_shell_command__run_shell_command_1795722649155_0","parameters":{"command":"echo hi","description":"echo"}}
+{"type":"tool_result","timestamp":"2026-11-26T19:50:49.167Z","tool_id":"run_shell_command__run_shell_command_1795722649155_0","status":"success","output":"hi"}
+{"type":"result","timestamp":"2026-11-26T19:50:49.168Z","status":"error","error":{"type":"FatalTurnLimitedError","message":"Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json."},"stats":{"total_tokens":30,"input_tokens":20,"output_tokens":10,"cached":0,"input":20,"duration_ms":0,"tool_calls":2,"models":{"gemini-4-neon":{"total_tokens":30,"input_tokens":20,"output_tokens":10,"cached":0,"input":20}}}}

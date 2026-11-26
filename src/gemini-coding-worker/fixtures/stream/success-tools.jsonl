@@ -1,0 +1,8 @@
+{"type":"init","timestamp":"2026-11-26T19:50:17.203Z","session_id":"b7ad2366-2147-4bbd-a9f4-f960dd406acb","model":"gemini-4-neon"}
+{"type":"message","timestamp":"2026-11-26T19:50:17.203Z","role":"user","content":"Add hello.txt. The final JSON runId must be run_rec."}
+{"type":"tool_use","timestamp":"2026-11-26T19:50:17.251Z","tool_name":"write_file","tool_id":"write_file__write_file_1795722617231_0","parameters":{"file_path":"hello.txt","content":"hello\n"}}
+{"type":"tool_result","timestamp":"2026-11-26T19:50:17.297Z","tool_id":"write_file__write_file_1795722617231_0","status":"success"}
+{"type":"tool_use","timestamp":"2026-11-26T19:50:17.305Z","tool_name":"run_shell_command","tool_id":"run_shell_command__run_shell_command_1795722617303_0","parameters":{"command":"cat hello.txt","description":"check"}}
+{"type":"tool_result","timestamp":"2026-11-26T19:50:17.335Z","tool_id":"run_shell_command__run_shell_command_1795722617303_0","status":"success","output":"hello"}
+{"type":"message","timestamp":"2026-11-26T19:50:17.343Z","role":"assistant","content":"{\"schemaVersion\":1,\"runId\":\"run_rec\",\"outcome\":\"changes_ready\",\"summary\":\"Added hello.txt\",\"tag\":null,\"commitType\":\"feat\",\"commitScope\":null,\"commitTitle\":\"add hello.txt\",\"pullRequest\":null,\"tests\":[]}","delta":true}
+{"type":"result","timestamp":"2026-11-26T19:50:17.345Z","status":"success","stats":{"total_tokens":45,"input_tokens":30,"output_tokens":15,"cached":0,"input":30,"duration_ms":143,"tool_calls":2,"models":{"gemini-4-neon":{"total_tokens":45,"input_tokens":30,"output_tokens":15,"cached":0,"input":30}}}}

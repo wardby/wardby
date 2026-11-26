@@ -1,0 +1,6 @@
+{"type":"init","timestamp":"2026-11-26T19:50:20.572Z","session_id":"eb0c9e9e-a17b-4ac8-aac9-8b2f0801a127","model":"gemini-4-neon"}
+{"type":"message","timestamp":"2026-11-26T19:50:20.573Z","role":"user","content":"Try a tool."}
+{"type":"tool_use","timestamp":"2026-11-26T19:50:20.604Z","tool_name":"no_such_tool","tool_id":"no_such_tool__no_such_tool_1795722620604_0","parameters":{}}
+{"type":"tool_result","timestamp":"2026-11-26T19:50:20.626Z","tool_id":"no_such_tool__no_such_tool_1795722620604_0","status":"error","output":"Tool \"no_such_tool\" not found. Did you mean one of: \"update_topic\", \"list_directory\", \"read_file\"?","error":{"type":"tool_not_registered","message":"Tool \"no_such_tool\" not found. Did you mean one of: \"update_topic\", \"list_directory\", \"read_file\"?"}}
+{"type":"message","timestamp":"2026-11-26T19:50:20.632Z","role":"assistant","content":"done","delta":true}
+{"type":"result","timestamp":"2026-11-26T19:50:20.633Z","status":"success","stats":{"total_tokens":30,"input_tokens":20,"output_tokens":10,"cached":0,"input":20,"duration_ms":61,"tool_calls":1,"models":{"gemini-4-neon":{"total_tokens":30,"input_tokens":20,"output_tokens":10,"cached":0,"input":20}}}}

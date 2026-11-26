@@ -1,0 +1,58 @@
+{
+  "session_id": "a5c44b41-07aa-46e8-b251-a938459dd748",
+  "response": "{\"schemaVersion\":1,\"runId\":\"run_rec\",\"outcome\":\"changes_ready\",\"summary\":\"Added hello.txt\",\"tag\":null,\"commitType\":\"feat\",\"commitScope\":null,\"commitTitle\":\"add hello.txt\",\"pullRequest\":null,\"tests\":[]}",
+  "stats": {
+    "models": {
+      "gemini-4-neon": {
+        "api": {
+          "totalRequests": 1,
+          "totalErrors": 0,
+          "totalLatencyMs": 38,
+          "errorsByType": {}
+        },
+        "tokens": {
+          "input": 10,
+          "prompt": 10,
+          "candidates": 5,
+          "total": 15,
+          "cached": 0,
+          "thoughts": 0,
+          "tool": 0
+        },
+        "roles": {
+          "main": {
+            "totalRequests": 1,
+            "totalErrors": 0,
+            "totalLatencyMs": 38,
+            "tokens": {
+              "input": 10,
+              "prompt": 10,
+              "candidates": 5,
+              "total": 15,
+              "cached": 0,
+              "thoughts": 0,
+              "tool": 0
+            }
+          }
+        }
+      }
+    },
+    "tools": {
+      "totalCalls": 0,
+      "totalSuccess": 0,
+      "totalFail": 0,
+      "totalDurationMs": 0,
+      "totalDecisions": {
+        "accept": 0,
+        "reject": 0,
+        "modify": 0,
+        "auto_accept": 0
+      },
+      "byName": {}
+    },
+    "files": {
+      "totalLinesAdded": 0,
+      "totalLinesRemoved": 0
+    }
+  }
+}
