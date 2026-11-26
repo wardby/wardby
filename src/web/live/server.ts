@@ -1,5 +1,5 @@
 /**
- * Live co-editing of Markdown documents: Hocuspocus (Yjs over a WebSocket) on the control plane's own port,
+ * Live co-editing (Markdown documents; each kind's own steps are in formats/): Hocuspocus (Yjs over a WebSocket) on the control plane's own port,
  * at /d/live/<documentId>.
  *
  * - Sign-in: the web session cookie the browser sends on the upgrade (member or guest), then the document's
@@ -25,9 +25,7 @@ import { WebSocketServer } from "ws";
 import * as Y from "yjs";
 import { requireDocumentAccess } from "../../core/documents/access.js";
 import type { DocumentEventBus } from "../../core/documents/events.js";
-import { readLiveAnchors } from "../../core/documents/live/anchors.js";
-import { liveDocToMarkdown, normalMarkdown, seedLiveDoc } from "../../core/documents/live/markdown.js";
-import { MERGE_ORIGIN, mergePublish } from "../../core/documents/live/merge.js";
+import { MERGE_ORIGIN } from "../../core/documents/live/merge.js";
 import {
   acquireLease,
   createLiveState,
@@ -39,14 +37,13 @@ import {
   resetLiveState,
   saveLiveState,
 } from "../../core/documents/live/store.js";
-import { notifyDocumentChange } from "../../core/documents/events.js";
 import { publishVersion } from "../../core/documents/service.js";
-import { showsSecret } from "../../core/documents/live/text.js";
 import { documentSecretValues } from "../../core/documents/redact.js";
 import { isLocked } from "../../core/documents/review-state.js";
 import { logger } from "../../core/logger.js";
-import { isLosslessRoundTrip } from "../app/roundtrip.js";
 import { resolveContext, type WebDeps } from "../context.js";
+import { markdownFormat } from "./formats/markdown.js";
+import type { LiveFormat } from "./formats/types.js";
 
 const log = logger.child({ module: "live" });
 
@@ -111,9 +108,11 @@ interface LiveContext {
 
 interface Loaded {
   epoch: string;
-  /** The newest version merged into (or saved from) the live document, and its Markdown. */
+  /** What kind of document this is, live (formats/). */
+  format: LiveFormat;
+  /** The newest version merged into (or saved from) the live document, and its text as the format compares it. */
   versionNumber: number;
-  versionMarkdown: string;
+  versionText: string;
   /** Who changed the text since the last checkpoint: the next checkpoint's author. */
   lastEditor: string | null;
   /** Merges and checkpoints for this document run one at a time, in order. */
@@ -140,6 +139,8 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
   const db = deps.db;
   const loaded = new Map<string, Loaded>();
   const secrets = new Map<string, { values: string[]; at: number }>();
+  const formats: Record<string, LiveFormat> = { document: markdownFormat(db) };
+  const versionFields = { number: true, markdown: true, format: true, baseNumber: true } as const;
 
   const secretValues = async (documentId: string): Promise<string[]> => {
     const hit = secrets.get(documentId);
@@ -221,20 +222,20 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
     },
 
     async onLoadDocument({ document, documentName }) {
+      const kind = await db.document.findUnique({ where: { id: documentName }, select: { kind: true } });
+      const format = kind ? formats[kind.kind] : undefined;
+      if (!format) throw refusal("live_unavailable");
       let stored = await loadLiveState(db, documentName);
       if (!stored) {
         const owner = await acquireLease(db, documentName, deps.replica, t.leaseSeconds);
         if (owner !== deps.replica) throw refusal("live_unavailable");
         const current = await db.document.findUnique({
           where: { id: documentName },
-          select: { currentVersion: { select: { number: true, markdown: true, format: true } } },
+          select: { currentVersion: { select: versionFields } },
         });
         const v = current?.currentVersion;
-        if (!v || v.format !== "markdown" || v.markdown === null) throw refusal("live_unavailable");
-        const seed = seedLiveDoc(v.markdown);
-        // Formatting the editor cannot keep (images, checklists, HTML) would be dropped from the live document and
-        // then saved: such documents stay out of live editing (the page opens them comment-only, as before).
-        if (!isLosslessRoundTrip(v.markdown, liveDocToMarkdown(seed))) throw refusal("live_unavailable");
+        const seed = v ? await format.seed(documentName, v) : null;
+        if (!v || !seed) throw refusal("live_unavailable");
         seed.getMap(LIVE_META).set("epoch", randomUUID());
         stored = await createLiveState(db, {
           documentId: documentName,
@@ -246,12 +247,13 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
       Y.applyUpdate(document, stored.state);
       const since = await db.documentVersion.findUnique({
         where: { documentId_number: { documentId: documentName, number: stored.versionNumber } },
-        select: { markdown: true },
+        select: versionFields,
       });
       const l: Loaded = {
         epoch: stored.epoch,
+        format,
         versionNumber: stored.versionNumber,
-        versionMarkdown: since?.markdown ?? "",
+        versionText: since ? await format.versionText(documentName, since) : "",
         lastEditor: null,
         queue: Promise.resolve(),
         reset: false,
@@ -287,10 +289,11 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
         connection.sendStateless(JSON.stringify({ type: "edit_refused", reason: "server_data" }));
         throw refusal("edit_refused");
       }
-      const values = await secretValues(documentName);
-      if (showsSecret(scratch, values)) {
-        log.warn({ documentId: documentName }, "live edit refused: it would show a secret value");
-        connection.sendStateless(JSON.stringify({ type: "edit_refused", reason: "secret_value" }));
+      const format = loaded.get(documentName)?.format;
+      const why = format ? format.refuse(scratch, await secretValues(documentName)) : "not_loaded";
+      if (why) {
+        log.warn({ documentId: documentName, why }, "live edit refused");
+        connection.sendStateless(JSON.stringify({ type: "edit_refused", reason: why }));
         throw refusal("edit_refused");
       }
     },
@@ -339,32 +342,6 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
     hocuspocus.closeConnections(documentId);
   };
 
-  /** Each thread's stored quote follows its positions; a thread whose words are gone becomes outdated. */
-  const refreshQuotes = async (documentId: string, doc: Y.Doc): Promise<void> => {
-    const readings = readLiveAnchors(doc);
-    if (readings.size === 0) return;
-    const threads = await db.commentThread.findMany({
-      where: { documentId, id: { in: [...readings.keys()] }, status: { in: ["open", "outdated"] } },
-      select: { id: true, status: true, anchor: true },
-    });
-    let changed = 0;
-    for (const th of threads) {
-      const r = readings.get(th.id);
-      if (!r || r === "keep") continue;
-      if (r === "gone") {
-        if (th.status === "open") {
-          await db.commentThread.update({ where: { id: th.id }, data: { status: "outdated" } });
-          changed++;
-        }
-        continue;
-      }
-      if (th.status === "open" && JSON.stringify(th.anchor) === JSON.stringify(r)) continue;
-      await db.commentThread.update({ where: { id: th.id }, data: { anchor: r, status: "open" } });
-      changed++;
-    }
-    if (changed > 0) await notifyDocumentChange(db, documentId, "thread");
-  };
-
   /** Merges every version newer than the live document's, in order, each from the version it was based on. */
   const catchUp = async (documentId: string, doc: Y.Doc, l: Loaded): Promise<void> => {
     // In Redis mode every replica may hold the document; only its leader merges (the result reaches the others).
@@ -372,21 +349,17 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
     const versions = await db.documentVersion.findMany({
       where: { documentId, number: { gt: l.versionNumber } },
       orderBy: { number: "asc" },
-      select: { number: true, markdown: true, format: true, baseNumber: true },
+      select: versionFields,
     });
     for (const v of versions) {
-      if (v.format !== "markdown" || v.markdown === null) return reset(documentId, l, "format");
       const base = await getVersionState(db, documentId, v.baseNumber ?? v.number - 1);
       if (!base) return reset(documentId, l, "base_not_held");
-      const merged = mergePublish(base, v.markdown);
-      // A version the editor cannot keep would lose content in the live document: start again without it.
-      const check = new Y.Doc();
-      Y.applyUpdate(check, merged.versionState);
-      if (!isLosslessRoundTrip(v.markdown, liveDocToMarkdown(check))) return reset(documentId, l, "lossy");
+      const merged = await l.format.merge(documentId, base, v);
+      if (merged === "reset") return reset(documentId, l, "not_mergeable");
       Y.applyUpdate(doc, merged.update, MERGE_ORIGIN);
       await putVersionState(db, { documentId, versionNumber: v.number, state: merged.versionState });
       l.versionNumber = v.number;
-      l.versionMarkdown = v.markdown;
+      l.versionText = merged.text;
     }
     if (versions.length === 0) return;
     await saveLiveState(db, {
@@ -395,7 +368,7 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
       state: Y.encodeStateAsUpdate(doc),
       versionNumber: l.versionNumber,
     });
-    await refreshQuotes(documentId, doc);
+    await l.format.refreshAnchors(documentId, doc);
   };
 
   /** Saves the live document as a version when someone changed its text since the last one. */
@@ -404,18 +377,18 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
     const recorded = doc.getMap(LIVE_META).get("editor");
     const author = typeof recorded === "string" ? recorded : l.lastEditor;
     if (!author || l.reset || (await locked(documentId))) return;
-    await refreshQuotes(documentId, doc);
-    // State and Markdown together, before any await: the version is exactly this state.
+    await l.format.refreshAnchors(documentId, doc);
+    // State and content together, before any await: the version is exactly this state.
     const state = Y.encodeStateAsUpdate(doc);
-    const markdown = liveDocToMarkdown(doc);
-    if (normalMarkdown(markdown) === normalMarkdown(l.versionMarkdown)) {
+    const snap = l.format.snapshot(doc, l.versionText);
+    if (!snap) {
       l.lastEditor = null;
       return;
     }
     try {
       const out = await publishVersion(db, deps.cipher, {
         documentId,
-        markdown,
+        ...snap.content,
         via: "editor",
         createdById: author,
         expectedNumber: l.versionNumber,
@@ -423,7 +396,7 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
       });
       await putVersionState(db, { documentId, versionNumber: out.number, state });
       l.versionNumber = out.number;
-      l.versionMarkdown = markdown;
+      l.versionText = snap.text;
       if (l.lastEditor === author) l.lastEditor = null;
       await saveLiveState(db, { documentId, epoch: l.epoch, state, versionNumber: out.number });
     } catch (err) {
