@@ -483,7 +483,10 @@ function mount(
       void edits.refresh();
     } catch (err) {
       dirty = true;
-      if (err instanceof ApiError && err.code === "document_version_conflict") {
+      if (
+        err instanceof ApiError &&
+        (err.code === "document_version_conflict" || err.code === "document_base_unavailable")
+      ) {
         conflict = true;
         editor.setEditable(false);
         showSave(errorMessage(err), true);

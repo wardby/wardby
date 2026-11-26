@@ -8,6 +8,7 @@ import type { Prisma, PrismaClient } from "#prisma";
 import { contentHash, type VersionContent } from "./content.js";
 import { storeDocumentContent, storeVersionFileRows } from "./files.js";
 import type { DocumentFormat, PreparedContent } from "./formats/index.js";
+import { liveAnchoredThreadIds } from "./live/anchors.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -30,6 +31,8 @@ export interface StagedVersion {
   files: Record<string, string> | null;
   /** Open thread id → outdated against the new content, for the threads open when it was staged. */
   checked: Map<string, boolean>;
+  /** Threads the document's live state anchors by position: the quote check never marks these outdated. */
+  liveAnchored: ReadonlySet<string>;
 }
 
 /**
@@ -50,8 +53,9 @@ export async function stageVersion(
     where: { documentId, status: "open" },
     select: { id: true, anchor: true },
   });
+  const liveAnchored = await liveAnchoredThreadIds(db, documentId);
   const outdatedBefore = new Set(fmt.outdated(prepared.content, openBefore));
-  for (const t of openBefore) checked.set(t.id, outdatedBefore.has(t.id));
+  for (const t of openBefore) checked.set(t.id, !liveAnchored.has(t.id) && outdatedBefore.has(t.id));
   const files = prepared.content.format === "boards-v1" ? prepared.content.files : null;
   if (files && expectedNumber !== undefined) {
     // A stale writer fails here, before it stores text no version will use. The check in writeVersion still
@@ -60,7 +64,7 @@ export async function stageVersion(
     if ((last._max.number ?? 0) !== expectedNumber) throw new Error("document_version_conflict");
   }
   if (files) await storeDocumentContent(db, documentId, files);
-  return { fmt, prepared, files, checked };
+  return { fmt, prepared, files, checked, liveAnchored };
 }
 
 /**
@@ -79,7 +83,7 @@ export async function writeVersion(
     expectedNumber?: number;
   },
 ): Promise<{ versionId: string; number: number; reanchored: { kept: number; outdated: number } }> {
-  const { fmt, prepared, files, checked } = staged;
+  const { fmt, prepared, files, checked, liveAnchored } = staged;
   const last = await tx.documentVersion.aggregate({ where: { documentId }, _max: { number: true } });
   if (meta.expectedNumber !== undefined && (last._max.number ?? 0) !== meta.expectedNumber) {
     throw new Error("document_version_conflict");
@@ -103,7 +107,7 @@ export async function writeVersion(
     where: { documentId, status: "open" },
     select: { id: true, anchor: true },
   });
-  const unchecked = threads.filter((t) => !checked.has(t.id));
+  const unchecked = threads.filter((t) => !checked.has(t.id) && !liveAnchored.has(t.id));
   const outdatedNew = new Set(unchecked.length ? fmt.outdated(prepared.content, unchecked) : []);
   const outdatedIds = threads.filter((t) => checked.get(t.id) ?? outdatedNew.has(t.id)).map((t) => t.id);
   if (outdatedIds.length > 0) {

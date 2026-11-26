@@ -14,13 +14,21 @@ type Db = Pick<
 export interface StoredLive {
   epoch: string;
   state: Uint8Array;
+  /** The newest version merged into (or saved from) this state. */
+  versionNumber: number;
 }
+
+/** Version states kept per document (the newest ones): a publish based on an older version is refused. */
+export const VERSION_STATES_KEPT = 50;
 
 const bytes = (b: Uint8Array): Uint8Array<ArrayBuffer> => new Uint8Array(b);
 
 export async function loadLiveState(db: Db, documentId: string): Promise<StoredLive | null> {
-  const row = await db.documentLiveState.findUnique({ where: { documentId }, select: { epoch: true, state: true } });
-  return row ? { epoch: row.epoch, state: new Uint8Array(row.state) } : null;
+  const row = await db.documentLiveState.findUnique({
+    where: { documentId },
+    select: { epoch: true, state: true, versionNumber: true },
+  });
+  return row ? { epoch: row.epoch, state: new Uint8Array(row.state), versionNumber: row.versionNumber } : null;
 }
 
 /**
@@ -34,33 +42,44 @@ export async function createLiveState(
   return db.$transaction(async (tx) => {
     const existing = await tx.documentLiveState.findUnique({
       where: { documentId: input.documentId },
-      select: { epoch: true, state: true },
+      select: { epoch: true, state: true, versionNumber: true },
     });
-    if (existing) return { epoch: existing.epoch, state: new Uint8Array(existing.state) };
+    if (existing) {
+      return { epoch: existing.epoch, state: new Uint8Array(existing.state), versionNumber: existing.versionNumber };
+    }
     await tx.documentLiveState.create({
-      data: { documentId: input.documentId, epoch: input.epoch, state: bytes(input.state) },
+      data: {
+        documentId: input.documentId,
+        epoch: input.epoch,
+        state: bytes(input.state),
+        versionNumber: input.versionNumber,
+      },
     });
     await tx.documentLiveVersionState.upsert({
       where: { documentId_versionNumber: { documentId: input.documentId, versionNumber: input.versionNumber } },
       create: { documentId: input.documentId, versionNumber: input.versionNumber, state: bytes(input.state) },
       update: {},
     });
-    return { epoch: input.epoch, state: input.state };
+    return { epoch: input.epoch, state: input.state, versionNumber: input.versionNumber };
   });
 }
 
 /** Saves the whole live state. Only for the history it was loaded with: a reset (new epoch) is never overwritten. */
 export async function saveLiveState(
   db: Db,
-  input: { documentId: string; epoch: string; state: Uint8Array },
+  input: { documentId: string; epoch: string; state: Uint8Array; versionNumber?: number },
 ): Promise<boolean> {
   const out = await db.documentLiveState.updateMany({
     where: { documentId: input.documentId, epoch: input.epoch },
-    data: { state: bytes(input.state) },
+    data: {
+      state: bytes(input.state),
+      ...(input.versionNumber !== undefined ? { versionNumber: input.versionNumber } : {}),
+    },
   });
   return out.count === 1;
 }
 
+/** Keeps a version's state, and lets go of states older than the newest VERSION_STATES_KEPT. */
 export async function putVersionState(
   db: Db,
   input: { documentId: string; versionNumber: number; state: Uint8Array },
@@ -70,9 +89,36 @@ export async function putVersionState(
     create: { documentId: input.documentId, versionNumber: input.versionNumber, state: bytes(input.state) },
     update: { state: bytes(input.state) },
   });
+  await db.documentLiveVersionState.deleteMany({
+    where: { documentId: input.documentId, versionNumber: { lte: input.versionNumber - VERSION_STATES_KEPT } },
+  });
 }
 
-export async function getVersionState(db: Db, documentId: string, versionNumber: number): Promise<Uint8Array | null> {
+/** Whether a publish based on `versionNumber` can be merged into the document's live state. */
+export async function holdsVersionState(
+  db: Pick<PrismaClient, "documentLiveVersionState">,
+  documentId: string,
+  versionNumber: number,
+): Promise<boolean> {
+  return (await db.documentLiveVersionState.count({ where: { documentId, versionNumber } })) === 1;
+}
+
+/**
+ * Drops a document's live state and version states: the next open starts a new history (epoch) from the latest
+ * version, and pages holding the old one are refused and reload.
+ */
+export async function resetLiveState(db: Db, documentId: string): Promise<void> {
+  await db.$transaction(async (tx) => {
+    await tx.documentLiveVersionState.deleteMany({ where: { documentId } });
+    await tx.documentLiveState.deleteMany({ where: { documentId } });
+  });
+}
+
+export async function getVersionState(
+  db: Pick<PrismaClient, "documentLiveVersionState">,
+  documentId: string,
+  versionNumber: number,
+): Promise<Uint8Array | null> {
   const row = await db.documentLiveVersionState.findUnique({
     where: { documentId_versionNumber: { documentId, versionNumber } },
     select: { state: true },

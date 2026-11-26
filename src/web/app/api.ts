@@ -388,6 +388,7 @@ export class Api {
 /** Fixed, user-facing text for each error code (never server text). */
 const MESSAGES: Record<string, string> = {
   document_version_conflict: "Someone else saved a newer version — reload",
+  document_base_unavailable: "This page is too far behind the document — reload",
   comment_thread_already_sent: "This thread is already with the agent.",
   document_too_large_for_agent: "This document is too large to send to the agent.",
   document_agent_unavailable: "The document's agent can't take work right now.",
