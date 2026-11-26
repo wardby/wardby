@@ -1,14 +1,19 @@
 ---
 id: live-editing
-title: Live editing - edit documents together, comments that follow their words
-summary: Everyone with a document open edits one copy live, with named carets; comments stay on their words through every edit; versions are saved as checkpoints; publishes merge in. How it works, what to set for several control-plane copies (WARDBY_LIVE_REDIS_URL, WARDBY_LIVE_ADVERTISE_ADDRESS) and what each error means.
+title: Live editing - edit documents and designs together, comments that follow their words
+summary: Everyone with a document or design open edits one copy live, with named carets (documents) or named outlines (designs); comments and pins stay on their words or elements through every edit; versions are saved as checkpoints; publishes merge in. How it works, what to set for several control-plane copies (WARDBY_LIVE_REDIS_URL, WARDBY_LIVE_ADVERTISE_ADDRESS) and what each error means.
 audience: operator
 tags:
   [
     live editing,
     co-editing,
     collaboration,
+    edit together,
     carets,
+    designs,
+    live design,
+    presence,
+    pins,
     WebSocket,
     /d/live,
     WARDBY_LIVE_REDIS_URL,
@@ -23,18 +28,18 @@ appliesTo: ">=0.10.2"
 
 # Live editing
 
-Everyone with a Markdown [document](documents.md) open edits the same copy at the same time. Typing appears for the others as it happens, with each person's named caret, and no one is locked out by someone else's save. The page's save state reads **Live**.
+Everyone with a Markdown [document](documents.md) or a [design](designs.md) open edits the same copy at the same time. Changes appear for the others as they happen, with each person's named caret (or, on a design, an outline of what they selected), and no one is locked out by someone else's save. The page's save state reads **Live**.
 
 ## What people see
 
 - **Who edits:** members with `write`. Members and guests with `comment` or `read` watch the edits arrive. An approved, rejected or archived document is read-only for everyone, at once.
 - **Comments follow their words.** A comment keeps its place through everyone's edits, including edits inside the commented words; it is marked outdated only when its words are deleted. A comment can cover up to 10,000 characters.
 - **Versions** are saved after 3 seconds without edits (at most every 15 seconds while edits continue), credited to whoever edited last. History, review, exports and every MCP tool keep working from versions. Opening a document saves nothing.
-- **Designs** are not edited live: they save versions as before (see [Designs](designs.md)).
+- **Designs** are edited live board by board: the first person to open a board builds its live copy and the others join it; changes arrive element by element, others' selections show as outlines with their names, and Undo undoes your own changes only. See [Edit together](designs.md#edit-together).
 
 ## Publishing to a live document
 
-`publish_version` takes the version you read as `baseNumber`. On a live document, a change based on an older version is merged word by word with everything published since: the saved version is the whole document with both changes, and everyone with the page open sees it arrive. Threads sent to a coding agent merge the same way. The merge needs the older version's state, kept for the 50 newest versions; an older base is [`document_base_unavailable`](errors/document-base-unavailable.md).
+`publish_version` takes the version you read as `baseNumber`. On a live document, a change based on an older version is merged with everything published since (word by word in a document, element by element in a design; a design board nobody has opened is taken as a whole file, and a publish that changes one a later version also changed is `document_version_conflict`): the saved version is the whole document with both changes, and everyone with the page open sees it arrive. Threads sent to a coding agent merge the same way. The merge needs the older version's state, kept for the 50 newest versions; an older base is [`document_base_unavailable`](errors/document-base-unavailable.md).
 
 A version with formatting the editor cannot keep (images, checklists, HTML) ends live editing for that document instead of dropping that content; such documents open comment-only, as before.
 
@@ -50,5 +55,5 @@ See [Availability](../docs/availability.md) and [Documents](../docs/documents.md
 
 - [`live_unavailable`](errors/live-unavailable.md): the page could not join (no WebSocket through a proxy, the leading copy unreachable, or a document that cannot go live); it saves versions the usual way.
 - [`live_state_stale`](errors/live-state-stale.md): the page held a copy from a history the server no longer has; it reloads.
-- [`edit_refused`](errors/edit-refused.md): an edit would have shown a secret value (or changed the server's own record in the document); no one else received it, and the page reloads.
+- [`edit_refused`](errors/edit-refused.md): an edit would have shown a secret value, broken a design's board format or made a board larger than 512 KB (or changed the server's own record in the document); no one else received it, and the page reloads.
 - [`document_base_unavailable`](errors/document-base-unavailable.md): a publish's base version is too old to merge from.

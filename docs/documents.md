@@ -207,9 +207,11 @@ more is a safe choice).
 
 ## Live editing
 
-Everyone with a document open edits the same copy at the same time: each
-person's typing appears for the others as they type, with a named caret, and
-no one is locked out by someone else's save. The save state reads **Live**.
+Everyone with a document or design open edits the same copy at the same time:
+each person's typing appears for the others as they type, with a named caret,
+and no one is locked out by someone else's save. The save state reads
+**Live**. This section covers both; what is particular to designs (boards,
+elements, pins) is in [Editing designs](#editing-designs).
 
 - **Who edits.** Members with `write` edit; members and guests with `comment`
   or `read` watch the edits arrive but cannot type. An approved, rejected or
@@ -234,7 +236,8 @@ no one is locked out by someone else's save. The save state reads **Live**.
   document is approved, rejected or archived.
 - **Publishing to a live document.** `publish_version` (and agents, restores
   and the page's own saves) name the version they read. When newer versions
-  exist, the change is merged word by word with everything published since:
+  exist, the change is merged with everything published since (word by word
+  in a document, element by element in a design):
   the saved version is the whole document with both, based on the latest
   version, and everyone with the page open sees it arrive. The merge needs
   the older version's state, which is kept for the 50 newest versions; an
@@ -246,7 +249,8 @@ no one is locked out by someone else's save. The save state reads **Live**.
 - **Secret values.** An edit that would put one of the document agent's secret
   values into the text is refused before anyone else receives it
   ([`edit_refused`](../help/errors/edit-refused.md)); the page reloads from
-  the server's copy and says why.
+  the server's copy and says why. In a design, an edit that breaks the board
+  format or makes a board larger than 512 KB is refused the same way.
 - **When live editing is not used.** Documents with formatting the editor
   cannot keep (images, checklists, HTML) open comment-only, as before, and
   never go live. When the page cannot join (no WebSocket through a proxy,
@@ -472,20 +476,56 @@ top bar) for checking the responsive layout, and the **Comments** and
 - **Style** and **Settings** tabs (right) for the selected element, with Undo
   and Redo.
 
-Edits save by themselves a moment after you stop, as a new version that
-contains only the changed files. If someone else published first, the page says
-so and offers to reload rather than overwriting. An edit that would break the
-board format (for example an external image) is not saved, and the page shows
-the problem.
+Everyone with the design open sees it live, and people with `write` edit it together (see [Live editing](#live-editing)):
+
+- **Boards go live when opened.** The first person to open a board builds its
+  live copy from the version's file, and everyone else on that board joins it
+  (a page with only `comment` or `read` access waits for someone who can
+  edit). A board nobody has opened stays as the version's file.
+- **Element by element.** Changes reach the others as they are made, text as
+  it is typed, without reloading the canvas. Two people changing different
+  properties of one element both keep their change. If two people move the
+  same element at the same moment, the later move stays.
+- **Who is where.** Other people's selected elements are outlined in their
+  colour with their name ("is typing" while they type in a text box), and each
+  board's tab shows a dot for everyone on it. The board list (adding,
+  renaming, moving and deleting boards) is shared too.
+- **Undo** and **Redo** undo your own changes only, never someone else's.
+- **Versions.** The server saves the whole file set as a version, as for
+  documents. The page itself saves nothing while live.
+- **Checks on every edit.** An edit that breaks the [board format](../help/design-boards-format.md)
+  (for example a script or an external image), makes a board larger than
+  512 KB, or would show one of the design agent's secret values is refused
+  before anyone else receives it
+  ([`edit_refused`](../help/errors/edit-refused.md)); the page reloads from
+  the server's copy and says why.
+- **Agents and `publish_version`.** A published version is merged into the
+  live boards element by element, from the version it was based on, so
+  people's edits made meanwhile stay; text an agent rewords in a text box
+  someone else changed merges word by word (where both changed the same words,
+  the published version wins). A board nobody has opened takes the published
+  file. A publish based on an older version is merged the same way; when both
+  it and a later version changed a board nobody has opened, it is refused
+  with `document_version_conflict` (read the latest version and publish
+  again).
+
+When the page cannot join live editing (for example no WebSocket through a
+proxy), edits save by themselves a moment after you stop, as a new version
+that contains only the changed files. If someone else published first, the
+page says so and offers to reload rather than overwriting. An edit that would
+break the board format (for example an external image) is not saved, and the
+page shows the problem.
 
 A board's CSS as written is kept as a **base layer** that always renders as
 written; the editor's own changes are saved as a separate block on top. When a
-writer first opens a version, the page renders each board as written and in the
-editor and compares computed styles. Where they differ it lists "N styles may
-not be editable on board X" under **Checks**: the board still looks right, but
-those styles live only in the base layer, so the Style panel cannot change them.
-To change them, edit the HTML and CSS in the repository or send a comment to a
-coding agent.
+writer opens a version and the page saves the usual way (not live), the page
+renders each board as written and in the editor and compares computed styles.
+Where they differ it lists "N styles may not be editable on board X" under
+**Checks**: the board still looks right, but those styles live only in the
+base layer, so the Style panel cannot change them. To change them, edit the
+HTML and CSS in the repository or send a comment to a coding agent. (The
+comparison switches through every board, so it is not run while editing
+live.)
 
 ### Comments on boards
 
@@ -494,7 +534,10 @@ button), click an element in the canvas and write the comment; Esc leaves
 comment mode. A pin is anchored to the element (its board, its id when it has
 one, its tag, its first words and its path), plus the point you clicked as a
 fraction of the element's box, so it stays on the element at every device
-width. Open threads show as numbered pins; a resolved or outdated thread shows
+width. While the design is edited live, a pin also follows its element through
+everyone's edits and agents' versions (it is kept on the element itself, not
+on its place in the board), and is marked outdated when the element is
+deleted. Open threads show as numbered pins; a resolved or outdated thread shows
 its pin only while it is selected. When a new version no longer contains the
 element, the thread is marked outdated, as for Markdown text. Replies,
 mentions, resolve and reopen, live updates and share-link guests work as for
