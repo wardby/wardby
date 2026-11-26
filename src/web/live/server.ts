@@ -22,15 +22,22 @@ import { WebSocketServer } from "ws";
 import * as Y from "yjs";
 import { requireDocumentAccess } from "../../core/documents/access.js";
 import type { DocumentEventBus } from "../../core/documents/events.js";
-import { liveDocToMarkdown, seedLiveDoc } from "../../core/documents/live/markdown.js";
+import { readLiveAnchors } from "../../core/documents/live/anchors.js";
+import { liveDocToMarkdown, normalMarkdown, seedLiveDoc } from "../../core/documents/live/markdown.js";
+import { MERGE_ORIGIN, mergePublish } from "../../core/documents/live/merge.js";
 import {
   acquireLease,
   createLiveState,
+  getVersionState,
   loadLiveState,
+  putVersionState,
   redeemLiveTicket,
   releaseLease,
+  resetLiveState,
   saveLiveState,
 } from "../../core/documents/live/store.js";
+import { notifyDocumentChange } from "../../core/documents/events.js";
+import { publishVersion } from "../../core/documents/service.js";
 import { showsSecret } from "../../core/documents/live/text.js";
 import { documentSecretValues } from "../../core/documents/redact.js";
 import { isLocked } from "../../core/documents/review-state.js";
@@ -97,7 +104,18 @@ interface LiveContext {
 
 interface Loaded {
   epoch: string;
+  /** The newest version merged into (or saved from) the live document, and its Markdown. */
+  versionNumber: number;
+  versionMarkdown: string;
+  /** Who changed the text since the last checkpoint: the next checkpoint's author. */
+  lastEditor: string | null;
+  /** Merges and checkpoints for this document run one at a time, in order. */
+  queue: Promise<void>;
+  /** The live state was dropped (a version the editor cannot keep, or a base no longer held). */
+  reset: boolean;
 }
+
+const asError = (err: unknown) => (err instanceof Error ? err.name : typeof err);
 
 export function createLiveServer(deps: LiveServerDeps): LiveServer {
   const t: LiveTimings = { ...LIVE_TIMINGS, ...deps.timings };
@@ -156,6 +174,8 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
         context.needsTicket = false;
       }
       if (context.needsTicket) throw refusal("document_not_found");
+      // A reset document is still unloading: wait for it, so this connection starts from the new history.
+      for (let i = 0; i < 60 && loaded.get(documentName)?.reset; i++) await new Promise((r) => setTimeout(r, 50));
       if (typeof sent.epoch === "string") {
         const epoch = loaded.get(documentName)?.epoch ?? (await loadLiveState(db, documentName))?.epoch;
         if (sent.epoch !== epoch) throw refusal("live_state_stale");
@@ -187,7 +207,27 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
         });
       }
       Y.applyUpdate(document, stored.state);
-      loaded.set(documentName, { epoch: stored.epoch });
+      const since = await db.documentVersion.findUnique({
+        where: { documentId_number: { documentId: documentName, number: stored.versionNumber } },
+        select: { markdown: true },
+      });
+      const l: Loaded = {
+        epoch: stored.epoch,
+        versionNumber: stored.versionNumber,
+        versionMarkdown: since?.markdown ?? "",
+        lastEditor: null,
+        queue: Promise.resolve(),
+        reset: false,
+      };
+      loaded.set(documentName, l);
+      // Versions published while no one had it open are merged in before anyone sees it.
+      await catchUp(documentName, document, l);
+      if (l.reset) throw refusal("live_unavailable");
+    },
+
+    async onChange({ documentName, context, transactionOrigin }) {
+      const l = loaded.get(documentName);
+      if (l && context?.principalId && transactionOrigin !== MERGE_ORIGIN) l.lastEditor = context.principalId;
     },
 
     async beforeSync({ document, documentName, type, payload, connection }) {
@@ -207,14 +247,19 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
 
     async onStoreDocument({ document, documentName }) {
       const l = loaded.get(documentName);
-      if (!l) return;
-      const saved = await saveLiveState(db, {
-        documentId: documentName,
-        epoch: l.epoch,
-        state: Y.encodeStateAsUpdate(document),
+      if (!l || l.reset) return;
+      await enqueue(documentName, l, async () => {
+        if (l.reset) return;
+        const saved = await saveLiveState(db, {
+          documentId: documentName,
+          epoch: l.epoch,
+          state: Y.encodeStateAsUpdate(document),
+          versionNumber: l.versionNumber,
+        });
+        // The history was reset meanwhile: these connections hold a history that no longer exists.
+        if (!saved) return hocuspocus.closeConnections(documentName);
+        await checkpoint(documentName, document, l);
       });
-      // The history was reset meanwhile: these connections hold a history that no longer exists.
-      if (!saved) hocuspocus.closeConnections(documentName);
     },
 
     async afterUnloadDocument({ documentName }) {
@@ -223,6 +268,121 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
       await releaseLease(db, documentName, deps.replica).catch(() => undefined);
     },
   });
+
+  /** Runs one step after the document's earlier ones; a failure is logged and does not stop the next. */
+  const enqueue = (documentId: string, l: Loaded, step: () => Promise<void>): Promise<void> => {
+    const run = l.queue.then(step).catch((err: unknown) => {
+      log.warn({ documentId, errorName: asError(err) }, "live step failed");
+    });
+    l.queue = run;
+    return run;
+  };
+
+  /**
+   * Drops the live state: pages are disconnected, refused as stale when they come back, and reload into the new
+   * history (or into the usual saving, for a document the editor cannot keep).
+   */
+  const reset = async (documentId: string, l: Loaded, why: string): Promise<void> => {
+    l.reset = true;
+    await resetLiveState(db, documentId);
+    log.info({ documentId, why }, "live document reset");
+    hocuspocus.closeConnections(documentId);
+  };
+
+  /** Each thread's stored quote follows its positions; a thread whose words are gone becomes outdated. */
+  const refreshQuotes = async (documentId: string, doc: Y.Doc): Promise<void> => {
+    const readings = readLiveAnchors(doc);
+    if (readings.size === 0) return;
+    const threads = await db.commentThread.findMany({
+      where: { documentId, id: { in: [...readings.keys()] }, status: { in: ["open", "outdated"] } },
+      select: { id: true, status: true, anchor: true },
+    });
+    let changed = 0;
+    for (const th of threads) {
+      const r = readings.get(th.id);
+      if (!r || r === "keep") continue;
+      if (r === "gone") {
+        if (th.status === "open") {
+          await db.commentThread.update({ where: { id: th.id }, data: { status: "outdated" } });
+          changed++;
+        }
+        continue;
+      }
+      if (th.status === "open" && JSON.stringify(th.anchor) === JSON.stringify(r)) continue;
+      await db.commentThread.update({ where: { id: th.id }, data: { anchor: r, status: "open" } });
+      changed++;
+    }
+    if (changed > 0) await notifyDocumentChange(db, documentId, "thread");
+  };
+
+  /** Merges every version newer than the live document's, in order, each from the version it was based on. */
+  const catchUp = async (documentId: string, doc: Y.Doc, l: Loaded): Promise<void> => {
+    const versions = await db.documentVersion.findMany({
+      where: { documentId, number: { gt: l.versionNumber } },
+      orderBy: { number: "asc" },
+      select: { number: true, markdown: true, format: true, baseNumber: true },
+    });
+    for (const v of versions) {
+      if (v.format !== "markdown" || v.markdown === null) return reset(documentId, l, "format");
+      const base = await getVersionState(db, documentId, v.baseNumber ?? v.number - 1);
+      if (!base) return reset(documentId, l, "base_not_held");
+      const merged = mergePublish(base, v.markdown);
+      // A version the editor cannot keep would lose content in the live document: start again without it.
+      const check = new Y.Doc();
+      Y.applyUpdate(check, merged.versionState);
+      if (!isLosslessRoundTrip(v.markdown, liveDocToMarkdown(check))) return reset(documentId, l, "lossy");
+      Y.applyUpdate(doc, merged.update, MERGE_ORIGIN);
+      await putVersionState(db, { documentId, versionNumber: v.number, state: merged.versionState });
+      l.versionNumber = v.number;
+      l.versionMarkdown = v.markdown;
+    }
+    if (versions.length === 0) return;
+    await saveLiveState(db, {
+      documentId,
+      epoch: l.epoch,
+      state: Y.encodeStateAsUpdate(doc),
+      versionNumber: l.versionNumber,
+    });
+    await refreshQuotes(documentId, doc);
+  };
+
+  /** Saves the live document as a version when someone changed its text since the last one. */
+  const checkpoint = async (documentId: string, doc: Y.Doc, l: Loaded, retried = false): Promise<void> => {
+    const author = l.lastEditor;
+    if (!author || l.reset || (await locked(documentId))) return;
+    await refreshQuotes(documentId, doc);
+    // State and Markdown together, before any await: the version is exactly this state.
+    const state = Y.encodeStateAsUpdate(doc);
+    const markdown = liveDocToMarkdown(doc);
+    if (normalMarkdown(markdown) === normalMarkdown(l.versionMarkdown)) {
+      l.lastEditor = null;
+      return;
+    }
+    try {
+      const out = await publishVersion(db, deps.cipher, {
+        documentId,
+        markdown,
+        via: "editor",
+        createdById: author,
+        expectedNumber: l.versionNumber,
+        strictBase: true,
+      });
+      await putVersionState(db, { documentId, versionNumber: out.number, state });
+      l.versionNumber = out.number;
+      l.versionMarkdown = markdown;
+      if (l.lastEditor === author) l.lastEditor = null;
+      await saveLiveState(db, { documentId, epoch: l.epoch, state, versionNumber: out.number });
+    } catch (err) {
+      const code = err instanceof Error ? err.message : "";
+      if (code === "document_locked") return;
+      // A version arrived meanwhile: merge it, then save this document's edits on top of it.
+      if (code === "document_version_conflict" && !retried) {
+        await catchUp(documentId, doc, l);
+        return checkpoint(documentId, doc, l, true);
+      }
+      throw err;
+    }
+  };
 
   const renew = setInterval(() => {
     for (const id of hocuspocus.documents.keys()) {
@@ -234,6 +394,11 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
   renew.unref();
 
   const unsubscribe = deps.bus.subscribe((event) => {
+    const doc = hocuspocus.documents.get(event.documentId);
+    const l = loaded.get(event.documentId);
+    if (event.kind === "version" && doc && l && !l.reset) {
+      void enqueue(event.documentId, l, () => catchUp(event.documentId, doc, l));
+    }
     if (event.kind === "review" && hocuspocus.documents.has(event.documentId)) {
       void applyLock(event.documentId).catch((err: unknown) =>
         log.warn({ errorName: err instanceof Error ? err.name : typeof err }, "live lock not applied"),

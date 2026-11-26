@@ -13,8 +13,10 @@ import type { Principal } from "#prisma";
 import { createPrismaClient } from "../../core/db.js";
 import type { DocumentEvent, DocumentEventBus } from "../../core/documents/events.js";
 import { LIVE_FIELD, liveDocToMarkdown } from "../../core/documents/live/markdown.js";
+import { LIVE_ANCHORS } from "../../core/documents/live/anchors.js";
 import { issueLiveTicket, loadLiveState } from "../../core/documents/live/store.js";
-import { createDocument } from "../../core/documents/service.js";
+import { createThread } from "../../core/documents/comments.js";
+import { createDocument, publishVersion } from "../../core/documents/service.js";
 import { attachSecret, createSecret } from "../../core/secrets.js";
 import { createWebSession } from "../session.js";
 import { createLiveServer, LIVE_META, type LiveServer } from "./server.js";
@@ -123,6 +125,23 @@ describe.skipIf(!process.env.DATABASE_URL)("live co-editing server (database)", 
       append: (needle: string, text: string) => {
         const t = paragraph(needle);
         ydoc.transact(() => t.insert(t.length, text));
+      },
+      insertAt: (needle: string, offset: number, text: string) => {
+        const t = paragraph(needle);
+        ydoc.transact(() => t.insert(t.toString().indexOf(needle) + offset, text));
+      },
+      remove: (needle: string) => {
+        const t = paragraph(needle);
+        ydoc.transact(() => t.delete(t.toString().indexOf(needle), needle.length));
+      },
+      /** What the page does for a comment: its range as positions in the shared document. */
+      anchor: (threadId: string, needle: string) => {
+        const t = paragraph(needle);
+        const at = t.toString().indexOf(needle);
+        ydoc.getMap(LIVE_ANCHORS).set(threadId, {
+          from: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(t, at)),
+          to: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(t, at + needle.length)),
+        });
       },
       close: () => {
         provider.destroy();
@@ -301,6 +320,153 @@ describe.skipIf(!process.env.DATABASE_URL)("live co-editing server (database)", 
     a.close();
   });
 
+  const versions = (documentId: string) =>
+    db.documentVersion.findMany({
+      where: { documentId },
+      orderBy: { number: "asc" },
+      select: { number: true, via: true, createdById: true, baseNumber: true, markdown: true },
+    });
+
+  it("saves edits as a version after a pause, credited to the editor; opening alone saves nothing", async () => {
+    const id = await newDoc();
+    const a = await client(ann, id);
+    await sleep(600);
+    expect((await versions(id)).length).toBe(1);
+    a.append("Ann writes", " Checkpointed.");
+    await sleep(800);
+    const vs = await versions(id);
+    expect(vs.length).toBe(2);
+    expect(vs[1]).toMatchObject({ via: "editor", createdById: ann.id, baseNumber: 1 });
+    expect(vs[1].markdown).toContain("Ann writes here. Checkpointed.");
+    a.close();
+  });
+
+  it("merges a publish based on an older version: everyone's edits kept, nothing applied twice", async () => {
+    const id = await newDoc();
+    const a = await client(ann, id);
+    a.append("Ann writes", " A-EDIT.");
+    await sleep(800); // checkpoint: v2
+    expect((await versions(id)).length).toBe(2);
+    // An agent read v1 and adds a line; the live document has moved on (v2).
+    const v1 = (await versions(id))[0].markdown!;
+    const out = await publishVersion(db, cipher, {
+      documentId: id,
+      markdown: v1.replace("Bo writes here.", "Bo writes here. AGENT-LINE."),
+      via: "agent",
+      expectedNumber: 1,
+    });
+    emit({ documentId: id, kind: "version" }); // what the real documents bus delivers
+    expect(out.number).toBe(3);
+    // The saved version is the whole document: the agent's line merged with Ann's edit, based on v2.
+    const v3 = (await versions(id))[2];
+    expect(v3).toMatchObject({ via: "agent", baseNumber: 2 });
+    expect(v3.markdown).toContain("Ann writes here. A-EDIT.");
+    expect(v3.markdown).toContain("Bo writes here. AGENT-LINE.");
+    await sleep(600);
+    expect(a.markdown()).toContain("Ann writes here. A-EDIT.");
+    expect(a.markdown()).toContain("Bo writes here. AGENT-LINE.");
+    expect(a.markdown().split("AGENT-LINE").length - 1).toBe(1);
+    expect(a.markdown().split("A-EDIT").length - 1).toBe(1);
+    // The next checkpoint saves both (v4, based on the agent's v3).
+    a.append("Bo writes", " MORE.");
+    await sleep(800);
+    const last = (await versions(id)).at(-1)!;
+    expect(last).toMatchObject({ via: "editor", baseNumber: 3 });
+    expect(last.markdown).toContain("A-EDIT.");
+    expect(last.markdown).toContain("AGENT-LINE.");
+    a.close();
+  });
+
+  it("merges versions published while no one had it open on the next open", async () => {
+    const id = await newDoc();
+    const a = await client(ann, id);
+    a.append("Ann writes", " FIRST.");
+    await sleep(800);
+    a.close();
+    await sleep(300);
+    const latest = (await versions(id)).at(-1)!;
+    await publishVersion(db, cipher, {
+      documentId: id,
+      markdown: latest.markdown!.replace("Bo writes here.", "Bo writes here. WHILE-CLOSED."),
+      via: "mcp",
+      expectedNumber: latest.number,
+    });
+    emit({ documentId: id, kind: "version" }); // what the real documents bus delivers
+    const b = await client(ann, id);
+    expect(b.markdown()).toContain("FIRST.");
+    expect(b.markdown()).toContain("WHILE-CLOSED.");
+    b.close();
+  });
+
+  it("a version the editor cannot keep ends live editing for that document instead of losing content", async () => {
+    const id = await newDoc();
+    const a = await client(ann, id);
+    await sleep(300);
+    await publishVersion(db, cipher, {
+      documentId: id,
+      markdown: "# Plan\n\n![diagram](https://example.com/d.png)\n",
+      via: "mcp",
+      expectedNumber: 1,
+    });
+    emit({ documentId: id, kind: "version" }); // what the real documents bus delivers
+    await sleep(600);
+    expect(await loadLiveState(db, id)).toBeNull();
+    a.close();
+    const again = await client(ann, id);
+    expect(again.synced()).toBe(false);
+    again.close();
+  });
+
+  it("refuses a publish based on a version whose state is no longer kept", async () => {
+    const id = await newDoc();
+    const a = await client(ann, id);
+    a.append("Ann writes", " V2.");
+    await sleep(800);
+    await db.documentLiveVersionState.deleteMany({ where: { documentId: id, versionNumber: 1 } });
+    await expect(
+      publishVersion(db, cipher, { documentId: id, markdown: "# Plan\n\nx\n", via: "mcp", expectedNumber: 1 }),
+    ).rejects.toThrow("document_base_unavailable");
+    a.close();
+  });
+
+  it("a comment's quote follows edits inside its words; it goes outdated only when they are deleted", async () => {
+    const id = await newDoc();
+    await grant(id, bo, "write");
+    const t = await createThread(db, cipher, {
+      documentId: id,
+      viewer: { kind: "principal", principalId: ann.id },
+      anchor: { type: "text", quote: "Ann writes", prefix: "", suffix: " here." },
+      body: "Who?",
+    });
+    const a = await client(ann, id);
+    a.anchor(t.threadId, "Ann writes");
+    a.insertAt("Ann writes", "Ann ".length, "really ");
+    await sleep(800);
+    let row = await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } });
+    expect(row.status).toBe("open");
+    expect((row.anchor as { quote: string }).quote).toBe("Ann really writes");
+    // An agent's publish that changes the quoted words does not mark it outdated either.
+    const latest = (await versions(id)).at(-1)!;
+    await publishVersion(db, cipher, {
+      documentId: id,
+      markdown: latest.markdown!.replace("Ann really writes", "Ann really truly writes"),
+      via: "agent",
+      expectedNumber: latest.number,
+    });
+    emit({ documentId: id, kind: "version" }); // what the real documents bus delivers
+    await sleep(800);
+    row = await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } });
+    expect(row.status).toBe("open");
+    expect((row.anchor as { quote: string }).quote).toBe("Ann really truly writes");
+    // Its words deleted: outdated.
+    a.remove("Ann really truly writes here.");
+    a.append("Bo writes", " (Ann left.)");
+    await sleep(800);
+    row = await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } });
+    expect(row.status).toBe("outdated");
+    a.close();
+  });
+
   it("after a restart the saved history resumes; a browser holding a reset history is refused", async () => {
     const id = await newDoc();
     const a = await client(ann, id);
@@ -326,11 +492,12 @@ describe.skipIf(!process.env.DATABASE_URL)("live co-editing server (database)", 
     expect(stale.reason()).toBe("live_state_stale");
     expect(stale.synced()).toBe(false);
     stale.close();
-    // A fresh browser starts the new history from the latest version: one copy, nothing merged from the old one.
+    // A fresh browser starts the new history from the latest version (which the checkpoint saved before the
+    // reset): one copy, nothing merged in from the old history.
     const fresh = await client(ann, id);
     expect(fresh.synced()).toBe(true);
     expect(fresh.markdown().split("Ann writes here.").length - 1).toBe(1);
-    expect(fresh.markdown()).not.toContain("BEFORE-RESTART");
+    expect(fresh.markdown().split("BEFORE-RESTART").length - 1).toBe(1);
     fresh.close();
   });
 });
