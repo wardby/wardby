@@ -346,7 +346,7 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   const runStepsCeiling = loadRunStepsLevel(env);
   // Throws on an invalid CODING_TUNNEL_* combination, before anything listens. Undefined: no tunnel.
   const tunnelConfig = loadCodingTunnelConfig(env);
-  // Throws before anything listens when the Vertex project is not a project id.
+  // Throws before anything listens when CODING_VERTEX_PROJECT is not a project id (an invalid fallback only warns).
   const geminiConfig = loadCodingProxyGeminiConfig(env);
   // Throws (test_simulators_refused) on any refusal, before anything listens.
   const simulators = startupTestSimulators("coding-proxy", env);
