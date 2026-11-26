@@ -5,7 +5,7 @@ import type { ProxyRefusalDetails } from "../../core/budget-events.js";
 import type { LeaseRenewal } from "../../core/request-lease.js";
 import type { CodingToolPin, NativeToolPin } from "../../core/coding-native-tools.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
-
+import type { WebTools } from "../../coding/google-web-tools.js";
 /**
  * The longest tool description (and other tool text) the proxy accepts in a request, in characters.
  * A native tool over it is refused at attach on a Claude Code agent and left out of its runs.
@@ -31,7 +31,8 @@ export function listedToolPins(pins: readonly CodingToolPin[]): ListedToolPin[] 
 
 export type ProxySessionStatus = "active" | "cancelled";
 export type ProxyRequestStatus = "reserved" | "completed" | "released" | "uncertain";
-export type ProxyProtocol = "openai-responses" | "anthropic-messages";
+export const PROXY_PROTOCOLS = ["openai-responses", "anthropic-messages", "gemini-generate-content"] as const;
+export type ProxyProtocol = (typeof PROXY_PROTOCOLS)[number];
 
 export interface PricingSnapshot extends ModelPricing {
   version: string;
@@ -109,6 +110,8 @@ export interface ProxySession {
   workflow: boolean;
   /** Native mode with repository skills (#582): its requests may use the Skill tool. False on older sessions. */
   skills: boolean;
+  /** Gemini's server-side web tools this run may use (gemini-generate-content only); "off" on other and older sessions. */
+  webTools: WebTools;
 }
 
 export interface ProxyRequest {
@@ -180,6 +183,8 @@ export interface CreateProxySessionInput {
   workflow?: boolean;
   /** Native mode with repository skills on; absent = false. */
   skills?: boolean;
+  /** Gemini's server-side web tools the run may use; absent = "off". */
+  webTools?: WebTools;
 }
 
 export interface ReserveProxyRequestInput {

@@ -305,6 +305,7 @@ export interface ContainerExecutorConfig {
   artifactRoot?: string;
   credentialRef: string;
   anthropicCredentialRef: string;
+  geminiCredentialRef: string;
   cpus: number;
   memoryMb: number;
   pids: number;
@@ -425,6 +426,7 @@ export function loadContainerExecutorConfig(env: NodeJS.ProcessEnv = process.env
     artifactRoot: env.CODING_ARTIFACT_ROOT,
     credentialRef: env.CODING_OPENAI_CREDENTIAL_REF ?? "env:OPENAI_API_KEY",
     anthropicCredentialRef: env.CODING_ANTHROPIC_CREDENTIAL_REF ?? "env:ANTHROPIC_API_KEY",
+    geminiCredentialRef: env.CODING_GEMINI_CREDENTIAL_REF ?? "env:GEMINI_API_KEY",
     cpus: optionalPositiveNumber(env.CODING_CPUS, "CODING_CPUS", 1),
     memoryMb: optionalPositiveInteger(env.CODING_MEMORY_MB, "CODING_MEMORY_MB") ?? 2048,
     pids: optionalPositiveInteger(env.CODING_PIDS, "CODING_PIDS") ?? 128,

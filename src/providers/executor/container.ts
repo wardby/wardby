@@ -16,6 +16,7 @@ import type { PlanFilesPathList, PlanFilesRecorder } from "../../coding/plan-fil
 import { loadPlanFiles, type PlanFile } from "../../coding/plan-files/store.js";
 import { withBaseCommit, withExtraRepositories, type GitHistoryWording } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
+import type { WebTools } from "../../coding/google-web-tools.js";
 import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
 import {
   NATIVE_TOOL_DUPLICATE_NAMES_ERROR,
@@ -1899,6 +1900,8 @@ export interface CodingSessionController {
     workflow?: boolean;
     /** The run's tunnel host patterns, fixed at dispatch (codingProfile.tunnelHosts within the ceiling). */
     tunnelHosts?: string[];
+    /** Gemini's server-side web tools the run may use; gemini-generate-content only (set from phase 4). */
+    webTools?: WebTools;
   }): Promise<{ id: string; capability: string }>;
   cancelSession(sessionId: string): Promise<void>;
   /** Whether the proxy refused a request of this session for budget. */
@@ -2000,6 +2003,7 @@ export interface ContainerExecutorOptions {
    */
   claudeToolRunnerImages?: Record<string, Record<string, string>>;
   anthropicCredentialRef?: string;
+  geminiCredentialRef?: string;
   limits: JobResourceLimits;
   /** Operator ceiling (MiB) on CodingRun.workspaceDiskMb; see coding_workspace_disk_exceeds_limit in jobSpec. */
   maxDiskMb: number;
@@ -2214,6 +2218,12 @@ export class ContainerExecutor implements Executor {
     if (
       options.anthropicCredentialRef !== undefined &&
       !/^[A-Za-z][A-Za-z0-9_.:-]{0,199}$/.test(options.anthropicCredentialRef)
+    ) {
+      throw new Error("coding_credential_ref_invalid");
+    }
+    if (
+      options.geminiCredentialRef !== undefined &&
+      !/^[A-Za-z][A-Za-z0-9_.:-]{0,199}$/.test(options.geminiCredentialRef)
     ) {
       throw new Error("coding_credential_ref_invalid");
     }

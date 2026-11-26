@@ -1,10 +1,10 @@
 import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from "@prometheus-io/client";
 import type { CodingLifecycleEvent, CodingLifecycleStage, CodingRunObserver } from "../coding/observability.js";
 import type { RunFollowUpObserver } from "../core/run-follow-ups.js";
-import type { ProxyAuditEvent } from "../providers/coding-proxy/types.js";
+import type { ProxyAuditEvent, ProxyProtocol } from "../providers/coding-proxy/types.js";
 
 type StatusClass = "1xx" | "2xx" | "3xx" | "4xx" | "5xx" | "other";
-type ProxyProtocolLabel = "openai-responses" | "anthropic-messages" | "tunnel" | "other";
+type ProxyProtocolLabel = ProxyProtocol | "tunnel" | "other";
 
 export interface ProxyHttpMetricEvent {
   protocol: ProxyProtocolLabel;
@@ -52,6 +52,7 @@ const AUDIT_EVENTS: Record<ProxyAuditEvent["type"], true> = {
 const PROTOCOLS: Record<ProxyProtocolLabel, true> = {
   "openai-responses": true,
   "anthropic-messages": true,
+  "gemini-generate-content": true,
   tunnel: true,
   other: true,
 };

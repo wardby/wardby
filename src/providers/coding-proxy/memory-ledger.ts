@@ -82,6 +82,7 @@ export class MemoryProxyLedger implements ProxyLedger {
       runStepsLevel: input.runStepsLevel ?? null,
       workflow: input.workflow === true,
       skills: input.skills === true,
+      webTools: input.webTools ?? "off",
     };
     this.sessions.set(session.id, session);
     this.sessionByCapability.set(session.capabilityHash, session.id);

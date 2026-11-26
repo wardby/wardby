@@ -3,9 +3,11 @@ import type { LeaseRenewal } from "../../core/request-lease.js";
 import { RUN_STEPS_LEVELS, type RunStepsLevel } from "../../core/run-steps/config.js";
 import { logger } from "../../core/logger.js";
 import type { CodingToolPin } from "../../core/coding-native-tools.js";
-import { listedToolPins, normalizeProxyModelTerms } from "./types.js";
+import { listedToolPins, normalizeProxyModelTerms, PROXY_PROTOCOLS } from "./types.js";
+import { isWebTools } from "../../coding/google-web-tools.js";
 import { parseTunnelHostPattern } from "../../coding/tunnel-hosts.js";
 import type {
+  ProxyProtocol,
   CreateProxySessionInput,
   ExpiredRequest,
   PreviousReply,
@@ -69,6 +71,7 @@ interface SessionRow {
   /** Selected by findSessionByCapabilityHash and findSessionByMcpTokenHash only. */
   workflow?: boolean | null;
   skills?: boolean | null;
+  webTools?: string | null;
 }
 
 interface RequestRow {
@@ -121,7 +124,7 @@ function sessionFromRow(row: SessionRow): ProxySession {
   if (!Array.isArray(row.allowedModels) || !row.allowedModels.every((model) => typeof model === "string")) {
     throw new Error("invalid_proxy_session_models");
   }
-  if (row.protocol !== "openai-responses" && row.protocol !== "anthropic-messages") {
+  if (!(PROXY_PROTOCOLS as readonly string[]).includes(row.protocol)) {
     throw new Error("invalid_proxy_session_protocol");
   }
   return {
@@ -129,7 +132,7 @@ function sessionFromRow(row: SessionRow): ProxySession {
     runId: row.runId,
     capabilityHash: row.capabilityHash,
     credentialRef: row.credentialRef,
-    protocol: row.protocol,
+    protocol: row.protocol as ProxyProtocol,
     allowedModels: row.allowedModels,
     deadlineAt: row.deadlineAt,
     budgetUsd: Number(row.budgetUsd),
@@ -147,6 +150,8 @@ function sessionFromRow(row: SessionRow): ProxySession {
     runStepsLevel: isRunStepsLevel(row.runStepsLevel) ? row.runStepsLevel : null,
     workflow: row.workflow === true,
     skills: row.skills === true,
+    // A malformed value gives the run no web tools, never a widened policy.
+    webTools: isWebTools(row.webTools) ? row.webTools : "off",
   };
 }
 
@@ -252,7 +257,7 @@ export class PrismaProxyLedger implements ProxyLedger {
       INSERT INTO "CodingProxySession"
         ("id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt",
          "budgetUsd", "status", "registryTokenHash", "tunnelTokenHash", "tunnelHosts", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "runStepsLevel",
-         "workflow", "skills", "createdAt", "updatedAt")
+         "workflow", "skills", "webTools", "createdAt", "updatedAt")
       VALUES
         (${input.id}, ${input.runId}, ${input.capabilityHash}, ${input.credentialRef}, ${input.protocol}, ${models}::jsonb,
          ${input.deadlineAt}, ${input.budgetUsd}, 'active', ${input.registryTokenHash}, ${input.tunnelTokenHash ?? null},
@@ -260,14 +265,14 @@ export class PrismaProxyLedger implements ProxyLedger {
          ${terms?.version ?? null}, ${terms ? JSON.stringify(terms.entry) : null}::jsonb,
          ${input.mcpTools ? JSON.stringify(input.mcpTools) : null}::jsonb, ${input.mcpTokenHash ?? null},
          ${input.runStepsLevel ?? null}::"RunStepsLevel",
-         ${input.workflow === true}, ${input.skills === true}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ${input.workflow === true}, ${input.skills === true}, ${input.webTools ?? "off"}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `;
   }
 
   async findSessionByCapabilityHash(capabilityHash: string): Promise<ProxySession | null> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
       SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
-             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel", "workflow", "skills", "requestRefusal"
+             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel", "workflow", "skills", "webTools", "requestRefusal"
       FROM "CodingProxySession" WHERE "capabilityHash" = ${capabilityHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : null;
@@ -276,7 +281,7 @@ export class PrismaProxyLedger implements ProxyLedger {
   async findSessionByMcpTokenHash(mcpTokenHash: string): Promise<ProxySession | undefined> {
     const rows = await this.db.$queryRaw<SessionRow[]>`
       SELECT "id", "runId", "capabilityHash", "credentialRef", "protocol", "allowedModels", "deadlineAt", "budgetUsd", "status", "registryTokenHash",
-             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel", "workflow", "skills", "requestRefusal"
+             "budgetExhaustedAt", "upstreamFailure", "pricingVersion", "catalogEntry", "mcpTools", "mcpTokenHash", "mcpCallCount", "runStepsLevel", "workflow", "skills", "webTools", "requestRefusal"
       FROM "CodingProxySession" WHERE "mcpTokenHash" = ${mcpTokenHash}
     `;
     return rows[0] ? sessionFromRow(rows[0]) : undefined;

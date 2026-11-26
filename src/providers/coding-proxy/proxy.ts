@@ -7,6 +7,13 @@ import { deriveRegistryToken } from "../../coding/registry/token.js";
 import { deriveTunnelToken } from "../../coding/tunnel-token.js";
 import { MAX_TUNNEL_HOSTS, parseTunnelHostPattern } from "../../coding/tunnel-hosts.js";
 import { capabilityHash } from "./capability-hash.js";
+import { isWebTools, type WebTools } from "../../coding/google-web-tools.js";
+import {
+  isGeminiProvider,
+  VERTEX_CREDENTIAL_REF,
+  type GeminiProxyOptions,
+  type GeminiRequestTarget,
+} from "./gemini-upstream.js";
 import { CLAUDE_MCP_TOOL_PREFIX } from "../../coding/mcp-token.js";
 import type { CodingToolPin } from "../../core/coding-native-tools.js";
 import {
@@ -33,6 +40,7 @@ import { createPinnedProxyFetch } from "./secure-fetch.js";
 import {
   resultsFromRequest,
   type StepCaptureOptions,
+  type StepWireProtocol,
   stepsFromJson,
   streamStepExtractor,
   type StreamStepExtractor,
@@ -62,7 +70,7 @@ import type {
   ReserveProxyRequestResult,
   ListedToolPin,
 } from "./types.js";
-import { MAX_TOOL_TEXT_BYTES } from "./types.js";
+import { MAX_TOOL_TEXT_BYTES, PROXY_PROTOCOLS } from "./types.js";
 
 export const PROXY_MAX_BODY_BYTES = 8 * 1024 * 1024;
 export const PROXY_MAX_OUTPUT_TOKENS = 1_000_000;
@@ -131,6 +139,13 @@ export interface ExecuteProxyRequest {
   anthropicBeta?: string;
   /** Claude Code's x-claude-code-agent-id: on a workflow session, the sub-agent its steps belong to (#582). */
   agentId?: string;
+  /** The Gemini request line parsed from the path (gemini-generate-content only). */
+  gemini?: GeminiRequestTarget;
+}
+
+/** The protocols whose replies and requests are read for run steps (a Gemini session has none yet). */
+function stepWireProtocol(protocol: ProxyProtocol): StepWireProtocol | undefined {
+  return protocol === "gemini-generate-content" ? undefined : protocol;
 }
 
 /** What this session's replies and requests are read for. */
@@ -159,6 +174,8 @@ export interface CreateCodingProxySession {
   workflow?: boolean;
   /** Native mode with repository skills (#582): its requests may use the Skill tool. Absent = false. */
   skills?: boolean;
+  /** Gemini's server-side web tools the run may use; gemini-generate-content only; absent = off. */
+  webTools?: WebTools;
   /**
    * The run's tunnel host patterns (its agent's codingProfile.tunnelHosts, within the ceiling at dispatch),
    * normalised. Fixed for the session: a later edit to the agent does not change them. Absent = none.
@@ -212,6 +229,8 @@ export interface CodingProxyOptions {
   steps?: RunStepSubmitter;
   /** The proxy's own WARDBY_RUN_STEPS: a session captures detail only when this is detail too. Default summary. */
   runStepsCeiling?: RunStepsLevel;
+  /** Gemini upstream settings (gemini-generate-content sessions). */
+  gemini?: GeminiProxyOptions;
   /** Tests only: replaces the stream step extractor. */
   createStepExtractor?: (protocol: ProxyProtocol, options?: StepCaptureOptions) => StreamStepExtractor;
 }
@@ -1210,7 +1229,7 @@ async function readBoundedBody(body: ReadableStream<Uint8Array> | null, maxBytes
 export class CodingProxy {
   private readonly ledger: ProxyLedger;
   private readonly credentials: CredentialResolver;
-  private readonly upstreamUrls: Record<ProxyProtocol, string>;
+  private readonly upstreamUrls: Record<StepWireProtocol, string>;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly now: () => Date;
   private readonly audit: ProxyAuditSink;
@@ -1260,6 +1279,7 @@ export class CodingProxy {
       options.pricing ??
       ((model, protocol) => {
         const entry = shippedCatalog().require(model);
+        if (protocol === "gemini-generate-content") throw new Error("unknown_model");
         const expected = protocol === "anthropic-messages" ? "anthropic" : "openai";
         if (entry.provider !== expected) throw new Error("unknown_model");
         return entry;
@@ -1268,20 +1288,34 @@ export class CodingProxy {
   }
 
   async createSession(input: CreateCodingProxySession): Promise<CreatedCodingProxySession> {
-    if (input.protocol !== "openai-responses" && input.protocol !== "anthropic-messages") {
-      throw new Error("invalid_proxy_protocol");
-    }
+    if (!(PROXY_PROTOCOLS as readonly string[]).includes(input.protocol)) throw new Error("invalid_proxy_protocol");
     const models = [...new Set(input.allowedModels)];
     if (models.length < 1 || models.length > 8 || models.some((model) => !model || model.length > 100)) {
       throw new Error("invalid_proxy_model_allowlist");
     }
-    if (input.terms) {
+    if (input.protocol === "gemini-generate-content") {
+      // The backend is read from the entry, so a Gemini session always has one (no pre-catalog fallback).
+      const entry = input.terms?.entry;
+      if (!entry || models.length !== 1 || entry.modelId !== models[0] || !isGeminiProvider(entry.provider)) {
+        throw new Error("invalid_proxy_model_terms");
+      }
+      // Vertex authenticates as the proxy itself; AI Studio with an env key. Never the other way round.
+      if ((entry.provider === "vertex-gemini") !== (input.credentialRef === VERTEX_CREDENTIAL_REF)) {
+        throw new Error("invalid_proxy_credential_reference");
+      }
+    } else if (input.terms) {
       const expected = input.protocol === "anthropic-messages" ? "anthropic" : "openai";
       if (models.length !== 1 || input.terms.entry.modelId !== models[0] || input.terms.entry.provider !== expected) {
         throw new Error("invalid_proxy_model_terms");
       }
     } else {
       for (const model of models) this.getPricing(model, input.protocol);
+    }
+    if (
+      input.webTools !== undefined &&
+      (!isWebTools(input.webTools) || (input.protocol !== "gemini-generate-content" && input.webTools !== "off"))
+    ) {
+      throw new Error("invalid_proxy_web_tools");
     }
     if (!Number.isFinite(input.budgetUsd) || input.budgetUsd <= 0) throw new Error("invalid_proxy_budget");
     if (input.deadlineAt.getTime() <= this.now().getTime()) throw new Error("invalid_proxy_deadline");
@@ -1326,6 +1360,7 @@ export class CodingProxy {
       ...(input.runStepsLevel ? { runStepsLevel: input.runStepsLevel } : {}),
       ...(input.workflow === true ? { workflow: true } : {}),
       ...(input.skills === true ? { skills: true } : {}),
+      ...(input.webTools && input.webTools !== "off" ? { webTools: input.webTools } : {}),
     });
     this.audit({ type: "session.created", runId: input.runId });
     return {
@@ -1373,6 +1408,8 @@ export class CodingProxy {
       this.audit({ type: "request.rejected", runId: session.runId, reason: "protocol_mismatch" });
       throw new CodingProxyError(403, "protocol_mismatch");
     }
+    // The Gemini forwarding path is not built yet: a session can exist, but nothing is relayed.
+    if (session.protocol === "gemini-generate-content") throw new CodingProxyError(404, "gemini_not_supported");
     // A session from before the model catalog has no stored entry: take the shape from the shipped one.
     const entry = session.terms?.entry ?? shippedCatalog().get(session.allowedModels[0]);
     const shape: AnthropicModelShape = {
@@ -1526,12 +1563,13 @@ export class CodingProxy {
     if (this.leaseMs !== undefined) this.openRequests.add(request.id);
     // Run steps: the results this (validated) request carries for the previous turn, once per call id.
     const capture = stepCapture(session, this.runStepsCeiling);
-    if (capture !== "none") {
+    const wire = stepWireProtocol(session.protocol);
+    if (capture !== "none" && wire) {
       this.submitSteps(input.bearer, session.runId, () => ({
         steps: [],
         results: this.seenResults.fresh(
           session.id,
-          resultsFromRequest(session.protocol, parsed.body, { detail: capture === "detail" }),
+          resultsFromRequest(wire, parsed.body, { detail: capture === "detail" }),
         ),
       }));
     }
@@ -1865,9 +1903,10 @@ export class CodingProxy {
     await safeWrite(sink, bytes, { value: true });
     sink.end();
     const capture = stepCapture(session, this.runStepsCeiling);
-    if (capture !== "none") {
+    const wire = stepWireProtocol(session.protocol);
+    if (capture !== "none" && wire) {
       this.submitSteps(capability, session.runId, () => ({
-        steps: tagged(stepsFromJson(session.protocol, value, { detail: capture === "detail" }), agent),
+        steps: tagged(stepsFromJson(wire, value, { detail: capture === "detail" }), agent),
         results: [],
       }));
     }
@@ -1994,9 +2033,10 @@ export class CodingProxy {
   private newStepExtractor(session: ProxySession): StreamStepExtractor | undefined {
     if (!this.steps) return undefined;
     const capture = stepCapture(session, this.runStepsCeiling);
-    if (capture === "none") return undefined;
+    const wire = stepWireProtocol(session.protocol);
+    if (capture === "none" || !wire) return undefined;
     try {
-      return (this.createStepExtractor ?? streamStepExtractor)(session.protocol, { detail: capture === "detail" });
+      return (this.createStepExtractor ?? streamStepExtractor)(wire, { detail: capture === "detail" });
     } catch {
       return undefined;
     }

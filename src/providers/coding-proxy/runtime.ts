@@ -50,7 +50,7 @@ import { startCodingProxyServer, type CodingProxyServerHandle } from "./server.j
 import { startTunnelListener, type TunnelAuditSink, type TunnelListenerHandle } from "./tunnel.js";
 import { loadInterceptor } from "./tunnel-intercept.js";
 import { LedgerTunnelAuthenticator, type TunnelAuthenticator } from "./tunnel-auth.js";
-import type { ProxyAuditSink } from "./types.js";
+import type { ProxyAuditSink, ProxyProtocol } from "./types.js";
 import { createActorIdentityVerifier } from "./substrate/actor-identity.js";
 import { PrismaRelayStore } from "./substrate/prisma-relay-store.js";
 import { createSubstrateRoutes, SUBSTRATE_UPLOAD_MS } from "./substrate/routes.js";
@@ -305,11 +305,7 @@ export interface CodingProxyRuntimeOptions {
   audit?: ProxyAuditSink;
   /** Overridable for tests: builds the dependency cache's blob store. */
   createBlobStore?: (config: BlobStoreConfig) => BlobStore;
-  onRequest?: (event: {
-    protocol: "openai-responses" | "anthropic-messages" | "tunnel" | "other";
-    status: number;
-    durationMs: number;
-  }) => void;
+  onRequest?: (event: { protocol: ProxyProtocol | "tunnel" | "other"; status: number; durationMs: number }) => void;
   /** Who a CONNECT tunnel token belongs to; defaults to the session ledger (tunnelTokenHash). Overridable for tests. */
   tunnelAuthenticator?: TunnelAuthenticator;
   /** One record per tunnel; defaults to the proxy's own log. */

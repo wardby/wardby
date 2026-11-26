@@ -103,6 +103,13 @@ describe("loadGitHubVcsConfig", () => {
 });
 
 describe("loadContainerExecutorConfig", () => {
+  it("defaults the Gemini coding credential reference to env:GEMINI_API_KEY and accepts an override", () => {
+    expect(loadContainerExecutorConfig({}).geminiCredentialRef).toBe("env:GEMINI_API_KEY");
+    expect(
+      loadContainerExecutorConfig({ CODING_GEMINI_CREDENTIAL_REF: "env:CODING_GEMINI_KEY" }).geminiCredentialRef,
+    ).toBe("env:CODING_GEMINI_KEY");
+  });
+
   it("treats empty or blank image variables as unset and trims the rest", () => {
     const image = `worker@sha256:${"a".repeat(64)}`;
     const config = loadContainerExecutorConfig({

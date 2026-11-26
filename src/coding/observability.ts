@@ -33,7 +33,7 @@ export interface CodingLifecycleEvent {
   cleanupSucceeded?: boolean;
   /** Enumerated execution metadata only; never a model request or source field. */
   workerProvider?: "codex" | "claude-code";
-  proxyProtocol?: "openai-responses" | "anthropic-messages";
+  proxyProtocol?: "openai-responses" | "anthropic-messages" | "gemini-generate-content";
 }
 
 export interface CodingRunObserver {

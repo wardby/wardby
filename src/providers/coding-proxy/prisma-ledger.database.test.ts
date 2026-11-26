@@ -55,6 +55,8 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       budgetUsd: 0.0002,
       registryTokenHash: `registry-hash-${suffix}`,
     });
+    // A session created without the field reads back as "off".
+    expect((await ledger.findSessionByCapabilityHash(`hash-${suffix}`))?.webTools).toBe("off");
     expect(await ledger.findSessionByCapabilityHash(`hash-${suffix}`)).toMatchObject({
       protocol: "openai-responses",
       // Created without a level, as a session from before run steps detail.
@@ -180,7 +182,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         runId: dRun,
         capabilityHash: `level-hash-${suffix}`,
         credentialRef: "openai/test",
-        protocol: "openai-responses",
+        protocol: "gemini-generate-content",
         allowedModels: ["gpt-5.6-luna"],
         deadlineAt: new Date(Date.now() + 60_000),
         budgetUsd: 1,
@@ -188,11 +190,14 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         runStepsLevel: "detail",
         workflow: true,
         skills: true,
+        webTools: "search-and-fetch",
       });
       expect(await ledger.findSessionByCapabilityHash(`level-hash-${suffix}`)).toMatchObject({
+        protocol: "gemini-generate-content",
         runStepsLevel: "detail",
         workflow: true,
         skills: true,
+        webTools: "search-and-fetch",
       });
       // The first refusal is kept; a later one does not replace it.
       await ledger.recordRequestRefusal(dSession, "tools_not_allowed");

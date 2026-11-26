@@ -1139,6 +1139,9 @@ model CodingProxySession {
   workflow                  Boolean                  @default(false)
   /// A Claude Code run in native mode with repository skills on (#582): its requests may use the Skill tool.
   skills                    Boolean                  @default(false)
+  /// Gemini's server-side web tools the run may use ("off" | "search" | "search-and-fetch"), copied at session
+  /// creation from the agent's codingProfile.webTools. Only gemini-generate-content sessions use it.
+  webTools                  String                   @default("off")
   /// MCP tools/call count for this run (capped by WARDBY_MCP_MAX_CALLS_PER_RUN).
   mcpCallCount              Int                      @default(0)
   /// Package registry: ecosystems where a lockfile plan of this run failed or refused an entry, so a

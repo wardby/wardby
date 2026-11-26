@@ -593,6 +593,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     additionalWorkerImages: config.additionalWorkerImages,
     credentialRef: config.credentialRef,
     anthropicCredentialRef: config.anthropicCredentialRef,
+    geminiCredentialRef: config.geminiCredentialRef,
     limits: { cpus: config.cpus, memoryMb: config.memoryMb, pids: config.pids, diskMb: config.diskMb },
     maxDiskMb: config.maxDiskMb,
     resultBundleMaxBytes: loadCodingResultBundleMaxBytes(env),
