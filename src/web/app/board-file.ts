@@ -7,22 +7,11 @@
  * Parsing uses DOMParser on a "text/html" string: the result is an inert document (no script runs,
  * nothing loads), and only text and attribute values are read from it.
  */
+import { BODY_ATTRS, LANG, serializeBoardFile, type BoardParts } from "../../core/documents/boards/board-file-text.js";
 import { escapeHtml } from "../../core/html-escape.js";
 
-export interface BoardParts {
-  lang: string;
-  title: string;
-  /** The board's CSS as written: what the canvas injects first, under the editable rules. */
-  baseCss: string;
-  /** CSS the editor wrote on an earlier save, or null when the board has none yet. */
-  editsCss: string | null;
-  bodyHtml: string;
-  /** The body's class, id and style (the only body attributes the format keeps). */
-  bodyAttrs: Record<string, string>;
-}
-
-const BODY_ATTRS = ["class", "id", "style"] as const;
-const LANG = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/;
+// Writing a file from its parts is shared with the server's live writer.
+export { serializeBoardFile, type BoardParts } from "../../core/documents/boards/board-file-text.js";
 
 export function parseBoardFile(html: string): BoardParts {
   const doc = new DOMParser().parseFromString(html, "text/html");
@@ -54,19 +43,6 @@ export function parseBoardFile(html: string): BoardParts {
     bodyHtml: doc.body.innerHTML.replace(/\s+$/, ""),
     bodyAttrs,
   };
-}
-
-export function serializeBoardFile(parts: BoardParts, editsCss: string, bodyHtml: string): string {
-  const attrs = BODY_ATTRS.filter((a) => Object.hasOwn(parts.bodyAttrs, a))
-    .map((a) => ` ${a}="${escapeHtml(parts.bodyAttrs[a])}"`)
-    .join("");
-  return (
-    `<!doctype html>\n<html lang="${LANG.test(parts.lang) ? parts.lang : "en"}">\n<head>\n<meta charset="utf-8">\n` +
-    `<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${escapeHtml(parts.title)}</title>\n` +
-    `<style data-wardby-base>${parts.baseCss}</style>\n` +
-    `<style data-wardby-edits>${editsCss}</style>\n` +
-    `</head>\n<body${attrs}>${bodyHtml}</body>\n</html>\n`
-  );
 }
 
 /** A design's manifest.json (board format v1; the server's format.ts is the authority). */
