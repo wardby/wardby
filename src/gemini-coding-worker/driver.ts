@@ -22,6 +22,7 @@ import { GEMINI_CONTEXT_FILE_NAMES, geminiCliModel, type GeminiBackend } from ".
 import { geminiCliEnvironment } from "./environment.js";
 import { geminiRunEnd, jsonOutputResult, type GeminiRunEnd } from "./failure.js";
 import { killLeftoverProcesses, type SweepResult } from "./leftovers.js";
+import { assertGeminiContextFilesRegular } from "./context-files.js";
 import { geminiOutputJsonSchema, geminiRepairPrompt, geminiTaskPrompt } from "./output.js";
 import { spawnGeminiCli, type GeminiCliDone, type GeminiCliSpawner } from "./process.js";
 import {
@@ -173,6 +174,8 @@ export async function runGeminiCodingWorker(options: GeminiRunOptions): Promise<
   const prepareTurn = async (): Promise<void> => {
     await sweep();
     await resetGeminiAgentState(home);
+    // The CLI follows a symlinked GEMINI.md/AGENTS.md/CLAUDE.md (context-files.ts): refuse the run first.
+    await assertGeminiContextFilesRegular(options.workspace);
     const agents = options.runSettings.subAgents
       ? await readRepoAgents(options.workspace)
       : { names: [], unpinnable: false };

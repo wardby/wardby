@@ -32,12 +32,12 @@ export const call = (name: string, args: Record<string, unknown>) => ({
   thoughtSignature: SKIP_SIGNATURE,
 });
 export const text = (value: string) => ({ text: value });
-export function sseReply(parts: unknown[], prompt = 1200): Response {
+export function sseReply(parts: unknown[], prompt = 1200, candidates = 20): Response {
   const body = {
     candidates: [{ content: { role: "model", parts }, finishReason: "STOP", index: 0 }],
     usageMetadata: {
       promptTokenCount: prompt,
-      candidatesTokenCount: 20,
+      candidatesTokenCount: candidates,
       thoughtsTokenCount: 0,
       cachedContentTokenCount: 0,
     },

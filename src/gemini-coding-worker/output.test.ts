@@ -3,6 +3,7 @@ import { MAX_CODING_TESTS, parseCodingAgentOutputJson } from "../coding/protocol
 import { codingOutputJsonSchema } from "../coding-worker/output-schema.js";
 import {
   escapeGeminiAtReferences,
+  GEMINI_AT_ESCAPE_NOTE,
   GEMINI_DROPPED_SCHEMA_KEYWORDS,
   geminiOutputJsonSchema,
   geminiRepairPrompt,
@@ -113,5 +114,15 @@ describe("@ references", () => {
     expect(prompt).toContain("See \\@README.md");
     expect(prompt).toContain("x\\@y");
     expect(geminiRepairPrompt("run_@x").match(UNESCAPED_AT)).toBeNull();
+  });
+
+  it("both prompts end with the note on what \\@ means, which itself has no unescaped at sign", () => {
+    expect(GEMINI_AT_ESCAPE_NOTE.match(UNESCAPED_AT)).toBeNull();
+    expect(GEMINI_AT_ESCAPE_NOTE).toContain("\\@");
+    expect(GEMINI_AT_ESCAPE_NOTE).toContain("never type that backslash");
+    const prompt = geminiTaskPrompt({ instructions: "R", task: "T", schema: {} });
+    expect(prompt.endsWith(`\n\n${GEMINI_AT_ESCAPE_NOTE}`)).toBe(true);
+    expect(geminiRepairPrompt("run_g").endsWith(`\n\n${GEMINI_AT_ESCAPE_NOTE}`)).toBe(true);
+    expect(geminiRepairPrompt("run_g").match(UNESCAPED_AT)).toBeNull();
   });
 });

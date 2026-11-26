@@ -1,4 +1,4 @@
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
@@ -202,6 +202,31 @@ describe("runGeminiCodingWorker", () => {
     };
     expect(safeWorkerErrorCode(await runGeminiCodingWorker(o).catch((e: unknown) => e))).toBe(
       "worker_agent_cli_incompatible",
+    );
+    expect(cli.calls).toHaveLength(2);
+  });
+
+  it("refuses a symlinked repository context file before the CLI starts, and again before the repair turn", async () => {
+    const first = fakeCli("success-tools");
+    const o = await options({ spawnCli: first.spawnCli });
+    await symlink("/proc/self/environ", join(o.workspace, "GEMINI.md"));
+    expect(safeWorkerErrorCode(await runGeminiCodingWorker(o).catch((e: unknown) => e))).toBe(
+      "coding_context_file_refused",
+    );
+    // Only the version check ran: no agent turn.
+    expect(first.calls.map((c) => c.args[0])).toEqual(["--version"]);
+    await rm(root!, { recursive: true, force: true });
+
+    const cli = fakeCli("prose-final", "repair-json");
+    const again = await options({ spawnCli: cli.spawnCli });
+    cli.hooks.before = async (run) => {
+      if (run === 1) {
+        await mkdir(join(again.workspace, "sub"), { recursive: true });
+        await symlink("/proc/self/environ", join(again.workspace, "sub", "CLAUDE.md"));
+      }
+    };
+    expect(safeWorkerErrorCode(await runGeminiCodingWorker(again).catch((e: unknown) => e))).toBe(
+      "coding_context_file_refused",
     );
     expect(cli.calls).toHaveLength(2);
   });

@@ -36,6 +36,9 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   // A coding agent CLI that is not the one this worker was built and tested with, or whose baked
   // configuration was changed or refused (Gemini CLI: system settings, version, fatal config exits).
   "worker_agent_cli_incompatible",
+  // Gemini CLI: a repository context file (GEMINI.md, AGENTS.md, CLAUDE.md) is a symlink or not a
+  // regular file; the CLI would follow it (gemini-coding-worker/context-files.ts).
+  "coding_context_file_refused",
 ]);
 
 export const WORKER_AGENT_CLI_INCOMPATIBLE = "worker_agent_cli_incompatible";

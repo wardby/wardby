@@ -47,6 +47,13 @@ export function escapeGeminiAtReferences(text: string): string {
 }
 
 /**
+ * Appended after escaping, to both prompts: tells the model what the escape means. Its only at sign
+ * is the escaped one (an unescaped "@" followed by a path or a quote would be read as a reference).
+ */
+export const GEMINI_AT_ESCAPE_NOTE =
+  "Note: every at sign in this prompt is written as \\@ (with a backslash before it) only so the CLI does not read it as a file reference. Read each one as a plain at sign, and never type that backslash in your own replies, files, commits or commands.";
+
+/**
  * The prompt the CLI gets: the security instructions, the task (boundedTaskPrompt, with its runId
  * line), and the answer's shape. The schema is also set on the run model's replies
  * (settings.ts customOverrides); the prompt says it too (prompt-only was 3/3 in the spike).
@@ -54,12 +61,13 @@ export function escapeGeminiAtReferences(text: string): string {
 export function geminiTaskPrompt(input: { instructions: string; task: string; schema: Schema }): string {
   const prompt = `${input.instructions}\n\n${input.task}\n\nWhen you have finished, your final reply must be only one JSON object (no prose, no code fences) that follows this JSON Schema:\n${JSON.stringify(input.schema)}`;
   // A prompt starting with "/" would run a repository's custom command (.gemini/commands).
-  return escapeGeminiAtReferences(prompt.startsWith("/") ? ` ${prompt}` : prompt);
+  return `${escapeGeminiAtReferences(prompt.startsWith("/") ? ` ${prompt}` : prompt)}\n\n${GEMINI_AT_ESCAPE_NOTE}`;
 }
 
 /** The one repair turn after a missing or invalid final answer (run with --resume latest). */
 export function geminiRepairPrompt(runId: string): string {
-  return escapeGeminiAtReferences(
+  const repair = escapeGeminiAtReferences(
     `Your last reply was not the JSON object this task requires. Do not call any tools and do not change any files. Reply with only one JSON object that follows the JSON Schema given earlier, with runId ${runId}.`,
   );
+  return `${repair}\n\n${GEMINI_AT_ESCAPE_NOTE}`;
 }

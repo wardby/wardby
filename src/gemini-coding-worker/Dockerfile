@@ -37,7 +37,10 @@ RUN apt-get update \
     && npm install --global --omit=dev npm@12.0.2 \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin wardby \
+    && chmod 0755 /var/tmp /run/lock
+# Debian's world-writable /var/tmp and /run/lock (/var/lock) closed: uid 10001 writes only HOME,
+# /workspace and /tmp, also on a launcher without a read-only root (compatibility.docker.test.ts).
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 RUN docker --version && docker compose version
@@ -89,7 +92,7 @@ RUN chown -R root:root /etc/gemini-cli \
 # Fail the build, not every run: every module the entry point imports loads, the baked settings pass
 # the driver's own check, and the installed CLI is the pinned one.
 # The two lists cover every module main.js reaches (image-policy.test.ts).
-RUN node --input-type=module -e 'await Promise.all(["agent-state", "cli", "driver", "environment", "failure", "leftovers", "output", "process", "settings", "stream", "system-check"].map((name) => import(`/opt/wardby/gemini-coding-worker/${name}.js`))); const m = await import("/opt/wardby/gemini-coding-worker/system-check.js"); await m.verifyGeminiSystemSettings();' \
+RUN node --input-type=module -e 'await Promise.all(["agent-state", "cli", "context-files", "driver", "environment", "failure", "leftovers", "output", "process", "settings", "stream", "system-check"].map((name) => import(`/opt/wardby/gemini-coding-worker/${name}.js`))); const m = await import("/opt/wardby/gemini-coding-worker/system-check.js"); await m.verifyGeminiSystemSettings();' \
     && node --input-type=module -e 'await Promise.all(["artifact", "credentials", "debug-trace", "errors", "mcp-config", "output-schema", "plan-output", "run-frame", "security-instructions", "task-note"].map((name) => import(`/opt/wardby/coding-worker/${name}.js`))); const m = await import("/opt/wardby/coding-worker/run-frame.js"); if (typeof m.prepareWorkerRun !== "function") process.exit(1)' \
     && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/dependency-cache.mjs"); if (typeof m.prepareDependencies !== "function") process.exit(1)' \
     && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/result-bundle.mjs"); if (typeof m.createResultBundle !== "function" || !(await m.gitAvailable())) process.exit(1)' \
