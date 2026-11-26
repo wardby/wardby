@@ -173,11 +173,6 @@ spec:
             - secretRef:
                 name: wardby-slack-env
                 optional: true
-            # Redis for live editing across copies, present only when the operator sets one
-            # (secrets/external-secrets-live-redis.yaml); without it documents are pinned to one copy.
-            - secretRef:
-                name: wardby-live-redis-env
-                optional: true
             # The Google AI Studio (Gemini) key, present only when the operator
             # uses Gemini models (secrets/external-secrets-gemini.yaml).
             - secretRef:
@@ -214,14 +209,6 @@ spec:
               value: http
             - name: MCP_HTTP_BIND
               value: 0.0.0.0:8080
-            # Live co-editing: the address other replicas forward a document's connections to (this pod's
-            # IP and the port above). Every replica writes it into the leases it holds.
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-            - name: WARDBY_LIVE_ADVERTISE_ADDRESS
-              value: $(POD_IP):8080
             # Run steps from the coding proxy (run-steps.yaml): POST /internal/run-steps only.
             - name: WARDBY_RUN_STEPS_LISTEN
               value: 0.0.0.0:8792

@@ -10,7 +10,6 @@ import { DOCUMENT_WRITE_ATTEMPTS } from "./limits.js";
 import { loadContent, storeVersionFiles } from "./files.js";
 import { formatFor, type DocumentKind } from "./formats/index.js";
 import { documentSecretValues } from "./redact.js";
-import { mergeIntoLatest } from "./live/merge-latest.js";
 import { isLocked } from "./review-state.js";
 import { assertNotLocked, recomputeAfterPublish } from "./review.js";
 import { stageVersion, versionColumns, writeVersion, type PublishVia } from "./version-write.js";
@@ -107,12 +106,6 @@ export async function publishVersion(
     expectedNumber?: number;
     /** Only restoreVersion sets this: a summary reading "Restored v<N>" marks a restore, so no one else may write it. */
     allowRestoredSummary?: boolean;
-    /**
-     * Only the live server's checkpoints set this: expectedNumber must be the latest version, as without live
-     * editing (the live server merges every newer version in first). Otherwise a live document merges a publish
-     * based on an older version with everything published since (mergeIntoLatest).
-     */
-    strictBase?: boolean;
   },
 ): Promise<{
   versionId: string;
@@ -133,18 +126,9 @@ export async function publishVersion(
   const fmt = formatFor(doc.kind);
   const content = contentInput(fmt.kind, input);
   const secrets = await documentSecretValues(db, cipher, doc.agentId);
-  let prepared = fmt.prepare(content, secrets);
-  let expectedNumber = input.expectedNumber;
-  if (!input.strictBase && expectedNumber !== undefined && prepared.content.format === "markdown") {
-    const merged = await mergeIntoLatest(db, input.documentId, expectedNumber, prepared.content.markdown);
-    if (merged) {
-      // The merged text is new text: it passes the same checks (and redaction) as any publish.
-      prepared = fmt.prepare({ format: "markdown", markdown: merged.markdown }, secrets);
-      expectedNumber = merged.latest;
-    }
-  }
+  const prepared = fmt.prepare(content, secrets);
   const summary = input.summary === undefined ? null : redactExactSecretValues(input.summary, secrets);
-  const staged = await stageVersion(db, input.documentId, fmt, prepared, expectedNumber);
+  const staged = await stageVersion(db, input.documentId, fmt, prepared, input.expectedNumber);
   const published = await withSerializableRetry(
     () =>
       db.$transaction(
@@ -156,7 +140,7 @@ export async function publishVersion(
             createdById: input.createdById,
             runId: input.runId,
             summary,
-            expectedNumber,
+            expectedNumber: input.expectedNumber,
           });
           await recomputeAfterPublish(tx, input.documentId);
           return { ...written, warnings: prepared.warnings };

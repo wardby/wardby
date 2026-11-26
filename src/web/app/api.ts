@@ -254,11 +254,6 @@ export class Api {
     return this.request("GET", this.doc("/mentions"));
   }
 
-  /** A single-use ticket carrying this request's access (a share link included) for joining live editing. */
-  liveTicket(): Promise<{ ticket: string; readOnly: boolean }> {
-    return this.request("POST", this.doc("/live-ticket"), {});
-  }
-
   saveContent(markdown: string, baseNumber: number): Promise<{ version: { number: number } }> {
     return this.request("PUT", this.doc("/content"), { markdown, baseNumber });
   }
@@ -388,7 +383,6 @@ export class Api {
 /** Fixed, user-facing text for each error code (never server text). */
 const MESSAGES: Record<string, string> = {
   document_version_conflict: "Someone else saved a newer version — reload",
-  document_base_unavailable: "This page is too far behind the document — reload",
   comment_thread_already_sent: "This thread is already with the agent.",
   document_too_large_for_agent: "This document is too large to send to the agent.",
   document_agent_unavailable: "The document's agent can't take work right now.",

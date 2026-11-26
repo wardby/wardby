@@ -426,12 +426,6 @@ spec:
           value: http
         - name: MCP_HTTP_BIND
           value: 0.0.0.0:8080
-        - name: POD_IP
-          valueFrom:
-            fieldRef:
-              fieldPath: status.podIP
-        - name: WARDBY_LIVE_ADVERTISE_ADDRESS
-          value: $(POD_IP):8080
         - name: WARDBY_RUN_STEPS_LISTEN
           value: 0.0.0.0:8792
         - name: MCP_CANONICAL_URI
@@ -512,9 +506,6 @@ spec:
             optional: true
         - secretRef:
             name: wardby-slack-env
-            optional: true
-        - secretRef:
-            name: wardby-live-redis-env
             optional: true
         - secretRef:
             name: wardby-gemini-env

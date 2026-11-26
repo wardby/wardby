@@ -1,7 +1,6 @@
 /**
- * The document schema the page edits in: the shared base list
- * (core/documents/editor-schema.ts: StarterKit without Underline, and GFM
- * tables), which the live-editing server uses too. The editor, the
+ * The document schema the page edits in: StarterKit (without Underline, which
+ * Markdown cannot hold, ruling R16) and GFM tables. The editor, the
  * round-trip check and the anchoring tests all use this one list.
  *
  * On a plan document the page passes its plan links: a relative link to
@@ -11,9 +10,10 @@
  * written, so the saved Markdown is unchanged.
  */
 import { Extension } from "@tiptap/core";
+import { TableKit } from "@tiptap/extension-table";
 import { DOMSerializer, type Mark } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
-import { editorBaseExtensions } from "../../core/documents/editor-schema.js";
+import StarterKit from "@tiptap/starter-kit";
 import type { PlanLinksPayload } from "../../core/plans/page-payload.js";
 
 /** Href as written → the page it opens ("/d/<id>", plus "#board-<id>" for a board). */
@@ -67,6 +67,13 @@ function planLinks(targets: () => PlanLinkTargets | null) {
   });
 }
 
-export function documentExtensions(targets?: () => PlanLinkTargets | null, opts: { collab?: boolean } = {}) {
-  return [...editorBaseExtensions(opts), ...(targets ? [planLinks(targets)] : [])];
+export function documentExtensions(targets?: () => PlanLinkTargets | null) {
+  return [
+    StarterKit.configure({
+      underline: false,
+      link: { openOnClick: false, autolink: true, protocols: ["https", "http", "mailto"] },
+    }),
+    TableKit.configure({ table: { resizable: false } }),
+    ...(targets ? [planLinks(targets)] : []),
+  ];
 }

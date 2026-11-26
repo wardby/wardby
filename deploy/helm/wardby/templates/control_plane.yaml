@@ -75,14 +75,7 @@ spec:
           {{- . | nindent 10 }}
           {{- end }}
           env:
-            {{- /* Live co-editing: other replicas forward a document's connections to this pod's IP (unless
-                 controlPlane.env sets WARDBY_LIVE_ADVERTISE_ADDRESS). POD_IP comes first: the address refers to it. */}}
-            {{- $live := list }}
-            {{- if not (hasKey (default dict $cp.env) "WARDBY_LIVE_ADVERTISE_ADDRESS") }}
-            {{- $live = list (dict "name" "POD_IP" "valueFrom" (dict "fieldRef" (dict "fieldPath" "status.podIP"))) (dict "name" "WARDBY_LIVE_ADVERTISE_ADDRESS" "value" (printf "$(POD_IP):%d" (int $cp.port))) }}
-            {{- end }}
-            {{- $cpEnv := merge (dict "extraEnv" (concat $live (default list $cp.extraEnv))) $cp }}
-            {{- include "wardby.env" (list $ $cpEnv "controlPlane" (include "wardby.controlPlane.env" . | fromYaml)) | nindent 12 }}
+            {{- include "wardby.env" (list $ $cp "controlPlane" (include "wardby.controlPlane.env" . | fromYaml)) | nindent 12 }}
           ports:
             - name: mcp
               containerPort: {{ $cp.port }}
