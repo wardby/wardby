@@ -22,7 +22,7 @@ import { WebSocketServer } from "ws";
 import * as Y from "yjs";
 import { requireDocumentAccess } from "../../core/documents/access.js";
 import type { DocumentEventBus } from "../../core/documents/events.js";
-import { seedLiveDoc } from "../../core/documents/live/markdown.js";
+import { liveDocToMarkdown, seedLiveDoc } from "../../core/documents/live/markdown.js";
 import {
   acquireLease,
   createLiveState,
@@ -35,6 +35,7 @@ import { showsSecret } from "../../core/documents/live/text.js";
 import { documentSecretValues } from "../../core/documents/redact.js";
 import { isLocked } from "../../core/documents/review-state.js";
 import { logger } from "../../core/logger.js";
+import { isLosslessRoundTrip } from "../app/roundtrip.js";
 import { resolveContext, type WebDeps } from "../context.js";
 
 const log = logger.child({ module: "live" });
@@ -174,6 +175,9 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
         const v = current?.currentVersion;
         if (!v || v.format !== "markdown" || v.markdown === null) throw refusal("live_unavailable");
         const seed = seedLiveDoc(v.markdown);
+        // Formatting the editor cannot keep (images, checklists, HTML) would be dropped from the live document and
+        // then saved: such documents stay out of live editing (the page opens them comment-only, as before).
+        if (!isLosslessRoundTrip(v.markdown, liveDocToMarkdown(seed))) throw refusal("live_unavailable");
         seed.getMap(LIVE_META).set("epoch", randomUUID());
         stored = await createLiveState(db, {
           documentId: documentName,

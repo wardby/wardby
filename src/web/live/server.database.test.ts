@@ -288,6 +288,19 @@ describe.skipIf(!process.env.DATABASE_URL)("live co-editing server (database)", 
     await db.agent.delete({ where: { id: agent.id } });
   });
 
+  it("a document with formatting the editor cannot keep never goes live (nothing would be dropped)", async () => {
+    const doc = await createDocument(db, cipher, {
+      ownerId: ann.id,
+      title: "Lossy",
+      markdown: "# Plan\n\n![diagram](https://example.com/d.png)\n\n- [ ] a checklist item\n",
+    });
+    docs.push(doc.id);
+    const a = await client(ann, doc.id);
+    expect(a.synced()).toBe(false);
+    expect(await loadLiveState(db, doc.id)).toBeNull();
+    a.close();
+  });
+
   it("after a restart the saved history resumes; a browser holding a reset history is refused", async () => {
     const id = await newDoc();
     const a = await client(ann, id);
