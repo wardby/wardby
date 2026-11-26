@@ -11,7 +11,14 @@ import { MemoryProxyLedger } from "../../../../src/providers/coding-proxy/memory
 import { CLAUDE_CODE_ANTHROPIC_BETAS, CodingProxy } from "../../../../src/providers/coding-proxy/proxy.js";
 import { startCodingProxyServer, type CodingProxyServerHandle } from "../../../../src/providers/coding-proxy/server.js";
 import type { ProxyAuditEvent } from "../../../../src/providers/coding-proxy/types.js";
-import { fillTemplates, renderMessages, renderResponses, ScriptedModel, type TurnScript } from "./script.js";
+import {
+  fillTemplates,
+  renderGemini,
+  renderMessages,
+  renderResponses,
+  ScriptedModel,
+  type TurnScript,
+} from "./script.js";
 
 const require = createRequire(import.meta.url);
 const SCRIPTS = resolve(import.meta.dirname, "../../scripts/flow-g");
@@ -283,5 +290,57 @@ describe("Flow G builder scripts through the real coding proxy", () => {
     expect(turns[1]).toContain('\\"runId\\":\\"run-flowg\\"');
     const completed = h.audit.filter((e) => e.type === "response.completed");
     expect(completed).toHaveLength(3);
+  });
+});
+
+describe("scripted Gemini model", () => {
+  it("renders a Gemini turn: a signature on the first function call, usage on the last chunk", () => {
+    const out = renderGemini(
+      {
+        parts: [
+          { functionCall: { id: "call_1", name: "t", args: {} } },
+          { functionCall: { id: "call_2", name: "t", args: {} } },
+        ],
+      },
+      1,
+    );
+    const chunks = out
+      .trim()
+      .split("\n\n")
+      .map((b) => JSON.parse(b.replace(/^data: /, "")));
+    expect(chunks[0].candidates[0].content.parts[0].thoughtSignature).toBe("sim-sig-1-0");
+    expect(chunks[1].candidates[0].content.parts[0].thoughtSignature).toBeUndefined();
+    expect(chunks.at(-1).usageMetadata.promptTokenCount).toBe(1200);
+  });
+
+  it("answers 400 when a model functionCall part comes back without its signature", () => {
+    const model = new ScriptedModel();
+    model.load([{ agent: "a", protocol: "gemini-generate-content", match: "M", turns: [{ parts: [{ text: "ok" }] }] }]);
+    const call = { functionCall: { id: "call_1", name: "t", args: {} } };
+    const body = (part: object) =>
+      JSON.stringify({
+        contents: [
+          { role: "user", parts: [{ text: "M" }] },
+          { role: "model", parts: [part] },
+          { role: "user", parts: [{ functionResponse: { id: "call_1", name: "t", response: {} } }] },
+        ],
+      });
+    expect(model.answerGemini(body(call))).toEqual({ error: "missing_thought_signature" });
+    const signed = model.answerGemini(body({ ...call, thoughtSignature: "s" }));
+    expect(typeof signed).toBe("string");
+  });
+
+  it("matches on systemInstruction first, like system and instructions", () => {
+    const model = new ScriptedModel();
+    model.load([
+      { agent: "lead", protocol: "gemini-generate-content", match: "LEAD", turns: [{ parts: [{ text: "lead" }] }] },
+      { agent: "sub", protocol: "gemini-generate-content", match: "SUB", turns: [{ parts: [{ text: "sub" }] }] },
+    ]);
+    const body = JSON.stringify({
+      systemInstruction: { parts: [{ text: "you are LEAD" }] },
+      contents: [{ role: "user", parts: [{ text: "SUB first in the conversation" }] }],
+    });
+    expect(model.answerGemini(body)).toContain("lead");
+    expect(model.served.at(-1)?.agent).toBe("lead");
   });
 });
