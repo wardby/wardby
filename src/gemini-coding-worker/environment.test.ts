@@ -30,6 +30,10 @@ const agentEnvironment = {
   OTEL_EXPORTER_OTLP_HEADERS: "x-exfil=1",
   OTEL_SDK_DISABLED: "false",
   GEMINI_API_KEY_AUTH_MECHANISM: "bearer",
+  GEMINI_CLI_EXP_AGENT: "true",
+  GEMINI_CLI_AUTH_OVERRIDE: "oauth-personal",
+  IS_BINARY: "true",
+  GEMINI_CLI_NO_RELAUNCH: "",
   GOOGLE_CLOUD_LOCATION: "us-central1",
   DATABASE_URL: "postgres://app@db/app",
 };
@@ -92,6 +96,11 @@ describe("geminiCliEnvironment", () => {
         "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
         "GEMINI_CLI_TRUSTED_FOLDERS_PATH",
         "GEMINI_API_KEY_AUTH_MECHANISM",
+        "GEMINI_CLI_EXP_AGENT",
+        "GEMINI_CLI_AUTH_OVERRIDE",
+        "GEMINI_RESTRICTED_MODE",
+        "GEMINI_CLI_EXTENSION_REGISTRY_URI",
+        "IS_BINARY",
       ]),
     );
   });
@@ -143,6 +152,15 @@ describe("geminiCliEnvironment", () => {
     ]) {
       expect(env[key], key).toBe("");
     }
+  });
+
+  it("turns off the CLI's self-relaunch", () => {
+    expect(build().GEMINI_CLI_NO_RELAUNCH).toBe("true");
+  });
+
+  it("rejects a malformed proxy URL even when the agent environment brings its own NO_PROXY", () => {
+    const tunnel = { ...agentEnvironment, NO_PROXY: "localhost" };
+    expect(() => build({ agentEnvironment: tunnel, proxyBaseUrl: "not a url" })).toThrow();
   });
 
   it("the guard lists do not overlap and never touch the backend's own variables", () => {

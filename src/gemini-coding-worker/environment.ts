@@ -34,6 +34,15 @@ export const GEMINI_GUARD_VARIABLES = [
   "GEMINI_CLI_IDE_SERVER_PORT",
   "GEMINI_CLI_IDE_SERVER_STDIO_COMMAND",
   "GEMINI_CLI_IDE_SERVER_STDIO_ARGS",
+  // Each read only as "true" or non-empty in 0.70.0 (gemini-AYDYW6NZ.js, chunk-UF44X63P.js,
+  // chunk-LMNAB62M.js, chunk-3VGGGCOZ.js): the experimental ADK agent runner, an auth type that
+  // overrides the settings, restricted mode, an extension registry, and "standalone binary" mode
+  // (which changes how the CLI reads its own arguments).
+  "GEMINI_CLI_EXP_AGENT",
+  "GEMINI_CLI_AUTH_OVERRIDE",
+  "GEMINI_RESTRICTED_MODE",
+  "GEMINI_CLI_EXTENSION_REGISTRY_URI",
+  "IS_BINARY",
   // Telemetry string values the CLI reads ahead of settings (0.70.0 ALLOWED_TELEMETRY_ENV_KEYS);
   // telemetry is off below, and empty headers are ignored.
   "GEMINI_TELEMETRY_OTLP_ENDPOINT",
@@ -45,7 +54,8 @@ export const GEMINI_GUARD_VARIABLES = [
 
 /**
  * Guards where an empty value would not mean "off": the CLI reads these telemetry flags ahead of
- * the system settings' `telemetry.enabled: false`, so each is fixed to its off value.
+ * the system settings' `telemetry.enabled: false`, so each is fixed to its off value; and the
+ * relaunch switch, fixed on.
  */
 export const GEMINI_GUARD_VALUES: Readonly<Record<string, string>> = {
   GEMINI_TELEMETRY_ENABLED: "false",
@@ -54,6 +64,9 @@ export const GEMINI_GUARD_VALUES: Readonly<Record<string, string>> = {
   GEMINI_TELEMETRY_USE_COLLECTOR: "false",
   GEMINI_TELEMETRY_USE_CLI_AUTH: "false",
   OTEL_SDK_DISABLED: "true",
+  // gemini.js otherwise relaunches itself in a child that inherits stdio (the runner also kills the
+  // whole process group). Without it the CLI runs in-process, without the relaunch's heap-size flag.
+  GEMINI_CLI_NO_RELAUNCH: "true",
 };
 
 /**
@@ -78,7 +91,8 @@ export function geminiCliEnvironment(input: {
   mcpHeaderMode?: boolean;
 }): Record<string, string> {
   const base = input.proxyBaseUrl.replace(/\/$/, "");
-  const noProxy = input.agentEnvironment.NO_PROXY ?? tunnelNoProxy(new URL(base).hostname);
+  const proxyHost = new URL(base).hostname;
+  const noProxy = input.agentEnvironment.NO_PROXY ?? tunnelNoProxy(proxyHost);
   const guards = Object.fromEntries(GEMINI_GUARD_VARIABLES.map((name) => [name, ""]));
   const backend: Record<string, string> =
     input.backend === "vertex"
