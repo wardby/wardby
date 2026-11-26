@@ -33,21 +33,6 @@ reproduced after this list:
   Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/)
 - linkifyjs
   Copyright (c) 2024 Nick Frasser
-- @tiptap/extension-collaboration, @tiptap/extension-collaboration-caret 3.33.1
-  (live co-editing in the document page)
-  Copyright (c) 2025, Tiptap GmbH
-- @tiptap/y-tiptap 3.2.0
-  Copyright (c) 2019 Kevin Jahns <kevin.jahns@protonmail.com>.
-  Copyright (c) 2025 Tiptap GmbH.
-- @hocuspocus/provider, @hocuspocus/common 4.8.0
-  Copyright (c) 2023, Tiptap GmbH
-- yjs 13.6.33
-  Copyright (c) 2023 Kevin Jahns <kevin.jahns@protonmail.com> and Chair of Computer
-  Science 5 (Databases & Information Systems), RWTH Aachen University, Germany
-- lib0, y-protocols
-  Copyright (c) 2019 Kevin Jahns <kevin.jahns@protonmail.com>.
-- @lifeomic/attempt
-  Copyright 2018 LifeOmic
 - backbone 1.4.1 (bundled inside grapesjs)
   Copyright (c) 2010-2022 Jeremy Ashkenas, DocumentCloud
 - underscore 1.13.8 (bundled inside grapesjs)

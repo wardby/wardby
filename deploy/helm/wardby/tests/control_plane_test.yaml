@@ -16,26 +16,6 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].readinessProbe.httpGet.httpHeaders[0].value
           value: wardby.example.com
-  - it: gives live co-editing this pod's address for other replicas to forward to
-    documentIndex: 1
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content: { name: POD_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content: { name: WARDBY_LIVE_ADVERTISE_ADDRESS, value: $(POD_IP):8080 }
-  - it: leaves the live advertise address to controlPlane.env when it sets one
-    documentIndex: 1
-    set:
-      controlPlane.env.WARDBY_LIVE_ADVERTISE_ADDRESS: wardby-0.internal:8080
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content: { name: WARDBY_LIVE_ADVERTISE_ADDRESS, value: wardby-0.internal:8080 }
-      - notContains:
-          path: spec.template.spec.containers[0].env
-          content: { name: POD_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
   - it: fails without a hostname
     set:
       hostname: ""

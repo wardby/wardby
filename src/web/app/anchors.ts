@@ -20,7 +20,7 @@ export interface TextAnchor {
 /** Characters of context stored on each side of a quote. */
 export const CONTEXT_CHARS = 32;
 /** The server's limit on a quote (src/core/documents/limits.ts MAX_QUOTE_CHARS). */
-export const MAX_QUOTE_CHARS = 10_000;
+export const MAX_QUOTE_CHARS = 500;
 
 /** The document's raw text and, for each character, the document position it came from. */
 export interface DocText {
