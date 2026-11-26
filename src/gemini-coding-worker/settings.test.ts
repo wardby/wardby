@@ -255,11 +255,32 @@ describe("writeGeminiUserSettings and readRepoAgents", () => {
     ["CRLF", "---\r\nname: a\r\n---\r\n"],
     ["trailing spaces on the delimiter", "---  \nname: a\n---\n"],
     ["no closing delimiter", "---\nname: a\n"],
+    [
+      "an indented root flow mapping hiding the name in a quoted string",
+      '---\n  {description: "x\nname: good\ny", name: evil, model: gemini-2.5-pro}\n---\nbody',
+    ],
+    [
+      "an indented root mapping hiding the name in a quoted string",
+      '---\n  description: "x\nname: good\ny"\n  model: gemini-2.5-pro\n  "name": evil\n---\nbody',
+    ],
+    ["a column-0 double-quoted value left open", '---\ndescription: "x\nname: a\n---\n'],
+    ["a column-0 value ending in an escaped quote", '---\ndescription: "x\\"\nname: a\n---\n'],
+    ["a column-0 single-quoted value left open", "---\ndescription: 'it''\nname: a\n---\n"],
+    ["a column-0 flow value left open", "---\ntools: [read_file,\nname: a\n---\n"],
   ])("marks the set unpinnable for %s, keeping the names it is sure of", async (_label, content) => {
     const agents = await agentsDir();
     await writeFile(join(agents, "a-good.md"), agent("good"));
     await writeFile(join(agents, "z-odd.md"), content);
     expect(await readRepoAgents(root!)).toEqual({ names: ["good"], unpinnable: true });
+  });
+
+  it("accepts closed quoted and flow values and a leading comment", async () => {
+    const agents = await agentsDir();
+    await writeFile(
+      join(agents, "a.md"),
+      `---\n# an agent\n\nname: good\ndescription: "say \\"hi\\" \\\\"\nnote: 'it''s'\ntools: [read_file, "x"]\n---\n`,
+    );
+    expect(await readRepoAgents(root!)).toEqual({ names: ["good"], unpinnable: false });
   });
 
   it("marks the set unpinnable past the size bound", async () => {

@@ -164,13 +164,14 @@ const MAX_REPO_AGENTS = 64;
 const MAX_AGENT_FILE_BYTES = 64 * 1024;
 /** The CLI's agent name rule (0.70.0). */
 const AGENT_NAME_LINE = /^name: ([a-z0-9_-]{1,64})$/;
+/** A column-0 line that is not a plain key: a quoted key, complex key, flow collection, anchor, alias, tag, directive or list. */
+const NOT_PLAIN_KEY = /^["'?{[&*!%|>@`-]/;
 /** Frontmatter lines that could set or change the top-level name some way this reader does not parse. */
 const AMBIGUOUS_LINE = [
   /^\s*["']?name["']?\s*:/, // another name key, quoted or indented
-  // At the top level: quoted keys (an escape can spell "name"), complex keys, flow collections,
-  // anchors, aliases, tags, directives, a list (the remote-agents form). Indented lines are nested
-  // and cannot set the name.
-  /^["'?{[&*!%|>@`-]/,
+  // Quoted keys (an escape can spell "name") and the other non-plain forms; a list at the top is
+  // the remote-agents form.
+  NOT_PLAIN_KEY,
   /<</, // merge keys
   /^(---|\.\.\.)/, // document markers
 ];
@@ -182,9 +183,37 @@ export interface RepoAgents {
   unpinnable: boolean;
 }
 
+/** A column-0 `key: value` whose quoted or flow value does not close on its own line (it would run on into later lines). */
+function opensMultiLineValue(line: string): boolean {
+  if (/^\s|^#/.test(line)) return false;
+  const colon = line.indexOf(":");
+  if (colon < 0) return false;
+  const value = line.slice(colon + 1).trimStart();
+  const count = (char: string) => value.split(char).length - 1;
+  switch (value[0]) {
+    case '"':
+      // Closed: ends in a quote not escaped by an odd run of backslashes.
+      return value.length < 2 || !value.endsWith('"') || /(^|[^\\])(\\\\)*\\"$/.test(value);
+    case "'":
+      // '' is an escaped quote, so a closed value has an even number of quotes.
+      return value.length < 2 || !value.endsWith("'") || count("'") % 2 !== 0;
+    case "{":
+    case "[":
+      return !/[}\]]$/.test(value) || count("{") !== count("}") || count("[") !== count("]");
+    default:
+      return false;
+  }
+}
+
 /**
  * The single top-level `name` of an agent file, only when it is certain: LF-only, no BOM, the CLI's
  * `---` delimiters exactly, and one `name: <slug>` line with nothing that could override or extend it.
+ *
+ * The root mapping must start at column 0 (YAML also allows an indented root, where a multi-line
+ * quoted scalar can hide a column-0 `name:` line while the real key sits indented). With a column-0
+ * root, every real top-level key is a column-0 line these checks see. A column-0 `name:` that is
+ * really inside a multi-line string means the mapping has no name of its own, so the CLI rejects the
+ * file and nothing unpinned runs; and any column-0 quoted or flow value left open is refused anyway.
  */
 function certainAgentName(content: string): string | undefined {
   if (!content.startsWith("---\n") || content.includes("\r")) return undefined;
@@ -192,6 +221,9 @@ function certainAgentName(content: string): string | undefined {
   const close = lines.indexOf("---");
   if (close < 0) return undefined;
   const frontmatter = lines.slice(0, close);
+  const first = frontmatter.find((line) => line.trim() !== "" && !line.startsWith("#"));
+  if (first === undefined || /^\s/.test(first) || NOT_PLAIN_KEY.test(first)) return undefined;
+  if (frontmatter.some(opensMultiLineValue)) return undefined;
   const nameLines = frontmatter.flatMap((line, index) => (line.startsWith("name:") ? [index] : []));
   if (nameLines.length !== 1) return undefined;
   const name = AGENT_NAME_LINE.exec(frontmatter[nameLines[0]])?.[1];
