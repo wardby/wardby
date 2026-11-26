@@ -125,12 +125,6 @@ interface Loaded {
 const asError = (err: unknown) => (err instanceof Error ? err.name : typeof err);
 /** Set on an upgrade one replica hands to the document's leader: it is never handed on again. */
 const FORWARDED = "x-wardby-live-forwarded";
-/** Whether two maps hold the same keys and values (their order can differ between copies). */
-function sameEntries(a: Y.Map<unknown>, b: Y.Map<unknown>): boolean {
-  if (a.size !== b.size) return false;
-  for (const [k, v] of a.entries()) if (!b.has(k) || JSON.stringify(b.get(k)) !== JSON.stringify(v)) return false;
-  return true;
-}
 const REASON: Record<number, string> = { 401: "Unauthorized", 404: "Not Found", 503: "Service Unavailable" };
 
 export function createLiveServer(deps: LiveServerDeps): LiveServer {
@@ -280,8 +274,12 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
     async beforeSync({ document, documentName, type, payload, connection }) {
       // Sync step 2 and updates carry content (1, 2); a read-only connection's are ignored anyway.
       if ((type !== 1 && type !== 2) || connection.readOnly) return;
+      // Everything awaited comes first: the copy below and the checks on it run without a pause, so nothing the
+      // server writes meanwhile (who edited last, for someone else's edit) is taken for this edit's change.
+      const secrets = await secretValues(documentName);
       const scratch = new Y.Doc();
       Y.applyUpdate(scratch, Y.encodeStateAsUpdate(document));
+      const metaBefore = JSON.stringify(scratch.getMap(LIVE_META).toJSON());
       const format = loaded.get(documentName)?.format;
       let applied = false;
       const apply = () => {
@@ -289,11 +287,12 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
         applied = true;
         Y.applyUpdate(scratch, payload);
       };
-      const why = format ? format.refuse(scratch, apply, await secretValues(documentName)) : "not_loaded";
+      const why = format ? format.refuse(scratch, apply, secrets) : "not_loaded";
       apply();
       // The history's epoch and the editor record are the server's: a browser that changes them is refused
-      // (another browser's copy would otherwise be refused as stale, or a version credited to someone else).
-      if (!sameEntries(scratch.getMap(LIVE_META), document.getMap(LIVE_META))) {
+      // (another browser's copy would otherwise be refused as stale, or a version credited to someone else). Only
+      // what this edit changed counts: the copy before it against the copy after it.
+      if (JSON.stringify(scratch.getMap(LIVE_META).toJSON()) !== metaBefore) {
         log.warn({ documentId: documentName }, "live edit refused: it changed the server's record");
         connection.sendStateless(JSON.stringify({ type: "edit_refused", reason: "server_data" }));
         throw refusal("edit_refused");

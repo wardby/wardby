@@ -65,7 +65,8 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
       authMode: "self-hosted",
       bus,
       replica: "127.0.0.1:1",
-      timings: { storeDebounceMs: 100, storeMaxDebounceMs: 300 },
+      // Secrets are read again on every edit, as when the cache has just expired (the read is a real pause).
+      timings: { storeDebounceMs: 100, storeMaxDebounceMs: 300, secretsTtlMs: 0 },
     });
     http = createServer((_req, res) => res.writeHead(404).end());
     http.on("upgrade", (req, socket, head) => {
@@ -618,5 +619,29 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
     expect(text(h1Of(a.ydoc).get(F.html))).toContain("BO-MEANWHILE");
     expect(a.closed()).toBe(false);
     a.close();
+  });
+
+  it("two people editing quickly at once are never refused for the server's own record of who edited last", async () => {
+    const id = await design(ann, [bo]);
+    const a = await client(ann, id);
+    a.open("home");
+    expect(await a.roleFor("home")).toBe("build");
+    buildBoard(a.ydoc, "home", coffee("boards/home.html"));
+    const b = await client(bo, id);
+    for (let i = 0; i < 40 && !boardMaps(b.ydoc, "home").nodes.has(BOARD_ROOT); i++) await sleep(50);
+    const p = (d: Y.Doc) => [...boardMaps(d, "home").nodes.values()].find((n) => n.get(F.tag) === "p")!;
+    // Each edit by one person makes the server record them as the last editor while it checks the other's edits.
+    for (let i = 0; i < 40; i++) {
+      a.ydoc.transact(() => h1Of(a.ydoc).set(F.html, `Heading ${i}`));
+      b.ydoc.transact(() => p(b.ydoc).set(F.html, `Paragraph ${i}`));
+      await sleep(5);
+    }
+    await sleep(800);
+    const refused = (c: { stateless: string[] }) => c.stateless.filter((m) => m.includes("edit_refused"));
+    expect(refused(a)).toEqual([]);
+    expect(refused(b)).toEqual([]);
+    expect(a.closed() || b.closed()).toBe(false);
+    a.close();
+    b.close();
   });
 });
