@@ -465,6 +465,13 @@ Claude Code agent and tool runner images from this release.
   `CODING_TUNNEL_ALLOWED_HOSTS` and the agent's own tunnel hosts (see [Pulling
   and pushing images](#pulling-and-pushing-images)); with the tunnel off, none. The run's
   network policy applies to the daemon and every container it starts.
+- **Bind mounts from the checkout.** The daemon sees the run's checkout at
+  `/workspace`, and each extra repository at its usual path, the same paths
+  as the agent's shells. A compose file's `.:/app`, or
+  `docker run -v "$PWD":/app`, run from the checkout, mounts the run's files.
+  Any other host path resolves in the daemon's own container, not the agent's:
+  the daemon is given no other part of the run's storage, and its `/tmp` is
+  its own.
 - Everything the daemon stores is deleted with the run's pod: no image or
   build cache carries over to the next run.
 
