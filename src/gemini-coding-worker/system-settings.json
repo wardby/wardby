@@ -6,6 +6,7 @@
     "fileName": ["GEMINI.md", "AGENTS.md", "CLAUDE.md"]
   },
   "experimental": {
+    "contextManagement": false,
     "gemmaModelRouter": {
       "enabled": false
     }

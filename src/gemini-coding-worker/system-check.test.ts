@@ -57,6 +57,7 @@ describe("baked system settings", () => {
     expect(settings.tools.exclude).toEqual([...GEMINI_ALWAYS_EXCLUDED_TOOLS]);
     expect(settings.telemetry).toEqual({ enabled: false, logPrompts: false });
     expect(settings.security.enableConseca).toBe(false);
+    expect(settings.experimental.contextManagement).toBe(false);
     expect(settings.security.auth.enforcedType).toBe("$WARDBY_GEMINI_AUTH_TYPE");
     // No credential is ever written into the system file.
     expect(JSON.stringify(settings)).not.toMatch(/apiKey|API_KEY|token|password/i);

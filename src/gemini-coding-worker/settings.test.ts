@@ -10,11 +10,12 @@ import {
 import { GEMINI_BUILTIN_AGENTS, GEMINI_HELPER_ALIASES } from "./cli.js";
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
+  geminiSubAgentsDisabledReason,
   geminiUserSettings,
   MAX_COMMAND_TIMEOUT_MS,
   MIN_COMMAND_TIMEOUT_MS,
   readGeminiRunSettings,
-  repoAgentNames,
+  readRepoAgents,
   writeGeminiUserSettings,
   type GeminiUserSettingsInput,
 } from "./settings.js";
@@ -29,10 +30,11 @@ const base: GeminiUserSettingsInput = {
   webTools: "off",
   repoSkills: true,
   repoAgentNames: [],
+  repoAgentsUnpinnable: false,
   outputSchema: { type: "object" },
 };
 type Override = {
-  match: Record<string, string>;
+  match: Record<string, string | boolean>;
   modelConfig: { model?: string; generateContentConfig?: Record<string, unknown> };
 };
 const overrides = (settings: Record<string, unknown>) =>
@@ -97,11 +99,23 @@ describe("geminiUserSettings", () => {
   it("sets the final-answer schema on the run model's own replies only", () => {
     const last = overrides(geminiUserSettings(base)).at(-1)!;
     expect(last).toEqual({
-      match: { model: "gemini-4-neon", overrideScope: "core" },
+      match: { model: "gemini-4-neon", isChatModel: true },
       modelConfig: {
         generateContentConfig: { responseMimeType: "application/json", responseJsonSchema: { type: "object" } },
       },
     });
+  });
+
+  it("matches the schema to the main loop's chat key, never a helper, when a helper's default is the run model", () => {
+    const list = overrides(geminiUserSettings({ ...base, googleModel: "gemini-3-flash-preview" }));
+    const withSchema = list.filter((o) => o.modelConfig.generateContentConfig?.responseJsonSchema !== undefined);
+    expect(withSchema.map((o) => o.match)).toEqual([{ model: "gemini-3-flash-preview", isChatModel: true }]);
+    expect(list.some((o) => "overrideScope" in o.match)).toBe(false);
+    for (const alias of GEMINI_HELPER_ALIASES) {
+      for (const o of list.filter((x) => x.match.model === alias)) {
+        expect(o.modelConfig.generateContentConfig).toEqual({ maxOutputTokens: 32_000 });
+      }
+    }
   });
 
   it("maps the run's limits, auth and skills", () => {
@@ -134,6 +148,15 @@ describe("geminiUserSettings", () => {
     expect(exclude({ webTools: "search-and-fetch" })).toEqual([]);
   });
 
+  it("turns sub-agents off (not the run) when a repository agent cannot be pinned, and says why", () => {
+    const unpinnable = { ...base, webTools: "search-and-fetch" as const, repoAgentsUnpinnable: true };
+    expect((geminiUserSettings(unpinnable).tools as { exclude: string[] }).exclude).toEqual(["invoke_agent"]);
+    expect(geminiSubAgentsDisabledReason(unpinnable)).toBe("repo_agents_unpinnable");
+    expect(geminiSubAgentsDisabledReason(base)).toBeUndefined();
+    // Already off by the operator: nothing to record.
+    expect(geminiSubAgentsDisabledReason({ ...unpinnable, subAgents: false })).toBeUndefined();
+  });
+
   it("adds the wardby_mcp server only on a run with MCP tools, never with the token's value", () => {
     expect(geminiUserSettings(base).mcpServers).toBeUndefined();
     expect(
@@ -157,7 +180,7 @@ describe("geminiUserSettings", () => {
   });
 });
 
-describe("writeGeminiUserSettings and repoAgentNames", () => {
+describe("writeGeminiUserSettings and readRepoAgents", () => {
   it("writes ~/.gemini/settings.json readable by the worker only", async () => {
     root = await mkdtemp(join(tmpdir(), "wardby-gemini-home-"));
     const path = await writeGeminiUserSettings(root, { model: { maxSessionTurns: 1 } });
@@ -195,16 +218,63 @@ describe("writeGeminiUserSettings and repoAgentNames", () => {
     await expect(readFile(join(elsewhere, "settings.json"))).rejects.toThrow();
   });
 
-  it("reads a repo's local agent names from frontmatter, bounded and without following links", async () => {
+  const agentsDir = async () => {
     root = await mkdtemp(join(tmpdir(), "wardby-gemini-agents-"));
     const agents = join(root, ".gemini", "agents");
     await mkdir(agents, { recursive: true });
-    await writeFile(join(agents, "reviewer.md"), "---\nname: reviewer\ndescription: x\n---\nbody");
-    await writeFile(join(agents, "no-name.md"), "---\ndescription: x\n---\n");
-    await writeFile(join(agents, "bad.md"), "---\nname: not a valid name!\n---\n");
+    return agents;
+  };
+  const agent = (name: string) => `---\nname: ${name}\ndescription: x\ntools:\n  - read_file\n---\nbody`;
+
+  it("pins every agent file the CLI loads, skipping what it skips", async () => {
+    const agents = await agentsDir();
+    await writeFile(join(agents, "reviewer.md"), agent("reviewer"));
+    await writeFile(join(agents, "b.md"), agent("helper_2"));
+    await writeFile(join(agents, "_draft.md"), "not an agent");
     await writeFile(join(agents, "notes.txt"), "---\nname: ignored\n---\n");
     await symlink("/etc/passwd", join(agents, "link.md"));
-    expect(await repoAgentNames(root)).toEqual(["no-name", "reviewer"]);
-    expect(await repoAgentNames(join(root, "missing"))).toEqual([]);
+    await mkdir(join(agents, "dir.md"));
+    expect(await readRepoAgents(root!)).toEqual({ names: ["helper_2", "reviewer"], unpinnable: false });
+    expect(await readRepoAgents(join(root!, "missing"))).toEqual({ names: [], unpinnable: false });
+  });
+
+  it.each([
+    ["no name", "---\ndescription: x\n---\n"],
+    ["a non-slug name", "---\nname: not a valid name!\n---\n"],
+    ["an upper-case name", "---\nname: Reviewer\n---\n"],
+    ["a quoted name", '---\nname: "reviewer"\n---\n'],
+    ["a trailing comment", "---\nname: reviewer # main\n---\n"],
+    ["two name lines", "---\nname: a\nname: b\n---\n"],
+    ["a quoted second key", '---\nname: a\n"n\\u0061me": b\n---\n'],
+    ["an indented name", "---\nname: a\nmeta:\n  name: b\n---\n"],
+    ["a folded continuation", "---\nname: a\n  b\n---\n"],
+    ["a merge key", "---\nname: a\n<<: *base\n---\n"],
+    ["a flow mapping", "---\n{name: a}\n---\n"],
+    ["the remote-agents list", "---\n- name: a\n  kind: remote\n---\n"],
+    ["a BOM", "\uFEFF---\nname: a\n---\n"],
+    ["CRLF", "---\r\nname: a\r\n---\r\n"],
+    ["trailing spaces on the delimiter", "---  \nname: a\n---\n"],
+    ["no closing delimiter", "---\nname: a\n"],
+  ])("marks the set unpinnable for %s, keeping the names it is sure of", async (_label, content) => {
+    const agents = await agentsDir();
+    await writeFile(join(agents, "a-good.md"), agent("good"));
+    await writeFile(join(agents, "z-odd.md"), content);
+    expect(await readRepoAgents(root!)).toEqual({ names: ["good"], unpinnable: true });
+  });
+
+  it("marks the set unpinnable past the size bound", async () => {
+    const agents = await agentsDir();
+    await writeFile(join(agents, "big.md"), agent("big") + "x".repeat(64 * 1024));
+    expect(await readRepoAgents(root!)).toEqual({ names: [], unpinnable: true });
+  });
+
+  it("pins the first 64 files in name order and marks the rest unpinnable", async () => {
+    const agents = await agentsDir();
+    const names = Array.from({ length: 65 }, (_, i) => `agent-${String(i).padStart(2, "0")}`);
+    // Written in reverse so the result shows the sort, not the directory's order.
+    for (const name of [...names].reverse()) await writeFile(join(agents, `${name}.md`), agent(name));
+    expect(await readRepoAgents(root!)).toEqual({ names: names.slice(0, 64), unpinnable: true });
+    await rm(join(agents, "agent-64.md"));
+    expect(await readRepoAgents(root!)).toEqual({ names: names.slice(0, 64), unpinnable: false });
   });
 });

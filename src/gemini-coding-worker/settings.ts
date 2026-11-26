@@ -1,5 +1,5 @@
 import { chmod, lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { isWebTools, type WebTools } from "../coding/google-web-tools.js";
 import { readBoundedRegularFile } from "../coding-worker/artifact.js";
 import {
@@ -10,7 +10,6 @@ import {
   WARDBY_MCP_TIMEOUT_MS,
   wardbyMcpUrl,
 } from "../coding-worker/mcp-config.js";
-import { frontmatterName } from "../coding-worker/skills.js";
 import { GEMINI_BUILTIN_AGENTS, GEMINI_BUILTIN_SKILLS, GEMINI_HELPER_ALIASES, type GeminiBackend } from "./cli.js";
 
 /** coding/command-timeouts.ts's values (it imports the profile module, too heavy for the image; a test keeps them equal). */
@@ -50,17 +49,30 @@ export interface GeminiUserSettingsInput {
   subAgents: boolean;
   webTools: WebTools;
   repoSkills: boolean;
-  /** Local agents the repository defines (.gemini/agents), pinned to the run model. */
+  /** Local agents the repository defines (.gemini/agents), pinned to the run model (readRepoAgents). */
   repoAgentNames: readonly string[];
+  /** readRepoAgents found an agent file it could not pin: sub-agents are turned off for the run. */
+  repoAgentsUnpinnable: boolean;
   /** The Gemini-safe final-answer schema (output.ts). */
   outputSchema: Record<string, unknown>;
   /** Set only on a run with MCP tools. Header mode: Substrate's gateway placeholder in its own header. */
   mcp?: { proxyBaseUrl: string; headerMode: boolean };
 }
 
+/** Why a run that asked for sub-agents runs without them, for the driver to record; undefined when it has them. */
+export type GeminiSubAgentsDisabledReason = "repo_agents_unpinnable";
+
+export function geminiSubAgentsDisabledReason(
+  input: Pick<GeminiUserSettingsInput, "subAgents" | "repoAgentsUnpinnable">,
+): GeminiSubAgentsDisabledReason | undefined {
+  // An agent wardby cannot pin could run on any model the repository names: fail closed, not the run.
+  return input.subAgents && input.repoAgentsUnpinnable ? "repo_agents_unpinnable" : undefined;
+}
+
 function perRunExclusions(input: GeminiUserSettingsInput): string[] {
+  const subAgents = input.subAgents && geminiSubAgentsDisabledReason(input) === undefined;
   return [
-    ...(input.subAgents ? [] : ["invoke_agent"]),
+    ...(subAgents ? [] : ["invoke_agent"]),
     ...(input.webTools === "search" || input.webTools === "search-and-fetch" ? [] : ["google_web_search"]),
     ...(input.webTools === "search-and-fetch" ? [] : ["web_fetch"]),
   ];
@@ -71,7 +83,8 @@ function perRunExclusions(input: GeminiUserSettingsInput): string[] {
  * (system-settings.json) outranks it for scalars and unions or intersects its arrays, so nothing
  * here can relax the lock-down. Every reply is capped (spec "Output cap"): an override on the run
  * model (main loop and sub-agents), one per helper alias that also moves the alias to the run model
- * (Decision 5), and each agent pinned to the run model.
+ * (Decision 5), and each agent pinned to the run model. When a repository agent cannot be pinned,
+ * `invoke_agent` is excluded (geminiSubAgentsDisabledReason).
  */
 export function geminiUserSettings(input: GeminiUserSettingsInput): Record<string, unknown> {
   const cap = { maxOutputTokens: input.maxOutputTokens };
@@ -91,9 +104,11 @@ export function geminiUserSettings(input: GeminiUserSettingsInput): Record<strin
           match: { model: alias },
           modelConfig: { model: input.googleModel, generateContentConfig: cap },
         })),
-        // Last and most specific: the main loop's own replies (not helpers, not sub-agents) answer in JSON.
+        // The main loop's own replies answer in JSON. Only the main loop resolves its config with
+        // isChatModel: true (0.70.0); helpers and sub-agents never do. Not overrideScope "core": that
+        // also matches a call with no scope, so a helper whose default model is the run model would get it.
         {
-          match: { model: input.googleModel, overrideScope: "core" },
+          match: { model: input.googleModel, isChatModel: true },
           modelConfig: {
             generateContentConfig: { responseMimeType: "application/json", responseJsonSchema: input.outputSchema },
           },
@@ -147,31 +162,79 @@ export async function writeGeminiUserSettings(home: string, settings: Record<str
 
 const MAX_REPO_AGENTS = 64;
 const MAX_AGENT_FILE_BYTES = 64 * 1024;
-const AGENT_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+/** The CLI's agent name rule (0.70.0). */
+const AGENT_NAME_LINE = /^name: ([a-z0-9_-]{1,64})$/;
+/** Frontmatter lines that could set or change the top-level name some way this reader does not parse. */
+const AMBIGUOUS_LINE = [
+  /^\s*["']?name["']?\s*:/, // another name key, quoted or indented
+  // At the top level: quoted keys (an escape can spell "name"), complex keys, flow collections,
+  // anchors, aliases, tags, directives, a list (the remote-agents form). Indented lines are nested
+  // and cannot set the name.
+  /^["'?{[&*!%|>@`-]/,
+  /<</, // merge keys
+  /^(---|\.\.\.)/, // document markers
+];
+
+export interface RepoAgents {
+  /** The names to pin to the run model, sorted. */
+  names: string[];
+  /** Some file the CLI may load as an agent was not pinned with certainty. */
+  unpinnable: boolean;
+}
 
 /**
- * The names of the repository's local agents (.gemini/agents/*.md, untrusted): the frontmatter
- * `name`, else the file name. Bounded (64 files, 64 KiB each), regular files only (a link is never
- * opened), names wardby can put in settings. Never throws.
+ * The single top-level `name` of an agent file, only when it is certain: LF-only, no BOM, the CLI's
+ * `---` delimiters exactly, and one `name: <slug>` line with nothing that could override or extend it.
  */
-export async function repoAgentNames(workspace: string): Promise<string[]> {
+function certainAgentName(content: string): string | undefined {
+  if (!content.startsWith("---\n") || content.includes("\r")) return undefined;
+  const lines = content.slice(4).split("\n");
+  const close = lines.indexOf("---");
+  if (close < 0) return undefined;
+  const frontmatter = lines.slice(0, close);
+  const nameLines = frontmatter.flatMap((line, index) => (line.startsWith("name:") ? [index] : []));
+  if (nameLines.length !== 1) return undefined;
+  const name = AGENT_NAME_LINE.exec(frontmatter[nameLines[0]])?.[1];
+  // A following indented line would continue the value (YAML folds it into the name).
+  if (!name || /^\s/.test(frontmatter[nameLines[0] + 1] ?? "")) return undefined;
+  const others = frontmatter.filter((_, index) => index !== nameLines[0]);
+  if (others.some((line) => AMBIGUOUS_LINE.some((pattern) => pattern.test(line)))) return undefined;
+  return name;
+}
+
+/**
+ * The repository's local agents (.gemini/agents, untrusted) the CLI may load: regular *.md files not
+ * starting with "_" (0.70.0's rule). Each name comes only from certainAgentName; anything else (too
+ * large, past the count cap, unreadable, a format variant, no or an ambiguous name) marks the set
+ * unpinnable so the driver turns sub-agents off. Never throws.
+ */
+export async function readRepoAgents(workspace: string): Promise<RepoAgents> {
   const dir = join(workspace, ".gemini", "agents");
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Nothing to load; any other listing failure is not certain.
+    return { names: [], unpinnable: code !== "ENOENT" && code !== "ENOTDIR" };
   }
+  const loadable = entries
+    .filter((e) => e.isFile() && e.name.endsWith(".md") && !e.name.startsWith("_"))
+    .map((e) => e.name)
+    .sort();
+  let unpinnable = loadable.length > MAX_REPO_AGENTS;
   const names = new Set<string>();
-  for (const entry of entries.filter((e) => e.isFile() && e.name.endsWith(".md")).slice(0, MAX_REPO_AGENTS)) {
+  for (const file of loadable.slice(0, MAX_REPO_AGENTS)) {
     let content: string;
     try {
-      content = await readBoundedRegularFile(join(dir, entry.name), MAX_AGENT_FILE_BYTES, "gemini_agent_file_invalid");
+      content = await readBoundedRegularFile(join(dir, file), MAX_AGENT_FILE_BYTES, "gemini_agent_file_invalid");
     } catch {
+      unpinnable = true;
       continue;
     }
-    const name = frontmatterName(content) || basename(entry.name, ".md");
-    if (AGENT_NAME.test(name)) names.add(name);
+    const name = certainAgentName(content);
+    if (name === undefined) unpinnable = true;
+    else names.add(name);
   }
-  return [...names].sort();
+  return { names: [...names].sort(), unpinnable };
 }
