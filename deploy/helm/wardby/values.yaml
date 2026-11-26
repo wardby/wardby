@@ -203,9 +203,11 @@ headroom:
   tolerations: []
 
 models:
-  # -- Existing Secret holding model provider keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY),
+  # -- Existing Secret holding model provider keys (ANTHROPIC_API_KEY, OPENAI_API_KEY),
   # added to the control plane, coding proxy and native gateway. Optional when each
-  # workload's env Secret already carries them.
+  # workload's env Secret already carries them. Do NOT put GEMINI_API_KEY here: it
+  # would reach the coding proxy and the migration Job; use a wardby-gemini-env Secret
+  # (loaded by controlPlane.extraEnvFrom and nativeGateway.extraEnvFrom) instead.
   providerSecret: ""
   # -- VERTEX_PROJECT: the Google Cloud project for Vertex AI Gemini models (provider
   # vertex-gemini). Empty = off. The control plane and native gateway pods need Google
@@ -287,6 +289,7 @@ controlPlane:
   extraEnvFrom:
     - secretRef: { name: wardby-jira-env, optional: true }
     - secretRef: { name: wardby-slack-env, optional: true }
+    - secretRef: { name: wardby-gemini-env, optional: true }
   # -- Plain environment variables, as a map. They override the chart's own.
   env:
     WARDBY_MOBILE_ENABLED: "false"
@@ -453,6 +456,7 @@ nativeGateway:
   envFromSecret: wardby-native-gateway-env
   extraEnvFrom:
     - secretRef: { name: wardby-jira-env, optional: true }
+    - secretRef: { name: wardby-gemini-env, optional: true }
   env: {}
   extraEnv: []
   resources:

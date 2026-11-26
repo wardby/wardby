@@ -6,8 +6,7 @@
 #
 # Reads .env.local at run time for DATABASE_URL, OPENAI_API_KEY,
 # ANTHROPIC_API_KEY, and the optional GEMINI_API_KEY (only those four names —
-# nothing else in the file is
-# sourced or exported) and builds the proxy's Secret manifest itself. The
+# nothing else in the file is sourced or exported) and builds the proxy's Secret manifest itself. The
 # values only ever exist as this script's own bash variables and on a
 # pipe's stdin into `kubectl apply -f -`; they are never passed as a
 # command-line argument to any subprocess (so they never appear in that
@@ -250,9 +249,10 @@ PROXY_DATABASE_URL="${PROXY_DATABASE_URL/@127.0.0.1:/@host.docker.internal:}"
 DATABASE_URL_B64="$(b64 "$PROXY_DATABASE_URL")"
 OPENAI_API_KEY_B64="$(b64 "$OPENAI_API_KEY")"
 ANTHROPIC_API_KEY_B64="$(b64 "$ANTHROPIC_API_KEY")"
+GEMINI_API_KEY_B64="$(b64 "$GEMINI_API_KEY")"
 GEMINI_API_KEY_LINE=""
 if [[ -n "$GEMINI_API_KEY" ]]; then
-  GEMINI_API_KEY_LINE="$(printf '  GEMINI_API_KEY: %s' "$(b64 "$GEMINI_API_KEY")")"
+  GEMINI_API_KEY_LINE="$(printf '  GEMINI_API_KEY: %s' "$GEMINI_API_KEY_B64")"
 fi
 {
   printf 'apiVersion: v1\n'
@@ -300,7 +300,7 @@ fi
   if [[ -n "$GITHUB_APP_LINES" ]]; then printf '%s\n' "$GITHUB_APP_LINES"; fi
 } | kubectl --context "$KUBE_CONTEXT" apply -f -
 unset DATABASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY PROXY_DATABASE_URL \
-  DATABASE_URL_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64 GEMINI_API_KEY_LINE SECRET_APP_KEY_VALUE SECRET_APP_KEY_B64 \
+  DATABASE_URL_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64 GEMINI_API_KEY_B64 GEMINI_API_KEY_LINE SECRET_APP_KEY_VALUE SECRET_APP_KEY_B64 \
   GITHUB_APP_LINES GITHUB_APP_ID_B64 GITHUB_APP_PRIVATE_KEY_B64
 
 echo "==> 8/${TOTAL_STEPS} render and apply the manifests (low-power mode: ${LOW_POWER_LABEL})"

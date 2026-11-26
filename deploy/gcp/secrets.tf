@@ -120,9 +120,9 @@ resource "google_secret_manager_secret_iam_member" "auth_credential_hash_key_acc
 }
 
 # Optional LLM provider credentials. The app (src/config/providers.ts)
-# registers each provider additively by credential presence - OpenAI and
-# Anthropic (and Bedrock, via BEDROCK_REGION, which isn't a secret and isn't
-# wired here) can all be configured at once, so this is a map rather than a
+# registers each provider additively by credential presence - OpenAI,
+# Anthropic and Gemini (GEMINI_API_KEY), and Bedrock (via BEDROCK_REGION, which
+# isn't a secret and isn't wired here) can all be configured at once, so this is a map rather than a
 # single slot: add an entry here for any other provider env var later. The
 # MCP server/scheduler process fails its own startup check with none of
 # these present - hit for real testing this module, 2026-09-17/18. Only
