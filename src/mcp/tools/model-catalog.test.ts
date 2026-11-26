@@ -171,6 +171,16 @@ function rawRow(overrides: Partial<Record<string, unknown>> = {}): Record<string
 }
 
 describe("model catalog tools", () => {
+  it("set_model describes every thinking mode, including Gemini's level", async () => {
+    const { client } = await connect(MODEL_MANAGER);
+    const { tools } = await client.listTools();
+    const setModel = tools.find((t) => t.name === "set_model");
+    const schema = setModel?.inputSchema as { properties: Record<string, { enum?: string[]; description?: string }> };
+    const thinking = schema.properties.thinkingMode;
+    for (const mode of thinking.enum ?? []) expect(thinking.description).toContain(`"${mode}"`);
+    expect(thinking.description).toMatch(/"level".*Gemini/);
+  });
+
   it("lists shipped models with origin, price version and routability", async () => {
     const { client } = await connect(READER);
     const out = JSON.parse(text(await client.callTool({ name: "list_models", arguments: {} })));
