@@ -149,6 +149,13 @@ export interface BoardsEditor {
   onChange(cb: () => void): void;
   /** Called after a board is put in the canvas (selection, a newer version, a board operation). */
   onBoard(cb: (id: string) => void): void;
+  /** A board's file parts (title, language, body attributes, base layer) as loaded, for live editing's builder. */
+  parts(id: string): BoardParts | null;
+  /**
+   * Live editing: the board list as it now stands in the live document (someone else added, renamed, moved or
+   * deleted a board). A new board starts from the first board's layout until its live copy arrives.
+   */
+  applyManifest(next: Manifest): void;
 }
 
 interface BoardState {
@@ -564,6 +571,24 @@ export function createBoardsEditor(opts: {
     setDevice: (id) => void editor.setDevice(id),
     onChange: (cb) => void changeListeners.push(cb),
     onBoard: (cb) => void boardListeners.push(cb),
+    parts: (id) => boards.get(id)?.parts ?? null,
+    applyManifest(next) {
+      const firstParts = manifest.boards[0] ? (boards.get(manifest.boards[0].id)?.parts ?? null) : null;
+      for (const b of next.boards) {
+        if (!boards.has(b.id)) {
+          const text = newBoardFile(firstParts, b.name);
+          boards.set(b.id, { parts: parseBoardFile(text), pending: null, baseline: null });
+        }
+      }
+      const ids = new Set(next.boards.map((b) => b.id));
+      for (const id of [...boards.keys()]) if (!ids.has(id)) boards.delete(id);
+      manifest = { title: next.title, boards: next.boards.map((b) => ({ ...b })) };
+      if (current && !ids.has(current)) {
+        current = "";
+        if (manifest.boards[0]) loadBoard(manifest.boards[0].id);
+      }
+      changed();
+    },
   };
   return api;
 }
