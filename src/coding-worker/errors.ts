@@ -39,6 +39,9 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   // Gemini CLI: a repository context file (GEMINI.md, AGENTS.md, CLAUDE.md) is a symlink or not a
   // regular file; the CLI would follow it (gemini-coding-worker/context-files.ts).
   "coding_context_file_refused",
+  // Gemini CLI: a run setting the launcher passes in the environment (WARDBY_SUB_AGENTS,
+  // WARDBY_WEB_TOOLS, WARDBY_COMMAND_TIMEOUT_MS) is not a valid value (gemini-coding-worker/settings.ts).
+  "worker_run_settings_invalid",
 ]);
 
 export const WORKER_AGENT_CLI_INCOMPATIBLE = "worker_agent_cli_incompatible";

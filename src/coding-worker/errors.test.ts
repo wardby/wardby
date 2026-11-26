@@ -24,6 +24,10 @@ describe("safeWorkerErrorCode", () => {
     expect(safeWorkerErrorCode(new Error("worker_git_unavailable"))).toBe("worker_git_unavailable");
   });
 
+  it("keeps worker_run_settings_invalid (a Gemini run setting the launcher set out of range)", () => {
+    expect(safeWorkerErrorCode(new Error("worker_run_settings_invalid"))).toBe("worker_run_settings_invalid");
+  });
+
   it("removes an attacker-controlled duplicate-key suffix", () => {
     expect(safeWorkerErrorCode(new Error("coding_artifact_duplicate_key:DO_NOT_LEAK"))).toBe(
       "coding_artifact_duplicate_key",
