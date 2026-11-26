@@ -40,6 +40,30 @@ vi.mock("./proxy.js", async (importOriginal) => {
 });
 
 describe("configured coding proxy runtime", () => {
+  it("hands the proxy the Vertex project (CODING_VERTEX_PROJECT first) and refuses a bad one before listening", async () => {
+    const startServer = vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} }));
+    const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
+    const before = constructed.length;
+    const started = await startConfiguredCodingProxy({
+      db: {} as PrismaClient,
+      env: { CODING_VERTEX_PROJECT: "coding-project", GOOGLE_CLOUD_PROJECT: "other-project" },
+      startServer,
+      startDenyPort,
+    });
+    expect(constructed[before]?.gemini).toEqual({ vertexProject: "coding-project" });
+    await started.close();
+    startServer.mockClear();
+    await expect(
+      startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: { CODING_VERTEX_PROJECT: "Bad/Project" },
+        startServer,
+        startDenyPort,
+      }),
+    ).rejects.toThrow("CODING_VERTEX_PROJECT");
+    expect(startServer).not.toHaveBeenCalled();
+  });
+
   it("binds the fixed worker-only endpoint and host header", async () => {
     const handle: CodingProxyServerHandle = { port: CODING_PROXY_PORT, close: async () => {} };
     const startServer = vi.fn(async () => handle);

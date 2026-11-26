@@ -1,11 +1,13 @@
 import type { PrismaClient } from "#prisma";
 import { loadCodingProxyLeaseConfig } from "../../config/coding-proxy-lease.js";
+import { loadCodingProxyGeminiConfig } from "../../config/coding-proxy-gemini.js";
 import { loadCodingTunnelConfig } from "../../config/coding-proxy-tunnel.js";
 import { createRemoteJWKSet } from "jose";
 import { loadDependencyCacheConfig } from "../../config/dependency-cache.js";
 import {
   createSimulatorModelFetch,
   createSimulatorRegistryFetch,
+  SIMULATOR_PLACEHOLDER_API_KEY,
   startupTestSimulators,
 } from "../../config/test-simulators.js";
 import { logger } from "../../core/logger.js";
@@ -344,6 +346,8 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
   const runStepsCeiling = loadRunStepsLevel(env);
   // Throws on an invalid CODING_TUNNEL_* combination, before anything listens. Undefined: no tunnel.
   const tunnelConfig = loadCodingTunnelConfig(env);
+  // Throws before anything listens when the Vertex project is not a project id.
+  const geminiConfig = loadCodingProxyGeminiConfig(env);
   // Throws (test_simulators_refused) on any refusal, before anything listens.
   const simulators = startupTestSimulators("coding-proxy", env);
   const buildPinnedFetch = options.createPinnedFetch ?? createPinnedProxyFetch;
@@ -458,6 +462,13 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     ledger,
     credentials: new EnvironmentCredentialResolver(env),
     audit,
+    // Under WARDBY_TEST_SIMULATORS the Vertex token is a placeholder the credential-free fetch drops.
+    gemini: simulators
+      ? {
+          vertexProject: geminiConfig.vertexProject ?? "wardby-sim",
+          vertexToken: async () => SIMULATOR_PLACEHOLDER_API_KEY,
+        }
+      : geminiConfig,
     leaseMs: leaseConfig.leaseMs,
     // WARDBY_TEST_SIMULATORS (test only; refused alongside the mock upstream): the scripted model,
     // with every credential header dropped.

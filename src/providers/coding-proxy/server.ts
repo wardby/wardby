@@ -16,6 +16,7 @@ import {
 import type { DependencyCacheService } from "./dependency-cache/service.js";
 import type { ProxyProtocol } from "./types.js";
 import { MCP_ROUTE_PATH } from "./mcp-route.js";
+import { matchGeminiRoute } from "./gemini-route.js";
 
 /** The worker's workflow-progress route (#582) and its body bound. */
 export const WORKFLOW_PROGRESS_PATH = "/wardby/workflow-progress";
@@ -180,6 +181,7 @@ function routeProtocol(method: string | undefined, url: string | undefined): Pro
   if (method !== "POST") return undefined;
   if (url === "/v1/responses") return "openai-responses";
   if (url === "/v1/messages" || url === "/v1/messages?beta=true") return "anthropic-messages";
+  if (matchGeminiRoute(url)?.ok) return "gemini-generate-content";
   return undefined;
 }
 
@@ -420,6 +422,13 @@ export async function startCodingProxyServer(
         response.writeHead(200, { "cache-control": "no-store" }).end();
         return;
       }
+      const geminiMatch = request.method === "POST" ? matchGeminiRoute(request.url) : undefined;
+      if (geminiMatch && !geminiMatch.ok) {
+        // Refused from the path alone (another method, or a query such as key=): the body is never read.
+        closeIfBodyUnread(request, response);
+        sendError(response, 404, geminiMatch.code);
+        return;
+      }
       const protocol = routeProtocol(request.method, request.url);
       if (!protocol) {
         sendError(response, 404, "not_found");
@@ -440,6 +449,7 @@ export async function startCodingProxyServer(
       // x-client-request-id is a tracing identifier that Codex may reuse across a multi-request tool loop.
       const requestKeyHeader = request.headers["idempotency-key"];
       const apiKeyHeader = request.headers["x-api-key"];
+      const googApiKeyHeader = request.headers["x-goog-api-key"];
       const anthropicBetaHeader = request.headers["anthropic-beta"];
       // Claude Code's sub-agent id (#582): read only for a workflow session's steps, never forwarded.
       const agentIdHeader = request.headers["x-claude-code-agent-id"];
@@ -449,20 +459,26 @@ export async function startCodingProxyServer(
       // both headers is refused on either route, whatever the Authorization holds.
       const authorization = request.headers.authorization;
       const capability =
-        protocol === "anthropic-messages"
-          ? authorization === undefined && typeof apiKeyHeader === "string"
-            ? apiKeyHeader
+        protocol === "gemini-generate-content"
+          ? // The Gemini CLI sends its API key (the run's capability) in x-goog-api-key, on both surfaces.
+            authorization === undefined && apiKeyHeader === undefined && typeof googApiKeyHeader === "string"
+            ? googApiKeyHeader
             : ""
-          : apiKeyHeader === undefined
-            ? bearer(authorization)
-            : authorization === undefined && typeof apiKeyHeader === "string"
+          : protocol === "anthropic-messages"
+            ? authorization === undefined && typeof apiKeyHeader === "string"
               ? apiKeyHeader
-              : "";
+              : ""
+            : apiKeyHeader === undefined
+              ? bearer(authorization)
+              : authorization === undefined && typeof apiKeyHeader === "string"
+                ? apiKeyHeader
+                : "";
       await proxy.execute(
         {
           bearer: capability,
           protocol,
           rawBody,
+          ...(geminiMatch?.ok ? { gemini: geminiMatch.route } : {}),
           requestKey: Array.isArray(requestKeyHeader) ? undefined : requestKeyHeader,
           anthropicBeta: Array.isArray(anthropicBetaHeader) ? "" : anthropicBetaHeader,
           ...(typeof agentIdHeader === "string" ? { agentId: agentIdHeader } : {}),
