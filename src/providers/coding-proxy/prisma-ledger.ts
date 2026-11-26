@@ -340,7 +340,11 @@ export class PrismaProxyLedger implements ProxyLedger {
         // row a live proxy settled (a broken stream) is not an orphan: neither is ever taken over.
         const reservedLeased = request.status === "reserved" && prior.leaseUntil !== null;
         const settledOrphan = request.status === "uncertain" && prior.orphanedAt !== null;
-        if (!retryable || !(reservedLeased || settledOrphan)) return { outcome: "duplicate", request } as const;
+        // A row the upstream rejected (released) was never billed: its identical retry is a new attempt.
+        const released = request.status === "released";
+        if (!retryable || !(reservedLeased || settledOrphan || released)) {
+          return { outcome: "duplicate", request } as const;
+        }
         if (reservedLeased && prior.leaseExpired !== true) {
           return { outcome: "in_progress", request, retryAfterMs: Number(prior.leaseRemainingMs ?? 0) } as const;
         }
@@ -373,7 +377,7 @@ export class PrismaProxyLedger implements ProxyLedger {
           await this.recomputeRunTotals(tx, request.sessionId, request.model);
         }
         attempt = request.attempt + 1;
-        tookOver = { requestId: request.id };
+        if (!released) tookOver = { requestId: request.id };
       }
 
       const totals = await tx.$queryRaw<

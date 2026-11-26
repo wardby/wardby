@@ -131,7 +131,9 @@ export class MemoryProxyLedger implements ProxyLedger {
       // (a broken stream) is not an orphan: neither is ever taken over.
       const reservedLeased = prior.status === "reserved" && Boolean(prior.leaseUntil);
       const settledOrphan = prior.status === "uncertain" && Boolean(prior.orphanedAt);
-      if (!retryable || !(reservedLeased || settledOrphan))
+      // A row the upstream rejected (released) was never billed: its identical retry is a new attempt.
+      const released = prior.status === "released";
+      if (!retryable || !(reservedLeased || settledOrphan || released))
         return { outcome: "duplicate", request: cloneRequest(prior) };
       if (reservedLeased) {
         const remainingMs = prior.leaseUntil!.getTime() - this.clock().getTime();
@@ -160,7 +162,7 @@ export class MemoryProxyLedger implements ProxyLedger {
         prior.costEstimated = true;
       }
       attempt = prior.attempt + 1;
-      tookOver = { requestId: prior.id };
+      if (!released) tookOver = { requestId: prior.id };
     }
 
     let spent = 0;

@@ -1194,7 +1194,8 @@ model CodingProxyRequest {
   /// before leases existed, which are never swept.
   leaseUntil         DateTime?
   /// Which try of this requestKey the row is: 1 for the first, then one more each time a retry
-  /// takes over an orphaned (lease expired) row. A duplicate lookup reads the highest.
+  /// takes over an orphaned (lease expired) row or repeats a released one. A duplicate lookup reads
+  /// the highest.
   attempt            Int                      @default(1)
   /// Set when the row was settled because its owner's lease ran out (the proxy died), never when a
   /// live proxy's stream broke. Only such a row, the newest attempt of its key, may be taken over by a retry.

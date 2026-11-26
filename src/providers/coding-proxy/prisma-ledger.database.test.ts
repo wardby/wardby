@@ -1313,7 +1313,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       expect((await attemptsOf("cap")).map((row) => row.attempt)).toEqual([1, 2]);
     });
 
-    it("keeps answering duplicate for completed, live-uncertain, released, unleased and different-body requests", async () => {
+    it("keeps answering duplicate for completed, live-uncertain, unleased and different-body requests", async () => {
       const completed = await reserved("dup-completed");
       await ledger.complete(completed.request.id, usage, 0.00001, 200);
       const uncertain = await reserved("dup-uncertain");
@@ -1328,7 +1328,6 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       for (const [key, row] of [
         ["dup-completed", completed],
         ["dup-uncertain", uncertain],
-        ["dup-released", released],
         ["dup-unleased", unleased],
       ] as const) {
         expect(await tryKey(key)).toMatchObject({ outcome: "duplicate", request: { id: row.request.id } });
@@ -1337,6 +1336,34 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         outcome: "duplicate",
         request: { id: other.request.id },
       });
+      // A released row is tried again only with the same body, and only when the caller sets a cap.
+      for (const extra of [{ requestFingerprint: "another body" }, { maxAttempts: undefined }]) {
+        expect(await tryKey("dup-released", extra)).toMatchObject({
+          outcome: "duplicate",
+          request: { id: released.request.id },
+        });
+      }
+      expect((await attemptsOf("dup-released")).map((row) => row.attempt)).toEqual([1]);
+    });
+
+    it("gives a released request's identical retry the next attempt, up to maxAttempts, and refuses a different body", async () => {
+      const first = await tryKey("released-retry");
+      expect(first).toMatchObject({ outcome: "reserved", request: { attempt: 1 } });
+      await ledger.release((first as { request: { id: string } }).request.id, 429);
+      expect(await tryKey("released-retry", { requestFingerprint: "other" })).toMatchObject({ outcome: "duplicate" });
+      const second = await tryKey("released-retry");
+      expect(second).toMatchObject({ outcome: "reserved", request: { attempt: 2 } });
+      expect("tookOver" in second && second.tookOver).toBeFalsy();
+      await ledger.release((second as { request: { id: string } }).request.id, 503);
+      const third = await tryKey("released-retry");
+      expect(third).toMatchObject({ outcome: "reserved", request: { attempt: 3 } });
+      await ledger.release((third as { request: { id: string } }).request.id, 503);
+      expect(await tryKey("released-retry")).toMatchObject({ outcome: "attempts_exhausted" });
+      expect((await attemptsOf("released-retry")).map((row) => [row.attempt, row.status])).toEqual([
+        [1, "released"],
+        [2, "released"],
+        [3, "released"],
+      ]);
     });
 
     it("counts the first attempt's estimate and the new attempt's hold against the budget", async () => {

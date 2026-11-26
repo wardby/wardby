@@ -486,7 +486,7 @@ describe("MemoryProxyLedger request attempts", () => {
     expect((await reserve("c", { maxAttempts: 3 })).outcome).toBe("orphaned");
   });
 
-  it("keeps answering duplicate for completed, live-uncertain, released, unleased and different-body requests", async () => {
+  it("keeps answering duplicate for completed, live-uncertain, unleased and different-body requests", async () => {
     const { ledger, reserve, advance } = await setup();
     const duplicateOf = async (id: string, extra: Parameters<typeof reserve>[1] = {}) => {
       const result = await reserve(`retry-${id}`, { requestKey: id, ...extra });
@@ -498,15 +498,34 @@ describe("MemoryProxyLedger request attempts", () => {
     await ledger.markUncertain("uncertain", 502, estimate);
     await reserve("released", { requestKey: "released" });
     await ledger.release("released", 500);
+    await reserve("released-body", { requestKey: "released-body" });
+    await ledger.release("released-body", 500);
     await reserve("unleased", { requestKey: "unleased" }, {});
     await reserve("body", { requestKey: "body" });
     advance(24 * 60 * 60_000 - 1);
 
     expect(await duplicateOf("completed")).toBe("completed");
     expect(await duplicateOf("uncertain")).toBe("uncertain");
-    expect(await duplicateOf("released")).toBe("released");
     expect(await duplicateOf("unleased")).toBe("unleased");
     expect(await duplicateOf("body", { requestFingerprint: "another body" })).toBe("body");
+    // A released row is tried again only with the same body, and only when the caller sets a cap.
+    expect(await duplicateOf("released-body", { requestFingerprint: "another body" })).toBe("released-body");
+    expect(await duplicateOf("released", { maxAttempts: undefined })).toBe("released");
+    expect(await reserve("retry-released", { requestKey: "released" })).toMatchObject({
+      outcome: "reserved",
+      request: { id: "retry-released", attempt: 2 },
+    });
+  });
+
+  it("holds nothing for a released attempt: its retry fits a budget with room for one hold", async () => {
+    // Holds of 0.2 against 0.3: a second live hold would not fit.
+    const { ledger, reserve } = await setup(0.3);
+    await reserve("a");
+    expect((await reserve("other", { requestKey: "other" })).outcome).toBe("budget_exhausted");
+    await ledger.release("a", 429);
+    const retry = await reserve("b");
+    expect(retry).toMatchObject({ outcome: "reserved", request: { id: "b", attempt: 2 } });
+    expect(await ledger.getRequest("a")).toMatchObject({ status: "released", attempt: 1 });
   });
 
   it("never takes a row over when the caller sets no attempt cap", async () => {
@@ -670,5 +689,46 @@ describe("MemoryProxyLedger pinned tools", () => {
     expect(session?.mcpTools).toEqual([
       { kind: "native", exposedName: "code_search", toolId: "tool-1", toolName: "code_search", definition },
     ]);
+  });
+});
+
+describe("retry after an upstream rejection", () => {
+  it("gives a released request's identical retry the next attempt, up to maxAttempts, and refuses a different body", async () => {
+    const now = new Date("2026-11-26T12:00:00Z");
+    const ledger = new MemoryProxyLedger({ now: () => now });
+    await ledger.createSession({
+      id: "s",
+      runId: "r",
+      capabilityHash: "c",
+      credentialRef: "env:GEMINI_API_KEY",
+      protocol: "gemini-generate-content",
+      allowedModels: ["m"],
+      deadlineAt: new Date(now.getTime() + 60_000),
+      budgetUsd: 10,
+      registryTokenHash: "g",
+    });
+    const reserve = (id: string, fingerprint = "f") =>
+      ledger.reserve({
+        id,
+        sessionId: "s",
+        requestKey: "body:f",
+        requestFingerprint: fingerprint,
+        model: "m",
+        reservationUsd: 0.01,
+        pricing: { version: "v", encoding: "o200k_base", inputPerMTok: 1, outputPerMTok: 1 },
+        now,
+        maxAttempts: 3,
+      });
+    const first = await reserve("a");
+    expect(first).toMatchObject({ outcome: "reserved", request: { attempt: 1 } });
+    await ledger.release("a", 429);
+    expect(await reserve("x", "other")).toMatchObject({ outcome: "duplicate" });
+    const second = await reserve("b");
+    expect(second).toMatchObject({ outcome: "reserved", request: { attempt: 2 } });
+    expect("tookOver" in second && second.tookOver).toBeFalsy();
+    await ledger.release("b", 503);
+    expect(await reserve("c")).toMatchObject({ outcome: "reserved", request: { attempt: 3 } });
+    await ledger.release("c", 503);
+    expect(await reserve("d")).toMatchObject({ outcome: "attempts_exhausted" });
   });
 });

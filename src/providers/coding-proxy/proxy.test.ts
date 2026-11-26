@@ -586,6 +586,39 @@ describe("model terms from the session", () => {
     return JSON.stringify(body);
   };
 
+  it("sends a Claude Code body again after the upstream rejected it (no idempotency header)", async () => {
+    let calls = 0;
+    const response = JSON.parse(await fixture("anthropic-message-response.json"));
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () =>
+        ++calls === 1
+          ? Response.json({ type: "error", error: { type: "overloaded_error" } }, { status: 529 })
+          : Response.json(response),
+    });
+    const raw = await anthropicBody("claude-sonnet-5");
+    const send = async () => {
+      const sink = new TestSink();
+      await h.proxy.execute(
+        {
+          bearer: h.session.capability,
+          protocol: "anthropic-messages",
+          rawBody: raw,
+          anthropicBeta: CLAUDE_CODE_ANTHROPIC_BETAS.join(","),
+        },
+        sink,
+      );
+      return sink;
+    };
+    expect((await send()).status).toBe(529);
+    expect((await send()).status).toBe(200);
+    expect(h.fetch).toHaveBeenCalledTimes(2);
+    expect(h.events.some((e) => e.type === "request.taken_over")).toBe(false);
+    // Once it has completed, the same body is never sent again.
+    await expect(send()).rejects.toMatchObject({ status: 409, code: "duplicate_completed" });
+    expect(h.fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("prices from the session's stored entry and tags requests with its version", async () => {
     const h = await harness({
       protocol: "anthropic-messages",

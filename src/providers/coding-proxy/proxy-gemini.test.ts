@@ -9,6 +9,7 @@ import {
   FAKE_GEMINI_KEY,
   FAKE_VERTEX_TOKEN,
   gemini,
+  okStream,
   sse,
   STUDIO,
   TestSink,
@@ -341,5 +342,25 @@ describe("relaying Gemini calls", () => {
         expect(text).not.toContain(secret);
       }
     }
+  });
+});
+
+describe("retries", () => {
+  it("sends a retried body again after Google rejected it, without an idempotency header", async () => {
+    let calls = 0;
+    const h = await gemini({
+      fetch: async () =>
+        ++calls === 1
+          ? Response.json({ error: { code: 429, status: "RESOURCE_EXHAUSTED" } }, { status: 429 })
+          : okStream(),
+    });
+    expect((await h.execute(body())).status).toBe(429);
+    expect((await h.execute(body())).status).toBe(200);
+    expect(h.fetch).toHaveBeenCalledTimes(2);
+    await expect(h.execute(body())).rejects.toMatchObject({ status: 409, code: "duplicate_completed" });
+    // A new attempt of a released row is not a takeover: nothing was orphaned.
+    expect(h.events.some((e) => e.type === "request.taken_over")).toBe(false);
+    const attempts = h.events.filter((e) => e.type === "request.reserved").map((e) => e.requestId!);
+    expect(await Promise.all(attempts.map(async (id) => (await h.ledger.getRequest(id))?.attempt))).toEqual([1, 2]);
   });
 });

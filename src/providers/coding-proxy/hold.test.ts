@@ -165,3 +165,31 @@ describe("conversationKey", () => {
     expect(conversationKey("openai-responses", { input: [] })).toBeNull();
   });
 });
+
+describe("Gemini conversation keys", () => {
+  const main = (turns: number) => ({
+    systemInstruction: { parts: [{ text: "You are the main agent." }] },
+    contents: Array.from({ length: turns }, (_, i) => ({
+      role: i % 2 ? "model" : "user",
+      parts: [{ text: `t${i}` }],
+    })),
+  });
+  it("keeps one key as the main conversation grows", () => {
+    expect(conversationKey("gemini-generate-content", main(1))).not.toBeNull();
+    expect(conversationKey("gemini-generate-content", main(1))).toBe(
+      conversationKey("gemini-generate-content", main(5)),
+    );
+  });
+  it("gives a sub-agent and a helper call their own keys", () => {
+    const sub = {
+      systemInstruction: { parts: [{ text: "You are a codebase investigator." }] },
+      contents: [{ role: "user", parts: [{ text: "find X" }] }],
+    };
+    const helper = { contents: main(5).contents };
+    const keys = new Set([main(3), sub, helper].map((b) => conversationKey("gemini-generate-content", b)));
+    expect(keys.size).toBe(3);
+  });
+  it("has no key without contents", () => {
+    expect(conversationKey("gemini-generate-content", { contents: [] })).toBeNull();
+  });
+});

@@ -50,10 +50,18 @@ function withoutCacheControl(value: unknown): unknown {
  * What identifies one conversation within a run (Claude Code runs several: the main one and its
  * sub-agents). Anthropic: the first message without cache markers (the system prompt carries a
  * per-version billing line). OpenAI: prompt_cache_key, else instructions + the first input item.
+ * Gemini: systemInstruction + the first content, so the Gemini CLI's sub-agents and helper calls
+ * each get their own conversation.
  */
 export function conversationKey(protocol: ProxyProtocol, body: Record<string, unknown>): string | null {
   let basis: unknown;
-  if (protocol === "anthropic-messages") {
+  if (protocol === "gemini-generate-content") {
+    // The system prompt plus the first message: a sub-agent (its own system prompt and task) and a helper
+    // call (no or another system prompt) each get their own conversation, so their holds never mix.
+    const contents = body.contents;
+    if (!Array.isArray(contents) || contents.length === 0) return null;
+    basis = ["gemini", body.systemInstruction ?? null, contents[0]];
+  } else if (protocol === "anthropic-messages") {
     const messages = body.messages;
     if (!Array.isArray(messages) || messages.length === 0) return null;
     // Claude Code's first message can carry the date, so a conversation crossing midnight starts a
