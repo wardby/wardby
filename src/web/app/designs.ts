@@ -738,6 +738,12 @@ function mount(
     boardNames,
     (body: string): string => comments.preview(body),
     afterMeasuring,
+    session
+      ? {
+          idOf: (el) => session.idOfElement(el),
+          elementOf: (liveId) => session.elementOf(liveId)?.getEl() ?? null,
+        }
+      : null,
   );
   surface = pins;
   const comments: CommentsUI = new CommentsUI(

@@ -16,6 +16,7 @@ import {
   anchorTarget,
   locateElement,
   type ElementAnchor,
+  type ElementLike,
 } from "../../core/documents/element-anchors.js";
 import type { Anchor, ThreadView } from "./api.js";
 import type { BoardsEditor } from "./boards-editor.js";
@@ -85,6 +86,11 @@ export class DesignSurface implements AnchorSurface {
     private readonly preview: (body: string) => string = (body) => previewText(body),
     /** Runs a board switch once no fidelity pass is running (the pass switches boards to measure them). */
     private readonly whenIdle: (run: () => void) => void = (run) => run(),
+    /** While editing live: elements by live id, and back (pins follow their element by its live id). */
+    private readonly live: {
+      idOf(el: Element): string | null;
+      elementOf(liveId: string): Element | null;
+    } | null = null,
   ) {
     this.marks = h("div", { class: "pin-marks" });
     this.hint = h("div", { class: "pin-mode-hint", hidden: true, role: "status" }, PIN_HINT);
@@ -198,11 +204,23 @@ export class DesignSurface implements AnchorSurface {
     this.pick(el, 0.5, 0.5);
   }
 
+  /** Finds a pin's element by its live id (only while editing live). */
+  private readonly byLiveId = (liveId: string): ElementLike | null =>
+    (this.live?.elementOf(liveId) as unknown as ElementLike | null) ?? null;
+
   private pick(el: Element, dx: number, dy: number): void {
     const root = this.boards.root();
     if (!root) return;
     try {
-      this.picked = anchorForElement(this.boards.currentBoard(), el, dx, dy, root, this.boards.storedIds());
+      this.picked = anchorForElement(
+        this.boards.currentBoard(),
+        el,
+        dx,
+        dy,
+        root,
+        this.boards.storedIds(),
+        this.live ? (x) => this.live!.idOf(x as unknown as Element) : undefined,
+      );
     } catch {
       return; // not under the board's root
     }
@@ -255,7 +273,7 @@ export class DesignSurface implements AnchorSurface {
     // element cannot be looked for: no claim that it is gone.
     const root = this.boards.root();
     if (this.suspended || !root) return true;
-    return locateElement(root, t.anchor) !== null;
+    return locateElement(root, t.anchor, this.byLiveId) !== null;
   }
 
   isMark(target: Element): boolean {
@@ -281,7 +299,7 @@ export class DesignSurface implements AnchorSurface {
       if (a.board !== this.boards.currentBoard()) this.boards.selectBoard(a.board);
       const go = () => {
         const root = this.boards.root();
-        const el = root ? (locateElement(root, a) as unknown as HTMLElement | null) : null;
+        const el = root ? (locateElement(root, a, this.byLiveId) as unknown as HTMLElement | null) : null;
         el?.scrollIntoView({ block: "center" });
       };
       const win = this.boards.canvasWindow();
@@ -430,7 +448,7 @@ export class DesignSurface implements AnchorSurface {
     if (this.draftAnchor && this.draftAnchor.board === board) items.push({ id: "draft", anchor: this.draftAnchor });
     const lost: string[] = [];
     for (const { id, anchor, t } of items) {
-      const el = locateElement(root, anchor) as unknown as Element | null;
+      const el = locateElement(root, anchor, this.byLiveId) as unknown as Element | null;
       if (!el) {
         if (t?.status === "open") lost.push(id);
         continue;

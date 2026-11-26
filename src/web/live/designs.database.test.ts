@@ -9,6 +9,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { JSDOM } from "jsdom";
 import WebSocket from "ws";
 import * as Y from "yjs";
 import type { Principal } from "#prisma";
@@ -19,6 +20,7 @@ import { writeBoardFile } from "../../core/documents/boards/live/writer.js";
 import type { DocumentEvent, DocumentEventBus } from "../../core/documents/events.js";
 import { loadVersionFiles } from "../../core/documents/files.js";
 import { issueLiveTicket } from "../../core/documents/live/store.js";
+import { createThread } from "../../core/documents/comments.js";
 import { createDocument, publishVersion } from "../../core/documents/service.js";
 import { attachSecret, createSecret } from "../../core/secrets.js";
 import { createWebSession } from "../session.js";
@@ -467,5 +469,76 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
     expect(names()).toContain("Our menu");
     expect(names()).toContain("Events");
     a.close();
+  });
+
+  it("a pin follows its element by live id through an agent's move, and is outdated when its element is deleted", async () => {
+    const id = await design(ann, [bo]);
+    const a = await client(ann, id);
+    a.open("home");
+    expect(await a.roleFor("home")).toBe("build");
+    buildBoard(a.ydoc, "home", coffee("boards/home.html"));
+    await savedWhen(id, (f) => f["boards/home.html"] !== normalizeDesign(coffeeFiles()).files["boards/home.html"]);
+    // Pins on the first card's heading and on the third section's heading, as the page makes them while live.
+    const nodes = boardMaps(a.ydoc, "home").nodes;
+    const h = (tag: string, words: string) =>
+      [...nodes.entries()].find(([, n]) => n.get(F.tag) === tag && text(n.get(F.html)).includes(words))!;
+    const [cardH3] = h("h3", "");
+    const [nookH2] = h("h2", "This week");
+    const pin = async (liveId: string, tag: string) =>
+      (
+        await createThread(db, cipher, {
+          documentId: id,
+          viewer: { kind: "principal", principalId: ann.id },
+          anchor: { type: "element", board: "home", liveId, path: "body", tag, words: "", dx: 0.5, dy: 0.5 },
+          body: "Look here",
+        })
+      ).threadId;
+    const onCard = await pin(cardH3, "h3");
+    const onNook = await pin(nookH2, "h2");
+    // The agent moves the third section above the cards.
+    await publishAsAgent(id, (files) => {
+      const dom = new JSDOM(files["boards/home.html"]);
+      const secs = dom.window.document.querySelectorAll("main > section");
+      secs[1].before(secs[2]);
+      files["boards/home.html"] = dom.serialize();
+    });
+    const anchorOf = async (t: string) =>
+      (await db.commentThread.findUniqueOrThrow({ where: { id: t }, select: { anchor: true, status: true } })) as {
+        anchor: { path: string; words: string; liveId?: string };
+        status: string;
+      };
+    let nook = await anchorOf(onNook);
+    for (let i = 0; i < 60 && !nook.anchor.words.startsWith("This week"); i++) {
+      await sleep(100);
+      nook = await anchorOf(onNook);
+    }
+    expect(nook.status).toBe("open");
+    expect(nook.anchor.liveId).toBe(nookH2);
+    expect(nook.anchor.words).toMatch(/^This week/);
+    expect(nook.anchor.path).toContain("section:nth-of-type(2)");
+    // Bo deletes the first card in the page: its pin is outdated at the next checkpoint.
+    const b = await client(bo, id);
+    for (let i = 0; i < 40 && !boardMaps(b.ydoc, "home").nodes.has(cardH3); i++) await sleep(50);
+    const bn = boardMaps(b.ydoc, "home").nodes;
+    const card = [...bn.entries()].find(([, n]) =>
+      (n.get(F.children) as Y.Array<string> | undefined)?.toArray().includes(cardH3),
+    )![0];
+    const parent = [...bn.values()].find((n) =>
+      (n.get(F.children) as Y.Array<string> | undefined)?.toArray().includes(card),
+    )!;
+    b.ydoc.transact(() => {
+      const ch = parent.get(F.children) as Y.Array<string>;
+      ch.delete(ch.toArray().indexOf(card), 1);
+      bn.delete(card);
+      bn.delete(cardH3);
+    });
+    let gone = await anchorOf(onCard);
+    for (let i = 0; i < 80 && gone.status !== "outdated"; i++) {
+      await sleep(100);
+      gone = await anchorOf(onCard);
+    }
+    expect(gone.status).toBe("outdated");
+    a.close();
+    b.close();
   });
 });

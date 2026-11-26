@@ -101,6 +101,24 @@ describe("element anchors", () => {
     expect(() => elementPath(doc.querySelector("p")!, doc.getElementById("b")!)).toThrow("element_not_under_root");
   });
 
+  it("while live, remembers the live id and finds the element by it first (wherever it moved)", () => {
+    const doc = home();
+    const h1 = doc.querySelector("h1")!;
+    const ids = new Map([[h1, "ib7"]]);
+    const a = anchorForElement("home", h1, 0.5, 0.5, doc.body, undefined, (el) => ids.get(el as typeof h1) ?? null);
+    expect(a.liveId).toBe("ib7");
+    expect(parseElementAnchor(a)).toEqual(a);
+    // The text changed and the element moved: the path and words no longer find it; the live id does.
+    h1.textContent = "Entirely new words here";
+    doc.body.append(h1);
+    expect(locateElement(doc.body, a)).toBeNull();
+    expect(locateElement(doc.body, a, (id) => (id === "ib7" ? h1 : null))).toBe(h1);
+    // Without a live copy (or an unknown id) the usual anchor decides.
+    const b = anchorForElement("home", doc.querySelectorAll("nav a")[1], 0, 0, doc.body);
+    expect(b.liveId).toBeUndefined();
+    expect(locateElement(doc.body, { ...b, liveId: "nope" }, () => null)).toBe(doc.querySelectorAll("nav a")[1]);
+  });
+
   it("clamps fractions", () => {
     expect([clamp01(-1), clamp01(2), clamp01(Number.NaN), clamp01(0.3)]).toEqual([0, 1, 0, 0.3]);
   });

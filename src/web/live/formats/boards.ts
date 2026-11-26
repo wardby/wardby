@@ -10,6 +10,7 @@
  * to wait (`role: "wait"`) and then read it from the live copy; if the builder leaves before building, the next
  * waiting page is told to build. A board that already has a live copy answers `role: "join"`.
  */
+import { JSDOM, VirtualConsole, type DomElement } from "jsdom";
 import * as Y from "yjs";
 import { checkCss } from "../../../core/documents/boards/css-check.js";
 import {
@@ -31,6 +32,15 @@ import {
 import { applyBoardMerge, boardOps, type MergeOp } from "../../../core/documents/boards/live/merge.js";
 import { writeBoard, writeBoardFile, writeElement } from "../../../core/documents/boards/live/writer.js";
 import { loadVersionFiles } from "../../../core/documents/files.js";
+import {
+  anchorTarget,
+  elementPath,
+  elementWords,
+  parseElementAnchor,
+  type ElementAnchor,
+} from "../../../core/documents/element-anchors.js";
+import { notifyDocumentChange } from "../../../core/documents/events.js";
+import { mapBase } from "../../../core/documents/boards/live/version-map.js";
 import type { WebDeps } from "../../context.js";
 import { SERVER_ORIGIN, type LiveFormat, type LiveVersion } from "./types.js";
 
@@ -413,8 +423,69 @@ export function boardsFormat(
       return checkEdit(scratch, touched, secretValues);
     },
 
-    async refreshAnchors() {
-      // Pins follow live element ids (part 4).
+    /**
+     * Pins follow their element by its live id: the stored anchor's path and words are brought up to date from the
+     * live copy (so a page that is not live, or a version, still finds the element), and a pin whose element was
+     * deleted is outdated. A pin without a live id keeps today's anchor (the version's own check decides).
+     */
+    async refreshAnchors(documentId, doc) {
+      const threads = await db.commentThread.findMany({
+        where: { documentId, status: { in: ["open", "outdated"] } },
+        select: { id: true, status: true, anchor: true },
+      });
+      const boards = new Map<string, { body: DomElement; byId: Map<string, DomElement>; close: () => void } | null>();
+      const boardOf = (id: string) => {
+        if (!boards.has(id)) {
+          if (!isBuilt(doc, id)) boards.set(id, null);
+          else {
+            const written = writeBoard(boardMaps(doc, id));
+            const dom = new JSDOM(`<body>${written.body}</body>`, { virtualConsole: new VirtualConsole() });
+            const body = dom.window.document.body;
+            const byId = new Map<string, DomElement>();
+            for (const [node, liveId] of mapBase(body, written.spots))
+              if (node.nodeType === 1) byId.set(liveId, node as DomElement);
+            boards.set(id, { body, byId, close: () => dom.window.close() });
+          }
+        }
+        return boards.get(id)!;
+      };
+      let changed = 0;
+      try {
+        for (const th of threads) {
+          let a: ElementAnchor;
+          try {
+            a = parseElementAnchor(th.anchor);
+          } catch {
+            continue;
+          }
+          if (!a.liveId) continue;
+          const board = boardOf(a.board);
+          if (!board) continue;
+          if (!boardMaps(doc, a.board).nodes.has(a.liveId)) {
+            if (th.status === "open") {
+              await db.commentThread.update({ where: { id: th.id }, data: { status: "outdated" } });
+              changed++;
+            }
+            continue;
+          }
+          // An element inside a text box has no spot of its own: its anchor stays as it is.
+          const found = board.byId.get(a.liveId);
+          if (!found) continue;
+          const el = anchorTarget(found) as DomElement;
+          const next: ElementAnchor = {
+            ...a,
+            path: elementPath(el, board.body),
+            tag: el.localName,
+            words: elementWords(el),
+          };
+          if (th.status === "open" && JSON.stringify(next) === JSON.stringify(a)) continue;
+          await db.commentThread.update({ where: { id: th.id }, data: { anchor: next, status: "open" } });
+          changed++;
+        }
+      } finally {
+        for (const b of boards.values()) b?.close();
+      }
+      if (changed > 0) await notifyDocumentChange(db, documentId, "thread");
     },
 
     message(documentId, doc, from, payload) {

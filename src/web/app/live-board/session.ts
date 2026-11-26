@@ -37,6 +37,8 @@ export interface DesignSession {
   onChange(cb: () => void): void;
   /** The element a peer has selected, in this page's canvas (for drawing their outline). */
   elementOf(id: string): Component | undefined;
+  /** The live id of a canvas element (a comment pin remembers it). */
+  idOfElement(el: Element): string | null;
   destroy(): void;
 }
 
@@ -192,6 +194,7 @@ export function startDesignSession(o: {
 
     onChange: (cb) => void listeners.push(cb),
     elementOf: (id) => binding?.componentById(id),
+    idOfElement: (el) => binding?.idOfElement(el) ?? null,
 
     destroy() {
       waiting?.();

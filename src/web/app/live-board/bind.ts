@@ -41,6 +41,8 @@ export interface BoardBinding {
   /** The text box being typed in, if any. */
   editingId(): string | null;
   componentById(id: string): Component | undefined;
+  /** The live id of the element a canvas DOM element shows (for a comment pin), or null. */
+  idOfElement(el: Element): string | null;
   undo(): void;
   redo(): void;
   canUndo(): boolean;
@@ -319,6 +321,11 @@ export function bindBoard(
     componentById: (id) => {
       reindex();
       return index.get(id);
+    },
+    idOfElement: (el) => {
+      reindex();
+      for (const [id, c] of index) if (c.getEl() === el) return id;
+      return null;
     },
     undo: () => void undoManager.undo(),
     redo: () => void undoManager.redo(),
