@@ -44,4 +44,27 @@ describe("GeminiLlmProvider", () => {
       void _;
     expect(onResponseStarted).toHaveBeenCalledTimes(1);
   });
+
+  it("does not call onResponseStarted on a non-200 response: nothing was generated, nothing to bill", async () => {
+    const p = make(
+      async () =>
+        new Response(JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "slow down" } }), {
+          status: 429,
+        }),
+    );
+    const onResponseStarted = vi.fn();
+    await expect(
+      (async () => {
+        for await (const _ of p.stream(
+          { model: entry.modelId, messages: [{ role: "user", content: "x" }] },
+          undefined,
+          {
+            onResponseStarted,
+          },
+        ))
+          void _;
+      })(),
+    ).rejects.toThrow(/Gemini API error: HTTP 429 RESOURCE_EXHAUSTED/);
+    expect(onResponseStarted).toHaveBeenCalledTimes(0);
+  });
 });
