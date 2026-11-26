@@ -64,20 +64,52 @@ describe("configured coding proxy runtime", () => {
     expect(startServer).not.toHaveBeenCalled();
   });
 
+  it("starts with an invalid VERTEX_PROJECT fallback, warning once, and leaves the Vertex project unset", async () => {
+    const startServer = vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} }));
+    const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const before = constructed.length;
+    try {
+      const started = await startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: { VERTEX_PROJECT: "Bad/SecretValue" },
+        startServer,
+        startDenyPort,
+      });
+      expect(constructed[before]?.gemini).toEqual({});
+      expect(startServer).toHaveBeenCalled();
+      const vertexWarnings = warn.mock.calls.filter((call) => JSON.stringify(call).includes("VERTEX_PROJECT"));
+      expect(vertexWarnings).toHaveLength(1);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("SecretValue");
+      await started.close();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("under the simulator switch the Gemini option has project wardby-sim and a placeholder token; off, the real config", async () => {
     const startServer = vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} }));
     const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
     const before = constructed.length;
-    const on = await startConfiguredCodingProxy({
-      db: {} as PrismaClient,
-      env: { WARDBY_TEST_SIMULATORS: "1", WARDBY_SIM_BASE_URL: "http://wardby-sim.wardby-sim.svc.cluster.local:8080" },
-      startServer,
-      startDenyPort,
-    });
-    const simulated = constructed[before]?.gemini;
-    expect(simulated?.vertexProject).toBe("wardby-sim");
-    expect(await simulated?.vertexToken?.()).toBe("sim-placeholder-not-a-credential");
-    await on.close();
+    // The switch logs its test_simulators.enabled warning; keep it out of the test output.
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    try {
+      const on = await startConfiguredCodingProxy({
+        db: {} as PrismaClient,
+        env: {
+          WARDBY_TEST_SIMULATORS: "1",
+          WARDBY_SIM_BASE_URL: "http://wardby-sim.wardby-sim.svc.cluster.local:8080",
+        },
+        startServer,
+        startDenyPort,
+      });
+      const simulated = constructed[before]?.gemini;
+      expect(simulated?.vertexProject).toBe("wardby-sim");
+      expect(await simulated?.vertexToken?.()).toBe("sim-placeholder-not-a-credential");
+      await on.close();
+    } finally {
+      warn.mockRestore();
+    }
     const off = await startConfiguredCodingProxy({
       db: {} as PrismaClient,
       env: { CODING_VERTEX_PROJECT: "real-project" },
