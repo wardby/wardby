@@ -21,7 +21,7 @@ import { resetGeminiAgentState } from "./agent-state.js";
 import { GEMINI_CONTEXT_FILE_NAMES, geminiCliModel, type GeminiBackend } from "./cli.js";
 import { geminiCliEnvironment } from "./environment.js";
 import { geminiRunEnd, jsonOutputResult, type GeminiRunEnd } from "./failure.js";
-import { killLeftoverProcesses } from "./leftovers.js";
+import { killLeftoverProcesses, type SweepResult } from "./leftovers.js";
 import { geminiOutputJsonSchema, geminiRepairPrompt, geminiTaskPrompt } from "./output.js";
 import { spawnGeminiCli, type GeminiCliDone, type GeminiCliSpawner } from "./process.js";
 import {
@@ -49,7 +49,7 @@ export interface GeminiRunOptions extends RunFrameOptions {
   /** Tests only: where the system settings are and who must own them. */
   systemCheck?: { root?: string; expectedUid?: number };
   /** Tests only: replaces killLeftoverProcesses (which signals every other process in the pid namespace). */
-  sweepProcesses?: () => Promise<void>;
+  sweepProcesses?: () => Promise<SweepResult>;
 }
 
 const VERSION_TIMEOUT_MS = 30_000;
@@ -61,7 +61,12 @@ export const GEMINI_DEADLINE_MARGIN_MS = 30_000;
 /** setTimeout's longest delay; a deadline further away than this needs no timer. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
-/** The fixed part of every CLI command line (spec §3): the run model, never `auto`; yolo; the repo never trusted. */
+/**
+ * The fixed part of every CLI command line (spec §3): the run model, never `auto`; yolo; and
+ * `--skip-trust`, which trusts the workspace for this session only (headless mode needs a trusted
+ * folder) without writing it to trustedFolders.json. Trust does not relax the lock-down: the
+ * system settings and policy still outrank anything in the workspace.
+ */
 export function geminiBaseArgs(googleModel: string): string[] {
   return ["-m", googleModel, "--approval-mode", "yolo", "--skip-trust"];
 }
@@ -117,7 +122,7 @@ async function verifySystem(options: GeminiRunOptions): Promise<void> {
  */
 export async function runGeminiCodingWorker(options: GeminiRunOptions): Promise<CodingWorkerOutput> {
   const spawnCli = options.spawnCli ?? spawnGeminiCli();
-  const sweep = options.sweepProcesses ?? (() => killLeftoverProcesses());
+  const sweepProcesses = options.sweepProcesses ?? (() => killLeftoverProcesses());
   const home = options.home ?? WORKER_HOME;
   const log = options.operatorLog ?? ((event) => process.stderr.write(`${JSON.stringify(event)}\n`));
   // Header mode puts the capability in a variable every shell can read: only the gateway's placeholder may go there.
@@ -151,6 +156,14 @@ export async function runGeminiCodingWorker(options: GeminiRunOptions): Promise<
       : {}),
   };
   let warnedSubAgents = false;
+  let warnedSweep = false;
+  /** Leftover processes stopped; outside the worker image's own pid namespace the sweep is skipped, and said once. */
+  const sweep = async (): Promise<void> => {
+    if ((await sweepProcesses()) === "skipped" && !warnedSweep) {
+      warnedSweep = true;
+      log({ warning: "gemini_process_sweep_skipped" });
+    }
+  };
   /**
    * Before each CLI start: nothing the agent left running, nothing it wrote for the CLI to load
    * (user policies outrank the per-run exclusions), the run's settings rewritten whole from the

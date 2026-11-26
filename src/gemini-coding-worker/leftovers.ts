@@ -1,11 +1,13 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-/** After SIGTERM, the wait before SIGKILL. */
-export const LEFTOVER_GRACE_MS = 2_000;
-/** SIGKILL rounds after the grace: a process forked while the sweep ran is caught by the next one. */
-const KILL_ROUNDS = 3;
-const KILL_ROUND_PAUSE_MS = 50;
+/** The worker image sets this to "1": the driver runs in the image's own pid namespace (Dockerfile ENV). */
+export const WORKER_PID_NAMESPACE_ENV = "WARDBY_WORKER_PID_NAMESPACE";
+/** Stop-then-kill rounds: a process forked while a round ran is caught by the next one. */
+const SWEEP_ROUNDS = 5;
+const ROUND_PAUSE_MS = 50;
+
+export type SweepResult = "swept" | "skipped";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -55,40 +57,59 @@ async function targets(procRoot: string, keep: Set<number>): Promise<number[]> {
   return found;
 }
 
-function signal(kill: (pid: number, signal: NodeJS.Signals) => void, pid: number, name: NodeJS.Signals): void {
+/** Sends a signal; false when the process is not ours to signal (another uid). Gone already is fine. */
+function signal(kill: (pid: number, signal: NodeJS.Signals) => void, pid: number, name: NodeJS.Signals): boolean {
   try {
     kill(pid, name);
-  } catch {
-    // Gone already, or not ours to signal (another uid).
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return false;
   }
+  return true;
 }
 
 /**
  * Stops every process left in the worker's pid namespace except the driver and its ancestors. The
  * CLI's shell commands run in process groups of their own, so ending the CLI's group (process.ts)
  * does not reach a command the agent left running in the background; one still writing to the
- * workspace would race the diff, or change the CLI's state before the next turn. Runs after every
- * CLI run. Only on Linux (no /proc elsewhere: a no-op). SIGTERM, a short grace, then SIGKILL rounds.
+ * workspace would race the diff, or change the CLI's state before the next turn. Runs before and
+ * after every CLI run.
+ *
+ * Only inside the worker image's own pid namespace: the image sets WORKER_PID_NAMESPACE_ENV, and
+ * PID 1 (the container's init) must be one of the driver's ancestors. Anywhere else (a developer
+ * machine, a namespace shared with other processes, no /proc) it signals nothing and returns
+ * "skipped".
+ *
+ * Each round SIGSTOPs every target first (a stopped process cannot fork), then SIGKILLs them, then
+ * looks again. A process that is still there after the last round throws coding_stream_failed:
+ * the run never goes on with the agent's processes alive. Processes it may not signal (another
+ * uid) are not the agent's and are left alone.
  */
 export async function killLeftoverProcesses(
   options: {
     procRoot?: string;
     self?: number;
-    graceMs?: number;
+    env?: NodeJS.ProcessEnv;
+    pauseMs?: number;
     kill?: (pid: number, signal: NodeJS.Signals) => void;
   } = {},
-): Promise<void> {
+): Promise<SweepResult> {
+  const env = options.env ?? process.env;
+  if (env[WORKER_PID_NAMESPACE_ENV] !== "1") return "skipped";
   const procRoot = options.procRoot ?? "/proc";
   const kill = options.kill ?? ((pid, name) => process.kill(pid, name));
+  const pause = options.pauseMs ?? ROUND_PAUSE_MS;
+  if ((await pids(procRoot)).length === 0) return "skipped";
   const keep = await protectedPids(procRoot, options.self ?? process.pid);
-  const first = await targets(procRoot, keep);
-  if (first.length === 0) return;
-  for (const pid of first) signal(kill, pid, "SIGTERM");
-  await sleep(options.graceMs ?? LEFTOVER_GRACE_MS);
-  for (let round = 0; round < KILL_ROUNDS; round += 1) {
-    const left = await targets(procRoot, keep);
-    if (left.length === 0) return;
-    for (const pid of left) signal(kill, pid, "SIGKILL");
-    await sleep(KILL_ROUND_PAUSE_MS);
+  if (!keep.has(1)) return "skipped";
+  const notOurs = new Set<number>();
+  const left = async () => (await targets(procRoot, keep)).filter((pid) => !notOurs.has(pid));
+  for (let round = 0; round < SWEEP_ROUNDS; round += 1) {
+    const found = await left();
+    if (found.length === 0) return "swept";
+    for (const pid of found) if (!signal(kill, pid, "SIGSTOP")) notOurs.add(pid);
+    for (const pid of found) if (!notOurs.has(pid)) signal(kill, pid, "SIGKILL");
+    await sleep(pause);
   }
+  if ((await left()).length > 0) throw new Error("coding_stream_failed");
+  return "swept";
 }

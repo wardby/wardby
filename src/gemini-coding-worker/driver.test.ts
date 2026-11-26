@@ -91,7 +91,7 @@ async function options(extra: Partial<GeminiRunOptions> = {}): Promise<GeminiRun
     runSettings: { subAgents: true, webTools: "off", commandTimeoutMs: 600_000 },
     systemCheck: { root: system, expectedUid: process.getuid!() },
     // Never the real sweep in a test: it would signal this machine's processes.
-    sweepProcesses: async () => {},
+    sweepProcesses: async () => "swept" as const,
     operatorLog: () => {},
     ...extra,
   };
@@ -216,10 +216,46 @@ describe("runGeminiCodingWorker", () => {
       if (event.type === "completed") order.push("completed");
     });
     await runGeminiCodingWorker(
-      await options({ spawnCli: cli.spawnCli, onProgress, sweepProcesses: async () => void order.push("sweep") }),
+      await options({
+        spawnCli: cli.spawnCli,
+        onProgress,
+        sweepProcesses: async () => (order.push("sweep"), "swept" as const),
+      }),
     );
     // Before the first turn too (whatever the dependency cache's commands left).
     expect(order).toEqual(["sweep", "run1", "sweep", "sweep", "run2", "sweep", "completed"]);
+  });
+
+  it("says once when the process sweep is skipped (not in the worker image's own pid namespace)", async () => {
+    const log = vi.fn();
+    const sweeps: string[] = [];
+    await runGeminiCodingWorker(
+      await options({
+        spawnCli: fakeCli("prose-final", "repair-json").spawnCli,
+        operatorLog: log,
+        sweepProcesses: async () => (sweeps.push("x"), "skipped" as const),
+      }),
+    );
+    expect(sweeps.length).toBeGreaterThan(1);
+    expect(log.mock.calls).toEqual([[{ warning: "gemini_process_sweep_skipped" }]]);
+  });
+
+  it("fails the run when leftover processes cannot all be stopped", async () => {
+    const error = await runGeminiCodingWorker(
+      await options({
+        spawnCli: fakeCli("success-tools").spawnCli,
+        sweepProcesses: (() => {
+          let calls = 0;
+          return async () => {
+            calls += 1;
+            // The sweep before the first turn succeeds; the one after it finds survivors.
+            if (calls > 1) throw new Error("coding_stream_failed");
+            return "swept" as const;
+          };
+        })(),
+      }),
+    ).catch((e: unknown) => e);
+    expect(safeWorkerErrorCode(error)).toBe("coding_stream_failed");
   });
 
   it("turns sub-agents off and says so when a repository agent cannot be pinned", async () => {
@@ -236,7 +272,8 @@ describe("runGeminiCodingWorker", () => {
   it("fails with the shared invalid-output code when the repair is still not an answer", async () => {
     const cli = fakeCli("prose-final", "prose-final");
     const error = await runGeminiCodingWorker(await options({ spawnCli: cli.spawnCli })).catch((e: unknown) => e);
-    expect(["coding_output_invalid", "coding_output_missing"]).toContain(safeWorkerErrorCode(error));
+    // The prose stream read as --output-format json has no response: nothing to parse.
+    expect(safeWorkerErrorCode(error)).toBe("coding_output_missing");
     expect(cli.calls).toHaveLength(3);
   });
 
