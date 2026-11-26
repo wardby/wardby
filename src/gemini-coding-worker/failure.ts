@@ -11,7 +11,11 @@ export type GeminiRunEnd = { kind: "ok" } | { kind: "budget_exhausted" } | { kin
 const failed = (code: string): GeminiRunEnd => ({ kind: "failed", code });
 /** The CLI's fatal configuration exits (41 auth, 42 input, 52 config, 55 sandbox/settings). */
 const CONFIG_EXITS = new Set([41, 42, 52, 55]);
-/** yargs' first stderr line when the command line is refused (the help text follows it). */
+/**
+ * yargs' first stderr line when the command line is refused (the help text follows it). Needs the
+ * runner's stderr tail to still hold stderr line 1: the recorded unknown-flag stderr is ~4.2 KiB and
+ * the runner keeps 16 KiB (decision 19).
+ */
 const REFUSED_ARGUMENTS = /Unknown arguments?:|Not enough non-option arguments|Invalid values:/;
 
 /**
@@ -29,7 +33,10 @@ export function geminiRunEnd(exit: GeminiExit, result: GeminiResult | undefined,
   ) {
     return { kind: "budget_exhausted" };
   }
-  if (exit.code === 0) return { kind: "ok" };
+  if (exit.code === 0) {
+    // Fail closed: a clean exit whose result event says error is not a success.
+    return result?.status === "error" ? failed("coding_stream_agent_exited") : { kind: "ok" };
+  }
   if (exit.signal !== null || exit.code === null) return failed("coding_stream_agent_exited");
   if (exit.code === 53 || result?.error?.type === "FatalTurnLimitedError") return failed("coding_turn_limit");
   if (CONFIG_EXITS.has(exit.code)) return failed(WORKER_AGENT_CLI_INCOMPATIBLE);
@@ -43,11 +50,7 @@ export function geminiRunEnd(exit: GeminiExit, result: GeminiResult | undefined,
   if (exit.code >= 244 && exit.code <= 255) return failed("coding_stream_upstream_error");
   if (exit.code === 1) {
     if (message.startsWith("[API Error")) {
-      return failed(
-        byMessage === "coding_stream_failed" || byMessage === "budget_exhausted"
-          ? "coding_stream_upstream_error"
-          : byMessage,
-      );
+      return failed(byMessage === "coding_stream_failed" ? "coding_stream_upstream_error" : byMessage);
     }
     if (!result && REFUSED_ARGUMENTS.test(stderrTail)) return failed(WORKER_AGENT_CLI_INCOMPATIBLE);
   }

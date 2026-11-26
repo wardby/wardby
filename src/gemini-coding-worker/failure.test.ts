@@ -73,6 +73,24 @@ describe("geminiRunEnd rules", () => {
     });
     expect(geminiRunEnd({ code: 0, signal: null }, undefined, "")).toEqual({ kind: "ok" });
   });
+  it("fails closed on a clean exit whose result says error", () => {
+    expect(geminiRunEnd({ code: 0, signal: null }, error("[API Error: injected 500]"), "")).toEqual({
+      kind: "failed",
+      code: "coding_stream_agent_exited",
+    });
+    expect(geminiRunEnd({ code: 0, signal: null }, { status: "success" }, "")).toEqual({ kind: "ok" });
+  });
+  it("reads refused arguments from stderr only without a result event", () => {
+    const stderr = "Unknown arguments: such-flag, suchFlag\nUsage: gemini [options] [command]\n";
+    expect(geminiRunEnd({ code: 1, signal: null }, undefined, stderr)).toEqual({
+      kind: "failed",
+      code: "worker_agent_cli_incompatible",
+    });
+    expect(geminiRunEnd({ code: 1, signal: null }, error("tool loop crashed"), stderr)).toEqual({
+      kind: "failed",
+      code: "coding_stream_agent_exited",
+    });
+  });
   it("reads --output-format json", () => {
     expect(
       jsonOutputResult(readFileSync(new URL("./fixtures/stream/repair-json.jsonl", import.meta.url), "utf8")).response,
