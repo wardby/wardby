@@ -132,6 +132,7 @@
     "@prometheus-io/client": "^0.16.1",
     "@renovatebot/pep440": "^5.0.1",
     "@smithy/signature-v4": "5.7.4",
+    "@tiptap/y-tiptap": "3.2.0",
     "asn1js": "^4.0.0",
     "croner": "^10.0.1",
     "dompurify": "3.4.17",
@@ -159,6 +160,7 @@
     "tldts": "7.5.4",
     "undici": "^8.12.3",
     "yaml": "^2.9.1",
+    "yjs": "13.6.33",
     "zod": "^4.6.7"
   },
   "devDependencies": {
