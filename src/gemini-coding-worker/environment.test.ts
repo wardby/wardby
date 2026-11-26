@@ -198,6 +198,23 @@ describe("geminiCliEnvironment", () => {
     expect(header.WARDBY_MCP_TOKEN).toBeUndefined();
   });
 
+  it("an inherited NO_PROXY keeps its hosts and gains the proxy's own, each once", () => {
+    const env = build({
+      agentEnvironment: { ...agentEnvironment, NO_PROXY: "internal.example, localhost" },
+      proxyBaseUrl: "http://wardby-proxy:8787",
+    });
+    expect(env.NO_PROXY).toBe("internal.example,localhost,127.0.0.1,::1,wardby-proxy");
+    expect(env.no_proxy).toBe(env.NO_PROXY);
+    // A lowercase-only no_proxy is inherited the same way.
+    const lower = build({ agentEnvironment: { ...agentEnvironment, no_proxy: "internal.example" } });
+    expect(lower.NO_PROXY).toBe("internal.example,localhost,127.0.0.1,::1,wardby-proxy");
+    // Already complete: unchanged.
+    const tunnel = build({
+      agentEnvironment: { ...agentEnvironment, NO_PROXY: "localhost,127.0.0.1,::1,wardby-proxy" },
+    });
+    expect(tunnel.NO_PROXY).toBe("localhost,127.0.0.1,::1,wardby-proxy");
+  });
+
   it("the capability appears only in the backend's key variable", () => {
     for (const backend of ["ai-studio", "vertex"] as const) {
       const env = build({ backend });

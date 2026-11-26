@@ -76,6 +76,19 @@ export const GEMINI_GUARD_VALUES: Readonly<Record<string, string>> = {
 export const GEMINI_GUARD_UNSET = ["GEMINI_TELEMETRY_TARGET", "GEMINI_TELEMETRY_OTLP_PROTOCOL"] as const;
 
 /**
+ * An inherited NO_PROXY (the tunnel's, or one the agent environment brings) with the machine's and
+ * the proxy's own hosts added when missing: model calls must never be sent into the tunnel.
+ */
+function withProxyHosts(inherited: string, required: string): string {
+  const hosts = inherited
+    .split(",")
+    .map((host) => host.trim())
+    .filter(Boolean);
+  for (const host of required.split(",")) if (!hosts.includes(host)) hosts.push(host);
+  return hosts.join(",");
+}
+
+/**
  * The CLI's environment, which its shell commands inherit (the CLI has no separate shell
  * environment; Decision 13). The capability goes in the key the backend's client sends as
  * x-goog-api-key; model calls go to the proxy directly (NO_PROXY: without it the CLI tunnels even
@@ -92,7 +105,10 @@ export function geminiCliEnvironment(input: {
 }): Record<string, string> {
   const base = input.proxyBaseUrl.replace(/\/$/, "");
   const proxyHost = new URL(base).hostname;
-  const noProxy = input.agentEnvironment.NO_PROXY ?? tunnelNoProxy(proxyHost);
+  const noProxy = withProxyHosts(
+    input.agentEnvironment.NO_PROXY ?? input.agentEnvironment.no_proxy ?? "",
+    tunnelNoProxy(proxyHost),
+  );
   const guards = Object.fromEntries(GEMINI_GUARD_VARIABLES.map((name) => [name, ""]));
   const backend: Record<string, string> =
     input.backend === "vertex"
