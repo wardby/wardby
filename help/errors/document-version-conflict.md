@@ -9,7 +9,9 @@ appliesTo: ">=0.10.0"
 
 # Document version conflict
 
-`document_version_conflict` (HTTP 409). The editor sends the version number it started from. Another version was published in the meantime (a colleague, an agent run, or `publish_version`), so your save was refused rather than overwriting it.
+`document_version_conflict` (HTTP 409). The editor, `publish_version` and `restore_document_version` send the version number they started from (`baseNumber` over MCP). Another version was published in the meantime (a colleague, an agent run, or another `publish_version`), so the write was refused rather than overwriting it.
+
+Over MCP, read the document again (`get_document` returns the current version number) and redo the change on it.
 
 Reload the page, copy your changes out if you need to, and edit the new version. Open comment threads stay anchored to the text they quote across versions; a thread whose quoted text is gone is marked outdated.
 

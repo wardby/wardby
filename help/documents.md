@@ -17,7 +17,7 @@ A document is a Markdown file (or a [design](designs.md): a set of HTML boards) 
 2. Open the URL and sign in (self-hosted users reuse their Wardby sign-in; with a delegating identity provider see [Browser sign-in](web-sign-in.md)).
 3. Select text and add a comment. Threads stay anchored to the quoted text across versions; a thread whose text is deleted is marked outdated.
 4. Share: `grant_access` with `resourceType: "document"` at `read`, `comment` or `write` for a person, or a [share link](document-share-links.md) for people who have no account.
-5. `publish_version` replaces the content (the page also saves versions).
+5. `publish_version` replaces the content (the page also saves versions). Pass `baseNumber`, the version you read: a newer version published since refuses the call with `document_version_conflict`.
 
 ## Tools
 

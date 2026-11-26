@@ -28,7 +28,7 @@ Click a row to see that version read-only, with its changes against the version 
 
 - `list_document_versions` (`documents:read`): `documentId`, optional `limit` (default 50, at most 200) and `before` (the `nextBefore` it returned, for older versions). It returns numbers, `via`, times, the run id and the threads the run answered; names and summaries are in `versionsText`, wrapped as untrusted tool output. It never returns content.
 - `get_document` with `versionNumber` reads one version's Markdown.
-- `restore_document_version` (`documents:write`): `documentId`, `versionNumber` and a required `baseNumber` (the latest version you saw) for the conflict check. `publish_version` (`documents:write`) refuses a summary that reads "Restored v<N>" (`document_summary_invalid`): only a restore writes it.
+- `restore_document_version` (`documents:write`): `documentId`, `versionNumber` and a required `baseNumber` (the latest version you saw) for the conflict check. `publish_version` (`documents:write`) takes a required `baseNumber` too (the version you read; `document_version_conflict` if a newer one was published since), and refuses a summary that reads "Restored v<N>" (`document_summary_invalid`): only a restore writes it.
 
 An unknown version number answers [`document_version_not_found`](errors/document-version-not-found.md).
 

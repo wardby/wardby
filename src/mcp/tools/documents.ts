@@ -392,6 +392,7 @@ const createDocArgs = z.object({
 });
 const publishArgs = z.object({
   documentId: id,
+  baseNumber: z.number().int().min(1),
   markdown: z.string().optional(),
   files: z.record(z.string().max(300), z.string()).optional(),
   summary: z.string().max(500).optional(),
@@ -683,16 +684,17 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     name: "publish_version",
     scope: "documents:write",
     description:
-      "Publishes new Markdown (a document) or a full set of files (a design) as the next version of a document you can write; give exactly one of markdown and files, matching its kind. Open comment threads whose anchored text or element is gone become outdated; reanchored counts kept and outdated. The result lists warnings. Refused with document_locked while the document is approved or archived (reopen_document first).",
+      "Publishes new Markdown (a document) or a full set of files (a design) as the next version of a document you can write; give exactly one of markdown and files, matching its kind. Give baseNumber (required): the version number you read (get_document returns it); it is refused with document_version_conflict when a newer version was published since: read the document again and redo your change on the new version. Open comment threads whose anchored text or element is gone become outdated; reanchored counts kept and outdated. The result lists warnings. Refused with document_locked while the document is approved or archived (reopen_document first).",
     inputSchema: {
       type: "object",
       properties: {
         documentId: { type: "string" },
+        baseNumber: { type: "integer", minimum: 1 },
         markdown: { type: "string" },
         files: { type: "object", additionalProperties: { type: "string" }, description: "a design's full file set" },
         summary: { type: "string" },
       },
-      required: ["documentId"],
+      required: ["documentId", "baseNumber"],
     },
     handler: async (args: unknown, ctx) => {
       const input = publishArgs.parse(args);
@@ -705,6 +707,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
           via: "mcp",
           createdById: ctx.principal.id,
           summary: input.summary,
+          expectedNumber: input.baseNumber,
         });
       });
       return textResult({

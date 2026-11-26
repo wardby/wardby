@@ -43,7 +43,7 @@ directory.
 | ------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `create_document`                                            | `documents:write` | Create a document or a design (`kind`); optionally link it to a repository and coding agent                       |
 | `link_document`                                              | `documents:write` | Link a document you own to a repository and coding agent, or change or clear the link                             |
-| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files` (needs `write`)                                    |
+| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files`, and the required `baseNumber` (needs `write`)     |
 | `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                                                          |
 | `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered                                      |
 | `restore_document_version`                                   | `documents:write` | Publish an earlier version's content as a new version (needs `write`)                                             |
@@ -247,6 +247,15 @@ content; read a version with `get_document` and `versionNumber`.
 (the latest version you saw) for the same conflict check. Only a restore may
 write a summary reading "Restored v<N>": `publish_version` refuses such a
 summary with `document_summary_invalid`.
+
+`publish_version` also takes a required `baseNumber`: the version number you
+read (`get_document` returns it). It is refused with
+`document_version_conflict` when a newer version was published since; read
+the document again and redo the change on the new version.
+
+**Upgrading.** `publish_version` now requires `baseNumber`. A client that
+calls it without one gets an error naming the field: read the document first
+and pass the version number it returns.
 
 The page API behind the tray: `GET /d/api/<documentId>/versions?before=&limit=`,
 `GET /d/api/<documentId>/versions/<n>` and `POST /d/api/<documentId>/versions/<n>/restore`

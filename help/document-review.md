@@ -115,7 +115,7 @@ Every document and design page shows a banner with the state and the approval co
 2. `submit_for_review` with the reviewers.
 3. `create_share_link` (comment) if reviewers have no account, and send them the link; once they have opened it and given a name, they appear in `reviewCandidates`.
 4. `wait_for_review` with the state you saw (`in_review`). It returns `changed` (whether the state differs) and `reason`: `state` (the review state changed), `comment` (someone other than you started a thread or replied, including an agent's reply) or `timeout`. On `comment`, read the threads with `list_comment_threads`, reply, and wait again with the same state; on `timeout`, call it again. Many MCP clients give up on a request after 60 seconds, so pass `timeoutSeconds` of 50 or less and loop while `changed` is `false`.
-5. On `changes_requested`: read the notes (`get_document`) and threads (`list_comment_threads`), revise with `publish_version`, reply to or resolve the threads, and wait again.
+5. On `changes_requested`: read the notes (`get_document`) and threads (`list_comment_threads`), revise with `publish_version` (`baseNumber`: the version you read), reply to or resolve the threads, and wait again.
 6. On `approved`: continue, citing the approved version number.
 
 ## Errors
