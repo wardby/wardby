@@ -3,7 +3,7 @@ id: coding-services
 title: Give coding runs the services their tests need
 summary: Let coding runs on the Kubernetes, Docker or Substrate launcher start fresh PostgreSQL, Redis or MySQL instances declared in the repository's .wardby/services.yaml; startCommand and substrateImage for Substrate; a rootless Docker daemon (docker kind) on Kubernetes with gVisor; a headless browser service reaching the web through the run's CONNECT tunnel.
 audience: operator
-tags: [coding-agents, services, postgres, redis, valkey, mysql, substrate, startCommand, substrateImage, docker, browser, chromium, playwright, cdp, tunnel]
+tags: [coding-agents, services, postgres, redis, valkey, mysql, substrate, startCommand, substrateImage, docker, docker compose, bind mount, browser, chromium, playwright, cdp, tunnel]
 appliesTo: >=0.2.1
 ---
 
@@ -217,6 +217,9 @@ images it builds. Its shells receive
 - **Only this daemon.** The agent's `docker` CLI reaches only this socket: no
   other catalog entry may set `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`,
   `DOCKER_TLS`, `DOCKER_TLS_VERIFY` or `DOCKER_CERT_PATH` in its `testEnv`.
+- **Bind mounts.** The daemon sees the checkout at `/workspace` (and each
+  extra repository at its usual path), so a compose file's `.:/app` mounts
+  the run's files. No other part of the run's storage is visible to it.
 - **Networking.** Host networking only: `docker build --network=host`,
   `docker run --network=host`, `network_mode: host` in compose. The default
   network has no DNS. Containers it starts cannot reach the run's other
