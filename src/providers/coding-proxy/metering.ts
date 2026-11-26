@@ -269,11 +269,18 @@ function geminiFrameData(frame: string): Record<string, unknown> | undefined {
  */
 export class GeminiSseUsageTracker {
   private latest?: ProxyUsage;
+  private finishReasonSeen = false;
 
   consume(frame: string): { failure?: string } {
     const value = geminiFrameData(frame);
     if (!value) return {};
     if (value.error && typeof value.error === "object") return { failure: upstreamErrorCode(value) };
+    if (Array.isArray(value.candidates)) {
+      for (const candidate of value.candidates as unknown[]) {
+        const reason = (candidate as Record<string, unknown> | null)?.finishReason;
+        if (typeof reason === "string" && reason.length > 0) this.finishReasonSeen = true;
+      }
+    }
     const usage = value.usageMetadata as Record<string, unknown> | undefined;
     if (usage && typeof usage === "object" && usage.promptTokenCount !== undefined) {
       this.latest = parseGeminiAuthoritativeUsage(usage);
@@ -283,6 +290,14 @@ export class GeminiSseUsageTracker {
 
   usage(): ProxyUsage | undefined {
     return this.latest ? { ...this.latest } : undefined;
+  }
+
+  /**
+   * Whether a candidate carried a finishReason. Gemini streams have no terminal event: a clean end of stream
+   * without one may be a reply cut short, whose cumulative usage is only partial.
+   */
+  finished(): boolean {
+    return this.finishReasonSeen;
   }
 
   /** What a cut stream reported before it broke, for interrupted.ts: the latest usage's input and output. */

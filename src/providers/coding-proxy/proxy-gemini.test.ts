@@ -175,6 +175,23 @@ describe("relaying Gemini calls", () => {
     expect(h.events.some((e) => e.type === "request.uncertain")).toBe(true);
   });
 
+  it("marks a stream that ends cleanly without a finishReason uncertain, never completed at its partial usage", async () => {
+    const h = await gemini({
+      fetch: async () =>
+        new Response(
+          sse([
+            { candidates: [{ content: { parts: [{ text: "a" }] } }], usageMetadata: usage(10, 1) },
+            { candidates: [{ content: { parts: [{ text: "b" }] } }], usageMetadata: usage(10, 2) },
+          ]),
+          { status: 200 },
+        ),
+    });
+    await expect(h.execute(body())).rejects.toMatchObject({ status: 502 });
+    const id = h.events.find((e) => e.type === "request.reserved")!.requestId!;
+    expect((await h.ledger.getRequest(id))?.status).toBe("uncertain");
+    expect(h.events.some((e) => e.type === "request.completed")).toBe(false);
+  });
+
   it("relays a stream error frame, records its status code and never its message", async () => {
     const h = await gemini({
       fetch: async () =>

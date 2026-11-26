@@ -2166,7 +2166,9 @@ export class CodingProxy {
         buffer = "";
         if (!failedWithoutUsage) {
           const usage = geminiUsage.usage();
-          if (!usage) throw new Error("terminal_usage_missing");
+          // No usage, or a stream that ended without a finishReason (its usage is only what arrived so far):
+          // uncertain with its hold, as a cut stream is, never completed at partial usage.
+          if (!usage || !geminiUsage.finished()) throw new Error("terminal_usage_missing");
           await this.complete(session, request, usage, upstream.status);
           completed = true;
         }

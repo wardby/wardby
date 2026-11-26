@@ -207,6 +207,19 @@ describe("Gemini usage", () => {
     expect(none.partial()).toEqual({});
   });
 
+  it("knows whether the stream carried a finishReason", () => {
+    const tracker = new GeminiSseUsageTracker();
+    tracker.consume(
+      geminiFrame({
+        candidates: [{ content: { parts: [{ text: "a" }] } }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 1 },
+      }),
+    );
+    expect(tracker.finished()).toBe(false);
+    tracker.consume(geminiFrame({ candidates: [{ finishReason: "STOP" }] }));
+    expect(tracker.finished()).toBe(true);
+  });
+
   it("reports a stream error's status code, never its message", () => {
     const tracker = new GeminiSseUsageTracker();
     const result = tracker.consume(
