@@ -94,6 +94,7 @@ export async function writeVersion(
       createdById: meta.createdById ?? null,
       runId: meta.runId ?? null,
       summary: meta.summary ?? null,
+      baseNumber: meta.expectedNumber ?? null,
     },
   });
   if (files) await storeVersionFileRows(tx, documentId, version.id, files);

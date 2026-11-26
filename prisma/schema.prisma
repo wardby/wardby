@@ -2781,6 +2781,9 @@ model DocumentVersion {
   createdById String?
   runId       String?
   summary     String?
+  /// The version the writer read (its expectedNumber); null for version 1 and writes without one.
+  /// Live editing merges a publish into the live document from this version's state.
+  baseNumber  Int?
   createdAt   DateTime       @default(now())
   currentOf   Document?      @relation("CurrentVersion")
 
