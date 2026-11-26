@@ -53,6 +53,8 @@ COPY --from=build /build/dist/coding-worker/keeper.js ./coding-worker/keeper.js
 COPY --from=build /build/dist/coding-worker/task-note.js ./coding-worker/task-note.js
 # The wardby_mcp server settings shared with the Codex worker (remote MCP servers); imports nothing.
 COPY --from=build /build/dist/coding-worker/mcp-config.js ./coding-worker/mcp-config.js
+# The shared security-instructions builder (imports mcp-config.js only).
+COPY --from=build /build/dist/coding-worker/security-instructions.js ./coding-worker/security-instructions.js
 COPY --from=build /build/dist/coding-worker/plan-output.js ./coding-worker/plan-output.js
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 # The driver imports the conventional-commit subject builder, which imports protocol.js.
