@@ -20,6 +20,9 @@ services:
       SECRET_APP_KEY: ${SECRET_APP_KEY:?SECRET_APP_KEY must be set in .env.local}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Google AI Studio (Gemini) models; optional. Vertex AI needs Google credentials in the
+      # container, which this overlay does not provide.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       NODE_ENV: production
     depends_on:
       postgres:

@@ -3,6 +3,8 @@
  * a real model (claude-haiku-4-5, cents per run), the built worker image, and a
  * `wardby native-gateway` container from the runtime image, against the local
  * Postgres. Opt-in only: WARDBY_NATIVE_DOCKER_TEST=1, plus
+ *   NATIVE_TEST_MODEL           (default claude-haiku-4-5; e.g. google-ai-studio.gemini-4-neon)
+ *   NATIVE_TEST_BUDGET_USD      (default 0.05; raise it for models with a higher output rate)
  *   NATIVE_TEST_RUNTIME_IMAGE   (default wardby-runtime:native-p4)
  *   NATIVE_TEST_WORKER_IMAGE    (default wardby-native-worker:local)
  *   NATIVE_TEST_DOCKER_NETWORK  (default local_default — the compose network Postgres is on)
@@ -41,7 +43,10 @@ const RUNTIME_IMAGE = process.env.NATIVE_TEST_RUNTIME_IMAGE ?? "wardby-runtime:n
 const WORKER_TAG = process.env.NATIVE_TEST_WORKER_IMAGE ?? "wardby-native-worker:local";
 const NETWORK = process.env.NATIVE_TEST_DOCKER_NETWORK ?? "local_default";
 const GATEWAY_DB = process.env.NATIVE_TEST_DATABASE_URL ?? "postgresql://wardby:wardby@local-postgres-1:5432/wardby";
-const MODEL = "claude-haiku-4-5";
+const MODEL = process.env.NATIVE_TEST_MODEL ?? "claude-haiku-4-5";
+// The gateway holds 4,096 output tokens per call before it runs; a model with a higher output rate
+// needs a larger budget than Haiku's (e.g. 0.25 for a $15/M-output model).
+const BUDGET_USD = Number(process.env.NATIVE_TEST_BUDGET_USD ?? "0.05");
 
 const docker = (args: string[], input?: string) =>
   execFileSync("docker", args, { encoding: "utf8", input, stdio: ["pipe", "pipe", "pipe"] }).trim();
@@ -83,6 +88,9 @@ describe.skipIf(!enabled)("native sandbox on Docker (acceptance)", () => {
       "--network",
       NETWORK,
       ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+      // By name only: docker copies the value from this process's environment, so the key is
+      // never in the docker command line.
+      ...(process.env.GEMINI_API_KEY ? ["-e", "GEMINI_API_KEY"] : []),
       RUNTIME_IMAGE,
       "node",
       "dist/cli.js",
@@ -148,7 +156,7 @@ return { note: await datastore.get(params.key) };`,
           id: agentId,
           name: agentId,
           model: MODEL,
-          budgetUsd: 0.05,
+          budgetUsd: BUDGET_USD,
           maxTurns: 4,
           ownerId,
           nativeExecutionMode: "sandbox",
