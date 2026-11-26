@@ -168,7 +168,8 @@ function validateTools(value: unknown, policy: WebTools): void {
       }
     } else if (kind === "googleSearch" || kind === "urlContext") {
       if (!isRecord(tool[kind]) || Object.keys(tool[kind]).length > 0) refuse("invalid_gemini_tool");
-      const allowed = kind === "googleSearch" ? policy !== "off" : policy === "search-and-fetch";
+      const allowed =
+        kind === "googleSearch" ? policy === "search" || policy === "search-and-fetch" : policy === "search-and-fetch";
       if (!allowed) refuse("web_tools_not_allowed");
     } else refuse("tools_not_allowed");
   }

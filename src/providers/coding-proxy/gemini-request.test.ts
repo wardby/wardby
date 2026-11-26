@@ -96,6 +96,19 @@ describe("parseGeminiRequest", () => {
     });
   });
 
+  it("refuses googleSearch and urlContext under a web-tool policy it does not know", () => {
+    const unknown = { webTools: "search-everything" as unknown as GeminiParseContext["webTools"] };
+    refused(body({ tools: [{ googleSearch: {} }] }), "web_tools_not_allowed", unknown);
+    refused(body({ tools: [{ urlContext: {} }] }), "web_tools_not_allowed", unknown);
+  });
+
+  it("maps a Vertex path model to the session's region-prefixed wardby id", () => {
+    const route = { surface: "vertex-express" as const, model: "gemini-4-neon", method: "streamGenerateContent" };
+    for (const id of ["us.gemini-4-neon", "eu.gemini-4-neon"]) {
+      expect(parse(body(), { route, backend: "vertex-gemini", allowedModels: [id] }).model).toBe(id);
+    }
+  });
+
   it("refuses every other server-side tool and server-fetched part", () => {
     for (const tool of [
       { codeExecution: {} },
