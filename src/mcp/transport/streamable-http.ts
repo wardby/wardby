@@ -198,6 +198,12 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         url.pathname ===
           "/.well-known/oauth-protected-resource" + (canonical.pathname === "/" ? "" : canonical.pathname))
     ) {
+      // The readiness probe reads this: with Redis configured for live editing but not connected, the replica
+      // is not ready (never a silent switch to serving documents another way).
+      if (opts.live && !opts.live.ready()) {
+        sendJson(res, 503, { error: "live_unavailable" });
+        return;
+      }
       const authorizationServers =
         opts.config.authProviderKind === "self-hosted"
           ? [canonical.href]

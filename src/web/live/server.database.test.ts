@@ -307,6 +307,21 @@ describe.skipIf(!process.env.DATABASE_URL)("live co-editing server (database)", 
     await db.agent.delete({ where: { id: agent.id } });
   });
 
+  it("a browser that changes the server's record (history epoch, editor) is refused before anyone gets it", async () => {
+    const id = await newDoc();
+    await grant(id, bo, "write");
+    const a = await client(ann, id);
+    const b = await client(bo, id);
+    const epoch = a.ydoc.getMap(LIVE_META).get("epoch");
+    b.ydoc.transact(() => b.ydoc.getMap(LIVE_META).set("epoch", "forged"));
+    b.ydoc.transact(() => b.ydoc.getMap(LIVE_META).set("editor", ann.id));
+    await sleep(400);
+    expect(a.ydoc.getMap(LIVE_META).get("epoch")).toBe(epoch);
+    expect(b.stateless.some((p) => p.includes("edit_refused"))).toBe(true);
+    a.close();
+    b.close();
+  });
+
   it("a document with formatting the editor cannot keep never goes live (nothing would be dropped)", async () => {
     const doc = await createDocument(db, cipher, {
       ownerId: ann.id,

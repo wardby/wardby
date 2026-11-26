@@ -16,8 +16,11 @@
  */
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
+import { connect as netConnect } from "node:net";
 import type { Duplex } from "node:stream";
+import { Redis } from "@hocuspocus/extension-redis";
 import { Hocuspocus } from "@hocuspocus/server";
+import { Redis as IORedis } from "ioredis";
 import { WebSocketServer } from "ws";
 import * as Y from "yjs";
 import { requireDocumentAccess } from "../../core/documents/access.js";
@@ -83,12 +86,16 @@ export interface LiveServerDeps extends WebDeps {
   bus: DocumentEventBus;
   /** This replica's advertise address (host:port): the lease names it. */
   replica: string;
+  /** WARDBY_LIVE_REDIS_URL (config.ts): every replica serves every document, edits relayed through Redis. */
+  redisUrl?: string;
   timings?: Partial<LiveTimings>;
 }
 
 export interface LiveServer {
   /** Takes the upgrade when its path is /d/live/<id> and returns true; false for any other path. */
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean;
+  /** False while Redis is configured but not connected (the replica reports itself not ready). */
+  ready(): boolean;
   close(): Promise<void>;
 }
 
@@ -116,6 +123,17 @@ interface Loaded {
 }
 
 const asError = (err: unknown) => (err instanceof Error ? err.name : typeof err);
+/** Set on an upgrade one replica hands to the document's leader: it is never handed on again. */
+const FORWARDED = "x-wardby-live-forwarded";
+/** The transaction origin of the server's own writes to the shared document (the editor record). */
+const SERVER_ORIGIN = "wardby-server";
+/** Whether two maps hold the same keys and values (their order can differ between copies). */
+function sameEntries(a: Y.Map<unknown>, b: Y.Map<unknown>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a.entries()) if (!b.has(k) || JSON.stringify(b.get(k)) !== JSON.stringify(v)) return false;
+  return true;
+}
+const REASON: Record<number, string> = { 401: "Unauthorized", 404: "Not Found", 503: "Service Unavailable" };
 
 export function createLiveServer(deps: LiveServerDeps): LiveServer {
   const t: LiveTimings = { ...LIVE_TIMINGS, ...deps.timings };
@@ -145,7 +163,26 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
     for (const c of doc.getConnections()) c.readOnly = isLockedNow || (c.context as LiveContext).readOnly;
   };
 
+  /** Whether this replica leads the document: it alone merges publishes and saves versions. */
+  const isLeader = async (documentId: string): Promise<boolean> =>
+    (await acquireLease(db, documentId, deps.replica, t.leaseSeconds)) === deps.replica;
+
+  const redisClients: IORedis[] = [];
   const hocuspocus = new Hocuspocus<LiveContext>({
+    extensions: deps.redisUrl
+      ? [
+          new Redis({
+            identifier: deps.replica,
+            createClient: () => {
+              const client = new IORedis(deps.redisUrl!, { maxRetriesPerRequest: null });
+              // The URL may carry a password: errors are logged by name only.
+              client.on("error", (err: unknown) => log.warn({ errorName: asError(err) }, "live Redis error"));
+              redisClients.push(client);
+              return client;
+            },
+          }),
+        ]
+      : [],
     debounce: t.storeDebounceMs,
     maxDebounce: t.storeMaxDebounceMs,
     quiet: true,
@@ -220,24 +257,37 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
         reset: false,
       };
       loaded.set(documentName, l);
-      // Versions published while no one had it open are merged in before anyone sees it.
-      await catchUp(documentName, document, l);
+      // Versions published while no one had it open are merged in before anyone sees it (by the leader).
+      if (await isLeader(documentName)) await catchUp(documentName, document, l);
       if (l.reset) throw refusal("live_unavailable");
     },
 
-    async onChange({ documentName, context, transactionOrigin }) {
+    async onChange({ document, documentName, context, transactionOrigin }) {
       const l = loaded.get(documentName);
-      if (l && context?.principalId && transactionOrigin !== MERGE_ORIGIN) l.lastEditor = context.principalId;
+      if (!l || !context?.principalId || transactionOrigin === MERGE_ORIGIN || transactionOrigin === SERVER_ORIGIN)
+        return;
+      l.lastEditor = context.principalId;
+      // Recorded in the shared document too, so the leader credits the edit whichever replica took it (Redis).
+      const meta = document.getMap(LIVE_META);
+      if (meta.get("editor") !== context.principalId) {
+        document.transact(() => meta.set("editor", context.principalId), SERVER_ORIGIN);
+      }
     },
 
     async beforeSync({ document, documentName, type, payload, connection }) {
       // Sync step 2 and updates carry content (1, 2); a read-only connection's are ignored anyway.
       if ((type !== 1 && type !== 2) || connection.readOnly) return;
-      const values = await secretValues(documentName);
-      if (values.length === 0) return;
       const scratch = new Y.Doc();
       Y.applyUpdate(scratch, Y.encodeStateAsUpdate(document));
       Y.applyUpdate(scratch, payload);
+      // The history's epoch and the editor record are the server's: a browser that changes them is refused
+      // (another browser's copy would otherwise be refused as stale, or a version credited to someone else).
+      if (!sameEntries(scratch.getMap(LIVE_META), document.getMap(LIVE_META))) {
+        log.warn({ documentId: documentName }, "live edit refused: it changed the server's record");
+        connection.sendStateless(JSON.stringify({ type: "edit_refused", reason: "server_data" }));
+        throw refusal("edit_refused");
+      }
+      const values = await secretValues(documentName);
       if (showsSecret(scratch, values)) {
         log.warn({ documentId: documentName }, "live edit refused: it would show a secret value");
         connection.sendStateless(JSON.stringify({ type: "edit_refused", reason: "secret_value" }));
@@ -317,6 +367,8 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
 
   /** Merges every version newer than the live document's, in order, each from the version it was based on. */
   const catchUp = async (documentId: string, doc: Y.Doc, l: Loaded): Promise<void> => {
+    // In Redis mode every replica may hold the document; only its leader merges (the result reaches the others).
+    if (deps.redisUrl && !(await isLeader(documentId))) return;
     const versions = await db.documentVersion.findMany({
       where: { documentId, number: { gt: l.versionNumber } },
       orderBy: { number: "asc" },
@@ -348,7 +400,9 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
 
   /** Saves the live document as a version when someone changed its text since the last one. */
   const checkpoint = async (documentId: string, doc: Y.Doc, l: Loaded, retried = false): Promise<void> => {
-    const author = l.lastEditor;
+    if (deps.redisUrl && !(await isLeader(documentId))) return;
+    const recorded = doc.getMap(LIVE_META).get("editor");
+    const author = typeof recorded === "string" ? recorded : l.lastEditor;
     if (!author || l.reset || (await locked(documentId))) return;
     await refreshQuotes(documentId, doc);
     // State and Markdown together, before any await: the version is exactly this state.
@@ -408,10 +462,30 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 * 1024 });
 
+  /** Hands an upgrade, as received, to the replica serving the document (it signs in and checks access again). */
+  const forward = (req: IncomingMessage, socket: Duplex, head: Buffer, owner: string, documentId: string) => {
+    const at = owner.lastIndexOf(":");
+    const host = owner.slice(0, at).replace(/^\[|\]$/g, "");
+    const port = Number(owner.slice(at + 1));
+    const upstream = netConnect(port, host, () => {
+      const lines = [`${req.method ?? "GET"} ${req.url ?? "/"} HTTP/1.1`];
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        if (req.rawHeaders[i].toLowerCase() !== FORWARDED) lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+      }
+      lines.push(`${FORWARDED}: 1`);
+      upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
+      if (head.length) upstream.write(head);
+      socket.pipe(upstream).pipe(socket);
+    });
+    upstream.on("error", (err: unknown) => {
+      log.warn({ documentId, owner, errorName: asError(err) }, "live connection could not reach the leading replica");
+      socket.destroy();
+    });
+    socket.on("error", () => upstream.destroy());
+  };
+
   const refuse = (socket: Duplex, status: number) => {
-    socket.end(
-      `HTTP/1.1 ${status} ${status === 401 ? "Unauthorized" : "Not Found"}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
-    );
+    socket.end(`HTTP/1.1 ${status} ${REASON[status] ?? "Not Found"}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   };
 
   return {
@@ -422,6 +496,14 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
       void (async () => {
         const ctx = await resolveContext(req, deps);
         if (ctx.kind === "none") return refuse(socket, 401);
+        // Pinned (no Redis): one replica serves the document; another hands the upgrade to it, once.
+        if (!deps.redisUrl) {
+          const owner = await acquireLease(db, documentId, deps.replica, t.leaseSeconds);
+          if (owner !== deps.replica) {
+            if (req.headers[FORWARDED]) return refuse(socket, 503);
+            return forward(req, socket, head, owner, documentId);
+          }
+        }
         if (ctx.kind === "guest" && ctx.documentId !== documentId) return refuse(socket, 404);
         let readOnly = true;
         let any = true;
@@ -455,12 +537,14 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
       });
       return true;
     },
+    ready: () => !deps.redisUrl || (redisClients.length > 0 && redisClients.every((c) => c.status === "ready")),
     async close() {
       clearInterval(renew);
       unsubscribe();
       hocuspocus.flushPendingStores();
       hocuspocus.closeConnections();
       wss.close();
+      for (const c of redisClients) c.disconnect();
     },
   };
 }
