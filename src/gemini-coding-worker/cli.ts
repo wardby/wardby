@@ -11,6 +11,15 @@ export const GEMINI_CLI_INTEGRITY =
 /** Where the image installs it (src/gemini-coding-worker/Dockerfile); run with `node`. */
 export const GEMINI_CLI_ENTRY = "/opt/wardby/node_modules/@google/gemini-cli/bundle/gemini.js";
 
+/** The CLI's system settings folder; the image bakes settings.json and policies/wardby.toml there, root-owned. */
+export const GEMINI_SYSTEM_DIR = "/etc/gemini-cli";
+/** SHA-256 of src/gemini-coding-worker/system-settings.json (system-check.test.ts keeps it current). */
+export const GEMINI_SYSTEM_SETTINGS_SHA256 = "1c469de4cffea71de50f979cc0ccc7ae84e339b1366aa507cbf0e8b939dc6c65";
+/** SHA-256 of src/gemini-coding-worker/policies/wardby.toml. */
+export const GEMINI_SYSTEM_POLICY_SHA256 = "1c8a5aa1777e054ed51463bb6549afb9f8e7f1859e88395e50c2071a502b69a8";
+/** The variable the system file's `security.auth.enforcedType` reference reads (environment.ts sets it). */
+export const GEMINI_AUTH_TYPE_ENV = "WARDBY_GEMINI_AUTH_TYPE";
+
 /** The repository instruction files the CLI loads, in this order (decision 5). */
 export const GEMINI_CONTEXT_FILE_NAMES = ["GEMINI.md", "AGENTS.md", "CLAUDE.md"] as const;
 

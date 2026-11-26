@@ -1,0 +1,44 @@
+{
+  "advanced": {
+    "ignoreLocalEnv": true
+  },
+  "context": {
+    "fileName": ["GEMINI.md", "AGENTS.md", "CLAUDE.md"]
+  },
+  "experimental": {
+    "gemmaModelRouter": {
+      "enabled": false
+    }
+  },
+  "general": {
+    "checkpointing": {
+      "enabled": false
+    },
+    "enableAutoUpdate": false,
+    "enableAutoUpdateNotification": false,
+    "maxAttempts": 3,
+    "plan": {
+      "modelRouting": false
+    }
+  },
+  "hooksConfig": {
+    "enabled": false
+  },
+  "mcp": {
+    "allowed": ["wardby_mcp"]
+  },
+  "privacy": {
+    "usageStatisticsEnabled": false
+  },
+  "security": {
+    "auth": {
+      "enforcedType": "$WARDBY_GEMINI_AUTH_TYPE"
+    },
+    "environmentVariableRedaction": {
+      "enabled": false
+    }
+  },
+  "tools": {
+    "exclude": ["enter_plan_mode", "list_background_processes", "read_background_output"]
+  }
+}

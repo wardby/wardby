@@ -1,0 +1,16 @@
+# The tools a wardby coding run never offers, as admin-tier rules (the same list as tools.exclude in
+# settings.json, ready for the CLI's removal of tools.exclude). Root-owned; checked by hash at start.
+[[rule]]
+toolName = "enter_plan_mode"
+decision = "deny"
+priority = 999
+
+[[rule]]
+toolName = "list_background_processes"
+decision = "deny"
+priority = 999
+
+[[rule]]
+toolName = "read_background_output"
+decision = "deny"
+priority = 999
