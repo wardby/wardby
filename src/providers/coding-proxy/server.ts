@@ -17,6 +17,7 @@ import type { DependencyCacheService } from "./dependency-cache/service.js";
 import type { ProxyProtocol } from "./types.js";
 import { MCP_ROUTE_PATH } from "./mcp-route.js";
 import { matchGeminiRoute } from "./gemini-route.js";
+import { geminiRefusalBody } from "./gemini-refusal.js";
 
 /** The worker's workflow-progress route (#582) and its body bound. */
 export const WORKFLOW_PROGRESS_PATH = "/wardby/workflow-progress";
@@ -62,14 +63,21 @@ export interface CodingProxyServerHandle {
   close(): Promise<void>;
 }
 
-function sendError(response: ServerResponse, status: number, code: string, retryAfterSeconds?: number): void {
+function sendError(
+  response: ServerResponse,
+  status: number,
+  code: string,
+  retryAfterSeconds?: number,
+  /** A Gemini route's refusals are Google-shaped (gemini-refusal.ts). */
+  gemini = false,
+): void {
   response
     .writeHead(status, {
       "content-type": "application/json",
       "cache-control": "no-store",
       ...(retryAfterSeconds !== undefined ? { "retry-after": String(retryAfterSeconds) } : {}),
     })
-    .end(JSON.stringify({ error: { type: code, message: code } }));
+    .end(gemini ? geminiRefusalBody(status, code) : JSON.stringify({ error: { type: code, message: code } }));
 }
 
 function bearer(value: string | undefined): string {
@@ -426,7 +434,7 @@ export async function startCodingProxyServer(
       if (geminiMatch && !geminiMatch.ok) {
         // Refused from the path alone (another method, or a query such as key=): the body is never read.
         closeIfBodyUnread(request, response);
-        sendError(response, 404, geminiMatch.code);
+        sendError(response, 404, geminiMatch.code, undefined, true);
         return;
       }
       const protocol = routeProtocol(request.method, request.url);
@@ -435,7 +443,7 @@ export async function startCodingProxyServer(
         return;
       }
       if (request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
-        sendError(response, 415, "unsupported_content_type");
+        sendError(response, 415, "unsupported_content_type", undefined, geminiMatch?.ok === true);
         return;
       }
       const controller = new AbortController();
@@ -501,6 +509,7 @@ export async function startCodingProxyServer(
           error.status,
           error instanceof CodingProxyError ? error.code : error.message,
           error instanceof CodingProxyError ? error.retryAfterSeconds : undefined,
+          request.method === "POST" && matchGeminiRoute(request.url)?.ok === true,
         );
         return;
       }

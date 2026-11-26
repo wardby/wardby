@@ -85,7 +85,12 @@ describe("coding proxy Gemini routes", () => {
     });
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({
-      error: { type: "gemini_backend_mismatch", message: "gemini_backend_mismatch" },
+      error: {
+        code: 403,
+        status: "PERMISSION_DENIED",
+        message: "gemini_backend_mismatch",
+        type: "gemini_backend_mismatch",
+      },
     });
   });
 
@@ -94,12 +99,17 @@ describe("coding proxy Gemini routes", () => {
     const counted = await post("/v1beta/models/gemini-4-neon:countTokens", { "x-goog-api-key": session.capability });
     expect(counted.status).toBe(404);
     expect(await counted.json()).toEqual({
-      error: { type: "gemini_method_not_supported", message: "gemini_method_not_supported" },
+      error: {
+        code: 404,
+        status: "NOT_FOUND",
+        message: "gemini_method_not_supported",
+        type: "gemini_method_not_supported",
+      },
     });
     const keyed = await post(`/v1beta/models/gemini-4-neon:generateContent?key=${session.capability}`, {});
     expect(keyed.status).toBe(404);
     expect(await keyed.json()).toEqual({
-      error: { type: "gemini_query_not_allowed", message: "gemini_query_not_allowed" },
+      error: { code: 404, status: "NOT_FOUND", message: "gemini_query_not_allowed", type: "gemini_query_not_allowed" },
     });
     expect(upstream.mock.calls.length).toBe(calls);
   });
@@ -116,7 +126,7 @@ describe("coding proxy Gemini routes", () => {
       });
       expect(response.status).toBe(401);
       expect(await response.json()).toEqual({
-        error: { type: "invalid_capability", message: "invalid_capability" },
+        error: { code: 401, status: "UNAUTHENTICATED", message: "invalid_capability", type: "invalid_capability" },
       });
     }
     expect(upstream.mock.calls.length).toBe(calls);
@@ -160,5 +170,62 @@ describe("coding proxy Gemini routes", () => {
     expect(lines.length).toBeGreaterThan(0);
     expect(lines.join("")).not.toContain(session.capability);
     expect(lines.join("")).not.toContain(FAKE_GEMINI_KEY);
+  });
+
+  it("keeps the wardby shape on the OpenAI and Anthropic routes", async () => {
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer rrp_wrong" },
+      body: "{}",
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: { type: "invalid_capability", message: "invalid_capability" } });
+  });
+});
+
+describe("coding proxy Gemini refusals", () => {
+  it("answers a budget refusal in Google's shape with limit: 0 and no secret", async () => {
+    const proxy = new CodingProxy({
+      ledger: new MemoryProxyLedger(),
+      credentials: { resolve: async () => FAKE_GEMINI_KEY },
+      fetch: vi.fn(async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } })),
+    });
+    const tiny = await proxy.createSession({
+      runId: "gemini-budget-run",
+      credentialRef: "env:GEMINI_API_KEY",
+      protocol: "gemini-generate-content",
+      allowedModels: ["google-ai-studio.gemini-4-neon"],
+      deadlineAt: new Date(Date.now() + 60_000),
+      budgetUsd: 0.000_000_1,
+      terms: { version: "v", entry: entryOf(shippedCatalog().require("google-ai-studio.gemini-4-neon")) },
+    });
+    const server = await startCodingProxyServer(proxy, { host: "127.0.0.1", port: 0 });
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${server.port}/v1beta/models/gemini-4-neon:streamGenerateContent?alt=sse`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-goog-api-key": tiny.capability },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: "hi" }] }],
+            generationConfig: { maxOutputTokens: 32_000 },
+          }),
+        },
+      );
+      expect(response.status).toBe(429);
+      const text = await response.text();
+      expect(JSON.parse(text)).toEqual({
+        error: {
+          code: 429,
+          status: "RESOURCE_EXHAUSTED",
+          message: "wardby_budget_exhausted (limit: 0)",
+          type: "wardby_budget_exhausted",
+        },
+      });
+      expect(text).not.toContain(tiny.capability);
+      expect(text).not.toContain(FAKE_GEMINI_KEY);
+    } finally {
+      await server.close();
+    }
   });
 });

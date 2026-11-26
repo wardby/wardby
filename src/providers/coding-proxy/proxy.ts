@@ -18,6 +18,7 @@ import {
   type GeminiUpstreamOptions,
 } from "./gemini-upstream.js";
 import { GeminiRequestRefused, parseGeminiRequest, type GeminiParseContext } from "./gemini-request.js";
+import { geminiRefusalBody } from "./gemini-refusal.js";
 import type { GeminiRoute } from "./gemini-route.js";
 import { CLAUDE_MCP_TOOL_PREFIX } from "../../coding/mcp-token.js";
 import type { CodingToolPin } from "../../core/coding-native-tools.js";
@@ -1717,7 +1718,13 @@ export class CodingProxy {
         reason: "upstream_rejected",
       });
       sink.start(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
-      await safeWrite(sink, errorBody("upstream_rejected"), { value: true });
+      await safeWrite(
+        sink,
+        session.protocol === "gemini-generate-content"
+          ? new TextEncoder().encode(geminiRefusalBody(upstream.status, "upstream_rejected"))
+          : errorBody("upstream_rejected"),
+        { value: true },
+      );
       sink.end();
       return;
     }
