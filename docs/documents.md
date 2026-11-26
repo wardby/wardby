@@ -226,6 +226,23 @@ no one is locked out by someone else's save. The save state reads **Live**.
   access comes from a share link gets a single-use, 60-second ticket from
   `POST /d/api/<documentId>/live-ticket` and sends it in the first message
   (never in the URL).
+- **Versions.** The live copy is saved as a new version after 3 seconds
+  without edits (at most every 15 seconds while edits keep coming), credited
+  to the person who edited last, so History, review, exports and every tool
+  keep working from versions. Opening a document saves nothing, and changes
+  that only re-format the Markdown are not saved. Nothing is saved while the
+  document is approved, rejected or archived.
+- **Publishing to a live document.** `publish_version` (and agents, restores
+  and the page's own saves) name the version they read. When newer versions
+  exist, the change is merged word by word with everything published since:
+  the saved version is the whole document with both, based on the latest
+  version, and everyone with the page open sees it arrive. The merge needs
+  the older version's state, which is kept for the 50 newest versions; an
+  older `baseNumber` is refused with
+  [`document_base_unavailable`](../help/errors/document-base-unavailable.md).
+  Threads sent to a coding agent merge the same way. A version with
+  formatting the editor cannot keep ends live editing for that document
+  (pages reload and open it comment-only) instead of dropping that content.
 - **Secret values.** An edit that would put one of the document agent's secret
   values into the text is refused before anyone else receives it
   ([`edit_refused`](../help/errors/edit-refused.md)); the page reloads from
