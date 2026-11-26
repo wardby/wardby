@@ -125,6 +125,7 @@ const jiraEnv = {
   WARDBY_JIRA_WEBHOOK_SECRET: "jira-webhook-secret-value-0000",
 };
 const slackEnv = { WARDBY_SLACK_BOT_TOKEN: "xoxb-slack-token-secret-value" };
+const geminiEnv = { GEMINI_API_KEY: "gemini-api-key-secret-value-0000" };
 const required = SECRETS.filter((s) => !s.group);
 const inGroup = (group) => SECRETS.filter((s) => s.group === group);
 
@@ -204,6 +205,31 @@ describe("seed", () => {
     const added = calls.find((c) => c.args.includes("add") && c.args.includes("wardby-slack-bot-token"));
     expect(added.input).toBe(slackEnv.WARDBY_SLACK_BOT_TOKEN);
     for (const call of calls) expect(call.args.join(" ")).not.toContain(slackEnv.WARDBY_SLACK_BOT_TOKEN);
+  });
+
+  it("leaves Gemini empty when its API key is not set", async () => {
+    const { exec, calls } = fakeExec({});
+    const result = await seed({ ...base, env: fullEnv, exec, generate: () => "c".repeat(64), log: () => {} });
+    expect(result.enabledGroups).not.toContain("gemini");
+    expect(calls.some((c) => c.args.includes("add") && c.args.some((a) => a.includes("gemini")))).toBe(false);
+  });
+
+  it("seeds the Gemini API key over stdin and never prints it when it is set", async () => {
+    const { exec, calls } = fakeExec({});
+    const env = { ...fullEnv, ...geminiEnv };
+    const logged = [];
+    const result = await seed({
+      ...base,
+      env,
+      exec,
+      generate: () => "c".repeat(64),
+      log: (line) => logged.push(String(line)),
+    });
+    expect(result.enabledGroups).toEqual(["gemini"]);
+    const added = calls.find((c) => c.args.includes("add") && c.args.includes("wardby-gemini-api-key"));
+    expect(added.input).toBe(geminiEnv.GEMINI_API_KEY);
+    for (const call of calls) expect(call.args.join(" ")).not.toContain(geminiEnv.GEMINI_API_KEY);
+    expect(logged.join("\n")).not.toContain(geminiEnv.GEMINI_API_KEY);
   });
 
   it("reports Jira and Slack together when both are set", async () => {

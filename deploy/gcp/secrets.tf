@@ -131,6 +131,7 @@ locals {
   llm_api_key_values = {
     OPENAI_API_KEY    = var.openai_api_key_value
     ANTHROPIC_API_KEY = var.anthropic_api_key_value
+    GEMINI_API_KEY    = var.gemini_api_key_value
   }
   # for_each can't accept a value derived from a sensitive variable (the API
   # key values above) - Terraform taints the whole filtered map as sensitive

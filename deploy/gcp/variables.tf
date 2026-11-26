@@ -88,6 +88,13 @@ variable "anthropic_api_key_value" {
   sensitive   = true
 }
 
+variable "gemini_api_key_value" {
+  description = "Google AI Studio (Gemini) API key, exposed to the container as GEMINI_API_KEY. Same rules as openai_api_key_value - no default, never committed; any combination of providers may be set."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
 variable "enable_cloud_armor" {
   description = "Put an external HTTPS load balancer with a Cloud Armor policy in front of the service, and restrict the service's own ingress so the *.run.app URL can no longer be reached directly. Cloud Run offers no request rate limiting of its own, so without this the only throttle is the app's per-IP limiter, which a distributed caller walks straight past. Off by default: it is a different fronting strategy than create_domain_mapping (an A record to a static IP rather than a CNAME to Cloud Run), not an addition to it — enabling both is not meaningful."
   type        = bool

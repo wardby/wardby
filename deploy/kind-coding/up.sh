@@ -4,8 +4,9 @@
 # at localhost:5001, and the in-cluster coding proxy. Run from the repo
 # root: `bash deploy/kind-coding/up.sh`.
 #
-# Reads .env.local at run time for DATABASE_URL, OPENAI_API_KEY, and
-# ANTHROPIC_API_KEY (only those three names — nothing else in the file is
+# Reads .env.local at run time for DATABASE_URL, OPENAI_API_KEY,
+# ANTHROPIC_API_KEY, and the optional GEMINI_API_KEY (only those four names —
+# nothing else in the file is
 # sourced or exported) and builds the proxy's Secret manifest itself. The
 # values only ever exist as this script's own bash variables and on a
 # pipe's stdin into `kubectl apply -f -`; they are never passed as a
@@ -83,6 +84,14 @@ env_value() {
     raw="${raw:1:len-2}"
   fi
   printf '%s' "$raw"
+}
+
+# Like env_value, but an unset or empty variable gives an empty value rather
+# than stopping the script (for optional keys).
+optional_env_value() {
+  if grep -qE "^[[:space:]]*(export[[:space:]]+)?${1}=" .env.local; then
+    env_value "$1"
+  fi
 }
 
 # base64-encodes one value with no external command ever seeing it in its
@@ -218,6 +227,9 @@ kubectl --context "$KUBE_CONTEXT" apply -f "${MANIFEST_DIR}/manifests/base/names
 DATABASE_URL="$(env_value DATABASE_URL)"
 OPENAI_API_KEY="$(env_value OPENAI_API_KEY)"
 ANTHROPIC_API_KEY="$(env_value ANTHROPIC_API_KEY)"
+# Optional: Gemini models on native agents. Empty is fine (it goes to the
+# native gateway's Secret only; Gemini models are never coding models).
+GEMINI_API_KEY="$(optional_env_value GEMINI_API_KEY)"
 # The proxy runs inside the kind node; the Docker-published local Postgres
 # is reachable at host.docker.internal, not localhost/127.0.0.1.
 PROXY_DATABASE_URL="${DATABASE_URL/@localhost:/@host.docker.internal:}"
@@ -238,6 +250,10 @@ PROXY_DATABASE_URL="${PROXY_DATABASE_URL/@127.0.0.1:/@host.docker.internal:}"
 DATABASE_URL_B64="$(b64 "$PROXY_DATABASE_URL")"
 OPENAI_API_KEY_B64="$(b64 "$OPENAI_API_KEY")"
 ANTHROPIC_API_KEY_B64="$(b64 "$ANTHROPIC_API_KEY")"
+GEMINI_API_KEY_LINE=""
+if [[ -n "$GEMINI_API_KEY" ]]; then
+  GEMINI_API_KEY_LINE="$(printf '  GEMINI_API_KEY: %s' "$(b64 "$GEMINI_API_KEY")")"
+fi
 {
   printf 'apiVersion: v1\n'
   printf 'kind: Secret\n'
@@ -279,11 +295,12 @@ fi
   printf '  DATABASE_URL: %s\n' "$DATABASE_URL_B64"
   printf '  OPENAI_API_KEY: %s\n' "$OPENAI_API_KEY_B64"
   printf '  ANTHROPIC_API_KEY: %s\n' "$ANTHROPIC_API_KEY_B64"
+  if [[ -n "$GEMINI_API_KEY_LINE" ]]; then printf '%s\n' "$GEMINI_API_KEY_LINE"; fi
   printf '  SECRET_APP_KEY: %s\n' "$SECRET_APP_KEY_B64"
   if [[ -n "$GITHUB_APP_LINES" ]]; then printf '%s\n' "$GITHUB_APP_LINES"; fi
 } | kubectl --context "$KUBE_CONTEXT" apply -f -
-unset DATABASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY PROXY_DATABASE_URL \
-  DATABASE_URL_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64 SECRET_APP_KEY_VALUE SECRET_APP_KEY_B64 \
+unset DATABASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY PROXY_DATABASE_URL \
+  DATABASE_URL_B64 OPENAI_API_KEY_B64 ANTHROPIC_API_KEY_B64 GEMINI_API_KEY_LINE SECRET_APP_KEY_VALUE SECRET_APP_KEY_B64 \
   GITHUB_APP_LINES GITHUB_APP_ID_B64 GITHUB_APP_PRIVATE_KEY_B64
 
 echo "==> 8/${TOTAL_STEPS} render and apply the manifests (low-power mode: ${LOW_POWER_LABEL})"

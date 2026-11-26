@@ -64,7 +64,11 @@ spec:
           {{- . | nindent 10 }}
           {{- end }}
           env:
-            {{- include "wardby.env" (list $ $w "nativeGateway" (dict "NATIVE_GATEWAY_LISTEN" "0.0.0.0:8790" "NATIVE_GATEWAY_DENY_PORT" "8791")) | nindent 12 }}
+            {{- $gatewayEnv := dict "NATIVE_GATEWAY_LISTEN" "0.0.0.0:8790" "NATIVE_GATEWAY_DENY_PORT" "8791" }}
+            {{- if .Values.models.vertexProject }}
+            {{- $_ := set $gatewayEnv "VERTEX_PROJECT" .Values.models.vertexProject }}
+            {{- end }}
+            {{- include "wardby.env" (list $ $w "nativeGateway" $gatewayEnv) | nindent 12 }}
           ports:
             - name: gateway
               containerPort: 8790

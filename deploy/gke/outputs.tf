@@ -90,6 +90,11 @@ output "dependency_cache_bucket" {
   value       = try(google_storage_bucket.dependency_cache[0].name, "")
 }
 
+output "vertex_ai_enabled" {
+  description = "Whether native agents may use Vertex AI Gemini models (vertex_ai_enabled); deploy/gke/up.sh sets VERTEX_PROJECT on the control plane and native gateway when true."
+  value       = var.vertex_ai_enabled
+}
+
 output "session_transcripts_bucket" {
   description = "Name of the session transcripts bucket; empty when session_transcripts_enabled is false."
   value       = try(google_storage_bucket.session_transcripts[0].name, "")
