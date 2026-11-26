@@ -522,10 +522,15 @@ describe("CodingProxy", () => {
     const sink = await execute(quota, "rejected-quota");
     expect(sink.status).toBe(429);
     expect(sink.text()).not.toContain("private text");
+    // The OpenAI/Anthropic shape is unchanged, quota code or not.
+    expect(sink.text()).toBe(JSON.stringify({ error: { type: "upstream_rejected", message: "upstream_rejected" } }));
     expect(await quota.proxy.upstreamFailure(quota.session.id)).toBe("insufficient_quota");
 
     const outage = await harness({ fetch: async () => new Response("<html>bad gateway</html>", { status: 503 }) });
-    await execute(outage, "rejected-outage");
+    const outageSink = await execute(outage, "rejected-outage");
+    expect(outageSink.text()).toBe(
+      JSON.stringify({ error: { type: "upstream_rejected", message: "upstream_rejected" } }),
+    );
     expect(await outage.proxy.upstreamFailure(outage.session.id)).toBe("http_503");
 
     const unsafe = await harness({

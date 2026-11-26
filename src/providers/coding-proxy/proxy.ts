@@ -18,7 +18,8 @@ import {
   type GeminiUpstreamOptions,
 } from "./gemini-upstream.js";
 import { GeminiRequestRefused, parseGeminiRequest, type GeminiParseContext } from "./gemini-request.js";
-import { geminiRefusalBody } from "./gemini-refusal.js";
+import { geminiUpstreamRejectedBody } from "./gemini-refusal.js";
+import { classifyProviderFailure } from "../../core/provider-wording.js";
 import type { GeminiRoute } from "./gemini-route.js";
 import { CLAUDE_MCP_TOOL_PREFIX } from "../../coding/mcp-token.js";
 import type { CodingToolPin } from "../../core/coding-native-tools.js";
@@ -30,7 +31,7 @@ import {
   type SweepResult,
 } from "../../core/request-lease.js";
 import { logger } from "../../core/logger.js";
-import { redactExactSecretValues, withEscapedForms } from "../../core/secret-spans.js";
+import { overlapsSecretValue, redactExactSecretValues, withEscapedForms } from "../../core/secret-spans.js";
 import {
   AnthropicSseUsageTracker,
   actualCostUsd,
@@ -1722,7 +1723,9 @@ export class CodingProxy {
       await safeWrite(
         sink,
         session.protocol === "gemini-generate-content"
-          ? new TextEncoder().encode(geminiRefusalBody(upstream.status, "upstream_rejected"))
+          ? new TextEncoder().encode(
+              geminiUpstreamRejectedBody(upstream.status, relayableQuotaCode(code, target.secret)),
+            )
           : errorBody("upstream_rejected"),
         { value: true },
       );
@@ -2430,6 +2433,17 @@ async function rejectedUpstreamErrorCode(upstream: Response): Promise<string | u
   } catch {
     return undefined;
   }
+}
+
+/**
+ * A rejected upstream's quota code, when a Gemini client may see it (gemini-refusal.ts): only a
+ * code the shared classifier files as a quota, and never one carrying the upstream credential or
+ * wardby's own budget marker (the worker reads that first, as a budget stop).
+ */
+function relayableQuotaCode(code: string, credential: string): string | undefined {
+  if (classifyProviderFailure(code) !== "quota") return undefined;
+  if (code.includes("wardby_budget_exhausted")) return undefined;
+  return overlapsSecretValue(code, withEscapedForms([credential])) ? undefined : code;
 }
 
 /** The fixed code a relay failed with, or a generic one: error messages are not recorded. */

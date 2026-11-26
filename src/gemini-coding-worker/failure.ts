@@ -9,6 +9,11 @@ export interface GeminiExit {
 export type GeminiRunEnd = { kind: "ok" } | { kind: "budget_exhausted" } | { kind: "failed"; code: string };
 
 const failed = (code: string): GeminiRunEnd => ({ kind: "failed", code });
+/**
+ * The coding proxy's mark on an upstream quota refusal (providers/coding-proxy/gemini-refusal.ts;
+ * the image carries no proxy code, so a test keeps the literal equal).
+ */
+export const GEMINI_QUOTA_MARKER = "upstream_quota_exceeded";
 /** The CLI's fatal configuration exits (41 auth, 42 input, 52 config, 55 sandbox/settings). */
 const CONFIG_EXITS = new Set([41, 42, 52, 55]);
 /**
@@ -34,10 +39,19 @@ export function geminiRunEnd(exit: GeminiExit, result: GeminiResult | undefined,
     return { kind: "budget_exhausted" };
   }
   if (exit.code === 0) {
-    // Fail closed: a clean exit whose result event says error is not a success.
-    return result?.status === "error" ? failed("coding_stream_agent_exited") : { kind: "ok" };
+    // Fail closed: a clean exit is a success only when its result event says so (not when it says
+    // error, and not when the stream ended without one).
+    return result?.status === "success" ? { kind: "ok" } : failed("coding_stream_agent_exited");
   }
   if (exit.signal !== null || exit.code === null) return failed("coding_stream_agent_exited");
+  // The provider account's quota or spend limit (the proxy relays it marked, with limit: 0, so the
+  // CLI does not retry): only an operator can fix it, whatever the status.
+  if (
+    message.includes(GEMINI_QUOTA_MARKER) ||
+    (exit.code === 173 && !result && stderrTail.includes(GEMINI_QUOTA_MARKER))
+  ) {
+    return failed("coding_stream_quota_exceeded");
+  }
   if (exit.code === 53 || result?.error?.type === "FatalTurnLimitedError") return failed("coding_turn_limit");
   if (CONFIG_EXITS.has(exit.code)) return failed(WORKER_AGENT_CLI_INCOMPATIBLE);
   const byMessage = streamFailureCode(new Error(message));

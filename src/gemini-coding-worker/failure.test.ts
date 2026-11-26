@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { GeminiStreamReader } from "./stream.js";
-import { geminiRunEnd, jsonOutputResult } from "./failure.js";
+import { GEMINI_UPSTREAM_QUOTA_MARKER } from "../providers/coding-proxy/gemini-refusal.js";
+import { GEMINI_QUOTA_MARKER, geminiRunEnd, jsonOutputResult } from "./failure.js";
 
 function recorded(scenario: string) {
   const dir = new URL("./fixtures/stream/", import.meta.url);
@@ -49,6 +50,26 @@ describe("geminiRunEnd rules", () => {
       geminiRunEnd({ code: 173, signal: null }, error("[API Error: You exceeded your current quota]"), ""),
     ).toEqual({ kind: "failed", code: "coding_stream_quota_exceeded" });
   });
+  it("reads the proxy's upstream quota refusal as a quota, whatever the status", () => {
+    // The worker image carries no proxy code: the literal is kept equal here.
+    expect(GEMINI_QUOTA_MARKER).toBe(GEMINI_UPSTREAM_QUOTA_MARKER);
+    const quota = error("[API Error: upstream_quota_exceeded: billing_not_active (limit: 0)]");
+    for (const code of [1, 144, 147, 173, 247]) {
+      expect(geminiRunEnd({ code, signal: null }, quota, "")).toEqual({
+        kind: "failed",
+        code: "coding_stream_quota_exceeded",
+      });
+    }
+    expect(geminiRunEnd({ code: 173, signal: null }, undefined, "upstream_quota_exceeded: x (limit: 0)")).toEqual({
+      kind: "failed",
+      code: "coding_stream_quota_exceeded",
+    });
+    // Without the marker, a 429 is still a rate limit.
+    expect(geminiRunEnd({ code: 173, signal: null }, error("[API Error: upstream_rejected]"), "")).toEqual({
+      kind: "failed",
+      code: "coding_stream_rate_limited",
+    });
+  });
   it("maps the fatal configuration exits and a signal", () => {
     for (const code of [41, 42, 52, 55]) {
       expect(geminiRunEnd({ code, signal: null }, undefined, "")).toEqual({
@@ -71,7 +92,6 @@ describe("geminiRunEnd rules", () => {
       kind: "failed",
       code: "coding_stream_agent_exited",
     });
-    expect(geminiRunEnd({ code: 0, signal: null }, undefined, "")).toEqual({ kind: "ok" });
   });
   it("fails closed on a clean exit whose result says error", () => {
     expect(geminiRunEnd({ code: 0, signal: null }, error("[API Error: injected 500]"), "")).toEqual({
@@ -79,6 +99,12 @@ describe("geminiRunEnd rules", () => {
       code: "coding_stream_agent_exited",
     });
     expect(geminiRunEnd({ code: 0, signal: null }, { status: "success" }, "")).toEqual({ kind: "ok" });
+  });
+  it("fails closed on a clean exit with no result event (the stream ended before it said how)", () => {
+    expect(geminiRunEnd({ code: 0, signal: null }, undefined, "")).toEqual({
+      kind: "failed",
+      code: "coding_stream_agent_exited",
+    });
   });
   it("reads refused arguments from stderr only without a result event", () => {
     const stderr = "Unknown arguments: such-flag, suchFlag\nUsage: gemini [options] [command]\n";

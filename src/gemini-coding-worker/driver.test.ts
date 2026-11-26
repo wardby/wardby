@@ -42,14 +42,16 @@ const versionRun = (version = "0.70.0"): GeminiCliRun => ({
 });
 
 /** Answers `--version`, then each run with the next scenario's recording; `before` runs as each run starts. */
-function fakeCli(...scenarios: string[]) {
+type Recording = ReturnType<typeof fixture>;
+function fakeCli(...scenarios: (string | Recording)[]) {
   const calls: { args: readonly string[]; env: Record<string, string> }[] = [];
   const hooks: { before?: (run: number) => Promise<void> | void; oversized?: number } = {};
   const spawnCli: GeminiCliSpawner = (args, options) => {
     calls.push({ args, env: options.env });
     if (args[0] === "--version") return versionRun();
     const index = calls.length - 1;
-    const f = fixture(scenarios.shift() ?? "success-tools");
+    const next = scenarios.shift() ?? "success-tools";
+    const f = typeof next === "string" ? fixture(next) : next;
     return {
       lines: (async function* () {
         await hooks.before?.(index);
@@ -295,10 +297,22 @@ describe("runGeminiCodingWorker", () => {
   });
 
   it("fails with the shared invalid-output code when the repair is still not an answer", async () => {
+    const prose = {
+      lines: [JSON.stringify({ session_id: "s", response: JSON.stringify({ schemaVersion: 1, runId: "run_rec" }) })],
+      exit: 0,
+      stderrTail: "",
+    };
+    const cli = fakeCli("prose-final", prose);
+    const error = await runGeminiCodingWorker(await options({ spawnCli: cli.spawnCli })).catch((e: unknown) => e);
+    expect(safeWorkerErrorCode(error)).toBe("coding_output_invalid");
+    expect(cli.calls).toHaveLength(3);
+  });
+
+  it("fails closed when the repair exits 0 with no JSON document (no result to say it succeeded)", async () => {
     const cli = fakeCli("prose-final", "prose-final");
     const error = await runGeminiCodingWorker(await options({ spawnCli: cli.spawnCli })).catch((e: unknown) => e);
-    // The prose stream read as --output-format json has no response: nothing to parse.
-    expect(safeWorkerErrorCode(error)).toBe("coding_output_missing");
+    // The prose stream read as --output-format json is no document at all.
+    expect(safeWorkerErrorCode(error)).toBe("coding_stream_agent_exited");
     expect(cli.calls).toHaveLength(3);
   });
 

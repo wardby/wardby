@@ -274,6 +274,76 @@ describe("relaying Gemini calls", () => {
     expect(JSON.stringify(h.events)).not.toContain(FAKE_GEMINI_KEY);
   });
 
+  it.each([400, 403, 429, 500, 503])(
+    "relays an upstream %i as the fixed Google-shaped upstream_rejected body, nothing from the upstream's",
+    async (status) => {
+      const h = await gemini({
+        fetch: async () =>
+          Response.json(
+            {
+              error: {
+                code: status,
+                status: "INVALID_ARGUMENT",
+                message: `key ${FAKE_GEMINI_KEY} rejected for prompt: MARK_PROMPT_TEXT`,
+                details: [{ reason: "MARK_DETAIL" }],
+              },
+            },
+            { status },
+          ),
+      });
+      const sink = await h.execute(body());
+      expect(sink.status).toBe(status);
+      expect(JSON.parse(sink.text())).toEqual({
+        error: {
+          code: status,
+          status: {
+            400: "INVALID_ARGUMENT",
+            403: "PERMISSION_DENIED",
+            429: "RESOURCE_EXHAUSTED",
+            500: "INTERNAL",
+            503: "UNAVAILABLE",
+          }[status],
+          message: "upstream_rejected",
+          type: "upstream_rejected",
+        },
+      });
+      for (const mark of [FAKE_GEMINI_KEY, "MARK_PROMPT_TEXT", "MARK_DETAIL"]) expect(sink.text()).not.toContain(mark);
+    },
+  );
+
+  it("relays an upstream quota code where the CLI and the worker see it, and nothing else of the body", async () => {
+    const h = await gemini({
+      fetch: async () =>
+        Response.json(
+          { error: { code: 429, type: "insufficient_quota", message: `key ${FAKE_GEMINI_KEY}: MARK_PROMPT_TEXT` } },
+          { status: 429 },
+        ),
+    });
+    const sink = await h.execute(body());
+    expect(sink.status).toBe(429);
+    expect(JSON.parse(sink.text())).toEqual({
+      error: {
+        code: 429,
+        status: "RESOURCE_EXHAUSTED",
+        // "(limit: 0)": the CLI stops at once instead of retrying a quota that will not clear.
+        message: "upstream_quota_exceeded: insufficient_quota (limit: 0)",
+        type: "insufficient_quota",
+      },
+    });
+    for (const mark of [FAKE_GEMINI_KEY, "MARK_PROMPT_TEXT"]) expect(sink.text()).not.toContain(mark);
+    expect(await h.ledger.upstreamFailure(h.session.id)).toBe("insufficient_quota");
+  });
+
+  it("never relays a quota-looking upstream code that carries the key or the budget marker", async () => {
+    for (const code of [`quota_${FAKE_GEMINI_KEY}`, "wardby_budget_exhausted_quota"]) {
+      const h = await gemini({
+        fetch: async () => Response.json({ error: { code: 429, type: code, message: "x" } }, { status: 429 }),
+      });
+      const sink = await h.execute(body());
+      expect(JSON.parse(sink.text()).error).toMatchObject({ message: "upstream_rejected", type: "upstream_rejected" });
+    }
+  });
+
   it("releases a Vertex call when the project is unset or ADC fails, with fixed reasons and no token text", async () => {
     const unset = await gemini({ model: VERTEX_US, vertexProject: null });
     await expect(unset.execute(body())).rejects.toMatchObject({ status: 503, code: "upstream_unavailable" });
