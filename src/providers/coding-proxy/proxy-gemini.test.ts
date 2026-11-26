@@ -221,6 +221,23 @@ describe("relaying Gemini calls", () => {
     expect((await untouched.execute(body(), "generateContent")).text()).toBe(plain);
   });
 
+  it("hands run steps nothing carrying the key, from a stream or a whole reply (detail capture on)", async () => {
+    const submitted: unknown[] = [];
+    const steps = { submit: (_capability: string, _runId: string, batch: unknown) => void submitted.push(batch) };
+    const echo = (text: string) => ({
+      candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }],
+      usageMetadata: usage(10, 2),
+    });
+    const stream = await gemini({
+      steps,
+      fetch: async () => new Response(sse([echo(`said ${FAKE_GEMINI_KEY}`)]), { status: 200 }),
+    });
+    expect((await stream.execute(body())).text()).toContain("said [REDACTED]");
+    const whole = await gemini({ steps, fetch: async () => Response.json(echo(`said ${FAKE_GEMINI_KEY}`)) });
+    expect((await whole.execute(body(), "generateContent")).text()).not.toContain(FAKE_GEMINI_KEY);
+    expect(JSON.stringify(submitted)).not.toContain(FAKE_GEMINI_KEY);
+  });
+
   it("answers a rejected call with a fixed body, recording Google's status code only", async () => {
     const h = await gemini({
       fetch: async () =>

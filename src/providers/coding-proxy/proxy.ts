@@ -29,7 +29,7 @@ import {
   type SweepResult,
 } from "../../core/request-lease.js";
 import { logger } from "../../core/logger.js";
-import { redactExactSecretValues } from "../../core/secret-spans.js";
+import { redactExactSecretValues, withEscapedForms } from "../../core/secret-spans.js";
 import {
   AnthropicSseUsageTracker,
   actualCostUsd,
@@ -1718,8 +1718,9 @@ export class CodingProxy {
         session.workflow === true && input.agentId !== undefined && STEP_AGENT_REF.test(input.agentId)
           ? input.agentId
           : undefined;
-      // The credential sent upstream: anything relayed to the client is redacted by its exact value.
-      const secrets = [target.secret];
+      // The credential sent upstream (and its JSON-escaped forms): everything relayed to the client, and
+      // everything read for run steps, is redacted by exact value. The control plane does not know this value.
+      const secrets = withEscapedForms([target.secret]);
       if (parsed.stream) {
         await this.forwardStream(session, request, upstream, sink, progress, secrets, input.bearer, agent);
       } else {
@@ -2004,7 +2005,11 @@ export class CodingProxy {
     const wire = stepWireProtocol(session.protocol);
     if (capture !== "none" && wire) {
       this.submitSteps(capability, session.runId, () => ({
-        steps: tagged(stepsFromJson(wire, value, { detail: capture === "detail" }), agent),
+        // Read from the redacted reply: the control plane cannot redact the upstream credential.
+        steps: tagged(
+          stepsFromJson(wire, redacted === text ? value : JSON.parse(redacted), { detail: capture === "detail" }),
+          agent,
+        ),
         results: [],
       }));
     }
@@ -2024,7 +2029,8 @@ export class CodingProxy {
     sink.start(upstream.status, { "content-type": "text/event-stream", "cache-control": "no-store" });
     const connected = { value: true };
     // Every relayed frame, failure frames above all (an upstream error message can echo the credential),
-    // reaches the client with the credential sent upstream replaced by exact value.
+    // reaches the client, and the step extractor, with the credential sent upstream replaced by exact value.
+    // Usage tracking reads the original frame: it takes numbers only.
     const write = (text: string) => safeWrite(sink, Buffer.from(redactExactSecretValues(text, secrets)), connected);
     const decoder = new TextDecoder();
     let buffer = "";
@@ -2043,6 +2049,11 @@ export class CodingProxy {
         steps = undefined;
       }
     };
+    const send = async (frame: string) => {
+      const clean = redactExactSecretValues(frame, secrets);
+      await safeWrite(sink, Buffer.from(`${clean}\n\n`), connected);
+      observe(clean);
+    };
     const geminiUsage =
       session.protocol === "gemini-generate-content" ? (progress.gemini = new GeminiSseUsageTracker()) : undefined;
     // Gemini streams have no terminal event: each frame goes out when the next arrives, and the last one only
@@ -2050,8 +2061,7 @@ export class CodingProxy {
     let held: string | undefined;
     const relay = async (frame: string) => {
       progress.relayedOutputBytes += relayedTextBytes(frame, session.protocol);
-      await write(`${frame}\n\n`);
-      observe(frame);
+      await send(frame);
     };
     const geminiFrame = async (frame: string) => {
       const seen = geminiUsage!.consume(frame);
@@ -2095,8 +2105,7 @@ export class CodingProxy {
           const terminal = anthropicUsage ? anthropicUsage.consume(frame) : terminalUsageFromSseFrame(frame);
           if (!terminal.terminal) {
             progress.relayedOutputBytes += relayedTextBytes(frame, session.protocol);
-            await write(`${frame}\n\n`);
-            observe(frame);
+            await send(frame);
             continue;
           }
           if (!terminal.usage) {
@@ -2115,14 +2124,12 @@ export class CodingProxy {
               );
             }
             failedWithoutUsage = true;
-            await write(`${frame}\n\n`);
-            observe(frame);
+            await send(frame);
             continue;
           }
           await this.complete(session, request, terminal.usage, upstream.status);
           completed = true;
-          await write(`${frame}\n\n`);
-          observe(frame);
+          await send(frame);
         }
       }
       buffer = (buffer + decoder.decode()).replaceAll("\r\n", "\n");

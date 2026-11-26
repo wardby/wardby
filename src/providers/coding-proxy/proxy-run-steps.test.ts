@@ -309,6 +309,28 @@ describe("CodingProxy run steps", () => {
     ]);
   });
 
+  it("keeps the upstream credential out of a stream's steps and its relayed frames", async () => {
+    const stream = anthropicToolStream("said UPSTREAM_SECRET", "echo UPSTREAM_SECRET");
+    const h = await harness("anthropic-messages", sse(stream));
+    const sink = await h.execute(await stepsFixture("anthropic-tool-result-request.json"), "k1");
+    expect(sink.text()).not.toContain("UPSTREAM_SECRET");
+    const steps = h.stepBatches()[0].batch.steps.map((s) => s.text);
+    expect(steps).toEqual(["said [REDACTED]", "echo [REDACTED]"]);
+    expect(JSON.stringify(h.submitted)).not.toContain("UPSTREAM_SECRET");
+  });
+
+  it("keeps the upstream credential out of a whole reply's steps and its relayed body", async () => {
+    const reply = JSON.parse(await stepsFixture("anthropic-run-command-response.json"));
+    reply.content[0].text = "Checking UPSTREAM_SECRET.";
+    const request = JSON.parse(await stepsFixture("anthropic-tool-result-request.json"));
+    request.stream = false;
+    const h = await harness("anthropic-messages", () => Response.json(reply));
+    const sink = await h.execute(JSON.stringify(request), "k1");
+    expect(sink.text()).not.toContain("UPSTREAM_SECRET");
+    expect(h.stepBatches()[0].batch.steps[0].text).toBe("Checking [REDACTED].");
+    expect(JSON.stringify(h.submitted)).not.toContain("UPSTREAM_SECRET");
+  });
+
   it("hands over a whole (non-stream) reply's steps", async () => {
     const reply = JSON.parse(await stepsFixture("anthropic-run-command-response.json"));
     const request = JSON.parse(await stepsFixture("anthropic-tool-result-request.json"));

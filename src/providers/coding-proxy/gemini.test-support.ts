@@ -6,6 +6,7 @@ import { shippedCatalog } from "../llm/catalog.js";
 import { entryOf } from "../llm/catalog-types.js";
 import { VERTEX_CREDENTIAL_REF } from "./gemini-upstream.js";
 import type { ProxyAuditEvent } from "./types.js";
+import type { RunStepSubmitter } from "../../core/run-steps/types.js";
 import type { WebTools } from "../../coding/google-web-tools.js";
 
 export const NOW = new Date("2026-11-26T12:00:00.000Z");
@@ -68,6 +69,7 @@ export async function gemini(
     vertexProject?: string | null;
     budgetUsd?: number;
     ledger?: MemoryProxyLedger;
+    steps?: RunStepSubmitter;
   } = {},
 ) {
   const model = opts.model ?? STUDIO;
@@ -82,6 +84,7 @@ export async function gemini(
     fetch,
     now: () => NOW,
     audit: (event) => events.push(event),
+    ...(opts.steps ? { steps: opts.steps, runStepsCeiling: "detail" as const } : {}),
     gemini: {
       ...(opts.vertexProject === null ? {} : { vertexProject: opts.vertexProject ?? "example-project" }),
       vertexToken: opts.vertexToken ?? (async () => FAKE_VERTEX_TOKEN),
@@ -95,6 +98,7 @@ export async function gemini(
     deadlineAt: new Date(NOW.getTime() + 60_000),
     budgetUsd: opts.budgetUsd ?? 5,
     terms: { version: "test-v1", entry },
+    ...(opts.steps ? { runStepsLevel: "detail" as const } : {}),
     ...(opts.webTools ? { webTools: opts.webTools } : {}),
   });
   const googleModel = vertex ? model.replace(/^(us|eu)\./, "") : model.replace(/^google-ai-studio\./, "");
