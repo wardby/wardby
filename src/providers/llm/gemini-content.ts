@@ -165,6 +165,24 @@ export function geminiError(status: number, bodyText: string): Error {
   return new Error(`Gemini API error: HTTP ${status}${googleStatus ? ` ${googleStatus}` : ""}: ${bounded}`);
 }
 
+export type GeminiUsageMetadata = NonNullable<GeminiChunk["usageMetadata"]>;
+
+/**
+ * The one usage rule for Gemini, shared by the native adapters and the coding proxy: input includes the
+ * tool-use prompt (e.g. grounded search results), output includes thinking, cached is the implicit cache's read.
+ */
+export function geminiUsageTokens(usage: GeminiUsageMetadata): {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+} {
+  return {
+    inputTokens: (usage.promptTokenCount ?? 0) + (usage.toolUsePromptTokenCount ?? 0),
+    outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
+    cachedInputTokens: usage.cachedContentTokenCount ?? 0,
+  };
+}
+
 export async function* mapGeminiStream(
   chunks: AsyncIterable<GeminiChunk>,
   price: (usage: Omit<LlmUsage, "costUsd">) => number,
@@ -195,11 +213,7 @@ export async function* mapGeminiStream(
   // A stream that stops before its usage summary (cut connection, proxy close) is a failure, as
   // for the other providers: a $0 "done" would let unbilled work pass as a success.
   if (usage === undefined) throw new Error("Gemini stream ended without a usage summary");
-  const tokens = {
-    inputTokens: (usage.promptTokenCount ?? 0) + (usage.toolUsePromptTokenCount ?? 0),
-    outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
-    cachedInputTokens: usage.cachedContentTokenCount ?? 0,
-  };
+  const tokens = geminiUsageTokens(usage);
   const stopReason = sawToolCall ? "tool_calls" : finish === "MAX_TOKENS" ? "length" : "stop";
   yield { type: "done", stopReason, usage: { ...tokens, costUsd: price(tokens) } };
 }

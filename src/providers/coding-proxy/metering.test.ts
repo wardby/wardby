@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   AnthropicSseUsageTracker,
   actualCostUsd,
+  GeminiSseUsageTracker,
   estimateReservationUsd,
+  parseGeminiAuthoritativeUsage,
+  safeUpstreamErrorCode,
   parseAuthoritativeUsage,
   parseAnthropicAuthoritativeUsage,
   terminalUsageFromSseFrame,
@@ -134,5 +137,89 @@ describe("coding proxy metering", () => {
       terminal: true,
       failure: "unknown",
     });
+  });
+});
+
+const geminiFrame = (value: unknown) => `data: ${JSON.stringify(value)}`;
+
+describe("Gemini usage", () => {
+  it("maps usageMetadata to proxy usage, thoughts as reasoning and no cache writes", () => {
+    expect(
+      parseGeminiAuthoritativeUsage({
+        promptTokenCount: 100,
+        toolUsePromptTokenCount: 7,
+        candidatesTokenCount: 20,
+        thoughtsTokenCount: 5,
+        cachedContentTokenCount: 60,
+      }),
+    ).toEqual({ inputTokens: 107, outputTokens: 25, cachedInputTokens: 60, cacheWriteTokens: 0, reasoningTokens: 5 });
+  });
+
+  it("refuses missing, negative or inconsistent counts", () => {
+    expect(() => parseGeminiAuthoritativeUsage(undefined)).toThrow("invalid_authoritative_usage");
+    expect(() => parseGeminiAuthoritativeUsage({ candidatesTokenCount: 1 })).toThrow("promptTokenCount");
+    expect(() => parseGeminiAuthoritativeUsage({ promptTokenCount: -1 })).toThrow("promptTokenCount");
+    expect(() => parseGeminiAuthoritativeUsage({ promptTokenCount: 5, cachedContentTokenCount: 9 })).toThrow(
+      "details_exceed_total",
+    );
+  });
+
+  it("keeps the latest usage of a stream, never a sum (AI Studio sends it cumulatively)", () => {
+    const tracker = new GeminiSseUsageTracker();
+    tracker.consume(
+      geminiFrame({
+        candidates: [{ content: { parts: [{ text: "a" }] } }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 1 },
+      }),
+    );
+    tracker.consume(
+      geminiFrame({
+        candidates: [{ content: { parts: [{ text: "b" }] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, cachedContentTokenCount: 4 },
+      }),
+    );
+    expect(tracker.usage()).toEqual({
+      inputTokens: 10,
+      outputTokens: 2,
+      cachedInputTokens: 4,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+    });
+    expect(tracker.partial()).toEqual({
+      readUsage: { inputTokens: 10, cachedInputTokens: 4, cacheWriteTokens: 0 },
+      reportedOutputTokens: 2,
+    });
+  });
+
+  it("reads usage from the last chunk only when earlier ones carry none (Vertex), and none at all is undefined", () => {
+    const vertex = new GeminiSseUsageTracker();
+    vertex.consume(geminiFrame({ candidates: [{ content: { parts: [{ text: "a" }] } }] }));
+    vertex.consume(
+      geminiFrame({
+        candidates: [{ finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 8, candidatesTokenCount: 3 },
+      }),
+    );
+    expect(vertex.usage()?.outputTokens).toBe(3);
+    const none = new GeminiSseUsageTracker();
+    none.consume(geminiFrame({ candidates: [{ content: { parts: [{ text: "a" }] } }] }));
+    expect(none.usage()).toBeUndefined();
+    expect(none.partial()).toEqual({});
+  });
+
+  it("reports a stream error's status code, never its message", () => {
+    const tracker = new GeminiSseUsageTracker();
+    const result = tracker.consume(
+      geminiFrame({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "quota for key AIzaFAKE" } }),
+    );
+    expect(result).toEqual({ failure: "RESOURCE_EXHAUSTED" });
+    expect(JSON.stringify(result)).not.toContain("AIzaFAKE");
+    expect(safeUpstreamErrorCode({ error: { code: 400, status: "INVALID_ARGUMENT", message: "x" } })).toBe(
+      "INVALID_ARGUMENT",
+    );
+  });
+
+  it("refuses a frame that is not JSON", () => {
+    expect(() => new GeminiSseUsageTracker().consume("data: {nope")).toThrow("invalid_upstream_sse");
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toGeminiBody, parseGeminiSse, mapGeminiStream, geminiError } from "./gemini-content.js";
+import { toGeminiBody, parseGeminiSse, mapGeminiStream, geminiError, geminiUsageTokens } from "./gemini-content.js";
 import type { CatalogEntry } from "./catalog-types.js";
 
 const NEON: CatalogEntry = {
@@ -330,5 +330,24 @@ describe("geminiError", () => {
     );
     expect(err.message).toBe("Gemini API error: HTTP 402 RESOURCE_EXHAUSTED: Your prepayment credits are depleted.");
     expect(geminiError(500, "x".repeat(5000)).message.length).toBeLessThan(400);
+  });
+});
+
+describe("geminiUsageTokens", () => {
+  it("adds tool-use prompt tokens to input and thoughts to output, and reads cached as is", () => {
+    expect(
+      geminiUsageTokens({
+        promptTokenCount: 100,
+        toolUsePromptTokenCount: 7,
+        candidatesTokenCount: 20,
+        thoughtsTokenCount: 5,
+        cachedContentTokenCount: 60,
+      }),
+    ).toEqual({ inputTokens: 107, outputTokens: 25, cachedInputTokens: 60 });
+    expect(geminiUsageTokens({ promptTokenCount: 3 })).toEqual({
+      inputTokens: 3,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+    });
   });
 });

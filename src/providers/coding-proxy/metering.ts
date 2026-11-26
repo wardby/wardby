@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { geminiUsageTokens } from "../llm/gemini-content.js";
 import { computeCost, type ModelPricing } from "../llm/pricing-core.js";
 import type { PricingSnapshot, ProxyUsage } from "./types.js";
 
@@ -112,7 +113,13 @@ export function safeUpstreamErrorCode(record: Record<string, unknown>): string |
     const value = record[key];
     return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
   };
-  const candidates = [nested("error")?.code, nested("error")?.type, nested("incomplete_details")?.reason, record.code];
+  const candidates = [
+    nested("error")?.code,
+    nested("error")?.type,
+    nested("error")?.status,
+    nested("incomplete_details")?.reason,
+    record.code,
+  ];
   const code = candidates.find((value) => typeof value === "string" && SAFE_ERROR_CODE.test(value));
   return typeof code === "string" ? code : undefined;
 }
@@ -213,6 +220,84 @@ export class AnthropicSseUsageTracker {
       },
       ...(this.outputTokens !== undefined ? { reportedOutputTokens: this.outputTokens } : {}),
       ...(this.startOutputTokens !== undefined ? { outputFloorTokens: this.startOutputTokens } : {}),
+    };
+  }
+}
+
+/** A Gemini usageMetadata, validated, as proxy usage (gemini-content.ts's rule; cache writes are free and unreported). */
+export function parseGeminiAuthoritativeUsage(value: unknown): ProxyUsage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid_authoritative_usage");
+  const usage = value as Record<string, unknown>;
+  const counts = {
+    promptTokenCount: tokenCount(usage.promptTokenCount, "promptTokenCount"),
+    candidatesTokenCount: tokenCount(usage.candidatesTokenCount ?? 0, "candidatesTokenCount"),
+    thoughtsTokenCount: tokenCount(usage.thoughtsTokenCount ?? 0, "thoughtsTokenCount"),
+    cachedContentTokenCount: tokenCount(usage.cachedContentTokenCount ?? 0, "cachedContentTokenCount"),
+    toolUsePromptTokenCount: tokenCount(usage.toolUsePromptTokenCount ?? 0, "toolUsePromptTokenCount"),
+  };
+  const parsed: ProxyUsage = {
+    ...geminiUsageTokens(counts),
+    cacheWriteTokens: 0,
+    reasoningTokens: counts.thoughtsTokenCount,
+  };
+  if (parsed.cachedInputTokens > parsed.inputTokens)
+    throw new Error("invalid_authoritative_usage:details_exceed_total");
+  return parsed;
+}
+
+/** The parsed `data:` JSON of a Gemini SSE frame, or undefined for a frame without data. */
+function geminiFrameData(frame: string): Record<string, unknown> | undefined {
+  const data = frame
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n");
+  if (!data) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(data);
+  } catch {
+    throw new Error("invalid_upstream_sse");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid_upstream_sse");
+  return value as Record<string, unknown>;
+}
+
+/**
+ * Gemini streams have no terminal event: usage rides on chunks (every chunk on AI Studio, cumulatively; the last
+ * one on Vertex) and the stream ends. The latest valid usage is kept; the caller settles at the end of the body.
+ */
+export class GeminiSseUsageTracker {
+  private latest?: ProxyUsage;
+
+  consume(frame: string): { failure?: string } {
+    const value = geminiFrameData(frame);
+    if (!value) return {};
+    if (value.error && typeof value.error === "object") return { failure: upstreamErrorCode(value) };
+    const usage = value.usageMetadata as Record<string, unknown> | undefined;
+    if (usage && typeof usage === "object" && usage.promptTokenCount !== undefined) {
+      this.latest = parseGeminiAuthoritativeUsage(usage);
+    }
+    return {};
+  }
+
+  usage(): ProxyUsage | undefined {
+    return this.latest ? { ...this.latest } : undefined;
+  }
+
+  /** What a cut stream reported before it broke, for interrupted.ts: the latest usage's input and output. */
+  partial(): {
+    readUsage?: { inputTokens: number; cachedInputTokens: number; cacheWriteTokens: number };
+    reportedOutputTokens?: number;
+  } {
+    if (!this.latest) return {};
+    return {
+      readUsage: {
+        inputTokens: this.latest.inputTokens,
+        cachedInputTokens: this.latest.cachedInputTokens,
+        cacheWriteTokens: 0,
+      },
+      reportedOutputTokens: this.latest.outputTokens,
     };
   }
 }
