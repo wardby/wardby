@@ -189,7 +189,7 @@ describe("relaying Gemini calls", () => {
     await expect(h.execute(body())).rejects.toMatchObject({ status: 502 });
     const id = h.events.find((e) => e.type === "request.reserved")!.requestId!;
     expect((await h.ledger.getRequest(id))?.status).toBe("uncertain");
-    expect(h.events.some((e) => e.type === "request.completed")).toBe(false);
+    expect(h.events.some((e) => e.type === "response.completed")).toBe(false);
   });
 
   it("relays a stream error frame, records its status code and never its message", async () => {

@@ -103,7 +103,7 @@ describe("parseGeminiRequest", () => {
   });
 
   it("maps a Vertex path model to the session's region-prefixed wardby id", () => {
-    const route = { surface: "vertex-express" as const, model: "gemini-4-neon", method: "streamGenerateContent" };
+    const route = { surface: "vertex-express", model: "gemini-4-neon", method: "streamGenerateContent" } as const;
     for (const id of ["us.gemini-4-neon", "eu.gemini-4-neon"]) {
       expect(parse(body(), { route, backend: "vertex-gemini", allowedModels: [id] }).model).toBe(id);
     }
