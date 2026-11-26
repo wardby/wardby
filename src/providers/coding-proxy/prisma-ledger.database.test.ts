@@ -1366,6 +1366,17 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       ]);
     });
 
+    it("gives two concurrent identical retries of a released request exactly one new attempt", async () => {
+      const first = await tryKey("released-race");
+      await ledger.release((first as { request: { id: string } }).request.id, 429);
+      const results = await Promise.all([tryKey("released-race"), tryKey("released-race")]);
+      expect(results.map((result) => result.outcome).sort()).toEqual(["in_progress", "reserved"]);
+      expect((await attemptsOf("released-race")).map((row) => [row.attempt, row.status])).toEqual([
+        [1, "released"],
+        [2, "reserved"],
+      ]);
+    });
+
     it("counts the first attempt's estimate and the new attempt's hold against the budget", async () => {
       // A hold as large as the whole budget never fits, so the refusal's numbers show what counted.
       const first = await reserved("budget");

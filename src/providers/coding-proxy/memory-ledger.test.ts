@@ -731,4 +731,39 @@ describe("retry after an upstream rejection", () => {
     await ledger.release("c", 503);
     expect(await reserve("d")).toMatchObject({ outcome: "attempts_exhausted" });
   });
+
+  it("gives two concurrent identical retries of a released request exactly one new attempt", async () => {
+    const now = new Date("2026-11-26T12:00:00Z");
+    const ledger = new MemoryProxyLedger({ now: () => now });
+    await ledger.createSession({
+      id: "s",
+      runId: "r",
+      capabilityHash: "c",
+      credentialRef: "env:GEMINI_API_KEY",
+      protocol: "gemini-generate-content",
+      allowedModels: ["m"],
+      deadlineAt: new Date(now.getTime() + 60_000),
+      budgetUsd: 10,
+      registryTokenHash: "g",
+    });
+    const reserve = (id: string) =>
+      ledger.reserve({
+        id,
+        sessionId: "s",
+        requestKey: "body:f",
+        requestFingerprint: "f",
+        model: "m",
+        reservationUsd: 0.01,
+        pricing: { version: "v", encoding: "o200k_base", inputPerMTok: 1, outputPerMTok: 1 },
+        now,
+        maxAttempts: 3,
+        ownerId: "owner",
+        leaseMs: 30_000,
+      });
+    await reserve("a");
+    await ledger.release("a", 429);
+    const results = await Promise.all([reserve("b"), reserve("c")]);
+    expect(results.filter((result) => result.outcome === "reserved")).toHaveLength(1);
+    expect(results.map((result) => result.outcome).sort()).toEqual(["in_progress", "reserved"]);
+  });
 });
