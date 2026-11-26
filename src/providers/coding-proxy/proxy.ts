@@ -46,8 +46,10 @@ import { conversationKey, estimateHold } from "./hold.js";
 import { estimateInterrupted, previousInput, type InterruptedEstimate } from "./interrupted.js";
 import { createPinnedProxyFetch } from "./secure-fetch.js";
 import {
+  geminiStepPosition,
   resultsFromRequest,
   type StepCaptureOptions,
+  type GeminiStepPosition,
   type StepWireProtocol,
   stepsFromJson,
   streamStepExtractor,
@@ -151,9 +153,9 @@ export interface ExecuteProxyRequest {
   gemini?: GeminiRoute;
 }
 
-/** The protocols whose replies and requests are read for run steps (a Gemini session has none yet). */
+/** The protocols whose replies and requests are read for run steps. */
 function stepWireProtocol(protocol: ProxyProtocol): StepWireProtocol | undefined {
-  return protocol === "gemini-generate-content" ? undefined : protocol;
+  return protocol;
 }
 
 /** What this session's replies and requests are read for. */
@@ -240,7 +242,11 @@ export interface CodingProxyOptions {
   /** Gemini upstreams: Vertex project and token source; bases for tests. */
   gemini?: GeminiUpstreamOptions;
   /** Tests only: replaces the stream step extractor. */
-  createStepExtractor?: (protocol: ProxyProtocol, options?: StepCaptureOptions) => StreamStepExtractor;
+  createStepExtractor?: (
+    protocol: ProxyProtocol,
+    options?: StepCaptureOptions,
+    position?: GeminiStepPosition,
+  ) => StreamStepExtractor;
 }
 
 /** Tries per request key by default, matching the workers' own retry setting (3 retries after the first try). */
@@ -1271,7 +1277,11 @@ export class CodingProxy {
   /** The requests this process holds a lease on and keeps renewing; one leaves the set the moment its relay ends. */
   private readonly openRequests = new Set<string>();
   private readonly steps?: RunStepSubmitter;
-  private readonly createStepExtractor?: (protocol: ProxyProtocol, options?: StepCaptureOptions) => StreamStepExtractor;
+  private readonly createStepExtractor?: (
+    protocol: ProxyProtocol,
+    options?: StepCaptureOptions,
+    position?: GeminiStepPosition,
+  ) => StreamStepExtractor;
   private readonly runStepsCeiling: RunStepsLevel;
   /** Results already handed over, per session: each request resends the history. */
   private readonly seenResults = new SeenIds();
@@ -1721,10 +1731,21 @@ export class CodingProxy {
       // The credential sent upstream (and its JSON-escaped forms): everything relayed to the client, and
       // everything read for run steps, is redacted by exact value. The control plane does not know this value.
       const secrets = withEscapedForms([target.secret]);
+      const stepPosition = session.protocol === "gemini-generate-content" ? geminiStepPosition(parsed.body) : undefined;
       if (parsed.stream) {
-        await this.forwardStream(session, request, upstream, sink, progress, secrets, input.bearer, agent);
+        await this.forwardStream(
+          session,
+          request,
+          upstream,
+          sink,
+          progress,
+          secrets,
+          input.bearer,
+          agent,
+          stepPosition,
+        );
       } else {
-        await this.forwardJson(session, request, upstream, sink, secrets, input.bearer, agent);
+        await this.forwardJson(session, request, upstream, sink, secrets, input.bearer, agent, stepPosition);
       }
     } catch (error) {
       await this.markUncertain(
@@ -1975,6 +1996,7 @@ export class CodingProxy {
     secrets: readonly string[],
     capability: string,
     agent?: string,
+    stepPosition?: GeminiStepPosition,
   ): Promise<void> {
     const declaredLength = Number(upstream.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_UPSTREAM_JSON_BYTES) {
@@ -2007,7 +2029,12 @@ export class CodingProxy {
       this.submitSteps(capability, session.runId, () => ({
         // Read from the redacted reply: the control plane cannot redact the upstream credential.
         steps: tagged(
-          stepsFromJson(wire, redacted === text ? value : JSON.parse(redacted), { detail: capture === "detail" }),
+          stepsFromJson(
+            wire,
+            redacted === text ? value : JSON.parse(redacted),
+            { detail: capture === "detail" },
+            stepPosition,
+          ),
           agent,
         ),
         results: [],
@@ -2024,6 +2051,7 @@ export class CodingProxy {
     secrets: readonly string[],
     capability: string,
     agent?: string,
+    stepPosition?: GeminiStepPosition,
   ): Promise<void> {
     if (!upstream.body) throw new Error("missing_upstream_body");
     sink.start(upstream.status, { "content-type": "text/event-stream", "cache-control": "no-store" });
@@ -2040,7 +2068,7 @@ export class CodingProxy {
     const anthropicUsage =
       session.protocol === "anthropic-messages" ? (progress.anthropic = new AnthropicSseUsageTracker()) : undefined;
     // Run steps: each frame is read after it was relayed. An extractor that throws is dropped, never the relay.
-    let steps = this.newStepExtractor(session);
+    let steps = this.newStepExtractor(session, stepPosition);
     const observe = (frame: string) => {
       if (!steps) return;
       try {
@@ -2189,13 +2217,15 @@ export class CodingProxy {
     }
   }
 
-  private newStepExtractor(session: ProxySession): StreamStepExtractor | undefined {
+  private newStepExtractor(session: ProxySession, position?: GeminiStepPosition): StreamStepExtractor | undefined {
     if (!this.steps) return undefined;
+    // A Gemini helper call (no function declarations) has no position and gives no steps.
+    if (session.protocol === "gemini-generate-content" && !position) return undefined;
     const capture = stepCapture(session, this.runStepsCeiling);
     const wire = stepWireProtocol(session.protocol);
     if (capture === "none" || !wire) return undefined;
     try {
-      return (this.createStepExtractor ?? streamStepExtractor)(wire, { detail: capture === "detail" });
+      return (this.createStepExtractor ?? streamStepExtractor)(wire, { detail: capture === "detail" }, position);
     } catch {
       return undefined;
     }

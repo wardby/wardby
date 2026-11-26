@@ -5,6 +5,7 @@
  * detail only its end (MAX_RESULT_OUTPUT_CHARS) is. Its status comes from its first lines. Each request resends the whole history, so results are read from the newest turn
  * only.
  */
+import { createHash } from "node:crypto";
 import {
   bounded,
   CLAUDE_RESULT_TOOL,
@@ -21,7 +22,7 @@ export interface StepCaptureOptions {
   detail?: boolean;
 }
 
-export type StepWireProtocol = "openai-responses" | "anthropic-messages";
+export type StepWireProtocol = "openai-responses" | "anthropic-messages" | "gemini-generate-content";
 
 export interface StreamStepExtractor {
   /** Reads one SSE frame (the text between blank lines). Never throws. */
@@ -319,7 +320,111 @@ export class OpenAiStreamSteps implements StreamStepExtractor {
   }
 }
 
-export function streamStepExtractor(protocol: StepWireProtocol, options?: StepCaptureOptions): StreamStepExtractor {
+/**
+ * Where a Gemini reply sits in its conversation. Gemini function calls usually carry no id (and the CLI invents
+ * its own for the response), so a step's id is positional: the thread (a hash of the first message), the
+ * reply's index in `contents`, and the call's index in the reply. The next request's k-th functionResponse after
+ * that model content has the same id.
+ */
+export interface GeminiStepPosition {
+  thread: string;
+  turn: number;
+}
+
+const arr = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+
+/** A request's position, or undefined for one that declares no functions (a helper call: no steps). */
+export function geminiStepPosition(value: unknown): GeminiStepPosition | undefined {
+  try {
+    const body = obj(value);
+    const contents = arr(body?.contents);
+    const declares = arr(body?.tools).some((tool) => arr(obj(tool)?.functionDeclarations).length > 0);
+    if (!declares || contents.length === 0) return undefined;
+    const thread = createHash("sha256").update(JSON.stringify(contents[0])).digest("base64url").slice(0, 16);
+    return { thread, turn: contents.length };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Gemini streams: text parts joined into one said step; each functionCall a tool step; thoughts skipped. */
+export class GeminiStreamSteps implements StreamStepExtractor {
+  private done: ExtractedStep[] = [];
+  private said?: OpenBlock;
+  private saidCount = 0;
+  private calls = 0;
+  private finishReason?: string;
+
+  constructor(
+    private readonly position: GeminiStepPosition,
+    private readonly options?: StepCaptureOptions,
+  ) {}
+
+  private closeSaid(): void {
+    if (!this.said) return;
+    const step = closeBlock(this.said, this.options);
+    if (step) this.done.push(step);
+    this.said = undefined;
+  }
+
+  consume(frame: string): void {
+    try {
+      const candidate = obj(arr(sseData(frame)?.candidates)[0]);
+      if (!candidate) return;
+      const reason = str(candidate.finishReason);
+      if (reason) this.finishReason = reason;
+      for (const value of arr(obj(candidate.content)?.parts)) {
+        const part = obj(value);
+        const call = obj(part?.functionCall);
+        if (call) {
+          this.closeSaid();
+          const callId = `gemini:${this.position.thread}:${this.position.turn}:${this.calls++}`;
+          const name = str(call.name);
+          if (!name) continue;
+          const block: OpenBlock = { kind: "tool", id: callId, name, buffer: "", truncated: false };
+          append(block, JSON.stringify(call.args ?? {}));
+          const step = closeBlock(block, this.options);
+          if (step) this.done.push(step);
+        } else if (typeof part?.text === "string" && part.thought !== true) {
+          this.said ??= {
+            kind: "said",
+            id: `said:gemini:${this.position.thread}:${this.position.turn}:${this.saidCount++}`,
+            name: "",
+            buffer: "",
+            truncated: false,
+          };
+          append(this.said, part.text);
+        }
+      }
+    } catch {
+      // A step is dropped, never the relay.
+    }
+  }
+
+  take(): ExtractedStep[] {
+    const out = this.done;
+    this.done = [];
+    return out;
+  }
+
+  finish(): ExtractedStep[] {
+    try {
+      this.closeSaid();
+      return markCut(this.take(), this.finishReason === undefined || this.finishReason === "MAX_TOKENS");
+    } catch {
+      return [];
+    }
+  }
+}
+
+const NO_STEPS: StreamStepExtractor = { consume: () => undefined, take: () => [], finish: () => [] };
+
+export function streamStepExtractor(
+  protocol: StepWireProtocol,
+  options?: StepCaptureOptions,
+  position?: GeminiStepPosition,
+): StreamStepExtractor {
+  if (protocol === "gemini-generate-content") return position ? new GeminiStreamSteps(position, options) : NO_STEPS;
   return protocol === "anthropic-messages" ? new AnthropicStreamSteps(options) : new OpenAiStreamSteps(options);
 }
 
@@ -328,8 +433,15 @@ export function stepsFromJson(
   protocol: StepWireProtocol,
   value: unknown,
   options?: StepCaptureOptions,
+  position?: GeminiStepPosition,
 ): ExtractedStep[] {
   try {
+    if (protocol === "gemini-generate-content") {
+      if (!position) return [];
+      const steps = new GeminiStreamSteps(position, options);
+      steps.consume(`data: ${JSON.stringify(value)}`);
+      return steps.finish();
+    }
     const body = obj(value);
     if (!body) return [];
     if (protocol === "openai-responses") {
@@ -428,6 +540,27 @@ export function resultsFromRequest(
   try {
     const body = obj(value);
     if (!body) return [];
+    if (protocol === "gemini-generate-content") {
+      const position = geminiStepPosition(body);
+      const contents = arr(body.contents);
+      const last = obj(contents.at(-1));
+      const modelIndex = contents.length - 2;
+      if (!position || last?.role !== "user" || obj(contents[modelIndex])?.role !== "model") return [];
+      const responses = arr(last.parts)
+        .map((part) => obj(obj(part)?.functionResponse))
+        .filter((response): response is Json => response !== undefined)
+        .slice(0, MAX_RESULTS_PER_REQUEST);
+      return responses.map((response, k) => {
+        const payload = obj(response.response) ?? {};
+        const error = str(payload.error);
+        const text = error ?? str(payload.output) ?? JSON.stringify(payload);
+        return {
+          callId: `gemini:${position.thread}:${modelIndex}:${k}`,
+          status: statusFromOutput(contentHead(text), error !== undefined),
+          ...(options?.detail ? (contentTail(text) ?? {}) : {}),
+        };
+      });
+    }
     if (protocol === "anthropic-messages") {
       const messages = Array.isArray(body.messages) ? body.messages : [];
       const results: ExtractedResult[] = [];

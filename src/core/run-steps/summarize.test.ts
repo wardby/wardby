@@ -25,6 +25,7 @@ describe("displayToolName", () => {
     expect(displayToolName("list_agents", "collaboration")).toBe("collaboration.list_agents");
     // Codex's shell tools show as Bash, the name Claude Code's has: one name for the same tool.
     expect(displayToolName("exec_command")).toBe("Bash");
+    expect(displayToolName("run_shell_command")).toBe("Bash");
     expect(displayToolName("shell")).toBe("Bash");
     expect(displayToolName("local_shell")).toBe("Bash");
     expect(displayToolName("shell_command")).toBe("Bash");

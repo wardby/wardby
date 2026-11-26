@@ -6,6 +6,8 @@ import type { StreamStepExtractor } from "../../core/run-steps/extract.js";
 import type { RunStepsLevel } from "../../core/run-steps/config.js";
 import type { RunStepBatch, RunStepSubmitter } from "../../core/run-steps/types.js";
 import type { ModelPricing } from "../llm/pricing-core.js";
+import { shippedCatalog } from "../llm/catalog.js";
+import { entryOf } from "../llm/catalog-types.js";
 import { MemoryProxyLedger } from "./memory-ledger.js";
 import { CLAUDE_CODE_ANTHROPIC_BETAS, CodingProxy, type ProxyResponseSink } from "./proxy.js";
 import { RunStepForwarder } from "./run-step-forwarder.js";
@@ -131,11 +133,30 @@ async function harness(
   });
   const session = await proxy.createSession({
     runId: "run-steps-1",
-    credentialRef: protocol === "anthropic-messages" ? "anthropic/project-a" : "openai/project-a",
+    credentialRef:
+      protocol === "gemini-generate-content"
+        ? "env:GEMINI_API_KEY"
+        : protocol === "anthropic-messages"
+          ? "anthropic/project-a"
+          : "openai/project-a",
     protocol,
-    allowedModels: [protocol === "anthropic-messages" ? "claude-sonnet-5" : "test-model"],
+    allowedModels: [
+      protocol === "gemini-generate-content"
+        ? "google-ai-studio.gemini-4-neon"
+        : protocol === "anthropic-messages"
+          ? "claude-sonnet-5"
+          : "test-model",
+    ],
     deadlineAt: new Date(NOW.getTime() + (opts.deadlineMs ?? 60_000)),
     budgetUsd: 1,
+    ...(protocol === "gemini-generate-content"
+      ? {
+          terms: {
+            version: "v",
+            entry: entryOf(shippedCatalog().require("google-ai-studio.gemini-4-neon")),
+          },
+        }
+      : {}),
     ...(opts.runStepsLevel ? { runStepsLevel: opts.runStepsLevel } : {}),
     ...(opts.workflow ? { workflow: true } : {}),
   });
@@ -149,6 +170,15 @@ async function harness(
         requestKey,
         anthropicBeta: protocol === "anthropic-messages" ? CLAUDE_CODE_ANTHROPIC_BETAS.join(",") : undefined,
         ...(agentId !== undefined ? { agentId } : {}),
+        ...(protocol === "gemini-generate-content"
+          ? {
+              gemini: {
+                surface: "ai-studio" as const,
+                model: "gemini-4-neon",
+                method: "streamGenerateContent" as const,
+              },
+            }
+          : {}),
       },
       sink,
     );
@@ -194,6 +224,88 @@ function anthropicToolStream(said: string, command: string): string {
 }
 
 describe("CodingProxy run steps", () => {
+  it("relays a Gemini reply's steps and the next request's results, and never logs them", async () => {
+    const lines: string[] = [];
+    setLogLineFilter((line) => {
+      lines.push(line);
+      return "";
+    });
+    try {
+      const reply = `data: ${JSON.stringify({
+        candidates: [
+          {
+            content: {
+              role: "model",
+              parts: [
+                { text: FAKE_SAID },
+                { functionCall: { name: "run_shell_command", args: { command: `echo ${FAKE_SECRET}` } } },
+              ],
+            },
+            finishReason: "STOP",
+          },
+        ],
+        usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 2 },
+      })}\r\n\r\n`;
+      const h = await harness("gemini-generate-content", sse(reply), {
+        runStepsLevel: "detail",
+        runStepsCeiling: "detail",
+        audit: (e) => logProxyAudit(e),
+      });
+      const tools = [{ functionDeclarations: [{ name: "run_shell_command" }] }];
+      const first = { role: "user", parts: [{ text: "task" }] };
+      await h.execute(JSON.stringify({ contents: [first], tools, generationConfig: { maxOutputTokens: 10 } }), "g1");
+      expect(h.stepBatches().flatMap((s) => s.batch.steps.map((step) => step.kind))).toEqual(["said", "tool"]);
+      await h.execute(
+        JSON.stringify({
+          contents: [
+            first,
+            {
+              role: "model",
+              parts: [{ functionCall: { name: "run_shell_command", args: { command: `echo ${FAKE_SECRET}` } } }],
+            },
+            {
+              role: "user",
+              parts: [
+                {
+                  functionResponse: { name: "run_shell_command", response: { output: `${FAKE_TOKEN}\nExit code: 0` } },
+                },
+              ],
+            },
+          ],
+          tools,
+          generationConfig: { maxOutputTokens: 10 },
+        }),
+        "g2",
+      );
+      const toolStep = h
+        .stepBatches()
+        .flatMap((s) => s.batch.steps)
+        .find((s) => s.kind === "tool")!;
+      expect(h.resultBatches().flatMap((s) => s.batch.results.map((r) => r.callId))).toContain(toolStep.callId);
+    } finally {
+      setLogLineFilter((line) => line);
+    }
+    expect(lines.join("")).not.toContain(FAKE_SECRET);
+    expect(lines.join("")).not.toContain(FAKE_TOKEN);
+    expect(lines.join("")).not.toContain(FAKE_SAID);
+  });
+
+  it("gives a Gemini helper call (no function declarations) no steps", async () => {
+    const reply = `data: ${JSON.stringify({
+      candidates: [{ content: { parts: [{ text: '{"next_speaker":"user"}' }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 2 },
+    })}\r\n\r\n`;
+    const h = await harness("gemini-generate-content", sse(reply));
+    await h.execute(
+      JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "who speaks next?" }] }],
+        generationConfig: { maxOutputTokens: 10 },
+      }),
+      "helper",
+    );
+    expect(h.submitted).toEqual([]);
+  });
+
   it("relays a Claude Code stream byte for byte and hands its steps over with the run capability", async () => {
     const stream = await stepsFixture("anthropic-run-command-stream.txt");
     const h = await harness("anthropic-messages", sse(stream));

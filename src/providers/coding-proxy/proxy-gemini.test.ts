@@ -236,6 +236,9 @@ describe("relaying Gemini calls", () => {
     expect((await stream.execute(body())).text()).toContain("said [REDACTED]");
     const whole = await gemini({ steps, fetch: async () => Response.json(echo(`said ${FAKE_GEMINI_KEY}`)) });
     expect((await whole.execute(body(), "generateContent")).text()).not.toContain(FAKE_GEMINI_KEY);
+    // Steps were produced (the request declares a function), and none carries the key.
+    expect(submitted.length).toBeGreaterThan(0);
+    expect(JSON.stringify(submitted)).toContain("said [REDACTED]");
     expect(JSON.stringify(submitted)).not.toContain(FAKE_GEMINI_KEY);
   });
 

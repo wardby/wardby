@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
   AnthropicStreamSteps,
+  GeminiStreamSteps,
+  geminiStepPosition,
   MAX_RESULTS_PER_REQUEST,
   OpenAiStreamSteps,
   openAiItemStep,
@@ -572,5 +574,93 @@ describe("detail capture", () => {
     ])
       x.consume(f);
     expect(x.finish()[0]).not.toHaveProperty("input");
+  });
+});
+
+describe("Gemini steps", () => {
+  const declared = { tools: [{ functionDeclarations: [{ name: "run_shell_command" }] }] };
+  const request = (contents: unknown[]) => ({ ...declared, contents });
+  const first = { role: "user", parts: [{ text: "task" }] };
+  const gframe = (parts: unknown[], finishReason?: string) =>
+    `data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts }, ...(finishReason ? { finishReason } : {}) }] })}`;
+
+  it("gives no position, so no steps, to a request that declares no functions (a helper call)", () => {
+    expect(geminiStepPosition({ contents: [first] })).toBeUndefined();
+    expect(geminiStepPosition(request([first]))).toMatchObject({ turn: 1 });
+    const helper = streamStepExtractor("gemini-generate-content");
+    helper.consume(gframe([{ text: "x" }], "STOP"));
+    expect(helper.finish()).toEqual([]);
+  });
+
+  it("joins streamed text into one said step and emits each functionCall as a tool step with a positional id", () => {
+    const position = geminiStepPosition(request([first]))!;
+    const steps = new GeminiStreamSteps(position);
+    steps.consume(gframe([{ text: "Let me " }]));
+    steps.consume(
+      gframe([
+        { text: "check.", thought: false },
+        { text: "secret thinking", thought: true },
+      ]),
+    );
+    steps.consume(
+      gframe(
+        [{ functionCall: { name: "run_shell_command", args: { command: "npm test" } }, thoughtSignature: "sig" }],
+        "STOP",
+      ),
+    );
+    const out = steps.finish();
+    expect(out).toEqual([
+      { kind: "said", callId: `said:gemini:${position.thread}:1:0`, text: "Let me check.", truncated: false },
+      expect.objectContaining({
+        kind: "tool",
+        callId: `gemini:${position.thread}:1:0`,
+        tool: "Bash",
+        text: "npm test",
+      }),
+    ]);
+    expect(JSON.stringify(out)).not.toContain("secret thinking");
+    expect(JSON.stringify(out)).not.toContain("sig");
+  });
+
+  it("reads the next request's functionResponses as results with the same ids", () => {
+    const position = geminiStepPosition(request([first]))!;
+    const next = request([
+      first,
+      {
+        role: "model",
+        parts: [
+          { functionCall: { name: "run_shell_command", args: {} } },
+          { functionCall: { name: "read_file", args: {} } },
+        ],
+      },
+      {
+        role: "user",
+        parts: [
+          { functionResponse: { name: "run_shell_command", response: { output: "Exit code: 1\nfail" } } },
+          { functionResponse: { name: "read_file", response: { error: "no such file" } } },
+        ],
+      },
+    ]);
+    expect(resultsFromRequest("gemini-generate-content", next)).toEqual([
+      { callId: `gemini:${position.thread}:1:0`, status: "exit 1" },
+      { callId: `gemini:${position.thread}:1:1`, status: "error" },
+    ]);
+    expect(resultsFromRequest("gemini-generate-content", { contents: next.contents })).toEqual([]);
+  });
+
+  it("marks a reply cut at the output limit or without a finish reason", () => {
+    const position = geminiStepPosition(request([first]))!;
+    const cut = new GeminiStreamSteps(position);
+    cut.consume(gframe([{ text: "half" }], "MAX_TOKENS"));
+    expect(cut.finish()).toEqual([expect.objectContaining({ kind: "said", truncated: true })]);
+  });
+
+  it("reads a non-stream reply the same way", () => {
+    const position = geminiStepPosition(request([first]))!;
+    const value = { candidates: [{ content: { parts: [{ text: "done" }] }, finishReason: "STOP" }] };
+    expect(stepsFromJson("gemini-generate-content", value, undefined, position)).toEqual([
+      { kind: "said", callId: `said:gemini:${position.thread}:1:0`, text: "done", truncated: false },
+    ]);
+    expect(stepsFromJson("gemini-generate-content", value)).toEqual([]);
   });
 });
