@@ -3,7 +3,7 @@ id: gemini-models
 title: Google Gemini models
 summary: Run native agents on Gemini 4 models through Vertex AI or Google AI Studio.
 audience: all
-tags: [models, gemini, google, vertex, vertex-ai, ai-studio, neon, hydrogen, carbon, providers]
+tags: [models, gemini, google, vertex, vertex-ai, ai-studio, neon, hydrogen, carbon, providers, thought_signature]
 appliesTo: ">=0.11.0"
 ---
 
@@ -33,9 +33,17 @@ each endpoint's own rates. Use `get_model` to see them.
 
 ## Older native worker images
 
-Gemini tool calls carry data the model needs back on the next turn. A native
-sandbox worker image older than this release cannot carry it: Gemini agents
-need the worker image that ships with this release.
+Gemini tool calls carry a thought signature the model needs back on the next
+turn. A native sandbox worker image older than this release silently drops
+it: that turn's tool calls still run, side effects included, and the next
+model call fails with:
+
+```
+Gemini API error: HTTP 400 INVALID_ARGUMENT: Function call is missing a thought_signature in functionCall parts
+```
+
+Use the native worker image that ships with this release (or a later one) for
+sandbox-mode Gemini agents.
 
 ## Errors
 
@@ -43,6 +51,8 @@ need the worker image that ships with this release.
   run out of prepaid credit. Add credit in AI Studio's billing settings.
 - `Gemini API error: HTTP 403 PERMISSION_DENIED` (Vertex) — the identity wardby runs as
   (its service account) lacks `roles/aiplatform.user`, or the Vertex AI API is not enabled on the project.
+- `Gemini API error: HTTP 400 INVALID_ARGUMENT: Function call is missing a thought_signature` —
+  the native sandbox worker image is older than this release; see above.
 - `vertex_auth_unavailable` — wardby could not get Google Cloud credentials. Check
   Workload Identity on GKE, or run `gcloud auth application-default login` locally.
 

@@ -202,10 +202,13 @@ lists `low`, `medium` and `high`. Thinking is billed as output and, as with
 OpenAI reasoning, is charged when each call ends, so a call can take a run
 past its budget by its thinking.
 
-**Worker image.** A Gemini tool call carries provider data the model needs
-back on the next turn. A native sandbox worker image older than the release
-that added Gemini rejects it, so Gemini agents need that release's worker
-image.
+**Worker image.** A Gemini tool call carries a thought signature the model
+needs back on the next turn. A native sandbox worker image older than the
+release that added Gemini silently drops it: the turn's tool calls still run,
+side effects included, and the next model call then fails with
+`Gemini API error: HTTP 400 INVALID_ARGUMENT: Function call is missing a thought_signature in functionCall parts`.
+Use the worker image from the release that added Gemini, or a later one,
+before pointing sandbox-mode agents at a Gemini model.
 
 **Errors.** A non-200 response ends the call with
 `Gemini API error: HTTP <status> <GOOGLE_STATUS>: <message>`. A `403
@@ -223,7 +226,13 @@ Where each deployment target takes the credentials:
   `controlPlane.extraEnvFrom` and `nativeGateway.extraEnvFrom`; set
   `models.vertexProject` for Vertex. Do not put it in `models.providerSecret`,
   which also reaches the coding proxy.
-- Google Cloud Run (`deploy/gcp`): set `gemini_api_key_value`.
+- Google Cloud Run (`deploy/gcp`): set `gemini_api_key_value`, and/or set
+  `vertex_ai_enabled = true` in `terraform.tfvars`. That enables the Vertex AI
+  API, grants the Cloud Run service's service account `roles/aiplatform.user`,
+  and sets `VERTEX_PROJECT` on the service.
+- Local kind cluster (`deploy/kind-coding`): only `GEMINI_API_KEY` (AI Studio)
+  is wired, from `.env.local`. Vertex needs Google Cloud credentials in the
+  control plane and the native gateway, which the kind setup does not provide.
 
 ## Disabling and resetting
 

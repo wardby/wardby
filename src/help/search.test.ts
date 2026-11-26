@@ -765,7 +765,14 @@ describe("Google Gemini models help", () => {
     const { buildHelpCatalog } = await import("./catalog.js");
     const { fileURLToPath } = await import("node:url");
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
-    for (const query of ["gemini", "vertex", "neon", "GEMINI_API_KEY"]) {
+    for (const query of [
+      "gemini",
+      "vertex",
+      "neon",
+      "GEMINI_API_KEY",
+      "thought_signature",
+      "Function call is missing a thought_signature",
+    ]) {
       expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("gemini-models");
     }
   });
