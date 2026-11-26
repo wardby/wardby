@@ -33,7 +33,12 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   "worker_git_unavailable",
   // The input plan files could not be placed in the plan folder.
   "worker_plan_files_failed",
+  // A coding agent CLI that is not the one this worker was built and tested with, or whose baked
+  // configuration was changed or refused (Gemini CLI: system settings, version, fatal config exits).
+  "worker_agent_cli_incompatible",
 ]);
+
+export const WORKER_AGENT_CLI_INCOMPATIBLE = "worker_agent_cli_incompatible";
 
 /**
  * For `coding_output_invalid`, where the model's final answer failed the output

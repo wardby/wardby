@@ -31,7 +31,7 @@ interface SkillScanBudget {
 }
 
 /** First `---`-delimited frontmatter block's `name:` value, quotes trimmed. */
-function frontmatterName(content: string): string | null {
+export function frontmatterName(content: string): string | null {
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
   if (!frontmatter) return null;
   // [ \t]*, not \s*: an empty `name:` must not capture the next line.

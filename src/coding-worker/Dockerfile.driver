@@ -107,7 +107,7 @@ RUN chmod 0755 /opt/wardby/coding-worker/wardby-packages.mjs /opt/wardby/coding-
 # driver-v4 shipped without coding/registry and every run exited at startup
 # with ERR_MODULE_NOT_FOUND before the model was called. main.js runs on
 # import, so this loads everything it imports rather than main.js itself.
-RUN node --input-type=module -e 'await Promise.all(["driver", "sdk", "artifact", "errors", "debug-trace", "skills", "task-note"].map((name) => import(`/opt/wardby/coding-worker/${name}.js`)))' \
+RUN node --input-type=module -e 'await Promise.all(["driver", "sdk", "artifact", "errors", "debug-trace", "skills", "task-note", "run-frame", "output-schema", "security-instructions"].map((name) => import(`/opt/wardby/coding-worker/${name}.js`)))' \
     && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/dependency-cache.mjs"); if (typeof m.prepareDependencies !== "function") process.exit(1)' \
     && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/result-bundle.mjs"); if (typeof m.createResultBundle !== "function" || !(await m.gitAvailable())) process.exit(1)' \
     && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/registry-refusals.mjs"); if (typeof m.recentRefusals !== "function") process.exit(1)' \
