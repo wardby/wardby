@@ -16,4 +16,4 @@ versions only; the `baseNumber` you sent is older than that.
 Read the document again (`get_document` returns the current version number) and redo the change on it, then
 publish with that `baseNumber`.
 
-See [Documents](../documents.md) and [`document_version_conflict`](document-version-conflict.md).
+See [Live editing](../live-editing.md) and [Documents](../documents.md) and [`document_version_conflict`](document-version-conflict.md).

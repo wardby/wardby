@@ -13,7 +13,9 @@ appliesTo: ">=0.10.2"
 of the secret values of the document's agent into the text (for example, a pasted API key) is refused: no one
 else receives it, nothing is saved, and the page reloads from the server's copy with a message.
 
+An edit that changes the server's own record in the shared document (its history id or who edited last) is refused the same way: pages never write those.
+
 Saved versions already have these values removed; the live check keeps them from reaching other people while
 you type. Remove the value from what you paste, or use the secret's name instead.
 
-See [Documents](../documents.md).
+See [Live editing](../live-editing.md) and [Documents](../documents.md).

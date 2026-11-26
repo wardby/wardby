@@ -17,4 +17,4 @@ server's copy.
 Anything typed on that page after its last save may be lost; the document's versions are unchanged. If it keeps
 happening, check that the control plane's database is the same one for every replica.
 
-See [Documents](../documents.md).
+See [Live editing](../live-editing.md) and [Documents](../documents.md).

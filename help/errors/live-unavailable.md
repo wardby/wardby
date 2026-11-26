@@ -20,4 +20,4 @@ Usual causes:
 - The replica leading the document cannot be reached from the one the browser reached.
 - The document is a design (designs are not edited live).
 
-See [Documents](../documents.md).
+See [Live editing](../live-editing.md) and [Documents](../documents.md).
