@@ -338,13 +338,20 @@ export const ROUTES: readonly RouteEntry[] = [
     "/gemini/v1beta/models/{model}",
     "Streams scripted Gemini parts (text, functionCall); the first functionCall of a turn carries a " +
       "thoughtSignature and an unsigned replay answers 400 INVALID_ARGUMENT. Replayed by wardby's native Gemini " +
-      "client (gemini-sim.test.ts); the real API's full chunk set is not modelled.",
+      "client (gemini-sim.test.ts); the real API's full chunk set is not modelled. :generateContent answers one JSON response.",
   ),
   unverified(
     "model",
     "POST",
     "/vertex/v1/projects/{project}/locations/{location}/publishers/google/models/{model}",
     "The same scripted Gemini stream on the Vertex AI path shape. Replayed by wardby's native Vertex client.",
+  ),
+  unverified(
+    "model",
+    "POST",
+    "/vertex/v1beta1/projects/{project}/locations/{location}/publishers/google/models/{model}",
+    "The scripted Gemini stream (or, for :generateContent, one JSON response) on the v1beta1 Vertex path the coding " +
+      "proxy rewrites Vertex express-mode calls to. Replayed by the proxy's Gemini protocol.",
   ),
 
   // --- Bitbucket Cloud REST 2.0 (bitbucket/service.ts): Bearer repository or workspace token ---

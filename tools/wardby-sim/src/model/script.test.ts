@@ -343,4 +343,23 @@ describe("scripted Gemini model", () => {
     expect(model.answerGemini(body)).toContain("lead");
     expect(model.served.at(-1)?.agent).toBe("lead");
   });
+
+  it("answers a Gemini non-stream call with one JSON response holding every part and the usage", () => {
+    const model = new ScriptedModel();
+    model.load([
+      {
+        agent: "a",
+        protocol: "gemini-generate-content",
+        match: "M",
+        turns: [{ parts: [{ text: "ok" }, { functionCall: { id: "c", name: "t", args: {} } }] }],
+      },
+    ]);
+    const out = JSON.parse(
+      model.answerGemini(JSON.stringify({ contents: [{ role: "user", parts: [{ text: "M" }] }] }), "json") as string,
+    );
+    expect(out.candidates[0].content.parts).toHaveLength(2);
+    expect(out.candidates[0].content.parts[1].thoughtSignature).toBe("sim-sig-1-1");
+    expect(out.candidates[0].finishReason).toBe("STOP");
+    expect(out.usageMetadata.promptTokenCount).toBe(1200);
+  });
 });

@@ -321,15 +321,24 @@ export function createCredentialFreeFetch(
   };
 }
 
-/** The real model upstream each scripted model path stands in for (the coding proxy's two). */
+/** The real model upstream each scripted model path stands in for (OpenAI and Anthropic). */
 const SIMULATED_MODEL_URLS: readonly [string, string][] = [
   ["https://api.openai.com/v1/responses", "/openai/v1/responses"],
   ["https://api.anthropic.com/v1/messages", "/anthropic/v1/messages"],
 ];
 
+/** Gemini's model and method are in the path: these prefixes map to the scripted model, the rest kept. */
+const SIMULATED_MODEL_PREFIXES: readonly [string, string][] = [
+  ["https://generativelanguage.googleapis.com/v1beta/models/", "/gemini/v1beta/models/"],
+  ["https://aiplatform.googleapis.com/v1beta1/projects/", "/vertex/v1beta1/projects/"],
+  ["https://aiplatform.us.rep.googleapis.com/v1beta1/projects/", "/vertex/v1beta1/projects/"],
+  ["https://aiplatform.eu.rep.googleapis.com/v1beta1/projects/", "/vertex/v1beta1/projects/"],
+];
+
 /**
- * The coding proxy's model upstream under the switch: the OpenAI Responses and Anthropic
- * Messages endpoints go to the scripted model, with no credential; every other URL is refused.
+ * The coding proxy's model upstream under the switch: the OpenAI Responses, Anthropic Messages
+ * and Gemini (AI Studio, Vertex) endpoints go to the scripted model, with no credential; every
+ * other URL is refused.
  */
 export function createSimulatorModelFetch(
   simulators: TestSimulators,
@@ -345,9 +354,13 @@ export function createSimulatorModelFetch(
     } catch {
       throw blocked();
     }
-    const match = SIMULATED_MODEL_URLS.find(([real]) => `${parsed.origin}${parsed.pathname}` === real);
-    if (!match || parsed.username || parsed.password) throw blocked();
-    return send(`${simulators.base("model")}${match[1]}${parsed.search}`, init);
+    if (parsed.username || parsed.password) throw blocked();
+    const full = `${parsed.origin}${parsed.pathname}`;
+    const exact = SIMULATED_MODEL_URLS.find(([real]) => full === real);
+    if (exact) return send(`${simulators.base("model")}${exact[1]}${parsed.search}`, init);
+    const prefix = SIMULATED_MODEL_PREFIXES.find(([real]) => full.startsWith(real));
+    if (!prefix) throw blocked();
+    return send(`${simulators.base("model")}${prefix[1]}${full.slice(prefix[0].length)}${parsed.search}`, init);
   };
 }
 

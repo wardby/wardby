@@ -64,6 +64,30 @@ describe("configured coding proxy runtime", () => {
     expect(startServer).not.toHaveBeenCalled();
   });
 
+  it("under the simulator switch the Gemini option has project wardby-sim and a placeholder token; off, the real config", async () => {
+    const startServer = vi.fn(async () => ({ port: CODING_PROXY_PORT, close: async () => {} }));
+    const startDenyPort = vi.fn(async () => ({ port: CODING_PROXY_DENY_PORT, close: async () => {} }));
+    const before = constructed.length;
+    const on = await startConfiguredCodingProxy({
+      db: {} as PrismaClient,
+      env: { WARDBY_TEST_SIMULATORS: "1", WARDBY_SIM_BASE_URL: "http://wardby-sim.wardby-sim.svc.cluster.local:8080" },
+      startServer,
+      startDenyPort,
+    });
+    const simulated = constructed[before]?.gemini;
+    expect(simulated?.vertexProject).toBe("wardby-sim");
+    expect(await simulated?.vertexToken?.()).toBe("sim-placeholder-not-a-credential");
+    await on.close();
+    const off = await startConfiguredCodingProxy({
+      db: {} as PrismaClient,
+      env: { CODING_VERTEX_PROJECT: "real-project" },
+      startServer,
+      startDenyPort,
+    });
+    expect(constructed[before + 1]?.gemini).toEqual({ vertexProject: "real-project" });
+    await off.close();
+  });
+
   it("binds the fixed worker-only endpoint and host header", async () => {
     const handle: CodingProxyServerHandle = { port: CODING_PROXY_PORT, close: async () => {} };
     const startServer = vi.fn(async () => handle);

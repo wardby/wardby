@@ -73,6 +73,14 @@ describe("createMockUpstream (openai-responses)", () => {
     });
     expect(res.status).toBe(501);
   });
+
+  it("answers a Gemini host with 501, like Anthropic's (ruling R1)", async () => {
+    const response = await createMockUpstream({}, noSleep)(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-neon:streamGenerateContent?alt=sse",
+      { method: "POST", body: "{}" },
+    );
+    expect(response.status).toBe(501);
+  });
 });
 
 // Minimum harness copied from proxy.test.ts (not exported there by design):

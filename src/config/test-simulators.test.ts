@@ -279,6 +279,29 @@ describe("model requests under the switch carry no credential", () => {
     expect(seen).toHaveLength(2);
   });
 
+  it("maps the Gemini AI Studio and Vertex upstreams to the scripted model and drops the key and bearer", async () => {
+    const { seen, fetch } = capture();
+    const model = createSimulatorModelFetch(sims, blocked, fetch);
+    await model("https://generativelanguage.googleapis.com/v1beta/models/gemini-4-neon:streamGenerateContent?alt=sse", {
+      method: "POST",
+      headers: { "x-goog-api-key": "AIzaFAKEfake0123", "content-type": "application/json" },
+      body: "{}",
+    });
+    await model(
+      "https://aiplatform.eu.rep.googleapis.com/v1beta1/projects/p/locations/eu/publishers/google/models/gemini-4-neon:generateContent",
+      { method: "POST", headers: { authorization: "Bearer ya29.FAKE" }, body: "{}" },
+    );
+    expect(seen.map((s) => s.url)).toEqual([
+      `${BASE}/model/gemini/v1beta/models/gemini-4-neon:streamGenerateContent?alt=sse`,
+      `${BASE}/model/vertex/v1beta1/projects/p/locations/eu/publishers/google/models/gemini-4-neon:generateContent`,
+    ]);
+    expect(JSON.stringify(seen)).not.toContain("AIzaFAKEfake0123");
+    expect(JSON.stringify(seen)).not.toContain("ya29.FAKE");
+    await expect(
+      model("https://generativelanguage.googleapis.com/v1beta/cachedContents", { method: "POST" }),
+    ).rejects.toThrow("blocked");
+  });
+
   it("the native clients get the scripted model's base, a placeholder key, and a fetch that drops it", async () => {
     expect(simulatorModelClientOptions("anthropic", {})).toBeNull();
     const anthropic = simulatorModelClientOptions("anthropic", ON)!;

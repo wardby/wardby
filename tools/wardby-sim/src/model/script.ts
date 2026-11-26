@@ -203,6 +203,27 @@ export function renderGemini(turn: GeminiTurn, seq: number): string {
   return chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("");
 }
 
+/** A Gemini generateContent (non-stream) body: one response with every part, the first functionCall signed. */
+export function renderGeminiJson(turn: GeminiTurn, seq: number): string {
+  let signed = false;
+  const parts = turn.parts.map((part, index) => {
+    const out: Record<string, unknown> = { ...part };
+    if ("functionCall" in part && !signed) {
+      out.thoughtSignature = `sim-sig-${seq}-${index}`;
+      signed = true;
+    }
+    return out;
+  });
+  return JSON.stringify({
+    candidates: [{ content: { role: "model", parts }, finishReason: "STOP" }],
+    usageMetadata: {
+      promptTokenCount: turn.usage?.promptTokenCount ?? 1200,
+      candidatesTokenCount: turn.usage?.candidatesTokenCount ?? 80,
+      thoughtsTokenCount: 0,
+    },
+  });
+}
+
 export interface ServedTurn {
   agent: string;
   protocol: ScriptProtocol;
@@ -243,7 +264,7 @@ export class ScriptedModel {
    * Like `answer` for Gemini, but refuses (as the real API does) a request whose model turn replays
    * a functionCall without its thoughtSignature: a content with function calls where none is signed.
    */
-  answerGemini(body: string): string | { error: "missing_thought_signature" } | null {
+  answerGemini(body: string, mode: "sse" | "json" = "sse"): string | { error: "missing_thought_signature" } | null {
     try {
       const parsed = JSON.parse(body) as { contents?: { role?: string; parts?: Record<string, unknown>[] }[] };
       for (const content of parsed.contents ?? []) {
@@ -256,11 +277,11 @@ export class ScriptedModel {
     } catch {
       // not JSON: nothing to check
     }
-    return this.answer("gemini-generate-content", body);
+    return this.answer("gemini-generate-content", body, mode);
   }
 
   /** The SSE body answering `body`, or null when no script of `protocol` matches it. */
-  answer(protocol: ScriptProtocol, body: string): string | null {
+  answer(protocol: ScriptProtocol, body: string, geminiMode: "sse" | "json" = "sse"): string | null {
     // A lead's later requests carry its sub-agent's marker too (in the delegation it made), so the
     // system prompt (Anthropic `system`, OpenAI `instructions`, Gemini `systemInstruction`) decides first; then the marker that
     // comes first anywhere in the request.
@@ -292,7 +313,11 @@ export class ScriptedModel {
     const model = /"model"\s*:\s*"([^"]+)"/.exec(body)?.[1] ?? "scripted";
     const turn = fillTemplates(script.turns[index], body);
     this.seq += 1;
-    if (protocol === "gemini-generate-content") return renderGemini(turn as GeminiTurn, this.seq);
+    if (protocol === "gemini-generate-content") {
+      return geminiMode === "json"
+        ? renderGeminiJson(turn as GeminiTurn, this.seq)
+        : renderGemini(turn as GeminiTurn, this.seq);
+    }
     return protocol === "openai-responses"
       ? renderResponses(turn as ResponsesTurn, `resp_sim_${this.seq}`, model)
       : renderMessages(turn as MessagesTurn, `msg_sim_${this.seq}`, model);
