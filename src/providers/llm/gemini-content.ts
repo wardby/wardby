@@ -9,7 +9,7 @@
  * - Thinking never streams as text and bills as output (`thoughtsTokenCount`), so the
  *   engine's mid-stream budget cap cannot see it; it is charged when the call ends.
  * - Usage: AI Studio sends cumulative usage on every chunk, Vertex only on the last;
- *   the latest one seen is used, never a sum.
+ *   the latest one seen is used, never a sum. A stream with no usage at all is an error.
  * - temperature/top_p/top_k are ignored by Gemini 4 (and slated to 400): never sent.
  */
 import { randomUUID } from "node:crypto";
@@ -31,7 +31,9 @@ interface Content {
 export interface GeminiBody {
   contents: Content[];
   systemInstruction?: { parts: { text: string }[] };
-  tools?: { functionDeclarations: { name: string; description: string; parameters: Record<string, unknown> }[] }[];
+  tools?: {
+    functionDeclarations: { name: string; description: string; parametersJsonSchema: Record<string, unknown> }[];
+  }[];
   generationConfig: { maxOutputTokens: number; thinkingConfig?: { thinkingLevel: string } };
 }
 
@@ -59,10 +61,18 @@ function argsOf(argsJson: string): Record<string, unknown> {
   }
 }
 
+/**
+ * `parametersJsonSchema` takes full JSON Schema on both backends; the older `parameters` field
+ * takes only Google's OpenAPI subset and rejects keywords such as `additionalProperties` (HTTP 400).
+ */
 function toolDeclarations(tools: LlmToolDef[]) {
   return [
     {
-      functionDeclarations: tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
+      functionDeclarations: tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        parametersJsonSchema: t.parameters,
+      })),
     },
   ];
 }
@@ -182,10 +192,13 @@ export async function* mapGeminiStream(
       }
     }
   }
+  // A stream that stops before its usage summary (cut connection, proxy close) is a failure, as
+  // for the other providers: a $0 "done" would let unbilled work pass as a success.
+  if (usage === undefined) throw new Error("Gemini stream ended without a usage summary");
   const tokens = {
-    inputTokens: (usage?.promptTokenCount ?? 0) + (usage?.toolUsePromptTokenCount ?? 0),
-    outputTokens: (usage?.candidatesTokenCount ?? 0) + (usage?.thoughtsTokenCount ?? 0),
-    cachedInputTokens: usage?.cachedContentTokenCount ?? 0,
+    inputTokens: (usage.promptTokenCount ?? 0) + (usage.toolUsePromptTokenCount ?? 0),
+    outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
+    cachedInputTokens: usage.cachedContentTokenCount ?? 0,
   };
   const stopReason = sawToolCall ? "tool_calls" : finish === "MAX_TOKENS" ? "length" : "stop";
   yield { type: "done", stopReason, usage: { ...tokens, costUsd: price(tokens) } };

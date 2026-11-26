@@ -73,11 +73,37 @@ describe("toGeminiBody", () => {
     expect(body.tools).toEqual([
       {
         functionDeclarations: [
-          { name: "get_weather", description: "d", parameters: { type: "object", properties: {} } },
+          { name: "get_weather", description: "d", parametersJsonSchema: { type: "object", properties: {} } },
         ],
       },
     ]);
     expect(body.generationConfig).toEqual({ maxOutputTokens: 32000, thinkingConfig: { thinkingLevel: "xhigh" } });
+  });
+
+  it("passes a full JSON Schema through unchanged as parametersJsonSchema, never parameters", () => {
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["filter"],
+      properties: {
+        filter: {
+          type: "object",
+          additionalProperties: false,
+          properties: { name: { type: "string" }, tags: { type: "array", items: { type: "string" } } },
+        },
+      },
+    };
+    const body = toGeminiBody(
+      {
+        model: "gemini-4-neon",
+        messages: [{ role: "user", content: "x" }],
+        tools: [{ name: "search", description: "s", parameters: schema }],
+      },
+      NEON,
+    );
+    const decl = body.tools?.[0]?.functionDeclarations[0];
+    expect(decl).toEqual({ name: "search", description: "s", parametersJsonSchema: schema });
+    expect(decl).not.toHaveProperty("parameters");
   });
 
   it("drops an effort the model does not accept, and never sends temperature", () => {
@@ -197,6 +223,7 @@ describe("mapGeminiStream", () => {
               },
             },
           ],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
         }),
       ),
     );
@@ -228,6 +255,47 @@ describe("mapGeminiStream", () => {
         usage: { inputTokens: 1, outputTokens: 1, cachedInputTokens: 0, costUsd: 0 },
       },
     ]);
+  });
+
+  it("adds toolUsePromptTokenCount to inputTokens and prices it", async () => {
+    const chunks = parseGeminiSse(
+      bytes(
+        sse({
+          candidates: [{ content: { parts: [{ text: "x" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 100, toolUsePromptTokenCount: 40, candidatesTokenCount: 5 },
+        }),
+      ),
+    );
+    const seen: unknown[] = [];
+    const events = await collect(
+      mapGeminiStream(chunks, (u) => {
+        seen.push(u);
+        return u.inputTokens / 1000;
+      }),
+    );
+    expect(seen).toEqual([{ inputTokens: 140, outputTokens: 5, cachedInputTokens: 0 }]);
+    expect(events.at(-1)).toEqual({
+      type: "done",
+      stopReason: "stop",
+      usage: { inputTokens: 140, outputTokens: 5, cachedInputTokens: 0, costUsd: 0.14 },
+    });
+  });
+
+  it("rejects a stream that ends without a usage summary, instead of a $0 success", async () => {
+    const chunks = parseGeminiSse(
+      bytes(sse({ candidates: [{ content: { parts: [{ text: "partial" }] }, finishReason: "STOP" }] })),
+    );
+    await expect(collect(mapGeminiStream(chunks, () => 0))).rejects.toThrow(
+      "Gemini stream ended without a usage summary",
+    );
+  });
+
+  it("still finishes with done when usage arrived but no finishReason did", async () => {
+    const chunks = parseGeminiSse(
+      bytes(sse({ candidates: [{ content: { parts: [{ text: "y" }] } }], usageMetadata: { promptTokenCount: 2 } })),
+    );
+    const events = await collect(mapGeminiStream(chunks, () => 0));
+    expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "stop" });
   });
 
   it("throws on a mid-stream error object", async () => {
