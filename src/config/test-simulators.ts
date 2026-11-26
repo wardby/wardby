@@ -372,3 +372,15 @@ export function simulatorModelClientOptions(
 export function refuseBedrockUnderTestSimulators(env: NodeJS.ProcessEnv = process.env): void {
   if (loadTestSimulators(env)) throw new TestSimulatorsRefused("bedrock_not_simulated");
 }
+
+/**
+ * Client options for the Gemini adapters under the switch (null when off): the scripted
+ * model's base, a placeholder key, and the credential-free fetch. Stub until the simulator
+ * wiring lands; always null for now.
+ */
+export function simulatorGeminiOptions(
+  _backend: "google-ai-studio" | "vertex-gemini",
+  _env: NodeJS.ProcessEnv = process.env,
+): { baseUrl: string; apiKey: string; fetch: typeof globalThis.fetch } | null {
+  return null;
+}
