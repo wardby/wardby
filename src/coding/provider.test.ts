@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { codingProviderSupportsModel, assertCodingProviderModel } from "./provider.js";
+import { codingProviderForModelProvider, codingProviderSupportsModel, assertCodingProviderModel } from "./provider.js";
 import { buildCatalog } from "../providers/llm/catalog.js";
 import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
 
@@ -36,5 +36,12 @@ describe("coding eligibility comes from the catalog", () => {
   it("keeps assertCodingProviderModel's errors", () => {
     expect(() => assertCodingProviderModel("cursor", "x")).toThrow(/Unsupported coding provider/);
     expect(() => assertCodingProviderModel("codex", "claude-sonnet-5")).toThrow(/not supported by coding provider/);
+  });
+});
+
+describe("Gemini providers are never coding providers", () => {
+  it("maps vertex-gemini and google-ai-studio to undefined", () => {
+    expect(codingProviderForModelProvider("vertex-gemini")).toBeUndefined();
+    expect(codingProviderForModelProvider("google-ai-studio")).toBeUndefined();
   });
 });

@@ -2,7 +2,7 @@
  * WARDBY_TEST_SIMULATORS: the release regression suite's switch that points wardby's
  * GitHub API base, GitHub clone URLs, the Slack and Jira API bases and the package
  * registry upstreams (npm, PyPI, OSV) and the model upstreams (the coding proxy's, and the
- * native Anthropic and OpenAI clients') at one simulator (tools/wardby-sim). Test only.
+ * native Anthropic, OpenAI and Gemini clients') at one simulator (tools/wardby-sim). Test only.
  *
  * Model requests never carry a credential to the simulator: the provider clients are built with
  * a placeholder key, and every model request goes through a fetch that drops each credential
@@ -50,7 +50,7 @@ export const SIMULATOR_PREFIXES = {
   pypi: "/pypi",
   "pypi-files": "/pypi-files",
   osv: "/osv",
-  /** The scripted model (tools/wardby-sim/src/model): /model/anthropic and /model/openai. */
+  /** The scripted model (tools/wardby-sim/src/model): /model/anthropic, /model/openai, /model/gemini/v1beta (AI Studio) and /model/vertex. */
   model: "/model",
 } as const;
 
@@ -371,4 +371,18 @@ export function simulatorModelClientOptions(
 /** Bedrock signs with AWS credentials and cannot be pointed at the simulator: refused under the switch. */
 export function refuseBedrockUnderTestSimulators(env: NodeJS.ProcessEnv = process.env): void {
   if (loadTestSimulators(env)) throw new TestSimulatorsRefused("bedrock_not_simulated");
+}
+
+/** Base URL, placeholder key and credential-free fetch for a Gemini adapter under the switch (null when off). */
+export function simulatorGeminiOptions(
+  provider: "google-ai-studio" | "vertex-gemini",
+  env: NodeJS.ProcessEnv = process.env,
+): { baseUrl: string; apiKey: string; fetch: typeof globalThis.fetch } | null {
+  const simulators = loadTestSimulators(env);
+  if (!simulators) return null;
+  return {
+    baseUrl: `${simulators.base("model")}${provider === "google-ai-studio" ? "/gemini/v1beta" : "/vertex"}`,
+    apiKey: SIMULATOR_PLACEHOLDER_API_KEY,
+    fetch: createCredentialFreeFetch(simulators, () => new Error("test_simulators_model_egress_blocked")),
+  };
 }

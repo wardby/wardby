@@ -255,7 +255,7 @@ const setModelProperties = {
     type: "string",
     enum: [...THINKING_MODES],
     description:
-      '"adaptive" (effort-based), "manual" (fixed budget_tokens, no effort), or "none" (no thinking parameter).',
+      '"adaptive" (effort-based), "manual" (fixed budget_tokens, no effort), "level" (Gemini: the effort sets Gemini\'s thinking level), or "none" (no thinking parameter).',
   },
   sourceUrl: {
     type: "string",

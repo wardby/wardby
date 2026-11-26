@@ -3,6 +3,8 @@ import { resolveLlmRegistrations } from "./registration.js";
 import { OpenAiLlmProvider } from "./openai.js";
 import { AnthropicLlmProvider } from "./anthropic.js";
 import { BedrockClaudeLlmProvider } from "./bedrock.js";
+import { GoogleAiStudioLlmProvider } from "./google-ai-studio.js";
+import { VertexGeminiLlmProvider } from "./vertex-gemini.js";
 
 const NO_CREDS = {} as NodeJS.ProcessEnv;
 const OPENAI_ONLY = { OPENAI_API_KEY: "sk-test-openai" } as NodeJS.ProcessEnv;
@@ -56,6 +58,38 @@ describe("resolveLlmRegistrations", () => {
       expect.any(OpenAiLlmProvider),
       expect.any(AnthropicLlmProvider),
       expect.any(BedrockClaudeLlmProvider),
+    ]);
+  });
+
+  it("registers google-ai-studio when GEMINI_API_KEY is present", () => {
+    const result = resolveLlmRegistrations({ GEMINI_API_KEY: "fake" });
+    if (result.kind !== "registrations") throw new Error("unreachable");
+    expect(result.registrations.map((r) => r.provider)).toEqual(["google-ai-studio"]);
+    expect(result.registrations[0].adapter).toBeInstanceOf(GoogleAiStudioLlmProvider);
+  });
+
+  it("registers vertex-gemini when VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT is present", () => {
+    for (const env of [{ VERTEX_PROJECT: "p" }, { GOOGLE_CLOUD_PROJECT: "p" }]) {
+      const result = resolveLlmRegistrations(env);
+      if (result.kind !== "registrations") throw new Error("unreachable");
+      expect(result.registrations.map((r) => r.provider)).toEqual(["vertex-gemini"]);
+      expect(result.registrations[0].adapter).toBeInstanceOf(VertexGeminiLlmProvider);
+    }
+  });
+
+  it("registers all five additively, in order", () => {
+    const result = resolveLlmRegistrations({
+      ...ALL_THREE,
+      GEMINI_API_KEY: "fake",
+      VERTEX_PROJECT: "p",
+    });
+    if (result.kind !== "registrations") throw new Error("unreachable");
+    expect(result.registrations.map((r) => r.provider)).toEqual([
+      "openai",
+      "anthropic",
+      "bedrock-claude",
+      "vertex-gemini",
+      "google-ai-studio",
     ]);
   });
 });

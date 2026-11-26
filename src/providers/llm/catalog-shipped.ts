@@ -12,13 +12,23 @@
  * no distinct cache-write tier (a first-time prefix bills at the standard
  * input rate), so their cacheWritePerMTok is their own input rate, stated
  * literally.
+ *
+ * Gemini rates (vertex-gemini: cloud.google.com/model-garden/pricing#gemini-4,
+ * google-ai-studio: aistudio.google.com/docs/pricing) are Standard PayGo. Gemini 4
+ * caches implicitly only and a first-time prefix bills at the standard input rate,
+ * so cacheWritePerMTok is each model's own input rate, stated literally. Vertex
+ * plain ids use the global endpoint; us./eu. ids the multi-region endpoints, at
+ * the non-global price. Carbon is at its December 1, 2026 rates.
  */
 import type { CatalogEntry } from "./catalog-types.js";
 import type { LlmEffort } from "./types.js";
 
-export const SHIPPED_CATALOG_VERSION = "2026-10-08";
+export const SHIPPED_CATALOG_VERSION = "2026-11-25";
 
 const ALL_EFFORTS: readonly LlmEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
+const GEMINI_FULL_EFFORTS: readonly LlmEffort[] = ["low", "medium", "high", "xhigh"];
+const GEMINI_CARBON_EFFORTS: readonly LlmEffort[] = ["low", "medium", "high"];
 
 export const SHIPPED_CATALOG: readonly CatalogEntry[] = [
   // OpenAI
@@ -213,5 +223,139 @@ export const SHIPPED_CATALOG: readonly CatalogEntry[] = [
     cacheWritePerMTok: 1.25,
     efforts: [],
     thinkingMode: "adaptive",
+  },
+  // Google Vertex AI
+  {
+    provider: "vertex-gemini",
+    modelId: "gemini-4-neon",
+    encoding: "o200k_base",
+    inputPerMTok: 3.0,
+    outputPerMTok: 15.0,
+    cachedInputPerMTok: 0.15,
+    cacheWritePerMTok: 3.0,
+    efforts: GEMINI_FULL_EFFORTS,
+    thinkingMode: "level",
+  },
+  {
+    provider: "vertex-gemini",
+    modelId: "gemini-4-hydrogen",
+    encoding: "o200k_base",
+    inputPerMTok: 1.5,
+    outputPerMTok: 7.5,
+    cachedInputPerMTok: 0.075,
+    cacheWritePerMTok: 1.5,
+    efforts: GEMINI_FULL_EFFORTS,
+    thinkingMode: "level",
+  },
+  {
+    provider: "vertex-gemini",
+    modelId: "gemini-4-carbon",
+    encoding: "o200k_base",
+    inputPerMTok: 4.0,
+    outputPerMTok: 20.0,
+    cachedInputPerMTok: 0.2,
+    cacheWritePerMTok: 4.0,
+    efforts: GEMINI_CARBON_EFFORTS,
+    thinkingMode: "level",
+  },
+  {
+    provider: "vertex-gemini",
+    modelId: "us.gemini-4-neon",
+    encoding: "o200k_base",
+    inputPerMTok: 3.3,
+    outputPerMTok: 16.5,
+    cachedInputPerMTok: 0.165,
+    cacheWritePerMTok: 3.3,
+    efforts: GEMINI_FULL_EFFORTS,
+    thinkingMode: "level",
+  },
+  {
+    provider: "vertex-gemini",
+    modelId: "eu.gemini-4-neon",
+    encoding: "o200k_base",
+    inputPerMTok: 3.3,
+    outputPerMTok: 16.5,
+    cachedInputPerMTok: 0.165,
+    cacheWritePerMTok: 3.3,
+    efforts: GEMINI_FULL_EFFORTS,
+    thinkingMode: "level",
+  },
+  {
+    provider: "vertex-gemini",
+    modelId: "us.gemini-4-hydrogen",
+    encoding: "o200k_base",
+    inputPerMTok: 1.65,
+    outputPerMTok: 8.25,
+    cachedInputPerMTok: 0.0825,
+    cacheWritePerMTok: 1.65,
+    efforts: GEMINI_FULL_EFFORTS,
+    thinkingMode: "level",
+  },
+  {
+    provider: "vertex-gemini",
+    modelId: "eu.gemini-4-hydrogen",
+    encoding: "o200k_base",
+    inputPerMTok: 1.65,
+    outputPerMTok: 8.25,
+    cachedInputPerMTok: 0.0825,
+    cacheWritePerMTok: 1.65,
+    efforts: GEMINI_FULL_EFFORTS,
+    thinkingMode: "level",
+  },
+  {
+    provider: "vertex-gemini",
+    modelId: "us.gemini-4-carbon",
+    encoding: "o200k_base",
+    inputPerMTok: 4.4,
+    outputPerMTok: 22.0,
+    cachedInputPerMTok: 0.22,
+    cacheWritePerMTok: 4.4,
+    efforts: GEMINI_CARBON_EFFORTS,
+    thinkingMode: "level",
+  },
+  {
+    provider: "vertex-gemini",
+    modelId: "eu.gemini-4-carbon",
+    encoding: "o200k_base",
+    inputPerMTok: 4.4,
+    outputPerMTok: 22.0,
+    cachedInputPerMTok: 0.22,
+    cacheWritePerMTok: 4.4,
+    efforts: GEMINI_CARBON_EFFORTS,
+    thinkingMode: "level",
+  },
+  // Google AI Studio
+  {
+    provider: "google-ai-studio",
+    modelId: "google-ai-studio.gemini-4-neon",
+    encoding: "o200k_base",
+    inputPerMTok: 3.0,
+    outputPerMTok: 15.0,
+    cachedInputPerMTok: 0.15,
+    cacheWritePerMTok: 3.0,
+    efforts: GEMINI_FULL_EFFORTS,
+    thinkingMode: "level",
+  },
+  {
+    provider: "google-ai-studio",
+    modelId: "google-ai-studio.gemini-4-hydrogen",
+    encoding: "o200k_base",
+    inputPerMTok: 1.5,
+    outputPerMTok: 7.5,
+    cachedInputPerMTok: 0.075,
+    cacheWritePerMTok: 1.5,
+    efforts: GEMINI_FULL_EFFORTS,
+    thinkingMode: "level",
+  },
+  {
+    provider: "google-ai-studio",
+    modelId: "google-ai-studio.gemini-4-carbon",
+    encoding: "o200k_base",
+    inputPerMTok: 4.0,
+    outputPerMTok: 20.0,
+    cachedInputPerMTok: 0.2,
+    cacheWritePerMTok: 4.0,
+    efforts: GEMINI_CARBON_EFFORTS,
+    thinkingMode: "level",
   },
 ];

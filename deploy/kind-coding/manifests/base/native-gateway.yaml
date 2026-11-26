@@ -41,6 +41,10 @@ spec:
             - secretRef:
                 name: wardby-jira-env
                 optional: true
+            # Google AI Studio (Gemini) key for native models, where configured (the control plane's same Secret).
+            - secretRef:
+                name: wardby-gemini-env
+                optional: true
           env:
             - name: NODE_ENV
               value: production

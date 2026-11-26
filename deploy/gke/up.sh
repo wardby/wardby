@@ -496,6 +496,12 @@ DEPENDENCY_CACHE_BUCKET="$(terraform -chdir="$TF_DIR" output -raw dependency_cac
 # Empty unless session_transcripts_enabled; only consulted when WARDBY_SESSION_TRANSCRIPTS=true.
 SESSION_TRANSCRIPTS_BUCKET="$(terraform -chdir="$TF_DIR" output -raw session_transcripts_bucket 2>/dev/null || true)"
 SESSION_TRANSCRIPTS_RETENTION_DAYS="$(terraform -chdir="$TF_DIR" output -raw session_transcripts_retention_days 2>/dev/null || true)"
+# "true" only when vertex_ai_enabled in terraform.tfvars; then VERTEX_PROJECT is the project id, else empty.
+VERTEX_AI_ENABLED="$(terraform -chdir="$TF_DIR" output -raw vertex_ai_enabled 2>/dev/null || true)"
+VERTEX_PROJECT=""
+if [[ "$VERTEX_AI_ENABLED" = true ]]; then
+  VERTEX_PROJECT="$PROJECT_ID"
+fi
 for var in CONNECTION DB_NAME APP_SERVICE_ACCOUNT MIGRATOR_SERVICE_ACCOUNT \
            PROXY_SERVICE_ACCOUNT APP_DATABASE_USER MIGRATOR_DATABASE_USER PROXY_DATABASE_USER \
            GATEWAY_SERVICE_ACCOUNT GATEWAY_DATABASE_USER; do
@@ -530,7 +536,7 @@ iam_substitutions() {
 # match a real registry path (which never starts with "wardby-").
 assert_no_placeholders() {
   local leftover
-  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*|value: wardby_github_allowed_accounts|value: wardby_mobile_enabled|image: wardby-renderer-image' || true)"
+  leftover="$(printf '%s' "$1" | grep -oE 'wardby-[a-z0-9-]*-gsa-email|wardby-[a-z0-9-]*-database-url|wardby-instance-connection-name|wardby-migrate-job|cidr: wardby-database-cidr|wardby-dbos-app-version|value: wardby-[a-z0-9-]*-image[a-z0-9-]*|value: wardby_github_allowed_accounts|value: wardby_mobile_enabled|value: wardby-vertex-project|image: wardby-renderer-image' || true)"
   if [[ -n "$leftover" ]]; then
     echo "up.sh: unresolved placeholder(s) in rendered manifest:" >&2
     echo "$leftover" | sort -u >&2
@@ -695,7 +701,7 @@ echo "==> 5/${TOTAL_STEPS} seed Secret Manager"
 # then .env.local, then -- for the two auth keys only -- a new random key. Values
 # go over stdin and are never printed. Stops before writing anything if a value
 # has no source.
-# Optional groups (Jira, Slack) are seeded all or none; the ones fully set are
+# Optional groups (Jira, Slack, Gemini) are seeded all or none; the ones fully set are
 # listed in SEED_GROUPS_FILE for step 7.
 SEED_GROUPS_FILE="$(mktemp)"
 node deploy/gke/seed-secrets.mjs --project "$PROJECT_ID" --prefix "$SECRET_PREFIX" \
@@ -704,6 +710,8 @@ JIRA_ENABLED=0
 grep -qx jira "$SEED_GROUPS_FILE" && JIRA_ENABLED=1
 SLACK_ENABLED=0
 grep -qx slack "$SEED_GROUPS_FILE" && SLACK_ENABLED=1
+GEMINI_ENABLED=0
+grep -qx gemini "$SEED_GROUPS_FILE" && GEMINI_ENABLED=1
 rm -f "$SEED_GROUPS_FILE"
 
 echo "==> 6/${TOTAL_STEPS} External Secrets Operator ${ESO_CHART_VERSION}, scoped to ${NAMESPACE}"
@@ -767,6 +775,17 @@ if ((SLACK_ENABLED)); then
   SYNCED_SECRETS+=(wardby-slack-env)
 else
   kubectl -n "$NAMESPACE" delete externalsecret wardby-slack-env --ignore-not-found >/dev/null
+fi
+# The Google AI Studio (Gemini) key is optional the same way (wardby-gemini-env, optional: true).
+if ((GEMINI_ENABLED)); then
+  echo "    Gemini is configured; syncing wardby-gemini-env"
+  if ! render_secrets external-secrets-gemini.yaml | kubectl apply -f - >/dev/null; then
+    echo "up.sh: applying the Gemini ExternalSecret failed; running pods are unaffected." >&2
+    exit 1
+  fi
+  SYNCED_SECRETS+=(wardby-gemini-env)
+else
+  kubectl -n "$NAMESPACE" delete externalsecret wardby-gemini-env --ignore-not-found >/dev/null
 fi
 if ! wait_external_secrets_synced 180s "${SYNCED_SECRETS[@]}"; then
   echo "up.sh: the Secrets did not sync from Secret Manager; nothing else was applied." >&2
@@ -921,6 +940,7 @@ OVERLAY_MANIFEST="$(kubectl kustomize "$OVERLAY" \
         -e "s|wardby-control-plane-hostname|${WARDBY_HOSTNAME}|g" \
         -e "s|value: wardby_github_allowed_accounts$|value: \"${WARDBY_GITHUB_ALLOWED_ACCOUNTS}\"|" \
         -e "s|value: wardby_mobile_enabled$|value: \"${WARDBY_MOBILE_ENABLED}\"|" \
+        -e "s|value: wardby-vertex-project$|value: \"${VERTEX_PROJECT}\"|" \
         -e "s|cidr: wardby-database-cidr|cidr: ${DB_IP}/32|g" \
   | iam_substitutions)"
 assert_no_placeholders "$OVERLAY_MANIFEST"

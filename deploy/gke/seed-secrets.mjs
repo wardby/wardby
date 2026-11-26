@@ -8,7 +8,7 @@
 // source of truth once seeded. An empty secret is filled from, in order, the live
 // cluster's wardby-control-plane-env Secret (so today's SECRET_APP_KEY and auth
 // keys carry over), .env.local, or -- for the two auth keys only -- a new random
-// key. An optional group (Jira, Slack) is seeded only when every one of its
+// key. An optional group (Jira, Slack, Gemini) is seeded only when every one of its
 // values has a source, and left empty when none does; anything in between is
 // an error.
 //
@@ -47,6 +47,9 @@ export const SECRETS = [
   // the wardby-slack-env ExternalSecret. WARDBY_SLACK_CUSTOMIZE and
   // WARDBY_SLACK_API_BASE_URL are not secrets and are not seeded.
   { id: "slack-bot-token", env: "WARDBY_SLACK_BOT_TOKEN", source: "optional", group: "slack" },
+  // Google AI Studio (Gemini) native models (docs/models.md). Optional: synced
+  // only when set, through the wardby-gemini-env ExternalSecret.
+  { id: "gemini-api-key", env: "GEMINI_API_KEY", source: "optional", group: "gemini" },
 ];
 
 const CONTROL_PLANE_SECRET = "wardby-control-plane-env";

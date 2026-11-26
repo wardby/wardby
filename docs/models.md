@@ -11,8 +11,8 @@ The catalog is the shipped set of models wardby ships with a release,
 overlaid with this deployment's own entries. An entry carries everything
 wardby needs to route, price, tokenize and shape calls to one model:
 
-- `provider` — which adapter routes calls to it (`openai`, `anthropic`, or
-  `bedrock-claude`).
+- `provider` — which adapter routes calls to it (`openai`, `anthropic`,
+  `bedrock-claude`, `vertex-gemini`, or `google-ai-studio`).
 - `modelId` — the exact string an agent's `model` field must equal.
 - `encoding` — the tokenizer used to pre-count tokens for budget enforcement
   before any call.
@@ -50,7 +50,7 @@ Fields on a returned entry:
 | `modelId`                                                                  | Exact string an agent's `model` must equal.                                                           |
 | `inputPerMTok`, `outputPerMTok`, `cachedInputPerMTok`, `cacheWritePerMTok` | USD per million tokens.                                                                               |
 | `efforts`                                                                  | Reasoning-effort levels this model accepts; empty means never send one.                               |
-| `thinkingMode`                                                             | `adaptive`, `manual`, or `none` — see below.                                                          |
+| `thinkingMode`                                                             | `adaptive`, `manual`, `level` or `none` — see below.                                                  |
 | `origin`                                                                   | `shipped` (came with this release) or `override` (an admin's row).                                    |
 | `priceVersion`                                                             | `shipped:<release version>` for a shipped entry, or the override row's last-updated timestamp.        |
 | `routable`                                                                 | Whether this deployment can actually route to it right now (its provider has credentials configured). |
@@ -122,15 +122,21 @@ reserves it.
 
 ## Thinking mode and effort
 
-`thinkingMode` tells wardby how to ask a Claude model for extended thinking,
-and must match what that exact model actually accepts:
+`thinkingMode` tells wardby how to ask a model for thinking, and must match
+what that exact model actually accepts:
 
 - `adaptive` — effort-based thinking (`{"type": "adaptive"}` plus an effort
   level from `efforts`). Most current Claude models.
 - `manual` — a fixed thinking budget (`{"type": "enabled", "budget_tokens": …}`)
   and no effort level at all. Some smaller Claude models reject `adaptive`
   entirely.
-- `none` — no thinking parameter is sent. Non-Claude models, including OpenAI.
+- `none` — no thinking parameter is sent. Models without a thinking setting,
+  including OpenAI.
+- `level` — Gemini models. The agent's effort is sent as the model's
+  thinking level (`low`, `medium`, `high`, `xhigh`, as listed in `efforts`).
+  Gemini 4 models always think, so thinking cannot be turned off; with no
+  effort set, Google's default level applies. See
+  [Google Gemini](#google-gemini).
 
 OpenAI models always use `none`; their reasoning is controlled by `efforts`
 alone. Native agents call OpenAI's Responses API, and when the agent has an
@@ -167,6 +173,66 @@ coding run's requests, and the run fails with the `provider_rejected` category
 at no cost; native runs on the same model are unaffected. Upgrade wardby (each
 release pins a tested Claude Code version), rebuild your worker images, and
 redeploy before pointing Claude Code agents at the new model.
+
+## Google Gemini
+
+Native agents can run Gemini 4 models through two providers. Coding agents
+cannot use Gemini models.
+
+| Provider                                  | Credentials                                                                                                   | Model ids                                                                                                                               |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `vertex-gemini` (Vertex AI)               | `VERTEX_PROJECT` (or `GOOGLE_CLOUD_PROJECT`) and Application Default Credentials with `roles/aiplatform.user` | `gemini-4-neon`, `gemini-4-hydrogen`, `gemini-4-carbon` (global endpoint); prefix `us.` or `eu.` for the US or EU multi-region endpoint |
+| `google-ai-studio` (Gemini Developer API) | `GEMINI_API_KEY`                                                                                              | `google-ai-studio.gemini-4-neon`, `google-ai-studio.gemini-4-hydrogen`, `google-ai-studio.gemini-4-carbon`                              |
+
+Either or both can be configured; `list_models` marks the entries this
+deployment can route to as `routable`.
+
+**Vertex AI.** Enable the Vertex AI API (`aiplatform.googleapis.com`) on the
+project, set `VERTEX_PROJECT`, and give the identity the server runs as
+`roles/aiplatform.user`. Wardby uses Application Default Credentials: a
+service account on Google Cloud (Workload Identity on GKE), or
+`gcloud auth application-default login` for local use. The `us.` and `eu.`
+ids keep requests inside that multi-region and cost more than the global ids;
+each id carries its own rates in the catalog.
+
+**Google AI Studio.** Set `GEMINI_API_KEY` to an AI Studio API key.
+
+**Effort.** Neon and Hydrogen list `low`, `medium`, `high` and `xhigh`; Carbon
+lists `low`, `medium` and `high`. Thinking is billed as output and, as with
+OpenAI reasoning, is charged when each call ends, so a call can take a run
+past its budget by its thinking.
+
+**Worker image.** A Gemini tool call carries a thought signature the model
+needs back on the next turn. A native sandbox worker image older than the
+release that added Gemini silently drops it: the turn's tool calls still run,
+side effects included, and the next model call then fails with
+`Gemini API error: HTTP 400 INVALID_ARGUMENT: Function call is missing a thought_signature in functionCall parts`.
+Use the worker image from the release that added Gemini, or a later one,
+before pointing sandbox-mode agents at a Gemini model.
+
+**Errors.** A non-200 response ends the call with
+`Gemini API error: HTTP <status> <GOOGLE_STATUS>: <message>`. A `403
+PERMISSION_DENIED` on Vertex means the identity wardby runs as (its service account) lacks `roles/aiplatform.user`
+or the API is not enabled. `vertex_auth_unavailable` means no Google Cloud
+credentials could be found. A `402 RESOURCE_EXHAUSTED` from AI Studio means
+the project is out of prepaid credit.
+
+Where each deployment target takes the credentials:
+
+- GKE (`deploy/gke`): put `GEMINI_API_KEY` in `.env.local` before running
+  `up.sh` (seeded as the optional Secret Manager entry `gemini-api-key`), and/or
+  set `vertex_ai_enabled = true` in `terraform.tfvars`.
+- Helm: put `GEMINI_API_KEY` in a Secret named `wardby-gemini-env`, loaded by
+  `controlPlane.extraEnvFrom` and `nativeGateway.extraEnvFrom`; set
+  `models.vertexProject` for Vertex. Do not put it in `models.providerSecret`,
+  which also reaches the coding proxy.
+- Google Cloud Run (`deploy/gcp`): set `gemini_api_key_value`, and/or set
+  `vertex_ai_enabled = true` in `terraform.tfvars`. That enables the Vertex AI
+  API, grants the Cloud Run service's service account `roles/aiplatform.user`,
+  and sets `VERTEX_PROJECT` on the service.
+- Local kind cluster (`deploy/kind-coding`): only `GEMINI_API_KEY` (AI Studio)
+  is wired, from `.env.local`. Vertex needs Google Cloud credentials in the
+  control plane and the native gateway, which the kind setup does not provide.
 
 ## Disabling and resetting
 

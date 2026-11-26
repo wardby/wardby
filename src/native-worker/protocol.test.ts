@@ -6,6 +6,7 @@ import {
   GATEWAY_INTERNAL_MESSAGE,
   GatewayError,
   GatewayRequestSchema,
+  LlmStreamEventSchema,
   MAX_MESSAGE_BYTES,
   parseMessage,
   parseParams,
@@ -15,6 +16,7 @@ import {
   workerGatewayError,
   type WorkerInput,
 } from "./protocol.js";
+import { MAX_PROVIDER_DATA_CHARS } from "../providers/llm/types.js";
 
 const input: WorkerInput = {
   v: 1,
@@ -236,5 +238,28 @@ describe("toGatewayError", () => {
     });
     const unlisted = toGatewayError(new GatewayError("internal", GATEWAY_INTERNAL_MESSAGE, "some_unlisted_word"));
     expect(unlisted.causeCode).toBeUndefined();
+  });
+});
+
+describe("providerData on tool calls", () => {
+  const toolCall = { type: "tool_call", id: "c1", name: "t", argsJson: "{}" };
+
+  it("accepts providerData on a streamed tool_call and rejects one over the limit", () => {
+    expect(LlmStreamEventSchema.safeParse({ ...toolCall, providerData: "x" }).success).toBe(true);
+    const tooLong = "x".repeat(MAX_PROVIDER_DATA_CHARS + 1);
+    expect(LlmStreamEventSchema.safeParse({ ...toolCall, providerData: tooLong }).success).toBe(false);
+  });
+
+  it("accepts providerData on a replayed tool call and still rejects unknown keys", () => {
+    const request = (call: object) => ({
+      request: {
+        model: "m",
+        messages: [{ role: "assistant", content: "", toolCalls: [{ id: "c1", name: "t", argsJson: "{}", ...call }] }],
+      },
+    });
+    expect(parseParams("llm.stream", request({ providerData: "sig" })).request.messages[0].toolCalls).toEqual([
+      { id: "c1", name: "t", argsJson: "{}", providerData: "sig" },
+    ]);
+    expect(() => parseParams("llm.stream", request({ extra: 1 }))).toThrow();
   });
 });

@@ -173,6 +173,11 @@ spec:
             - secretRef:
                 name: wardby-slack-env
                 optional: true
+            # The Google AI Studio (Gemini) key, present only when the operator
+            # uses Gemini models (secrets/external-secrets-gemini.yaml).
+            - secretRef:
+                name: wardby-gemini-env
+                optional: true
           env:
             # Password-less: the Auth Proxy sidecar logs in as this pod's Google
             # identity. This is the only source of DATABASE_URL -- the Secret
@@ -188,6 +193,10 @@ spec:
             # The placeholder is neither, so an unsubstituted render fails to boot.
             - name: WARDBY_MOBILE_ENABLED
               value: wardby_mobile_enabled
+            # Set by up.sh: the project id when vertex_ai_enabled in terraform.tfvars, else
+            # empty (Vertex AI Gemini models off).
+            - name: VERTEX_PROJECT
+              value: wardby-vertex-project
             # `serve` refuses any transport but http (src/serve.ts): in stdio
             # mode stdout is the JSON-RPC wire. The endpoint is ClusterIP-only —
             # nothing outside the cluster can reach it. An operator's MCP client

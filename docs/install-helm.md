@@ -115,6 +115,12 @@ workload's Secret as `DATABASE_URL`, with `database.urls.<workload>` left empty.
 
 Model provider keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) come from the
 workload Secrets, or from one shared Secret named in `models.providerSecret`.
+To use Google Gemini models, put `GEMINI_API_KEY` in a separate Secret named
+`wardby-gemini-env` (loaded by `controlPlane.extraEnvFrom` and
+`nativeGateway.extraEnvFrom`), not in `models.providerSecret`, which also
+reaches the coding proxy. For Vertex AI, set `models.vertexProject` and give the
+server's service account `roles/aiplatform.user`; see
+[Google Gemini](models.md#google-gemini).
 Agent budgets and the model catalog live in the database and are managed with
 the MCP tools, not the chart; see [Models and pricing](models.md).
 
