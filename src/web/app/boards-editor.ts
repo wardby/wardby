@@ -149,6 +149,8 @@ export interface BoardsEditor {
   onChange(cb: () => void): void;
   /** Called after a board is put in the canvas (selection, a newer version, a board operation). */
   onBoard(cb: (id: string) => void): void;
+  /** Called just before the canvas is given to a board (the one leaving is still in it), for live editing. */
+  beforeBoard(cb: () => void): void;
   /** A board's file parts (title, language, body attributes, base layer) as loaded, for live editing's builder. */
   parts(id: string): BoardParts | null;
   /**
@@ -243,6 +245,7 @@ export function createBoardsEditor(opts: {
   let current = "";
   const changeListeners: (() => void)[] = [];
   const boardListeners: ((id: string) => void)[] = [];
+  const beforeBoardListeners: (() => void)[] = [];
   let loading = false;
   let editable = opts.editable;
 
@@ -372,6 +375,7 @@ export function createBoardsEditor(opts: {
     const state = boards.get(id);
     if (!state) return;
     const parts = state.pending !== null ? parseBoardFile(state.pending) : state.parts;
+    for (const cb of beforeBoardListeners) cb();
     loading = true;
     const um = editor.UndoManager;
     um.stop();
@@ -576,6 +580,7 @@ export function createBoardsEditor(opts: {
     setDevice: (id) => void editor.setDevice(id),
     onChange: (cb) => void changeListeners.push(cb),
     onBoard: (cb) => void boardListeners.push(cb),
+    beforeBoard: (cb) => void beforeBoardListeners.push(cb),
     parts: (id) => boards.get(id)?.parts ?? null,
     applyManifest(next) {
       const firstParts = manifest.boards[0] ? (boards.get(manifest.boards[0].id)?.parts ?? null) : null;

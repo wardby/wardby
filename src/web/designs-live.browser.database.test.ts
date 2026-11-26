@@ -6,6 +6,7 @@
  * DATABASE_URL or Playwright's Chromium.
  */
 import { existsSync, readFileSync } from "node:fs";
+import { JSDOM } from "jsdom";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadVersionFiles } from "../core/documents/files.js";
@@ -171,6 +172,99 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         .locator("body")
         .click({ position: { x: 5, y: 5 } });
       await expect.poll(() => first(b).textContent(), { timeout: 10_000 }).toContain("MENU-EDIT");
+      expect([...a.errors, ...b.errors]).toEqual([]);
+    }, 120_000);
+
+    it("switching boards never writes one board into another: each board keeps its own content and edits", async () => {
+      const { documentId, cookie } = await server.design({ title: "Coffee", files: files(), access: "write" });
+      const a = await open(cookie, documentId);
+      const tab = (name: string) => a.locator(".boards .pick", { hasText: name }).first();
+      const heading = () => a.frameLocator(CANVAS).locator("h1, h2").first();
+      const typeInFirstHeading = async (text: string) => {
+        for (let tries = 0; tries < 4; tries++) {
+          await heading().dblclick();
+          await a.waitForTimeout(150);
+          await a.keyboard.press("Control+End");
+          await a.keyboard.type(text, { delay: 15 });
+          if ((await heading().textContent())?.includes(text)) break;
+        }
+      };
+      // Types on Home and switches to Menu with the text box still open (the switch closes it), then types on Menu,
+      // then switches back and forth again.
+      await typeInFirstHeading(" HOME-EDIT");
+      await tab("Menu").click();
+      await expect.poll(async () => (await heading().textContent()) ?? "", { timeout: 15_000 }).toMatch(/short list/i);
+      await a.waitForTimeout(800);
+      await typeInFirstHeading(" MENU-EDIT");
+      await a
+        .frameLocator(CANVAS)
+        .locator("body")
+        .click({ position: { x: 5, y: 5 } });
+      await tab("Home").click();
+      await a.waitForTimeout(800);
+      await tab("Menu").click();
+      await a.waitForTimeout(800);
+      await tab("Home").click();
+      const latestFiles = async () => {
+        const v = await server.db.documentVersion.findFirst({
+          where: { documentId },
+          orderBy: { number: "desc" },
+          select: { id: true },
+        });
+        return v ? loadVersionFiles(server.db, v.id) : ({} as Record<string, string>);
+      };
+      await expect
+        .poll(
+          async () => {
+            const f = await latestFiles();
+            return (
+              (f["boards/home.html"] ?? "").includes("HOME-EDIT") && (f["boards/menu.html"] ?? "").includes("MENU-EDIT")
+            );
+          },
+          { timeout: 20_000 },
+        )
+        .toBe(true);
+      const f = await latestFiles();
+      const original = (path: string) => new JSDOM(files()[path]).window.document;
+      const saved = (path: string) => new JSDOM(f[path]).window.document;
+      // Each board is still itself: its own heading, sections and element count, and only its own edit.
+      for (const [path, edit, other] of [
+        ["boards/home.html", "HOME-EDIT", "MENU-EDIT"],
+        ["boards/menu.html", "MENU-EDIT", "HOME-EDIT"],
+      ] as const) {
+        const [o, n] = [original(path), saved(path)];
+        expect(n.querySelector("h1, h2")?.textContent).toContain(
+          (o.querySelector("h1, h2")?.textContent ?? "").trim().slice(0, 12),
+        );
+        expect(n.body.querySelectorAll("*").length, path).toBe(o.body.querySelectorAll("*").length);
+        expect(f[path]).toContain(edit);
+        expect(f[path]).not.toContain(other);
+      }
+      expect(a.errors).toEqual([]);
+    }, 120_000);
+
+    it("the keyboard's Undo undoes your own change only, like the button, never someone else's later change", async () => {
+      const { documentId, cookie, secondCookie } = await server.design({
+        title: "Coffee",
+        files: files(),
+        access: "write",
+      });
+      const a = await open(cookie, documentId);
+      const b = await open(secondCookie, documentId);
+      await typeInHeading(a, " ANN-KEY");
+      await expect.poll(() => h1Text(b), { timeout: 10_000 }).toContain("ANN-KEY");
+      // Bo then changes the same heading.
+      await typeInHeading(b, " BO-AFTER");
+      await expect.poll(() => h1Text(a), { timeout: 10_000 }).toContain("BO-AFTER");
+      // Ann presses Cmd/Ctrl+Z in the canvas: her change was overwritten by Bo's, so nothing of Bo's goes.
+      await a
+        .frameLocator(CANVAS)
+        .locator("body")
+        .click({ position: { x: 5, y: 5 } });
+      await a.keyboard.press("ControlOrMeta+z");
+      await a.waitForTimeout(1500);
+      expect(await h1Text(b)).toContain("BO-AFTER");
+      expect(await h1Text(a)).toContain("BO-AFTER");
       expect([...a.errors, ...b.errors]).toEqual([]);
     }, 120_000);
   },

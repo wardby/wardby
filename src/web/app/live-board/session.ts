@@ -97,6 +97,16 @@ export function startDesignSession(o: {
     boardsMap.observeDeep(check);
   };
 
+  // A board switch: what this page changed on the board leaving goes out while that board is still in the canvas,
+  // and its binding stops before the canvas changes (the next board binds once it is shown).
+  boards.beforeBoard(() => {
+    waiting?.();
+    waiting = null;
+    binding?.flush();
+    binding?.destroy();
+    binding = null;
+  });
+
   // ---- the board list ----
   const liveManifest = (): Manifest => {
     const list = manifestOf(ydoc)

@@ -44,6 +44,8 @@ export interface BoardBinding {
   componentById(id: string): Component | undefined;
   /** The live id of the element a canvas DOM element shows (for a comment pin), or null. */
   idOfElement(el: Element): string | null;
+  /** Sends this page's unsent changes now (before the canvas is given to another board). */
+  flush(): void;
   undo(): void;
   redo(): void;
   canUndo(): boolean;
@@ -93,15 +95,18 @@ export function bindBoard(
       for (const k of [...since.keys()]) if (k.startsWith(`r|${key}|`) || k === `rp|${key}`) since.delete(k);
     }
   };
+  // Once destroyed, nothing queued earlier may run: the canvas may already show another board (a board switch
+  // replaces it before the page drops this binding), and writing it here would put that board into this one.
+  let destroyed = false;
   const sync = () => {
-    if (applying) return;
+    if (applying || destroyed) return;
     stats.out += readBoard(editor, maps, { since, editing, origin: LOCAL, created, structureOrigin: STRUCTURE });
     stats.created = created.size;
     since = snapshotBoard(editor, editing);
   };
   let queued = false;
   const schedule = () => {
-    if (applying || queued) return;
+    if (applying || queued || destroyed) return;
     queued = true;
     queueMicrotask(() => {
       queued = false;
@@ -232,6 +237,7 @@ export function bindBoard(
   };
 
   const applyIn = () => {
+    if (destroyed) return;
     const root = editor.getWrapper();
     if (!root) return;
     applying = true;
@@ -334,7 +340,10 @@ export function bindBoard(
     redo: () => void undoManager.redo(),
     canUndo: () => undoManager.canUndo(),
     canRedo: () => undoManager.canRedo(),
+    flush: () => sync(),
     destroy() {
+      destroyed = true;
+      if (editing) editing.el.removeEventListener("input", onInput);
       nodes.unobserveDeep(onRemote);
       rules.unobserveDeep(onRemote);
       ruleOrder.unobserve(onRemote);

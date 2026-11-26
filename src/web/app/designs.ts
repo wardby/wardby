@@ -476,6 +476,10 @@ function mount(
     return [mark];
   };
   if (session) {
+    // The keyboard's Undo and Redo (GrapesJS's core:undo and core:redo commands) undo your own changes too, as the
+    // buttons do: GrapesJS's own undo would put back what an element held before your change, over anyone's since.
+    boards.editor.Commands.add("core:undo", { run: () => session.undo() });
+    boards.editor.Commands.add("core:redo", { run: () => session.redo() });
     onSessionMessages((msg) => session.message(msg));
     boards.onBoard((id) => session.boardShown(id));
     drawOutlines(session, boards.editor, peopleLayer, () => boards.currentBoard());
