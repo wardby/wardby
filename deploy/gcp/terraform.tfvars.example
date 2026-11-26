@@ -24,6 +24,11 @@ create_domain_mapping = true
 # cloudsql_availability_type   = "ZONAL"
 # cloudsql_deletion_protection = true
 
+# Vertex AI Gemini models for native agents (off by default). Enables the
+# aiplatform API, grants the Cloud Run service account roles/aiplatform.user,
+# and sets VERTEX_PROJECT on the service.
+# vertex_ai_enabled = true
+
 container_image = "us-docker.pkg.dev/my-gcp-project-id/wardby/control-plane@sha256:REPLACE_ME"
 migration_image = "us-docker.pkg.dev/my-gcp-project-id/wardby/control-plane-migrate@sha256:REPLACE_ME"
 

@@ -95,6 +95,12 @@ variable "gemini_api_key_value" {
   sensitive   = true
 }
 
+variable "vertex_ai_enabled" {
+  description = "Let native agents use Vertex AI Gemini models (provider vertex-gemini): enable the aiplatform.googleapis.com API on the project, grant the Cloud Run service's own service account roles/aiplatform.user, and set VERTEX_PROJECT to project_id on the container. No key is stored: the service authenticates as its service account. Off by default."
+  type        = bool
+  default     = false
+}
+
 variable "enable_cloud_armor" {
   description = "Put an external HTTPS load balancer with a Cloud Armor policy in front of the service, and restrict the service's own ingress so the *.run.app URL can no longer be reached directly. Cloud Run offers no request rate limiting of its own, so without this the only throttle is the app's per-IP limiter, which a distributed caller walks straight past. Off by default: it is a different fronting strategy than create_domain_mapping (an A record to a static IP rather than a CNAME to Cloud Run), not an addition to it — enabling both is not meaningful."
   type        = bool

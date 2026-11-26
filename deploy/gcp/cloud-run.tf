@@ -195,6 +195,16 @@ resource "google_cloud_run_v2_service" "main" {
         }
       }
 
+      # Vertex AI Gemini (vertex-ai.tf): the project to call Vertex in. The
+      # service account's roles/aiplatform.user grant supplies the credentials.
+      dynamic "env" {
+        for_each = var.vertex_ai_enabled ? [var.project_id] : []
+        content {
+          name  = "VERTEX_PROJECT"
+          value = env.value
+        }
+      }
+
       # The app fails its own startup check without at least one LLM
       # credential (or BEDROCK_REGION, which needs no secret and isn't
       # wired here). One env block per name in local.llm_api_key_names -
@@ -231,6 +241,8 @@ resource "google_cloud_run_v2_service" "main" {
     google_secret_manager_secret_version.auth_credential_hash_key,
     google_secret_manager_secret_iam_member.llm_api_key_access,
     google_secret_manager_secret_version.llm_api_key,
+    google_project_iam_member.cloud_run_vertex_ai_user,
+    google_project_service.aiplatform,
     null_resource.run_migration,
   ]
 }
