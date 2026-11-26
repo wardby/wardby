@@ -1301,8 +1301,31 @@ describe("buildRunPod with a docker service", () => {
         { name: "docker-xdg", mountPath: "/wardby/xdg" },
         { name: "docker-home", mountPath: "/home/wardby" },
         { name: "docker-tmp", mountPath: "/tmp" },
+        // The checkout, at the agent's path, so a compose bind mount (`.:/app`) sees the run's files.
+        { name: "storage", mountPath: "/workspace", subPath: "workspace" },
       ],
     });
+  });
+
+  it("mounts the run's extra repositories into the daemon at the agent's paths, read-only when the run only reads them", () => {
+    const multi: JobSpec = {
+      ...codex,
+      repositories: [
+        { name: "shared-lib", access: "read", hostPath: "/ws/run/repos/shared-lib/workspace" },
+        { name: "infra", access: "write", hostPath: "/ws/run/repos/infra/workspace" },
+      ],
+    };
+    const mounts = container(buildRunPod(multi, gvisor), "service-docker").volumeMounts!;
+    expect(mounts.filter((m) => m.name === "storage")).toEqual([
+      { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+      {
+        name: "storage",
+        mountPath: expect.stringMatching(/\/shared-lib$/),
+        subPath: "repos/shared-lib",
+        readOnly: true,
+      },
+      { name: "storage", mountPath: expect.stringMatching(/\/infra$/), subPath: "repos/infra" },
+    ]);
   });
 
   describe("with the run's tunnel", () => {
@@ -1449,7 +1472,13 @@ describe("buildRunPod with a docker service", () => {
       expect(daemon.envFrom).toBeUndefined();
       expect(daemon.env!.every((e) => e.value !== undefined && e.valueFrom === undefined)).toBe(true);
       expect(daemon.env!.map((e) => e.name).filter((name) => name.startsWith("WARDBY_"))).toEqual([]);
-      const text = JSON.stringify(daemon);
+      // From the run's storage, only the checkout: never input, output or the toolchain's token folder.
+      const storage = daemon.volumeMounts!.filter((m) => m.name === "storage");
+      expect(storage.map((m) => m.subPath)).toEqual(["workspace"]);
+      const text = JSON.stringify({
+        ...daemon,
+        volumeMounts: daemon.volumeMounts!.filter((m) => m.name !== "storage"),
+      });
       for (const secretish of [names.secret, "secretKeyRef", "capability", "mcp-token", "tool-setup", "storage"]) {
         expect(text).not.toContain(secretish);
       }
