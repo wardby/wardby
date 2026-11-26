@@ -95,7 +95,7 @@ RUN node --input-type=module -e 'await Promise.all(["agent-state", "cli", "drive
     && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/result-bundle.mjs"); if (typeof m.createResultBundle !== "function" || !(await m.gitAvailable())) process.exit(1)' \
     && node --input-type=module -e 'const m = await import("/opt/wardby/coding-worker/plan-folder.mjs"); if (typeof m.collectPlanFolder !== "function") process.exit(1)' \
     && /opt/wardby/bin/wardby-packages 2>&1 | grep -q "no package registry is configured" \
-    && HOME=/tmp/gemini-version node /opt/wardby/node_modules/@google/gemini-cli/bundle/gemini.js --version | grep -qx 0.70.0 \
+    && test "$(HOME=/tmp/gemini-version node /opt/wardby/node_modules/@google/gemini-cli/bundle/gemini.js --version)" = "0.70.0" \
     && rm -rf /tmp/gemini-version
 COPY --from=command-agent /wardby-cmd /opt/wardby/bin/wardby-cmd
 RUN /opt/wardby/bin/wardby-cmd --version | grep -q "protocol 1"

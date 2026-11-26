@@ -28,7 +28,7 @@ describe("Gemini CLI coding worker image policy", () => {
     expect(dockerfile).toContain("npm ci --omit=dev --ignore-scripts");
     expect(dockerfile).not.toMatch(/npm install[^\n]*gemini-cli/);
     expect(dockerfile).not.toContain("GEMINI_CLI_TRUST_WORKSPACE");
-    expect(dockerfile).toMatch(/gemini\.js --version \| grep -qx 0\.70\.0/);
+    expect(dockerfile).toMatch(/test "\$\(HOME=\/tmp\/gemini-version node [^"]*gemini\.js --version\)" = "0\.70\.0"/);
   });
 
   it("bakes the system settings root-owned and read-only, and checks them at build", async () => {
