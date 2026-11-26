@@ -35,6 +35,9 @@ either: the same body is sent again as a new attempt, up to three attempts per
 request key, then `422 wardby_request_attempts_exhausted`. A different body
 under the same key is still `idempotency_conflict`.
 
+Older versions answered such a retry after a provider refusal with
+`409 duplicate_released`; current versions send it as a new attempt instead.
+
 ## What to do
 
 A single `409` on a retry is usually correct: the first try finished or its

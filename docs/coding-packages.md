@@ -1602,7 +1602,7 @@ heartbeat, or the proxy refuses to start. The heartbeat also delivers a stop: a
 request of a cancelled run is aborted at the next one. A worker's retry of a request whose
 proxy stopped takes over as a new attempt once the lease has run out; see
 [Availability](availability.md#a-model-request-whose-proxy-stops-mid-stream)
-and [A retry after the proxy stopped](availability.md#a-retry-after-the-proxy-stopped).
+and [A retry after the proxy stopped or the provider refused](availability.md#a-retry-after-the-proxy-stopped-or-the-provider-refused).
 
 A large allowlist can reach the package bound: the walk follows every kept
 version in each range plus optional and peer dependencies, so a graph is

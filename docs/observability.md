@@ -47,7 +47,7 @@ Two counters show it:
 A worker's retry that takes over a stopped proxy's request is counted in
 `wardby_proxy_audit_events_total{event="request.taken_over"}`; refusals of
 retries appear as `request.rejected` events (see
-[Availability](availability.md#a-retry-after-the-proxy-stopped)).
+[Availability](availability.md#a-retry-after-the-proxy-stopped-or-the-provider-refused)).
 
 ## Run follow-ups
 

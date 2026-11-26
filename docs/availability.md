@@ -206,17 +206,17 @@ nothing will settle.
 - A request reserved before leases existed carries none and is never swept.
 - The worker's retry of the same request is a new attempt, not a duplicate,
   once the original's lease has run out (see
-  [A retry after the proxy stopped](#a-retry-after-the-proxy-stopped)).
+  [A retry after the proxy stopped or the provider refused](#a-retry-after-the-proxy-stopped-or-the-provider-refused)).
 
 The lease must be more than twice the heartbeat, or the proxy refuses to
 start. A longer lease means fewer settlements of a slow but live request and a
 longer wait to release a stopped proxy's hold. Metrics:
 [Monitor Wardby](observability.md#request-leases).
 
-### A retry after the proxy stopped
+### A retry after the proxy stopped or the provider refused
 
 The worker's client retries a model request that failed because the proxy
-stopped, resending the same body. The proxy recognises the retry by its request
+stopped, or that the model provider refused, resending the same body. The proxy recognises the retry by its request
 key (the `Idempotency-Key` header if the client sends one, otherwise a hash of
 the body) and answers by the state of the earlier request:
 
