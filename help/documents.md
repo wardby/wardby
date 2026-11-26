@@ -15,9 +15,9 @@ A document is a Markdown file (or a [design](designs.md): a set of HTML boards) 
 
 1. `create_document` with a `title` and `markdown` (at most 1 MiB). The result has the `documentId` and `url`. Over stdio without `MCP_CANONICAL_URI`, it gives `path` (`/d/<id>`) and a note instead of `url`: open the path on the address that serves Wardby's pages.
 2. Open the URL and sign in (self-hosted users reuse their Wardby sign-in; with a delegating identity provider see [Browser sign-in](web-sign-in.md)).
-3. Select text and add a comment. Threads stay anchored to the quoted text across versions; a thread whose text is deleted is marked outdated.
+3. Select text and add a comment. Everyone with the page open edits together live (see [Live editing](live-editing.md)), and a comment follows its words through everyone's edits; a thread whose words are deleted is marked outdated.
 4. Share: `grant_access` with `resourceType: "document"` at `read`, `comment` or `write` for a person, or a [share link](document-share-links.md) for people who have no account.
-5. `publish_version` replaces the content (the page also saves versions).
+5. `publish_version` replaces the content (the page also saves versions). Pass `baseNumber`, the version you read: a newer version published since refuses the call with `document_version_conflict`.
 
 ## Tools
 

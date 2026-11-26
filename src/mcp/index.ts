@@ -30,6 +30,9 @@ import {
   loadWebOidcConfig,
 } from "../config/providers.js";
 import { createDocumentStreams } from "../web/events.js";
+import { liveAdvertiseAddress } from "../web/live/address.js";
+import { loadLiveConfig } from "../web/live/config.js";
+import { createLiveServer } from "../web/live/server.js";
 import { createOidcLogin } from "../web/oidc-login.js";
 import { sendThreadsToAgent } from "../core/documents/agent-loop.js";
 import { createDocumentEventBus } from "../core/documents/events.js";
@@ -664,6 +667,15 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
         }
       : {}),
   };
+  // Live co-editing on the same port; it needs the documents bus (review events) and so a database.
+  const live = documentsBus
+    ? createLiveServer({
+        ...web,
+        bus: documentsBus,
+        replica: liveAdvertiseAddress(mcpConfig.httpBind),
+        ...loadLiveConfig(),
+      })
+    : undefined;
   const http = await startHttpServer({
     mcp,
     config: {
@@ -686,6 +698,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     viewer,
     blobs,
     web,
+    live,
   });
   const cleanupTimer = selfHosted
     ? setInterval(() => {

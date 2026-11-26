@@ -54,6 +54,15 @@ Every coordinating piece of the control plane keeps its state in PostgreSQL:
   a run pod, and push its changes even though it did not launch it (see
   [Coding-worker isolation](coding-worker-isolation.md) and
   [Pod or node loss](#failures-and-recovery) below).
+- **Live editing.** Each live document has a lease row naming the copy that
+  leads it (30 seconds, renewed every 10, released when no one has the
+  document open). By default that copy serves the document and the others
+  hand its connections to it, at the address the copy writes into the lease
+  (its advertise address, below). With `WARDBY_LIVE_REDIS_URL` set, every copy
+  serves every document and edits pass between them through Redis; the lease
+  then only picks the copy that saves versions and merges publishes. The live
+  copy itself is in PostgreSQL, so another copy resumes a document whose
+  leader stopped, and pages send back anything not yet saved.
 - **MCP.** Requests carry their own state, so any copy can serve any request
   and the load balancer needs no session affinity. Browser secret entry needs
   the same `SECRET_APP_KEY` (or `REQUEST_STATE_KEY`) on every copy, which the
@@ -308,6 +317,21 @@ controlPlane:
   changes the pod template and restarts the existing copy, which ends its
   in-flight runs as in a drain.
 
+- Live editing: each copy needs an address the others can reach. The chart
+  and the GKE manifests set `WARDBY_LIVE_ADVERTISE_ADDRESS` to the pod's IP
+  and port; elsewhere Wardby uses the machine's first non-internal IPv4
+  address. Set it yourself (`host:port`) where that is wrong: separate
+  machines with several networks or NAT. Platforms whose instances cannot
+  reach each other (Cloud Run) need one copy, or `WARDBY_LIVE_REDIS_URL`.
+- A document's editors pause for up to 30 seconds when the copy leading it
+  stops without warning (its lease must expire first); a graceful stop hands
+  it over at once. With `WARDBY_LIVE_REDIS_URL` they do not pause: only saving
+  versions waits for the lease. Redis is optional: put
+  `WARDBY_LIVE_REDIS_URL` (`redis://` or `rediss://`; it may carry a password,
+  so keep it in the Secret, never in values) in the control plane's Secret.
+  While Redis is configured but unreachable a copy reports itself not ready,
+  instead of serving documents another way.
+
 The native gateway is stateless and already runs two replicas. Spread it the
 same way with `nativeGateway.topologySpreadConstraints`.
 
@@ -316,11 +340,11 @@ same way with `nativeGateway.topologySpreadConstraints`.
 Each workload has a readiness probe, which takes a pod out of its Service
 while it fails:
 
-| Workload       | Readiness probe                                                     |
-| -------------- | ------------------------------------------------------------------- |
-| Control plane  | `GET /.well-known/oauth-protected-resource` with the canonical Host |
-| Coding proxy   | TCP on the proxy port (8787)                                        |
-| Native gateway | `GET /healthz`, which also checks the database                      |
+| Workload       | Readiness probe                                                                                                                         |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane  | `GET /.well-known/oauth-protected-resource` with the canonical Host (503 while `WARDBY_LIVE_REDIS_URL` is set but Redis is unreachable) |
+| Coding proxy   | TCP on the proxy port (8787)                                                                                                            |
+| Native gateway | `GET /healthz`, which also checks the database                                                                                          |
 
 There are no liveness probes, by design:
 
