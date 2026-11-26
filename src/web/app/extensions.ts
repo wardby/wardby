@@ -67,6 +67,6 @@ function planLinks(targets: () => PlanLinkTargets | null) {
   });
 }
 
-export function documentExtensions(targets?: () => PlanLinkTargets | null) {
-  return [...editorBaseExtensions(), ...(targets ? [planLinks(targets)] : [])];
+export function documentExtensions(targets?: () => PlanLinkTargets | null, opts: { collab?: boolean } = {}) {
+  return [...editorBaseExtensions(opts), ...(targets ? [planLinks(targets)] : [])];
 }

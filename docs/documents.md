@@ -205,6 +205,43 @@ balancers in front of Wardby must not buffer `text/event-stream` responses
 an idle or read timeout longer than the 15-second heartbeat (60 seconds or
 more is a safe choice).
 
+## Live editing
+
+Everyone with a document open edits the same copy at the same time: each
+person's typing appears for the others as they type, with a named caret, and
+no one is locked out by someone else's save. The save state reads **Live**.
+
+- **Who edits.** Members with `write` edit; members and guests with `comment`
+  or `read` watch the edits arrive but cannot type. An approved, rejected or
+  archived document is read-only for everyone, and a review change applies at
+  once to everyone who has it open.
+- **Comments follow their words.** A comment's place is kept as a position in
+  the shared document, so it stays on its words through everyone's edits, even
+  edits inside the commented words, and it is marked outdated only when its
+  words are deleted. A comment can cover up to 10,000 characters.
+- **The connection.** The page joins over a WebSocket on the same address,
+  `wss://<your-host>/d/live/<documentId>`, signed in with its browser session.
+  Proxies and load balancers in front of Wardby must pass WebSocket upgrades on
+  `/d/live/` and allow idle connections of at least a minute. A member whose
+  access comes from a share link gets a single-use, 60-second ticket from
+  `POST /d/api/<documentId>/live-ticket` and sends it in the first message
+  (never in the URL).
+- **Secret values.** An edit that would put one of the document agent's secret
+  values into the text is refused before anyone else receives it
+  ([`edit_refused`](../help/errors/edit-refused.md)); the page reloads from
+  the server's copy and says why.
+- **When live editing is not used.** Documents with formatting the editor
+  cannot keep (images, checklists, HTML) open comment-only, as before, and
+  never go live. When the page cannot join (no WebSocket through a proxy,
+  [`live_unavailable`](../help/errors/live-unavailable.md)), it saves
+  versions the usual way: each save names the version it started from and is
+  refused with `document_version_conflict` if someone published since.
+- **History.** The live copy is kept in PostgreSQL and continues across
+  restarts. A page holding a copy from a history the server no longer has
+  (the live copy was reset) is refused
+  ([`live_state_stale`](../help/errors/live-state-stale.md)) and reloads, so
+  an old copy is never merged back in.
+
 ## Edits and restore
 
 The side panel of a document page has the same tabs as a design page's:
@@ -774,7 +811,7 @@ row shows the document's review state as a chip.
 | `brand.md`                   | 64 KB                                                                                                     |
 | MCP request body             | 1 MiB (`publish_version` sends every file: update a larger design in the editor; see [Designs](#designs)) |
 | Comment or reply             | 10,000 characters                                                                                         |
-| Quoted anchor text           | 500 characters                                                                                            |
+| Quoted anchor text           | 10,000 characters                                                                                         |
 | Guest name                   | 1-40 characters                                                                                           |
 | Share link lifetime          | 1-90 days, default 14                                                                                     |
 | Threads per send             | 50                                                                                                        |

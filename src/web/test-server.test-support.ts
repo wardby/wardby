@@ -18,6 +18,7 @@ import { buildMcpServer } from "../mcp/server.js";
 import { startHttpServer, type HttpServerHandle } from "../mcp/transport/streamable-http.js";
 import type { AuthProvider } from "../providers/auth/types.js";
 import { createDocumentStreams, type DocumentStreams } from "./events.js";
+import { createLiveServer } from "./live/server.js";
 import type { WebDeps } from "./routes.js";
 import { createWebSession } from "./session.js";
 
@@ -64,13 +65,27 @@ export function startWebHttpServer(
   db: PrismaClient,
   port: number,
   web: Omit<WebDeps, "db" | "canonicalUri" | "authMode"> & Partial<Pick<WebDeps, "authMode">>,
+  /** Live co-editing on /d/live/<id> (it needs the documents bus); omitted, the page saves the usual way. */
+  liveBus?: DocumentEventBus,
 ): Promise<HttpServerHandle> {
   const canonicalUri = `http://127.0.0.1:${port}/mcp`;
+  const live = liveBus
+    ? createLiveServer({
+        db,
+        canonicalUri,
+        authMode: "delegating",
+        ...web,
+        bus: liveBus,
+        replica: `127.0.0.1:${port}`,
+        timings: { storeDebounceMs: 300, storeMaxDebounceMs: 1000 },
+      })
+    : undefined;
   return startHttpServer({
     mcp: buildMcpServer({ providers: {} as never, db, config: { canonicalUri } }),
     config: { canonicalUri, httpBind: { host: "127.0.0.1", port }, authProviderKind: "delegating" },
     auth: { authProvider: {} as AuthProvider, db, providers: {} as never },
     web: { db, canonicalUri, authMode: "delegating", ...web },
+    ...(live ? { live } : {}),
   });
 }
 
@@ -129,6 +144,8 @@ export const FAKE_RENDERER = {
 export async function startTestWebServer(opts: {
   assetsRoot: string;
   exports?: "fake" | null;
+  /** Live co-editing on (documents are edited together); off, pages save versions the usual way. */
+  live?: boolean;
   extra?: Partial<WebDeps>;
 }): Promise<TestWebServer> {
   const db = createPrismaClient();
@@ -142,13 +159,18 @@ export async function startTestWebServer(opts: {
       : { db, renderer: opts.exports === "fake" ? FAKE_RENDERER : null, rateLimiter: allowAll };
   const port = await freePort();
   const origin = `http://127.0.0.1:${port}`;
-  const handle = await startWebHttpServer(db, port, {
-    cipher: TEST_CIPHER,
-    assetsRoot: opts.assetsRoot,
-    events,
-    ...(exportDeps ? { exports: exportDeps } : {}),
-    ...opts.extra,
-  });
+  const handle = await startWebHttpServer(
+    db,
+    port,
+    {
+      cipher: TEST_CIPHER,
+      assetsRoot: opts.assetsRoot,
+      events,
+      ...(exportDeps ? { exports: exportDeps } : {}),
+      ...opts.extra,
+    },
+    opts.live ? bus : undefined,
+  );
 
   const principal = async (label: string) => {
     const p = await db.principal.create({ data: { subject: `pages-${label}-${run}-${principals.length}` } });

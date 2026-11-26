@@ -4,6 +4,9 @@
  * page saves holds no comment markup, and they are mapped through every edit.
  */
 import { Editor, Extension } from "@tiptap/core";
+import Collaboration from "@tiptap/extension-collaboration";
+import CollaborationCaret from "@tiptap/extension-collaboration-caret";
+import type * as Y from "yjs";
 import { Markdown } from "@tiptap/markdown";
 import { Plugin, PluginKey, type EditorState, type Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
@@ -72,21 +75,61 @@ const CommentHighlights = Extension.create({
   },
 });
 
-/** `planLinks`: a plan document's link targets, read on every render (they follow the latest payload). */
+/** Live co-editing: the shared document, its provider (for carets) and who this person is. */
+export interface CollabOptions {
+  ydoc: Y.Doc;
+  provider: unknown;
+  user: { name: string; color: string };
+}
+
+/** Another person's caret, drawn with CSSOM only (the page's CSP refuses style attributes from markup). */
+function renderCaret(user: { name?: unknown; color?: unknown }): HTMLElement {
+  const color = typeof user.color === "string" && /^#[0-9a-f]{6}$/i.test(user.color) ? user.color : "#868e96";
+  const caret = document.createElement("span");
+  caret.className = "collab-caret";
+  caret.style.borderColor = color;
+  const label = document.createElement("span");
+  label.className = "collab-caret-label";
+  label.style.backgroundColor = color;
+  // Text only: a name from another browser is never parsed as markup.
+  label.textContent = typeof user.name === "string" ? user.name.slice(0, 60) : "Someone";
+  caret.append(label);
+  return caret;
+}
+
+/**
+ * `planLinks`: a plan document's link targets, read on every render (they follow the latest payload).
+ * `collab`: edit the live document instead of `markdown` (the content comes from it).
+ */
 export function createEditor(
   element: HTMLElement,
   markdown: string,
   editable: boolean,
   planLinks?: () => PlanLinkTargets | null,
+  collab?: CollabOptions,
 ): Editor {
   return new Editor({
     element,
     // The page's CSP allows no inline <style>; the editor's base styles are in styles.css.
     injectCSS: false,
     editable,
-    extensions: [...documentExtensions(planLinks), Markdown, CommentHighlights],
-    content: markdown,
-    contentType: "markdown",
+    extensions: [
+      ...documentExtensions(planLinks, { collab: Boolean(collab) }),
+      Markdown,
+      CommentHighlights,
+      ...(collab
+        ? [
+            Collaboration.configure({ document: collab.ydoc, field: "default" }),
+            CollaborationCaret.configure({
+              provider: collab.provider,
+              user: collab.user,
+              render: renderCaret,
+              selectionRender: () => ({ nodeName: "span", class: "collab-selection" }),
+            }),
+          ]
+        : []),
+    ],
+    ...(collab ? {} : { content: markdown, contentType: "markdown" as const }),
   });
 }
 

@@ -254,6 +254,11 @@ export class Api {
     return this.request("GET", this.doc("/mentions"));
   }
 
+  /** A single-use ticket carrying this request's access (a share link included) for joining live editing. */
+  liveTicket(): Promise<{ ticket: string; readOnly: boolean }> {
+    return this.request("POST", this.doc("/live-ticket"), {});
+  }
+
   saveContent(markdown: string, baseNumber: number): Promise<{ version: { number: number } }> {
     return this.request("PUT", this.doc("/content"), { markdown, baseNumber });
   }
