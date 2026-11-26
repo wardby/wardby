@@ -25,7 +25,8 @@ export function registerWebhookTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_webhooks",
     permission: "webhooks:write",
-    description: "Lists webhooks you created, and every webhook on an agent you own.",
+    description:
+      "Lists webhooks you or your Teams created, every webhook on an agent you or your Teams own, and webhooks shared with you.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
       const everything = ctx.operator === true || isOwnerAll(ctx);

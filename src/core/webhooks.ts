@@ -29,6 +29,7 @@ import {
 import { dispatchRun } from "./dispatch.js";
 import { PlanRefusedError, type PlanRefusalCode } from "./plans/refusal.js";
 import { atLeast, accessFor } from "./grants.js";
+import { resolveStanding } from "./teams/standing.js";
 
 export type WebhookMetadata = Pick<Webhook, "id" | "agentId" | "status" | "ownerId" | "createdAt" | "lastFiredAt">;
 
@@ -209,8 +210,11 @@ export async function resolveWebhookRun(
         // sharing grants spec §3.10): its owner, or a holder of execute. Read
         // through tx, so a revoke or make_owner takes effect on the next fire.
         // A webhook on a formerly public agent keeps firing through the
-        // migration's everyone-execute grant.
-        const creatorAccess = await accessFor(tx, "agent", currentAgent, current.ownerId);
+        // migration's everyone-execute grant. The creator acts for its Teams
+        // too, read live: a member's webhook on a Team agent keeps firing
+        // while the member stays in the Team, and stops once it leaves.
+        const creator = current.ownerId === null ? null : (await resolveStanding(tx, current.ownerId)).actsFor;
+        const creatorAccess = await accessFor(tx, "agent", currentAgent, creator);
         if (!atLeast("agent", creatorAccess, "execute")) {
           rejected = "disabled";
           return false;
