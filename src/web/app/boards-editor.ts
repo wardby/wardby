@@ -442,6 +442,25 @@ export function createBoardsEditor(opts: {
   const keymapDefaults = editor.Keymaps.getConfig().defaults ?? {};
   if (!editable) editor.Keymaps.removeAll();
 
+  // A copy of an element (duplicate, paste) takes its original's id plus a number GrapesJS picks from this page's
+  // ids alone ("card-2"): two people copying one element at once would both make "card-2", and in live editing the
+  // two copies would become one element. Numbers carry a token unique to this page ("card-k3f21"), so they never
+  // meet. Only the picking changes: no id is added to the HTML.
+  const base = editor.Components.getType("default")?.model as unknown as
+    | { getIncrementId?: (id: string, list: Record<string, unknown>, opts?: { keepIds?: string[] }) => string }
+    | undefined;
+  if (base?.getIncrementId) {
+    const token = Math.random().toString(36).slice(2, 6);
+    let n = 0;
+    base.getIncrementId = (id, list, opts = {}) => {
+      if ((opts.keepIds ?? []).includes(id) || !list[id]) return id;
+      let next: string;
+      do next = `${id}-${token}${++n}`;
+      while (list[next]);
+      return next;
+    };
+  }
+
   const api: BoardsEditor = {
     editor,
     ready,

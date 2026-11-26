@@ -442,5 +442,41 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         socket.destroy();
       }
     }, 120_000);
+
+    it("two people duplicating elements in one container at once: every original and every copy stays", async () => {
+      const { documentId, cookie, secondCookie } = await server.design({
+        title: "Coffee",
+        files: files(),
+        access: "write",
+      });
+      const a = await open(cookie, documentId);
+      const b = await open(secondCookie, documentId);
+      const cards = (p: Page) => p.frameLocator(CANVAS).locator(".grid > *");
+      const before = await cards(a).count();
+      const duplicate = async (p: Page, i: number) => {
+        await cards(p)
+          .nth(i)
+          .click({ position: { x: 5, y: 5 } });
+        await p.waitForTimeout(200);
+        await p.locator(".gjs-toolbar-item").nth(2).click();
+      };
+      // Different elements three times (Bo copies his own copies), then both copy the same element at once.
+      for (let round = 0; round < 3; round++) {
+        await Promise.all([duplicate(a, 0), duplicate(b, (await cards(b).count()) - 1)]);
+        await a.waitForTimeout(700);
+      }
+      await Promise.all([duplicate(a, 1), duplicate(b, 1)]);
+      await a.waitForTimeout(700);
+      const texts = (p: Page) =>
+        cards(p).evaluateAll((els) => els.map((e) => (e.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 24)));
+      const ids = (p: Page) => cards(p).evaluateAll((els) => els.map((e) => e.id));
+      await expect.poll(async () => (await texts(a)).length, { timeout: 10_000 }).toBe(before + 8);
+      await expect
+        .poll(async () => JSON.stringify(await texts(b)), { timeout: 10_000 })
+        .toBe(JSON.stringify(await texts(a)));
+      // Every element has its own id.
+      expect(new Set(await ids(a)).size).toBe(before + 8);
+      expect([...a.errors, ...b.errors]).toEqual([]);
+    }, 120_000);
   },
 );

@@ -336,6 +336,30 @@ export function bindBoard(
     "component:update:classes component:update:attributes component:update:components component:update:content";
   editor.on(events, schedule);
 
+  // An element this page adds (a duplicate, a paste) must have an id no other element has: GrapesJS checks a copy's
+  // id against this page's ids only when it is added, and a copy of a copy can keep its original's id. Two elements
+  // with one id would be one element in the live copy, and the other would vanish. A clashing one gets a fresh id.
+  const onAdd = (added: Component) => {
+    if (applying || destroyed) return;
+    const root = editor.getWrapper();
+    if (!root) return;
+    const count = new Map<string, number>();
+    const walk = (k: Component) => {
+      count.set(k.getId(), (count.get(k.getId()) ?? 0) + 1);
+      k.components().forEach(walk);
+    };
+    walk(root);
+    const fix = (k: Component) => {
+      if ((count.get(k.getId()) ?? 0) > 1) {
+        count.set(k.getId(), (count.get(k.getId()) ?? 1) - 1);
+        k.setId(`i${Math.random().toString(36).slice(2, 10)}`);
+      }
+      k.components().forEach(fix);
+    };
+    fix(added);
+  };
+  editor.on("component:add", onAdd);
+
   // Typing streams out while a text box is open; its final text goes out when it closes (GrapesJS updates its own
   // model a moment later, and until then the model holds the text from before the box opened).
   const onInput = () => schedule();
@@ -423,6 +447,7 @@ export function bindBoard(
       ruleOrder.unobserve(onRemote);
       meta.unobserve(onRemote);
       editor.off(events, schedule);
+      editor.off("component:add", onAdd);
       editor.off("rte:enable", onEnable);
       editor.off("rte:disable", onDisable);
       undoManager.destroy();

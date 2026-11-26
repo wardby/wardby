@@ -128,6 +128,63 @@ export function syncArray(a: Y.Array<string>, want: string[]): boolean {
   return true;
 }
 
+/**
+ * Applies this page's own changes to a shared list: what it removed and what it added or moved since `base` (the
+ * list as it last saw it), each placed after the nearest item before it in `want` that the shared list has. Anything
+ * else in the shared list (someone else's change this page has not shown yet) is left as it is: making the list
+ * equal to `want` would drop it. Without a base, the list is made equal to `want`.
+ */
+export function mergeList(a: Y.Array<string>, base: string[] | undefined, want: string[]): boolean {
+  if (!base) return syncArray(a, want);
+  const inBase = new Set(base);
+  const inWant = new Set(want);
+  // Items in both whose order changed: the longest run in the same order stays, the rest move.
+  const common = want.filter((x) => inBase.has(x));
+  const at = new Map(base.map((x, i) => [x, i]));
+  const seq = common.map((x) => at.get(x)!);
+  const prev = new Array<number>(seq.length).fill(-1);
+  const tails: number[] = [];
+  for (let i = 0; i < seq.length; i++) {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (seq[tails[mid]] < seq[i]) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo > 0) prev[i] = tails[lo - 1];
+    tails[lo] = i;
+  }
+  const stays = new Set<string>();
+  for (let k = tails.length ? tails[tails.length - 1] : -1; k >= 0; k = prev[k]) stays.add(common[k]);
+  const moved = new Set(common.filter((x) => !stays.has(x)));
+  const removed = new Set(base.filter((x) => !inWant.has(x)));
+  let changed = false;
+  const have = a.toArray();
+  for (let i = have.length - 1; i >= 0; i--) {
+    if (removed.has(have[i]) || moved.has(have[i])) {
+      a.delete(i, 1);
+      changed = true;
+    }
+  }
+  for (let j = 0; j < want.length; j++) {
+    const x = want[j];
+    if (inBase.has(x) && !moved.has(x)) continue;
+    if (!inBase.has(x) && a.toArray().includes(x)) continue; // someone else added it too
+    let pos = 0;
+    for (let k = j - 1; k >= 0; k--) {
+      const i = a.toArray().indexOf(want[k]);
+      if (i >= 0) {
+        pos = i + 1;
+        break;
+      }
+    }
+    a.insert(pos, [x]);
+    changed = true;
+  }
+  return changed;
+}
+
 export interface ReadOptions {
   /** A text box being typed in: its HTML comes from the page (GrapesJS updates its model when it closes). */
   editing?: { id: string; el: HTMLElement } | null;
@@ -227,6 +284,13 @@ export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {
   /** Whether this page had `key` and no longer does (a local deletion). */
   const gone = (key: string) => (since ? since.has(key) && !now.has(key) : !now.has(key));
   let changes = 0;
+  /** A list as this page last saw it (the base its own list changes are taken from). */
+  const listBase = (key: string): string[] | undefined => {
+    const seen = since?.get(key);
+    if (seen === undefined) return undefined;
+    const v = JSON.parse(seen) as unknown;
+    return Array.isArray(v) ? v.map(String) : undefined;
+  };
   const set = (m: Y.Map<unknown>, field: string, key: string, value: unknown) => {
     if (mine(key) && setIf(m, field, value)) changes++;
   };
@@ -256,8 +320,9 @@ export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {
     }
     if (
       mine(`ak|${id}`) &&
-      syncArray(
+      mergeList(
         attrKeys,
+        listBase(`ak|${id}`),
         want.map(([k]) => k),
       )
     )
@@ -276,8 +341,9 @@ export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {
     const ch = child(n, F.children, () => new Y.Array<string>());
     if (
       mine(`c|${id}`) &&
-      syncArray(
+      mergeList(
         ch,
+        listBase(`c|${id}`),
         kids.map((k) => k.getId()),
       )
     )
@@ -345,8 +411,9 @@ export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {
       }
       if (
         mine(`rp|${key}`) &&
-        syncArray(
+        mergeList(
           y.get(R.props) as Y.Array<string>,
+          listBase(`rp|${key}`),
           want.map(([p]) => p),
         )
       )
@@ -360,8 +427,9 @@ export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {
     }
     if (
       mine("ro") &&
-      syncArray(
+      mergeList(
         ruleOrder,
+        listBase("ro"),
         live.map(([k]) => k),
       )
     )
