@@ -15,6 +15,7 @@ import type {
   V1Secret,
   V1Toleration,
   V1Volume,
+  V1VolumeMount,
 } from "@kubernetes/client-node";
 import {
   DOCKER_SOCKET_DIR,
@@ -491,6 +492,7 @@ function dockerServiceSidecar(
   service: ResolvedDockerService,
   profile: KubernetesPlatformProfile,
   tunnel?: DockerDaemonTunnel,
+  repositoryMounts: readonly V1VolumeMount[] = [],
 ): V1Container {
   return {
     name: serviceContainerName(service.name),
@@ -514,6 +516,11 @@ function dockerServiceSidecar(
     volumeMounts: [
       ...serviceStorage(service, 0).map(({ name, mountPath }) => ({ name, mountPath })),
       ...(tunnel?.trustCa ? [{ name: DOCKER_TUNNEL_CA_VOLUME, mountPath: DOCKER_TUNNEL_CA_DIR, readOnly: true }] : []),
+      // The checkout at the same path as in the agent's shells, so a bind mount from the repository (a
+      // compose file's `.:/app`) resolves to the run's files and not to an empty directory in the daemon.
+      // The agent already writes /workspace and drives the daemon through its socket: nothing new reachable.
+      { name: "storage", mountPath: "/workspace", subPath: "workspace" },
+      ...repositoryMounts,
     ],
   };
 }
@@ -566,9 +573,10 @@ function serviceSidecar(
   timeoutSec: number,
   withDocker: boolean,
   dockerTunnel?: DockerDaemonTunnel,
+  repositoryMounts: readonly V1VolumeMount[] = [],
 ): V1Container {
   if (isToolchainService(entry)) return toolchainSidecar(entry, index, profile, timeoutSec, withDocker);
-  if (isDockerService(entry)) return dockerServiceSidecar(entry, profile, dockerTunnel);
+  if (isDockerService(entry)) return dockerServiceSidecar(entry, profile, dockerTunnel, repositoryMounts);
   const service = sidecarOnly(entry);
   const env = Object.entries(service.serviceEnv)
     .sort(([left], [right]) => left.localeCompare(right))
@@ -1015,7 +1023,15 @@ export function buildRunPod(spec: JobSpec, options: RunPodOptions): V1Pod {
         ...(toolRunner ? [toolRunner] : []),
         // Setup jobs (#589) are not sidecars: they get containers of their own, so none is built here.
         ...runningServices(services).map((service, index) =>
-          serviceSidecar(service, index, profile, spec.timeoutSec, dockerSocket.length > 0, dockerTunnel),
+          serviceSidecar(
+            service,
+            index,
+            profile,
+            spec.timeoutSec,
+            dockerSocket.length > 0,
+            dockerTunnel,
+            repositoryMounts,
+          ),
         ),
       ],
       // Setup jobs (#589) between the keeper and the worker: each waits for the checkout, then runs once.
