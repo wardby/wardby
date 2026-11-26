@@ -24,6 +24,7 @@ describe("coding proxy Gemini routes", () => {
     async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
   );
   const observed: { protocol: string; status: number }[] = [];
+  const audits: unknown[] = [];
 
   beforeAll(async () => {
     setLogLineFilter((line) => {
@@ -34,7 +35,10 @@ describe("coding proxy Gemini routes", () => {
       ledger: new MemoryProxyLedger(),
       credentials: { resolve: async () => FAKE_GEMINI_KEY },
       fetch: upstream,
-      audit: (event) => logProxyAudit(event),
+      audit: (event) => {
+        audits.push(event);
+        logProxyAudit(event);
+      },
     });
     session = await proxy.createSession({
       runId: "gemini-server-run",
@@ -111,8 +115,39 @@ describe("coding proxy Gemini routes", () => {
         ...extra,
       });
       expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({
+        error: { type: "invalid_capability", message: "invalid_capability" },
+      });
     }
     expect(upstream.mock.calls.length).toBe(calls);
+  });
+
+  it("keeps a key carried in a refused request's body out of the response, the audit events and the logs", async () => {
+    const BODY_KEY = "AIzaBODYbodyBODYbody9876543210zyxwVUTS";
+    const calls = upstream.mock.calls.length;
+    const auditsBefore = audits.length;
+    const linesBefore = lines.length;
+    for (const body of [
+      // A web tool under the session's "off" policy.
+      { contents: [{ role: "user", parts: [{ text: BODY_KEY }] }], tools: [{ googleSearch: {} }] },
+      // An unknown generation field whose value is the key.
+      { contents: [{ role: "user", parts: [{ text: "hi" }] }], generationConfig: { [BODY_KEY]: BODY_KEY } },
+      // A cached-content reference naming the key.
+      { contents: [{ role: "user", parts: [{ text: "hi" }] }], cachedContent: BODY_KEY },
+    ]) {
+      const response = await post(
+        "/v1beta/models/gemini-4-neon:generateContent",
+        { "x-goog-api-key": session.capability },
+        JSON.stringify(body),
+      );
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(await response.text()).not.toContain(BODY_KEY);
+    }
+    expect(upstream.mock.calls.length).toBe(calls);
+    expect(audits.length).toBeGreaterThan(auditsBefore);
+    expect(JSON.stringify(audits.slice(auditsBefore))).not.toContain(BODY_KEY);
+    expect(lines.length).toBeGreaterThan(linesBefore);
+    expect(lines.slice(linesBefore).join("")).not.toContain(BODY_KEY);
   });
 
   it("never logs the capability or the upstream key", async () => {
