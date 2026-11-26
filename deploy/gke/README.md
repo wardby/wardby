@@ -74,7 +74,8 @@ agents: the proxy's `WARDBY_MCP_GATEWAY_URL` points at the in-cluster Service
 proxy-to-gateway path on `8790`. Its `wardby-native-gateway-env` Secret comes from External Secrets and
 reuses existing Secret Manager entries (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 `SECRET_APP_KEY`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`; no new ones), with
-Jira settings from `wardby-jira-env` when configured. `DATABASE_URL` is a plain
+Jira settings from `wardby-jira-env` and the Gemini key from `wardby-gemini-env`
+when configured. `DATABASE_URL` is a plain
 environment variable built by `up.sh`, never part of the Secret.
 
 The namespace ResourceQuota (26 pods, 11 CPU, 20Gi memory) includes the
@@ -296,6 +297,21 @@ overlay's rules that select the throwaway database by pod label do not match
 a Cloud SQL address. `connector_enforcement = REQUIRED` (`cloudsql.tf`)
 refuses a plain Postgres (5432) connection anyway, so there is no rule for
 it.
+
+## Gemini models
+
+Native agents can use Google Gemini models (see
+[Google Gemini](../../docs/models.md#google-gemini)). Two independent options:
+
+- **Google AI Studio key.** Set `GEMINI_API_KEY` in `.env.local`. `seed-secrets.mjs`
+  stores it as the optional Secret Manager entry `gemini-api-key`, and an
+  ExternalSecret syncs it into `wardby-gemini-env`, read only by the control
+  plane and native gateway (never the coding proxy). Without it, nothing is
+  created.
+- **Vertex AI.** Set `vertex_ai_enabled = true`. Terraform enables
+  `aiplatform.googleapis.com` and grants `roles/aiplatform.user` to the
+  control-plane and native-gateway service accounts; `up.sh` then sets
+  `VERTEX_PROJECT` on both.
 
 ## Secrets
 

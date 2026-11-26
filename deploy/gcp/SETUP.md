@@ -157,6 +157,10 @@ apply where it changes — see `migration-job.tf`.
 
 ## 8. Plan and apply
 
+To let native agents use Google Gemini models through Google AI Studio, also set
+`gemini_api_key_value` in `terraform.tfvars`; it reaches the container as
+`GEMINI_API_KEY`. It is optional, like the other provider keys.
+
 ```bash
 cd deploy/gcp
 cp terraform.tfvars.example terraform.tfvars   # fill in your values from the steps above

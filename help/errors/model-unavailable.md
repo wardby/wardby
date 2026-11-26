@@ -25,11 +25,13 @@ coding proxy's own credentials rather than looking up a provider adapter:
   `models:admin` to bring it back with `reset_model` (reverts to the shipped
   entry, if any) or `set_model` (re-adds it with current values).
 - **`provider_not_configured`** (native agents only) — the model's provider
-  (`openai`, `anthropic`, or `bedrock-claude`) has no credentials configured
+  (`openai`, `anthropic`, `bedrock-claude`, `vertex-gemini` or
+  `google-ai-studio`) has no credentials configured
   for native runs in this deployment, even though the model itself is in the
   catalog. An operator needs to configure that provider's credentials before
   any native agent can use a model under it; see
-  [Getting started](../getting-started.md).
+  [Getting started](../getting-started.md). For the Gemini providers, read the
+  `gemini-models` help article.
 
 Whatever the reason, the run is not lost: it ends with status `failed`, zero spend, and
 the `model_unavailable` message as its error, so `list_runs` and `get_run`

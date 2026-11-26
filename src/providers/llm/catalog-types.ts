@@ -11,7 +11,7 @@ export const MODEL_PROVIDERS = ["openai", "anthropic", "bedrock-claude", "vertex
 export type ModelProvider = (typeof MODEL_PROVIDERS)[number];
 
 /**
- * How a Claude model takes extended thinking. adaptive: `{type: "adaptive"}`
+ * How a model takes thinking. adaptive: `{type: "adaptive"}`
  * plus an effort level. manual: `{type: "enabled", budget_tokens}` and no
  * effort (Claude Haiku 4.5 returns a 400 for adaptive). none: no thinking
  * parameter (OpenAI models). level: Gemini's

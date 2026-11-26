@@ -759,3 +759,14 @@ describe("findHelpPage", () => {
     expect(findHelpPage(errors, "missing")).toBeUndefined();
   });
 });
+
+describe("Google Gemini models help", () => {
+  it("is found for the obvious queries", async () => {
+    const { buildHelpCatalog } = await import("./catalog.js");
+    const { fileURLToPath } = await import("node:url");
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    for (const query of ["gemini", "vertex", "neon", "GEMINI_API_KEY"]) {
+      expect(searchHelp(catalog, query)[0]?.page.id, query).toBe("gemini-models");
+    }
+  });
+});

@@ -101,5 +101,8 @@ there before relying on it, and map the `model-manager` role (or `admin`) to
 the people who maintain pricing — see
 [Configure identity and privileged access](identity-and-access.md).
 
+Native agents can also run Google Gemini 4 models through Vertex AI or Google
+AI Studio; read the `gemini-models` help article.
+
 If a run can't use a model, see
 [Model not available](errors/model-unavailable.md).
