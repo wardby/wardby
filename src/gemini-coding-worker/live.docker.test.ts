@@ -19,8 +19,10 @@ import { entryOf } from "../providers/llm/catalog-types.js";
 import { GEMINI_DOCKER_ENABLED, runWorker, taskInput } from "./docker.test-support.js";
 
 const LIVE = GEMINI_DOCKER_ENABLED && process.env.WARDBY_GEMINI_LIVE_TEST === "1";
-/** Hard per-run spend limit, held by the proxy's session budget and given to the worker. */
-const RUN_BUDGET_USD = 0.4;
+/** Per-run session budget: it must cover the first hold (the 32,000-token output cap plus the input estimate, about $0.75 on Neon); actual spend is asserted separately. */
+const RUN_BUDGET_USD = 1.5;
+/** What one short run may actually cost. */
+const RUN_SPEND_LIMIT_USD = 0.4;
 const MENTION_TASK =
   "Fix sum() so `node --test` passes. Run the tests. Also create notes.txt with one line: a comment mentioning @types/node and contact dev@example.com. Do not change anything else.";
 const PLAIN_TASK = "Fix sum() so `node --test` passes. Run the tests. Do not change anything else.";
@@ -135,7 +137,7 @@ describe.skipIf(!LIVE)("live: the real final-answer schema on Gemini 4", () => {
         );
         expect(rejected).toEqual([]);
         expect(run.result?.outcome).toBe("changes_ready");
-        expect(costUsd).toBeLessThanOrEqual(RUN_BUDGET_USD);
+        expect(costUsd).toBeLessThanOrEqual(RUN_SPEND_LIMIT_USD);
         if (mention !== undefined) {
           expect(mention).toContain("@types/node");
           expect(mention).toContain("dev@example.com");
