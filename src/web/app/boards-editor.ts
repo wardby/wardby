@@ -216,7 +216,10 @@ export function createBoardsEditor(opts: {
     container: opts.container,
     height: "100%",
     width: "auto",
-    storageManager: false,
+    // No storage, and no autosave: GrapesJS 0.23 keeps autosave on with `storageManager: false`, and each "save"
+    // first copies an open text box back into its model, which redraws the box and puts the caret at its start
+    // (with live editing, every change someone else makes would do that while you type).
+    storageManager: { type: "", autosave: false, autoload: false },
     // GrapesJS sends usage data to app.grapesjs.com by default: never (the CSP would block it anyway).
     telemetry: false,
     // No external icon stylesheet (CSP, and nothing from a CDN at runtime).
