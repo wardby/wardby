@@ -178,7 +178,7 @@ describe("model catalog tools", () => {
       expect.objectContaining({
         modelId: "claude-haiku-4-5",
         origin: "shipped",
-        priceVersion: "shipped:2026-10-08",
+        priceVersion: "shipped:2026-11-25",
         routable: true,
         thinkingMode: "manual",
       }),

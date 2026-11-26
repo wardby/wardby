@@ -7,16 +7,18 @@
 import type { TokenizerEncoding } from "./pricing-core.js";
 import { isLlmEffort, type LlmEffort } from "./types.js";
 
-export const MODEL_PROVIDERS = ["openai", "anthropic", "bedrock-claude"] as const;
+export const MODEL_PROVIDERS = ["openai", "anthropic", "bedrock-claude", "vertex-gemini", "google-ai-studio"] as const;
 export type ModelProvider = (typeof MODEL_PROVIDERS)[number];
 
 /**
  * How a Claude model takes extended thinking. adaptive: `{type: "adaptive"}`
  * plus an effort level. manual: `{type: "enabled", budget_tokens}` and no
  * effort (Claude Haiku 4.5 returns a 400 for adaptive). none: no thinking
- * parameter (OpenAI models).
+ * parameter (OpenAI models). level: Gemini's
+ * generationConfig.thinkingConfig.thinkingLevel, set from the effort level;
+ * thinking cannot be turned off.
  */
-export const THINKING_MODES = ["adaptive", "manual", "none"] as const;
+export const THINKING_MODES = ["adaptive", "manual", "none", "level"] as const;
 export type ThinkingMode = (typeof THINKING_MODES)[number];
 
 export const TOKENIZER_ENCODINGS = ["cl100k_base", "o200k_base"] as const;

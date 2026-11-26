@@ -67,7 +67,9 @@ describe("RoutingLlmProvider", () => {
       ],
       catalog,
     );
-    const expected = SHIPPED_CATALOG.filter((e) => e.provider !== "bedrock-claude").map((e) => e.modelId);
+    const expected = SHIPPED_CATALOG.filter((e) => e.provider === "openai" || e.provider === "anthropic").map(
+      (e) => e.modelId,
+    );
     expect(r.listModels().sort()).toEqual(expected.sort());
   });
 });
