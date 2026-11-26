@@ -120,7 +120,7 @@ counts them.
 
 Before a step is stored, Wardby removes every secret value the run's agent has
 (its attached secrets, readable or brokered, and its MCP servers' secrets), the
-run's own capability and registry token, and
+run's own capability and registry token, the model provider's credential, and
 anything shaped like a token or key. A command that echoes a secret shows
 `[REDACTED]` in its place.
 

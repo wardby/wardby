@@ -264,8 +264,8 @@ counts the rest.
 
 **Secrets.** Every step is redacted before it is stored: every secret value of
 the run's agent (attached secrets, readable or brokered, and its MCP servers'
-secrets), the run's own capability and its registry token are replaced with
-`[REDACTED]`, then anything shaped like a token or key.
+secrets), the run's own capability, its registry token and the model provider's
+credential are replaced with `[REDACTED]`, then anything shaped like a token or key.
 If the agent's secrets can't be read at that moment, the step is not stored.
 
 **Retention.** Steps are deleted `RUN_STEP_RETENTION_DAYS` after they are

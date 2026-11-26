@@ -275,6 +275,9 @@ attached. The worker still reaches only the proxy:
    Logs for the route carry the method, status and session id, never bodies,
    arguments, results or the token.
 
+The proxy removes the model provider's credential, by exact value, from every
+reply it relays to the worker and from the steps it reports for the run.
+
 The proxy can reach the gateway's HTTP port. It holds no gateway credentials,
 and each route authenticates separately. The Anthropic allowlist accepts the
 run's own MCP tools as plain client tools named
