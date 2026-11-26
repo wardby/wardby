@@ -29,6 +29,7 @@ import {
 } from "../tools/oauth-loopback-routes.js";
 import { logger } from "../../core/logger.js";
 import { VIEWER_API_PREFIX, type ViewerApi } from "../../viewer/http.js";
+import type { LiveServer } from "../../web/live/server.js";
 import { handleWebRequest, type WebDeps } from "../../web/routes.js";
 
 const httpLog = logger.child({ module: "streamable-http" });
@@ -70,6 +71,8 @@ export interface StartHttpServerOptions {
   blobs?: BlobStore;
   /** The document pages, share links, browser sign-in and document JSON API; absent = /d/, /s/ and /web/ answer 404. */
   web?: WebDeps;
+  /** Live co-editing (WebSocket upgrades on /d/live/<id>); absent = upgrades are refused. */
+  live?: LiveServer;
   /** How long close() lets open requests finish before cutting them (default CLOSE_GRACE_MS). */
   closeGraceMs?: number;
 }
@@ -140,6 +143,15 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         sendJson(res, 500, { error: "internal_error", id });
       }
     });
+  });
+  // WebSocket upgrades (live co-editing), with the same host and origin checks as any request.
+  server.on("upgrade", (req, socket, head) => {
+    const hostCount = req.rawHeaders.filter((_, i) => i % 2 === 0 && req.rawHeaders[i].toLowerCase() === "host").length;
+    const hostOk = hostCount === 1 && req.headers.host?.toLowerCase() === canonical.host;
+    const originOk = !req.headers.origin || origins.has(req.headers.origin);
+    if (!hostOk || !originOk || !opts.live?.handleUpgrade(req, socket, head)) {
+      socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    }
   });
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const hostCount = req.rawHeaders.filter((_, i) => i % 2 === 0 && req.rawHeaders[i].toLowerCase() === "host").length;
@@ -355,6 +367,7 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
       new Promise((resolve, reject) => {
         opts.viewer?.closeStreams();
         opts.web?.events?.closeStreams();
+        void opts.live?.close();
         const cut = setTimeout(() => {
           const now = Date.now();
           const requests = [...open.values()].map((r) => ({
