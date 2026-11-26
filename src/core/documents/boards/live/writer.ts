@@ -14,7 +14,7 @@
  */
 import type * as Y from "yjs";
 import { serializeBoardFile, type BoardParts } from "../board-file-text.js";
-import { BOARD_ROOT, F, orderedPairs, R, type BoardMaps } from "./model.js";
+import { BOARD_ROOT, F, htmlOf, orderedPairs, R, type BoardMaps } from "./model.js";
 
 /** One spot in the written body, in document order: which live element (or text) produced it. */
 export type Spot = { id: string; kind: "el" | "leaf" | "text"; tag?: string };
@@ -75,7 +75,8 @@ export function writeBoard(maps: BoardMaps): WrittenBoard {
       if (t) spots.push({ id, kind: "text" });
       return escText(t);
     }
-    const isLeaf = typeof n.get(F.html) === "string";
+    const leafHtml = htmlOf(n);
+    const isLeaf = leafHtml !== undefined;
     const tag = str(n.get(F.tag), "div");
     spots.push({ id, kind: isLeaf ? "leaf" : "el", tag });
     used.add(`#${id}`);
@@ -94,7 +95,7 @@ export function writeBoard(maps: BoardMaps): WrittenBoard {
     if (!n.get(F.ownId) && idRules.has(id)) out.push(`id="${escAttr(id)}"`);
     let inner: string;
     if (isLeaf) {
-      inner = n.get(F.html) as string;
+      inner = leafHtml ?? "";
       for (const name of jsonList(n.get(F.names))) used.add(name);
     } else {
       inner = ((n.get(F.children) as Y.Array<string> | undefined)?.toArray() ?? []).map(html).join("");
@@ -181,7 +182,7 @@ export function writeElement(maps: BoardMaps, id: string): string {
   const classes = str(n.get(F.classes)).split(" ").filter(Boolean);
   if (classes.length) out.push(`class="${escAttr(classes.join(" "))}"`);
   const tag = str(n.get(F.tag), "div");
-  const inner = typeof n.get(F.html) === "string" ? (n.get(F.html) as string) : "";
+  const inner = htmlOf(n) ?? "";
   const attrText = out.length ? ` ${out.join(" ")}` : "";
   return !inner && n.get(F.void) ? `<${tag}${attrText}/>` : `<${tag}${attrText}>${inner}</${tag}>`;
 }

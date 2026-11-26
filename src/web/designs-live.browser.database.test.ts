@@ -267,5 +267,99 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       expect(await h1Text(a)).toContain("BO-AFTER");
       expect([...a.errors, ...b.errors]).toEqual([]);
     }, 120_000);
+
+    it("two people typing at once in different text boxes: each keeps their caret and their text, in order", async () => {
+      const { documentId, cookie, secondCookie } = await server.design({
+        title: "Coffee",
+        files: files(),
+        access: "write",
+      });
+      const a = await open(cookie, documentId);
+      const b = await open(secondCookie, documentId);
+      /** Opens a text box and puts the caret at its very end (not the first line's end). */
+      const openAtEnd = async (p: Page, sel: string) => {
+        const el = p.frameLocator(CANVAS).locator(sel).first();
+        for (let tries = 0; tries < 4; tries++) {
+          await el.dblclick();
+          await p.waitForTimeout(200);
+          if (await el.evaluate((n) => !!n.closest("[contenteditable=true]"))) break;
+        }
+        await el.evaluate((node) => {
+          const r = node.ownerDocument.createRange();
+          r.selectNodeContents(node);
+          r.collapse(false);
+          const s = node.ownerDocument.getSelection()!;
+          s.removeAllRanges();
+          s.addRange(r);
+        });
+        return el;
+      };
+      const [ha, pb] = [await openAtEnd(a, "h1"), await openAtEnd(b, ".hero p")];
+      await Promise.all([
+        a.keyboard.type(" ANN-TYPES-IN-ORDER", { delay: 70 }),
+        b.keyboard.type(" BO-TYPES-IN-ORDER", { delay: 70 }),
+      ]);
+      // While open, each box holds its own typing in order (at the end, where the caret was).
+      expect((await ha.textContent())?.trimEnd()).toMatch(/ ANN-TYPES-IN-ORDER$/);
+      expect((await pb.textContent())?.trimEnd()).toMatch(/ BO-TYPES-IN-ORDER$/);
+      for (const p of [a, b])
+        await p
+          .frameLocator(CANVAS)
+          .locator("body")
+          .click({ position: { x: 5, y: 5 } });
+      // Once closed, everyone has both.
+      for (const p of [a, b]) {
+        await expect
+          .poll(() => p.frameLocator(CANVAS).locator("h1").first().textContent(), { timeout: 10_000 })
+          .toMatch(/ ANN-TYPES-IN-ORDER\s*$/);
+        await expect
+          .poll(() => p.frameLocator(CANVAS).locator(".hero p").first().textContent(), { timeout: 10_000 })
+          .toMatch(/ BO-TYPES-IN-ORDER\s*$/);
+      }
+      expect([...a.errors, ...b.errors]).toEqual([]);
+    }, 120_000);
+
+    it("two people typing in the same text box at once: both keep their words", async () => {
+      const { documentId, cookie, secondCookie } = await server.design({
+        title: "Coffee",
+        files: files(),
+        access: "write",
+      });
+      const a = await open(cookie, documentId);
+      const b = await open(secondCookie, documentId);
+      const openAtEnd = async (p: Page) => {
+        const el = p.frameLocator(CANVAS).locator(".hero p").first();
+        for (let tries = 0; tries < 4; tries++) {
+          await el.dblclick();
+          await p.waitForTimeout(200);
+          if (await el.evaluate((n) => !!n.closest("[contenteditable=true]"))) break;
+        }
+        await el.evaluate((node) => {
+          const r = node.ownerDocument.createRange();
+          r.selectNodeContents(node);
+          r.collapse(false);
+          const s = node.ownerDocument.getSelection()!;
+          s.removeAllRanges();
+          s.addRange(r);
+        });
+      };
+      await openAtEnd(a);
+      await openAtEnd(b);
+      await Promise.all([
+        a.keyboard.type(" ANN-SAME-BOX", { delay: 70 }),
+        b.keyboard.type(" BO-SAME-BOX", { delay: 70 }),
+      ]);
+      for (const p of [a, b])
+        await p
+          .frameLocator(CANVAS)
+          .locator("body")
+          .click({ position: { x: 5, y: 5 } });
+      for (const p of [a, b]) {
+        const para = () => p.frameLocator(CANVAS).locator(".hero p").first().textContent();
+        await expect.poll(async () => (await para()) ?? "", { timeout: 10_000 }).toContain("ANN-SAME-BOX");
+        await expect.poll(async () => (await para()) ?? "", { timeout: 10_000 }).toContain("BO-SAME-BOX");
+      }
+      expect([...a.errors, ...b.errors]).toEqual([]);
+    }, 120_000);
   },
 );

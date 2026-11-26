@@ -17,7 +17,8 @@ import { JSDOM, VirtualConsole, type DomElement, type DomNode } from "jsdom";
 import postcss from "postcss";
 import * as Y from "yjs";
 import { nodesFromHtml, putNodes } from "./elements.js";
-import { BOARD_ROOT, F, R, type BoardMaps } from "./model.js";
+import { BOARD_ROOT, F, htmlOf, R, setHtml, type BoardMaps } from "./model.js";
+import { merge3 } from "./merge3.js";
 import { mapBase } from "./version-map.js";
 import { writeBoard, type Spot } from "./writer.js";
 
@@ -448,8 +449,7 @@ export function applyBoardMerge(maps: BoardMaps, ops: MergeOp[], newId: () => st
     } else if (op.kind === "html") {
       const n = nodes.get(op.id);
       // Word by word: the new version's change applied to the box as it is now.
-      if (n)
-        n.set(F.html, merge3(op.base, typeof n.get(F.html) === "string" ? (n.get(F.html) as string) : "", op.html));
+      if (n) setHtml(n, merge3(op.base, htmlOf(n) ?? "", op.html));
     } else if (op.kind === "text") {
       nodes.get(op.id)?.set(F.content, op.content);
     } else if (op.kind === "remove") {
@@ -520,54 +520,6 @@ export function applyBoardMerge(maps: BoardMaps, ops: MergeOp[], newId: () => st
   for (const k of kept) dropTree(k, new Set());
 }
 
-/** Word-level three-way merge: both sides' changes to `base`; where they overlap, `theirs` (the new version) wins. */
-export function merge3(base: string, mine: string, theirs: string): string {
-  if (mine === base) return theirs;
-  if (theirs === base || theirs === mine) return mine;
-  const tok = (x: string) => x.match(/<[^>]+>|[^<\s]+|\s+/g) ?? [];
-  const [b, m, t] = [tok(base), tok(mine), tok(theirs)];
-  type Hunk = { a0: number; a1: number; with: string[]; from: "m" | "t" };
-  const hunks = (x: string[], from: "m" | "t"): Hunk[] => {
-    const dp = Array.from({ length: b.length + 1 }, () => new Array<number>(x.length + 1).fill(0));
-    for (let i = b.length - 1; i >= 0; i--)
-      for (let j = x.length - 1; j >= 0; j--)
-        dp[i][j] = b[i] === x[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    const out: Hunk[] = [];
-    let i = 0;
-    let j = 0;
-    while (i < b.length || j < x.length) {
-      if (i < b.length && j < x.length && b[i] === x[j]) {
-        i++;
-        j++;
-        continue;
-      }
-      const h: Hunk = { a0: i, a1: i, with: [], from };
-      while ((i < b.length || j < x.length) && !(i < b.length && j < x.length && b[i] === x[j])) {
-        if (j < x.length && (i >= b.length || dp[i][j + 1] >= dp[i + 1][j])) h.with.push(x[j++]);
-        else i++;
-      }
-      h.a1 = i;
-      out.push(h);
-    }
-    return out;
-  };
-  const ht = hunks(t, "t");
-  const overlaps = (x: Hunk, y: Hunk) =>
-    (x.a0 < y.a1 && y.a0 < x.a1) ||
-    x.a0 === y.a0 ||
-    (x.a0 === x.a1 && x.a0 > y.a0 && x.a0 < y.a1) ||
-    (y.a0 === y.a1 && y.a0 > x.a0 && y.a0 < x.a1);
-  const hm = hunks(m, "m").filter((h) => !ht.some((x) => overlaps(h, x)));
-  const all = [...ht, ...hm].sort((x, y) => x.a0 - y.a0 || (x.from === "m" ? -1 : 1));
-  let out = "";
-  let pos = 0;
-  for (const h of all) {
-    out += b.slice(pos, h.a0).join("") + h.with.join("");
-    pos = Math.max(pos, h.a1);
-  }
-  return out + b.slice(pos).join("");
-}
-
 /** A board file's parts for merging (read only, on the server). */
 export function fileParts(text: string): { bodyHtml: string; baseCss: string; editsCss: string } {
   const dom = new JSDOM(text, { virtualConsole: new VirtualConsole() });
@@ -628,3 +580,5 @@ export function boardOps(
   if (!writtenIsBase) throw new Error("version_map_mismatch");
   return from({ bodyHtml: written.body, baseCss: written.baseCss ?? "", editsCss: written.css });
 }
+
+export { merge3 };

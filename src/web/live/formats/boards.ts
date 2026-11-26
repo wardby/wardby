@@ -150,6 +150,7 @@ export function watchEdit(scratch: Y.Doc, apply: () => void): Map<string, Touche
 /** Every string under a live-copy map (text, attributes, CSS values). */
 function stringsIn(v: unknown, out: string[]): string[] {
   if (typeof v === "string") out.push(v);
+  else if (v instanceof Y.Text) out.push(v.toJSON());
   else if (v instanceof Y.Map) for (const x of (v as Y.Map<unknown>).values()) stringsIn(x, out);
   else if (v instanceof Y.Array) for (const x of (v as Y.Array<unknown>).toArray()) stringsIn(x, out);
   return out;

@@ -26,7 +26,11 @@ export const F = {
   attrs: "attrs",
   /** The attributes' order, as GrapesJS writes them. */
   attrKeys: "attrKeys",
-  /** A text box: its inner HTML as GrapesJS writes it (one box merges as a whole). */
+  /**
+   * A text box: its inner HTML as GrapesJS writes it, as shared text (Y.Text), so two people typing in one box both
+   * keep every character. A live copy saved before text boxes were shared text holds a plain string: read either
+   * with htmlOf, write with setHtml.
+   */
   html: "html",
   /** A text box: the class and id names used inside it (JSON array), for the CSS writer. */
   names: "names",
@@ -97,4 +101,44 @@ export function orderedPairs<V>(m: Y.Map<V> | undefined, keys: Y.Array<string> |
   const listed = [...new Set(keys?.toArray() ?? [])].filter((k) => m.has(k));
   const rest = [...m.keys()].filter((k) => !listed.includes(k));
   return [...listed, ...rest].map((k) => [k, m.get(k) as V]);
+}
+
+/** A text box's inner HTML, or undefined when the element is not a text box. */
+export function htmlOf(n: Y.Map<unknown> | undefined): string | undefined {
+  const v = n?.get(F.html);
+  if (typeof v === "string") return v;
+  if (v instanceof Y.Text) return v.toJSON();
+  return undefined;
+}
+
+/**
+ * Sets a text box's inner HTML. The shared text takes only the difference (the run between the unchanged start and
+ * end), so what others type elsewhere in the box at the same time stays; a plain string becomes shared text.
+ * Returns whether anything changed.
+ */
+export function setHtml(n: Y.Map<unknown>, value: string): boolean {
+  const v = n.get(F.html);
+  if (!(v instanceof Y.Text)) {
+    n.set(F.html, new Y.Text(value));
+    return v !== value;
+  }
+  return applyTextDiff(v, value);
+}
+
+/** Changes `text` into `value` by deleting and inserting only the run that differs. Returns whether it changed. */
+export function applyTextDiff(text: Y.Text, value: string): boolean {
+  const now = text.toJSON();
+  if (now === value) return false;
+  let start = 0;
+  while (start < now.length && start < value.length && now[start] === value[start]) start++;
+  let end = 0;
+  while (
+    end < now.length - start &&
+    end < value.length - start &&
+    now[now.length - 1 - end] === value[value.length - 1 - end]
+  )
+    end++;
+  if (now.length - start - end > 0) text.delete(start, now.length - start - end);
+  if (value.length - start - end > 0) text.insert(start, value.slice(start, value.length - end));
+  return true;
 }

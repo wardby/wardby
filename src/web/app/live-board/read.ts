@@ -6,7 +6,7 @@
  */
 import type { Component, CssRule, Editor } from "grapesjs";
 import * as Y from "yjs";
-import { BOARD_ROOT, F, R, type BoardMaps } from "../../../core/documents/boards/live/model.js";
+import { BOARD_ROOT, F, R, setHtml, type BoardMaps } from "../../../core/documents/boards/live/model.js";
 
 type AttrValue = string | boolean;
 
@@ -264,7 +264,10 @@ export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {
       changes++;
     set(n, F.classes, `n|${id}|${F.classes}`, classesOf(c));
     if (isTextBox(c) && id !== BOARD_ROOT) {
-      set(n, F.html, `n|${id}|${F.html}`, opts.editing?.id === id ? opts.editing.el.innerHTML : c.getInnerHTML());
+      // The box being typed in (or just closed) goes out from the connector as character changes (bind.ts);
+      // any other box's text replaces only the run that changed.
+      const key = `n|${id}|${F.html}`;
+      if (opts.editing?.id !== id && mine(key) && setHtml(n, c.getInnerHTML())) changes++;
       set(n, F.names, `n|${id}|${F.names}`, JSON.stringify(namesInside(c)));
       return;
     }

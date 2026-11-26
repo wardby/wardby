@@ -303,7 +303,7 @@ export function putNodes(maps: BoardMaps, parsed: ParsedElements): void {
       keys.push([k]);
     }
     if (init.html !== undefined) {
-      n.set(F.html, init.html);
+      n.set(F.html, new Y.Text(init.html));
       n.set(F.names, JSON.stringify(init.names ?? []));
     } else {
       const ch = new Y.Array<string>();

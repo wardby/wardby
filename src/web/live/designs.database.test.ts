@@ -30,7 +30,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 import { buildBoard, coffee, coffeeFiles } from "./design.test-support.js";
 
 /** A live-copy field as text. */
-const text = (v: unknown): string => (typeof v === "string" ? v : "");
+const text = (v: unknown): string => (typeof v === "string" ? v : v instanceof Y.Text ? v.toJSON() : "");
 
 describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)", () => {
   const db = createPrismaClient();

@@ -13,7 +13,17 @@
  */
 import type { Component, CssRule, Editor } from "grapesjs";
 import * as Y from "yjs";
-import { BOARD_ROOT, F, orderedPairs, R, type BoardMaps } from "../../../core/documents/boards/live/model.js";
+import {
+  applyTextDiff,
+  BOARD_ROOT,
+  boardMaps,
+  F,
+  htmlOf,
+  orderedPairs,
+  R,
+  setHtml,
+  type BoardMaps,
+} from "../../../core/documents/boards/live/model.js";
 import {
   attrsOf,
   classesOf,
@@ -62,6 +72,18 @@ export function bindBoard(
   const stats = { out: 0, in: 0, fullBuilds: 0, resent: 0, created: 0, remote: 0 };
   let applying = false;
   let editing: { id: string; el: HTMLElement } | null = null;
+  /**
+   * A box just closed: GrapesJS copies its text into its model a moment later, and until then the model holds the
+   * text from before it opened. The box is held (not read, not changed) until the model has caught up.
+   */
+  let closing: { id: string; el: HTMLElement; until: number } | null = null;
+  /**
+   * The box being typed in, mirrored in a private copy of the live document taken when it opened. The copy's text
+   * is exactly what this page shows (others' typing in the box arrives when it closes), so each change is applied to
+   * it where the typing happened and goes out as character changes, which the shared text merges with anyone else's
+   * typing in the same box: both keep every character.
+   */
+  let shadow: { id: string; doc: Y.Doc; text: Y.Text; last: string } | null = null;
   let since: Snapshot = new Map();
   const index = new Map<string, Component>();
 
@@ -100,9 +122,15 @@ export function bindBoard(
   let destroyed = false;
   const sync = () => {
     if (applying || destroyed) return;
-    stats.out += readBoard(editor, maps, { since, editing, origin: LOCAL, created, structureOrigin: STRUCTURE });
+    if (closing) {
+      const c = index.get(closing.id) ?? (reindex(), index.get(closing.id));
+      if (!c || c.getInnerHTML() === closing.el.innerHTML || Date.now() > closing.until) closing = null;
+    }
+    const held = editing ?? closing;
+    stats.out += readBoard(editor, maps, { since, editing: held, origin: LOCAL, created, structureOrigin: STRUCTURE });
+    if (editing && shadow?.id === editing.id) pushShadow(editing.el.innerHTML);
     stats.created = created.size;
-    since = snapshotBoard(editor, editing);
+    since = snapshotBoard(editor, held);
   };
   let queued = false;
   const schedule = () => {
@@ -132,7 +160,8 @@ export function bindBoard(
       classes,
     };
     if (!n.get(F.ownId)) base.id = id;
-    if (typeof n.get(F.html) === "string") return { ...base, components: n.get(F.html) };
+    const html = htmlOf(n);
+    if (html !== undefined) return { ...base, components: html };
     return { ...base, components: childrenIn(n).map(defOf) };
   };
   /** A rule's GrapesJS definition from the live copy, carrying its live key. */
@@ -154,6 +183,11 @@ export function bindBoard(
       }
       return;
     }
+    // The text box being typed in is left entirely as it is until it closes (then it is caught up): changing its
+    // attributes or classes now would make GrapesJS redraw it and put the caret back at its start, so the rest of
+    // the typing would land in the wrong place. While open it also carries contenteditable, which the live copy
+    // never has.
+    if (editing?.id === id || closing?.id === id) return;
     if (id !== BOARD_ROOT) {
       const want = attrsIn(n);
       const have = Object.fromEntries(attrsOf(c));
@@ -169,10 +203,9 @@ export function bindBoard(
         stats.in++;
       }
     }
-    if (typeof n.get(F.html) === "string") {
-      // Plan A: the person typing in this box keeps it until they finish; their version then goes out.
-      if (editing?.id === id) return;
-      const want = n.get(F.html) as string;
+    const html = htmlOf(n);
+    if (html !== undefined) {
+      const want = html;
       if (c.getInnerHTML() !== want) {
         c.components(want);
         stats.in++;
@@ -252,7 +285,7 @@ export function bindBoard(
       um.start();
       applying = false;
     }
-    since = snapshotBoard(editor, editing);
+    since = snapshotBoard(editor, editing ?? closing);
   };
 
   /** A joiner builds its canvas from the live copy once. */
@@ -306,17 +339,58 @@ export function bindBoard(
   // Typing streams out while a text box is open; its final text goes out when it closes (GrapesJS updates its own
   // model a moment later, and until then the model holds the text from before the box opened).
   const onInput = () => schedule();
+  /** This board's key in the live document (its maps are found again in the private copy by it). */
+  const boardKey = (): string | undefined => {
+    for (const [key, b] of nodes.doc!.getMap<unknown>("boards"))
+      if (b instanceof Y.Map && b.get("nodes") === nodes) return key;
+    return undefined;
+  };
+  const startShadow = (id: string, el: HTMLElement) => {
+    shadow = null;
+    const n = nodes.get(id);
+    const key = boardKey();
+    if (!n || !key) return;
+    // A box saved as a plain string becomes shared text first (not an edit anyone undoes).
+    if (!(n.get(F.html) instanceof Y.Text)) nodes.doc!.transact(() => setHtml(n, htmlOf(n) ?? ""), STRUCTURE);
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(nodes.doc!));
+    const text = boardMaps(doc, key).nodes.get(id)?.get(F.html);
+    if (!(text instanceof Y.Text)) return;
+    shadow = { id, doc, text, last: text.toJSON() };
+    pushShadow(el.innerHTML);
+  };
+  /** The box's text now: the change from what went out last is applied to the copy and sent as character changes. */
+  const pushShadow = (page: string) => {
+    if (!shadow || destroyed || page === shadow.last) return;
+    const vector = Y.encodeStateVector(shadow.doc);
+    applyTextDiff(shadow.text, page);
+    Y.applyUpdate(nodes.doc!, Y.encodeStateAsUpdate(shadow.doc, vector), LOCAL);
+    shadow.last = page;
+    stats.out++;
+  };
   const onEnable = (view: { el: HTMLElement; model: Component }) => {
+    closing = null;
     editing = { id: view.model.getId(), el: view.el };
+    startShadow(editing.id, view.el);
     view.el.addEventListener("input", onInput);
   };
   const onDisable = (view: { el: HTMLElement }) => {
     view.el.removeEventListener("input", onInput);
     sync();
+    if (editing) closing = { ...editing, until: Date.now() + 1500 };
     editing = null;
+    shadow = null;
     schedule();
-    // Whatever arrived for this box while it was open is applied now (ours already went out).
-    setTimeout(applyIn, 60);
+    // Whatever arrived for this box while it was open is applied once GrapesJS has caught up (ours already went out).
+    const catchUp = () => {
+      if (destroyed) return;
+      if (closing) {
+        sync();
+        if (closing) return void setTimeout(catchUp, 60);
+      }
+      applyIn();
+    };
+    setTimeout(catchUp, 60);
   };
   editor.on("rte:enable", onEnable);
   editor.on("rte:disable", onDisable);

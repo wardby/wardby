@@ -13,7 +13,7 @@ import { boardMaps, F } from "./model.js";
 import { writeBoard, writeBoardFile } from "./writer.js";
 
 /** A live-copy field as text. */
-const text = (v: unknown): string => (typeof v === "string" ? v : "");
+const text = (v: unknown): string => (typeof v === "string" ? v : v instanceof Y.Text ? v.toJSON() : "");
 
 type Doc = DomDocument;
 type Fact = [string, (body: string, css: string) => boolean];
@@ -346,6 +346,22 @@ describe("merging an agent's board into its live copy", () => {
       }
     });
   }
+});
+
+describe("merge3: two people adding words at the same point", () => {
+  it("keeps both (the earlier one first), at the end, at the start and in the middle", () => {
+    const base = "Open every day from seven.";
+    expect(merge3(base, `${base} ANN`, `${base} BO`)).toBe(`${base} ANN BO`);
+    expect(merge3(base, `ANN ${base}`, `BO ${base}`)).toBe(`ANN BO ${base}`);
+    expect(merge3(base, "Open every ANN day from seven.", "Open every BO day from seven.")).toBe(
+      "Open every ANN BO day from seven.",
+    );
+    // A box ending in a newline and indentation (as files are written): typing at its end is an insertion.
+    const indented = "Open every day from seven.\n      ";
+    expect(merge3(indented, `${indented} ANN`, `${indented} BO`)).toBe(`${indented} ANN BO`);
+    // Both rewriting the same word is still a conflict: the later one wins.
+    expect(merge3(base, "Open every day from six.", "Open every day from eight.")).toBe("Open every day from eight.");
+  });
 });
 
 describe("merge3 (a text box both sides changed)", () => {
