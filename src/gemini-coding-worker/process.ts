@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { totalmem } from "node:os";
 import { GEMINI_CLI_ENTRY } from "./cli.js";
 
 /**
@@ -10,6 +11,21 @@ export const STDERR_TAIL_BYTES = 16 * 1024;
 export const STDOUT_LINE_MAX_BYTES = 8 * 1024 * 1024;
 /** After SIGTERM on cancellation, the wait before SIGKILL. */
 export const KILL_GRACE_MS = 10_000;
+
+/** Bounds on the CLI's heap limit (MiB). */
+export const MIN_CLI_HEAP_MIB = 512;
+export const MAX_CLI_HEAP_MIB = 16_384;
+const MIB = 1024 * 1024;
+
+/**
+ * The CLI's V8 heap limit: half the smaller of the machine's memory and the container's limit,
+ * within MIN/MAX_CLI_HEAP_MIB. GEMINI_CLI_NO_RELAUNCH drops the flag the CLI's own relaunch would
+ * set (which read the host's memory, not the container's), so the runner sets one.
+ */
+export function cliHeapMiB(total: number = totalmem(), constrained: number = process.constrainedMemory()): number {
+  const limit = Math.min(total, constrained > 0 ? constrained : Number.POSITIVE_INFINITY);
+  return Math.min(MAX_CLI_HEAP_MIB, Math.max(MIN_CLI_HEAP_MIB, Math.floor((limit / MIB) * 0.5)));
+}
 
 export interface GeminiCliDone {
   code: number | null;
@@ -28,7 +44,7 @@ export type GeminiCliSpawner = (
 ) => GeminiCliRun;
 
 /**
- * Runs `node <entry> ...args` with exactly `env` (never the driver's own environment). stdout and
+ * Runs `node --max-old-space-size=<cliHeapMiB> <entry> ...args` with exactly `env` (never the driver's own environment). stdout and
  * stderr are piped, never inherited or logged: the caller reads the lines, and the stderr tail
  * reaches only the classifier and the redacting debug trace.
  *
@@ -40,9 +56,10 @@ export type GeminiCliSpawner = (
  */
 export function spawnGeminiCli(
   entry: string = GEMINI_CLI_ENTRY,
-  options: { killGraceMs?: number } = {},
+  options: { killGraceMs?: number; heapMiB?: number } = {},
 ): GeminiCliSpawner {
   const killGraceMs = options.killGraceMs ?? KILL_GRACE_MS;
+  const heapFlag = `--max-old-space-size=${options.heapMiB ?? cliHeapMiB()}`;
   return (args, run) => {
     if (run.signal.aborted) {
       return {
@@ -50,7 +67,7 @@ export function spawnGeminiCli(
         done: Promise.resolve({ code: null, signal: null, stderrTail: "", oversizedLines: 0 }),
       };
     }
-    const child = spawn(process.execPath, [entry, ...args], {
+    const child = spawn(process.execPath, [heapFlag, entry, ...args], {
       cwd: run.cwd,
       env: run.env,
       stdio: ["ignore", "pipe", "pipe"],

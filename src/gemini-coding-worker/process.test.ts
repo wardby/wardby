@@ -2,7 +2,14 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { spawnGeminiCli, STDERR_TAIL_BYTES, STDOUT_LINE_MAX_BYTES } from "./process.js";
+import {
+  cliHeapMiB,
+  MAX_CLI_HEAP_MIB,
+  MIN_CLI_HEAP_MIB,
+  spawnGeminiCli,
+  STDERR_TAIL_BYTES,
+  STDOUT_LINE_MAX_BYTES,
+} from "./process.js";
 
 let root: string | undefined;
 afterEach(async () => {
@@ -189,5 +196,39 @@ process.stdout.write('{"type":"result"}\\r\\n', () => process.exit(0));`,
     ) as { stderrTail: string };
     expect(fixture.stderrTail).toContain("Unknown argument");
     expect(STDERR_TAIL_BYTES).toBeGreaterThanOrEqual(Buffer.byteLength(fixture.stderrTail, "utf8"));
+  });
+
+  it("runs the CLI with a heap limit of half the container's memory (no relaunch sets one)", async () => {
+    const path = await fakeCli();
+    await writeFile(path, `console.log(JSON.stringify(process.execArgv));`);
+    const run = spawnGeminiCli(path, { heapMiB: 1234 })([], {
+      cwd: tmpdir(),
+      env: { PATH: process.env.PATH ?? "" },
+      signal: new AbortController().signal,
+    });
+    const lines: string[] = [];
+    for await (const line of run.lines) lines.push(line);
+    await run.done;
+    expect(JSON.parse(lines[0])).toEqual(["--max-old-space-size=1234"]);
+  });
+});
+
+describe("cliHeapMiB", () => {
+  const MiB = 1024 * 1024;
+  it("is half the smaller of the machine's memory and the container's limit", () => {
+    expect(cliHeapMiB(8192 * MiB, 0)).toBe(4096);
+    expect(cliHeapMiB(8192 * MiB, 2048 * MiB)).toBe(1024);
+    // An unconstrained cgroup reports a huge number: the machine's memory wins.
+    expect(cliHeapMiB(8192 * MiB, Number.MAX_SAFE_INTEGER)).toBe(4096);
+    expect(cliHeapMiB(3001 * MiB, 0)).toBe(1500);
+  });
+  it("stays within its floor and cap", () => {
+    expect(cliHeapMiB(512 * MiB, 0)).toBe(MIN_CLI_HEAP_MIB);
+    expect(cliHeapMiB(1024 * 1024 * MiB, 0)).toBe(MAX_CLI_HEAP_MIB);
+    expect(MIN_CLI_HEAP_MIB).toBe(512);
+    expect(MAX_CLI_HEAP_MIB).toBe(16384);
+  });
+  it("defaults to this process's view of memory", () => {
+    expect(cliHeapMiB()).toBeGreaterThanOrEqual(MIN_CLI_HEAP_MIB);
   });
 });
