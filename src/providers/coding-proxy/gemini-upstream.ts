@@ -35,7 +35,7 @@ export interface GeminiUpstreamOptions {
 
 /** Why a Gemini call could not be sent: a fixed code, safe to audit. */
 export class GeminiUpstreamUnavailable extends Error {
-  constructor(readonly code: "vertex_project_unset" | "vertex_auth_unavailable") {
+  constructor(readonly code: "vertex_project_unset" | "vertex_auth_unavailable" | "gemini_session_invalid") {
     super(code);
     this.name = "GeminiUpstreamUnavailable";
   }

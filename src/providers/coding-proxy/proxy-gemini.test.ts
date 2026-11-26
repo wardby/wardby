@@ -182,9 +182,43 @@ describe("relaying Gemini calls", () => {
           { status: 200 },
         ),
     });
-    await h.execute(body());
+    const sink = await h.execute(body());
     expect(await h.ledger.upstreamFailure(h.session.id)).toBe("RESOURCE_EXHAUSTED");
     expect(JSON.stringify(h.events)).not.toContain(FAKE_GEMINI_KEY);
+    expect(sink.text()).toContain("RESOURCE_EXHAUSTED");
+    expect(sink.text()).toContain("quota for [REDACTED]");
+    expect(sink.text()).not.toContain(FAKE_GEMINI_KEY);
+    expect(sink.ended).toBe(true);
+  });
+
+  it("redacts the Vertex token from a relayed error frame", async () => {
+    const h = await gemini({
+      model: VERTEX_US,
+      fetch: async () =>
+        new Response(
+          sse([{ error: { code: 401, status: "UNAUTHENTICATED", message: `token ${FAKE_VERTEX_TOKEN}` } }]),
+          {
+            status: 200,
+          },
+        ),
+    });
+    const sink = await h.execute(body());
+    expect(sink.text()).toContain("token [REDACTED]");
+    expect(sink.text()).not.toContain(FAKE_VERTEX_TOKEN);
+  });
+
+  it("redacts the key from a non-stream reply and leaves a reply without it byte-for-byte", async () => {
+    const reply = {
+      candidates: [{ content: { role: "model", parts: [{ text: `echo ${FAKE_GEMINI_KEY}` }] }, finishReason: "STOP" }],
+      usageMetadata: usage(20, 3),
+    };
+    const echoed = await gemini({ fetch: async () => Response.json(reply) });
+    const sink = await echoed.execute(body(), "generateContent");
+    expect(sink.text()).not.toContain(FAKE_GEMINI_KEY);
+    expect(JSON.parse(sink.text()).candidates[0].content.parts[0].text).toBe("echo [REDACTED]");
+    const plain = ' { "candidates": [], "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1} } ';
+    const untouched = await gemini({ fetch: async () => new Response(plain, { status: 200 }) });
+    expect((await untouched.execute(body(), "generateContent")).text()).toBe(plain);
   });
 
   it("answers a rejected call with a fixed body, recording Google's status code only", async () => {

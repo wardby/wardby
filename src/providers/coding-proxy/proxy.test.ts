@@ -1340,6 +1340,37 @@ describe("CodingProxy Anthropic Messages", () => {
     await execute(h, "anthropic-overloaded", new TestSink(), await fixture("anthropic-sdk-request.json"));
     expect(await h.proxy.upstreamFailure(h.session.id)).toBe("overloaded_error");
   });
+
+  it("relays an OpenAI failure frame with the upstream credential redacted by exact value", async () => {
+    const frame = `event: response.failed\ndata: ${JSON.stringify({
+      type: "response.failed",
+      response: { usage: null, error: { code: "invalid_api_key", message: "Incorrect key UPSTREAM_SECRET" } },
+    })}`;
+    const h = await harness({
+      fetch: async () => new Response(`${frame}\n\n`, { headers: { "content-type": "text/event-stream" } }),
+    });
+    const sink = await execute(h, "failed-echo", new TestSink(), requestBody(true));
+    expect(sink.text()).toContain("response.failed");
+    expect(sink.text()).toContain("Incorrect key [REDACTED]");
+    expect(sink.text()).not.toContain("UPSTREAM_SECRET");
+    expect(await h.proxy.upstreamFailure(h.session.id)).toBe("invalid_api_key");
+    expect(JSON.stringify(h.events)).not.toContain("UPSTREAM_SECRET");
+  });
+
+  it("relays an Anthropic error event with the upstream credential redacted by exact value", async () => {
+    const h = await harness({
+      protocol: "anthropic-messages",
+      fetch: async () =>
+        new Response(
+          `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "authentication_error", message: "bad key UPSTREAM_SECRET" } })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    const sink = await execute(h, "anthropic-echo", new TestSink(), await fixture("anthropic-sdk-request.json"));
+    expect(sink.text()).toContain("bad key [REDACTED]");
+    expect(sink.text()).not.toContain("UPSTREAM_SECRET");
+    expect(await h.proxy.upstreamFailure(h.session.id)).toBe("authentication_error");
+  });
 });
 
 interface CodexFixture {

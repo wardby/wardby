@@ -29,6 +29,7 @@ import {
   type SweepResult,
 } from "../../core/request-lease.js";
 import { logger } from "../../core/logger.js";
+import { redactExactSecretValues } from "../../core/secret-spans.js";
 import {
   AnthropicSseUsageTracker,
   actualCostUsd,
@@ -256,6 +257,14 @@ interface ParsedRequest {
   stream: boolean;
   fingerprint: string;
   anthropicBeta?: string;
+}
+
+/** Where a request goes, the headers carrying its credential, and that credential (to redact replies by). */
+interface UpstreamTarget {
+  url: string;
+  headers: Record<string, string>;
+  /** Never logged or audited: only used to redact what is relayed to the client. */
+  secret: string;
 }
 
 /** What an in-flight request's relay has seen so far, to settle it at an estimate if it breaks. */
@@ -1609,7 +1618,7 @@ export class CodingProxy {
       }));
     }
 
-    let target: { url: string; headers: Record<string, string> };
+    let target: UpstreamTarget;
     try {
       target = await this.upstreamTarget(session, parsed, request.id, input.gemini);
     } catch (error) {
@@ -1709,8 +1718,13 @@ export class CodingProxy {
         session.workflow === true && input.agentId !== undefined && STEP_AGENT_REF.test(input.agentId)
           ? input.agentId
           : undefined;
-      if (parsed.stream) await this.forwardStream(session, request, upstream, sink, progress, input.bearer, agent);
-      else await this.forwardJson(session, request, upstream, sink, input.bearer, agent);
+      // The credential sent upstream: anything relayed to the client is redacted by its exact value.
+      const secrets = [target.secret];
+      if (parsed.stream) {
+        await this.forwardStream(session, request, upstream, sink, progress, secrets, input.bearer, agent);
+      } else {
+        await this.forwardJson(session, request, upstream, sink, secrets, input.bearer, agent);
+      }
     } catch (error) {
       await this.markUncertain(
         session,
@@ -1733,13 +1747,16 @@ export class CodingProxy {
     parsed: ParsedRequest,
     requestId: string,
     route: GeminiRoute | undefined,
-  ): Promise<{ url: string; headers: Record<string, string> }> {
+  ): Promise<UpstreamTarget> {
     if (session.protocol === "gemini-generate-content") {
       const entry = session.terms?.entry;
-      if (!entry || !isGeminiProvider(entry.provider) || !route) throw new Error("gemini_session_invalid");
+      if (!entry || !isGeminiProvider(entry.provider) || !route) {
+        throw new GeminiUpstreamUnavailable("gemini_session_invalid");
+      }
       const url = geminiUpstreamUrl(entry.provider, parsed.model, route.method, this.gemini);
       if (entry.provider === "vertex-gemini") {
-        if (session.credentialRef !== VERTEX_CREDENTIAL_REF) throw new Error("gemini_session_invalid");
+        if (session.credentialRef !== VERTEX_CREDENTIAL_REF)
+          throw new GeminiUpstreamUnavailable("gemini_session_invalid");
         let token: string;
         try {
           token = await this.gemini.vertexToken();
@@ -1748,11 +1765,11 @@ export class CodingProxy {
           throw new GeminiUpstreamUnavailable("vertex_auth_unavailable");
         }
         if (!token) throw new GeminiUpstreamUnavailable("vertex_auth_unavailable");
-        return { url, headers: { authorization: `Bearer ${token}` } };
+        return { url, headers: { authorization: `Bearer ${token}` }, secret: token };
       }
       const key = await this.credentials.resolve(session.credentialRef);
       if (!key) throw new Error("credential_unavailable");
-      return { url, headers: { "x-goog-api-key": key } };
+      return { url, headers: { "x-goog-api-key": key }, secret: key };
     }
     const key = await this.credentials.resolve(session.credentialRef);
     if (!key) throw new Error("credential_unavailable");
@@ -1764,11 +1781,13 @@ export class CodingProxy {
           "anthropic-version": "2023-06-01",
           ...(parsed.anthropicBeta ? { "anthropic-beta": parsed.anthropicBeta } : {}),
         },
+        secret: key,
       };
     }
     return {
       url: this.upstreamUrls["openai-responses"],
       headers: { authorization: `Bearer ${key}`, "idempotency-key": `${session.id}:${requestId}` },
+      secret: key,
     };
   }
 
@@ -1952,6 +1971,7 @@ export class CodingProxy {
     request: ProxyRequest,
     upstream: Response,
     sink: ProxyResponseSink,
+    secrets: readonly string[],
     capability: string,
     agent?: string,
   ): Promise<void> {
@@ -1960,9 +1980,10 @@ export class CodingProxy {
       throw new Error("upstream_response_too_large");
     }
     const bytes = await readBoundedBody(upstream.body, MAX_UPSTREAM_JSON_BYTES);
+    const text = Buffer.from(bytes).toString("utf8");
     let value: unknown;
     try {
-      value = JSON.parse(Buffer.from(bytes).toString("utf8"));
+      value = JSON.parse(text);
     } catch {
       throw new Error("invalid_upstream_json");
     }
@@ -1975,7 +1996,9 @@ export class CodingProxy {
           : parseAuthoritativeUsage(record?.usage);
     await this.complete(session, request, usage, upstream.status);
     sink.start(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
-    await safeWrite(sink, bytes, { value: true });
+    // Byte-for-byte unless the reply carries the credential sent upstream, which the client never sees.
+    const redacted = redactExactSecretValues(text, secrets);
+    await safeWrite(sink, redacted === text ? bytes : Buffer.from(redacted), { value: true });
     sink.end();
     const capture = stepCapture(session, this.runStepsCeiling);
     const wire = stepWireProtocol(session.protocol);
@@ -1993,12 +2016,16 @@ export class CodingProxy {
     upstream: Response,
     sink: ProxyResponseSink,
     progress: RelayProgress,
+    secrets: readonly string[],
     capability: string,
     agent?: string,
   ): Promise<void> {
     if (!upstream.body) throw new Error("missing_upstream_body");
     sink.start(upstream.status, { "content-type": "text/event-stream", "cache-control": "no-store" });
     const connected = { value: true };
+    // Every relayed frame, failure frames above all (an upstream error message can echo the credential),
+    // reaches the client with the credential sent upstream replaced by exact value.
+    const write = (text: string) => safeWrite(sink, Buffer.from(redactExactSecretValues(text, secrets)), connected);
     const decoder = new TextDecoder();
     let buffer = "";
     let receivedBytes = 0;
@@ -2023,7 +2050,7 @@ export class CodingProxy {
     let held: string | undefined;
     const relay = async (frame: string) => {
       progress.relayedOutputBytes += relayedTextBytes(frame, session.protocol);
-      await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
+      await write(`${frame}\n\n`);
       observe(frame);
     };
     const geminiFrame = async (frame: string) => {
@@ -2068,7 +2095,7 @@ export class CodingProxy {
           const terminal = anthropicUsage ? anthropicUsage.consume(frame) : terminalUsageFromSseFrame(frame);
           if (!terminal.terminal) {
             progress.relayedOutputBytes += relayedTextBytes(frame, session.protocol);
-            await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
+            await write(`${frame}\n\n`);
             observe(frame);
             continue;
           }
@@ -2088,13 +2115,13 @@ export class CodingProxy {
               );
             }
             failedWithoutUsage = true;
-            await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
+            await write(`${frame}\n\n`);
             observe(frame);
             continue;
           }
           await this.complete(session, request, terminal.usage, upstream.status);
           completed = true;
-          await safeWrite(sink, Buffer.from(`${frame}\n\n`), connected);
+          await write(`${frame}\n\n`);
           observe(frame);
         }
       }
@@ -2112,7 +2139,7 @@ export class CodingProxy {
         held = undefined;
       }
       if (!completed && !failedWithoutUsage) throw new Error("terminal_usage_missing");
-      if (buffer) await safeWrite(sink, Buffer.from(buffer), connected);
+      if (buffer) await write(buffer);
       if (connected.value) sink.end();
     } finally {
       // The reply's steps, also when the stream broke (then its open text is marked cut).
