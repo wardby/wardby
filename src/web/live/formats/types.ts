@@ -5,6 +5,9 @@
  */
 import type * as Y from "yjs";
 
+/** The transaction origin of the server's own writes to a live document: never credited to anyone as an edit. */
+export const SERVER_ORIGIN = "wardby-server";
+
 /** A stored version, as the live server reads it. */
 export interface LiveVersion {
   number: number;

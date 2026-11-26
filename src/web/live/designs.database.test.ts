@@ -5,59 +5,27 @@
  * to the same rules).
  */
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
-import { JSDOM } from "jsdom";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import * as Y from "yjs";
 import type { Principal } from "#prisma";
 import { createPrismaClient } from "../../core/db.js";
-import { putNodes, nodesFromHtml } from "../../core/documents/boards/live/elements.js";
 import { normalizeDesign } from "../../core/documents/boards/format.js";
 import { BOARD_ROOT, boardMaps, F } from "../../core/documents/boards/live/model.js";
 import { writeBoardFile } from "../../core/documents/boards/live/writer.js";
 import type { DocumentEvent, DocumentEventBus } from "../../core/documents/events.js";
 import { loadVersionFiles } from "../../core/documents/files.js";
+import { issueLiveTicket } from "../../core/documents/live/store.js";
 import { createDocument, publishVersion } from "../../core/documents/service.js";
 import { attachSecret, createSecret } from "../../core/secrets.js";
 import { createWebSession } from "../session.js";
 import { createLiveServer, LIVE_META, type LiveServer } from "./server.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const coffee = (p: string) =>
-  readFileSync(new URL(`../../core/documents/boards/fixtures/coffee/${p}`, import.meta.url), "utf8");
-const coffeeFiles = (): Record<string, string> => ({
-  "manifest.json": coffee("manifest.json"),
-  ...Object.fromEntries(
-    ["home", "menu", "about", "visit"].map((id) => [`boards/${id}.html`, coffee(`boards/${id}.html`)]),
-  ),
-});
-
-/** What a builder page does: the board's live copy from its file (GrapesJS in the page; Part 1's rules here). */
-function buildBoard(ydoc: Y.Doc, board: string, file: string): void {
-  const dom = new JSDOM(file).window.document;
-  const baseCss = Array.from(dom.querySelectorAll("style"))
-    .map((s) => s.textContent ?? "")
-    .join("\n");
-  for (const s of Array.from(dom.querySelectorAll("style"))) s.remove();
-  let n = 0;
-  const parsed = nodesFromHtml(dom.body.innerHTML.replace(/\s+$/, ""), () => `ib${board}${++n}`);
-  ydoc.transact(() => {
-    const maps = boardMaps(ydoc, board);
-    const root = new Y.Map<unknown>();
-    maps.nodes.set(BOARD_ROOT, root);
-    root.set(F.gid, "wrapper");
-    const ch = new Y.Array<string>();
-    ch.push(parsed.roots);
-    root.set(F.children, ch);
-    putNodes(maps, parsed);
-    maps.meta.set("baseCss", baseCss);
-    maps.meta.set("parts", JSON.stringify({ lang: dom.documentElement.lang || "en", title: dom.title, bodyAttrs: {} }));
-  });
-}
+import { buildBoard, coffee, coffeeFiles } from "./design.test-support.js";
 
 describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)", () => {
   const db = createPrismaClient();
@@ -100,14 +68,17 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
     });
     await new Promise<void>((r) => http.listen(0, "127.0.0.1", () => r()));
   });
+  const open: { close(): void }[] = [];
   afterAll(async () => {
+    // A failed test leaves its pages open: close them all before the server, or closing it waits on them.
+    for (const c of open) c.close();
     await live.close();
     http.closeAllConnections();
     await new Promise<void>((r) => http.close(() => r()));
     await db.document.deleteMany({ where: { id: { in: docs } } });
     await db.principal.deleteMany({ where: { id: { in: [ann.id, bo.id, cy.id] } } });
     await db.$disconnect();
-  });
+  }, 30_000);
 
   async function design(owner: Principal, writers: Principal[] = [], agentId?: string): Promise<string> {
     const doc = await createDocument(db, cipher, {
@@ -133,7 +104,7 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
     return doc.id;
   }
 
-  async function client(p: Principal, documentId: string) {
+  async function client(p: Principal, documentId: string, opts: { ticket?: string } = {}) {
     const cookie = (await createWebSession(db, { principalId: p.id }, { secure: false })).cookie.split(";")[0];
     class Socket extends WebSocket {
       constructor(url: string, protocols?: string | string[]) {
@@ -155,7 +126,7 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
       websocketProvider: socket,
       name: documentId,
       document: ydoc,
-      token: () => JSON.stringify({ epoch: ydoc.getMap(LIVE_META).get("epoch") }),
+      token: () => JSON.stringify({ epoch: ydoc.getMap(LIVE_META).get("epoch"), ticket: opts.ticket }),
       onSynced: ({ state }) => {
         synced ||= state;
       },
@@ -181,9 +152,10 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
       }
       return null;
     };
-    return {
+    const handle = {
       ydoc,
       synced: () => synced,
+      failed: () => failed,
       closed: () => closed,
       stateless,
       open: (board: string) => provider.sendStateless(JSON.stringify({ type: "open-board", board })),
@@ -193,6 +165,8 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
         socket.destroy();
       },
     };
+    open.push(handle);
+    return handle;
   }
 
   it("a design goes live with its board list; nothing is built until a page opens a board", async () => {
@@ -337,6 +311,62 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
     await db.agent.delete({ where: { id: agent.id } });
   });
 
+  const h1Of = (d: Y.Doc) => [...boardMaps(d, "home").nodes.entries()].find(([, n]) => n.get(F.tag) === "h1")![1];
+
+  it("an approved design is read-only for everyone, switched live, and never built while locked; reopening restores editing", async () => {
+    const id = await design(ann, [bo]);
+    const a = await client(ann, id);
+    a.open("home");
+    expect(await a.roleFor("home")).toBe("build");
+    buildBoard(a.ydoc, "home", coffee("boards/home.html"));
+    const b = await client(bo, id);
+    b.open("home");
+    expect(await b.roleFor("home")).toBe("join");
+    for (let i = 0; i < 40 && !boardMaps(b.ydoc, "home").nodes.has(BOARD_ROOT); i++) await sleep(50);
+    await db.document.update({ where: { id }, data: { reviewState: "approved" } });
+    emit({ documentId: id, kind: "review" });
+    await sleep(300);
+    a.ydoc.transact(() => h1Of(a.ydoc).set(F.html, "LOCKED-EDIT"));
+    await sleep(400);
+    expect(String(h1Of(b.ydoc).get(F.html))).not.toContain("LOCKED-EDIT");
+    // A locked page is never told to build a board nobody has built.
+    b.open("menu");
+    expect(await b.roleFor("menu")).toBe("wait");
+    await db.document.update({ where: { id }, data: { reviewState: "draft" } });
+    emit({ documentId: id, kind: "review" });
+    await sleep(300);
+    // On another element than the refused one: a real page cannot edit while locked (its editor is locked), so
+    // Ann's refused heading edit is a test artefact that would compete with Bo's on the same field.
+    const pOf = (d: Y.Doc) => [...boardMaps(d, "home").nodes.entries()].find(([, n]) => n.get(F.tag) === "p")![1];
+    b.ydoc.transact(() => pOf(b.ydoc).set(F.html, "REOPENED-EDIT"));
+    for (let i = 0; i < 60 && !String(pOf(a.ydoc).get(F.html)).includes("REOPENED-EDIT"); i++) await sleep(50);
+    expect(String(pOf(a.ydoc).get(F.html))).toContain("REOPENED-EDIT");
+    a.close();
+    b.close();
+  });
+
+  it("a member with only a share link joins with a single-use ticket, watches read-only and never builds", async () => {
+    const id = await design(ann);
+    const without = await client(cy, id);
+    expect(without.synced()).toBe(false);
+    without.close();
+    const a = await client(ann, id);
+    a.open("home");
+    expect(await a.roleFor("home")).toBe("build");
+    buildBoard(a.ydoc, "home", coffee("boards/home.html"));
+    const ticket = await issueLiveTicket(db, { documentId: id, principalId: cy.id, readOnly: true });
+    const c = await client(cy, id, { ticket });
+    expect(c.synced()).toBe(true);
+    for (let i = 0; i < 40 && !boardMaps(c.ydoc, "home").nodes.has(BOARD_ROOT); i++) await sleep(50);
+    c.ydoc.transact(() => h1Of(c.ydoc).set(F.html, "CY-EDIT"));
+    await sleep(400);
+    expect(String(h1Of(a.ydoc).get(F.html))).not.toContain("CY-EDIT");
+    c.open("about");
+    expect(await c.roleFor("about")).toBe("wait");
+    c.close();
+    a.close();
+  });
+
   it("a version published by someone else meanwhile starts the design's live copy again (until merges land)", async () => {
     const id = await design(ann);
     const a = await client(ann, id);
@@ -346,16 +376,24 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
     await sleep(400);
     const files = coffeeFiles();
     files["boards/menu.html"] = files["boards/menu.html"].replace("</main>", "<p>New</p></main>");
-    const latest = await db.document.findUniqueOrThrow({
-      where: { id },
-      select: { currentVersion: { select: { number: true } } },
-    });
-    await publishVersion(db, cipher, {
-      documentId: id,
-      files,
-      via: "agent",
-      expectedNumber: latest.currentVersion!.number,
-    });
+    // A checkpoint may land between reading the latest number and publishing: retry, as the agent loop does.
+    for (let tries = 0; ; tries++) {
+      const latest = await db.document.findUniqueOrThrow({
+        where: { id },
+        select: { currentVersion: { select: { number: true } } },
+      });
+      try {
+        await publishVersion(db, cipher, {
+          documentId: id,
+          files,
+          via: "agent",
+          expectedNumber: latest.currentVersion!.number,
+        });
+        break;
+      } catch (err) {
+        if (tries >= 5 || (err as Error).message !== "document_version_conflict") throw err;
+      }
+    }
     emit({ kind: "version", documentId: id });
     for (let i = 0; i < 40 && !a.closed(); i++) await sleep(50);
     expect(a.closed()).toBe(true);

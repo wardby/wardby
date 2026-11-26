@@ -44,7 +44,7 @@ import { logger } from "../../core/logger.js";
 import { resolveContext, type WebDeps } from "../context.js";
 import { boardsFormat } from "./formats/boards.js";
 import { markdownFormat } from "./formats/markdown.js";
-import type { LiveFormat } from "./formats/types.js";
+import { SERVER_ORIGIN, type LiveFormat } from "./formats/types.js";
 
 const log = logger.child({ module: "live" });
 
@@ -125,8 +125,6 @@ interface Loaded {
 const asError = (err: unknown) => (err instanceof Error ? err.name : typeof err);
 /** Set on an upgrade one replica hands to the document's leader: it is never handed on again. */
 const FORWARDED = "x-wardby-live-forwarded";
-/** The transaction origin of the server's own writes to the shared document (the editor record). */
-const SERVER_ORIGIN = "wardby-server";
 /** Whether two maps hold the same keys and values (their order can differ between copies). */
 function sameEntries(a: Y.Map<unknown>, b: Y.Map<unknown>): boolean {
   if (a.size !== b.size) return false;
@@ -140,7 +138,8 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
   const db = deps.db;
   const loaded = new Map<string, Loaded>();
   const secrets = new Map<string, { values: string[]; at: number }>();
-  const boards = boardsFormat(db);
+  // Redis mode: several replicas may claim a board's builder at once; claims settle before anyone is told to build.
+  const boards = boardsFormat(db, { replica: deps.replica, settleMs: deps.redisUrl ? 300 : 0 });
   const formats: Record<string, LiveFormat> = { document: markdownFormat(db), design: boards };
   const versionFields = { number: true, markdown: true, format: true, baseNumber: true } as const;
 

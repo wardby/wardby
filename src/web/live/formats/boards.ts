@@ -31,7 +31,7 @@ import {
 import { writeBoard, writeBoardFile, writeElement } from "../../../core/documents/boards/live/writer.js";
 import { loadVersionFiles } from "../../../core/documents/files.js";
 import type { WebDeps } from "../../context.js";
-import type { LiveFormat, LiveVersion } from "./types.js";
+import { SERVER_ORIGIN, type LiveFormat, type LiveVersion } from "./types.js";
 
 export const DESIGN_META = "design";
 const MANIFEST = "manifest.json";
@@ -193,12 +193,26 @@ function liveStringsOutsideBoards(doc: Y.Doc): string[] {
   return out;
 }
 
-interface Waiting {
-  builder: string | null;
-  waiting: { socketId: string; readOnly: boolean; send: (payload: string) => void }[];
+/**
+ * Who builds each board, in the live document itself (a server-only map browsers may not change), so every replica
+ * agrees: in Redis mode several replicas serve one design. A claim is `replica|socketId|time`; a replica tells its
+ * page to build only when its claim is the one standing after the others had time to arrive (Yjs settles concurrent
+ * writes the same way everywhere). A claim older than CLAIM_MS on a board still not built is abandoned (a replica
+ * that died mid-build).
+ */
+export const BUILDERS = "wardby-builders";
+const CLAIM_MS = 30_000;
+
+interface Page {
+  socketId: string;
+  readOnly: boolean;
+  send: (payload: string) => void;
 }
 
-export function boardsFormat(db: WebDeps["db"]): LiveFormat & {
+export function boardsFormat(
+  db: WebDeps["db"],
+  opts: { replica: string; settleMs: number },
+): LiveFormat & {
   message(
     documentId: string,
     doc: Y.Doc,
@@ -214,15 +228,16 @@ export function boardsFormat(db: WebDeps["db"]): LiveFormat & {
     });
     return row ? loadVersionFiles(db, row.id) : {};
   };
-  /** Per document, per board: who builds it and who waits. */
-  const rooms = new Map<string, Map<string, Waiting>>();
-  const roomOf = (documentId: string, board: string): Waiting => {
-    let byBoard = rooms.get(documentId);
-    if (!byBoard) rooms.set(documentId, (byBoard = new Map<string, Waiting>()));
-    let w = byBoard.get(board);
-    if (!w) byBoard.set(board, (w = { builder: null, waiting: [] }));
-    return w;
+  /** Pages on this replica waiting for a board to be built, per document and board. */
+  const waiting = new Map<string, Map<string, Page[]>>();
+  const waitersOf = (documentId: string, board: string): Page[] => {
+    let byBoard = waiting.get(documentId);
+    if (!byBoard) waiting.set(documentId, (byBoard = new Map<string, Page[]>()));
+    let list = byBoard.get(board);
+    if (!list) byBoard.set(board, (list = []));
+    return list;
   };
+  const watched = new WeakSet<Y.Doc>();
   const tell = (send: (p: string) => void, board: string, role: "build" | "wait" | "join") =>
     send(JSON.stringify({ type: "board", board, role }));
 
@@ -282,7 +297,10 @@ export function boardsFormat(db: WebDeps["db"]): LiveFormat & {
     },
 
     refuse(scratch, apply, secretValues) {
+      // Who builds which board is the server's: a page that changes it is refused.
+      const claims = JSON.stringify(scratch.getMap(BUILDERS).toJSON());
       const touched = watchEdit(scratch, apply);
+      if (JSON.stringify(scratch.getMap(BUILDERS).toJSON()) !== claims) return "server_data";
       return checkEdit(scratch, touched, secretValues);
     },
 
@@ -291,7 +309,6 @@ export function boardsFormat(db: WebDeps["db"]): LiveFormat & {
     },
 
     message(documentId, doc, from, payload) {
-      const { socketId, send } = from;
       let msg: { type?: unknown; board?: unknown };
       try {
         msg = JSON.parse(payload) as typeof msg;
@@ -299,34 +316,65 @@ export function boardsFormat(db: WebDeps["db"]): LiveFormat & {
         return;
       }
       if (msg.type !== "open-board" || typeof msg.board !== "string") return;
-      const board = msg.board;
-      if (isBuilt(doc, board)) return tell(send, board, "join");
-      const w = roomOf(documentId, board);
-      // A read-only page never builds (its edits are not taken): it waits for someone who can.
-      if (!from.readOnly && (!w.builder || w.builder === socketId)) {
-        w.builder = socketId;
-        return tell(send, board, "build");
-      }
-      if (!w.waiting.some((x) => x.socketId === socketId)) w.waiting.push({ socketId, send, readOnly: from.readOnly });
-      tell(send, board, "wait");
+      watch(documentId, doc);
+      open(documentId, doc, msg.board, from);
     },
 
     left(documentId, doc, socketId) {
-      const byBoard = rooms.get(documentId);
-      if (!byBoard) return;
-      for (const [board, w] of byBoard) {
-        w.waiting = w.waiting.filter((x) => x.socketId !== socketId);
-        if (w.builder !== socketId) continue;
-        w.builder = null;
-        if (isBuilt(doc, board)) continue;
-        // The builder left before building: the next one waiting builds instead.
-        const i = w.waiting.findIndex((x) => !x.readOnly);
-        const next = i >= 0 ? w.waiting.splice(i, 1)[0] : undefined;
-        if (next) {
-          w.builder = next.socketId;
-          tell(next.send, board, "build");
-        }
-      }
+      const byBoard = waiting.get(documentId);
+      if (byBoard)
+        for (const [board, list] of byBoard)
+          byBoard.set(
+            board,
+            list.filter((p) => p.socketId !== socketId),
+          );
+      const claims = doc.getMap<string>(BUILDERS);
+      const mine = `${opts.replica}|${socketId}|`;
+      const gone = [...claims.entries()].filter(([board, c]) => c.startsWith(mine) && !isBuilt(doc, board));
+      // The builder left before building: its claim goes, and waiting pages (on any replica) ask again.
+      if (gone.length) doc.transact(() => gone.forEach(([board]) => claims.delete(board)), SERVER_ORIGIN);
     },
   };
+
+  /** A page opens a board: join it, or claim building it, or wait for whoever does. */
+  function open(documentId: string, doc: Y.Doc, board: string, page: Page): void {
+    if (isBuilt(doc, board)) return tell(page.send, board, "join");
+    const list = waitersOf(documentId, board);
+    const wait = () => {
+      if (!list.some((p) => p.socketId === page.socketId)) list.push(page);
+      tell(page.send, board, "wait");
+    };
+    // A read-only page never builds (its edits are not taken): it waits for someone who can.
+    if (page.readOnly) return wait();
+    const claims = doc.getMap<string>(BUILDERS);
+    const standing = claims.get(board);
+    const mine = `${opts.replica}|${page.socketId}|`;
+    if (standing && !standing.startsWith(mine) && Date.now() - Number(standing.split("|")[2] ?? 0) < CLAIM_MS)
+      return wait();
+    const claim = `${mine}${Date.now()}`;
+    doc.transact(() => claims.set(board, claim), SERVER_ORIGIN);
+    const decide = () => {
+      if (isBuilt(doc, board)) return tell(page.send, board, "join");
+      if (claims.get(board) === claim) return tell(page.send, board, "build");
+      wait();
+    };
+    if (opts.settleMs > 0) setTimeout(decide, opts.settleMs);
+    else decide();
+  }
+
+  /** When a claim goes (its builder left, on any replica), this replica's waiting pages ask again. */
+  function watch(documentId: string, doc: Y.Doc): void {
+    if (watched.has(doc)) return;
+    watched.add(doc);
+    doc.getMap<string>(BUILDERS).observe((e) => {
+      for (const [board, change] of e.changes.keys) {
+        if (change.action !== "delete" || isBuilt(doc, board)) continue;
+        const list = waitersOf(documentId, board);
+        const next = list.find((p) => !p.readOnly);
+        if (!next) continue;
+        list.splice(list.indexOf(next), 1);
+        open(documentId, doc, board, next);
+      }
+    });
+  }
 }
