@@ -236,4 +236,43 @@ describe.skipIf(!existsSync(chromium.executablePath()))("the connector (browser)
     await a.close();
     await b.close();
   }, 60_000);
+
+  it("removing the first of two rules with one selector leaves the second one's style as it is", async () => {
+    const [a, b] = await pair();
+    type Rule = { selectorsToString(): string; getStyle(): Record<string, string> };
+    type Rules = { models: Rule[]; add(defs: unknown[]): unknown; remove(r: Rule): void };
+    const rulesOf = (p: Page) =>
+      p.evaluate(() =>
+        ((globalThis as unknown as W).live.editor.Css.getAll() as unknown as Rules).models
+          .filter((r) => r.selectorsToString() === ".dup-a")
+          .map((r) => r.getStyle()),
+      );
+    // Two rules for one selector in the edits layer. GrapesJS's own addRules and style manager fold a repeated
+    // selector into one rule; its collection keeps both. A change straight to the collection is followed by the
+    // "update" GrapesJS sends after a change.
+    await a.evaluate(() => {
+      const editor = (globalThis as unknown as W).live.editor;
+      (editor.Css.getAll() as unknown as Rules).add([
+        { selectors: ["dup-a"], style: { color: "rgb(1, 1, 1)" } },
+        { selectors: ["dup-a"], style: { "background-color": "rgb(2, 2, 2)" } },
+      ]);
+      editor.trigger("update");
+    });
+    await wait(400);
+    // Bo removes the first; the second (and its style) must stay what it was for both.
+    await b.evaluate(() => {
+      const editor = (globalThis as unknown as W).live.editor;
+      const all = editor.Css.getAll() as unknown as Rules;
+      all.remove(all.models.find((r) => r.selectorsToString() === ".dup-a")!);
+      editor.trigger("update");
+    });
+    await wait(400);
+    for (const p of [a, b]) expect(await rulesOf(p)).toEqual([{ "background-color": "rgb(2, 2, 2)" }]);
+    expect([
+      ...(a as unknown as { errors: string[] }).errors,
+      ...(b as unknown as { errors: string[] }).errors,
+    ]).toEqual([]);
+    await a.close();
+    await b.close();
+  }, 60_000);
 });

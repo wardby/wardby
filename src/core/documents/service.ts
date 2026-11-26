@@ -10,7 +10,7 @@ import { DOCUMENT_WRITE_ATTEMPTS } from "./limits.js";
 import { loadContent, storeVersionFiles } from "./files.js";
 import { formatFor, type DocumentKind } from "./formats/index.js";
 import { documentSecretValues } from "./redact.js";
-import { mergeIntoLatest } from "./live/merge-latest.js";
+import { mergeFilesIntoLatest, mergeIntoLatest } from "./live/merge-latest.js";
 import { isLocked } from "./review-state.js";
 import { assertNotLocked, recomputeAfterPublish } from "./review.js";
 import { stageVersion, versionColumns, writeVersion, type PublishVia } from "./version-write.js";
@@ -140,6 +140,12 @@ export async function publishVersion(
     if (merged) {
       // The merged text is new text: it passes the same checks (and redaction) as any publish.
       prepared = fmt.prepare({ format: "markdown", markdown: merged.markdown }, secrets);
+      expectedNumber = merged.latest;
+    }
+  } else if (!input.strictBase && expectedNumber !== undefined && prepared.content.format === "boards-v1") {
+    const merged = await mergeFilesIntoLatest(db, input.documentId, expectedNumber, prepared.content.files);
+    if (merged) {
+      prepared = fmt.prepare({ format: "boards-v1", files: merged.files }, secrets);
       expectedNumber = merged.latest;
     }
   }

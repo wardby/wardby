@@ -13,24 +13,17 @@
 import { JSDOM, VirtualConsole, type DomElement } from "jsdom";
 import * as Y from "yjs";
 import { checkCss } from "../../../core/documents/boards/css-check.js";
-import {
-  BOARD_MAX_BYTES,
-  normalizeDesign,
-  parseManifest,
-  serializeManifest,
-  type Manifest,
-} from "../../../core/documents/boards/format.js";
+import { BOARD_MAX_BYTES, normalizeDesign, parseManifest } from "../../../core/documents/boards/format.js";
 import { sanitizeFragment } from "../../../core/documents/boards/sanitize.js";
+import { boardMaps, manifestOf, orderedPairs, R, type BoardMaps } from "../../../core/documents/boards/live/model.js";
 import {
-  BOARD_ROOT,
-  boardMaps,
-  manifestOf,
-  orderedPairs,
-  R,
-  type BoardMaps,
-} from "../../../core/documents/boards/live/model.js";
-import { applyBoardMerge, boardOps, type MergeOp } from "../../../core/documents/boards/live/merge.js";
-import { writeBoard, writeBoardFile, writeElement } from "../../../core/documents/boards/live/writer.js";
+  DESIGN_META,
+  designFiles,
+  isBuilt,
+  newElementIds,
+  planDesignMerge,
+} from "../../../core/documents/boards/live/design-doc.js";
+import { writeBoard, writeElement } from "../../../core/documents/boards/live/writer.js";
 import { loadVersionFiles } from "../../../core/documents/files.js";
 import {
   anchorTarget,
@@ -44,82 +37,54 @@ import { mapBase } from "../../../core/documents/boards/live/version-map.js";
 import type { WebDeps } from "../../context.js";
 import { SERVER_ORIGIN, type LiveFormat, type LiveVersion } from "./types.js";
 
-export const DESIGN_META = "design";
 const MANIFEST = "manifest.json";
 
 /** Stable text of a file set (key order fixed), what checkpoints compare. */
 const filesText = (files: Record<string, string>): string =>
   JSON.stringify(Object.fromEntries(Object.entries(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))));
 
-/** A live-document field as text (anything else as the fallback). */
-const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
-
-/** The board list as stored in the live document. */
-export function liveManifest(doc: Y.Doc): Manifest {
-  const boards = manifestOf(doc)
-    .toArray()
-    .map((m) => ({
-      id: str(m.get("id")),
-      name: str(m.get("name")),
-      file: str(m.get("file")),
-      width: Number(m.get("width") ?? 1280),
-    }))
-    .filter((b) => b.id && b.file);
-  const title = doc.getMap(DESIGN_META).get("title");
-  return { title: typeof title === "string" ? title : "", boards };
-}
-
-/** Puts a board list into the live document (its title too); boards no longer listed lose their live copies. */
-function setLiveManifest(doc: Y.Doc, m: Manifest): void {
-  const arr = manifestOf(doc);
-  arr.delete(0, arr.length);
-  arr.push(
-    m.boards.map((b) => {
-      const entry = new Y.Map<unknown>();
-      for (const [k, v] of Object.entries(b)) entry.set(k, v);
-      return entry;
-    }),
-  );
-  doc.getMap(DESIGN_META).set("title", m.title);
-  const listed = new Set(m.boards.map((b) => b.id));
-  const boards = doc.getMap<unknown>("boards");
-  for (const id of [...boards.keys()]) if (!listed.has(id)) boards.delete(id);
-}
-
 /**
- * The board list after a version: its changes from its base list (boards added, removed, renamed, resized,
- * reordered) applied to the list as it is now, so a board someone added meanwhile stays (after the new version's).
+ * Two people moving the same element at the same moment can leave it in two places (both remove it from where it
+ * was; each puts it somewhere). The later move stays: for every element an edit just put into a parent, any other
+ * place it is in goes. The writer also writes an element only once, for what a repair here has not reached.
  */
-export function mergeManifest(before: Manifest | null, next: Manifest, now: Manifest): Manifest {
-  if (!before) return next;
-  const was = new Map(before.boards.map((b) => [b.id, b]));
-  const inNext = new Set(next.boards.map((b) => b.id));
-  const nowById = new Map(now.boards.map((b) => [b.id, b]));
-  const boards: Manifest["boards"] = [];
-  for (const b of next.boards) {
-    const old = was.get(b.id);
-    const cur = nowById.get(b.id);
-    if (!old) boards.push({ ...b });
-    else if (!cur)
-      continue; // someone deleted it meanwhile
-    else
-      boards.push({
-        ...cur,
-        name: b.name !== old.name ? b.name : cur.name,
-        width: b.width !== old.width ? b.width : cur.width,
-      });
+export function keepLaterMoves(doc: Y.Doc, events: Y.YEvent<Y.AbstractType<unknown>>[]): void {
+  const placed: { board: string; parent: string; at: number; id: string }[] = [];
+  for (const e of events) {
+    if (!(e.target instanceof Y.Array)) continue;
+    const path = e.path.map(String);
+    if (path.length !== 4 || path[1] !== "nodes" || path[3] !== "children") continue;
+    let at = 0;
+    for (const d of e.delta) {
+      if (d.retain) at += d.retain;
+      if (Array.isArray(d.insert)) {
+        for (const id of d.insert)
+          if (typeof id === "string") placed.push({ board: path[0], parent: path[2], at: at++, id });
+      }
+    }
   }
-  // Boards added meanwhile (not in the base list), kept at the end.
-  for (const b of now.boards) if (!was.has(b.id) && !inNext.has(b.id)) boards.push({ ...b });
-  return { title: next.title !== before.title ? next.title : now.title, boards };
-}
-
-/** Whether a board has a live copy yet (its builder has written it). */
-export function isBuilt(doc: Y.Doc, boardId: string): boolean {
-  // Read only: boardMaps would create the board's maps, and on the server that is an edit everyone receives.
-  const board = doc.getMap<unknown>("boards").get(boardId);
-  const nodes: unknown = board instanceof Y.Map ? (board as Y.Map<unknown>).get("nodes") : undefined;
-  return nodes instanceof Y.Map && nodes.has(BOARD_ROOT);
+  if (!placed.length) return;
+  const extra: { arr: Y.Array<string>; at: number }[] = [];
+  const byBoard = new Map<string, typeof placed>();
+  for (const p of placed) byBoard.set(p.board, [...(byBoard.get(p.board) ?? []), p]);
+  for (const [board, list] of byBoard) {
+    const ids = new Set(list.map((p) => p.id));
+    for (const [parent, n] of boardMaps(doc, board).nodes) {
+      const arr = n.get("children");
+      if (!(arr instanceof Y.Array)) continue;
+      (arr as Y.Array<string>).toArray().forEach((id, at) => {
+        if (!ids.has(id)) return;
+        // The place this edit made stays; every other one goes.
+        if (list.some((p) => p.id === id && p.parent === parent && p.at === at)) return;
+        if (list.some((p) => p.id === id)) extra.push({ arr: arr as Y.Array<string>, at });
+      });
+    }
+  }
+  if (!extra.length) return;
+  doc.transact(() => {
+    // From the end, so earlier places keep their index.
+    for (const x of extra.sort((a, b) => b.at - a.at)) x.arr.delete(x.at, 1);
+  }, SERVER_ORIGIN);
 }
 
 /** Every string a design's live document shows: text, attributes, CSS values, board names (for secret checks). */
@@ -327,19 +292,7 @@ export function boardsFormat(
       } catch {
         before = {};
       }
-      const manifest = liveManifest(doc);
-      const files: Record<string, string> = {};
-      // Files that are not boards (brand.md) carry over as they are.
-      const boardFiles = new Set(Object.keys(before).filter((p) => p.startsWith("boards/")));
-      for (const [p, text] of Object.entries(before)) if (p !== MANIFEST && !boardFiles.has(p)) files[p] = text;
-      const listed: Manifest["boards"] = [];
-      for (const b of manifest.boards) {
-        if (isBuilt(doc, b.id)) files[b.file] = writeBoardFile(boardMaps(doc, b.id));
-        else if (typeof before[b.file] === "string") files[b.file] = before[b.file];
-        else continue; // a board nobody has built yet has no file: it is not saved until it has one.
-        listed.push(b);
-      }
-      files[MANIFEST] = serializeManifest({ title: manifest.title, boards: listed });
+      const files = designFiles(doc, before);
       // Stored versions are in the board sanitizer's form (publishVersion normalises every file): compare in that
       // form too, or every checkpoint would see a difference (<br/> against <br>) and save again with no edit.
       const normal = normalizeDesign(files).files;
@@ -360,51 +313,27 @@ export function boardsFormat(
       const next = await filesOf(documentId, v);
       const before = await filesOf(documentId, { ...v, number: v.baseNumber ?? v.number - 1 });
       if (typeof next[MANIFEST] !== "string") return "reset";
-      const nextManifest = parseManifest(next[MANIFEST]);
-      const beforeManifest = typeof before[MANIFEST] === "string" ? parseManifest(before[MANIFEST]) : null;
       const scratch = new Y.Doc();
       Y.applyUpdate(scratch, base);
       const now = new Y.Doc();
       Y.applyUpdate(now, Y.encodeStateAsUpdate(live));
       const vector = Y.encodeStateVector(now);
-      // New elements get the same ids in both copies: made once, then replayed.
-      const taken = new Set<string>();
-      const made: string[] = [];
-      const newId = () => {
-        for (;;) {
-          const id = `i${Math.random().toString(36).slice(2, 8)}`;
-          if (taken.has(id)) continue;
-          taken.add(id);
-          made.push(id);
-          return id;
-        }
-      };
-      const replay = () => {
-        let i = 0;
-        return () => made[i++] ?? newId();
-      };
       try {
-        const plans: { board: string; ops: MergeOp[] }[] = [];
-        for (const b of nextManifest.boards) {
-          if (typeof next[b.file] !== "string" || before[b.file] === next[b.file]) continue;
-          // The board's live copy at the base, or (built since by someone who opened it) now.
-          const atBase = isBuilt(scratch, b.id);
-          if (!atBase && !isBuilt(now, b.id)) continue;
-          const maps = boardMaps(atBase ? scratch : now, b.id);
-          for (const doc of [scratch, now]) {
-            if (isBuilt(doc, b.id)) for (const id of boardMaps(doc, b.id).nodes.keys()) taken.add(id);
-          }
-          plans.push({ board: b.id, ops: boardOps(maps, before[b.file], next[b.file]) });
-        }
-        const apply = (doc: Y.Doc, ids: () => string) =>
-          doc.transact(() => {
-            if (beforeManifest === null || before[MANIFEST] !== next[MANIFEST]) {
-              setLiveManifest(doc, mergeManifest(beforeManifest, nextManifest, liveManifest(doc)));
-            }
-            for (const p of plans) if (isBuilt(doc, p.board)) applyBoardMerge(boardMaps(doc, p.board), p.ops, ids);
-          }, SERVER_ORIGIN);
-        apply(now, newId);
-        apply(scratch, replay());
+        const plan = planDesignMerge(scratch, now, before, next);
+        // New elements get the same ids in both copies: made once, then replayed.
+        const fresh = newElementIds(scratch, now);
+        const made: string[] = [];
+        plan.apply(
+          now,
+          () => {
+            const id = fresh();
+            made.push(id);
+            return id;
+          },
+          SERVER_ORIGIN,
+        );
+        let i = 0;
+        plan.apply(scratch, () => made[i++] ?? fresh(), SERVER_ORIGIN);
       } catch {
         return "reset";
       }
@@ -546,6 +475,11 @@ export function boardsFormat(
   function watch(documentId: string, doc: Y.Doc): void {
     if (watched.has(doc)) return;
     watched.add(doc);
+    // An edit from a page on this replica: where it put an element that is also somewhere else, the other place goes.
+    doc.getMap<unknown>("boards").observeDeep((events, tr) => {
+      const origin = tr.origin as { source?: unknown } | null;
+      if (origin?.source === "connection") keepLaterMoves(doc, events as Y.YEvent<Y.AbstractType<unknown>>[]);
+    });
     doc.getMap<string>(BUILDERS).observe((e) => {
       for (const [board, change] of e.changes.keys) {
         if (change.action !== "delete" || isBuilt(doc, board)) continue;

@@ -47,15 +47,32 @@ function namesInside(c: Component): string[] {
   return [...out].sort();
 }
 
-/** Rules in collection order, keyed by selector + at-rule + occurrence. */
+/** The attribute that holds a rule's live key on its GrapesJS model (never in the board's CSS). */
+export const RULE_KEY = "wardbyKey";
+
+/**
+ * Rules in collection order with their live keys. A rule's key is given once, when this page first sees the rule
+ * (selector + at-rule + occurrence, so two pages adding the same rule at once give it the same key and it merges),
+ * and kept on the rule: a rule with the same selector added or removed earlier later never shifts it.
+ */
 export function rulesInOrder(editor: Editor): [string, CssRule][] {
+  const models = editor.Css.getAll().models;
+  const used = new Set(models.map((r) => r.get(RULE_KEY) as unknown).filter((k) => typeof k === "string"));
   const out: [string, CssRule][] = [];
   const seen = new Map<string, number>();
-  for (const r of editor.Css.getAll().models) {
+  for (const r of models) {
     const base = [r.selectorsToString(), r.getAtRule(), r.get("singleAtRule") ? 1 : 0].join("@@");
     const n = seen.get(base) ?? 0;
     seen.set(base, n + 1);
-    out.push([`${base}#${n}`, r]);
+    let key = r.get(RULE_KEY) as unknown;
+    if (typeof key !== "string") {
+      let m = n;
+      while (used.has(`${base}#${m}`)) m++;
+      key = `${base}#${m}`;
+      used.add(key as string);
+      r.set(RULE_KEY, key, { silent: true });
+    }
+    out.push([key as string, r]);
   }
   return out;
 }
@@ -268,7 +285,8 @@ export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {
     const y = new Y.Map<unknown>();
     rules.set(key, y);
     opts.created?.set(key, y);
-    const { style: _style, ...def } = r.toJSON() as Record<string, unknown>;
+    // The key is the live copy's own (its map key), not part of the rule's definition.
+    const { style: _style, [RULE_KEY]: _key, ...def } = r.toJSON() as Record<string, unknown>;
     y.set(R.def, JSON.stringify(def));
     for (const [k, v] of Object.entries(ruleFacts(r))) y.set(k, v);
     y.set(R.style, new Y.Map());

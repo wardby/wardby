@@ -541,4 +541,82 @@ describe.skipIf(!process.env.DATABASE_URL)("live editing of designs (database)",
     a.close();
     b.close();
   });
+
+  it("two pages moving one element at the same moment leave it in one place, the same for both", async () => {
+    const id = await design(ann, [bo]);
+    const a = await client(ann, id);
+    a.open("home");
+    expect(await a.roleFor("home")).toBe("build");
+    buildBoard(a.ydoc, "home", coffee("boards/home.html"));
+    const b = await client(bo, id);
+    for (let i = 0; i < 40 && !boardMaps(b.ydoc, "home").nodes.has(BOARD_ROOT); i++) await sleep(50);
+    const parentsOf = (d: Y.Doc, x: string) =>
+      [...boardMaps(d, "home").nodes.entries()].flatMap(([pid, n]) =>
+        ((n.get(F.children) as Y.Array<string> | undefined)?.toArray() ?? []).filter((c) => c === x).map(() => pid),
+      );
+    const [h1] = [...boardMaps(a.ydoc, "home").nodes.entries()].find(([, n]) => n.get(F.tag) === "h1")!;
+    const [from] = parentsOf(a.ydoc, h1);
+    const move = (d: Y.Doc, to: string) =>
+      d.transact(() => {
+        const nodes = boardMaps(d, "home").nodes;
+        const src = nodes.get(from)!.get(F.children) as Y.Array<string>;
+        src.delete(src.toArray().indexOf(h1), 1);
+        (nodes.get(to)!.get(F.children) as Y.Array<string>).push([h1]);
+      });
+    // Both move the heading in the same tick, before either hears of the other's move.
+    const footer = [...boardMaps(a.ydoc, "home").nodes.entries()].find(([, n]) => n.get(F.tag) === "footer")![0];
+    move(a.ydoc, BOARD_ROOT);
+    move(b.ydoc, footer);
+    await sleep(800);
+    const pa = parentsOf(a.ydoc, h1);
+    expect(pa).toHaveLength(1);
+    expect(parentsOf(b.ydoc, h1)).toEqual(pa);
+    a.close();
+    b.close();
+  });
+
+  it("an agent that read an older version publishes without a conflict: its change merges with everything since", async () => {
+    const id = await design(ann, [bo]);
+    const a = await client(ann, id);
+    a.open("home");
+    expect(await a.roleFor("home")).toBe("build");
+    buildBoard(a.ydoc, "home", coffee("boards/home.html"));
+    await savedWhen(id, (f) => f["boards/home.html"] !== normalizeDesign(coffeeFiles()).files["boards/home.html"]);
+    // The agent reads this version and works on the hero paragraph and the menu board...
+    const read = await db.document.findUniqueOrThrow({
+      where: { id },
+      select: { currentVersion: { select: { id: true, number: true } } },
+    });
+    const files = await loadVersionFiles(db, read.currentVersion!.id);
+    // ...while Bo edits the heading and the server saves it as a newer version.
+    a.ydoc.transact(() => h1Of(a.ydoc).set(F.html, `${text(h1Of(a.ydoc).get(F.html))} BO-MEANWHILE`));
+    await savedWhen(id, (f) => f["boards/home.html"].includes("BO-MEANWHILE"));
+    files["boards/home.html"] = files["boards/home.html"].replace("small on purpose", "small, on purpose");
+    files["boards/menu.html"] = files["boards/menu.html"].replace("</main>", "<p>AGENT-OLD-BASE</p></main>");
+    const v = await publishVersion(db, cipher, {
+      documentId: id,
+      files,
+      via: "agent",
+      expectedNumber: read.currentVersion!.number,
+    });
+    emit({ kind: "version", documentId: id });
+    const saved = await loadVersionFiles(
+      db,
+      (
+        await db.documentVersion.findUniqueOrThrow({
+          where: { documentId_number: { documentId: id, number: v.number } },
+        })
+      ).id,
+    );
+    expect(saved["boards/home.html"]).toContain("small, on purpose");
+    expect(saved["boards/home.html"]).toContain("BO-MEANWHILE");
+    expect(saved["boards/menu.html"]).toContain("AGENT-OLD-BASE");
+    const heroP = () =>
+      [...boardMaps(a.ydoc, "home").nodes.values()].find((n) => text(n.get(F.html)).includes("on purpose"));
+    for (let i = 0; i < 60 && !text(heroP()?.get(F.html)).includes("small, on purpose"); i++) await sleep(50);
+    expect(text(heroP()?.get(F.html))).toContain("small, on purpose");
+    expect(text(h1Of(a.ydoc).get(F.html))).toContain("BO-MEANWHILE");
+    expect(a.closed()).toBe(false);
+    a.close();
+  });
 });

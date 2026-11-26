@@ -61,9 +61,13 @@ export function writeBoard(maps: BoardMaps): WrittenBoard {
   }
 
   const used = new Set<string>();
+  // Two people moving one element at the same moment can leave it in two places (the server removes one: the
+  // later move stays), or two elements inside each other: an element is written once, where it is first reached.
+  const written = new Set<string>();
   const html = (id: string): string => {
     const n = nodes.get(id);
-    if (!n || n.get(F.type) === "pending") return "";
+    if (!n || n.get(F.type) === "pending" || written.has(id)) return "";
+    written.add(id);
     // A comment: written as is, and no spot (the version map skips comments as the parser does not).
     if (n.get(F.type) === "comment") return `<!--${str(n.get(F.content))}-->`;
     if (n.get(F.type) === "textnode") {

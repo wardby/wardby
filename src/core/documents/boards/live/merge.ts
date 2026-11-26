@@ -118,11 +118,24 @@ function cssRules(css: string): { key: string; selector: string; at: string; pro
   return out;
 }
 
-/** A live-copy rule key in the same normal form (selectorsToString@@atRule@@single#n). */
-export function normalRuleKey(liveKey: string): string {
-  const [sel = "", at = ""] = liveKey.split("@@");
-  const n = liveKey.slice(liveKey.lastIndexOf("#") + 1);
-  return `${sel.replace(/\s+/g, "")}@@${at.replace(/\s+/g, "")}#${n}`;
+/**
+ * The live copy's rules by the key a stylesheet's rules get here (selector, at-rule, occurrence; whitespace
+ * dropped), from each rule's selector and at-rule in the live order: rule keys in the live copy are stable ids and
+ * say nothing about the rule.
+ */
+export function ruleOccurrences(maps: BoardMaps): Map<string, string> {
+  const out = new Map<string, string>();
+  const seen = new Map<string, number>();
+  const text = (v: unknown) => (typeof v === "string" ? v : "");
+  for (const key of new Set(maps.ruleOrder.toArray())) {
+    const y = maps.rules.get(key);
+    if (!y) continue;
+    const base = `${text(y.get(R.sel)).replace(/\s+/g, "")}@@${text(y.get(R.atRule)).replace(/\s+/g, "")}`;
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    out.set(`${base}#${n}`, key);
+  }
+  return out;
 }
 
 export function diffBoard(input: {
@@ -405,7 +418,9 @@ export function applyBoardMerge(maps: BoardMaps, ops: MergeOp[], newId: () => st
     // An anchor someone removed meanwhile: the end of the parent.
     ch.insert(after && i < 0 ? ch.length : i + 1, ids);
   };
-  const ruleKey = (k: string) => [...rules.keys()].find((x) => normalRuleKey(x) === k);
+  // Rules by their place in the stylesheet as it was before these changes (removals and additions shift it).
+  const byPlace = ruleOccurrences(maps);
+  const ruleKey = (k: string) => byPlace.get(k);
   const kept = new Set<string>();
 
   for (const op of ops) {

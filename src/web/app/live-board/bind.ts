@@ -19,6 +19,7 @@ import {
   classesOf,
   isTextBox,
   readBoard,
+  RULE_KEY,
   rulesInOrder,
   snapshotBoard,
   styleOf,
@@ -129,8 +130,10 @@ export function bindBoard(
     if (typeof n.get(F.html) === "string") return { ...base, components: n.get(F.html) };
     return { ...base, components: childrenIn(n).map(defOf) };
   };
-  const ruleDef = (y: Y.Map<unknown>): Record<string, unknown> => ({
+  /** A rule's GrapesJS definition from the live copy, carrying its live key. */
+  const ruleDef = (key: string, y: Y.Map<unknown>): Record<string, unknown> => ({
     ...(JSON.parse(str(y.get(R.def), "{}")) as Record<string, unknown>),
+    [RULE_KEY]: key,
     style: Object.fromEntries(orderedPairs(y.get(R.style) as Y.Map<string>, y.get(R.props) as Y.Array<string>)),
   });
 
@@ -207,7 +210,7 @@ export function bindBoard(
       const y = rules.get(order[i])!;
       let r = live.get(order[i]);
       if (!r) {
-        [r] = all.add([ruleDef(y)], { at: i }) as unknown as CssRule[];
+        [r] = all.add([ruleDef(order[i], y)], { at: i }) as unknown as CssRule[];
         stats.in++;
       } else if (all.indexOf(r) !== i) {
         all.remove(r, { silent: true });
@@ -255,7 +258,7 @@ export function bindBoard(
       editor.setComponents(childrenIn(nodes.get(BOARD_ROOT)).map(defOf));
       editor.Css.getAll().reset();
       editor.Css.getAll().add(
-        [...new Set(ruleOrder.toArray())].filter((k) => rules.has(k)).map((k) => ruleDef(rules.get(k)!)),
+        [...new Set(ruleOrder.toArray())].filter((k) => rules.has(k)).map((k) => ruleDef(k, rules.get(k)!)),
       );
       applyBase();
       stats.fullBuilds++;

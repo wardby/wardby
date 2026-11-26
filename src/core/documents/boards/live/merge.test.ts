@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { buildBoard, coffee, coffeeFiles } from "../../../../web/live/design.test-support.js";
 import { normalizeDesign } from "../format.js";
-import { applyBoardMerge, boardOps, fileParts, merge3 } from "./merge.js";
+import { applyBoardMerge, boardOps, fileParts, merge3, ruleOccurrences } from "./merge.js";
 import { boardMaps, F } from "./model.js";
 import { writeBoard, writeBoardFile } from "./writer.js";
 
@@ -341,5 +341,30 @@ describe("merge3 (a text box both sides changed)", () => {
     expect(merge3(base, "Small batch tea, roasted on Mondays.", "Small batch cocoa, roasted on Mondays.")).toBe(
       "Small batch cocoa, roasted on Mondays.",
     );
+  });
+});
+
+describe("rules by their place in the stylesheet", () => {
+  it("are found by selector, at-rule and occurrence, whatever their live keys", () => {
+    const doc = new Y.Doc();
+    buildBoard(doc, "home", coffee("boards/home.html"));
+    const maps = boardMaps(doc, "home");
+    doc.transact(() =>
+      applyBoardMerge(
+        maps,
+        [
+          { kind: "css-add", selector: ".card", at: "", props: [["color", "red"]] },
+          { kind: "css-add", selector: ".card", at: "@media (max-width: 600px)", props: [["color", "blue"]] },
+          { kind: "css-add", selector: ".card", at: "", props: [["color", "green"]] },
+        ],
+        newId,
+      ),
+    );
+    const places = ruleOccurrences(maps);
+    const style = (place: string) =>
+      text((maps.rules.get(places.get(place)!)!.get("style") as Y.Map<string>).get("color"));
+    expect(style(".card@@#0")).toBe("red");
+    expect(style(".card@@#1")).toBe("green");
+    expect(style(".card@@@media(max-width:600px)#0")).toBe("blue");
   });
 });
