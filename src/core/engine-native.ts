@@ -74,7 +74,7 @@ interface TurnResult {
     costUsd: number;
   };
   text: string;
-  toolCalls: { id: string; name: string; argsJson: string }[];
+  toolCalls: { id: string; name: string; argsJson: string; providerData?: string }[];
   budgetExceededMidStream: boolean;
   error?: string;
 }
@@ -177,11 +177,13 @@ export class NativeEngine implements Engine {
       const assistantMessage: LlmMessage = { role: "assistant", content: turn.text };
       if (turn.toolCalls.length > 0) assistantMessage.toolCalls = turn.toolCalls;
       messages.push(assistantMessage);
-      this.emitTurn(ctx, () => ({ kind: "turn", turn: turns, text: turn.text, toolCalls: turn.toolCalls }));
+      // Provider data is for the next request only: events (and so run steps) never carry it.
+      const shownCalls = turn.toolCalls.map(({ id, name, argsJson }) => ({ id, name, argsJson }));
+      this.emitTurn(ctx, () => ({ kind: "turn", turn: turns, text: turn.text, toolCalls: shownCalls }));
 
       if (turn.toolCalls.length > 0) {
         const results = await this.runToolCalls(ctx, step, turns, turn.toolCalls);
-        this.emitTurn(ctx, () => ({ kind: "results", turn: turns, toolCalls: turn.toolCalls, results }));
+        this.emitTurn(ctx, () => ({ kind: "results", turn: turns, toolCalls: shownCalls, results }));
         for (const [index, toolCall] of turn.toolCalls.entries()) {
           messages.push({
             role: "tool",
@@ -358,7 +360,7 @@ export class NativeEngine implements Engine {
 
     const controller = new AbortController();
     let text = "";
-    const toolCalls: { id: string; name: string; argsJson: string }[] = [];
+    const toolCalls: { id: string; name: string; argsJson: string; providerData?: string }[] = [];
     let usage: LlmUsage | undefined;
     let outputTokensSoFar = 0;
     let budgetExceededMidStream = false;
@@ -402,7 +404,12 @@ export class NativeEngine implements Engine {
           // here since tool-call argument tokens are typically small
           // relative to a text completion, but worth knowing if a tool
           // call ever carries a very large argument payload.
-          toolCalls.push({ id: event.id, name: event.name, argsJson: event.argsJson });
+          toolCalls.push({
+            id: event.id,
+            name: event.name,
+            argsJson: event.argsJson,
+            ...(event.providerData !== undefined ? { providerData: event.providerData } : {}),
+          });
         } else if (event.type === "done") {
           usage = event.usage;
         }

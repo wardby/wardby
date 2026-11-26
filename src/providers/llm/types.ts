@@ -24,8 +24,20 @@ export interface LlmMessage {
    * the conversation, since the provider can no longer correlate the
    * `role: "tool"` results that follow it.
    */
-  toolCalls?: { id: string; name: string; argsJson: string }[];
+  toolCalls?: {
+    id: string;
+    name: string;
+    argsJson: string;
+    /**
+     * Opaque data the provider requires back with this call on later turns (Gemini's thought
+     * signature). Set and read only by the adapter that produced it; never shown or published.
+     */
+    providerData?: string;
+  }[];
 }
+
+/** Upper bound on one tool call's opaque provider data (a Gemini thought signature is ~0.5 KB). */
+export const MAX_PROVIDER_DATA_CHARS = 65_536;
 
 export interface LlmToolDef {
   name: string;
@@ -73,7 +85,17 @@ export interface LlmUsage {
 export type LlmStreamEvent =
   | { type: "text"; delta: string }
   /** `id` must be unique within a run, not only within a turn: a delegation keys its child run on it. */
-  | { type: "tool_call"; id: string; name: string; argsJson: string }
+  | {
+      type: "tool_call";
+      id: string;
+      name: string;
+      argsJson: string;
+      /**
+       * Opaque data the provider requires back with this call on later turns (Gemini's thought
+       * signature). Set and read only by the adapter that produced it; never shown or published.
+       */
+      providerData?: string;
+    }
   | { type: "done"; stopReason: string; usage: LlmUsage };
 
 /** Observers of a stream's progress that its events do not show. */

@@ -13,7 +13,7 @@
 
 import { z } from "zod";
 import { causeCodeOf, GATEWAY_CAUSE_CODES } from "../core/error-code.js";
-import { LLM_EFFORT_LEVELS } from "../providers/llm/types.js";
+import { LLM_EFFORT_LEVELS, MAX_PROVIDER_DATA_CHARS } from "../providers/llm/types.js";
 import { overlapsSecretValue } from "../sandbox/host-functions.js";
 
 // The allow-list and its checked helper live in core/error-code.ts (shared with the runner); re-exported here.
@@ -119,13 +119,17 @@ export function toGatewayError(err: unknown): GatewayError {
 const runId = z.string().min(1).max(64);
 const callId = z.string().min(1).max(128);
 
+const providerData = z.string().max(MAX_PROVIDER_DATA_CHARS).optional();
+
 const LlmMessageSchema = z
   .object({
     role: z.enum(["system", "user", "assistant", "tool"]),
     content: z.string(),
     toolCallId: z.string().optional(),
     name: z.string().optional(),
-    toolCalls: z.array(z.object({ id: z.string(), name: z.string(), argsJson: z.string() }).strict()).optional(),
+    toolCalls: z
+      .array(z.object({ id: z.string(), name: z.string(), argsJson: z.string(), providerData }).strict())
+      .optional(),
   })
   .strict();
 
@@ -147,7 +151,9 @@ export const LlmRequestSchema = z
 
 export const LlmStreamEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text"), delta: z.string() }).strict(),
-  z.object({ type: z.literal("tool_call"), id: z.string(), name: z.string(), argsJson: z.string() }).strict(),
+  z
+    .object({ type: z.literal("tool_call"), id: z.string(), name: z.string(), argsJson: z.string(), providerData })
+    .strict(),
   z
     .object({
       type: z.literal("done"),
