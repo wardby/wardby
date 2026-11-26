@@ -244,7 +244,7 @@ export function buildMcpProviders(): McpProviderComposition {
   const llmResult = resolveLlmRegistrations();
   if (llmResult.kind !== "registrations") {
     throw new Error(
-      "No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, and/or BEDROCK_REGION (or AWS_REGION).",
+      "No LLM credentials present. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, BEDROCK_REGION (or AWS_REGION), GEMINI_API_KEY, and/or VERTEX_PROJECT (or GOOGLE_CLOUD_PROJECT).",
     );
   }
   const llm = new RoutingLlmProvider(llmResult.registrations);
