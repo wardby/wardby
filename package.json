@@ -101,6 +101,8 @@
     "test:docker-job": "node scripts/docker-job-acceptance.mjs",
     "test:docker-services": "node scripts/docker-services-acceptance.mjs",
     "claude:images:local": "docker build -f src/claude-coding-worker/Dockerfile -t wardby-claude-coding-worker:phase5 . && docker build -f src/claude-tool-runner/Dockerfile -t wardby-claude-tool-runner:phase5 . && docker build -f src/claude-tool-runner/Dockerfile --target node-python --build-arg PYTHON_DEFAULT_VERSION=3.12 -t wardby-claude-tool-runner:phase5-node-python . && docker build -f src/claude-tool-runner/Dockerfile.custom-example -t wardby-claude-tool-runner-custom:phase5 .",
+    "gemini:images:local": "docker build -f src/gemini-coding-worker/Dockerfile -t wardby-gemini-coding-worker:phase3 . && docker build -f src/gemini-coding-worker/Dockerfile --target node-python --build-arg PYTHON_DEFAULT_VERSION=3.12 -t wardby-gemini-coding-worker:phase3-node-python .",
+    "test:gemini-docker": "WARDBY_GEMINI_DOCKER_TEST=1 vitest run src/gemini-coding-worker/compatibility.docker.test.ts src/gemini-coding-worker/acceptance.docker.test.ts",
     "test:claude-compatibility": "docker build -f src/claude-coding-worker/Dockerfile.compatibility -t wardby-claude-compat:phase5 . && docker run --rm wardby-claude-compat:phase5",
     "test:claude-docker": "node scripts/claude-docker-acceptance.mjs",
     "test:production-boundary": "node scripts/production-boundary-policy.mjs",
