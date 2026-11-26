@@ -35,6 +35,18 @@ export function geminiOutputJsonSchema(multi: boolean): Schema {
 }
 
 /**
+ * Escapes every "@" no backslash already precedes. 0.70.0 runs each non-interactive prompt through
+ * its @-reference handling with no setting to turn it off: an "@" not preceded by a backslash, then
+ * a path, inlines that file (or names an agent, or reads an MCP resource) into the prompt — e-mail
+ * addresses included. With no reference found it sends the text unchanged, backslashes kept, so the
+ * model reads a literal "\@". The agent can still read any file with its tools; this keeps file contents
+ * out of the prompt wardby writes (spec: never `@path` includes).
+ */
+export function escapeGeminiAtReferences(text: string): string {
+  return text.replace(/(?<!\\)@/g, "\\@");
+}
+
+/**
  * The prompt the CLI gets: the security instructions, the task (boundedTaskPrompt, with its runId
  * line), and the answer's shape. The schema is also set on the run model's replies
  * (settings.ts customOverrides); the prompt says it too (prompt-only was 3/3 in the spike).
@@ -42,10 +54,12 @@ export function geminiOutputJsonSchema(multi: boolean): Schema {
 export function geminiTaskPrompt(input: { instructions: string; task: string; schema: Schema }): string {
   const prompt = `${input.instructions}\n\n${input.task}\n\nWhen you have finished, your final reply must be only one JSON object (no prose, no code fences) that follows this JSON Schema:\n${JSON.stringify(input.schema)}`;
   // A prompt starting with "/" would run a repository's custom command (.gemini/commands).
-  return prompt.startsWith("/") ? ` ${prompt}` : prompt;
+  return escapeGeminiAtReferences(prompt.startsWith("/") ? ` ${prompt}` : prompt);
 }
 
 /** The one repair turn after a missing or invalid final answer (run with --resume latest). */
 export function geminiRepairPrompt(runId: string): string {
-  return `Your last reply was not the JSON object this task requires. Do not call any tools and do not change any files. Reply with only one JSON object that follows the JSON Schema given earlier, with runId ${runId}.`;
+  return escapeGeminiAtReferences(
+    `Your last reply was not the JSON object this task requires. Do not call any tools and do not change any files. Reply with only one JSON object that follows the JSON Schema given earlier, with runId ${runId}.`,
+  );
 }

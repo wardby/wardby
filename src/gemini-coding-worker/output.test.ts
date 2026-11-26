@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MAX_CODING_TESTS, parseCodingAgentOutputJson } from "../coding/protocol.js";
 import { codingOutputJsonSchema } from "../coding-worker/output-schema.js";
 import {
+  escapeGeminiAtReferences,
   GEMINI_DROPPED_SCHEMA_KEYWORDS,
   geminiOutputJsonSchema,
   geminiRepairPrompt,
@@ -75,5 +76,42 @@ describe("prompts", () => {
     expect(geminiTaskPrompt({ instructions: "/cmd", task: "t", schema: {} }).startsWith("/")).toBe(false);
     expect(geminiRepairPrompt("run_g")).toContain("run_g");
     expect(geminiRepairPrompt("run_g").startsWith("/")).toBe(false);
+  });
+});
+
+/**
+ * 0.70.0 reads an @-reference (a file, an agent or an MCP resource) only at an "@" that no backslash
+ * precedes: an unescaped "@" is the one thing that must never reach it.
+ */
+const UNESCAPED_AT = /(?<!\\)@/g;
+
+describe("@ references", () => {
+  it.each([
+    ["mail a@b.com", "mail a\\@b.com"],
+    ["See @README.md", "See \\@README.md"],
+    ["@/etc/passwd", "\\@/etc/passwd"],
+    ["read @~/x now", "read \\@~/x now"],
+    ['@"a file.md"', '\\@"a file.md"'],
+    ["@codebase_investigator do it", "\\@codebase_investigator do it"],
+    ["@wardby_mcp:res://x", "\\@wardby_mcp:res://x"],
+    ["\\@already", "\\@already"],
+    ["a@@b", "a\\@\\@b"],
+    ["trailing @", "trailing \\@"],
+  ])("escapes %j so the CLI matches no reference", (raw, escaped) => {
+    expect(escapeGeminiAtReferences(raw)).toBe(escaped);
+    expect(escapeGeminiAtReferences(raw).match(UNESCAPED_AT)).toBeNull();
+  });
+
+  it("escapes the whole task prompt (instructions, task, schema) and the repair prompt", () => {
+    const prompt = geminiTaskPrompt({
+      instructions: "rules @GEMINI.md",
+      task: "See @README.md",
+      schema: { description: "x@y" },
+    });
+    expect(prompt.match(UNESCAPED_AT)).toBeNull();
+    expect(prompt).toContain("rules \\@GEMINI.md");
+    expect(prompt).toContain("See \\@README.md");
+    expect(prompt).toContain("x\\@y");
+    expect(geminiRepairPrompt("run_@x").match(UNESCAPED_AT)).toBeNull();
   });
 });
