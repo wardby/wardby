@@ -75,7 +75,7 @@ agent you own (or one whose owner allows task text from others with
 `document_repo_link_invalid` or the usual repository errors), `link_document` (the owner
 links, relinks or, with `unlink: true`, clears that link later; `document_link_busy` while threads are with the
 agent), `publish_version`
-(needs write access; open threads whose text is gone become outdated),
+(needs write access and a `baseNumber`, the version you read: `document_version_conflict` if a newer one was published; open threads whose text is gone become outdated),
 `get_document` (current or a `versionNumber`; the title and Markdown, or a design's files as `--- <path> ---` sections, come in one `documentText` field, wrapped as untrusted tool output) and
 `list_documents` (each with its `kind`). A design version is at most 2 MiB, a board at most 512 KB, and the MCP request body at most 1 MiB. `publish_version` sends the full file set in that one request, so a design over about 1 MiB cannot be updated over MCP: change it in the editor or send its threads to the agent (a larger design can still be created from a repository). `document_format_mismatch` means Markdown was sent for a design or files for a document; `board_format_invalid` and `board_too_large` refuse files that break the board format.
 

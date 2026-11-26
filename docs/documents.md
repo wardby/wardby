@@ -43,7 +43,7 @@ directory.
 | ------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `create_document`                                            | `documents:write` | Create a document or a design (`kind`); optionally link it to a repository and coding agent                       |
 | `link_document`                                              | `documents:write` | Link a document you own to a repository and coding agent, or change or clear the link                             |
-| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files` (needs `write`)                                    |
+| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files`, and the required `baseNumber` (needs `write`)     |
 | `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                                                          |
 | `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered                                      |
 | `restore_document_version`                                   | `documents:write` | Publish an earlier version's content as a new version (needs `write`)                                             |
@@ -205,6 +205,64 @@ balancers in front of Wardby must not buffer `text/event-stream` responses
 an idle or read timeout longer than the 15-second heartbeat (60 seconds or
 more is a safe choice).
 
+## Live editing
+
+Everyone with a document open edits the same copy at the same time: each
+person's typing appears for the others as they type, with a named caret, and
+no one is locked out by someone else's save. The save state reads **Live**.
+
+- **Who edits.** Members with `write` edit; members and guests with `comment`
+  or `read` watch the edits arrive but cannot type. An approved, rejected or
+  archived document is read-only for everyone, and a review change applies at
+  once to everyone who has it open.
+- **Comments follow their words.** A comment's place is kept as a position in
+  the shared document, so it stays on its words through everyone's edits, even
+  edits inside the commented words, and it is marked outdated only when its
+  words are deleted. A comment can cover up to 10,000 characters.
+- **The connection.** The page joins over a WebSocket on the same address,
+  `wss://<your-host>/d/live/<documentId>`, signed in with its browser session.
+  Proxies and load balancers in front of Wardby must pass WebSocket upgrades on
+  `/d/live/` and allow idle connections of at least a minute. A member whose
+  access comes from a share link gets a single-use, 60-second ticket from
+  `POST /d/api/<documentId>/live-ticket` and sends it in the first message
+  (never in the URL).
+- **Versions.** The live copy is saved as a new version after 3 seconds
+  without edits (at most every 15 seconds while edits keep coming), credited
+  to the person who edited last, so History, review, exports and every tool
+  keep working from versions. Opening a document saves nothing, and changes
+  that only re-format the Markdown are not saved. Nothing is saved while the
+  document is approved, rejected or archived.
+- **Publishing to a live document.** `publish_version` (and agents, restores
+  and the page's own saves) name the version they read. When newer versions
+  exist, the change is merged word by word with everything published since:
+  the saved version is the whole document with both, based on the latest
+  version, and everyone with the page open sees it arrive. The merge needs
+  the older version's state, which is kept for the 50 newest versions; an
+  older `baseNumber` is refused with
+  [`document_base_unavailable`](../help/errors/document-base-unavailable.md).
+  Threads sent to a coding agent merge the same way. A version with
+  formatting the editor cannot keep ends live editing for that document
+  (pages reload and open it comment-only) instead of dropping that content.
+- **Secret values.** An edit that would put one of the document agent's secret
+  values into the text is refused before anyone else receives it
+  ([`edit_refused`](../help/errors/edit-refused.md)); the page reloads from
+  the server's copy and says why.
+- **When live editing is not used.** Documents with formatting the editor
+  cannot keep (images, checklists, HTML) open comment-only, as before, and
+  never go live. When the page cannot join (no WebSocket through a proxy,
+  [`live_unavailable`](../help/errors/live-unavailable.md)), it saves
+  versions the usual way: each save names the version it started from and is
+  refused with `document_version_conflict` if someone published since.
+- **Several copies of the control plane.** Each document is served by one
+  copy at a time (the others hand its connections to it), or, with
+  `WARDBY_LIVE_REDIS_URL`, by every copy through Redis. See
+  [Availability](availability.md#why-the-control-plane-can-run-more-than-one-copy).
+- **History.** The live copy is kept in PostgreSQL and continues across
+  restarts. A page holding a copy from a history the server no longer has
+  (the live copy was reset) is refused
+  ([`live_state_stale`](../help/errors/live-state-stale.md)) and reloads, so
+  an old copy is never merged back in.
+
 ## Edits and restore
 
 The side panel of a document page has the same tabs as a design page's:
@@ -247,6 +305,15 @@ content; read a version with `get_document` and `versionNumber`.
 (the latest version you saw) for the same conflict check. Only a restore may
 write a summary reading "Restored v<N>": `publish_version` refuses such a
 summary with `document_summary_invalid`.
+
+`publish_version` also takes a required `baseNumber`: the version number you
+read (`get_document` returns it). It is refused with
+`document_version_conflict` when a newer version was published since; read
+the document again and redo the change on the new version.
+
+**Upgrading.** `publish_version` now requires `baseNumber`. A client that
+calls it without one gets an error naming the field: read the document first
+and pass the version number it returns.
 
 The page API behind the tray: `GET /d/api/<documentId>/versions?before=&limit=`,
 `GET /d/api/<documentId>/versions/<n>` and `POST /d/api/<documentId>/versions/<n>/restore`
@@ -765,7 +832,7 @@ row shows the document's review state as a chip.
 | `brand.md`                   | 64 KB                                                                                                     |
 | MCP request body             | 1 MiB (`publish_version` sends every file: update a larger design in the editor; see [Designs](#designs)) |
 | Comment or reply             | 10,000 characters                                                                                         |
-| Quoted anchor text           | 500 characters                                                                                            |
+| Quoted anchor text           | 10,000 characters                                                                                         |
 | Guest name                   | 1-40 characters                                                                                           |
 | Share link lifetime          | 1-90 days, default 14                                                                                     |
 | Threads per send             | 50                                                                                                        |
