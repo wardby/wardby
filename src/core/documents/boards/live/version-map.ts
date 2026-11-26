@@ -11,7 +11,8 @@ import { writeBoard, type Spot } from "./writer.js";
 
 /**
  * Maps each element and text node of `body` (a parsed body the writer produced from `spots`) to its live id,
- * walking as the writer wrote: pre-order, not inside text boxes, empty text and comments skipped. Throws
+ * walking as the writer wrote: pre-order, not inside text boxes, empty text and comments skipped (and whitespace
+ * between elements the live copy did not keep, so a board's original file maps too). Throws
  * `version_map_mismatch` when the body is not what the spots say was written.
  */
 export function mapBase(body: DomElement, spots: Spot[]): Map<DomNode, string> {
@@ -22,6 +23,9 @@ export function mapBase(body: DomElement, spots: Spot[]): Map<DomNode, string> {
     for (const n of Array.from(parent.childNodes)) {
       if (n.nodeType === 3) {
         if (!n.textContent) continue;
+        // Whitespace between elements in a file as written by hand or by an agent: the editor keeps none of it, so
+        // the live copy has no spot for it (a version written from the live copy has none to skip).
+        if (!n.textContent.trim() && spots[i]?.kind !== "text") continue;
         const spot = spots[i++];
         if (spot?.kind !== "text") throw mismatch();
         map.set(n, spot.id);

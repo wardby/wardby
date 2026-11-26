@@ -590,9 +590,19 @@ export function fileParts(text: string): { bodyHtml: string; baseCss: string; ed
  * A board's changes from its base file to its new file, by live element id. The stored base file is exactly what
  * the agent read (in the sanitizer's form): when its elements line up with the live copy's version map, the
  * comparison is with it, so the sanitizer's own changes are never taken for the agent's. Otherwise the live copy's
- * own writing is the base.
+ * own writing is the base, but only when `maps` is the live copy at the base: throws version_map_mismatch for a
+ * board built since (the caller refuses or starts again rather than undoing people's edits).
  */
-export function boardOps(maps: BoardMaps, beforeFile: string | undefined, nextFile: string): MergeOp[] {
+export function boardOps(
+  maps: BoardMaps,
+  beforeFile: string | undefined,
+  nextFile: string,
+  /**
+   * Whether `maps` is the live copy at the base. Only then is its own writing the base; a board built since has
+   * people's edits in it, which a comparison with it would take for the new version's changes and undo.
+   */
+  writtenIsBase = true,
+): MergeOp[] {
   const written = writeBoard(maps);
   const now = fileParts(nextFile);
   const ownIds = new Set([...maps.nodes.entries()].filter(([, n]) => n.get(F.ownId)).map(([id]) => id));
@@ -614,5 +624,6 @@ export function boardOps(maps: BoardMaps, beforeFile: string | undefined, nextFi
       /* the stored file does not line up with the version map: the live copy's writing */
     }
   }
+  if (!writtenIsBase) throw new Error("version_map_mismatch");
   return from({ bodyHtml: written.body, baseCss: written.baseCss ?? "", editsCss: written.css });
 }

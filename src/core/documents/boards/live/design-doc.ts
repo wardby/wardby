@@ -107,7 +107,10 @@ export function planDesignMerge(
     if (typeof next[b.file] !== "string" || before[b.file] === next[b.file]) continue;
     const atBase = isBuilt(base, b.id);
     if (!atBase && !isBuilt(now, b.id)) continue;
-    plans.push({ board: b.id, ops: boardOps(boardMaps(atBase ? base : now, b.id), before[b.file], next[b.file]) });
+    plans.push({
+      board: b.id,
+      ops: boardOps(boardMaps(atBase ? base : now, b.id), before[b.file], next[b.file], atBase),
+    });
   }
   const listChanged = beforeManifest === null || before[MANIFEST] !== next[MANIFEST];
   return {

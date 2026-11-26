@@ -368,3 +368,33 @@ describe("rules by their place in the stylesheet", () => {
     expect(style(".card@@@media(max-width:600px)#0")).toBe("blue");
   });
 });
+
+describe("a board built after the version the agent read", () => {
+  it("maps the original file (whitespace and all) and keeps a person's edit made since", () => {
+    const original = normalizeDesign(coffeeFiles()).files["boards/home.html"];
+    const dom = new JSDOM(original);
+    const p = dom.window.document.querySelector(".hero p")!;
+    p.innerHTML = p.innerHTML.replace("small on purpose", "small, on purpose");
+    const agent = normalizeDesign({ ...coffeeFiles(), "boards/home.html": dom.serialize() }).files["boards/home.html"];
+    // The board is built from the original file after the agent read it, and Bo edits the heading.
+    const doc = new Y.Doc();
+    buildBoard(doc, "home", original);
+    const maps = boardMaps(doc, "home");
+    const h1 = findNode(doc, (n) => n.get(F.tag) === "h1");
+    doc.transact(() => maps.nodes.get(h1)!.set(F.html, `${text(maps.nodes.get(h1)!.get(F.html))} BO-SINCE`));
+    const ops = boardOps(maps, original, agent, false);
+    doc.transact(() => applyBoardMerge(maps, ops, newId));
+    const out = writeBoard(maps).body;
+    expect(out).toContain("small, on purpose");
+    expect(out).toContain("BO-SINCE");
+  });
+
+  it("refuses rather than comparing with the live copy's writing when the base file does not line up", () => {
+    const doc = new Y.Doc();
+    buildBoard(doc, "home", coffee("boards/home.html"));
+    const unrelated = "<!doctype html><html><head><title>x</title></head><body><main><p>other</p></main></body></html>";
+    expect(() => boardOps(boardMaps(doc, "home"), unrelated, unrelated.replace("other", "changed"), false)).toThrow(
+      "version_map_mismatch",
+    );
+  });
+});

@@ -178,7 +178,7 @@ export const DOCUMENT_WRITE_TOOL_DEFS: LoadedTool[] = [
   },
   {
     name: "doc_publish_version",
-    description: `Publishes a new version of a document this agent can write, on top of baseNumber (the latest version you read). If the document has a newer version it fails with document_version_conflict: read it again with doc_get and redo the edit. An approved or archived document is locked. ${DATA_NOTE}`,
+    description: `Publishes a new version of a document this agent can write, on top of baseNumber (the latest version you read). If the document has a newer version it fails with document_version_conflict (read it again with doc_get and redo the edit), except on a document or design being edited live, where your change is merged with what was published since. An approved or archived document is locked. ${DATA_NOTE}`,
     jsonSchema: {
       type: "object",
       properties: {
