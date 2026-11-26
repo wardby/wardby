@@ -13,6 +13,7 @@ import {
   streamStepExtractor,
   type StreamStepExtractor,
 } from "./extract.js";
+import { recordedGemini } from "../../providers/coding-proxy/gemini.test-support.js";
 import { MAX_RESULT_OUTPUT_CHARS, MAX_STEP_TEXT_CHARS } from "./types.js";
 
 const fixture = (name: string) => readFile(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
@@ -636,7 +637,14 @@ describe("Gemini steps", () => {
       {
         role: "user",
         parts: [
-          { functionResponse: { name: "run_shell_command", response: { output: "Exit code: 1\nfail" } } },
+          {
+            functionResponse: {
+              name: "run_shell_command",
+              response: {
+                output: "<untrusted_context>\nOutput: fail\nExit Code: 1\nProcess Group PGID: 7\n</untrusted_context>",
+              },
+            },
+          },
           { functionResponse: { name: "read_file", response: { error: "no such file" } } },
         ],
       },
@@ -662,5 +670,79 @@ describe("Gemini steps", () => {
       { kind: "said", callId: `said:gemini:${position.thread}:1:0`, text: "done", truncated: false },
     ]);
     expect(stepsFromJson("gemini-generate-content", value)).toEqual([]);
+  });
+
+  it("reads a failed real CLI shell result whose status line follows long output", () => {
+    const position = geminiStepPosition(request([first]))!;
+    const wrap = (output: string) =>
+      request([
+        first,
+        { role: "model", parts: [{ functionCall: { name: "run_shell_command", args: {} } }] },
+        { role: "user", parts: [{ functionResponse: { name: "run_shell_command", response: { output } } }] },
+      ]);
+    const long = Array.from({ length: 40 }, (_, n) => `line ${n} ${"x".repeat(40)}`).join("\n");
+    const failed = `<untrusted_context>\nOutput: ${long}\nExit Code: 2\nBackground PIDs: 9\nProcess Group PGID: 7\n</untrusted_context>`;
+    const ok = `<untrusted_context>\nOutput: ${long}\nProcess Group PGID: 7\n</untrusted_context>`;
+    const signalled = `<untrusted_context>\nOutput: ${long}\nSignal: SIGKILL\nProcess Group PGID: 7\n</untrusted_context>`;
+    const id = `gemini:${position.thread}:1:0`;
+    expect(resultsFromRequest("gemini-generate-content", wrap(failed))).toEqual([{ callId: id, status: "exit 2" }]);
+    expect(resultsFromRequest("gemini-generate-content", wrap(ok))).toEqual([{ callId: id, status: "ok" }]);
+    expect(resultsFromRequest("gemini-generate-content", wrap(signalled))).toEqual([{ callId: id, status: "error" }]);
+    // An "Exit Code:" line inside the output is not the status.
+    const inside = `<untrusted_context>\nOutput: a\nExit Code: 3\nb\nProcess Group PGID: 7\n</untrusted_context>`;
+    expect(resultsFromRequest("gemini-generate-content", wrap(inside))).toEqual([{ callId: id, status: "ok" }]);
+  });
+
+  it("lines steps and results up across the recorded real CLI turns", async () => {
+    const recorded = await recordedGemini();
+    for (const surface of ["ai-studio", "vertex-express"]) {
+      const turns = recorded.filter((r) => r.surface === surface && r.scenario.includes("agent turn"));
+      expect(turns.length).toBeGreaterThanOrEqual(4);
+      const positions = turns.map((t) => geminiStepPosition(t.body));
+      positions.forEach((p) => expect(p).toBeDefined());
+      // Every turn after the first carries the results of the one before, with the id the reply's steps get.
+      for (let n = 1; n < turns.length; n++) {
+        const results = resultsFromRequest("gemini-generate-content", turns[n].body);
+        const prev = positions[n - 1]!;
+        expect(results.length).toBeGreaterThan(0);
+        results.forEach((r, k) => expect(r.callId).toBe(`gemini:${prev.thread}:${prev.turn}:${k}`));
+        expect(results.every((r) => r.status === "ok")).toBe(true);
+      }
+      // The first reply's recorded run_shell_command call is a Bash step with that id.
+      const call = (turns[1].body.contents as { parts: { functionCall?: unknown }[] }[])[1].parts[0].functionCall as {
+        name: string;
+        args: unknown;
+      };
+      const steps = new GeminiStreamSteps(positions[0]!);
+      steps.consume(
+        `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ functionCall: call }] }, finishReason: "STOP" }] })}`,
+      );
+      expect(steps.finish()).toEqual([
+        expect.objectContaining({
+          kind: "tool",
+          tool: "Bash",
+          callId: `gemini:${positions[0]!.thread}:1:0`,
+          text: "echo recorded",
+        }),
+      ]);
+    }
+  });
+
+  it("numbers the calls of a multi-call turn by position", () => {
+    const position = geminiStepPosition(request([first]))!;
+    const steps = new GeminiStreamSteps(position);
+    steps.consume(
+      gframe(
+        [
+          { functionCall: { name: "run_shell_command", args: { command: "a" } } },
+          { functionCall: { name: "read_file", args: { file_path: "b" } } },
+        ],
+        "STOP",
+      ),
+    );
+    expect(steps.finish().map((s) => s.callId)).toEqual([
+      `gemini:${position.thread}:1:0`,
+      `gemini:${position.thread}:1:1`,
+    ]);
   });
 });

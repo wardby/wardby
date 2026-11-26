@@ -492,6 +492,27 @@ export function statusFromOutput(head: string, isError: boolean): StepStatus {
   return code > 0 && code < 1000 ? `exit ${code}` : "error";
 }
 
+/**
+ * The Gemini CLI's shell result ends with its status lines after the (unbounded) output:
+ * `Exit Code: N` (only when non-zero), then optional Signal / Background PIDs / Process Group PGID lines,
+ * all inside `<untrusted_context>`. The head read of statusFromOutput misses them behind long output.
+ */
+const GEMINI_STATUS_TAIL =
+  /^Exit Code: (-?\d{1,6})$(?:\n(?:Signal|Background PIDs|Process Group PGID): .*)*\s*(?:<\/untrusted_context>)?\s*(?![\s\S])/m;
+const GEMINI_SIGNAL_TAIL =
+  /^Signal: \S.*(?:\n(?:Background PIDs|Process Group PGID): .*)*\s*(?:<\/untrusted_context>)?\s*(?![\s\S])/m;
+
+function geminiStatus(text: string, isError: boolean): StepStatus {
+  const tail = text.slice(-1024);
+  const match = GEMINI_STATUS_TAIL.exec(tail);
+  if (match) {
+    const code = Number(match[1]);
+    return code === 0 ? "ok" : code > 0 && code < 1000 ? `exit ${code}` : "error";
+  }
+  if (GEMINI_SIGNAL_TAIL.test(tail)) return "error";
+  return statusFromOutput(text.slice(0, STATUS_HEAD_CHARS), isError);
+}
+
 /** The first STATUS_HEAD_CHARS of a result's text parts; images and other parts are skipped. */
 function contentHead(content: unknown): string {
   if (typeof content === "string") return content.slice(0, STATUS_HEAD_CHARS);
@@ -556,7 +577,7 @@ export function resultsFromRequest(
         const text = error ?? str(payload.output) ?? JSON.stringify(payload);
         return {
           callId: `gemini:${position.thread}:${modelIndex}:${k}`,
-          status: statusFromOutput(contentHead(text), error !== undefined),
+          status: geminiStatus(text, error !== undefined),
           ...(options?.detail ? (contentTail(text) ?? {}) : {}),
         };
       });
