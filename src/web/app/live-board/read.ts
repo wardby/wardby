@@ -130,6 +130,8 @@ export interface ReadOptions {
   editing?: { id: string; el: HTMLElement } | null;
   /** The base layer, written into the board's meta when given. */
   baseCss?: string;
+  /** The board file's other parts (title, language, body attributes), written into the meta when given. */
+  parts?: { lang: string; title: string; bodyAttrs: Record<string, string> };
   /** The origin the transaction carries (the connector's, so it does not apply its own changes back). */
   origin?: unknown;
 }
@@ -177,6 +179,7 @@ export function readBoard(editor: Editor, maps: BoardMaps, opts: ReadOptions = {
   };
   nodes.doc!.transact(() => {
     if (opts.baseCss !== undefined && setIf(meta, "baseCss", opts.baseCss)) changes++;
+    if (opts.parts && setIf(meta, "parts", JSON.stringify(opts.parts))) changes++;
     const seen = new Set<string>();
     writeNode(root, BOARD_ROOT, seen);
     // Parts a merge parked (detached) wait to be placed again: never deleted here.

@@ -159,8 +159,36 @@ export function writeBoard(maps: BoardMaps): WrittenBoard {
   return { body, css, spots, baseCss: typeof base === "string" ? base : null };
 }
 
-/** A whole board file from the live copy: the parts the live copy does not hold (title, language, body attributes) come from `parts`. */
-export function writeBoardFile(maps: BoardMaps, parts: BoardParts): string {
+/** The board's file parts the builder stored in its meta (`parts`: title, language, body attributes). */
+export function storedParts(maps: BoardMaps): Pick<BoardParts, "lang" | "title" | "bodyAttrs"> | null {
+  const raw = maps.meta.get("parts");
+  if (typeof raw !== "string") return null;
+  try {
+    const p = JSON.parse(raw) as Partial<BoardParts>;
+    return {
+      lang: typeof p.lang === "string" ? p.lang : "en",
+      title: typeof p.title === "string" ? p.title : "",
+      bodyAttrs: p.bodyAttrs && typeof p.bodyAttrs === "object" ? p.bodyAttrs : {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A whole board file from the live copy alone: the base layer and the file parts (title, language, body attributes)
+ * come from the board's meta, as its builder stored them; `fallback` fills anything missing.
+ */
+export function writeBoardFile(maps: BoardMaps, fallback?: Partial<BoardParts>): string {
   const out = writeBoard(maps);
-  return serializeBoardFile(out.baseCss === null ? parts : { ...parts, baseCss: out.baseCss }, out.css, out.body);
+  const stored = storedParts(maps);
+  const parts: BoardParts = {
+    lang: stored?.lang ?? fallback?.lang ?? "en",
+    title: stored?.title ?? fallback?.title ?? "",
+    bodyAttrs: stored?.bodyAttrs ?? fallback?.bodyAttrs ?? {},
+    baseCss: out.baseCss ?? fallback?.baseCss ?? "",
+    editsCss: null,
+    bodyHtml: out.body,
+  };
+  return serializeBoardFile(parts, out.css, out.body);
 }

@@ -1,5 +1,5 @@
 /**
- * Live co-editing (Markdown documents; each kind's own steps are in formats/): Hocuspocus (Yjs over a WebSocket) on the control plane's own port,
+ * Live co-editing of Markdown documents and designs (each kind's own steps are in formats/): Hocuspocus (Yjs over a WebSocket) on the control plane's own port,
  * at /d/live/<documentId>.
  *
  * - Sign-in: the web session cookie the browser sends on the upgrade (member or guest), then the document's
@@ -42,6 +42,7 @@ import { documentSecretValues } from "../../core/documents/redact.js";
 import { isLocked } from "../../core/documents/review-state.js";
 import { logger } from "../../core/logger.js";
 import { resolveContext, type WebDeps } from "../context.js";
+import { boardsFormat } from "./formats/boards.js";
 import { markdownFormat } from "./formats/markdown.js";
 import type { LiveFormat } from "./formats/types.js";
 
@@ -139,7 +140,8 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
   const db = deps.db;
   const loaded = new Map<string, Loaded>();
   const secrets = new Map<string, { values: string[]; at: number }>();
-  const formats: Record<string, LiveFormat> = { document: markdownFormat(db) };
+  const boards = boardsFormat(db);
+  const formats: Record<string, LiveFormat> = { document: markdownFormat(db), design: boards };
   const versionFields = { number: true, markdown: true, format: true, baseNumber: true } as const;
 
   const secretValues = async (documentId: string): Promise<string[]> => {
@@ -313,6 +315,21 @@ export function createLiveServer(deps: LiveServerDeps): LiveServer {
         if (!saved) return hocuspocus.closeConnections(documentName);
         await checkpoint(documentName, document, l);
       });
+    },
+
+    // Designs: which page builds a board's live copy (formats/boards.ts).
+    async onStateless({ connection, document, documentName, payload }) {
+      if (loaded.get(documentName)?.format !== boards) return;
+      boards.message(
+        documentName,
+        document,
+        { socketId: connection.socketId, readOnly: connection.readOnly, send: (p) => connection.sendStateless(p) },
+        payload,
+      );
+    },
+
+    async onDisconnect({ document, documentName, socketId }) {
+      if (loaded.get(documentName)?.format === boards) boards.left(documentName, document, socketId);
     },
 
     async afterUnloadDocument({ documentName }) {
