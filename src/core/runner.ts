@@ -149,6 +149,10 @@ import { trackRun } from "./in-flight-runs.js";
 import { dispatchRunStepsLevel } from "./run-steps/config.js";
 import { REVIEW_READ_TOOLS, ReviewReadLedger } from "./review-reads.js";
 import { refusalOf } from "./plans/refusal.js";
+import type { SecretCipher } from "./plans/publish.js";
+import type { PlanFile } from "../coding/plan-files/store.js";
+import { countJobStart, jobForRun, REVIEW_ROUTE_TARGET_NO_DOCUMENTS_REFUSAL } from "./review-routing/jobs.js";
+import { routedInputFiles } from "./review-routing/files.js";
 import { MAX_PLAN_NUMBER } from "./plans/number.js";
 import { planSummaryForRun, type PlanSummary } from "./plans/publish.js";
 import { createRepoAccessGate, requiredLevel, type RepoAccessGate } from "./repo-access.js";
@@ -341,6 +345,8 @@ const DELEGATION_CHILD_SELECT = {
   ownerId: true,
   nativeExecutionMode: true,
   runSteps: true,
+  // A native target of routed work must be able to read documents (#646, spec §4).
+  documentTools: true,
   codingProfile: {
     select: { allowWebhookTaskOverride: true, timeoutSec: true, repository: true, baseRef: true, workflowName: true },
   },
@@ -348,6 +354,56 @@ const DELEGATION_CHILD_SELECT = {
 
 /** The child agent fields a delegation decides on. */
 export type DelegationChildAgent = Prisma.AgentGetPayload<{ select: typeof DELEGATION_CHILD_SELECT }>;
+
+/**
+ * Routed work (#646, spec §4): a delegation from a run that belongs to a review job (its router run or a run below
+ * it). Not routed: nothing changes. Routed: a native child without documentTools is refused; a coding child of a
+ * call with no planNumber gets the job's documents as plan files (null when the child's secret values cannot be
+ * read: the caller refuses); then the start is counted against the decision's maxStartsPerDecision, last, so a
+ * delegation refused before it uses none of the count. A start counted here and refused later (budget) still counts.
+ */
+async function routedDelegation(
+  db: RunnerDb,
+  cipher: SecretCipher | undefined,
+  runId: string,
+  childAgent: DelegationChildAgent,
+  args: { planNumber?: number },
+): Promise<{ refusal: string } | { routedInputFiles?: PlanFile[] }> {
+  const job = await jobForRun(db, runId);
+  if (!job) return {};
+  if (childAgent.kind === "native" && childAgent.documentTools === null) {
+    return { refusal: REVIEW_ROUTE_TARGET_NO_DOCUMENTS_REFUSAL };
+  }
+  let routedFiles: PlanFile[] | undefined;
+  if (childAgent.kind === "coding" && args.planNumber === undefined) {
+    // The document services take the full client; RunnerDb only narrows it for test fakes.
+    // A document that cannot be read (a damaged version) refuses this start, never the lead's run.
+    const files = await routedInputFiles(db as unknown as PrismaClient, cipher, job, childAgent.id).catch(
+      (err: unknown) => {
+        // Ids and the error's name only: a document's content never reaches a log.
+        runnerLog.warn(
+          { runId, jobId: job.id, errorName: err instanceof Error ? err.name : typeof err },
+          "routed documents could not be read",
+        );
+        return "unreadable" as const;
+      },
+    );
+    if (files === "unreadable") {
+      return {
+        refusal: JSON.stringify({ error: "dispatch_failed", message: "The sub-agent run could not be created." }),
+      };
+    }
+    if (files === null) {
+      return {
+        refusal: JSON.stringify({ error: "secret_check_unavailable", message: SECRET_CHECK_UNAVAILABLE_MESSAGE }),
+      };
+    }
+    routedFiles = files;
+  }
+  const counted = await countJobStart(db, job);
+  if (counted) return counted;
+  return routedFiles && routedFiles.length > 0 ? { routedInputFiles: routedFiles } : {};
+}
 
 /**
  * The live authorization of one delegation, and the child agent as it is now. Owners are re-read
@@ -542,6 +598,8 @@ export type RunnerDb = Pick<
   | "principal"
   | "documentVersion"
   | "documentFile"
+  // Routed work (#646): the review job a delegating run belongs to, and its start count.
+  | "reviewJob"
 >;
 
 /** The providers a native run needs; `executor`, `reviewHosts` and `issueTrackers` are optional capabilities. */
@@ -1693,6 +1751,8 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
             limit: loaded.maxDelegationsPerRun ?? 1,
           });
           if (limitRefusal) return limitRefusal;
+          const routed = await routedDelegation(db, providers.secrets, runId, childAgent, args);
+          if ("refusal" in routed) return routed.refusal;
 
           // parallelDelegations: a child the budget would refuse (run_tree_exhausted or
           // budget_group_exhausted:*) while a sibling still runs waits for a sibling to finish and
@@ -1774,6 +1834,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 continuesCodingRunId: args.continuePriorRun,
                 mergeOrder: args.mergeOrder,
                 planNumber: args.planNumber,
+                ...(routed.routedInputFiles ? { routedInputFiles: routed.routedInputFiles } : {}),
                 codingRepository: delegation.repository,
                 codingRepositories: args.repositories,
                 requireExplicitRepository: true,
@@ -2517,6 +2578,10 @@ export async function durableDelegate(
       }
     }
 
+    // Routed work (#646): after the budget wait, so a call answered `waiting_budget` and called again counts once.
+    const routed = await routedDelegation(db, providers.secrets, runId, childAgent, dispatchArgs);
+    if ("refusal" in routed) return finish(routed.refusal);
+
     // Recorded before dispatch, so a replica dying in between leaves a row the next call adopts.
     await ledger.setDelegation(sessionId, callId, {
       status: "pending",
@@ -2540,6 +2605,7 @@ export async function durableDelegate(
               continuesCodingRunId: dispatchArgs.continuePriorRun,
               mergeOrder: dispatchArgs.mergeOrder,
               planNumber: dispatchArgs.planNumber,
+              ...(routed.routedInputFiles ? { routedInputFiles: routed.routedInputFiles } : {}),
               codingRepository: delegation.repository,
               codingRepositories: dispatchArgs.repositories,
               requireExplicitRepository: true,

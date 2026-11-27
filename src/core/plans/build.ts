@@ -12,13 +12,13 @@ import type { PrismaClient } from "#prisma";
 import { byteLength, MAX_CODING_TASK_BYTES, PLAN_FOLDER_PATH } from "../../coding/protocol.js";
 import { normalizeHostedRepository } from "../../coding/code-host.js";
 import { assertPlanFilesWithinLimits, type PlanFile } from "../../coding/plan-files/store.js";
-import { loadContent } from "../documents/files.js";
 import { withHtmlEscapedForms } from "../documents/formats/boards.js";
 import { atLeast, effectiveAccess } from "../grants.js";
 import { loadAgentSecretValues } from "../secret-guard.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { wrapUntrusted } from "../untrusted-content.js";
 import { rewriteLinksForBuilder } from "./links.js";
+import { versionPlanFiles } from "./revision.js";
 import type { SecretCipher } from "./publish.js";
 import { PlanRefusedError } from "./refusal.js";
 import { defuseNotice, shownPlanPath } from "./wording.js";
@@ -243,18 +243,13 @@ async function composeBuildPlan(
   // plan.md as given to the builder (redacted, links rewritten): the source of a ticket's own section.
   let planText: string | null = null;
   for (const doc of documents) {
-    const content = await loadContent(db, doc.version);
-    if (content.format === "markdown") {
-      const redacted = redact(content.markdown);
-      // R14: the file itself, so every rewritten link names a file the builder can open.
-      planInputFiles.push({ path: doc.path, content: redacted });
-      const rewritten = rewriteLinksForBuilder(redacted, entries, doc.path);
+    // R14: the files themselves, so every rewritten link names a file the builder can open.
+    const { files, markdown } = await versionPlanFiles(db, doc.path, doc.version, redact);
+    planInputFiles.push(...files);
+    if (markdown !== null) {
+      const rewritten = rewriteLinksForBuilder(markdown, entries, doc.path);
       if (doc.path === "plan.md") planText = rewritten;
       sections.push(`--- ${doc.path} (approved v${doc.version.number}) ---\n${rewritten}`);
-    } else {
-      for (const [inner, text] of Object.entries(content.files)) {
-        planInputFiles.push({ path: `${doc.path}${inner}`, content: redact(text) });
-      }
     }
   }
   try {

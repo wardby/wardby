@@ -25,14 +25,29 @@ export async function planSetInputFiles(
   const files: PlanFile[] = [];
   for (const doc of documents) {
     if (!doc.currentVersion || !doc.planPath) continue;
-    const content = await loadContent(db, doc.currentVersion);
-    if (content.format === "markdown") {
-      files.push({ path: doc.planPath, content: redact(content.markdown) });
-      continue;
-    }
-    for (const [path, text] of Object.entries(content.files)) {
-      files.push({ path: `${doc.planPath}${path}`, content: redact(text) });
-    }
+    files.push(...(await versionPlanFiles(db, doc.planPath, doc.currentVersion, redact)).files);
   }
   return files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
+ * One document version as plan files, the way a builder gets them: Markdown at `path`, a design's files under it
+ * (`path` ends with "/"), each redacted with `redact`. Also returns the redacted Markdown (null for a design).
+ * Shared by the build gate (build.ts), a plan revision (above) and a routed coding run (review-routing/files.ts).
+ */
+export async function versionPlanFiles(
+  db: Pick<PrismaClient, "documentFile">,
+  path: string,
+  version: { id: string; format: string; markdown: string | null },
+  redact: (text: string) => string,
+): Promise<{ files: PlanFile[]; markdown: string | null }> {
+  const content = await loadContent(db, version);
+  if (content.format === "markdown") {
+    const markdown = redact(content.markdown);
+    return { files: [{ path, content: markdown }], markdown };
+  }
+  return {
+    files: Object.entries(content.files).map(([inner, text]) => ({ path: `${path}${inner}`, content: redact(text) })),
+    markdown: null,
+  };
 }

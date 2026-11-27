@@ -255,6 +255,12 @@ export interface DispatchRunOptions {
    * is a PlanRefusedError("plan_too_large"). Coding agents only.
    */
   planInputFiles?: PlanFile[];
+  /**
+   * A routed coding child's documents as plan files (#646, spec §4: review-routing/files.ts). Used only when
+   * nothing else gives the run plan files: never on a planner run, and never in place of planInputFiles or an
+   * approved plan's files. Bounded like planInputFiles. Coding agents only.
+   */
+  routedInputFiles?: PlanFile[];
   /** The coding run returns its plan folder, stored when it ends. Coding agents only. */
   collectPlanFiles?: boolean;
   /** trigger_agent's workflowArgs: the workflow script's `args` (#582). Only for an agent with a workflow. */
@@ -1247,6 +1253,14 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     }
     throw err;
   }
+  try {
+    assertPlanFilesWithinLimits(options.routedInputFiles ?? []);
+  } catch (err) {
+    if (err instanceof Error && err.message === "plan_too_large") {
+      throw new PlanRefusedError("plan_too_large", "the routed documents exceed the plan file limits");
+    }
+    throw err;
+  }
   // Plan documents (spec §2): the number and the planner check are decided here, before the
   // transaction, so a refusal leaves no Run row behind. attributeRun runs inside the transaction,
   // after the Run row exists, so the issue is read the way resolvePlanNumber does.
@@ -1341,7 +1355,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
     planRefusal = setRefusalOf(err);
     if (planRefusal === undefined) throw err;
   }
-  const runPlanInputFiles = options.planInputFiles ?? buildPlan?.planInputFiles ?? [];
+  const runPlanInputFiles =
+    options.planInputFiles ?? buildPlan?.planInputFiles ?? (planSetting ? [] : (options.routedInputFiles ?? []));
   if (planSections.length > 0 && planRefusal === undefined) {
     try {
       composeCodingTask(

@@ -10,6 +10,8 @@ export interface JobRef {
   id: string;
   routerAgentId: string;
   rootJobId: string | null;
+  /** The router run the job's documents were granted to (RunDocumentGrant). */
+  routerRunId: string | null;
 }
 
 /** Claims the job for a review event: null when the event already has one (a repeated click, a retried hook). */
@@ -39,7 +41,7 @@ export async function jobForRun(db: Pick<PrismaClient, "run" | "reviewJob">, run
     const job = await db.reviewJob.findFirst({
       where: { routerRunId: id },
       orderBy: { createdAt: "desc" },
-      select: { id: true, routerAgentId: true, rootJobId: true },
+      select: { id: true, routerAgentId: true, rootJobId: true, routerRunId: true },
     });
     if (job) return job;
     const row: { parentRunId: string | null } | null = await db.run.findUnique({
@@ -58,4 +60,45 @@ export async function continuedJob(
 ): Promise<JobRef | null> {
   const event = await db.documentReviewEvent.findUnique({ where: { id: reviewEventId }, select: { actorRunId: true } });
   return event?.actorRunId ? jobForRun(db, event.actorRunId) : null;
+}
+
+/** The refusal of a start past the router's maxStartsPerDecision (fixed text: never a caller's value). */
+export const REVIEW_ROUTE_LIMIT_REFUSAL = JSON.stringify({
+  error: "review_route_limit",
+  message:
+    "This decision has already started the most agents its router allows (maxStartsPerDecision). A person's next review action starts a new count.",
+});
+
+/** The refusal of a native agent without documentTools as the target of routed work. */
+export const REVIEW_ROUTE_TARGET_NO_DOCUMENTS_REFUSAL = JSON.stringify({
+  error: "review_route_target_no_documents",
+  message:
+    "This agent cannot read documents (it has no documentTools), so it cannot take work routed from a review. Give it documentTools or start another agent.",
+});
+
+/**
+ * Counts one start against the decision's limit (spec §4): on the root job (`rootJobId ?? id`), atomically, only
+ * while under the router's maxStartsPerDecision. Past it, the start is refused and the job records it.
+ */
+export async function countJobStart(
+  db: Pick<PrismaClient, "reviewJob" | "$queryRaw">,
+  job: JobRef,
+): Promise<{ refusal: string } | null> {
+  const rootId = job.rootJobId ?? job.id;
+  const counted = await db.$queryRaw<{ id: string }[]>`
+    UPDATE "ReviewJob" j SET "startsUsed" = j."startsUsed" + 1, "updatedAt" = now()
+    FROM "Agent" a WHERE j."id" = ${rootId} AND a."id" = j."routerAgentId" AND j."startsUsed" < a."maxStartsPerDecision"
+    RETURNING j."id"`;
+  if (counted.length > 0) return null;
+  await db.reviewJob.updateMany({ where: { id: job.id, outcome: "started" }, data: { outcome: "review_route_limit" } });
+  return { refusal: REVIEW_ROUTE_LIMIT_REFUSAL };
+}
+
+/** A start from a run: null when the run belongs to no job (no limit), else as countJobStart. */
+export async function countRoutedStart(
+  db: Pick<PrismaClient, "run" | "reviewJob" | "$queryRaw">,
+  parentRunId: string,
+): Promise<{ refusal: string } | null> {
+  const job = await jobForRun(db, parentRunId);
+  return job ? countJobStart(db, job) : null;
 }
