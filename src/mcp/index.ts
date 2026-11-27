@@ -118,7 +118,8 @@ import { oauthLoopbackStdioRoutes } from "./tools/oauth-loopback-routes.js";
 import { loadRunStepRetentionDays, loadRunStepsLevel } from "../core/run-steps/config.js";
 import { buildRunStepWriter } from "../core/run-steps/writer.js";
 import { registerRunStepsTool } from "./tools/run-steps.js";
-import { registerJoinRunTools } from "./tools/join-run.js";
+import { registerJoinRunTools, type JoinRunToolOptions } from "./tools/join-run.js";
+import { joinApiStdioRoutes } from "./tools/join-api.js";
 import { registerRunTranscriptTool } from "./tools/run-transcript.js";
 import { handleRunTranscriptDownload, RUN_TRANSCRIPT_DOWNLOAD_PATH } from "./tools/run-transcript-download.js";
 import { createBlobStore } from "../providers/storage/index.js";
@@ -189,6 +190,8 @@ export function registerAllTools(
     refreshModelCatalog?: () => Promise<void>;
     /** Where create_secret's loopback sign-in links point, and which host accepts them; absent = not offered. */
     oauthLoopback: SecretsToolsOptions["oauthLoopback"];
+    /** Where join_run's terminal links (`wardby join -`) point, and which host accepts them; absent = not offered. */
+    joinLink?: JoinRunToolOptions["link"];
   },
 ): void {
   registerAgentTools(mcp);
@@ -213,7 +216,7 @@ export function registerAllTools(
   });
   registerRunStepsTool(mcp, { level: loadRunStepsLevel(), retentionDays: loadRunStepRetentionDays() });
   registerStopRunTool(mcp);
-  registerJoinRunTools(mcp);
+  registerJoinRunTools(mcp, opts.joinLink ? { link: opts.joinLink } : {});
   registerCostReportTools(mcp);
   registerDatastoreTools(mcp);
   registerSubAgentTools(mcp);
@@ -447,6 +450,17 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
           db: prisma,
           blobs,
         }),
+      // `wardby join` (join_run's terminal links): Bearer routes on this same host.
+      ...joinApiStdioRoutes({
+        verify: (t) => mcp.verifyRequestState(t),
+        mint: (payload) => mcp.mintRequestState(payload),
+        audience: "stdio",
+        db: prisma,
+        ...(providers.runSteps?.recordJoin
+          ? { recordJoin: providers.runSteps.recordJoin.bind(providers.runSteps) }
+          : {}),
+        executor: providers.executor,
+      }),
       // `wardby secret connect` (create_secret's loopback links): Bearer routes on this same host.
       ...oauthLoopbackStdioRoutes({
         verify: (t) => mcp.verifyRequestState(t),
@@ -463,6 +477,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
       runTranscriptAudience: "stdio",
       // Loopback sign-in links name this process's loopback link host, as transcript links do.
       oauthLoopback: { origin: () => linkHost.origin(), audience: "stdio" },
+      joinLink: { origin: () => linkHost.origin(), audience: "stdio" },
       blobStoreConfigured: blobs !== undefined,
       secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
       refreshModelCatalog: () => modelCatalog.refreshNow(),
@@ -516,6 +531,7 @@ export async function startMcp(options: StartMcpOptions = {}): Promise<McpServer
     runTranscriptUrl: (token) =>
       Promise.resolve(`${httpOrigin}${RUN_TRANSCRIPT_DOWNLOAD_PATH}?t=${encodeURIComponent(token)}`),
     oauthLoopback: { origin: () => Promise.resolve(httpOrigin), audience: "http" },
+    joinLink: { origin: () => Promise.resolve(httpOrigin), audience: "http" },
     blobStoreConfigured: blobs !== undefined,
     secretElicitationProtocol: mcpConfig.secretElicitationProtocol,
     refreshModelCatalog: () => modelCatalog.refreshNow(),

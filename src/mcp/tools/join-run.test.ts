@@ -24,6 +24,7 @@ async function setup(
     grants?: FakeGrantSeed[];
     triggeredById?: string | null;
     noWriter?: boolean;
+    link?: boolean;
   } = {},
 ) {
   const steps: Step[] = [];
@@ -62,7 +63,10 @@ async function setup(
     mcpReq: { requestState: () => undefined },
   };
   mcp.setFixedContext(ctx);
-  registerJoinRunTools(mcp);
+  registerJoinRunTools(
+    mcp,
+    opts.link ? { link: { origin: async () => "https://wardby.example.com", audience: "http" } } : {},
+  );
   const server = (await mcp.factory({ era: "modern" })) as import("@modelcontextprotocol/server").McpServer;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test-client", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
@@ -96,6 +100,22 @@ describe("join_run / send_to_run / leave_run", () => {
       ["interrupt", "g", "stop"],
       ["leave", "g", null],
     ]);
+    await t.client.close();
+  });
+
+  it("returns the terminal command and a join link, token in the fragment, when the server serves the join API", async () => {
+    const t = await setup("owner", { link: true });
+    const joined = JSON.parse((await t.call("join_run", { runId: "r1" })).text) as {
+      terminal?: { command: string; link: string };
+    };
+    expect(joined.terminal?.command).toBe("npx @wardby/cli@latest join -");
+    expect(joined.terminal?.link).toMatch(/^https:\/\/wardby\.example\.com\/join#.+/);
+    await t.client.close();
+  });
+
+  it("has no terminal link where the join API is not served", async () => {
+    const t = await setup("owner");
+    expect(JSON.parse((await t.call("join_run", { runId: "r1" })).text)).not.toHaveProperty("terminal");
     await t.client.close();
   });
 

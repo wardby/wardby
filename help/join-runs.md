@@ -51,6 +51,35 @@ need longer sessions. The run's budget caps all of it; joining never raises the 
 The turn limit (`codingProfile.maxTurns`) applies to each message separately: the agent's turns answering
 you do not use up the task's turns.
 
+## From a terminal
+
+From 0.11.1 you can also join from a terminal chat instead of through your
+MCP client's agent:
+
+1. Ask your agent to call `join_run` for the run. Its answer has
+   `terminal.command` and `terminal.link`.
+2. Run `npx @wardby/cli@latest join -` and paste the link when it asks. The
+   link is never an argument, so it stays out of your shell history and the
+   process list.
+3. The chat shows the run's steps as they happen. Type a line and press Enter
+   to send it; start it with `!` to interrupt. `/leave` leaves (the run
+   finishes its work); `/quit` stops the agent after asking you to confirm:
+   the run then ends cancelled and its work is not pushed. Ctrl-C leaves, as
+   `/leave` does. After leaving, the chat keeps showing the run until it
+   ends; press Ctrl-C (again) to stop watching.
+
+Closing the terminal leaves the run too. If the connection to the server drops,
+the chat retries for about a minute, then leaves the run on its way out so it
+is not held open. Only a chat cut off for longer than 10 minutes cannot leave;
+the run then stays open until its timeout, or until you join it again and
+leave.
+
+The link works until the run's timeout (plus a few minutes) and only for you.
+It is a credential: do not share it. Every request it makes is checked against
+your access again, so it stops working if you lose execute on the agent. An
+admin with owner-all access can join any run from a terminal too, as long as
+their admin role still grants it.
+
 ## What others see
 
 Join, leave and message steps appear in the run's steps for everyone who can see the run. Secret

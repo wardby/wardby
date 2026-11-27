@@ -34,6 +34,10 @@ async function main(): Promise<void> {
     // Runs on a developer's machine: no environment, database, or server runtime.
     const { resumeCommand } = await import("./coding/transcript/resume/command.js");
     process.exitCode = await resumeCommand(process.argv.slice(3));
+  } else if (command === "join") {
+    // Runs on a person's machine: no environment, database, or server runtime.
+    const { joinCommand } = await import("./join/command.js");
+    process.exitCode = await joinCommand(process.argv.slice(3));
   } else if (command === "secret" && process.argv[3] === "connect") {
     // Runs on the owner's machine: no environment, database, or server runtime.
     const { secretConnectCommand } = await import("./oauth-loopback/connect.js");

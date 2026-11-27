@@ -1672,6 +1672,18 @@ current turn first), and `leave_run`. Follow the agent's replies with
 `get_run_steps`. Workflow runs, Codex runs and native agents cannot be joined
 yet.
 
+From a terminal (0.11.1 or later): `join_run`'s answer also carries
+`terminal.command` (`npx @wardby/cli@latest join -`) and `terminal.link`. Run
+the command and paste the link: it opens a terminal chat with the run (a line
+sends a message, `!text` interrupts, `/leave` leaves, `/quit` stops the agent
+after a confirmation, Ctrl-C leaves). The link is `<server origin>/join#<token>`;
+the CLI sends the token only as `Authorization: Bearer` to the server's
+`/join/api/*` routes, which check the person's access on every call, and each
+answer renews the token until the run's timeout plus a short grace. The HTTP
+server serves these routes on its canonical origin; on the stdio server they
+are served by its loopback link host, so a stdio link works only on the same
+machine.
+
 - **The run stays open while anyone is joined.** After the agent finishes its
   task it waits for more messages, until the last person leaves or the run's
   `codingProfile.timeoutSec` is reached; then it wraps up and opens or updates
