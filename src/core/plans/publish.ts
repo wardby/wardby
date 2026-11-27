@@ -12,6 +12,7 @@ import { contentHash, type VersionContent } from "../documents/content.js";
 import { loadContent } from "../documents/files.js";
 import { formatFor } from "../documents/formats/index.js";
 import { documentSecretValues } from "../documents/redact.js";
+import { redactExactSecretValues } from "../secret-spans.js";
 import { submitForReview } from "../documents/review.js";
 import { createDocument, publishVersion } from "../documents/service.js";
 import { atLeast, effectiveAccess } from "../grants.js";
@@ -536,7 +537,13 @@ async function publishSet(
       await db.$transaction([
         db.document.update({
           where: { id: created.id },
-          data: { planSetId: set.id, planPath: doc.path, setId: set.setId, option: doc.path },
+          // The option label is shown to people and routers: redacted like a native writer's label.
+          data: {
+            planSetId: set.id,
+            planPath: doc.path,
+            setId: set.setId,
+            option: redactExactSecretValues(doc.path, secrets),
+          },
         }),
         // Version 1 records the run that wrote it, like every later version (R11, planSummaryForRun).
         db.documentVersion.update({ where: { id: created.versionId }, data: { runId } }),

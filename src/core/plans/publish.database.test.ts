@@ -360,6 +360,24 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     expect(JSON.stringify(plan)).not.toContain(FAKE_SECRET);
   });
 
+  it("a plan document's option label is its path redacted against the planner's secret values", async () => {
+    const agentId = await planner();
+    const name = `PLAN_OPT_${s}`;
+    await createSecret(name, FAKE_SECRET, owner.id, cipher, db);
+    await attachSecret(agentId, name, owner.id, db);
+    const runId = await makeRun(agentId, [
+      { path: "plan.md", content: "# Plan\n" },
+      { path: `notes-${FAKE_SECRET}.md`, content: "# Notes\n" },
+    ]);
+    const plan = published(await publishPlanFromRun(db, deps, runId));
+    const rows = await db.document.findMany({
+      where: { id: { in: plan.documents.map((d) => d.id) } },
+      select: { option: true },
+    });
+    const options = rows.map((r) => r.option).sort();
+    expect(options).toEqual(["notes-[REDACTED].md", "plan.md"]);
+  });
+
   it("store repository: documents and designs link to the plan folder on the run's branch; an unchanged design stays", async () => {
     const agentId = await makeAgent("coding", {
       store: "repository",

@@ -8,6 +8,7 @@
  * here), a choice (chooseOption) routes once, and every other action routes once as that action on the set.
  */
 import type { PrismaClient } from "#prisma";
+import { readPlanDocument } from "../../coding/profile.js";
 import { logger } from "../logger.js";
 import { principalNames } from "../documents/comments.js";
 import type { ReviewAction, ReviewActionHook } from "../documents/review-hooks.js";
@@ -68,7 +69,14 @@ async function route(db: PrismaClient, deps: { startRouter: StartRouter }, actio
       option: true,
       planPath: true,
       set: setSelect,
-      planSet: { select: { id: true, number: true, set: setSelect } },
+      planSet: {
+        select: {
+          id: true,
+          number: true,
+          set: setSelect,
+          agent: { select: { ownerId: true, codingProfile: { select: { planDocument: true } } } },
+        },
+      },
     },
   });
   if (!doc || events.length === 0) return;
@@ -83,13 +91,11 @@ async function route(db: PrismaClient, deps: { startRouter: StartRouter }, actio
 
   let builderStarted = false;
   if (planSet) {
-    // Read after the plan hook ran: its claim of the set's approval, and its build chain.
-    const fresh = await db.planSet.findUnique({
-      where: { id: planSet.id },
-      select: { approvedAt: true, chainTicket: true },
-    });
-    if (approvalsOnly && !fresh?.approvedAt) return;
-    builderStarted = fresh?.chainTicket != null && kinds.includes("approved");
+    // The plan hook (run first) claims a plan set's approval: only the action it claimed it for routes an approval,
+    // and that action's approval starts the builder when the planner builds on approval.
+    const claimed = action.planApprovalClaimed === true;
+    if (approvalsOnly && !claimed) return;
+    builderStarted = claimed && onApproved(planSet.agent) === "build";
   } else if (set) {
     // Every action decides the native set's approval (a reopen ends it); only the completing approval routes.
     const claim = await claimSetApproval(db, { kind: "documents", setId: set.id }, action.actorId);
@@ -116,61 +122,78 @@ async function route(db: PrismaClient, deps: { startRouter: StartRouter }, actio
     rootJobId,
   });
   if (!job) return;
+  try {
+    const eventDocumentIds = [...new Set(events.map((e) => e.documentId))];
+    const members = planSet
+      ? await db.document.findMany({ where: { planSetId: planSet.id, removedFromPlan: false }, select: { id: true } })
+      : set
+        ? await db.document.findMany({ where: { setId: set.id, removedFromPlan: false }, select: { id: true } })
+        : [];
+    const documentIds = [...new Set([doc.id, ...members.map((d) => d.id), ...eventDocumentIds])];
 
-  const eventDocumentIds = [...new Set(events.map((e) => e.documentId))];
-  const members = planSet
-    ? await db.document.findMany({ where: { planSetId: planSet.id, removedFromPlan: false }, select: { id: true } })
-    : set
-      ? await db.document.findMany({ where: { setId: set.id, removedFromPlan: false }, select: { id: true } })
+    const byName = action.actorId
+      ? ((await principalNames(db, [action.actorId])).get(action.actorId) ?? null)
+      : events[0].actorGuestId
+        ? "a guest"
+        : null;
+    const chosenOption = chose ? (doc.option ?? doc.planPath ?? null) : null;
+    const rejectedEvents = events.filter((e) => e.kind === "rejected" && e.documentId !== doc.id);
+    const rejected = chose
+      ? (
+          await db.document.findMany({
+            where: { id: { in: rejectedEvents.map((e) => e.documentId) } },
+            select: { option: true, planPath: true },
+          })
+        )
+          .map((d) => d.option ?? d.planPath)
+          .filter((o): o is string => !!o)
+          .sort()
       : [];
-  const documentIds = [...new Set([doc.id, ...members.map((d) => d.id), ...eventDocumentIds])];
+    // Only stored (redacted) notes: a choice's note is stored on each rejected document as "Chose <option>: <note>".
+    const note = chose
+      ? choiceWords(rejectedEvents.find((e) => e.note)?.note ?? null, chosenOption ?? "")
+      : (events.find((e) => e.note)?.note ?? null);
+    const task = routerTask({
+      action: chose ? "option_chosen" : events[events.length - 1].kind,
+      subject:
+        set || planSet
+          ? { kind: "set", title: planSet ? `Plan ${planSet.number}` : (set?.name ?? doc.title) }
+          : { kind: "document", title: doc.title },
+      versions: [...new Set(events.map((e) => e.versionNumber))],
+      ...(chosenOption ? { chosen: { option: chosenOption, rejected } } : {}),
+      byName,
+      note,
+      builderStarted,
+    });
+    const started = await deps.startRouter({
+      routerAgentId,
+      task,
+      triggeredById: startedById,
+      jobId: job.id,
+      documentIds,
+    });
+    await db.reviewJob.update({
+      where: { id: job.id },
+      data: "runId" in started ? { routerRunId: started.runId, outcome: "started" } : { outcome: started.refused },
+    });
+    if ("refused" in started) log.info({ jobId: job.id, routerAgentId, code: started.refused }, "router not started");
+  } catch (err) {
+    // A claimed job never stays without an outcome.
+    await db.reviewJob.update({ where: { id: job.id }, data: { outcome: "route_failed" } }).catch(() => undefined);
+    log.warn(
+      { jobId: job.id, documentId: action.documentId, errorName: err instanceof Error ? err.name : typeof err },
+      "review routing failed",
+    );
+  }
+}
 
-  const byName = action.actorId
-    ? ((await principalNames(db, [action.actorId])).get(action.actorId) ?? null)
-    : events[0].actorGuestId
-      ? "a guest"
-      : null;
-  const chosenOption = chose ? (doc.option ?? doc.planPath ?? null) : null;
-  const rejectedEvents = events.filter((e) => e.kind === "rejected" && e.documentId !== doc.id);
-  const rejected = chose
-    ? (
-        await db.document.findMany({
-          where: { id: { in: rejectedEvents.map((e) => e.documentId) } },
-          select: { option: true, planPath: true },
-        })
-      )
-        .map((d) => d.option ?? d.planPath)
-        .filter((o): o is string => !!o)
-        .sort()
-    : [];
-  // Only stored (redacted) notes: a choice's note is stored on each rejected document as "Chose <option>: <note>".
-  const note = chose
-    ? choiceWords(rejectedEvents.find((e) => e.note)?.note ?? null, chosenOption ?? "")
-    : (events.find((e) => e.note)?.note ?? null);
-  const task = routerTask({
-    action: chose ? "option_chosen" : events[events.length - 1].kind,
-    subject:
-      set || planSet
-        ? { kind: "set", title: planSet ? `Plan ${planSet.number}` : (set?.name ?? doc.title) }
-        : { kind: "document", title: doc.title },
-    versions: [...new Set(events.map((e) => e.versionNumber))],
-    ...(chosenOption ? { chosen: { option: chosenOption, rejected } } : {}),
-    byName,
-    note,
-    builderStarted,
-  });
-  const started = await deps.startRouter({
-    routerAgentId,
-    task,
-    triggeredById: startedById,
-    jobId: job.id,
-    documentIds,
-  });
-  await db.reviewJob.update({
-    where: { id: job.id },
-    data: "runId" in started ? { routerRunId: started.runId, outcome: "started" } : { outcome: started.refused },
-  });
-  if ("refused" in started) log.info({ jobId: job.id, routerAgentId, code: started.refused }, "router not started");
+/** The planner's onApproved, read as plans/approval.ts reads it; an unreadable setting is none. */
+function onApproved(planner: { ownerId: string | null; codingProfile: { planDocument: unknown } | null }) {
+  try {
+    return readPlanDocument(planner.codingProfile?.planDocument, planner.ownerId)?.onApproved ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**

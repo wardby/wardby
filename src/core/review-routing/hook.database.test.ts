@@ -38,7 +38,6 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
   let router: string;
   let router2: string;
   let writer: string;
-  let planner: string;
   const as = (p: Principal): Viewer => ({ kind: "principal", principalId: p.id });
   const writeSetting = { access: "write", reviewers: ["x"], finalApproverId: null, maxNewPerRun: 5, plans: [] };
 
@@ -65,10 +64,6 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     router = await agent({ router: true, description: "routes work" });
     router2 = await agent({ router: true, description: "routes other work" });
     writer = await agent({ documentTools: writeSetting });
-    planner = await agent({
-      kind: "coding",
-      codingProfile: { create: { repository: `o/rr-${s}`, protectedPaths: [] } },
-    });
     await createSecret(`RR_KEY_${s}`, SECRET, owner.id, cipher, db);
     await attachSecret(writer, `RR_KEY_${s}`, owner.id, db);
   });
@@ -324,8 +319,7 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     expect(job).toMatchObject({ outcome: "run_refused", routerRunId: null });
   });
 
-  it("a plan set routes when the plan hook completed its approval, and says the builder started", async () => {
-    install();
+  const installPlanHook = () =>
     setPlanReviewHook(
       createPlanReviewHook({
         postIssueNotice: async () => {},
@@ -335,9 +329,26 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
         track: (work) => void pending.push(work),
       }),
     );
-    const number = 700 + Math.floor(Math.random() * 1000);
+  let planNumber = 700 + Math.floor(Math.random() * 1000);
+  /** plan.md approved, c.md and d.md submitted to Ann; the plan's shared set carries the router. */
+  const planFixture = async (onApproved: "build" | "notify") => {
+    const plannerId = await agent({
+      kind: "coding",
+      codingProfile: {
+        create: {
+          repository: `o/rr-${s}`,
+          protectedPaths: [],
+          planDocument: {
+            store: "wardby",
+            onApproved,
+            ...(onApproved === "build" ? { builderAgentId: writer } : {}),
+          },
+        },
+      },
+    });
+    const number = ++planNumber;
     const fixture = await createPlanSetFixture(db, {
-      plannerId: planner,
+      plannerId,
       ownerId: owner.id,
       repository: `o/rr-${s}`,
       number,
@@ -348,15 +359,22 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
       ],
     });
     const setId = (
-      await db.documentSet.create({ data: { agentId: planner, ownerId: owner.id, routerAgentId: router } })
+      await db.documentSet.create({ data: { agentId: plannerId, ownerId: owner.id, routerAgentId: router } })
     ).id;
-    await db.planSet.update({ where: { id: fixture.planSetId }, data: { setId, chainTicket: 1 } });
+    await db.planSet.update({ where: { id: fixture.planSetId }, data: { setId } });
     await db.document.updateMany({ where: { planSetId: fixture.planSetId }, data: { setId } });
     const [c, d] = [fixture.documentIds["c.md"], fixture.documentIds["d.md"]];
     await submit(c);
     await submit(d);
     await settle();
     calls = [];
+    return { number, c, d, planSetId: fixture.planSetId };
+  };
+
+  it("a plan set routes the approval its plan hook claimed; a build planner's task says the builder started", async () => {
+    install();
+    installPlanHook();
+    const { number, c, d } = await planFixture("build");
     await approve(c);
     await settle();
     expect(calls).toEqual([]);
@@ -366,6 +384,70 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     expect(calls[0].task).toContain(`Review action: approved on Plan ${number} (version 1).`);
     expect(calls[0].task).toContain("The builder for this plan was already started.");
     expect(calls[0].documentIds).toHaveLength(3);
+  });
+
+  it("a completing force approval on a build plan says the builder started; a notify plan never does", async () => {
+    install();
+    installPlanHook();
+    const build = await planFixture("build");
+    await approve(build.c);
+    await forceApprove(db, cipher, { documentId: build.d, viewer: as(owner), note: "go" });
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].task).toContain(`Review action: force approved on Plan ${build.number}`);
+    expect(calls[0].task).toContain("The builder for this plan was already started.");
+    calls = [];
+    const notify = await planFixture("notify");
+    await approve(notify.c);
+    await approve(notify.d);
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].task).toContain(`Review action: approved on Plan ${notify.number}`);
+    expect(calls[0].task).not.toContain("builder");
+  });
+
+  it("an extra approval on an already-approved plan set starts no second job", async () => {
+    install();
+    installPlanHook();
+    const { c, d } = await planFixture("notify");
+    await approve(c);
+    await approve(d);
+    await settle();
+    expect(calls).toHaveLength(1);
+    // Another approved event on a document of the approved set: the plan hook claims nothing, so nothing routes.
+    const extra = await db.documentReviewEvent.create({
+      data: {
+        documentId: d,
+        actorPrincipalId: owner.id,
+        kind: "approved",
+        fromState: "approved",
+        toState: "approved",
+        versionNumber: 1,
+      },
+    });
+    await runReviewHooks(db, { documentId: d, eventIds: [extra.id], actorId: owner.id });
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(await db.reviewJob.count({ where: { reviewEventId: extra.id } })).toBe(0);
+  });
+
+  it("a start that throws leaves the job with outcome route_failed; the action still succeeds", async () => {
+    setReviewActionHook(
+      createReviewRouterHook({
+        startRouter: async (input) => {
+          calls.push(input);
+          throw new Error("boom");
+        },
+        track: (work) => void pending.push(work),
+      }),
+    );
+    const id = await doc();
+    await routed(id);
+    expect((await submit(id)).state).toBe("in_review");
+    await settle();
+    expect(calls).toHaveLength(1);
+    const job = await db.reviewJob.findUniqueOrThrow({ where: { id: calls[0].jobId } });
+    expect(job).toMatchObject({ outcome: "route_failed", routerRunId: null });
   });
 
   it("the composed start (real dispatch) makes a review_action run with the task, its job link and grants", async () => {

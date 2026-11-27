@@ -69,7 +69,15 @@ export interface PlanApprovalDeps {
   track?: (work: Promise<void>) => void;
 }
 
-export type PlanReviewHook = (db: PrismaClient, documentId: string, actorId: string | null) => Promise<void>;
+/** What the plan hook did for one action: `approvalClaimed` when this action completed the plan set's approval. */
+export interface PlanReviewOutcome {
+  approvalClaimed: boolean;
+}
+export type PlanReviewHook = (
+  db: PrismaClient,
+  documentId: string,
+  actorId: string | null,
+) => Promise<PlanReviewOutcome | void>;
 
 let hook: PlanReviewHook | undefined;
 
@@ -496,9 +504,9 @@ export function createPlanReviewHook(deps: PlanApprovalDeps): PlanReviewHook {
   return async (db, documentId, actorId) => {
     try {
       const doc = await db.document.findUnique({ where: { id: documentId }, select: { planSetId: true } });
-      if (!doc?.planSetId) return;
+      if (!doc?.planSetId) return { approvalClaimed: false };
       const claimed = await claimApproval(db, doc.planSetId, actorId);
-      if (!claimed) return;
+      if (!claimed) return { approvalClaimed: false };
       const set = claimed.set;
       // The review action returns now; host calls and the ticket start follow in the background.
       const work = (
@@ -511,9 +519,11 @@ export function createPlanReviewHook(deps: PlanApprovalDeps): PlanReviewHook {
             )
       ).catch(logFailure({ documentId, planSetId: set.id }));
       deps.track?.(work);
+      return { approvalClaimed: claimed.approved };
     } catch (err) {
       // Never throws: a review verdict is never undone by its plan follow-up.
       logFailure({ documentId })(err);
+      return { approvalClaimed: false };
     }
   };
 }

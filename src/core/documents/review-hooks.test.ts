@@ -22,6 +22,16 @@ describe("runReviewHooks", () => {
     ]);
   });
 
+  it("tells the action hook when the plan hook claimed the plan set's approval for this action", async () => {
+    const seen: unknown[] = [];
+    setReviewActionHook(async (_db, action) => void seen.push(action.planApprovalClaimed));
+    for (const approvalClaimed of [true, false]) {
+      setPlanReviewHook(async () => ({ approvalClaimed }));
+      await runReviewHooks(db, { documentId: "d1", eventIds: ["e1"], actorId: null });
+    }
+    expect(seen).toEqual([true, undefined]);
+  });
+
   it("does not throw when the action hook throws", async () => {
     setReviewActionHook(async () => {
       throw new Error("boom");

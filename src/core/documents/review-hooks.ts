@@ -11,6 +11,8 @@ export interface ReviewAction {
   eventIds: string[];
   /** The person who acted, or null for an agent or guest. */
   actorId: string | null;
+  /** Set by runReviewHooks: this action completed its plan set's approval (the plan hook claimed it). */
+  planApprovalClaimed?: boolean;
 }
 export type ReviewActionHook = (db: PrismaClient, action: ReviewAction) => Promise<void>;
 
@@ -21,9 +23,9 @@ export function setReviewActionHook(next: ReviewActionHook | undefined): void {
 }
 
 export async function runReviewHooks(db: PrismaClient, action: ReviewAction): Promise<void> {
-  await planReviewHook()?.(db, action.documentId, action.actorId);
+  const plan = await planReviewHook()?.(db, action.documentId, action.actorId);
   try {
-    await actionHook?.(db, action);
+    await actionHook?.(db, plan?.approvalClaimed ? { ...action, planApprovalClaimed: true } : action);
   } catch {
     // The action hook logs its own failures by name; a review action is never failed by it.
   }
