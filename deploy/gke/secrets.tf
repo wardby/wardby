@@ -36,6 +36,8 @@ locals {
     "jira-webhook-secret",
     # Optional (seed-secrets.mjs): left empty when Slack notifications are unused.
     "slack-bot-token",
+    # Optional (seed-secrets.mjs): left empty without Redis for live editing (documents are pinned instead).
+    "live-redis-url",
     # Optional (seed-secrets.mjs): left empty when Gemini models are unused.
     "gemini-api-key",
   ])

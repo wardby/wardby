@@ -310,6 +310,12 @@ controlPlane:
     port: 443
     # -- CIDR the control plane may reach the API server at; needed when it is in a private range.
     cidr: ""
+  liveRedis:
+    # -- CIDRs of the Redis server in WARDBY_LIVE_REDIS_URL (live editing across copies; see docs/availability.md).
+    # Empty opens no egress to Redis.
+    egressCidrs: []
+    # -- Port of that Redis server.
+    port: 6379
   resources:
     requests: { cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi }
     limits: { cpu: "1", memory: 2Gi, ephemeral-storage: 4Gi }

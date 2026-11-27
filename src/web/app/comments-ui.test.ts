@@ -81,7 +81,7 @@ describe("CommentsUI with a surface", () => {
 
   it("shows the surface's reason when there is nothing to comment on", () => {
     const { ui, surface } = setup([]);
-    vi.mocked(surface.draft).mockReturnValueOnce("Select some words to comment on (up to 500 characters).");
+    vi.mocked(surface.draft).mockReturnValueOnce("Select some words to comment on (up to 10,000 characters).");
     ui.startComment();
     expect(document.body.textContent).toContain("Select some words");
   });

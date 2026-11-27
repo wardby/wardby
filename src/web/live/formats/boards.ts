@@ -1,0 +1,495 @@
+/**
+ * Designs in the live server (spec "Live editing for designs"): the live document holds the board list and, per
+ * board, its live copy (core/documents/boards/live/model.ts). The server never parses a board: the first browser to
+ * open a board builds its live copy with GrapesJS and stores the file's parts with it; the server writes board files
+ * from live copies (core/documents/boards/live/writer.ts) for checkpoints, compared in the sanitizer's normal form,
+ * and a board nobody has opened keeps its stored text.
+ *
+ * Builder choice (per board): a page that opens a board sends `{ type: "open-board", board }`; the first page to
+ * open a board that has no live copy yet is told to build it (`{ type: "board", board, role: "build" }`), the others
+ * to wait (`role: "wait"`) and then read it from the live copy; if the builder leaves before building, the next
+ * waiting page is told to build. A board that already has a live copy answers `role: "join"`.
+ */
+import { JSDOM, VirtualConsole, type DomElement } from "jsdom";
+import * as Y from "yjs";
+import { checkCss } from "../../../core/documents/boards/css-check.js";
+import { BOARD_MAX_BYTES, normalizeDesign, parseManifest } from "../../../core/documents/boards/format.js";
+import { sanitizeFragment } from "../../../core/documents/boards/sanitize.js";
+import { boardMaps, manifestOf, orderedPairs, R, type BoardMaps } from "../../../core/documents/boards/live/model.js";
+import {
+  DESIGN_META,
+  designFiles,
+  isBuilt,
+  newElementIds,
+  planDesignMerge,
+} from "../../../core/documents/boards/live/design-doc.js";
+import { writeBoard, writeElement } from "../../../core/documents/boards/live/writer.js";
+import { loadVersionFiles } from "../../../core/documents/files.js";
+import {
+  anchorTarget,
+  elementPath,
+  elementWords,
+  parseElementAnchor,
+  type ElementAnchor,
+} from "../../../core/documents/element-anchors.js";
+import { notifyDocumentChange } from "../../../core/documents/events.js";
+import { mapBase } from "../../../core/documents/boards/live/version-map.js";
+import type { WebDeps } from "../../context.js";
+import { SERVER_ORIGIN, type LiveFormat, type LiveVersion } from "./types.js";
+
+const MANIFEST = "manifest.json";
+
+/** Stable text of a file set (key order fixed), what checkpoints compare. */
+const filesText = (files: Record<string, string>): string =>
+  JSON.stringify(Object.fromEntries(Object.entries(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))));
+
+/**
+ * Two people moving the same element at the same moment can leave it in two places (both remove it from where it
+ * was; each puts it somewhere). The later move stays: for every element an edit just put into a parent, any other
+ * place it is in goes. The writer also writes an element only once, for what a repair here has not reached.
+ */
+export function keepLaterMoves(doc: Y.Doc, events: Y.YEvent<Y.AbstractType<unknown>>[]): void {
+  const placed: { board: string; parent: string; at: number; id: string }[] = [];
+  for (const e of events) {
+    if (!(e.target instanceof Y.Array)) continue;
+    const path = e.path.map(String);
+    if (path.length !== 4 || path[1] !== "nodes" || path[3] !== "children") continue;
+    let at = 0;
+    for (const d of e.delta) {
+      if (d.retain) at += d.retain;
+      if (Array.isArray(d.insert)) {
+        for (const id of d.insert)
+          if (typeof id === "string") placed.push({ board: path[0], parent: path[2], at: at++, id });
+      }
+    }
+  }
+  if (!placed.length) return;
+  const extra: { arr: Y.Array<string>; at: number }[] = [];
+  const byBoard = new Map<string, typeof placed>();
+  for (const p of placed) byBoard.set(p.board, [...(byBoard.get(p.board) ?? []), p]);
+  for (const [board, list] of byBoard) {
+    const ids = new Set(list.map((p) => p.id));
+    for (const [parent, n] of boardMaps(doc, board).nodes) {
+      const arr = n.get("children");
+      if (!(arr instanceof Y.Array)) continue;
+      (arr as Y.Array<string>).toArray().forEach((id, at) => {
+        if (!ids.has(id)) return;
+        // The place this edit made stays; every other one goes.
+        if (list.some((p) => p.id === id && p.parent === parent && p.at === at)) return;
+        if (list.some((p) => p.id === id)) extra.push({ arr: arr as Y.Array<string>, at });
+      });
+    }
+  }
+  if (!extra.length) return;
+  doc.transact(() => {
+    // From the end, so earlier places keep their index.
+    for (const x of extra.sort((a, b) => b.at - a.at)) x.arr.delete(x.at, 1);
+  }, SERVER_ORIGIN);
+}
+
+/** Every string a design's live document shows: text, attributes, CSS values, board names (for secret checks). */
+export function liveStrings(doc: Y.Doc): string[] {
+  const out: string[] = [];
+  const walk = (v: unknown) => {
+    if (typeof v === "string") out.push(v);
+    else if (v instanceof Y.Map) for (const x of (v as Y.Map<unknown>).values()) walk(x);
+    else if (v instanceof Y.Array) for (const x of (v as Y.Array<unknown>).toArray()) walk(x);
+  };
+  walk(doc.getMap("boards"));
+  walk(manifestOf(doc));
+  walk(doc.getMap(DESIGN_META));
+  return out;
+}
+
+/** What one edit touched, per board: everything (a new board), or these elements and rules, and the base layer. */
+interface Touched {
+  all: boolean;
+  nodes: Set<string>;
+  rules: Set<string>;
+  meta: boolean;
+}
+
+/** Applies an edit to `scratch` and returns what it touched in the boards (the board list is small: always checked). */
+export function watchEdit(scratch: Y.Doc, apply: () => void): Map<string, Touched> {
+  const touched = new Map<string, Touched>();
+  const mark = (board: string): Touched => {
+    let t = touched.get(board);
+    if (!t) touched.set(board, (t = { all: false, nodes: new Set(), rules: new Set(), meta: false }));
+    return t;
+  };
+  const boards = scratch.getMap<unknown>("boards");
+  const handler = (events: Y.YEvent<Y.AbstractType<unknown>>[]) => {
+    for (const e of events) {
+      const path = e.path.map(String);
+      const keys = [...e.changes.keys.keys()];
+      if (path.length === 0) {
+        for (const k of keys) mark(k).all = true;
+        continue;
+      }
+      const t = mark(path[0]);
+      if (path.length === 1) {
+        t.all = true;
+        continue;
+      }
+      const into = path[1] === "nodes" ? t.nodes : path[1] === "rules" ? t.rules : null;
+      if (into) {
+        if (path.length >= 3) into.add(path[2]);
+        else for (const k of keys) into.add(k);
+      } else if (path[1] === "meta") t.meta = true;
+    }
+  };
+  boards.observeDeep(handler);
+  try {
+    apply();
+  } finally {
+    boards.unobserveDeep(handler);
+  }
+  return touched;
+}
+
+/** Every string under a live-copy map (text, attributes, CSS values). */
+function stringsIn(v: unknown, out: string[]): string[] {
+  if (typeof v === "string") out.push(v);
+  else if (v instanceof Y.Text) out.push(v.toJSON());
+  else if (v instanceof Y.Map) for (const x of (v as Y.Map<unknown>).values()) stringsIn(x, out);
+  else if (v instanceof Y.Array) for (const x of (v as Y.Array<unknown>).toArray()) stringsIn(x, out);
+  return out;
+}
+
+/** One rule as CSS text (for the CSS check). */
+function ruleCss(maps: BoardMaps, key: string): string {
+  const y = maps.rules.get(key);
+  if (!y) return "";
+  const decl = orderedPairs(y.get(R.style) as Y.Map<string>, y.get(R.props) as Y.Array<string>)
+    .map(([p, v]) => `${p}:${v};`)
+    .join("");
+  const at = typeof y.get(R.atRule) === "string" ? (y.get(R.atRule) as string) : "";
+  const sel = typeof y.get(R.sel) === "string" ? (y.get(R.sel) as string) : "";
+  if (y.get(R.single)) return `${at}{${decl}}`;
+  return at ? `${at}{${sel}{${decl}}}` : `${sel}{${decl}}`;
+}
+
+/**
+ * Why an edit is refused, checking only what it touched with the board format's own rules: the elements through
+ * the board sanitizer's allow-list (no scripts, event handlers, javascript: URLs or external references), the rules
+ * and the base layer through the CSS check, the board's size, and secret values in the touched text.
+ */
+export function checkEdit(scratch: Y.Doc, touched: Map<string, Touched>, secretValues: string[]): string | null {
+  const strings = liveStringsOutsideBoards(scratch);
+  for (const [board, t] of touched) {
+    if (!(scratch.getMap<unknown>("boards").get(board) instanceof Y.Map)) continue;
+    const maps = boardMaps(scratch, board);
+    const ids = t.all ? [...maps.nodes.keys()] : [...t.nodes].filter((id) => maps.nodes.has(id));
+    const keys = t.all ? [...maps.rules.keys()] : [...t.rules].filter((k) => maps.rules.has(k));
+    for (const id of ids) stringsIn(maps.nodes.get(id), strings);
+    for (const k of keys) stringsIn(maps.rules.get(k), strings);
+    if (t.all || t.meta) stringsIn(maps.meta, strings);
+
+    const html = ids.map((id) => writeElement(maps, id)).join("");
+    if (html) {
+      const clean = sanitizeFragment(html, { images: "refuse" });
+      const r = clean.removed;
+      if (clean.problems.length || r.scripts || r.handlers || r.jsUrls) return "board_format";
+    }
+    const css = keys.map((k) => ruleCss(maps, k)).join("");
+    if (css && checkCss(css).length) return "board_format";
+    const base = maps.meta.get("baseCss");
+    if ((t.all || t.meta) && typeof base === "string" && checkCss(base).length) return "board_format";
+    if (ids.length || keys.length) {
+      const out = writeBoard(maps);
+      if (Buffer.byteLength(out.body) + Buffer.byteLength(out.css) > BOARD_MAX_BYTES) return "board_too_large";
+    }
+  }
+  if (secretValues.length) {
+    const all = strings.join("\n");
+    if (secretValues.some((v) => v.length > 0 && all.includes(v))) return "secret_value";
+  }
+  return null;
+}
+
+/** The board list and the design's title (always small, always checked). */
+function liveStringsOutsideBoards(doc: Y.Doc): string[] {
+  const out: string[] = [];
+  stringsIn(manifestOf(doc), out);
+  stringsIn(doc.getMap(DESIGN_META), out);
+  return out;
+}
+
+/**
+ * Who builds each board, in the live document itself (a server-only map browsers may not change), so every replica
+ * agrees: in Redis mode several replicas serve one design. A claim is `replica|socketId|time`; a replica tells its
+ * page to build only when its claim is the one standing after the others had time to arrive (Yjs settles concurrent
+ * writes the same way everywhere). A claim older than CLAIM_MS on a board still not built is abandoned (a replica
+ * that died mid-build).
+ */
+export const BUILDERS = "wardby-builders";
+const CLAIM_MS = 30_000;
+
+interface Page {
+  socketId: string;
+  readOnly: boolean;
+  send: (payload: string) => void;
+}
+
+export function boardsFormat(
+  db: WebDeps["db"],
+  opts: { replica: string; settleMs: number },
+): LiveFormat & {
+  message(
+    documentId: string,
+    doc: Y.Doc,
+    from: { socketId: string; readOnly: boolean; send: (p: string) => void },
+    payload: string,
+  ): void;
+  left(documentId: string, doc: Y.Doc, socketId: string): void;
+} {
+  const filesOf = async (documentId: string, v: LiveVersion): Promise<Record<string, string>> => {
+    const row = await db.documentVersion.findUnique({
+      where: { documentId_number: { documentId, number: v.number } },
+      select: { id: true },
+    });
+    return row ? loadVersionFiles(db, row.id) : {};
+  };
+  /** Pages on this replica waiting for a board to be built, per document and board. */
+  const waiting = new Map<string, Map<string, Page[]>>();
+  const waitersOf = (documentId: string, board: string): Page[] => {
+    let byBoard = waiting.get(documentId);
+    if (!byBoard) waiting.set(documentId, (byBoard = new Map<string, Page[]>()));
+    let list = byBoard.get(board);
+    if (!list) byBoard.set(board, (list = []));
+    return list;
+  };
+  const watched = new WeakSet<Y.Doc>();
+  const tell = (send: (p: string) => void, board: string, role: "build" | "wait" | "join") =>
+    send(JSON.stringify({ type: "board", board, role }));
+
+  return {
+    async seed(documentId, v) {
+      if (v.format !== "boards-v1") return null;
+      const files = await filesOf(documentId, v);
+      const text = files[MANIFEST];
+      if (typeof text !== "string") return null;
+      const manifest = parseManifest(text);
+      const doc = new Y.Doc();
+      doc.transact(() => {
+        doc.getMap(DESIGN_META).set("title", manifest.title);
+        for (const b of manifest.boards) {
+          const m = new Y.Map<unknown>();
+          for (const [k, val] of Object.entries(b)) m.set(k, val);
+          manifestOf(doc).push([m]);
+        }
+      });
+      return doc;
+    },
+
+    async versionText(documentId, v) {
+      return filesText(await filesOf(documentId, v));
+    },
+
+    snapshot(doc, since) {
+      let before: Record<string, string>;
+      try {
+        before = JSON.parse(since) as Record<string, string>;
+      } catch {
+        before = {};
+      }
+      const files = designFiles(doc, before);
+      // Stored versions are in the board sanitizer's form (publishVersion normalises every file): compare in that
+      // form too, or every checkpoint would see a difference (<br/> against <br>) and save again with no edit.
+      const normal = normalizeDesign(files).files;
+      const text = filesText(normal);
+      return text === since ? null : { content: { files: normal }, text };
+    },
+
+    /**
+     * A version published while people edit (an agent, MCP, a page's fallback save) is merged into the live copies
+     * board by board, as changes by element from the version it was based on (core/documents/boards/live/merge.ts).
+     * The changes are worked out once and applied twice: to a copy of the live document as it is now, so they land
+     * after everyone's edits (a text box someone changed meanwhile merges word by word, never by whoever wrote last),
+     * and to the base state, which then writes the new version (the next merge's base). A board nobody has opened
+     * takes the new file as it is; the board list takes the new version's changes, keeping boards added meanwhile.
+     */
+    async merge(documentId, base, v, live) {
+      if (v.format !== "boards-v1") return "reset";
+      const next = await filesOf(documentId, v);
+      const before = await filesOf(documentId, { ...v, number: v.baseNumber ?? v.number - 1 });
+      if (typeof next[MANIFEST] !== "string") return "reset";
+      const scratch = new Y.Doc();
+      Y.applyUpdate(scratch, base);
+      const now = new Y.Doc();
+      Y.applyUpdate(now, Y.encodeStateAsUpdate(live));
+      const vector = Y.encodeStateVector(now);
+      try {
+        const plan = planDesignMerge(scratch, now, before, next);
+        // New elements get the same ids in both copies: made once, then replayed.
+        const fresh = newElementIds(scratch, now);
+        const made: string[] = [];
+        plan.apply(
+          now,
+          () => {
+            const id = fresh();
+            made.push(id);
+            return id;
+          },
+          SERVER_ORIGIN,
+        );
+        let i = 0;
+        plan.apply(scratch, () => made[i++] ?? fresh(), SERVER_ORIGIN);
+      } catch {
+        return "reset";
+      }
+      return {
+        update: Y.encodeStateAsUpdate(now, vector),
+        versionState: Y.encodeStateAsUpdate(scratch),
+        text: filesText(next),
+      };
+    },
+
+    refuse(scratch, apply, secretValues) {
+      // Who builds which board is the server's: a page that changes it is refused.
+      const claims = JSON.stringify(scratch.getMap(BUILDERS).toJSON());
+      const touched = watchEdit(scratch, apply);
+      if (JSON.stringify(scratch.getMap(BUILDERS).toJSON()) !== claims) return "server_data";
+      return checkEdit(scratch, touched, secretValues);
+    },
+
+    /**
+     * Pins follow their element by its live id: the stored anchor's path and words are brought up to date from the
+     * live copy (so a page that is not live, or a version, still finds the element), and a pin whose element was
+     * deleted is outdated. A pin without a live id keeps today's anchor (the version's own check decides).
+     */
+    async refreshAnchors(documentId, doc) {
+      const threads = await db.commentThread.findMany({
+        where: { documentId, status: { in: ["open", "outdated"] } },
+        select: { id: true, status: true, anchor: true },
+      });
+      const boards = new Map<string, { body: DomElement; byId: Map<string, DomElement>; close: () => void } | null>();
+      const boardOf = (id: string) => {
+        if (!boards.has(id)) {
+          if (!isBuilt(doc, id)) boards.set(id, null);
+          else {
+            const written = writeBoard(boardMaps(doc, id));
+            const dom = new JSDOM(`<body>${written.body}</body>`, { virtualConsole: new VirtualConsole() });
+            const body = dom.window.document.body;
+            const byId = new Map<string, DomElement>();
+            for (const [node, liveId] of mapBase(body, written.spots))
+              if (node.nodeType === 1) byId.set(liveId, node as DomElement);
+            boards.set(id, { body, byId, close: () => dom.window.close() });
+          }
+        }
+        return boards.get(id)!;
+      };
+      let changed = 0;
+      try {
+        for (const th of threads) {
+          let a: ElementAnchor;
+          try {
+            a = parseElementAnchor(th.anchor);
+          } catch {
+            continue;
+          }
+          if (!a.liveId) continue;
+          const board = boardOf(a.board);
+          if (!board) continue;
+          if (!boardMaps(doc, a.board).nodes.has(a.liveId)) {
+            if (th.status === "open") {
+              await db.commentThread.update({ where: { id: th.id }, data: { status: "outdated" } });
+              changed++;
+            }
+            continue;
+          }
+          // An element inside a text box has no spot of its own: its anchor stays as it is.
+          const found = board.byId.get(a.liveId);
+          if (!found) continue;
+          const el = anchorTarget(found) as DomElement;
+          const next: ElementAnchor = {
+            ...a,
+            path: elementPath(el, board.body),
+            tag: el.localName,
+            words: elementWords(el),
+          };
+          if (th.status === "open" && JSON.stringify(next) === JSON.stringify(a)) continue;
+          await db.commentThread.update({ where: { id: th.id }, data: { anchor: next, status: "open" } });
+          changed++;
+        }
+      } finally {
+        for (const b of boards.values()) b?.close();
+      }
+      if (changed > 0) await notifyDocumentChange(db, documentId, "thread");
+    },
+
+    message(documentId, doc, from, payload) {
+      let msg: { type?: unknown; board?: unknown };
+      try {
+        msg = JSON.parse(payload) as typeof msg;
+      } catch {
+        return;
+      }
+      if (msg.type !== "open-board" || typeof msg.board !== "string") return;
+      watch(documentId, doc);
+      open(documentId, doc, msg.board, from);
+    },
+
+    left(documentId, doc, socketId) {
+      const byBoard = waiting.get(documentId);
+      if (byBoard)
+        for (const [board, list] of byBoard)
+          byBoard.set(
+            board,
+            list.filter((p) => p.socketId !== socketId),
+          );
+      const claims = doc.getMap<string>(BUILDERS);
+      const mine = `${opts.replica}|${socketId}|`;
+      const gone = [...claims.entries()].filter(([board, c]) => c.startsWith(mine) && !isBuilt(doc, board));
+      // The builder left before building: its claim goes, and waiting pages (on any replica) ask again.
+      if (gone.length) doc.transact(() => gone.forEach(([board]) => claims.delete(board)), SERVER_ORIGIN);
+    },
+  };
+
+  /** A page opens a board: join it, or claim building it, or wait for whoever does. */
+  function open(documentId: string, doc: Y.Doc, board: string, page: Page): void {
+    if (isBuilt(doc, board)) return tell(page.send, board, "join");
+    const list = waitersOf(documentId, board);
+    const wait = () => {
+      if (!list.some((p) => p.socketId === page.socketId)) list.push(page);
+      tell(page.send, board, "wait");
+    };
+    // A read-only page never builds (its edits are not taken): it waits for someone who can.
+    if (page.readOnly) return wait();
+    const claims = doc.getMap<string>(BUILDERS);
+    const standing = claims.get(board);
+    const mine = `${opts.replica}|${page.socketId}|`;
+    if (standing && !standing.startsWith(mine) && Date.now() - Number(standing.split("|")[2] ?? 0) < CLAIM_MS)
+      return wait();
+    const claim = `${mine}${Date.now()}`;
+    doc.transact(() => claims.set(board, claim), SERVER_ORIGIN);
+    const decide = () => {
+      if (isBuilt(doc, board)) return tell(page.send, board, "join");
+      if (claims.get(board) === claim) return tell(page.send, board, "build");
+      wait();
+    };
+    if (opts.settleMs > 0) setTimeout(decide, opts.settleMs);
+    else decide();
+  }
+
+  /** When a claim goes (its builder left, on any replica), this replica's waiting pages ask again. */
+  function watch(documentId: string, doc: Y.Doc): void {
+    if (watched.has(doc)) return;
+    watched.add(doc);
+    // An edit from a page on this replica: where it put an element that is also somewhere else, the other place goes.
+    doc.getMap<unknown>("boards").observeDeep((events, tr) => {
+      const origin = tr.origin as { source?: unknown } | null;
+      if (origin?.source === "connection") keepLaterMoves(doc, events as Y.YEvent<Y.AbstractType<unknown>>[]);
+    });
+    doc.getMap<string>(BUILDERS).observe((e) => {
+      for (const [board, change] of e.changes.keys) {
+        if (change.action !== "delete" || isBuilt(doc, board)) continue;
+        const list = waitersOf(documentId, board);
+        const next = list.find((p) => !p.readOnly);
+        if (!next) continue;
+        list.splice(list.indexOf(next), 1);
+        open(documentId, doc, board, next);
+      }
+    });
+  }
+}

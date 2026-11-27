@@ -6,6 +6,10 @@
  * both locate with the same function. Paths are relative to an explicit root element (on the
  * server the document body, in the page the GrapesJS wrapper element). The browser bundle
  * imports this file: keep it free of Node and server-only imports.
+ *
+ * While a design is edited live, a pin also remembers its element's live id (`liveId`, never written into the
+ * board's HTML): it follows that element through everyone's edits and agents' merges, and the server keeps the
+ * path and words current from it, so the anchor still works for a page that is not live.
  */
 import { z } from "zod";
 import { BOARD_ID } from "./boards/ids.js";
@@ -22,6 +26,7 @@ const schema = z
     type: z.literal("element"),
     board: z.string().regex(BOARD_ID),
     elementId: z.string().regex(ID_OK).optional(),
+    liveId: z.string().regex(ID_OK).optional(),
     path: z.string().max(2048).regex(PATH),
     tag: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
     words: z.string().max(MAX_ANCHOR_WORDS),
@@ -95,14 +100,18 @@ export function anchorForElement(
   dy: number,
   root: ElementLike,
   storedIds?: ReadonlySet<string>,
+  /** While editing live: the picked element's live id. */
+  liveIdOf?: (el: ElementLike) => string | null,
 ): ElementAnchor {
   const el = anchorTarget(picked);
+  const liveId = liveIdOf?.(el) ?? null;
   // storedIds alone decides when given; the generated-id pattern is only the fallback without it.
   const idOk = ID_OK.test(el.id) && (storedIds ? storedIds.has(el.id) : !GRAPES_GENERATED_ID.test(el.id));
   return {
     type: "element",
     board,
     ...(idOk ? { elementId: el.id } : {}),
+    ...(liveId && ID_OK.test(liveId) ? { liveId } : {}),
     path: elementPath(el, root),
     tag: tagOf(el),
     words: elementWords(el),
@@ -113,8 +122,19 @@ export function anchorForElement(
 
 const WORDS_PREFIX = 24;
 
-/** The element an anchor points at under `root`: by id, then by path (same tag, same first words), then by unique words. */
-export function locateElement(root: ElementLike, a: ElementAnchor): ElementLike | null {
+/**
+ * The element an anchor points at under `root`: by live id (while editing live, `byLiveId` finds it), then by id,
+ * then by path (same tag, same first words), then by unique words.
+ */
+export function locateElement(
+  root: ElementLike,
+  a: ElementAnchor,
+  byLiveId?: (liveId: string) => ElementLike | null,
+): ElementLike | null {
+  if (a.liveId && byLiveId) {
+    const live = byLiveId(a.liveId);
+    if (live) return anchorTarget(live);
+  }
   const head = a.words.slice(0, WORDS_PREFIX);
   const sameText = (el: ElementLike) => head === "" || norm(el.textContent).startsWith(head);
   if (a.elementId) {

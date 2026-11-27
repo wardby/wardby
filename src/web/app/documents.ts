@@ -25,6 +25,7 @@ import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
 import { pdfExportButton } from "./exports-menu.js";
 import { EditsTray } from "./edits-ui.js";
+import { caretColor, joinLive, type Coedit } from "./coedit.js";
 import { createEditor } from "./editor.js";
 import {
   coalesce,
@@ -47,7 +48,7 @@ import {
 } from "./plan-bar.js";
 import { ReviewPanel } from "./review-ui.js";
 import { unresolvedLinksText } from "../../core/plans/page-payload.js";
-import { isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
+import { hasUnkeepableSyntax, isLosslessRoundTrip, LOSSY_NOTICE } from "./roundtrip.js";
 import { TextSurface } from "./text-surface.js";
 
 const SAVE_DELAY_MS = 1500;
@@ -86,10 +87,23 @@ async function main(): Promise<void> {
     return fatal(root, errorMessage(err));
   }
   if (payload.version.format !== "markdown") return fatal(root, "This page shows documents only. Reload to try again.");
-  mount(root, boot, api, payload, payload.version.markdown);
+  // Live co-editing, joined before the editor is drawn. Null (no session, no WebSocket, formatting the editor
+  // cannot keep): the page saves versions the usual way.
+  const coedit =
+    payload.me.kind !== "anonymous" && !hasUnkeepableSyntax(payload.version.markdown)
+      ? await joinLive(boot, api, payload.me.name ?? "Someone")
+      : null;
+  mount(root, boot, api, payload, payload.version.markdown, coedit);
 }
 
-function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPayload, markdown: string): void {
+function mount(
+  root: HTMLElement,
+  boot: Bootstrap,
+  api: Api,
+  payload: DocumentPayload,
+  markdown: string,
+  coedit: Coedit | null,
+): void {
   let viewer: Viewer = payload.me;
   let baseNumber = payload.version.number;
   const canWrite = viewer.kind === "member" && atLeast(viewer.access, "write");
@@ -232,9 +246,22 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   renderPlan(payload);
 
   // ---- editor ----
-  const editor = createEditor(editorEl, markdown, canWrite, payload.planSet ? () => planTargets : undefined);
+  const editor = createEditor(
+    editorEl,
+    markdown,
+    canWrite,
+    payload.planSet ? () => planTargets : undefined,
+    coedit
+      ? {
+          ydoc: coedit.ydoc,
+          provider: coedit.provider,
+          user: { name: viewer.name ?? "Someone", color: caretColor(viewer.name ?? "Someone") },
+        }
+      : undefined,
+  );
   // A document the editor can't keep as written opens comment-only for everyone (ruling R17).
-  const lossless = isLosslessRoundTrip(markdown, editor.getMarkdown());
+  // Live: the server only lets documents the editor can keep go live, and the content comes from it.
+  const lossless = coedit !== null || isLosslessRoundTrip(markdown, editor.getMarkdown());
   const editable = canWrite && lossless;
   let lossyLocked = false;
   const lockLossy = () => {
@@ -320,8 +347,11 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
 
   let startLive: () => void = () => undefined;
   // Badge tooltips name mentioned people as the dialog does.
-  const surface: TextSurface = new TextSurface(editor, { page, margin, bubble, stage }, (body): string =>
-    comments.preview(body),
+  const surface: TextSurface = new TextSurface(
+    editor,
+    { page, margin, bubble, stage },
+    (body): string => comments.preview(body),
+    coedit?.anchors(editor),
   );
   const comments = new CommentsUI(
     {
@@ -453,7 +483,10 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       void edits.refresh();
     } catch (err) {
       dirty = true;
-      if (err instanceof ApiError && err.code === "document_version_conflict") {
+      if (
+        err instanceof ApiError &&
+        (err.code === "document_version_conflict" || err.code === "document_base_unavailable")
+      ) {
         conflict = true;
         editor.setEditable(false);
         showSave(errorMessage(err), true);
@@ -494,6 +527,7 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
       const word = lockState === "archived" ? "Read only: archived" : "Read only: approved";
       return dirty ? `${word} · unsaved changes` : word;
     }
+    if (editable && !lossyLocked && coedit) return "Live";
     if (editable && !lossyLocked) return dirty ? "Unsaved changes" : "Saved";
     return atLeast(viewer.access, "comment") ? "Comment only" : "Read only";
   };
@@ -556,7 +590,11 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
     }
     // A guest who commented since the page loaded becomes mentionable, so the @-list is refreshed with the threads.
     void comments.loadMentions();
-    if (act === "load") return loadVersion(next);
+    // Live: the editor already holds the newest text (a version is a checkpoint of it); only the number moves.
+    if (act === "load" && coedit) {
+      baseNumber = next.version.number;
+      version.textContent = `v${baseNumber}`;
+    } else if (act === "load") return loadVersion(next);
     if (act === "banner") changedBanner.hidden = false;
     // A reopen's copy of the shown version: same text, so only the number moves; unsaved edits save over it.
     if (act === "adopt") {
@@ -658,8 +696,13 @@ function mount(root: HTMLElement, boot: Bootstrap, api: Api, payload: DocumentPa
   };
   startLive();
 
-  showSave(restingSaveText());
-  if (editable) {
+  showSave(coedit?.refusedNotice ?? restingSaveText());
+  // After a reconnect the shared document may have moved on: place the comments again from it.
+  coedit?.onResync(() => {
+    surface.reset();
+    void refresh();
+  });
+  if (editable && !coedit) {
     editor.on("update", ({ transaction }) => {
       if (!transaction.docChanged || conflict || locked) return;
       dirty = true;

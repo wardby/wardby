@@ -11,6 +11,7 @@ resources:
   - control-plane-gateway.yaml
   - priority.yaml
   - run-steps.yaml
+  - live-replicas.yaml
 patches:
   - path: proxy-cloudsql.yaml
   - path: proxy-priority.yaml

@@ -43,7 +43,7 @@ directory.
 | ------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `create_document`                                            | `documents:write` | Create a document or a design (`kind`); optionally link it to a repository and coding agent                       |
 | `link_document`                                              | `documents:write` | Link a document you own to a repository and coding agent, or change or clear the link                             |
-| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files` (needs `write`)                                    |
+| `publish_version`                                            | `documents:write` | Publish the next version: `markdown` or, for a design, `files`, and the required `baseNumber` (needs `write`)     |
 | `get_document`                                               | `documents:read`  | Read the current or a numbered version (`versionNumber`)                                                          |
 | `list_document_versions`                                     | `documents:read`  | List versions, newest first: who, how, when, the run and threads it answered                                      |
 | `restore_document_version`                                   | `documents:write` | Publish an earlier version's content as a new version (needs `write`)                                             |
@@ -205,6 +205,71 @@ balancers in front of Wardby must not buffer `text/event-stream` responses
 an idle or read timeout longer than the 15-second heartbeat (60 seconds or
 more is a safe choice).
 
+## Live editing
+
+Everyone with a document or design open edits the same copy at the same time:
+each person's typing appears for the others as they type, with a named caret,
+and no one is locked out by someone else's save. The save state reads
+**Live**. This section covers both; what is particular to designs (boards,
+elements, pins) is in [Editing designs](#editing-designs).
+
+- **Who edits.** Members with `write` edit; members and guests with `comment`
+  or `read` watch the edits arrive but cannot type. An approved, rejected or
+  archived document is read-only for everyone, and a review change applies at
+  once to everyone who has it open.
+- **Comments follow their words.** A comment's place is kept as a position in
+  the shared document, so it stays on its words through everyone's edits, even
+  edits inside the commented words, and it is marked outdated only when its
+  words are deleted (undoing that deletion opens it again). An agent's version
+  merged into the live document changes only the paragraphs it edited, so
+  comments elsewhere stay where they are. A comment can cover up to 10,000
+  characters.
+- **The connection.** The page joins over a WebSocket on the same address,
+  `wss://<your-host>/d/live/<documentId>`, signed in with its browser session.
+  Proxies and load balancers in front of Wardby must pass WebSocket upgrades on
+  `/d/live/` and allow idle connections of at least a minute. A member whose
+  access comes from a share link gets a single-use, 60-second ticket from
+  `POST /d/api/<documentId>/live-ticket` and sends it in the first message
+  (never in the URL).
+- **Versions.** The live copy is saved as a new version after 3 seconds
+  without edits (at most every 15 seconds while edits keep coming), credited
+  to the person who edited last, so History, review, exports and every tool
+  keep working from versions. Opening a document saves nothing, and changes
+  that only re-format the Markdown are not saved. Nothing is saved while the
+  document is approved, rejected or archived.
+- **Publishing to a live document.** `publish_version` (and agents, restores
+  and the page's own saves) name the version they read. When newer versions
+  exist, the change is merged with everything published since (word by word
+  in a document, element by element in a design):
+  the saved version is the whole document with both, based on the latest
+  version, and everyone with the page open sees it arrive. The merge needs
+  the older version's state, which is kept for the 50 newest versions; an
+  older `baseNumber` is refused with
+  [`document_base_unavailable`](../help/errors/document-base-unavailable.md).
+  Threads sent to a coding agent merge the same way. A version with
+  formatting the editor cannot keep ends live editing for that document
+  (pages reload and open it comment-only) instead of dropping that content.
+- **Secret values.** An edit that would put one of the document agent's secret
+  values into the text is refused before anyone else receives it
+  ([`edit_refused`](../help/errors/edit-refused.md)); the page reloads from
+  the server's copy and says why. In a design, an edit that breaks the board
+  format or makes a board larger than 512 KB is refused the same way.
+- **When live editing is not used.** Documents with formatting the editor
+  cannot keep (images, checklists, HTML) open comment-only, as before, and
+  never go live. When the page cannot join (no WebSocket through a proxy,
+  [`live_unavailable`](../help/errors/live-unavailable.md)), it saves
+  versions the usual way: each save names the version it started from and is
+  refused with `document_version_conflict` if someone published since.
+- **Several copies of the control plane.** Each document is served by one
+  copy at a time (the others hand its connections to it), or, with
+  `WARDBY_LIVE_REDIS_URL`, by every copy through Redis. See
+  [Availability](availability.md#why-the-control-plane-can-run-more-than-one-copy).
+- **History.** The live copy is kept in PostgreSQL and continues across
+  restarts. A page holding a copy from a history the server no longer has
+  (the live copy was reset) is refused
+  ([`live_state_stale`](../help/errors/live-state-stale.md)) and reloads, so
+  an old copy is never merged back in.
+
 ## Edits and restore
 
 The side panel of a document page has the same tabs as a design page's:
@@ -247,6 +312,15 @@ content; read a version with `get_document` and `versionNumber`.
 (the latest version you saw) for the same conflict check. Only a restore may
 write a summary reading "Restored v<N>": `publish_version` refuses such a
 summary with `document_summary_invalid`.
+
+`publish_version` also takes a required `baseNumber`: the version number you
+read (`get_document` returns it). It is refused with
+`document_version_conflict` when a newer version was published since; read
+the document again and redo the change on the new version.
+
+**Upgrading.** `publish_version` now requires `baseNumber`. A client that
+calls it without one gets an error naming the field: read the document first
+and pass the version number it returns.
 
 The page API behind the tray: `GET /d/api/<documentId>/versions?before=&limit=`,
 `GET /d/api/<documentId>/versions/<n>` and `POST /d/api/<documentId>/versions/<n>/restore`
@@ -405,20 +479,60 @@ top bar) for checking the responsive layout, and the **Comments** and
 - **Style** and **Settings** tabs (right) for the selected element, with Undo
   and Redo.
 
-Edits save by themselves a moment after you stop, as a new version that
-contains only the changed files. If someone else published first, the page says
-so and offers to reload rather than overwriting. An edit that would break the
-board format (for example an external image) is not saved, and the page shows
-the problem.
+Everyone with the design open sees it live, and people with `write` edit it together (see [Live editing](#live-editing)):
+
+- **Boards go live when opened.** The first person to open a board builds its
+  live copy from the version's file, and everyone else on that board joins it
+  (a page with only `comment` or `read` access waits for someone who can
+  edit). Until the board's live copy reaches a page, the board cannot be
+  edited there. A board nobody has opened stays as the version's file.
+- **Element by element.** Changes reach the others as they are made, text as
+  it is typed, without reloading the canvas. Two people changing different
+  properties of one element both keep their change, and two people typing in
+  the same text box both keep every character (what someone else types in a
+  box you are typing in appears when you leave the box; characters two people
+  type at the very same spot at the same moment can interleave). If two people
+  move the same element at the same moment, the later move stays.
+- **Who is where.** Other people's selected elements are outlined in their
+  colour with their name ("is typing" while they type in a text box), and each
+  board's tab shows a dot for everyone on it. The board list (adding,
+  renaming, moving and deleting boards) is shared too.
+- **Undo** and **Redo** undo your own changes only, never someone else's.
+- **Versions.** The server saves the whole file set as a version, as for
+  documents. The page itself saves nothing while live.
+- **Checks on every edit.** An edit that breaks the [board format](../help/design-boards-format.md)
+  (for example a script or an external image), makes a board larger than
+  512 KB, or would show one of the design agent's secret values is refused
+  before anyone else receives it
+  ([`edit_refused`](../help/errors/edit-refused.md)); the page reloads from
+  the server's copy and says why.
+- **Agents and `publish_version`.** A published version is merged into the
+  live boards element by element, from the version it was based on, so
+  people's edits made meanwhile stay; text an agent rewords in a text box
+  someone else changed merges word by word (where both changed the same words,
+  the published version wins). A board nobody has opened takes the published
+  file. A publish based on an older version is merged the same way; when both
+  it and a later version changed a board nobody has opened, it is refused
+  with `document_version_conflict` (read the latest version and publish
+  again).
+
+When the page cannot join live editing (for example no WebSocket through a
+proxy), edits save by themselves a moment after you stop, as a new version
+that contains only the changed files. If someone else published first, the
+page says so and offers to reload rather than overwriting. An edit that would
+break the board format (for example an external image) is not saved, and the
+page shows the problem.
 
 A board's CSS as written is kept as a **base layer** that always renders as
 written; the editor's own changes are saved as a separate block on top. When a
-writer first opens a version, the page renders each board as written and in the
-editor and compares computed styles. Where they differ it lists "N styles may
-not be editable on board X" under **Checks**: the board still looks right, but
-those styles live only in the base layer, so the Style panel cannot change them.
-To change them, edit the HTML and CSS in the repository or send a comment to a
-coding agent.
+writer opens a version and the page saves the usual way (not live), the page
+renders each board as written and in the editor and compares computed styles.
+Where they differ it lists "N styles may not be editable on board X" under
+**Checks**: the board still looks right, but those styles live only in the
+base layer, so the Style panel cannot change them. To change them, edit the
+HTML and CSS in the repository or send a comment to a coding agent. (The
+comparison switches through every board, so it is not run while editing
+live.)
 
 ### Comments on boards
 
@@ -427,7 +541,10 @@ button), click an element in the canvas and write the comment; Esc leaves
 comment mode. A pin is anchored to the element (its board, its id when it has
 one, its tag, its first words and its path), plus the point you clicked as a
 fraction of the element's box, so it stays on the element at every device
-width. Open threads show as numbered pins; a resolved or outdated thread shows
+width. While the design is edited live, a pin also follows its element through
+everyone's edits and agents' versions (it is kept on the element itself, not
+on its place in the board), and is marked outdated when the element is
+deleted. Open threads show as numbered pins; a resolved or outdated thread shows
 its pin only while it is selected. When a new version no longer contains the
 element, the thread is marked outdated, as for Markdown text. Replies,
 mentions, resolve and reopen, live updates and share-link guests work as for
@@ -765,7 +882,7 @@ row shows the document's review state as a chip.
 | `brand.md`                   | 64 KB                                                                                                     |
 | MCP request body             | 1 MiB (`publish_version` sends every file: update a larger design in the editor; see [Designs](#designs)) |
 | Comment or reply             | 10,000 characters                                                                                         |
-| Quoted anchor text           | 500 characters                                                                                            |
+| Quoted anchor text           | 10,000 characters                                                                                         |
 | Guest name                   | 1-40 characters                                                                                           |
 | Share link lifetime          | 1-90 days, default 14                                                                                     |
 | Threads per send             | 50                                                                                                        |

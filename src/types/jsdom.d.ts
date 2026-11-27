@@ -14,6 +14,7 @@ declare module "jsdom" {
     readonly isConnected: boolean;
     readonly parentElement: DomElement | null;
     readonly childNodes: ArrayLike<DomNode> & Iterable<DomNode>;
+    readonly lastChild: DomNode | null;
     contains(other: DomNode | null): boolean;
     insertBefore<T extends DomNode>(node: T, child: DomNode | null): T;
   }
@@ -29,6 +30,7 @@ declare module "jsdom" {
     readonly namespaceURI: string | null;
     readonly attributes: ArrayLike<DomAttr> & Iterable<DomAttr>;
     innerHTML: string;
+    readonly outerHTML: string;
     lang: string;
     getAttribute(name: string): string | null;
     hasAttribute(name: string): boolean;
@@ -41,6 +43,13 @@ declare module "jsdom" {
     readonly content?: unknown;
     matches(selectors: string): boolean;
     remove(): void;
+    className: string;
+    readonly classList: { add(...tokens: string[]): void; replace(token: string, next: string): boolean };
+    before(...nodes: (DomNode | string)[]): void;
+    append(...nodes: (DomNode | string)[]): void;
+    prepend(...nodes: (DomNode | string)[]): void;
+    replaceWith(...nodes: (DomNode | string)[]): void;
+    insertAdjacentHTML(position: "beforebegin" | "afterbegin" | "beforeend" | "afterend", html: string): void;
   }
   export interface DomDocument extends DomNode, DomParent {
     title: string;
@@ -49,6 +58,7 @@ declare module "jsdom" {
     readonly documentElement: DomElement;
     getElementById(id: string): DomElement | null;
     createElement(tagName: string): DomElement;
+    createTextNode(data: string): DomNode;
   }
   export interface DomWindow {
     readonly document: DomDocument;

@@ -27,6 +27,9 @@ import {
   type Viewer,
 } from "./api.js";
 import { createBoardsEditor, ManifestUnreadableError, type BoardsEditor, type DeviceId } from "./boards-editor.js";
+import { joinLiveDocument, type LiveJoin } from "./live-join.js";
+import { drawOutlines } from "./live-board/outlines.js";
+import { startDesignSession, type DesignSession } from "./live-board/session.js";
 import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
 import { measureFidelity } from "./fidelity.js";
@@ -97,7 +100,20 @@ async function main(): Promise<void> {
     return fatal(root, errorMessage(err));
   }
   if (payload.version.format !== "boards-v1") return fatal(root, "This page shows designs only. Reload to try again.");
-  mount(root, boot, api, payload, payload.version.files);
+  // Live editing, joined before the boards are drawn. Null (no session, no WebSocket): the page saves versions the
+  // usual way. The server's board messages may arrive before the session starts: they wait in `early`.
+  const early: Record<string, unknown>[] = [];
+  let toSession: ((msg: Record<string, unknown>) => void) | null = null;
+  const join =
+    payload.me.kind !== "anonymous"
+      ? await joinLiveDocument(boot, api, payload.me.name ?? "Someone", {
+          onMessage: (msg) => (toSession ? toSession(msg) : early.push(msg)),
+        })
+      : null;
+  mount(root, boot, api, payload, payload.version.files, join, (deliver) => {
+    toSession = deliver;
+    for (const msg of early.splice(0)) deliver(msg);
+  });
 }
 
 /** A small modal in the page's own style (never confirm() or prompt()). Resolves null on cancel. */
@@ -148,6 +164,8 @@ function mount(
   api: Api,
   payload: DocumentPayload,
   files: Record<string, string>,
+  join: LiveJoin | null = null,
+  onSessionMessages: (deliver: (msg: Record<string, unknown>) => void) => void = () => undefined,
 ): void {
   let viewer: Viewer = payload.me;
   let baseNumber = payload.version.number;
@@ -245,7 +263,9 @@ function mount(
   const canvasEl = h("div", { class: "canvas" });
   // Comment pins over the canvas (design-surface.ts).
   const pinsLayer = h("div", { class: "pins" });
-  const canvasWrap = h("div", { class: "canvas-wrap" }, canvasEl, pinsLayer);
+  // Other people's selections while editing live (live-board/outlines.ts).
+  const peopleLayer = h("div", { class: "people", aria: { hidden: "true" } });
+  const canvasWrap = h("div", { class: "canvas-wrap" }, canvasEl, pinsLayer, peopleLayer);
 
   const checks = h("div", { class: "checks", hidden: true, role: "note" });
   const commentsPanel = h("div", { class: "panel" });
@@ -422,6 +442,57 @@ function mount(
   }
   const boardNames = () => new Map(boards.manifest().boards.map((b) => [b.id, b.name]));
 
+  // ---- live editing: the server saves versions; this page keeps its board in step with everyone's ----
+  /** Live: boards with no live copy take their file from version `v` (a newer version than the page shows). */
+  const refreshUnbuilt = (v: DocumentPayload["version"]) => {
+    if (!session || v.format !== "boards-v1") return;
+    for (const b of boards.manifest().boards) {
+      const text = v.files[b.file];
+      if (!session.isBuilt(b.id) && typeof text === "string") boards.setBoardFile(b.id, text);
+    }
+  };
+  const session: DesignSession | null = join
+    ? startDesignSession({
+        join,
+        boards,
+        editable: () => canEdit && !lockedNow,
+        beforeBuild: async () => {
+          const latest = await api.load();
+          if (latest.version.number > baseNumber) refreshUnbuilt(latest.version);
+        },
+      })
+    : null;
+  /** Who else is on each board: a dot in their colour per person, their names as the tooltip. */
+  const presenceMarks = (board: string): HTMLElement[] => {
+    if (!session) return [];
+    const here = session.peers().filter((p) => p.board === board);
+    if (!here.length) return [];
+    const mark = h("span", { class: "presence", title: here.map((p) => p.name).join(", ") });
+    for (const p of here) {
+      const dot = h("span", { class: "dot" });
+      dot.style.background = p.color;
+      mark.append(dot);
+    }
+    return [mark];
+  };
+  if (session) {
+    // The keyboard's Undo and Redo (GrapesJS's core:undo and core:redo commands) undo your own changes too, as the
+    // buttons do: GrapesJS's own undo would put back what an element held before your change, over anyone's since.
+    boards.editor.Commands.add("core:undo", { run: () => session.undo() });
+    boards.editor.Commands.add("core:redo", { run: () => session.redo() });
+    onSessionMessages((msg) => session.message(msg));
+    boards.onBoard((id) => session.boardShown(id));
+    drawOutlines(session, boards.editor, peopleLayer, () => boards.currentBoard());
+    // The board tabs follow who is where (redrawn only when that changes, not on every selection).
+    let where = "";
+    session.onChange(() => {
+      const now = JSON.stringify(session.peers().map((p) => [p.name, p.board]));
+      if (now === where) return;
+      where = now;
+      renderBoards();
+    });
+  }
+
   deviceButtons.forEach((btn, i) =>
     btn.addEventListener("click", () => {
       boards.setDevice(DEVICE_IDS[i]);
@@ -431,8 +502,9 @@ function mount(
       });
     }),
   );
-  undoBtn.addEventListener("click", () => boards.editor.UndoManager.undo());
-  redoBtn.addEventListener("click", () => boards.editor.UndoManager.redo());
+  // Live: your own changes only (someone else's are never undone by your Undo).
+  undoBtn.addEventListener("click", () => (session ? session.undo() : boards.editor.UndoManager.undo()));
+  redoBtn.addEventListener("click", () => (session ? session.redo() : boards.editor.UndoManager.redo()));
 
   // ---- checks: the version's warnings, in the server's own wording (warningText) ----
   const renderChecks = () => {
@@ -477,6 +549,7 @@ function mount(
         "button",
         { type: "button", class: "pick", disabled: measuring, aria: { current: String(on) } },
         h("span", { class: "name" }, b.name),
+        ...presenceMarks(b.id),
       );
       pick.addEventListener("click", () => {
         if (!measuring) boards.selectBoard(b.id);
@@ -669,6 +742,12 @@ function mount(
     boardNames,
     (body: string): string => comments.preview(body),
     afterMeasuring,
+    session
+      ? {
+          idOf: (el) => session.idOfElement(el),
+          elementOf: (liveId) => session.elementOf(liveId)?.getEl() ?? null,
+        }
+      : null,
   );
   surface = pins;
   const comments: CommentsUI = new CommentsUI(
@@ -767,12 +846,14 @@ function mount(
    * The board holds edits not saved yet, also while locked: they wait for a reopen, and a newer version
    * then shows the changed banner instead of replacing them.
    */
-  const dirty = () => canEdit && boards.dirty();
+  // Live: nothing waits to be saved on this page (the server saves versions from the live copy).
+  const dirty = () => canEdit && !session && boards.dirty();
   /** Unsaved edits that may be saved now: none while the design is locked. */
   const canSaveNow = () => dirty() && !lockedNow;
   /** The save state when nothing is being saved: what this viewer can do with the design now. */
   const restingSaveText = () => {
     if (lockedNow) return `Read only: ${lockState}${dirty() ? " · unsaved changes" : ""}`;
+    if (canEdit && session) return "Live";
     if (canEdit) return dirty() ? "Unsaved changes" : "Saved";
     return atLeast(viewer.access, "comment") ? "Comment only" : "Read only";
   };
@@ -851,6 +932,11 @@ function mount(
 
   boards.onChange(() => {
     renderBoards();
+    // Live: board-list changes go to everyone; edits reach the live copy through the connector.
+    if (session) {
+      if (canEdit && !lockedNow) session.pushManifest();
+      return;
+    }
     if (!canEdit || lockedNow || conflict || measuring) return;
     clearTimeout(fidelityTimer);
     showSave("Unsaved changes");
@@ -981,6 +1067,17 @@ function mount(
   /** Shows a newer version in place, keeping the selected board and device. */
   const loadVersion = (next: DocumentPayload) => {
     if (next.version.format !== "boards-v1") return;
+    // Live: the boards already show it (the live copy is what versions are saved from); only the version's number,
+    // checks and threads change.
+    if (session) {
+      refreshUnbuilt(next.version);
+      baseNumber = next.version.number;
+      version.textContent = `design · v${baseNumber}`;
+      warnings = next.version.warnings ?? [];
+      renderChecks();
+      applyPayload(next);
+      return;
+    }
     // Someone else's version: the earlier saves' entries say nothing about it.
     afterSave = null;
     clearTimeout(fidelityTimer);
@@ -1173,7 +1270,8 @@ function mount(
   };
   startLive();
 
-  showSave(restingSaveText());
+  // After the server refused an edit and the page reloaded, the reason shows once (as on the document page).
+  showSave(join?.refusedNotice ?? restingSaveText());
   if (canEdit) {
     addEventListener("beforeunload", (e) => {
       if (dirty() || saving) e.preventDefault();
@@ -1190,7 +1288,10 @@ function mount(
 
   void boards.ready.then(async () => {
     renderBoards();
-    await runFidelity(baseNumber);
+    // Live: the fidelity pass switches through every board, which would rebuild each one's live connection; it runs
+    // for designs saved the usual way.
+    if (session) session.boardShown(boards.currentBoard());
+    else await runFidelity(baseNumber);
     openBoardFromHash();
     // Marks the first fidelity pass done (it switches boards), for page tests and later steps.
     root.dataset.fidelityDone = "";

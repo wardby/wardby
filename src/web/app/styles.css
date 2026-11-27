@@ -975,6 +975,11 @@ img.ProseMirror-separator {
 .topbar .page-actions {
   margin-left: auto;
 }
+/* A label and its icon or ▾ stay on one line when the bar is narrow (the button keeps its width). */
+.topbar .page-actions button {
+  flex: none;
+  white-space: nowrap;
+}
 .design-toolbar .group {
   display: flex;
   gap: 0.25rem;
@@ -1559,10 +1564,40 @@ button.bubble .icon {
     flex-wrap: wrap;
     row-gap: 0.4rem;
   }
+  /* Whole buttons go to the next row (their labels never break: see .topbar .page-actions button). */
+  .topbar .page-actions {
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
+  }
   .topbar .save {
     width: auto;
   }
   .rb-status {
     max-width: 100%;
   }
+}
+
+/* Live co-editing: other people's carets and selections (colours set per person in editor.ts) */
+.collab-caret {
+  position: relative;
+  margin: 0 -1px;
+  border-left: 2px solid;
+  pointer-events: none;
+  word-break: normal;
+}
+.collab-caret-label {
+  position: absolute;
+  top: -1.4em;
+  left: -2px;
+  padding: 0 4px;
+  border-radius: 3px 3px 3px 0;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  user-select: none;
+}
+.collab-selection {
+  background: rgba(25, 113, 194, 0.18);
 }

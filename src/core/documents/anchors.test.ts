@@ -25,8 +25,12 @@ describe("text anchors", () => {
     expect(() => parseTextAnchor({ type: "text", quote: "", prefix: "", suffix: "" })).toThrow(
       "comment_anchor_invalid",
     );
-    expect(() => parseTextAnchor({ type: "text", quote: "x".repeat(501), prefix: "", suffix: "" })).toThrow(
+    expect(() => parseTextAnchor({ type: "text", quote: "x".repeat(10_001), prefix: "", suffix: "" })).toThrow(
       "comment_anchor_invalid",
+    );
+    // Up to 10,000 characters: a long selection keeps its comment (live editing anchors it by position).
+    expect(parseTextAnchor({ type: "text", quote: "x".repeat(10_000), prefix: "", suffix: "" }).quote).toHaveLength(
+      10_000,
     );
   });
 });

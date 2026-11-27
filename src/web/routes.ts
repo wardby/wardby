@@ -89,6 +89,7 @@ import {
   type WebCookieOptions,
 } from "./session.js";
 import { openDocumentStream } from "./events.js";
+import { postLiveTicket } from "./live/ticket.js";
 import { DEFAULT_ASSETS_ROOT, readIntegrity, readManifest, serveStatic, STATIC_PREFIX } from "./static.js";
 
 const routesLog = logger.child({ module: "web" });
@@ -100,7 +101,7 @@ const DOC_PAGE = new RegExp(`^/d/(${ID})$`);
 const SHARE_PAGE = /^\/s\/([A-Za-z0-9_-]{1,200})$/;
 const SHARE_GUEST = /^\/s\/([A-Za-z0-9_-]{1,200})\/guest$/;
 const API_DOC = new RegExp(
-  `^/d/api/(${ID})(?:/(content|threads|send|mentions|fidelity|frames|export|exports|review|review-candidates|share-links))?$`,
+  `^/d/api/(${ID})(?:/(content|threads|send|mentions|fidelity|frames|export|exports|review|review-candidates|share-links|live-ticket))?$`,
 );
 const API_THREAD = new RegExp(`^/d/api/threads/(${ID})/(replies|status)$`);
 const API_COMMENT = new RegExp(`^/d/api/comments/(${ID})$`);
@@ -537,6 +538,8 @@ function matchApi(res: ServerResponse, url: URL, method: string, deps: WebDeps):
     if (sub === "review-candidates" && method === "GET")
       return { write: false, run: (v) => getReviewCandidates(res, deps, id, v) };
     if (sub === "share-links" && method === "POST") return { write: true, run: (v) => postShareLink(res, deps, id, v) };
+    if (sub === "live-ticket" && method === "POST")
+      return { write: true, run: (v) => postLiveTicket(res, deps, id, v) };
     if (sub === "fidelity" && method === "POST") {
       return { write: true, run: (v, _a, b) => postFidelity(res, deps, id, v, b) };
     }

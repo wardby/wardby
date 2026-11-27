@@ -24,6 +24,7 @@ import grapesjs, {
   type SelectorProps,
 } from "grapesjs";
 import parserPostCSS from "grapesjs-parser-postcss";
+import { RULE_KEY } from "./live-board/read.js";
 import { BOARD_ID } from "../../core/documents/boards/ids.js";
 import {
   boardIdFor,
@@ -149,6 +150,20 @@ export interface BoardsEditor {
   onChange(cb: () => void): void;
   /** Called after a board is put in the canvas (selection, a newer version, a board operation). */
   onBoard(cb: (id: string) => void): void;
+  /** Called just before the canvas is given to a board (the one leaving is still in it), for live editing. */
+  beforeBoard(cb: () => void): void;
+  /** A board's file parts (title, language, body attributes, base layer) as loaded, for live editing's builder. */
+  parts(id: string): BoardParts | null;
+  /**
+   * Live editing: the board list as it now stands in the live document (someone else added, renamed, moved or
+   * deleted a board). A new board starts from the first board's layout until its live copy arrives.
+   */
+  applyManifest(next: Manifest): void;
+  /**
+   * Live editing: a board's file from a newer version, for a board with no live copy yet (its next builder must
+   * start from it, not from the file this page loaded). Shown again when it is in the canvas.
+   */
+  setBoardFile(id: string, text: string): void;
 }
 
 interface BoardState {
@@ -202,7 +217,10 @@ export function createBoardsEditor(opts: {
     container: opts.container,
     height: "100%",
     width: "auto",
-    storageManager: false,
+    // No storage, and no autosave: GrapesJS 0.23 keeps autosave on with `storageManager: false`, and each "save"
+    // first copies an open text box back into its model, which redraws the box and puts the caret at its start
+    // (with live editing, every change someone else makes would do that while you type).
+    storageManager: { type: "", autosave: false, autoload: false },
     // GrapesJS sends usage data to app.grapesjs.com by default: never (the CSP would block it anyway).
     telemetry: false,
     // No external icon stylesheet (CSP, and nothing from a CDN at runtime).
@@ -231,6 +249,7 @@ export function createBoardsEditor(opts: {
   let current = "";
   const changeListeners: (() => void)[] = [];
   const boardListeners: ((id: string) => void)[] = [];
+  const beforeBoardListeners: (() => void)[] = [];
   let loading = false;
   let editable = opts.editable;
 
@@ -360,6 +379,7 @@ export function createBoardsEditor(opts: {
     const state = boards.get(id);
     if (!state) return;
     const parts = state.pending !== null ? parseBoardFile(state.pending) : state.parts;
+    for (const cb of beforeBoardListeners) cb();
     loading = true;
     const um = editor.UndoManager;
     um.stop();
@@ -422,6 +442,55 @@ export function createBoardsEditor(opts: {
   // A locked board has no shortcuts (undo, paste, delete, ...); unlocking adds GrapesJS's defaults back.
   const keymapDefaults = editor.Keymaps.getConfig().defaults ?? {};
   if (!editable) editor.Keymaps.removeAll();
+
+  // A copy of an element (duplicate, paste) takes its original's id plus a number GrapesJS picks from this page's
+  // ids alone ("card-2"): two people copying one element at once would both make "card-2", and in live editing the
+  // two copies would become one element. Numbers carry a token unique to this page ("card-k3f21"), so they never
+  // meet. Only the picking changes: no id is added to the HTML.
+  const base = editor.Components.getType("default")?.model as unknown as
+    | { getIncrementId?: (id: string, list: Record<string, unknown>, opts?: { keepIds?: string[] }) => string }
+    | undefined;
+  // A copy takes its original's id first and is then renamed (GrapesJS's _idUpdated), which also renamed the "#id"
+  // selector: but the original still has that id, so its own style rules moved to the copy. When another element
+  // still has the old id, its selector and its place in the id registry stay; the copy is registered under the new
+  // id and takes the rules GrapesJS copied for it.
+  const proto = (base as unknown as { prototype?: Record<string, unknown> } | undefined)?.prototype;
+  if (proto && typeof proto._idUpdated === "function") {
+    const original = proto._idUpdated as (
+      this: Component,
+      m: unknown,
+      v: unknown,
+      opts?: { idUpdate?: boolean },
+    ) => void;
+    proto._idUpdated = function (this: Component, m: unknown, v: unknown, opts: { idUpdate?: boolean } = {}) {
+      const self = this as Component & { ccid: string; previous(k: string): unknown };
+      const list = (editor.Components as unknown as { allById(): Record<string, Component | undefined> }).allById();
+      const id = (self.get("attributes") as { id?: string } | undefined)?.id;
+      const idPrev = (self.previous("attributes") as { id?: string } | undefined)?.id ?? self.ccid;
+      const other = idPrev ? list[idPrev] : undefined;
+      if (opts.idUpdate || !id || !idPrev || !other || other === self || list[id])
+        return original.call(this, m, v, opts);
+      list[id] = self;
+      self.ccid = id;
+      // GrapesJS copied the original's rules while the copy still had its id: those copies are the copy's own.
+      const rules = editor.Css.getRules(`#${idPrev}`);
+      for (const r of rules.slice(Math.ceil(rules.length / 2))) {
+        r.set("selectors", [`#${id}`] as never);
+        r.unset(RULE_KEY);
+      }
+    };
+  }
+  if (base?.getIncrementId) {
+    const token = Math.random().toString(36).slice(2, 6);
+    let n = 0;
+    base.getIncrementId = (id, list, opts = {}) => {
+      if ((opts.keepIds ?? []).includes(id) || !list[id]) return id;
+      let next: string;
+      do next = `${id}-${token}${++n}`;
+      while (list[next]);
+      return next;
+    };
+  }
 
   const api: BoardsEditor = {
     editor,
@@ -564,6 +633,36 @@ export function createBoardsEditor(opts: {
     setDevice: (id) => void editor.setDevice(id),
     onChange: (cb) => void changeListeners.push(cb),
     onBoard: (cb) => void boardListeners.push(cb),
+    beforeBoard: (cb) => void beforeBoardListeners.push(cb),
+    parts: (id) => boards.get(id)?.parts ?? null,
+    applyManifest(next) {
+      const firstParts = manifest.boards[0] ? (boards.get(manifest.boards[0].id)?.parts ?? null) : null;
+      for (const b of next.boards) {
+        if (!boards.has(b.id)) {
+          const text = newBoardFile(firstParts, b.name);
+          boards.set(b.id, { parts: parseBoardFile(text), pending: null, baseline: null });
+        }
+      }
+      const ids = new Set(next.boards.map((b) => b.id));
+      for (const id of [...boards.keys()]) if (!ids.has(id)) boards.delete(id);
+      manifest = { title: next.title, boards: next.boards.map((b) => ({ ...b })) };
+      if (current && !ids.has(current)) {
+        current = "";
+        if (manifest.boards[0]) loadBoard(manifest.boards[0].id);
+      }
+      changed();
+    },
+    setBoardFile(id, text) {
+      const state = boards.get(id);
+      if (!state) return;
+      state.parts = parseBoardFile(text);
+      state.pending = null;
+      state.baseline = null;
+      if (current === id) {
+        current = "";
+        loadBoard(id);
+      }
+    },
   };
   return api;
 }
