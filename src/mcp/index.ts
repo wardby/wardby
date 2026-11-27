@@ -90,6 +90,7 @@ import { registerVersionTool } from "./tools/version.js";
 import { registerWhoamiTool } from "./tools/whoami.js";
 import { registerHelpTools } from "./tools/help.js";
 import { registerTriggerTool } from "./tools/trigger.js";
+import { registerRequestWorkTool } from "./tools/request-work.js";
 import { registerToolAuthoringTools } from "./tools/tools.js";
 import { registerSchedulingTools } from "./tools/scheduling.js";
 import { registerRunTools } from "./tools/runs.js";
@@ -201,6 +202,7 @@ export function registerAllTools(
   registerVersionTool(mcp);
   registerWhoamiTool(mcp);
   registerTriggerTool(mcp);
+  registerRequestWorkTool(mcp);
   registerToolAuthoringTools(mcp);
   registerSchedulingTools(mcp);
   registerRunTools(mcp);

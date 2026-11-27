@@ -400,6 +400,23 @@ describe("trigger_agent", () => {
     await client.close();
   });
 
+  it("tells a writer's caller which router its documents' reviews go to (#646)", async () => {
+    const db = fakeDb([
+      { id: "w1", name: "writer", ownerId: "p1", reviewRouterId: "r1" } as never,
+      { id: "r1", name: "the-router", ownerId: "p1" },
+    ]);
+    const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+    mcp.setFixedContext(fakeCtx(db, "p1", ["runs:trigger"], false));
+    registerTriggerTool(mcp);
+    const client = await connectClient(mcp);
+    const result = await client.callTool({ name: "trigger_agent", arguments: { agentId: "w1" } });
+    expect(result.isError).toBeFalsy();
+    expect(parseText(result as never)).toMatchObject({ reviewsGoTo: { id: "r1", name: "the-router" } });
+    const plain = await client.callTool({ name: "trigger_agent", arguments: { agentId: "r1" } });
+    expect(parseText(plain as never)).not.toHaveProperty("reviewsGoTo");
+    await client.close();
+  });
+
   it("any principal can trigger an owner-less agent through its everyone-execute grant, and only through it", async () => {
     const granted = fakeDb(
       [{ id: "a1", name: "greeter", ownerId: null }],

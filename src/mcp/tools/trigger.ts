@@ -196,7 +196,7 @@ type TriggerableAgent = {
 };
 
 /** execute on the agent, plus the override rule; `db` is the transaction when re-checking. */
-async function requireTriggerable<A extends TriggerableAgent>(
+export async function requireTriggerable<A extends TriggerableAgent>(
   ctx: McpRequestContext,
   row: A | null,
   id: string,
@@ -409,7 +409,15 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
           throw err;
         }
       }
-      const withWarnings = <T extends object>(result: T) => (warnings.length > 0 ? { ...result, warnings } : result);
+      // A writer or planner with a review router: say where its documents' reviews go (#646).
+      const reviewRouterId = (agent as { reviewRouterId?: string | null }).reviewRouterId ?? null;
+      const reviewsGoTo = reviewRouterId
+        ? await ctx.db.agent.findUnique({ where: { id: reviewRouterId }, select: { id: true, name: true } })
+        : null;
+      const withWarnings = <T extends object>(result: T) => {
+        const out = warnings.length > 0 ? { ...result, warnings } : result;
+        return reviewsGoTo ? { ...out, reviewsGoTo } : out;
+      };
 
       // Refused before any run exists: an invalid or unlinked issue is never
       // silently dropped into an unattributed run.

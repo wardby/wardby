@@ -30,7 +30,7 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
     scope: "agents:read",
     description:
       "The agents you can read and how they link, grouped into flows: sub-agent delegation, pull request review, " +
-      "review fix rounds, after-merge triggers and ticket status hand-offs (an agent that moves a Jira ticket to a status " +
+      "review fix rounds, document reviews routed to a router agent (routes_reviews), after-merge triggers and ticket status hand-offs (an agent that moves a Jira ticket to a status " +
       "starts the agents that trigger on it), plus each agent's entry points (mention, Jira, a status only a person sets, " +
       "schedule, webhook, manual). " +
       "notes lists each agent's MCP servers (mcp:<name>), run hooks (runHook:<event>) and tunnel hosts " +
@@ -54,6 +54,7 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
           model: true,
           budgetUsd: true,
           ownerId: true,
+          reviewRouterId: true,
           systemPrompt: true,
           schedule: true,
           scheduleEnabled: true,
@@ -115,6 +116,7 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
         webhook: r.webhooks.length > 0,
         repositories: r.repositories.map((l) => ({ ...l, access: l.access === "write" ? "write" : "read" })),
         issueProjects: r.issueProjects,
+        reviewRouterId: r.reviewRouterId,
       }));
       const flows = buildAgentFlows(facts, subAgents);
       return textResult({

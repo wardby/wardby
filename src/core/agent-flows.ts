@@ -35,13 +35,15 @@ export interface AgentLinkFacts {
   webhook: boolean;
   repositories: RepoLinkFact[];
   issueProjects: IssueLinkFact[];
+  /** The router that gets the reviews of this agent's documents (#646). */
+  reviewRouterId?: string | null;
 }
 export interface SubAgentFact {
   parentId: string;
   childId: string;
   boundName: string;
 }
-export type FlowEdgeKind = "delegates" | "reviews" | "fixes" | "after_merge" | "status";
+export type FlowEdgeKind = "delegates" | "reviews" | "fixes" | "after_merge" | "status" | "routes_reviews";
 export interface FlowEdge {
   from: string;
   to: string;
@@ -51,7 +53,7 @@ export interface FlowEdge {
 }
 
 const DEFAULT_FIX_ROUNDS = 2;
-const KIND_ORDER: FlowEdgeKind[] = ["delegates", "fixes", "reviews", "after_merge", "status"];
+const KIND_ORDER: FlowEdgeKind[] = ["delegates", "fixes", "reviews", "after_merge", "status", "routes_reviews"];
 
 export function repoKey(provider: string, repository: string): string {
   return `${provider}:${provider === "github" ? repository.toLowerCase() : repository}`;
@@ -130,6 +132,10 @@ export function flowEdges(agents: AgentLinkFacts[], subAgents: SubAgentFact[]): 
   for (const s of subAgents)
     if (ids.has(s.parentId) && ids.has(s.childId))
       add({ from: s.parentId, to: s.childId, kind: "delegates", repository: null, label: s.boundName });
+  // Reviews of a writer's documents go to its review router.
+  for (const a of agents)
+    if (a.reviewRouterId && ids.has(a.reviewRouterId))
+      add({ from: a.id, to: a.reviewRouterId, kind: "routes_reviews", repository: null, label: "reviews" });
   const keys = [...new Set(agents.flatMap((a) => linksOf(a).map((l) => l.key)))].sort();
   for (const key of keys) {
     const writers = writersOf(agents, key);

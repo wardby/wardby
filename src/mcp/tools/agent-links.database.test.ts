@@ -254,6 +254,20 @@ describe("list_agent_links", () => {
     expect(flow.issueProjects).toEqual(["jira:FLW"]);
   });
 
+  it("links an agent to its review router with routes_reviews (#646)", async () => {
+    const me = await principal();
+    const router = await agent(me.id, "router", { router: true, description: "routes" });
+    const writer = await agent(me.id, "writer", { reviewRouterId: router.id });
+    const { value } = await (await connect(me))();
+    expect(value.edges).toContainEqual({
+      from: writer.id,
+      to: router.id,
+      kind: "routes_reviews",
+      repository: null,
+      label: "reviews",
+    });
+  });
+
   it("strips terminal control sequences from the prompt's first line", async () => {
     const me = await principal();
     const a = await agent(me.id, "escapes", {
