@@ -554,6 +554,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
     cipher
       ? createReviewRouterHook({
           startRouter: reviewRouterStarter({ db: options.db, executor: () => composed, cipher }),
+          secretValues: (agentId) => documentSecretValues(options.db, cipher, agentId),
         })
       : undefined,
   );

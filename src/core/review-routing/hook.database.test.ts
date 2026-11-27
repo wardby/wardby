@@ -20,6 +20,7 @@ import {
   setArchived,
   submitForReview,
 } from "../documents/review.js";
+import { documentSecretValues } from "../documents/redact.js";
 import { createDocument } from "../documents/service.js";
 import { createPlanReviewHook, setPlanReviewHook } from "../plans/approval.js";
 import { createPlanSetFixture } from "../plans/build.test-support.js";
@@ -78,8 +79,16 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     const run = await db.run.create({ data: { agentId: input.routerAgentId } });
     return { runId: run.id };
   };
+  /** The router hook's secret values: the stored ones, through the test cipher (documentSecretValues). */
+  let secretValues = (agentId: string): Promise<readonly string[]> => documentSecretValues(db, cipher, agentId);
   const install = () =>
-    setReviewActionHook(createReviewRouterHook({ startRouter, track: (work) => void pending.push(work) }));
+    setReviewActionHook(
+      createReviewRouterHook({
+        secretValues: (agentId) => secretValues(agentId),
+        startRouter,
+        track: (work) => void pending.push(work),
+      }),
+    );
   /** Awaits the background routing of every action so far. */
   const settle = async () => {
     while (pending.length) await Promise.all(pending.splice(0));
@@ -91,6 +100,7 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     calls = [];
     pending = [];
     refuse = null;
+    secretValues = (agentId) => documentSecretValues(db, cipher, agentId);
   });
   afterAll(async () => {
     const ids = [owner.id, ann.id];
@@ -368,7 +378,7 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     await submit(d);
     await settle();
     calls = [];
-    return { number, c, d, planSetId: fixture.planSetId };
+    return { number, c, d, planSetId: fixture.planSetId, plannerId };
   };
 
   it("a plan set routes the approval its plan hook claimed; a build planner's task says the builder started", async () => {
@@ -431,9 +441,40 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     expect(await db.reviewJob.count({ where: { reviewEventId: extra.id } })).toBe(0);
   });
 
+  it("a plan's option labels and paths are redacted against the planner's secret values in the task", async () => {
+    install();
+    installPlanHook();
+    const { c, d, plannerId } = await planFixture("notify");
+    await attachSecret(plannerId, `RR_KEY_${s}`, owner.id, db);
+    // Older rows: labels copied raw from the plan path, before publish redacted them.
+    await db.document.update({ where: { id: c }, data: { option: `c-${SECRET}`, planPath: `c-${SECRET}.md` } });
+    await db.document.update({ where: { id: d }, data: { option: null, planPath: `d-${SECRET}.md` } });
+    await chooseOption(db, cipher, { documentId: c, viewer: as(ann), versionNumber: 1, reject: [d] });
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].task).toContain('Option "c-[REDACTED]" was chosen; d-[REDACTED].md were rejected.');
+    expect(calls[0].task).not.toContain(SECRET);
+  });
+
+  it("loading the planner's secret values failing starts nothing and records route_failed", async () => {
+    install();
+    installPlanHook();
+    const { c, d } = await planFixture("notify");
+    secretValues = async () => {
+      throw new Error("secrets unavailable");
+    };
+    await chooseOption(db, cipher, { documentId: c, viewer: as(ann), versionNumber: 1, reject: [d] });
+    await settle();
+    expect(calls).toEqual([]);
+    const event = (await eventsOf(c)).find((e) => e.kind === "approved")!;
+    const job = await db.reviewJob.findUniqueOrThrow({ where: { reviewEventId: event.id } });
+    expect(job).toMatchObject({ outcome: "route_failed", routerRunId: null });
+  });
+
   it("a start that throws leaves the job with outcome route_failed; the action still succeeds", async () => {
     setReviewActionHook(
       createReviewRouterHook({
+        secretValues: (agentId) => secretValues(agentId),
         startRouter: async (input) => {
           calls.push(input);
           throw new Error("boom");
@@ -460,6 +501,7 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     };
     setReviewActionHook(
       createReviewRouterHook({
+        secretValues: (agentId) => secretValues(agentId),
         startRouter: reviewRouterStarter({ db, executor: () => executor, cipher }),
         track: (work) => void pending.push(work),
       }),

@@ -14,6 +14,7 @@ import { principalNames } from "../documents/comments.js";
 import type { ReviewAction, ReviewActionHook } from "../documents/review-hooks.js";
 import { choiceNote } from "../documents/review.js";
 import { claimSetApproval } from "../documents/sets.js";
+import { redactExactSecretValues } from "../secret-spans.js";
 import { resolveRouter } from "./lineage.js";
 import { claimJob, continuedJob } from "./jobs.js";
 import { routerTask } from "./task.js";
@@ -28,8 +29,18 @@ export type StartRouter = (input: {
   documentIds: string[];
 }) => Promise<{ runId: string } | { refused: string }>;
 
+export interface ReviewRouterDeps {
+  startRouter: StartRouter;
+  /**
+   * An agent's secret values: a plan set's option labels and plan paths are agent-written (an older row's label
+   * was copied from its raw path), so they are redacted against the planner's values before they reach the task.
+   */
+  secretValues: (agentId: string) => Promise<readonly string[]>;
+}
+
 export function createReviewRouterHook(deps: {
   startRouter: StartRouter;
+  secretValues: ReviewRouterDeps["secretValues"];
   track?: (work: Promise<void>) => void;
 }): ReviewActionHook {
   return async (db, action) => {
@@ -53,7 +64,7 @@ function choiceWords(note: string | null, option: string): string | null {
   return note.startsWith(prefix) ? note.slice(prefix.length) : note;
 }
 
-async function route(db: PrismaClient, deps: { startRouter: StartRouter }, action: ReviewAction): Promise<void> {
+async function route(db: PrismaClient, deps: ReviewRouterDeps, action: ReviewAction): Promise<void> {
   const events = await db.documentReviewEvent.findMany({
     where: { id: { in: action.eventIds } },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -73,6 +84,7 @@ async function route(db: PrismaClient, deps: { startRouter: StartRouter }, actio
         select: {
           id: true,
           number: true,
+          agentId: true,
           set: setSelect,
           agent: { select: { ownerId: true, codingProfile: { select: { planDocument: true } } } },
         },
@@ -136,7 +148,11 @@ async function route(db: PrismaClient, deps: { startRouter: StartRouter }, actio
       : events[0].actorGuestId
         ? "a guest"
         : null;
-    const chosenOption = chose ? (doc.option ?? doc.planPath ?? null) : null;
+    // A plan's labels are redacted here, at the point of use; loading the planner's values failing fails closed
+    // (the catch below records route_failed and nothing starts).
+    const planSecrets = planSet ? await deps.secretValues(planSet.agentId) : [];
+    const label = (value: string | null) => (value && planSet ? redactExactSecretValues(value, planSecrets) : value);
+    const chosenOption = chose ? label(doc.option ?? doc.planPath ?? null) : null;
     const rejectedEvents = events.filter((e) => e.kind === "rejected" && e.documentId !== doc.id);
     const rejected = chose
       ? (
@@ -145,7 +161,7 @@ async function route(db: PrismaClient, deps: { startRouter: StartRouter }, actio
             select: { option: true, planPath: true },
           })
         )
-          .map((d) => d.option ?? d.planPath)
+          .map((d) => label(d.option ?? d.planPath))
           .filter((o): o is string => !!o)
           .sort()
       : [];
