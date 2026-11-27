@@ -1270,7 +1270,8 @@ function mount(
   };
   startLive();
 
-  showSave(restingSaveText());
+  // After the server refused an edit and the page reloaded, the reason shows once (as on the document page).
+  showSave(join?.refusedNotice ?? restingSaveText());
   if (canEdit) {
     addEventListener("beforeunload", (e) => {
       if (dirty() || saving) e.preventDefault();

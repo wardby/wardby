@@ -15,7 +15,8 @@ import * as Y from "yjs";
 import { BOARD_ROOT, boardMaps, htmlOf } from "../core/documents/boards/live/model.js";
 import { buildBoard } from "./live/design.test-support.js";
 import { loadVersionFiles } from "../core/documents/files.js";
-import { startTestWebServer, type BrowserCookie, type TestWebServer } from "./test-server.test-support.js";
+import { attachSecret, createSecret } from "../core/secrets.js";
+import { startTestWebServer, TEST_CIPHER, type BrowserCookie, type TestWebServer } from "./test-server.test-support.js";
 
 /** GrapesJS 0.23.9's canvas iframe. */
 const CANVAS = "iframe.gjs-frame";
@@ -477,6 +478,89 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       // Every element has its own id.
       expect(new Set(await ids(a)).size).toBe(before + 8);
       expect([...a.errors, ...b.errors]).toEqual([]);
+    }, 120_000);
+
+    it("typing in a box and switching boards right after keeps what was typed", async () => {
+      const { documentId, cookie, secondCookie } = await server.design({
+        title: "Coffee",
+        files: files(),
+        access: "write",
+      });
+      const a = await open(cookie, documentId);
+      const b = await open(secondCookie, documentId);
+      const tab = (name: string) => a.locator(".boards .pick", { hasText: name }).first();
+      await tab("About").click();
+      await a.waitForTimeout(1500);
+      const words: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        const el = a
+          .frameLocator(CANVAS)
+          .locator("main p")
+          .nth(i % 3);
+        for (let tries = 0; tries < 4; tries++) {
+          await el.dblclick();
+          await a.waitForTimeout(150);
+          if (await el.evaluate((n) => !!n.closest("[contenteditable=true]"))) break;
+        }
+        // Type only into an open box (elsewhere a letter is a shortcut: C starts a comment).
+        expect(await el.evaluate((n) => !!n.closest("[contenteditable=true]"))).toBe(true);
+        await el.evaluate((node) => {
+          const r = node.ownerDocument.createRange();
+          r.selectNodeContents(node);
+          r.collapse(false);
+          const sel = node.ownerDocument.getSelection()!;
+          sel.removeAllRanges();
+          sel.addRange(r);
+        });
+        const word = `SWITCH${i}`;
+        await a.keyboard.type(` ${word}`, { delay: 25 });
+        words.push(word);
+        await a
+          .frameLocator(CANVAS)
+          .locator("body")
+          .click({ position: { x: 5, y: 5 } });
+        // Switches away almost at once (sooner each time), then back.
+        await a.waitForTimeout(400 - i * 40);
+        await a.keyboard.press("Escape");
+        await tab("Menu").click();
+        await a.waitForTimeout(600);
+        await tab("About").click();
+        await a.waitForTimeout(800);
+      }
+      // Bo, on About, sees every word.
+      await b.locator(".boards .pick", { hasText: "About" }).first().click();
+      const aboutText = async () => (await b.frameLocator(CANVAS).locator("main").first().textContent()) ?? "";
+      for (const w of words) await expect.poll(aboutText, { timeout: 10_000 }).toContain(w);
+      expect([...a.errors, ...b.errors]).toEqual([]);
+    }, 180_000);
+
+    it("an edit the server refuses (a secret value) reloads the page and says why; the value is gone", async () => {
+      const { documentId, ownerCookie, principalIds } = await server.design({
+        title: "Coffee",
+        files: files(),
+        access: "owner",
+      });
+      const FAKE = `sk-test-${Math.random().toString(36).slice(2, 12)}`;
+      const agent = await server.db.agent.create({
+        data: {
+          name: `refuse-${documentId}`,
+          systemPrompt: "t",
+          model: "t",
+          budgetUsd: 1,
+          ownerId: principalIds.owner,
+        },
+      });
+      const name = `REFUSE_${documentId.slice(-8).toUpperCase()}`;
+      await createSecret(name, FAKE, principalIds.owner, TEST_CIPHER, server.db);
+      await attachSecret(agent.id, name, principalIds.owner, server.db);
+      await server.db.document.update({ where: { id: documentId }, data: { agentId: agent.id } });
+      const a = await open(ownerCookie, documentId);
+      await typeInHeading(a, ` ${FAKE}`);
+      // The page reloads from the server's copy and says why.
+      await expect
+        .poll(() => a.locator(".save").textContent(), { timeout: 20_000 })
+        .toContain("contained a secret value");
+      await expect.poll(() => h1Text(a), { timeout: 20_000 }).not.toContain(FAKE);
     }, 120_000);
   },
 );
