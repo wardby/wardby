@@ -45,13 +45,13 @@ An invalid setting is refused with [`review_router_invalid`](errors/review-route
 2. Otherwise the writer's (or planner's) `reviewRouter`, read when the action happens.
 3. Otherwise nothing starts.
 
-A recorded router that is no longer `router: true` is skipped. The document's owner can change or clear the router with `link_document` and `routerAgentId` (a router the owner can run, or `null`). `trigger_agent` on a writer with a `reviewRouter` answers `reviewsGoTo` when you can run that router, and `list_agent_links` shows a `routes_reviews` link from the writer to its router.
+The router is checked again when each action happens: it must still be `router: true`, a router the document's owner set must still be one the owner can run, and a writer's `reviewRouter` one the writer's owner can run (a router recorded from the run tree needs nothing more). A router that fails the check is skipped. The document's owner can change or clear the router with `link_document` and `routerAgentId` (a router the owner can run, or `null`); a document in a set is refused, since its set's router applies. `trigger_agent` on a writer with a `reviewRouter` answers `reviewsGoTo` while it is `router: true` and you can run it, and `list_agent_links` shows a `routes_reviews` link from the writer to its router.
 
 ## Which actions route
 
 Every review action: submitted, approved (and force approved), option chosen, changes requested, rejected, reopened, archived, unarchived and reviewers changed. The router decides when nothing is needed.
 
-Documents in a set (a plan set, or an option set made with `doc_create` `set` and `option`) route as one piece of work: the set entering review, the approval that completes the set, a choice (once, not once per document), and each other action once. A plan approval routes only for the action that completed it. Each action routes once: a repeated click or a retried hook starts nothing more.
+Documents in a set (a plan set, or an option set made with `doc_create` `set` and `option`) route as one piece of work: the set entering review (its first submit; a later member's submit routes nothing, and a published plan's documents enter review together), the approval that completes the set, a choice (once, not once per document), and each other action once. A plan approval routes only for the action that completed it. Each action routes once: a repeated click or a retried hook starts nothing more.
 
 A person can add a `note` to `submit_for_review`, an approval, a choice or a request for changes. It reaches the router labelled as that person's.
 
@@ -59,11 +59,11 @@ A person can add a `note` to `submit_for_review`, an approval, a choice or a req
 
 A fixed text: the action, the documents by id (and option labels), who acted, the note, and "The builder for this plan was already started." when a plan's `onApproved` is `build` (the builder starts exactly as before; the router does not start it again). The router and the agents it starts can read those documents by id with `doc_get`; they do not appear in `doc_list`.
 
-A native agent started this way needs `documentTools`, otherwise the start is refused with [`review_route_target_no_documents`](errors/review-route-target-no-documents.md). A coding agent gets the documents as files in `/tmp/wardby-plan` (a planner gets none; documents too large for a coding run refuse with [`plan_too_large`](errors/plan-too-large.md)). An agent owned by someone else runs its own instructions; the router's task text is dropped.
+A native agent started this way needs `documentTools` when the router was given documents, otherwise the start is refused with [`review_route_target_no_documents`](errors/review-route-target-no-documents.md) (work from `request_work` carries no documents, so any attached agent may take it). A coding agent gets the documents as files in `/tmp/wardby-plan` (a planner gets none; documents too large for a coding run refuse with [`plan_too_large`](errors/plan-too-large.md)). An agent owned by someone else runs its own instructions; the router's task text is dropped.
 
 ## Limits
 
-- `maxStartsPerDecision` counts start attempts for one person decision, across every router run that agents' own actions set off. A start refused later (for example for budget) still counts. Past it, a start is refused with [`review_route_limit`](errors/review-route-limit.md); the person's next action starts a new count.
+- `maxStartsPerDecision` counts start attempts for one person decision, across every router run that agents' own actions set off. Each such router run is itself one start, and so is one set off by a plan that a planner in the work publishes. A start refused later (for example for budget) still counts. Past it, a start is refused with [`review_route_limit`](errors/review-route-limit.md); the person's next action starts a new count.
 - `maxDelegationsPerRun` still limits each run.
 - The router run's budget covers the agents it starts.
 - A router starts only its attached agents, and only those its owner can run.
@@ -78,7 +78,7 @@ How work reaches an agent already names an agent, so a router needs no new featu
 
 ## See what happened
 
-The document's **Review** tab has a **Routing** section: the router (or "No router: review actions start nothing."), each action's outcome, the agents started and the first line of their task, and a plain sentence when a start was refused. The task text is shown only to the document's owner and people who can run that router.
+The document's **Review** tab has a **Routing** section: the router (or "No router: review actions start nothing."), each action's outcome, the agents started (the 10 newest per action) and the first line of their task with secret values removed, and a plain sentence when a start was refused. On the tab, the task text is shown only to the document's owner and people who can run that router; the person who started an action can still open its runs with `get_run`.
 
 ## A starting system prompt for a router
 

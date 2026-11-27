@@ -13,6 +13,6 @@ appliesTo: ">=0.11.0"
 
 The next review action by a person starts a new count. To allow more starts, raise the router's `maxStartsPerDecision` (1 to 100, default 20) with `update_agent`; it is separate from `maxDelegationsPerRun`, which still limits each run.
 
-In the document's **Routing** section it reads "Stopped: this decision started the most agents its router allows."
+A router run that an agent's own action sets off is one start too: past the limit it is not started. In the document's **Routing** section that action reads "Stopped: this decision started the most agents its router allows."; an action whose router already started agents keeps listing them, and the router got the refusal as its tool result.
 
 See [Route work from reviews](../route-work-from-reviews.md).

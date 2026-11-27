@@ -55,7 +55,7 @@ directory.
 | `submit_for_review`                                          | `documents:write` | Submit a document you own for review, or replace its reviewers (`reviewers`, `finalApproverId`, `note`)           |
 | `review_document`                                            | `documents:write` | Give a verdict as a named reviewer (`approve` or `request_changes`, on `versionNumber`)                           |
 | `force_approve_document`                                     | `documents:write` | Owner or final approver approves the current version over missing verdicts (`note` required)                      |
-| `reject_document`                                            | `documents:write` | Reject a plan document (never `plan.md`): it leaves the plan; owner, final approver or reviewer (`note` required) |
+| `reject_document`                                            | `documents:write` | Reject a document in a set (not a plan's `plan.md`): it leaves the set; owner, final approver, reviewers (`note`) |
 | `choose_plan_option`                                         | `documents:write` | Approve one option of a plan and reject the listed others, in one transaction (`versionNumber`, `reject`)         |
 | `reopen_document`                                            | `documents:write` | Reopen an approved or rejected document for review as a new version, a copy of the current one (`write`)          |
 | `archive_document`                                           | `documents:write` | Archive or unarchive a document you own                                                                           |
@@ -692,22 +692,28 @@ start nothing. The short guide is the help article
 | `description`                               | Anyone who can edit the agent | What work the router takes; `request_work` ranks routers by it.                                                                             |
 | `reviewRouter`                              | Agent owner                   | On a writer or planner: the router that gets reviews of its documents when no router started the work. A router the owner can run.          |
 | `maxStartsPerDecision` (1 to 100)           | Agent owner                   | The most agents one person decision may start (default 20).                                                                                 |
-| `link_document` `routerAgentId`             | Document owner                | Change or clear (`null`) the router a document's reviews go to; a router the caller can run.                                                |
+| `link_document` `routerAgentId`             | Document owner                | Change or clear (`null`) the router of a document not in a set; a router the caller can run.                                                |
 | `request_work`                              | Anyone with `runs:trigger`    | Without `router`, ranks up to 5 routers you can run by their descriptions and starts nothing; with `router`, starts it with your `request`. |
 
 **Which router.** The router whose work produced the document, found up the run
 tree when the document is created (router, then lead, then writer, at any
 depth). Otherwise the writer's `reviewRouter`, read when the action happens.
-A recorded router that is no longer `router: true` is skipped; otherwise nothing
-starts. Documents in a set route through the set.
+A router is checked again when each action happens: it must still be
+`router: true`, and a router the document's owner set with `link_document` must
+still be one the owner can run, and a writer's `reviewRouter` one the writer's
+owner can run (a router recorded from the run tree needs nothing more). A router
+that fails the check is skipped, as if it were not set; when none is left,
+nothing starts. Documents in a set route through the set and take no router of
+their own (`link_document` refuses `routerAgentId` for them).
 
 **Which actions.** Every review action: submitted, approved (and force
 approved), option chosen, changes requested, rejected, reopened, archived,
-unarchived and reviewers changed. In a set, the set entering review, the
-approval that completes the set, a choice (once, not once per document) and each
-other action once. A plan approval routes only for the action that completed
-it, and an approval completed without a review action (for example removing the
-last waiting document) does not route. Each action routes once; a failure to
+unarchived and reviewers changed. In a set, the set entering review (its first
+submit: a later member's submit routes nothing, and a published plan's documents
+enter review together), the approval that completes the set, a choice (once,
+not once per document) and each other action once. A plan approval routes only
+for the action that completed it, and an approval completed without a review
+action (for example removing the last waiting document) does not route. Each action routes once; a failure to
 start the router never fails or undoes the person's action.
 
 **Option sets.** A native writer can put documents in an option set with
@@ -725,17 +731,21 @@ by id (and option labels), who acted, the note, and "The builder for this plan
 was already started." when the plan's `onApproved` is `build`. It carries no
 document content. The router and the agents it starts read those documents by id
 with `doc_get` for the length of their run; the documents do not appear in
-`doc_list`. A native agent it starts needs `documentTools`, else the start is
-refused with `review_route_target_no_documents`. A coding agent gets the
-documents as files in `/tmp/wardby-plan` (a planner gets none), and documents
-too large for a coding run refuse with `plan_too_large`. An agent owned by
+`doc_list`. A native agent it starts needs `documentTools` when the router was
+given documents, else the start is refused with
+`review_route_target_no_documents` (a `request_work` run has none, so any
+attached agent may take it). A coding agent gets the documents as files in
+`/tmp/wardby-plan` (a planner gets none), and documents too large for a coding
+run refuse with `plan_too_large`. An agent owned by
 someone else runs its own instructions, and the router's task text is dropped.
 
 **Limits.** `maxStartsPerDecision` counts start attempts for one person decision
-across every router run that agents' own actions set off; a start refused later
-(for example for budget) still counts, and a gateway crash in the middle of a
-start can count it once more. Past it a start is refused with
-`review_route_limit`; the person's next action starts a new count.
+across every router run that agents' own actions set off. Each such router run
+is itself one start, and so is a router run set off by a plan that a planner in
+the work publishes. A start refused later (for example for budget) still
+counts, and a gateway crash in the middle of a start can count it once more.
+Past it a start is refused with `review_route_limit` (a router run past it is not
+started); the person's next action starts a new count.
 `maxDelegationsPerRun` still limits each run. The router run's budget covers the
 agents it starts, and it can start only its attached agents that its owner can
 run.
@@ -748,13 +758,18 @@ produces route back to it. A Jira project, repository, schedule or webhook can
 be linked to a router like to any agent.
 
 **Visibility.** `trigger_agent` on a writer with a `reviewRouter` adds
-`reviewsGoTo` (only if you can run that router). `list_agent_links` adds
-`routes_reviews` links, and a router keeps a `manual` entry point. The page's
+`reviewsGoTo` (only while it is `router: true` and you can run it).
+`list_agent_links` adds `routes_reviews` links, and a router keeps a `manual`
+entry point. The page's
 Review tab has a **Routing** section: the router (or "No router: review actions
-start nothing."), each action's outcome, the agents started and the first line
-of their task (task text only for the document's owner and people who can run
-that router), and a sentence when a start was refused (`route_failed`,
-`run_refused`, `run_failed`, `review_router_invalid`, `review_route_limit`).
+start nothing."), each action's outcome, the agents started (the 10 newest per
+action) and the first line of their task, with secret values removed, and a
+sentence when a start was refused (`route_failed`, `run_refused`, `run_failed`,
+`review_router_invalid`, `review_route_limit`). On the tab, task text is shown
+only to the document's owner and people who can run that router; the person who
+started an action can still open its runs with `get_run`. An action whose
+router run already started agents keeps showing them when a later start is
+refused (the router gets the refusal as its tool result).
 
 ## Sending threads to a coding agent
 
