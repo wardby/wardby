@@ -496,6 +496,30 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     expect(job).toMatchObject({ outcome: "route_failed", routerRunId: null });
   });
 
+  it("the composed start with a dispatch that throws leaves the job route_failed; the action still succeeds", async () => {
+    setReviewActionHook(
+      createReviewRouterHook({
+        secretValues: (agentId) => secretValues(agentId),
+        startRouter: reviewRouterStarter({
+          db,
+          executor: () => ({ async start() {}, async stop() {} }),
+          cipher,
+          dispatch: async () => {
+            throw new Error("boom");
+          },
+        }),
+        track: (work) => void pending.push(work),
+      }),
+    );
+    const id = await doc();
+    await routed(id);
+    expect((await submit(id)).state).toBe("in_review");
+    await settle();
+    const event = (await eventsOf(id))[0];
+    const job = await db.reviewJob.findUniqueOrThrow({ where: { reviewEventId: event.id } });
+    expect(job).toMatchObject({ outcome: "route_failed", routerRunId: null });
+  });
+
   it("the composed start (real dispatch) makes a review_action run with the task, its job link and grants", async () => {
     const started: string[] = [];
     const executor = {

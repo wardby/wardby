@@ -373,19 +373,16 @@ export function reviewRouterStarter(deps: {
   dispatch?: typeof dispatchRun;
 }): StartRouter {
   return async ({ routerAgentId, task, triggeredById, jobId, documentIds }) => {
-    try {
-      return await startRouterRun(
-        {
-          db: deps.db,
-          executor: deps.executor(),
-          ...(deps.cipher ? { cipher: deps.cipher } : {}),
-          ...(deps.dispatch ? { dispatch: deps.dispatch } : {}),
-        },
-        { routerAgentId, task, triggeredById, jobId, documentIds, trigger: "review_action" },
-      );
-    } catch {
-      return { refused: "run_refused" };
-    }
+    // A throw reaches the review hook's own catch, which records route_failed.
+    return startRouterRun(
+      {
+        db: deps.db,
+        executor: deps.executor(),
+        ...(deps.cipher ? { cipher: deps.cipher } : {}),
+        ...(deps.dispatch ? { dispatch: deps.dispatch } : {}),
+      },
+      { routerAgentId, task, triggeredById, jobId, documentIds, trigger: "review_action" },
+    );
   };
 }
 

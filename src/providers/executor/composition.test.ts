@@ -857,7 +857,7 @@ describe("reviewRouterStarter", () => {
     });
   });
 
-  it("a refused or failed run, or a dispatch that throws, reports a refusal code", async () => {
+  it("a refused or failed run reports a refusal code, and a dispatch that throws rejects", async () => {
     for (const status of ["refused", "failed"]) {
       const dispatch = vi.fn(async () => ({ run: { id: "x", status, error: "budget_exhausted: over" } }) as never);
       expect(await reviewRouterStarter({ db, executor: () => native, dispatch })(input)).toEqual({
@@ -867,8 +867,9 @@ describe("reviewRouterStarter", () => {
     const throwing = vi.fn(async () => {
       throw new Error("agent_not_found");
     });
-    expect(await reviewRouterStarter({ db, executor: () => native, dispatch: throwing })(input)).toEqual({
-      refused: "run_refused",
-    });
+    // A throw is not turned into a refusal: the review hook records route_failed and the action still succeeds.
+    await expect(reviewRouterStarter({ db, executor: () => native, dispatch: throwing })(input)).rejects.toThrow(
+      "agent_not_found",
+    );
   });
 });
