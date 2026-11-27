@@ -40,6 +40,7 @@ export const RunTriggerSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("comment") }),
   /** Started by a plan's approval (onApproved "build", a `build ticket` command, or the next ticket of the chain). */
   z.object({ kind: z.literal("plan_approved") }),
+  /** Started by a review action (a person's decision on a document or set) that reached a router agent. */
   z.object({ kind: z.literal("review_action") }),
 ]);
 

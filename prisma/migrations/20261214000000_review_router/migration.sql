@@ -13,7 +13,7 @@ CREATE INDEX "Agent_reviewRouterId_idx" ON "Agent"("reviewRouterId");
 CREATE TABLE "DocumentSet" (
   "id" TEXT NOT NULL,
   "agentId" TEXT NOT NULL,
-  "ownerId" TEXT NOT NULL,
+  "ownerId" TEXT,
   "name" TEXT,
   "routerAgentId" TEXT,
   "createdByRunId" TEXT,
@@ -45,7 +45,7 @@ ALTER TABLE "Document" ADD CONSTRAINT "Document_setId_fkey"
 ALTER TABLE "PlanSet" ADD COLUMN "setId" TEXT;
 CREATE UNIQUE INDEX "PlanSet_setId_key" ON "PlanSet"("setId");
 ALTER TABLE "PlanSet" ADD CONSTRAINT "PlanSet_setId_fkey"
-  FOREIGN KEY ("setId") REFERENCES "DocumentSet"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+  FOREIGN KEY ("setId") REFERENCES "DocumentSet"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 CREATE TABLE "ReviewJob" (
   "id" TEXT NOT NULL,
@@ -82,7 +82,7 @@ CREATE INDEX "RunDocumentGrant_documentId_idx" ON "RunDocumentGrant"("documentId
 
 -- Backfill: one shared set per plan set, carrying its approval; its documents join it (spec §6).
 INSERT INTO "DocumentSet" ("id", "agentId", "ownerId", "routerAgentId", "createdByRunId", "approvedAt", "approvedById", "createdAt", "updatedAt")
-SELECT 'ds_' || ps."id", ps."agentId", COALESCE(a."ownerId", ''), NULL, ps."createdByRunId", ps."approvedAt", ps."approvedById", ps."createdAt", ps."updatedAt"
+SELECT 'ds_' || ps."id", ps."agentId", a."ownerId", NULL, ps."createdByRunId", ps."approvedAt", ps."approvedById", ps."createdAt", ps."updatedAt"
 FROM "PlanSet" ps JOIN "Agent" a ON a."id" = ps."agentId";
 UPDATE "PlanSet" SET "setId" = 'ds_' || "id";
 UPDATE "Document" SET "setId" = 'ds_' || "planSetId", "option" = "planPath" WHERE "planSetId" IS NOT NULL;

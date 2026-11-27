@@ -2771,7 +2771,7 @@ model PlanSet {
   documents         Document[]
   /// The shared set holding membership and review state (spec §6); coding details stay here.
   setId             String?      @unique
-  set               DocumentSet? @relation(fields: [setId], references: [id], onDelete: Restrict)
+  set               DocumentSet? @relation(fields: [setId], references: [id], onDelete: SetNull)
 
   @@unique([agentId, repository, number])
   @@index([accessAgentId])
@@ -3216,7 +3216,7 @@ model DocumentSet {
   /// The writer or planner whose run made the set.
   agentId        String
   agent          Agent      @relation("DocumentSetAgent", fields: [agentId], references: [id], onDelete: Cascade)
-  ownerId        String
+  ownerId        String?
   /// A native writer's set name (unique per creating run); null for plan sets.
   name           String?
   routerAgentId  String?
