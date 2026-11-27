@@ -179,6 +179,15 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       }
     }, 90_000);
 
+    it("the Review tab of a document with no router says review actions start nothing", async () => {
+      const d = await server.design({ title: "Unrouted", kind: "document", markdown: "# U\n\nx\n", access: "comment" });
+      const o = await open(d.ownerCookie, d.documentId);
+      await o.getByRole("tab", { name: "Review" }).click();
+      await expect
+        .poll(() => o.locator(".rv-panel").textContent())
+        .toContain("No router: review actions start nothing.");
+    }, 90_000);
+
     it("an outdated thread takes a reply from the page", async () => {
       const d = await server.design({
         title: "Out",

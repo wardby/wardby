@@ -115,8 +115,8 @@ export interface ReviewPayload {
       at: string;
       eventId: string;
       outcome: string | null;
-      routerRunId: string | null;
-      started: { runId: string; agentName: string; task: string | null }[];
+      routerName: string;
+      started: { agentName: string; task: string | null }[];
     }[];
   };
   can: {

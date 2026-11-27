@@ -758,7 +758,11 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       expect(view.routing.jobs).toHaveLength(2);
       const started = view.routing.jobs.find((j) => j.outcome === "started")!;
       expect(started.eventId).toBe(event.id);
-      expect(started.started).toEqual([{ runId: expect.any(String), agentName: "Builder bee", task: "Build it now" }]);
+      // A read-only viewer sees the names and the outcome, not the task; the owner sees the task's first line.
+      expect(started.started).toEqual([{ agentName: "Builder bee", task: null }]);
+      expect(started.routerName).toBe("Release router");
+      const ownerJob = (await getReviewView(db, id, as(owner))).routing.jobs.find((j) => j.outcome === "started")!;
+      expect(ownerJob.started).toEqual([{ agentName: "Builder bee", task: "Build it now" }]);
       expect(view.routing.jobs.find((j) => j.outcome === "review_route_limit")!.started).toEqual([]);
       // A router turned off is no longer what would happen now; its jobs stay listed.
       await db.agent.update({ where: { id: routerId }, data: { router: false } });

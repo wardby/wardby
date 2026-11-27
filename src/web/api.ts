@@ -256,7 +256,13 @@ export function reviewJson(view: ReviewView) {
     })),
     routing: {
       router: view.routing.router,
-      jobs: view.routing.jobs.map((j) => ({ ...j, at: j.at.toISOString() })),
+      jobs: view.routing.jobs.map((j) => ({
+        at: j.at.toISOString(),
+        eventId: j.eventId,
+        outcome: j.outcome,
+        routerName: j.routerName,
+        started: j.started.map((c) => ({ agentName: c.agentName, task: c.task })),
+      })),
     },
     can: view.can,
   };

@@ -19,7 +19,7 @@
  * Errors are codes; nothing here logs.
  */
 import { Prisma, type PrismaClient } from "#prisma";
-import { atLeast, principalGranteeKey } from "../grants.js";
+import { atLeast, effectiveAccess, principalGranteeKey } from "../grants.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import { documentAccess, requireDocumentAccess, type Viewer } from "./access.js";
@@ -124,12 +124,15 @@ export interface ReviewRoutingView {
     eventId: string;
     /** "started", or a refusal code; null while the job is being claimed. */
     outcome: string | null;
-    routerRunId: string | null;
-    started: { runId: string; agentName: string; task: string | null }[];
+    /** The router this job ran for (its own, which may differ from the router now). */
+    routerName: string;
+    /** Each started agent; the task line only for the document's owner or someone who can execute the router. */
+    started: { agentName: string; task: string | null }[];
   }[];
 }
 
 const MAX_ROUTING_JOBS = 20;
+const MAX_ROUTING_CHILDREN = 50;
 const MAX_TASK_LINE_CHARS = 200;
 
 const SUBMITTABLE = new Set<string>(["draft", "in_review", "changes_requested"]);
@@ -867,7 +870,12 @@ export async function documentReviewState(
 }
 
 /** The routing block: the router that applies now (as the hook resolves it) and the newest jobs with their children. */
-async function routingView(db: PrismaClient, documentId: string): Promise<ReviewRoutingView> {
+async function routingView(
+  db: PrismaClient,
+  documentId: string,
+  viewer: Viewer,
+  owner: boolean,
+): Promise<ReviewRoutingView> {
   const doc = await db.document.findUnique({
     where: { id: documentId },
     select: {
@@ -893,29 +901,47 @@ async function routingView(db: PrismaClient, documentId: string): Promise<Review
     where: set ? { OR: [{ documentId }, { setId: set.id }] } : { documentId },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: MAX_ROUTING_JOBS,
-    select: { createdAt: true, reviewEventId: true, outcome: true, routerRunId: true },
+    select: { createdAt: true, reviewEventId: true, outcome: true, routerRunId: true, routerAgentId: true },
   });
   const runIds = [...new Set(jobs.flatMap((j) => (j.routerRunId ? [j.routerRunId] : [])))];
   const children = runIds.length
     ? await db.run.findMany({
         where: { parentRunId: { in: runIds } },
         orderBy: [{ startedAt: "asc" }, { id: "asc" }],
+        take: MAX_ROUTING_CHILDREN,
         select: { id: true, parentRunId: true, taskOverride: true, agent: { select: { name: true } } },
       })
     : [];
+  const routerIds = [...new Set(jobs.map((j) => j.routerAgentId))];
+  const routers = new Map(
+    (
+      await db.agent.findMany({ where: { id: { in: routerIds } }, select: { id: true, name: true, ownerId: true } })
+    ).map((a) => [a.id, a]),
+  );
+  // Task text: the document's owner, or a person who can execute that job's router.
+  const principalId = viewer.kind === "principal" ? viewer.principalId : null;
+  const seeTask = new Map<string, boolean>();
+  for (const a of routers.values()) {
+    seeTask.set(
+      a.id,
+      owner ||
+        (principalId !== null && atLeast("agent", await effectiveAccess(db, "agent", a, principalId), "execute")),
+    );
+  }
   return {
     router,
     jobs: jobs.map((j) => ({
       at: j.createdAt,
       eventId: j.reviewEventId,
       outcome: j.outcome,
-      routerRunId: j.routerRunId,
+      routerName: routers.get(j.routerAgentId)?.name ?? "The router",
       started: children
         .filter((c) => c.parentRunId === j.routerRunId)
         .map((c) => ({
-          runId: c.id,
           agentName: c.agent.name,
-          task: c.taskOverride?.split("\n", 1)[0]?.trim().slice(0, MAX_TASK_LINE_CHARS) || null,
+          task: seeTask.get(j.routerAgentId)
+            ? c.taskOverride?.split("\n", 1)[0]?.trim().slice(0, MAX_TASK_LINE_CHARS) || null
+            : null,
         })),
     })),
   };
@@ -1037,7 +1063,7 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
       overridden: (e.overridden as string[] | null) ?? [],
       createdAt: e.createdAt,
     })),
-    routing: await routingView(db, documentId),
+    routing: await routingView(db, documentId, viewer, owner),
     can: {
       submit: (owner || (viewer.kind === "agent" && atLeast("document", access, "write"))) && SUBMITTABLE.has(state),
       review: canReview,

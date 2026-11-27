@@ -234,7 +234,6 @@ export class ReviewPanel {
   /** Where review actions go: the router now, and for each recent action what it started or why it did not. */
   private routingSection(panel: HTMLElement): void {
     const { router, jobs } = this.review.routing;
-    if (!router && !jobs.length) return;
     panel.append(
       h("h3", {}, "Routing"),
       h("div", { class: "rv-final" }, router ? `Routed to ${router.name}` : "No router: review actions start nothing."),
