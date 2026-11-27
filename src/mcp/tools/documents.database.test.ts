@@ -719,6 +719,21 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     const nonOwner = await (await connect(other))("link_document", { documentId, routerAgentId: foreign.id });
     expect(nonOwner.isError).toBe(true);
     expect(await routerOf()).toBeNull();
+    // A document in a set: its set's router applies, so a document's own router is refused (fixed text, no echo).
+    const docSet = await db.documentSet.create({
+      data: { agentId: plain.id, ownerId: owner.id, name: `docmcp-set-${randomUUID()}` },
+    });
+    const member = (await call("create_document", { title: "M", markdown: "# M\n" })).json.documentId as string;
+    await db.document.update({ where: { id: member }, data: { setId: docSet.id, option: "a" } });
+    for (const routerAgentId of [router.id, null]) {
+      const refused = await call("link_document", { documentId: member, routerAgentId });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("review_router_invalid: this document is in a set; its set's router applies.");
+      expect(refused.text).not.toContain(router.id);
+    }
+    expect((await db.document.findUniqueOrThrow({ where: { id: member } })).routerAgentId).toBeNull();
+    await db.document.update({ where: { id: member }, data: { setId: null } });
+    await db.documentSet.delete({ where: { id: docSet.id } });
   });
 
   it("link_document links a native agent with documentTools write as the writer, and refuses the rest", async () => {

@@ -414,12 +414,12 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       const routerRow = reviewRouterId
         ? await ctx.db.agent.findUnique({
             where: { id: reviewRouterId },
-            select: { id: true, name: true, ownerId: true },
+            select: { id: true, name: true, ownerId: true, router: true },
           })
         : null;
-      // Named only to a caller who can run the router: an id and name are not for anyone else.
+      // Named only while it is still a router (routing ignores it otherwise), and only to a caller who can run it.
       const reviewsGoTo =
-        routerRow && atLeast("agent", await agentAccess(ctx, routerRow), "execute")
+        routerRow?.router && atLeast("agent", await agentAccess(ctx, routerRow), "execute")
           ? { id: routerRow.id, name: routerRow.name }
           : null;
       const withWarnings = <T extends object>(result: T) => {

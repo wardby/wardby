@@ -638,7 +638,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         routerAgentId: {
           type: ["string", "null"],
           description:
-            "The router that review actions on this document go to; null clears it (then the writer's reviewRouter applies). Must be a router you can run.",
+            "The router that review actions on this document go to; null clears it (then the writer's reviewRouter applies). Must be a router you can run. Refused for a document in a set (its set's router applies).",
         },
       },
       required: ["documentId"],
@@ -653,6 +653,10 @@ function registerContentTools(mcp: WardbyMcpServer): void {
       const routerOnly = input.routerAgentId !== undefined && !given && input.unlink !== true;
       if (!routerOnly && (input.unlink === true ? given : !given || input.agentId === undefined)) {
         throw new McpError(400, "document_repo_link_invalid");
+      }
+      // A set routes as one piece of work: its set's router applies, never a member's own.
+      if (input.routerAgentId !== undefined && (doc.setId !== null || doc.planSetId !== null)) {
+        throw new McpError(400, "review_router_invalid: this document is in a set; its set's router applies.");
       }
       if (input.routerAgentId) {
         const router = await ctx.db.agent.findUnique({
