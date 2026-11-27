@@ -792,11 +792,11 @@ describe("tool authoring tools", () => {
     it.each([
       ["a Codex coding agent", { provider: "codex" }],
       ["a coding agent with no profile", null],
-    ])("refuses %s, saying Codex support is tracked separately", async (_label, codingProfile) => {
+    ])("refuses %s, saying it runs its commands next to the agent", async (_label, codingProfile) => {
       const result = await attach({ id: "a1", ownerId: "p1", kind: "coding", codingProfile });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain(
-        "Native tools work only on Claude Code coding agents for now; Codex support is tracked separately.",
+        "Native tools work only on Claude Code coding agents for now: a coding agent that runs its commands next to the agent (Codex, Gemini CLI) can't take them yet.",
       );
     });
 

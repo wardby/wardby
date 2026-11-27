@@ -17,7 +17,7 @@ import { MEMORY_TOOL_NAMES } from "./memory-tools.js";
 import { SUBAGENT_MEMORY_TOOL_NAMES } from "./subagent-memory-tools.js";
 import { ISSUE_TRACKER_TOOL_NAMES } from "./issue-tracker-tools.js";
 import { exposedNames } from "./mcp-servers.js";
-import { isCodexCoding } from "./mcp-tools.js";
+import { runsCommandsInAgentContainer } from "./mcp-tools.js";
 import { DOCUMENT_TOOL_PREFIX } from "./documents/tools-setting.js";
 import { MAX_TOOL_TEXT_BYTES } from "../providers/coding-proxy/types.js";
 
@@ -117,9 +117,12 @@ export function nativeToolDescriptionMessage(name: string): string {
   return `The tool "${name.slice(0, 80)}" can't be offered to a Claude Code agent: its description is over ${NATIVE_TOOL_DESCRIPTION_MAX_CHARS} characters.`;
 }
 
-/** The refusal for attaching a native tool to a Codex coding agent (Codex support is tracked separately). */
-export const CODEX_NATIVE_TOOLS_MESSAGE =
-  "Native tools work only on Claude Code coding agents for now; Codex support is tracked separately.";
+/**
+ * The refusal for attaching a native tool to a coding agent that runs its commands next to the agent
+ * (Codex, Gemini CLI).
+ */
+export const IN_CONTAINER_NATIVE_TOOLS_MESSAGE =
+  "Native tools work only on Claude Code coding agents for now: a coding agent that runs its commands next to the agent (Codex, Gemini CLI) can't take them yet.";
 
 /** Why a Claude Code run can't be offered `tool`, or undefined when it can. */
 export function claudeCodeToolProblem(tool: Pick<Tool, "name" | "description">): string | undefined {
@@ -130,9 +133,10 @@ export function claudeCodeToolProblem(tool: Pick<Tool, "name" | "description">):
 
 /**
  * Why `tool` can't be attached to the agent `agentId` because the agent is a coding agent, or undefined
- * (a native agent, or a Claude Code agent the tool fits). A Codex coding agent (or one with no coding
- * profile, which counts as Codex) takes no native tools; a Claude Code agent takes only a tool its runs
- * can be offered. Every attach path asks it: MCP attach_tool, `wardby tool attach` and the importer.
+ * (a native agent, or a Claude Code agent the tool fits). A coding agent that runs its commands next to
+ * the agent (Codex, Gemini CLI, or one with no coding profile, which counts as one) takes no native
+ * tools; a Claude Code agent takes only a tool its runs can be offered. Every attach path asks it: MCP
+ * attach_tool, `wardby tool attach` and the importer.
  */
 export async function codingAgentAttachProblem(
   db: Pick<PrismaClient | Prisma.TransactionClient, "agent">,
@@ -144,7 +148,7 @@ export async function codingAgentAttachProblem(
     select: { kind: true, codingProfile: { select: { provider: true } } },
   });
   if (!agent || agent.kind !== "coding") return undefined;
-  if (isCodexCoding(agent.codingProfile?.provider)) return CODEX_NATIVE_TOOLS_MESSAGE;
+  if (runsCommandsInAgentContainer(agent.codingProfile?.provider)) return IN_CONTAINER_NATIVE_TOOLS_MESSAGE;
   return claudeCodeToolProblem(tool);
 }
 

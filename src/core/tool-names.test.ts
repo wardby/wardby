@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  CODEX_NATIVE_TOOLS_MESSAGE,
+  IN_CONTAINER_NATIVE_TOOLS_MESSAGE,
   codingAgentAttachProblem,
   NATIVE_TOOL_DESCRIPTION_MAX_CHARS,
   nativeToolDescriptionMessage,
@@ -159,7 +159,7 @@ describe("codingAgentAttachProblem (every attach path: attach_tool, wardby tool 
   it("refuses a Codex coding agent, and a coding agent with no profile", async () => {
     for (const codingProfile of [{ provider: "codex" }, null]) {
       expect(await codingAgentAttachProblem(fakeDb({ kind: "coding", codingProfile }), "a1", tool)).toBe(
-        CODEX_NATIVE_TOOLS_MESSAGE,
+        IN_CONTAINER_NATIVE_TOOLS_MESSAGE,
       );
     }
   });

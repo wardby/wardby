@@ -52,10 +52,14 @@ import { validateCronExpression } from "../../core/cron.js";
 import { scheduleStartFields } from "../../core/schedule-start.js";
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { modelSupportedEfforts } from "../../providers/llm/routing.js";
-import { agentMcpServerViews, codexUnavailableMcpTools, codexWriteToolsWarning } from "./mcp-servers.js";
-import { claudeCodeUnofferedToolsWarning, codexNativeToolsWarning, codexUnavailableNativeTools } from "./tools.js";
+import { agentMcpServerViews, inContainerUnavailableMcpTools, inContainerWriteToolsWarning } from "./mcp-servers.js";
+import {
+  claudeCodeUnofferedToolsWarning,
+  inContainerNativeToolsWarning,
+  inContainerUnavailableNativeTools,
+} from "./tools.js";
 import { claudeCodeUnofferedTools } from "../../core/tool-names.js";
-import { isCodexCoding } from "../../core/mcp-tools.js";
+import { runsCommandsInAgentContainer } from "../../core/mcp-tools.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
 import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
 import { requireReadableBudgetGroup } from "../auth/ownership.js";
@@ -1487,21 +1491,22 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         );
       }
       const shown = withRunStepsWarning(withProfileWarnings(withOperatorMode(agent)));
-      // Becoming Codex (a provider switch, or a native agent becoming coding) leaves out every attached
-      // MCP tool the server doesn't mark read-only: say which, so the owner isn't surprised by a run.
-      // Its attached native tools are left out of Codex runs altogether (#622): say which, too.
-      const wasCodex = before.kind === "coding" && isCodexCoding(before.codingProfile?.provider);
+      // Becoming a coding agent that runs commands next to the agent (Codex, Gemini CLI: a provider
+      // switch, or a native agent becoming coding) leaves out every attached MCP tool the server doesn't
+      // mark read-only: say which, so the owner isn't surprised by a run. Its attached native tools are
+      // left out of those runs altogether (#622): say which, too.
+      const wasInContainer = before.kind === "coding" && runsCommandsInAgentContainer(before.codingProfile?.provider);
       const added: string[] = [];
-      if (agent.kind === "coding" && isCodexCoding(agent.codingProfile?.provider) && !wasCodex) {
-        const writers = await codexUnavailableMcpTools(ctx.db, agent.id);
-        const nativeTools = await codexUnavailableNativeTools(ctx.db, agent.id);
-        if (writers.length > 0) added.push(codexWriteToolsWarning(writers));
-        if (nativeTools.length > 0) added.push(codexNativeToolsWarning(nativeTools));
+      if (agent.kind === "coding" && runsCommandsInAgentContainer(agent.codingProfile?.provider) && !wasInContainer) {
+        const writers = await inContainerUnavailableMcpTools(ctx.db, agent.id);
+        const nativeTools = await inContainerUnavailableNativeTools(ctx.db, agent.id);
+        if (writers.length > 0) added.push(inContainerWriteToolsWarning(writers));
+        if (nativeTools.length > 0) added.push(inContainerNativeToolsWarning(nativeTools));
       }
       // Becoming Claude Code (a provider switch, or a native agent becoming coding): its runs leave out
       // an attached tool whose name or description Claude Code can't be offered; say which.
-      const wasClaudeCode = before.kind === "coding" && !wasCodex;
-      if (agent.kind === "coding" && !isCodexCoding(agent.codingProfile?.provider) && !wasClaudeCode) {
+      const wasClaudeCode = before.kind === "coding" && !wasInContainer;
+      if (agent.kind === "coding" && !runsCommandsInAgentContainer(agent.codingProfile?.provider) && !wasClaudeCode) {
         const unoffered = await claudeCodeUnofferedTools(ctx.db, agent.id);
         if (unoffered.length > 0) added.push(claudeCodeUnofferedToolsWarning(unoffered));
       }

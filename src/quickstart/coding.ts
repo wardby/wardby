@@ -94,11 +94,16 @@ export interface CodingStepResult {
   seed?: CodingSeedResult;
 }
 
-const PROVIDER_KEYS: Record<CodingProvider, "OPENAI_API_KEY" | "ANTHROPIC_API_KEY"> = {
+const PROVIDER_KEYS: Record<CodingProvider, "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" | "GEMINI_API_KEY"> = {
   codex: "OPENAI_API_KEY",
   "claude-code": "ANTHROPIC_API_KEY",
+  "gemini-cli": "GEMINI_API_KEY",
 };
-const PROVIDER_LABELS: Record<CodingProvider, string> = { codex: "Codex", "claude-code": "Claude Code" };
+const PROVIDER_LABELS: Record<CodingProvider, string> = {
+  codex: "Codex",
+  "claude-code": "Claude Code",
+  "gemini-cli": "Gemini CLI",
+};
 
 /** The top level of the git work tree containing `cwd`, realpath'd; null outside one. */
 export function defaultTrustedFolder(cwd: string): string | null {

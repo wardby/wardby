@@ -17,7 +17,7 @@ import { loadPlanFiles, type PlanFile } from "../../coding/plan-files/store.js";
 import { withBaseCommit, withExtraRepositories, type GitHistoryWording } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
 import type { WebTools } from "../../coding/google-web-tools.js";
-import { isCodexCoding, type McpToolPin } from "../../core/mcp-tools.js";
+import { runsCommandsInAgentContainer, type McpToolPin } from "../../core/mcp-tools.js";
 import {
   NATIVE_TOOL_DUPLICATE_NAMES_ERROR,
   withoutClashingNativePins,
@@ -38,7 +38,12 @@ import {
   type ClaudeContext,
 } from "../../coding/claude-context.js";
 import { normalizeCollectExclusions } from "../../coding/collect-exclude.js";
-import { codingProviderForModelProvider, type CodingProvider } from "../../coding/provider.js";
+import {
+  CODING_PROVIDERS,
+  codingProviderForModelProvider,
+  codingProviderProtocol,
+  type CodingProvider,
+} from "../../coding/provider.js";
 import { CodingProfileSchema } from "../../coding/profile.js";
 import {
   parseStoredServices,
@@ -267,12 +272,6 @@ class NotRequeuedError extends Error {
  * fails the run instead.
  */
 export type CapacityRequeueOutcome = "requeued" | "not_owned" | "spend_recorded";
-
-function proxyProtocol(provider: string): ProxyProtocol {
-  if (provider === "codex") return "openai-responses";
-  if (provider === "claude-code") return "anthropic-messages";
-  throw new Error("coding_provider_unsupported");
-}
 
 /**
  * Claude Code's commands run in its tool runner, which never reports back through the agent, so the
@@ -1969,7 +1968,7 @@ export interface ContainerExecutorOptions {
    * The agent's MCP tool pins (composition wires loadMcpToolPins; [] when WARDBY_MCP_SERVERS=off).
    * Absent = no coding run gets MCP tools. A run with pins gets an MCP token, delivered as
    * WARDBY_MCP_TOKEN; one without gets neither. `readOnlyOnly` comes from the run's dispatched
-   * provider (isCodexCoding(run.provider)), never the agent's current profile.
+   * provider (runsCommandsInAgentContainer(run.provider)), never the agent's current profile.
    */
   mcpToolPins?: (agentId: string, options: { readOnlyOnly: boolean }) => Promise<McpToolPin[]>;
   /**
@@ -2433,8 +2432,12 @@ export class ContainerExecutor implements Executor {
         let mcpTools: CodingToolPin[];
         try {
           const mcp =
-            (await this.options.mcpToolPins?.(run.agentId, { readOnlyOnly: isCodexCoding(run.provider) })) ?? [];
-          const native = isCodexCoding(run.provider) ? [] : ((await this.options.nativeToolPins?.(run.agentId)) ?? []);
+            (await this.options.mcpToolPins?.(run.agentId, {
+              readOnlyOnly: runsCommandsInAgentContainer(run.provider),
+            })) ?? [];
+          const native = runsCommandsInAgentContainer(run.provider)
+            ? []
+            : ((await this.options.nativeToolPins?.(run.agentId)) ?? []);
           mcpTools = [
             ...mcp,
             ...withoutClashingNativePins(
@@ -2454,7 +2457,7 @@ export class ContainerExecutor implements Executor {
         const session = await this.options.sessions.createSession({
           runId,
           credentialRef: this.credentialRef(run.provider),
-          protocol: proxyProtocol(run.provider),
+          protocol: codingProviderProtocol(run.provider),
           allowedModels: [run.model],
           deadlineAt,
           budgetUsd: run.budgetUsd,
@@ -5724,8 +5727,8 @@ export class ContainerExecutor implements Executor {
       diagnosticId: audit?.diagnosticId,
       durationMs: this.duration(run.runId),
       budgetActualUsd: latest?.costUsd ?? run.costUsd,
-      ...(run.provider === "codex" || run.provider === "claude-code"
-        ? { workerProvider: run.provider, proxyProtocol: proxyProtocol(run.provider) }
+      ...((CODING_PROVIDERS as readonly string[]).includes(run.provider)
+        ? { workerProvider: run.provider as CodingProvider, proxyProtocol: codingProviderProtocol(run.provider) }
         : {}),
     });
   }

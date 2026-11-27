@@ -34,7 +34,7 @@ import {
   type NativeToolPin,
 } from "./coding-native-tools.js";
 import type { Logger } from "./logger.js";
-import { handleMcpTool, isCodexCoding, mcpToolDefs, type McpToolPin } from "./mcp-tools.js";
+import { handleMcpTool, runsCommandsInAgentContainer, mcpToolDefs, type McpToolPin } from "./mcp-tools.js";
 import { runDrivability, TOOL_STOP_POLL_MS, watchRunStop } from "./runner.js";
 
 export const CODING_MCP_PATH = "/coding-mcp";
@@ -313,7 +313,7 @@ async function callTool(session: Session, params: unknown, deps: CodingMcpDeps, 
       runId: session.runId,
       signal,
       deadlineAt: session.deadlineAt,
-      readOnlyOnly: isCodexCoding(session.run.provider),
+      readOnlyOnly: runsCommandsInAgentContainer(session.run.provider),
       fetchImpl: deps.fetchImpl,
       log: deps.log,
     });
@@ -325,8 +325,8 @@ async function callTool(session: Session, params: unknown, deps: CodingMcpDeps, 
 
 /**
  * A native tool's call (#622): Claude Code runs only, judged by the run's dispatched provider (fails
- * closed, as isCodexCoding does); a Codex run's shell commands can read the token, and a native tool
- * has no read-only mark.
+ * closed, as runsCommandsInAgentContainer does); a Codex or Gemini CLI run's shell commands can read the
+ * token, and a native tool has no read-only mark.
  */
 async function callNativeTool(
   pin: NativeToolPin,
@@ -336,7 +336,7 @@ async function callNativeTool(
   signal: AbortSignal,
   deps: CodingMcpDeps,
 ) {
-  if (isCodexCoding(session.run.provider)) {
+  if (runsCommandsInAgentContainer(session.run.provider)) {
     return toolError(
       "mcp_tool_not_allowed",
       `The tool "${pin.exposedName}" is not allowed for this run: native tools work only in Claude Code runs.`,

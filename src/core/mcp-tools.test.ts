@@ -5,7 +5,7 @@ import { createSecret } from "./secrets.js";
 import { loadAgentSecretValues } from "./secret-guard.js";
 import {
   handleMcpTool,
-  isCodexCoding,
+  runsCommandsInAgentContainer,
   loadMcpToolPins,
   mcpSecretValuesForAgent,
   mcpToolDefs,
@@ -191,9 +191,10 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP tools in runs (database)", () =>
     }
   });
 
-  it("isCodexCoding fails closed: only exactly claude-code is exempt", () => {
-    expect(isCodexCoding("claude-code")).toBe(false);
-    for (const provider of ["codex", "Claude-Code", "", null, undefined]) expect(isCodexCoding(provider)).toBe(true);
+  it("runsCommandsInAgentContainer fails closed: only exactly claude-code is exempt", () => {
+    expect(runsCommandsInAgentContainer("claude-code")).toBe(false);
+    for (const provider of ["codex", "Claude-Code", "", null, undefined])
+      expect(runsCommandsInAgentContainer(provider)).toBe(true);
   });
 
   it("pins only allowed tools present in the snapshot, without the URL, secret names or owner id", async () => {

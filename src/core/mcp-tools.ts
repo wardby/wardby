@@ -12,6 +12,7 @@
  */
 import type { PrismaClient } from "#prisma";
 import { ownerCanUseMcpServer } from "./grants.js";
+import { codingProviderHasToolRunner } from "../coding/provider.js";
 import { loadMcpServersMode, MCP_SERVERS_OFF_MESSAGE } from "../config/mcp-servers.js";
 import { loadToolMaxTimeoutMs } from "../config/tool-timeout.js";
 import { McpClientError, McpHttpClient } from "./mcp-client/client.js";
@@ -71,13 +72,15 @@ export function isMarkedReadOnly(entry: { annotations?: Record<string, unknown> 
 }
 
 /**
- * Whether a coding provider gets the Codex read-only rule. Fails closed: anything but exactly
- * "claude-code" (Codex, an unknown value, or a coding agent with no profile) counts as Codex. A run
- * is judged by the provider it was dispatched with (CodingRun.provider), never the agent's current
- * profile, which can change between dispatch and launch.
+ * A coding run whose shell commands run next to the agent (Codex, Gemini CLI): the shells can read
+ * the MCP token, so the run gets only tools the server marks read-only, and no native tools. Fails
+ * closed (codingProviderHasToolRunner): anything but exactly "claude-code" (an unknown value, or a
+ * coding agent with no profile, included) counts. A run is judged by the provider it was dispatched
+ * with (CodingRun.provider), never the agent's current profile, which can change between dispatch and
+ * launch.
  */
-export function isCodexCoding(provider: string | null | undefined): boolean {
-  return provider !== "claude-code";
+export function runsCommandsInAgentContainer(provider: string | null | undefined): boolean {
+  return !codingProviderHasToolRunner(provider);
 }
 
 type McpToolsDb = Pick<PrismaClient, "agentMcpServer" | "secret" | "resourceGrant" | "$transaction">;
@@ -86,8 +89,9 @@ type McpSecretsDb = Pick<PrismaClient, "agentMcpServer" | "secret">;
 
 export interface McpToolPinOptions {
   /**
-   * Pin only tools the server marks read-only: the caller sets it for a Codex coding run, from the
-   * provider the run was dispatched with (isCodexCoding(run.provider)). Native runs leave it unset.
+   * Pin only tools the server marks read-only: the caller sets it for a coding run whose commands run
+   * next to the agent (Codex, Gemini CLI), from the provider the run was dispatched with
+   * (runsCommandsInAgentContainer(run.provider)). Native runs leave it unset.
    */
   readOnlyOnly?: boolean;
 }
@@ -179,8 +183,9 @@ export interface McpToolContext {
   /** A sandboxed run's session deadline; the call's time limit never runs past it. */
   deadlineAt?: Date;
   /**
-   * Refuse any tool the live tool list doesn't mark read-only: set by the coding gateway for a Codex
-   * run, from the run's dispatched provider (isCodexCoding(codingRun.provider)). Native runs leave it unset.
+   * Refuse any tool the live tool list doesn't mark read-only: set by the coding gateway for a run
+   * whose commands run next to the agent (Codex, Gemini CLI), from the run's dispatched provider
+   * (runsCommandsInAgentContainer(codingRun.provider)). Native runs leave it unset.
    */
   readOnlyOnly?: boolean;
   fetchImpl?: typeof safeFetch;
@@ -258,7 +263,7 @@ export async function handleMcpTool(pin: McpToolPin, argsJson: string, ctx: McpT
     if (ctx.readOnlyOnly === true && !isMarkedReadOnly(live)) {
       return fail(
         "mcp_tool_not_allowed",
-        `The tool "${pin.exposedName}" is no longer allowed for this agent: Codex agents can use only tools the server marks read-only.`,
+        `The tool "${pin.exposedName}" is no longer allowed for this agent: Codex and Gemini CLI agents can use only tools the server marks read-only.`,
       );
     }
     const args = parseArgs(argsJson);

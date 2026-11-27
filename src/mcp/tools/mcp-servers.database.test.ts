@@ -481,7 +481,9 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
           allowedTools: ["search", name],
         });
         expect(refused.isError).toBe(true);
-        expect(refused.text).toContain(`Codex agents can use only tools the server marks read-only (${name} isn't).`);
+        expect(refused.text).toContain(
+          `Coding agents that run commands next to the agent (Codex, Gemini CLI) can use only tools the server marks read-only (${name} isn't).`,
+        );
       }
       // The refused attempts left the earlier allowlist alone.
       expect((await db.agentMcpServer.findFirstOrThrow({ where: { agentId: coding.id } })).allowedTools).toEqual([
@@ -507,7 +509,9 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
       agentIds.push(bare.id);
       const refused = await call("attach_mcp_server", { agentId: bare.id, serverId: id, allowedTools: ["plain"] });
       expect(refused.isError).toBe(true);
-      expect(refused.text).toContain("Codex agents can use only tools the server marks read-only (plain isn't).");
+      expect(refused.text).toContain(
+        "Coding agents that run commands next to the agent (Codex, Gemini CLI) can use only tools the server marks read-only (plain isn't).",
+      );
       ok(await call("attach_mcp_server", { agentId: bare.id, serverId: id, allowedTools: ["search"] }));
     });
 
@@ -533,7 +537,7 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
       const switched = ok(await call("update_agent", { id: coding.id, codingProfile: { provider: "codex" } }));
       expect(switched.codingProfile.provider).toBe("codex");
       expect(switched.warnings).toEqual([
-        "These MCP tools aren't read-only and won't be available to Codex runs: acme__get_issue, acme__plain.",
+        "These MCP tools aren't read-only and won't be available to this agent's runs (Codex and Gemini CLI run commands next to the agent, so they get read-only tools only): acme__get_issue, acme__plain.",
       ]);
       // Already Codex: no repeat on an unrelated edit.
       expect(ok(await call("update_agent", { id: coding.id, systemPrompt: "y" })).warnings).toBeUndefined();
@@ -572,7 +576,9 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
         expect(ok(await call("update_agent", { id: coding.id, systemPrompt: "y" })).warnings).toBeUndefined();
         const switched = ok(await call("update_agent", { id: coding.id, codingProfile: { provider: "codex" } }));
         expect(switched.codingProfile.provider).toBe("codex");
-        expect(switched.warnings).toEqual(["These native tools won't be available to Codex runs: code_search."]);
+        expect(switched.warnings).toEqual([
+          "These native tools won't be available to this agent's runs (Codex and Gemini CLI can't take native tools yet): code_search.",
+        ]);
         // Already Codex: no repeat.
         expect(ok(await call("update_agent", { id: coding.id, systemPrompt: "z" })).warnings).toBeUndefined();
 
@@ -683,7 +689,9 @@ describe.skipIf(!process.env.DATABASE_URL)("MCP server tools (PostgreSQL)", () =
           }),
         );
         expect(switched.kind).toBe("coding");
-        expect(switched.warnings).toEqual(["These native tools won't be available to Codex runs: kb_lookup."]);
+        expect(switched.warnings).toEqual([
+          "These native tools won't be available to this agent's runs (Codex and Gemini CLI can't take native tools yet): kb_lookup.",
+        ]);
       } finally {
         await db.agentTool.deleteMany({ where: { toolId: tool.id } });
       }

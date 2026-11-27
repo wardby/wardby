@@ -25,7 +25,7 @@ import {
   snapshotOf,
   type McpServerRow,
 } from "../../core/mcp-servers.js";
-import { isCodexCoding, isMarkedReadOnly } from "../../core/mcp-tools.js";
+import { runsCommandsInAgentContainer, isMarkedReadOnly } from "../../core/mcp-tools.js";
 import { REVIEW_HOST_TOOL_NAMES } from "../../core/review-host-tools.js";
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { reservedToolNameReason } from "../../core/tool-names.js";
@@ -180,16 +180,19 @@ export async function agentMcpServerViews(db: Pick<PrismaClient, "agentMcpServer
   });
 }
 
-/** The update_agent warning when an agent becomes Codex with attached tools the server doesn't mark read-only. */
-export function codexWriteToolsWarning(names: readonly string[]): string {
-  return `These MCP tools aren't read-only and won't be available to Codex runs: ${names.join(", ")}.`;
+/**
+ * The update_agent warning when an agent becomes a coding agent that runs commands next to the agent
+ * (Codex, Gemini CLI) with attached tools the server doesn't mark read-only.
+ */
+export function inContainerWriteToolsWarning(names: readonly string[]): string {
+  return `These MCP tools aren't read-only and won't be available to this agent's runs (Codex and Gemini CLI run commands next to the agent, so they get read-only tools only): ${names.join(", ")}.`;
 }
 
 /**
  * The exposed names of an agent's attached, allowed tools that the saved tool list doesn't mark read-only:
- * a Codex run never gets them (loadMcpToolPins with readOnlyOnly). Tools no longer listed are left out.
+ * a Codex or Gemini CLI run never gets them (loadMcpToolPins with readOnlyOnly). Tools no longer listed are left out.
  */
-export async function codexUnavailableMcpTools(
+export async function inContainerUnavailableMcpTools(
   db: Pick<PrismaClient, "agentMcpServer">,
   agentId: string,
 ): Promise<string[]> {
@@ -425,7 +428,7 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
     name: "attach_mcp_server",
     scope: "tools:write",
     description:
-      "Agent owner only: let an agent (native or coding) call the named tools of one of your MCP servers, or of one shared with you at use or higher (its tools then run with the owner's credentials). allowedTools are exact names from the saved tool list (no wildcards); the agent sees each as <server name>__<tool name>. callTimeoutMs (per call, default 30000) is capped by WARDBY_TOOL_MAX_TIMEOUT_MS. Re-attaching replaces the allowlist and time limit. Coding agents get the tools as mcp__wardby_mcp__<name>; Codex agents can use only tools the server marks read-only (readOnlyHint) in the saved tool list.",
+      "Agent owner only: let an agent (native or coding) call the named tools of one of your MCP servers, or of one shared with you at use or higher (its tools then run with the owner's credentials). allowedTools are exact names from the saved tool list (no wildcards); the agent sees each as <server name>__<tool name>. callTimeoutMs (per call, default 30000) is capped by WARDBY_TOOL_MAX_TIMEOUT_MS. Re-attaching replaces the allowlist and time limit. Coding agents get the tools as mcp__wardby_mcp__<name>; Codex and Gemini CLI agents can use only tools the server marks read-only (readOnlyHint) in the saved tool list.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -481,14 +484,14 @@ export function registerMcpServerTools(mcp: WardbyMcpServer): void {
                 where: { agentId: agent.id },
                 select: { provider: true },
               });
-              // Fails closed: a coding agent with no profile, or any provider but claude-code, is Codex here.
-              if (isCodexCoding(profile?.provider)) {
+              // Fails closed: a coding agent with no profile, or any provider but claude-code, runs commands next to the agent here.
+              if (runsCommandsInAgentContainer(profile?.provider)) {
                 const byName = new Map(snapshotOf(server).map((t) => [t.name, t]));
                 const writer = input.allowedTools.find((t) => !isMarkedReadOnly(byName.get(t)));
                 if (writer !== undefined) {
                   throw new McpError(
                     400,
-                    `Codex agents can use only tools the server marks read-only (${writer} isn't).`,
+                    `Coding agents that run commands next to the agent (Codex, Gemini CLI) can use only tools the server marks read-only (${writer} isn't).`,
                   );
                 }
               }

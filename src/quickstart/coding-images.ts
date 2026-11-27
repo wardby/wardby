@@ -101,6 +101,7 @@ export function prepareImages(
 export const NODE_PYTHON_ENV: Record<CodingProvider, string> = {
   codex: "CODING_WORKER_IMAGE_NODE_PYTHON_3_12",
   "claude-code": "CODING_CLAUDE_TOOL_RUNNER_IMAGE_NODE_PYTHON_3_12",
+  "gemini-cli": "CODING_GEMINI_WORKER_IMAGE_NODE_PYTHON_3_12",
 };
 
 /**

@@ -135,11 +135,14 @@ async function brokeredSecretWarnings(
   return brokerCompatibilityWarnings([{ ...tool, allowedSecrets }], brokered);
 }
 
-export { CODEX_NATIVE_TOOLS_MESSAGE } from "../../core/tool-names.js";
+export { IN_CONTAINER_NATIVE_TOOLS_MESSAGE } from "../../core/tool-names.js";
 
-/** The update_agent warning when an agent becomes Codex with native tools attached (#622). */
-export function codexNativeToolsWarning(names: readonly string[]): string {
-  return `These native tools won't be available to Codex runs: ${names.join(", ")}.`;
+/**
+ * The update_agent warning when an agent becomes a coding agent that runs commands next to the agent
+ * (Codex, Gemini CLI) with native tools attached (#622).
+ */
+export function inContainerNativeToolsWarning(names: readonly string[]): string {
+  return `These native tools won't be available to this agent's runs (Codex and Gemini CLI can't take native tools yet): ${names.join(", ")}.`;
 }
 
 /**
@@ -151,8 +154,8 @@ export function claudeCodeUnofferedToolsWarning(names: readonly string[]): strin
   return `These native tools won't be available to Claude Code runs (a name with characters other than letters, digits, "_" and "-" or over 64 characters, or a description over ${NATIVE_TOOL_DESCRIPTION_MAX_CHARS} characters): ${names.map((name) => name.slice(0, 80)).join(", ")}.`;
 }
 
-/** The names of the native tools attached to `agentId`, sorted: a Codex run never gets them. */
-export async function codexUnavailableNativeTools(
+/** The names of the native tools attached to `agentId`, sorted: a Codex or Gemini CLI run never gets them. */
+export async function inContainerUnavailableNativeTools(
   db: Pick<PrismaClient, "agentTool">,
   agentId: string,
 ): Promise<string[]> {
@@ -400,7 +403,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
     name: "attach_tool",
     scope: "tools:write",
     description:
-      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant. Granting a brokered secret lets the tool send it only via fetch(url, { secrets: [name] }), never read it; the result includes warnings when the tool calls secrets.get() on one. A coding agent can take native tools only when it runs Claude Code: its runs call the tool as mcp__wardby_mcp__<tool name>, through the same gateway and per-run call limit as its MCP tools (Codex agents are refused for now).",
+      "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant. Granting a brokered secret lets the tool send it only via fetch(url, { secrets: [name] }), never read it; the result includes warnings when the tool calls secrets.get() on one. A coding agent can take native tools only when it runs Claude Code: its runs call the tool as mcp__wardby_mcp__<tool name>, through the same gateway and per-run call limit as its MCP tools (Codex and Gemini CLI agents are refused for now).",
     inputSchema: {
       type: "object",
       properties: {

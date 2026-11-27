@@ -28,7 +28,8 @@ type WardbyMcpServers = { [WARDBY_MCP_SERVER]: WardbyMcpServer };
  * (bearer_token_env_var; it refuses an inline bearer_token for an HTTP server), so the config, and
  * with it Codex's command line, never holds the token. That does not hide it from the model: shell
  * commands run in the same container and can still read the token from Codex's environment through
- * /proc, which is why a Codex run gets only read-only MCP tools (isCodexCoding, core/mcp-tools.ts).
+ * /proc, which is why a Codex run gets only read-only MCP tools
+ * (runsCommandsInAgentContainer, core/mcp-tools.ts).
  * On Substrate (header mode) the token is the gateway's placeholder, sent in its own header from the
  * config: the shells can read only the placeholder, and the egress gateway injects the real token.
  */

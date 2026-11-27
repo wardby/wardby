@@ -7,7 +7,7 @@ import { createGatewayServer } from "../native-worker/http-server.js";
 import { handleCodingMcpRequest, type CodingMcpDeps } from "./coding-mcp.js";
 import { createPrismaClient } from "./db.js";
 import type { Logger } from "./logger.js";
-import { isCodexCoding, loadMcpToolPins } from "./mcp-tools.js";
+import { runsCommandsInAgentContainer, loadMcpToolPins } from "./mcp-tools.js";
 import { fakeMcpServer, textResult } from "./mcp-tools.test-support.js";
 import { createSecret } from "./secrets.js";
 import type { safeFetch } from "../sandbox/safe-fetch.js";
@@ -256,7 +256,7 @@ describe.skipIf(!process.env.DATABASE_URL)("/coding-mcp (database)", () => {
     try {
       const { provider } = await db.codingRun.findUniqueOrThrow({ where: { runId } });
       // Pin time (the executor passes the run's provider): no write pin.
-      expect(await loadMcpToolPins(db, agentId, { readOnlyOnly: isCodexCoding(provider) })).toEqual([]);
+      expect(await loadMcpToolPins(db, agentId, { readOnlyOnly: runsCommandsInAgentContainer(provider) })).toEqual([]);
       // Per call (the session's pins were taken before): refused, the server never asked.
       const server = fakeMcpServer(() => textResult("ran"));
       const res = await handleCodingMcpRequest(`Bearer ${token}`, callBody(), deps(server.impl));

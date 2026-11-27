@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { codingProviderForModelProvider, codingProviderSupportsModel, assertCodingProviderModel } from "./provider.js";
+import {
+  CODING_PROVIDER_LABELS,
+  CODING_PROVIDERS,
+  assertCodingProviderModel,
+  codingProviderForModelProvider,
+  codingProviderHasToolRunner,
+  codingProviderProtocol,
+  codingProviderSupportsModel,
+  codingProviderTakesSubAgents,
+} from "./provider.js";
 import { buildCatalog } from "../providers/llm/catalog.js";
 import { SHIPPED_CATALOG } from "../providers/llm/catalog-shipped.js";
 
@@ -39,9 +48,36 @@ describe("coding eligibility comes from the catalog", () => {
   });
 });
 
-describe("Gemini providers are never coding providers", () => {
-  it("maps vertex-gemini and google-ai-studio to undefined", () => {
-    expect(codingProviderForModelProvider("vertex-gemini")).toBeUndefined();
-    expect(codingProviderForModelProvider("google-ai-studio")).toBeUndefined();
+describe("gemini-cli is the third coding provider", () => {
+  it("runs Vertex and AI Studio Gemini models, never Bedrock", () => {
+    const catalog = buildCatalog(SHIPPED_CATALOG, [], "2026-10-03");
+    expect(CODING_PROVIDERS).toEqual(["codex", "claude-code", "gemini-cli"]);
+    expect(codingProviderForModelProvider("vertex-gemini")).toBe("gemini-cli");
+    expect(codingProviderForModelProvider("google-ai-studio")).toBe("gemini-cli");
+    expect(codingProviderForModelProvider("bedrock-claude")).toBeUndefined();
+    expect(codingProviderSupportsModel("gemini-cli", "google-ai-studio.gemini-4-neon", catalog)).toBe(true);
+    expect(codingProviderSupportsModel("gemini-cli", "us.gemini-4-hydrogen", catalog)).toBe(true);
+    expect(codingProviderSupportsModel("codex", "gemini-4-neon", catalog)).toBe(false);
+    expect(codingProviderSupportsModel("gemini-cli", "claude-sonnet-5", catalog)).toBe(false);
+  });
+
+  it("has the Codex shape: no tool runner, the Gemini protocol, sub-agents like Claude Code", () => {
+    expect(codingProviderHasToolRunner("claude-code")).toBe(true);
+    expect(codingProviderHasToolRunner("codex")).toBe(false);
+    expect(codingProviderHasToolRunner("gemini-cli")).toBe(false);
+    // Fails closed: an unknown or missing provider is treated as running commands next to the agent.
+    expect(codingProviderHasToolRunner(undefined)).toBe(false);
+    expect(codingProviderProtocol("codex")).toBe("openai-responses");
+    expect(codingProviderProtocol("claude-code")).toBe("anthropic-messages");
+    expect(codingProviderProtocol("gemini-cli")).toBe("gemini-generate-content");
+    expect(() => codingProviderProtocol("cursor")).toThrow("coding_provider_unsupported");
+    expect(codingProviderTakesSubAgents("claude-code")).toBe(true);
+    expect(codingProviderTakesSubAgents("gemini-cli")).toBe(true);
+    expect(codingProviderTakesSubAgents("codex")).toBe(false);
+    expect(CODING_PROVIDER_LABELS).toEqual({
+      codex: "Codex",
+      "claude-code": "Claude Code",
+      "gemini-cli": "Gemini CLI",
+    });
   });
 });

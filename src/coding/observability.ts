@@ -1,4 +1,6 @@
 import { logger } from "../core/logger.js";
+import type { CodingProvider } from "./provider.js";
+import type { ProxyProtocol } from "../providers/coding-proxy/types.js";
 
 /**
  * Metadata-only lifecycle telemetry for coding runs. Keep untrusted task and
@@ -32,8 +34,8 @@ export interface CodingLifecycleEvent {
   budgetActualUsd?: number;
   cleanupSucceeded?: boolean;
   /** Enumerated execution metadata only; never a model request or source field. */
-  workerProvider?: "codex" | "claude-code";
-  proxyProtocol?: "openai-responses" | "anthropic-messages" | "gemini-generate-content";
+  workerProvider?: CodingProvider;
+  proxyProtocol?: ProxyProtocol;
 }
 
 export interface CodingRunObserver {
