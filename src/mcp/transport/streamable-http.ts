@@ -19,6 +19,8 @@ import { canonicalUrl, HTTP_LIMITS, HttpBoundaryError, parseBody, readBody } fro
 import { browserHandler } from "../auth/self-hosted/browser.js";
 import { handleSecretElicitationForm, SECRET_ELICITATION_PATH } from "../tools/secret-elicitation-form.js";
 import { handleRunTranscriptDownload, RUN_TRANSCRIPT_DOWNLOAD_PATH } from "../tools/run-transcript-download.js";
+import { handleJoinApi, joinApiAction } from "../tools/join-api.js";
+import { JOIN_API_BODY_LIMIT } from "../tools/join-link.js";
 import type { BlobStore } from "../../providers/storage/types.js";
 import { bearerToken, OAUTH_LOOPBACK_COMPLETE_PATH, OAUTH_LOOPBACK_START_PATH } from "../tools/oauth-loopback-link.js";
 import {
@@ -183,7 +185,9 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
             ? HTTP_LIMITS.json
             : url.pathname === OAUTH_LOOPBACK_START_PATH || url.pathname === OAUTH_LOOPBACK_COMPLETE_PATH
               ? OAUTH_LOOPBACK_BODY_LIMIT
-              : HTTP_LIMITS.auth;
+              : joinApiAction(url.pathname)
+                ? JOIN_API_BODY_LIMIT
+                : HTTP_LIMITS.auth;
         const raw = await readBody(req, limit, controller.signal);
         rawBody = raw;
         body = parseBody(raw, req.headers["content-type"]);
@@ -250,6 +254,26 @@ export async function startHttpServer(opts: StartHttpServerOptions): Promise<Htt
         verify: (token) => opts.mcp.verifyRequestState(token),
         audience: "http",
       });
+      return;
+    }
+    const joinAction = joinApiAction(url.pathname);
+    if (joinAction) {
+      // `wardby join -` (join_run's terminal link): the link's token is the credential, as
+      // `Authorization: Bearer` only (never the query, never logged: open-request tracking keeps the
+      // path only); the canonical-Host check has run.
+      const writer = opts.auth.providers.runSteps;
+      await handleJoinApi(
+        { method: req.method, action: joinAction, token: bearerToken(req.headers.authorization), body },
+        res,
+        {
+          verify: (token) => opts.mcp.verifyRequestState(token),
+          mint: (payload) => opts.mcp.mintRequestState(payload),
+          audience: "http",
+          db: opts.auth.db,
+          ...(writer?.recordJoin ? { recordJoin: writer.recordJoin.bind(writer) } : {}),
+          executor: opts.auth.providers.executor,
+        },
+      );
       return;
     }
     if (oauth && (await oauth(req, res, url, body))) return;

@@ -4,6 +4,7 @@
  * callId is never returned; its detail text (the detail level) only to the agent's owner, the run's
  * starter and the stdio operator (canReadRunDetail).
  */
+import type { PrismaClient } from "#prisma";
 import { recordedRunStepsLevel, type RunStepsLevel } from "../../core/run-steps/config.js";
 import type { WardbyMcpServer } from "../server.js";
 import { canReadRunDetail, findReadableRun } from "./run-access.js";
@@ -19,6 +20,61 @@ export interface RunStepsToolOptions {
   level: RunStepsLevel;
   retentionDays: number;
   now?: () => Date;
+}
+
+/** One run step as get_run_steps (and the join API, join-api.ts) return it. */
+export interface RunStepView {
+  seq: number;
+  at: string;
+  kind: string;
+  tool: string | null;
+  summary: string;
+  status: string | null;
+  agent?: string;
+  from?: string;
+  detail?: string | null;
+}
+
+/**
+ * A page of a run's steps after `after`, oldest first, as returned to a reader: detail only when
+ * `showDetail` (canReadRunDetail). `next` is the after for the next page, or null; `rows` is the
+ * page's length.
+ */
+export async function loadRunStepsPage(
+  db: Pick<PrismaClient, "runStep">,
+  runId: string,
+  opts: { after: number; take: number; showDetail: boolean },
+): Promise<{ steps: RunStepView[]; next: number | null; rows: number }> {
+  const found = await db.runStep.findMany({
+    where: { runId, seq: { gt: opts.after } },
+    orderBy: { seq: "asc" },
+    take: opts.take + 1,
+    select: {
+      seq: true,
+      at: true,
+      kind: true,
+      tool: true,
+      summary: true,
+      status: true,
+      agentRef: true,
+      fromPrincipalId: true,
+      ...(opts.showDetail ? { detail: true } : {}),
+    },
+  });
+  const page = found.slice(0, opts.take);
+  const steps = page.map((s) => ({
+    seq: s.seq,
+    at: s.at.toISOString(),
+    kind: s.kind,
+    tool: s.tool,
+    summary: s.summary,
+    status: s.status,
+    ...(s.agentRef ? { agent: s.agentRef } : {}),
+    // Join steps (join, leave, message, interrupt): the principal who joined, left or sent it.
+    ...(s.fromPrincipalId ? { from: s.fromPrincipalId } : {}),
+    ...(opts.showDetail ? { detail: (s as { detail?: string | null }).detail ?? null } : {}),
+  }));
+  return { steps, next: found.length > opts.take ? page[page.length - 1].seq : null, rows: page.length };
 }
 
 export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOptions): void {
@@ -60,52 +116,25 @@ export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOpt
       const after = Number.isFinite(args.after) ? Math.max(0, Math.floor(args.after as number)) : 0;
       const requested = Number.isFinite(args.limit) ? Math.floor(args.limit as number) : RUN_STEPS_DEFAULT_LIMIT;
       const take = Math.min(Math.max(1, requested), RUN_STEPS_MAX_LIMIT);
-      const rows = await ctx.db.runStep.findMany({
-        where: { runId: run.id, seq: { gt: after } },
-        orderBy: { seq: "asc" },
-        take: take + 1,
-        select: {
-          seq: true,
-          at: true,
-          kind: true,
-          tool: true,
-          summary: true,
-          status: true,
-          agentRef: true,
-          fromPrincipalId: true,
-          ...(showDetail ? { detail: true } : {}),
-        },
-      });
+      const { steps, next, rows } = await loadRunStepsPage(ctx.db, run.id, { after, take, showDetail });
       // A workflow run's phases and sub-agents (#582): each step's `agent` is one of workflow.agents' ids.
       // Best effort: a failure here leaves the steps ungrouped, never the call failed.
       const workflow: unknown = await Promise.resolve()
         .then(() => ctx.db.codingRun.findUnique({ where: { runId: run.id }, select: { workflowProgress: true } }))
         .then((coding) => coding?.workflowProgress ?? null)
         .catch(() => null);
-      const page = rows.slice(0, take);
       const now = (opts.now ?? (() => new Date()))();
       const expired =
-        page.length === 0 &&
+        rows === 0 &&
         after === 0 &&
         run.finishedAt != null &&
         run.finishedAt.getTime() + opts.retentionDays * DAY_MS < now.getTime();
       return textResult({
         runId: run.id,
         level: recordedRunStepsLevel(run.runStepsLevel, opts.level),
-        steps: page.map((s) => ({
-          seq: s.seq,
-          at: s.at.toISOString(),
-          kind: s.kind,
-          tool: s.tool,
-          summary: s.summary,
-          status: s.status,
-          ...(s.agentRef ? { agent: s.agentRef } : {}),
-          // Join steps (join, leave, message, interrupt): the principal who joined, left or sent it.
-          ...(s.fromPrincipalId ? { from: s.fromPrincipalId } : {}),
-          ...(showDetail ? { detail: s.detail ?? null } : {}),
-        })),
+        steps,
         ...(workflow ? { workflow } : {}),
-        next: rows.length > take ? page[page.length - 1].seq : null,
+        next,
         dropped: run.stepsDropped,
         ...(expired ? { expired: true, meaning: EXPIRED_MEANING } : {}),
       });
