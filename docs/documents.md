@@ -220,7 +220,10 @@ elements, pins) is in [Editing designs](#editing-designs).
 - **Comments follow their words.** A comment's place is kept as a position in
   the shared document, so it stays on its words through everyone's edits, even
   edits inside the commented words, and it is marked outdated only when its
-  words are deleted. A comment can cover up to 10,000 characters.
+  words are deleted (undoing that deletion opens it again). An agent's version
+  merged into the live document changes only the paragraphs it edited, so
+  comments elsewhere stay where they are. A comment can cover up to 10,000
+  characters.
 - **The connection.** The page joins over a WebSocket on the same address,
   `wss://<your-host>/d/live/<documentId>`, signed in with its browser session.
   Proxies and load balancers in front of Wardby must pass WebSocket upgrades on

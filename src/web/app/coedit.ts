@@ -7,8 +7,10 @@ import {
   absolutePositionToRelativePosition,
   relativePositionToAbsolutePosition,
   ySyncPluginKey,
+  yUndoPluginKey,
 } from "@tiptap/y-tiptap";
 import * as Y from "yjs";
+import { repointRestoredAnchors } from "../../core/documents/live/anchors.js";
 import type { Api, Bootstrap } from "./api.js";
 import { caretColor, joinLiveDocument, type LiveJoin } from "./live-join.js";
 import type { LiveAnchors } from "./text-surface.js";
@@ -30,9 +32,17 @@ export async function joinLive(boot: Bootstrap, api: Api, who: string): Promise<
   return joined ? { ...joined, anchors: (editor) => liveAnchors(joined.ydoc, editor) } : null;
 }
 
+const repointing = new WeakSet<Y.UndoManager>();
+
 /** Comment ranges as Yjs relative positions in the shared document, so they follow everyone's edits. */
 function liveAnchors(ydoc: Y.Doc, editor: Editor): LiveAnchors {
   const anchors = ydoc.getMap<{ from: unknown; to: unknown }>(ANCHORS);
+  // A comment whose words this page's undo (or redo) brought back points at them again (only this page can tell).
+  const undo = yUndoPluginKey.getState(editor.state)?.undoManager;
+  if (undo && !repointing.has(undo)) {
+    repointing.add(undo);
+    undo.on("stack-item-popped", () => repointRestoredAnchors(ydoc));
+  }
   const fragment = ydoc.getXmlFragment(FIELD);
   const mapping = () => ySyncPluginKey.getState(editor.state)?.binding?.mapping;
   type Pair = { from: unknown; to: unknown };

@@ -33,7 +33,7 @@ Everyone with a Markdown [document](documents.md) or a [design](designs.md) open
 ## What people see
 
 - **Who edits:** members with `write`. Members and guests with `comment` or `read` watch the edits arrive. An approved, rejected or archived document is read-only for everyone, at once.
-- **Comments follow their words.** A comment keeps its place through everyone's edits, including edits inside the commented words; it is marked outdated only when its words are deleted. A comment can cover up to 10,000 characters.
+- **Comments follow their words.** A comment keeps its place through everyone's edits, including edits inside the commented words; it is marked outdated only when its words are deleted, and opens again if that deletion is undone. A comment can cover up to 10,000 characters.
 - **Versions** are saved after 3 seconds without edits (at most every 15 seconds while edits continue), credited to whoever edited last. History, review, exports and every MCP tool keep working from versions. Opening a document saves nothing.
 - **Designs** are edited live board by board: the first person to open a board builds its live copy and the others join it; changes arrive element by element, others' selections show as outlines with their names, and Undo undoes your own changes only. See [Edit together](designs.md#edit-together).
 

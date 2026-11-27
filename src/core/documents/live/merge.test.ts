@@ -89,6 +89,53 @@ describe("mergePublish", () => {
     expect(quote(live)).toBeFalsy();
   });
 
+  describe("touches only the blocks the publish changed", () => {
+    const words = ["launch", "pricing", "support", "hiring", "travel", "budget", "office", "design", "tests", "docs"];
+    const paras = words.map((w, i) => `The ${w} plan, part ${i}: ${w} notes that read nothing like the others.`);
+    const md = (ps: string[]) => ps.join("\n\n") + "\n";
+    /** Items the merge deletes from the live copy (the text it re-creates rather than keeps). */
+    const deletedBy = (from: string, to: string) => {
+      const start = seedLiveDoc(from);
+      const state = Y.encodeStateAsUpdate(start);
+      const live = fromState(state);
+      let deleted = 0;
+      live.on("afterTransaction", (tr) => tr.deleteSet.clients.forEach((rs) => rs.forEach((r) => (deleted += r.len))));
+      Y.applyUpdate(live, mergePublish(state, to).update);
+      expect(liveDocToMarkdown(live)).toBe(liveDocToMarkdown(seedLiveDoc(to)));
+      return deleted;
+    };
+    it("an inserted paragraph deletes nothing", () => {
+      expect(deletedBy(md(paras), md([...paras.slice(0, 1), "A new paragraph.", ...paras.slice(1)]))).toBe(0);
+    });
+    it("a deleted paragraph deletes only that paragraph", () => {
+      expect(deletedBy(md(paras), md(paras.filter((_, i) => i !== 1)))).toBe(paras[1].length + 2); // its text, its text node and its element
+    });
+    it("two edits far apart touch only their own words", () => {
+      const edited = paras.map((p, i) => (i === 1 || i === 8 ? p.replace("nothing like", "unlike") : p));
+      expect(deletedBy(md(paras), md(edited))).toBeLessThanOrEqual(2 * "nothing like".length);
+    });
+    it("an inserted list item leaves the other items", () => {
+      const list = "- Weekdays from seven\n- Weekends from eight\n- Closed on the first Monday\n";
+      expect(
+        deletedBy(md(paras.slice(0, 2)) + "\n" + list, md(paras.slice(0, 2)) + "\n- Opening day at six\n" + list),
+      ).toBe(0);
+    });
+    it("a block Markdown rewrites (bold starting with a space) does not spread to the others", () => {
+      const start = seedLiveDoc(md(paras));
+      const live = fromState(Y.encodeStateAsUpdate(start));
+      // A person bolds text that starts with a space: Markdown writes the space outside the bold.
+      const t = para(live, 5);
+      t.format(t.toString().indexOf(" notes"), 6, { bold: true });
+      const state = Y.encodeStateAsUpdate(live);
+      const published = md([...paras.slice(0, 1), "A new paragraph.", ...paras.slice(1)]);
+      const target = fromState(state);
+      const t2 = para(target, 1);
+      const at = Y.createRelativePositionFromTypeIndex(t2, 4);
+      Y.applyUpdate(target, mergePublish(state, published.replace(" notes that", " **notes** that")).update);
+      expect(Y.createAbsolutePositionFromRelativePosition(at, target)?.type).toBe(para(target, 2));
+    });
+  });
+
   it("an unchanged publish produces no content change", () => {
     const live = fromState(base);
     const before = liveDocToMarkdown(live);

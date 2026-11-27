@@ -147,6 +147,33 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect.poll(() => markedText(a), { timeout: 10_000 }).toBe("Ann really writes");
     }, 60_000);
 
+    it("a comment whose words were deleted comes back when the deletion is undone", async () => {
+      const { documentId, cookie, secondCookie } = await server.design({
+        kind: "document",
+        title: "Plan",
+        markdown: MD,
+        access: "write",
+      });
+      const a = await open(cookie, documentId);
+      const b = await open(secondCookie, documentId);
+      await select(a, "Ann writes here.", 0, "Ann writes".length);
+      await a.locator(".bubble").click({ timeout: 5000 });
+      await a.locator("textarea").first().fill("Who is Ann?", { timeout: 5000 });
+      await a.keyboard.press(SUBMIT);
+      await expect.poll(() => markedText(b), { timeout: 10_000 }).toBe("Ann writes");
+      const status = async () =>
+        (await server.db.commentThread.findFirstOrThrow({ where: { documentId }, select: { status: true } })).status;
+      // Bo deletes the commented words: the comment is outdated.
+      await select(b, "Ann writes here.", 0, "Ann writes here.".length);
+      await b.keyboard.press("Backspace");
+      await expect.poll(status, { timeout: 15_000 }).toBe("outdated");
+      // Bo undoes: the words are back, and so is the comment, for everyone.
+      await b.keyboard.press("ControlOrMeta+z");
+      await expect.poll(() => editorText(a), { timeout: 10_000 }).toContain("Ann writes here.");
+      await expect.poll(status, { timeout: 15_000 }).toBe("open");
+      await expect.poll(() => markedText(a), { timeout: 10_000 }).toBe("Ann writes");
+    }, 60_000);
+
     it("a person with comment access sees edits live but cannot type", async () => {
       const { documentId, cookie, ownerCookie } = await server.design({
         kind: "document",
