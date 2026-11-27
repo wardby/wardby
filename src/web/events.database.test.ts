@@ -226,10 +226,10 @@ describe.skipIf(!process.env.DATABASE_URL)("document event stream (database)", {
     try {
       const st = await liveStream(await memberCookie(owner.id), d1);
       const narrow = await liveStream(await memberCookie(reader.id), d1);
-      await submitForReview(db, { documentId: d2, viewer, reviewers: [outsider.id] });
+      await submitForReview(db, cipher, { documentId: d2, viewer, reviewers: [outsider.id] });
       await forceApprove(db, cipher, { documentId: d2, viewer, note: `ok ${FAKE_SECRET}` });
       await publishVersion(db, cipher, { documentId: outside, markdown: "hello world 2", via: "mcp" });
-      await submitForReview(db, { documentId: outside, viewer, reviewers: [outsider.id] });
+      await submitForReview(db, cipher, { documentId: outside, viewer, reviewers: [outsider.id] });
       await st.waitFor(new RegExp(`event: review\ndata: \\{"documentId":"${d2}","kind":"review"\\}`));
       // A sentinel on the stream's own document: everything before it has been delivered.
       await publishVersion(db, cipher, { documentId: d1, markdown: "hello world 3", via: "mcp" });
@@ -275,7 +275,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document event stream (database)", {
       const session = await createWebSession(db, { guestId, shareLinkId: link.id }, DEV);
       const st = await liveStream(`wardby-dev-web=${session.token}`, d1);
       await publishVersion(db, cipher, { documentId: d2, markdown: "hello world 2", via: "mcp" });
-      await submitForReview(db, { documentId: d2, viewer, reviewers: [outsider.id] });
+      await submitForReview(db, cipher, { documentId: d2, viewer, reviewers: [outsider.id] });
       await forceApprove(db, cipher, { documentId: d2, viewer, note: "ok" });
       // A sentinel on the guest's own document: everything before it has been delivered.
       await publishVersion(db, cipher, { documentId: d1, markdown: "hello world 3", via: "mcp" });

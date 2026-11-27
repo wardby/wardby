@@ -116,7 +116,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document services accept the agent v
     );
     await expect(reopenDocument(db, cipher, { documentId: d, viewer: v })).rejects.toThrow("document_not_found");
     await expect(setArchived(db, { documentId: d, viewer: v, archived: true })).rejects.toThrow("document_not_found");
-    await expect(submitForReview(db, { documentId: d, viewer: v, reviewers: [r.id] })).rejects.toThrow(
+    await expect(submitForReview(db, cipher, { documentId: d, viewer: v, reviewers: [r.id] })).rejects.toThrow(
       "document_not_found",
     );
     await expect(getReviewView(db, d, v)).rejects.toThrow("document_not_found");
@@ -136,7 +136,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document services accept the agent v
   });
 
   it("submits for review with write, recording the run and no principal", async () => {
-    const view = await submitForReview(db, { documentId: d, viewer: agentViewer(), reviewers: [r.id] });
+    const view = await submitForReview(db, cipher, { documentId: d, viewer: agentViewer(), reviewers: [r.id] });
     expect(view.state).toBe("in_review");
     const ev = await db.documentReviewEvent.findFirstOrThrow({ where: { documentId: d, kind: "submitted" } });
     expect(ev.actorRunId).toBe("run-1");
@@ -146,9 +146,9 @@ describe.skipIf(!process.env.DATABASE_URL)("document services accept the agent v
   });
 
   it("submit with only comment access is denied", async () => {
-    await expect(submitForReview(db, { documentId: dRead, viewer: agentViewer(), reviewers: [r.id] })).rejects.toThrow(
-      "document_access_denied",
-    );
+    await expect(
+      submitForReview(db, cipher, { documentId: dRead, viewer: agentViewer(), reviewers: [r.id] }),
+    ).rejects.toThrow("document_access_denied");
   });
 
   it("refuses review, force approval, reopen, archive and export for an agent with access", async () => {

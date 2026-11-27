@@ -146,7 +146,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan approval (database)", { timeout
     });
     for (const doc of documents) {
       if (doc.reviewState === "draft") {
-        await submitForReview(db, {
+        await submitForReview(db, cipher, {
           documentId: fixture.documentIds[doc.path],
           viewer: as(owner),
           reviewers: [ada.id],

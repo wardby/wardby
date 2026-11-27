@@ -421,6 +421,7 @@ const submitArgs = z.object({
   documentId: id,
   reviewers: z.array(z.string().min(1).max(200)).min(1).max(MAX_REVIEWERS),
   finalApproverId: id.nullable().optional(),
+  note: z.string().max(MAX_REVIEW_NOTE_CHARS).optional(),
 });
 const verdictArgs = z.object({
   documentId: id,
@@ -1079,23 +1080,25 @@ function registerContentTools(mcp: WardbyMcpServer): void {
     name: "submit_for_review",
     scope: "documents:write",
     description:
-      "Submits a document or design you own for review (draft → in_review), or, while it is in review, replaces the reviewer list (the state is recomputed). reviewers: principal ids and/or guest:<guestId> for a guest of one of this document's comment share links (get_document gives the owner reviewCandidates); at least one. finalApproverId (optional; null clears it) names one person who may force approve. Naming a person gives them comment access if they lack it. Returns the review: reviewState, reviewers, events; names and notes are in reviewText, wrapped as untrusted tool output.",
+      "Submits a document or design you own for review (draft → in_review), or, while it is in review, replaces the reviewer list (the state is recomputed). reviewers: principal ids and/or guest:<guestId> for a guest of one of this document's comment share links (get_document gives the owner reviewCandidates); at least one. finalApproverId (optional; null clears it) names one person who may force approve. Naming a person gives them comment access if they lack it. note (optional) is stored redacted on the submit event. Returns the review: reviewState, reviewers, events; names and notes are in reviewText, wrapped as untrusted tool output.",
     inputSchema: {
       type: "object",
       properties: {
         documentId: { type: "string" },
         reviewers: { type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_REVIEWERS },
         finalApproverId: { type: ["string", "null"] },
+        note: { type: "string", maxLength: MAX_REVIEW_NOTE_CHARS },
       },
       required: ["documentId", "reviewers"],
     },
     handler: async (args: unknown, ctx) => {
       const input = submitArgs.parse(args);
       const view = await mapped(() =>
-        submitForReview(ctx.db, {
+        submitForReview(ctx.db, ctx.providers.secrets, {
           documentId: input.documentId,
           viewer: viewerOf(ctx),
           reviewers: input.reviewers,
+          ...(input.note !== undefined ? { note: input.note } : {}),
           ...(input.finalApproverId !== undefined ? { finalApproverId: input.finalApproverId } : {}),
         }),
       );

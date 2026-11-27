@@ -184,7 +184,12 @@ describe.skipIf(!process.env.DATABASE_URL)("rejectDocument (database)", () => {
   async function reviewedOption() {
     const set = await planSet();
     const id = set.documentIds["option-c/"];
-    await submitForReview(db, { documentId: id, viewer: asOwner, reviewers: [reviewer], finalApproverId: approver });
+    await submitForReview(db, cipher, {
+      documentId: id,
+      viewer: asOwner,
+      reviewers: [reviewer],
+      finalApproverId: approver,
+    });
     await db.resourceGrant.create({
       data: {
         resourceType: "document",
@@ -258,7 +263,11 @@ describe.skipIf(!process.env.DATABASE_URL)("rejectDocument (database)", () => {
         ],
       });
       for (const path of ["option-a/", "option-b/", "option-c/"]) {
-        await submitForReview(db, { documentId: fixture.documentIds[path], viewer: asOwner, reviewers: [owner] });
+        await submitForReview(db, cipher, {
+          documentId: fixture.documentIds[path],
+          viewer: asOwner,
+          reviewers: [owner],
+        });
       }
       return { ...fixture, number, ids: fixture.documentIds };
     }
@@ -359,7 +368,7 @@ describe.skipIf(!process.env.DATABASE_URL)("rejectDocument (database)", () => {
       expect((await state(id)).reviewState).toBe("in_review");
       // Once they review option-b too (back in review, with them as its reviewer), the choice goes through.
       await db.document.update({ where: { id: b.id }, data: { reviewState: "in_review" } });
-      await submitForReview(db, { documentId: b.id, viewer: asOwner, reviewers: [reviewer] });
+      await submitForReview(db, cipher, { documentId: b.id, viewer: asOwner, reviewers: [reviewer] });
       await choose();
       expect((await state(id)).reviewState).toBe("approved");
       expect((await state(b.id)).reviewState).toBe("rejected");

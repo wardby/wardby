@@ -495,7 +495,7 @@ async function publishSet(
   });
   const review = await planReviewers(db, { id: agentId, ownerId }, set.accessAgentId ?? agentId, setting);
   const submit = (documentId: string) =>
-    submitForReview(db, {
+    submitForReview(db, deps.cipher, {
       documentId,
       viewer: { kind: "principal", principalId: ownerId },
       reviewers: review.reviewers.length ? review.reviewers : [ownerId],

@@ -1222,7 +1222,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
       // The other document is approved: the bar follows without a reload.
       const viewer = { kind: "principal" as const, principalId: owner };
-      await submitForReview(server.db, { documentId: api, viewer, reviewers: [plan.principalIds.second] });
+      await submitForReview(server.db, TEST_CIPHER, { documentId: api, viewer, reviewers: [plan.principalIds.second] });
       await forceApprove(server.db, TEST_CIPHER, { documentId: api, viewer, note: "ok" });
       await expect
         .poll(() => bar.locator(".plan-count").textContent(), { timeout: 20_000 })

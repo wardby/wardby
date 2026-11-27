@@ -275,10 +275,12 @@ export async function postReview(
       if (!Array.isArray(reviewers) || !reviewers.every((r) => typeof r === "string")) return invalid();
       const fa = body.finalApproverId;
       if (fa !== undefined && fa !== null && typeof fa !== "string") return invalid();
-      view = await submitForReview(deps.db, {
+      if (body.note !== undefined && typeof body.note !== "string") return invalid();
+      view = await submitForReview(deps.db, deps.cipher, {
         documentId,
         viewer,
         reviewers: reviewers,
+        ...(body.note !== undefined ? { note: body.note } : {}),
         ...(fa !== undefined ? { finalApproverId: fa } : {}),
       });
       break;

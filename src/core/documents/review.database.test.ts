@@ -10,6 +10,8 @@ import { createPrismaClient } from "../db.js";
 import { attachSecret, createSecret } from "../secrets.js";
 import { documentAccess, type Viewer } from "./access.js";
 import { createDocumentEventBus, type DocumentEvent } from "./events.js";
+import { MAX_REVIEW_NOTE_CHARS } from "./limits.js";
+import { setReviewActionHook } from "./review-hooks.js";
 import { createDocument, publishVersion } from "./service.js";
 import { createShareLink, registerGuest } from "./share-links.js";
 import { restoreVersion } from "./versions.js";
@@ -87,13 +89,13 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
   it("new documents are drafts; only the owner submits, with at least one reviewer", async () => {
     const id = await doc();
     expect(await stateOf(id)).toBe("draft");
-    await expect(submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [] })).rejects.toThrow(
+    await expect(submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [] })).rejects.toThrow(
       "document_review_state_invalid",
     );
-    await expect(submitForReview(db, { documentId: id, viewer: as(ann), reviewers: [ann.id] })).rejects.toThrow(
+    await expect(submitForReview(db, cipher, { documentId: id, viewer: as(ann), reviewers: [ann.id] })).rejects.toThrow(
       "document_not_found",
     );
-    const view = await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    const view = await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
     expect(view.state).toBe("in_review");
     expect(view.progress).toEqual({ approved: 0, total: 2 });
     expect(view.reviewers.map((r) => [r.name, r.verdict])).toEqual([
@@ -117,7 +119,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
         level: "write",
       },
     });
-    await submitForReview(db, {
+    await submitForReview(db, cipher, {
       documentId: id,
       viewer: as(owner),
       reviewers: [ann.id, ben.id],
@@ -156,7 +158,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       },
     });
     try {
-      await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+      await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
       expect(await db.resourceGrant.count({ where: { resourceType: "document", resourceId: id } })).toBe(0);
       expect(await documentAccess(db, id, as(ann))).toBe("comment");
       await db.resourceGrant.delete({ where: { id: grant.id } });
@@ -185,7 +187,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       [`guest:${viewer.guestId}`],
       Array.from({ length: 51 }, (_, i) => `p${i}`),
     ]) {
-      await expect(submitForReview(db, { documentId: id, viewer: as(owner), reviewers })).rejects.toThrow(
+      await expect(submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers })).rejects.toThrow(
         "document_review_state_invalid",
       );
     }
@@ -193,7 +195,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("approves once every reviewer approved the current version; changes requested wins", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
     let v = await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     expect([v.state, v.progress.approved]).toEqual(["in_review", 1]);
     v = await reviewDocument(db, cipher, {
@@ -216,7 +218,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("a repeat of the verdict that counts now changes nothing and writes no event", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
     const approve = (p: Principal, note?: string) =>
       reviewDocument(db, cipher, {
         documentId: id,
@@ -245,7 +247,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     expect((await eventsOf(id)).map((e) => e.kind)).toEqual(["submitted", "approved", "approved", "changes_requested"]);
     // A reopen starts a new version, so the same verdict after it (on that version) is recorded.
     const id2 = await doc();
-    await submitForReview(db, { documentId: id2, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id2, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id2, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     await reopenDocument(db, cipher, { documentId: id2, viewer: as(owner) });
     await reviewDocument(db, cipher, { documentId: id2, viewer: as(ann), verdict: "approve", versionNumber: 2 });
@@ -257,7 +259,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     await expect(
       reviewDocument(db, cipher, { documentId: id, viewer: as(owner), verdict: "approve", versionNumber: 1 }),
     ).rejects.toThrow("document_review_forbidden");
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await expect(
       reviewDocument(db, cipher, { documentId: id, viewer: as(owner), verdict: "approve", versionNumber: 1 }),
     ).rejects.toThrow("document_review_forbidden");
@@ -284,7 +286,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("a reviewer who lost access cannot act until the grant is back", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await db.resourceGrant.deleteMany({ where: { resourceId: id, granteePrincipalId: ann.id } });
     await expect(
       reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 }),
@@ -300,7 +302,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     const cands = await reviewCandidates(db, id, as(owner));
     expect(cands.guests).toEqual([{ guestId, name: "Gail" }]);
     await expect(reviewCandidates(db, id, as(ann))).rejects.toThrow();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [`guest:${guestId}`] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [`guest:${guestId}`] });
     const v = await reviewDocument(db, cipher, { documentId: id, viewer: guest, verdict: "approve", versionNumber: 1 });
     expect(v.state).toBe("approved");
     expect(v.reviewers[0]).toMatchObject({ kind: "guest", name: "Gail (guest)", ref: `guest:${guestId}`, me: true });
@@ -322,7 +324,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     expect((await reviewCandidates(db, id, as(owner))).guests).toEqual([]);
     for (const guestId of [gone.guestId, late.guestId]) {
       await expect(
-        submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [`guest:${guestId}`] }),
+        submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [`guest:${guestId}`] }),
       ).rejects.toThrow("document_review_state_invalid");
     }
     expect(await stateOf(id)).toBe("draft");
@@ -344,7 +346,12 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       };
     };
     const id = await doc(true);
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id], finalApproverId: cat.id });
+    await submitForReview(db, cipher, {
+      documentId: id,
+      viewer: as(owner),
+      reviewers: [ann.id],
+      finalApproverId: cat.id,
+    });
     await expect(
       reviewDocument(db, revokingCipher(ann.id, id), {
         documentId: id,
@@ -380,7 +387,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       };
     };
     const id = await doc(true);
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await expect(
       forceApprove(db, transferringCipher(id), { documentId: id, viewer: as(owner), note: "Deadline" }),
     ).rejects.toThrow("document_not_found");
@@ -394,7 +401,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("force approve on a document deleted after the access check says document_not_found", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     // Deletes the document just before force approve reads its final approver (after the access check).
     const racing = new Proxy(db, {
       get(target, prop, receiver) {
@@ -418,7 +425,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("two concurrent approvals move the document to approved exactly once", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
     await Promise.all([
       reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 }),
       reviewDocument(db, cipher, { documentId: id, viewer: as(ben), verdict: "approve", versionNumber: 1 }),
@@ -430,7 +437,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("force approves over missing and changes-requested verdicts, with a required note, and records who it overrode", async () => {
     const id = await doc();
-    await submitForReview(db, {
+    await submitForReview(db, cipher, {
       documentId: id,
       viewer: as(owner),
       reviewers: [ann.id, ben.id],
@@ -463,9 +470,9 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("a removed reviewer is recomputed out: the rest decide", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
-    const v = await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    const v = await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     expect(v.state).toBe("approved");
     expect((await eventsOf(id)).at(-1)).toMatchObject({
       kind: "reviewers_changed",
@@ -476,7 +483,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("reopen (writers only, approved only) then publish and re-approve", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await expect(reopenDocument(db, cipher, { documentId: id, viewer: as(owner) })).rejects.toThrow(
       "document_review_state_invalid",
     );
@@ -521,7 +528,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       anchor: { type: "text", quote: "second", prefix: "", suffix: "" },
       body: "Still open",
     });
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 2 });
     await forceApprove(db, cipher, { documentId: id, viewer: as(owner), note: "Ship" });
     const view = await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
@@ -553,7 +560,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       ["reopened", 3, "approved", "in_review"],
     ]);
     // The next review action recomputes on v3: nothing given on v2 counts, so it stays in review.
-    const after = await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    const after = await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
     expect(after.state).toBe("in_review");
   });
 
@@ -567,7 +574,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       ),
     };
     const design = await createDocument(db, cipher, { kind: "design", ownerId: owner.id, title: "Coffee", files });
-    await submitForReview(db, { documentId: design.id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: design.id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: design.id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     const texts = await db.documentContent.count({ where: { documentId: design.id } });
     const { getDocument } = await import("./service.js");
@@ -591,7 +598,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("a publish racing a reopen never lands on the approved version", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     const [reopen, publish] = await Promise.allSettled([
       reopenDocument(db, cipher, { documentId: id, viewer: as(owner) }),
@@ -610,7 +617,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("a verdict on the approved version after a reopen is stale; one on the new version counts", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
     await expect(
@@ -628,7 +635,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("the force banner does not report changes requested before a reopen as an overridden objection", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "request_changes", versionNumber: 1 });
     await forceApprove(db, cipher, { documentId: id, viewer: as(owner), note: "First" });
     await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
@@ -638,7 +645,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("a force approval is final: a reviewer cannot request changes, and can.review is false", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
     await forceApprove(db, cipher, { documentId: id, viewer: as(owner), note: "Ship" });
     await expect(
       reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "request_changes", versionNumber: 1 }),
@@ -651,7 +658,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("an approval by every reviewer is not final: a reviewer may still request changes, which unlocks it", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     expect(await stateOf(id)).toBe("approved");
     expect((await getReviewView(db, id, as(ann))).can.review).toBe(true);
@@ -666,7 +673,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("archive and unarchive (owner only) return to the state before", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "request_changes", versionNumber: 1 });
     await expect(setArchived(db, { documentId: id, viewer: as(ann), archived: true })).rejects.toThrow(
       "document_access_denied",
@@ -688,7 +695,12 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("a view's permissions follow the viewer", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id], finalApproverId: cat.id });
+    await submitForReview(db, cipher, {
+      documentId: id,
+      viewer: as(owner),
+      reviewers: [ann.id],
+      finalApproverId: cat.id,
+    });
     expect((await getReviewView(db, id, as(owner))).can).toEqual({
       submit: true,
       review: false,
@@ -714,9 +726,36 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     await expect(getReviewView(db, id, as(outsider))).rejects.toThrow("document_not_found");
   });
 
+  it("a submit note is stored redacted on the submit event, and the action hook gets that event's id", async () => {
+    const id = await doc(true);
+    const seen: string[][] = [];
+    setReviewActionHook(async (_db, action) => void seen.push(action.eventIds));
+    try {
+      await submitForReview(db, cipher, {
+        documentId: id,
+        viewer: as(owner),
+        reviewers: [ann.id],
+        note: `please look ${SECRET}`,
+      });
+    } finally {
+      setReviewActionHook(undefined);
+    }
+    const [event] = await eventsOf(id);
+    expect(event?.note).toBe("please look [REDACTED]");
+    expect(seen).toEqual([[event?.id]]);
+    await expect(
+      submitForReview(db, cipher, {
+        documentId: id,
+        viewer: as(owner),
+        reviewers: [ann.id],
+        note: "x".repeat(MAX_REVIEW_NOTE_CHARS + 1),
+      }),
+    ).rejects.toThrow("comment_too_long");
+  });
+
   it("redacts the agent's secret values from notes before they are stored; events carry no content", async () => {
     const id = await doc(true);
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
     await reviewDocument(db, cipher, {
       documentId: id,
       viewer: as(ann),
@@ -739,7 +778,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       await createDocument(db, cipher, { ownerId: owner.id, title: "Plan", markdown: `# Plan\n\nkey ${SECRET} end` })
     ).id;
     await db.document.update({ where: { id }, data: { agentId } });
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     await reopenDocument(db, cipher, { documentId: id, viewer: as(owner) });
     const versions = await db.documentVersion.findMany({ where: { documentId: id }, orderBy: { number: "asc" } });
@@ -759,7 +798,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     });
     try {
       await live;
-      await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+      await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
       await expect.poll(() => seen.map((e) => e.kind)).toContain("review");
       // A reopen writes a version too: open pages load it.
       await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
@@ -776,7 +815,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
   it("an approved or archived document takes no new version: publish and restore are refused", async () => {
     const id = await doc();
     await publishVersion(db, cipher, { documentId: id, markdown: "v2", via: "mcp" });
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 2 });
     for (const attempt of [
       () => publishVersion(db, cipher, { documentId: id, markdown: "v3", via: "editor", expectedNumber: 2 }),
@@ -818,7 +857,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       title: "Coffee",
       files: all(),
     });
-    await submitForReview(db, { documentId: design.id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: design.id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: design.id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
     const before = await db.documentContent.count({ where: { documentId: design.id } });
     await expect(
@@ -834,7 +873,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("a publish while in review recomputes: changes requested on v1 becomes in_review on v2", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "request_changes", versionNumber: 1 });
     expect(await stateOf(id)).toBe("changes_requested");
     await publishVersion(db, cipher, { documentId: id, markdown: "fixed", via: "mcp" });
@@ -847,7 +886,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     // A cipher that approves while the agent's secret values are read (after the early check, before
     // the transaction), so only the check inside the transaction can refuse the publish.
     const id = await doc(true);
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     let approved = false;
     const approvingCipher = {
       ...cipher,
@@ -869,7 +908,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
 
   it("an approval racing a publish: exactly one wins", async () => {
     const id = await doc();
-    await submitForReview(db, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
     const results = await Promise.allSettled([
       reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 }),
       publishVersion(db, cipher, { documentId: id, markdown: "racing", via: "mcp", expectedNumber: 1 }),

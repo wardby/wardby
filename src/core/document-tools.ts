@@ -458,7 +458,7 @@ async function handleWrite(
     default: {
       const a = parse(DocumentIdArgs);
       if (typeof a === "string") return a;
-      const view = await submitForReview(db, {
+      const view = await submitForReview(db, cipher, {
         documentId: a.documentId,
         viewer,
         reviewers: setting.reviewers,

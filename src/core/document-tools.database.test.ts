@@ -146,7 +146,7 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* read tools (database)", () => 
       error: "document_version_not_found",
     });
 
-    await submitForReview(db, { documentId: linked, viewer: owner(), reviewers: [r.id] });
+    await submitForReview(db, cipher, { documentId: linked, viewer: owner(), reviewers: [r.id] });
     await reviewDocument(db, cipher, {
       documentId: linked,
       viewer: { kind: "principal", principalId: r.id },
@@ -318,7 +318,7 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* write tools (database)", () =>
       data: { principalId: rev.id, displayName: "Rex Reviewer", source: "operator" },
     });
     const id = (await createDocument(db, cipher, { ownerId: o.id, title: "N", markdown: "hello", agentId: W })).id;
-    await submitForReview(db, { documentId: id, viewer: owner(), reviewers: [rev.id] });
+    await submitForReview(db, cipher, { documentId: id, viewer: owner(), reviewers: [rev.id] });
     await reviewDocument(db, cipher, {
       documentId: id,
       viewer: { kind: "principal", principalId: rev.id },
@@ -380,7 +380,8 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* write tools (database)", () =>
     expect(await call("doc_create", { title: "D", markdown: "# D", option: "solo" })).toMatchObject({
       error: "invalid_arguments",
     });
-    for (const id of [a.id, b.id]) await submitForReview(db, { documentId: id, viewer: owner(), reviewers: [rev.id] });
+    for (const id of [a.id, b.id])
+      await submitForReview(db, cipher, { documentId: id, viewer: owner(), reviewers: [rev.id] });
     const chose = await chooseOption(db, cipher, {
       documentId: b.id,
       viewer: { kind: "principal", principalId: rev.id },

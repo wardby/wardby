@@ -1354,7 +1354,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
   });
 
   const approve = async (docId: string) => {
-    await submitForReview(db, {
+    await submitForReview(db, cipher, {
       documentId: docId,
       viewer: { kind: "principal", principalId: owner.id },
       reviewers: [writer.id],

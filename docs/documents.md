@@ -52,7 +52,7 @@ directory.
 | `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                                                                  |
 | `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                                                                   |
 | `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                                                        |
-| `submit_for_review`                                          | `documents:write` | Submit a document you own for review, or replace its reviewers (`reviewers`, `finalApproverId`)                   |
+| `submit_for_review`                                          | `documents:write` | Submit a document you own for review, or replace its reviewers (`reviewers`, `finalApproverId`, `note`)           |
 | `review_document`                                            | `documents:write` | Give a verdict as a named reviewer (`approve` or `request_changes`, on `versionNumber`)                           |
 | `force_approve_document`                                     | `documents:write` | Owner or final approver approves the current version over missing verdicts (`note` required)                      |
 | `reject_document`                                            | `documents:write` | Reject a plan document (never `plan.md`): it leaves the plan; owner, final approver or reviewer (`note` required) |

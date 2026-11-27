@@ -104,7 +104,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
     it("a reviewer is offered only the verdict they have not given: once approved, only Request changes on vN", async () => {
       const d = await server.design({ title: "Offer", kind: "document", markdown: "# O\n\nx\n", access: "comment" });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.first],
@@ -163,7 +163,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
     it("force approve lists who it overrides and needs a note", async () => {
       const d = await server.design({ title: "Force", kind: "document", markdown: "# F\n\nx\n", access: "comment" });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.first, d.principalIds.second],
@@ -199,7 +199,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         markdown: "# N\n\nfirst\n",
         access: "comment",
       });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.first],
@@ -280,7 +280,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
     it("a Markdown page approved while typing saves nothing while locked; after a reopen the edits wait for the next edit", async () => {
       const d = await server.design({ title: "Lock", kind: "document", markdown: "# L\n\nfirst\n", access: "write" });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.second],
@@ -331,7 +331,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         markdown: "# L\n\nsecond\n",
         via: "mcp",
       });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.first],
@@ -379,7 +379,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         where: { id: d.documentId },
         data: { repository: "acme/web", path: "designs/coffee", baseRef: "main" },
       });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.first],
@@ -429,7 +429,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
     it("a design approved while open is read-only in place; the state word follows; reopening saves nothing on its own", async () => {
       const d = await server.design({ title: "Coffee", files: files(), access: "write" });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.second],
@@ -557,7 +557,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
     it("a design's Review vN shows the boards changed since the version the reviewer read, not just the last step", async () => {
       const d = await server.design({ title: "Coffee", files: files(), access: "comment" });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.first],
@@ -589,7 +589,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
     it("a design's edits from before a lock survive a reopen and a newer version: the changed banner shows", async () => {
       const d = await server.design({ title: "Coffee", files: files(), access: "write" });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.second],
@@ -653,7 +653,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
     it("a design's edits from before a lock survive a reopen: the page moves to the copy and saves over it", async () => {
       const d = await server.design({ title: "Coffee", files: files(), access: "write" });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.second],
@@ -706,7 +706,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
     it("a design approved while open stops saving and says it is read-only now, with no Reload", async () => {
       const d = await server.design({ title: "Coffee", files: files(), access: "write" });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.second],
@@ -738,7 +738,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         files: { ...files(), "boards/home.html": home },
         via: "mcp",
       });
-      await submitForReview(server.db, {
+      await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
         viewer: owner(d.principalIds),
         reviewers: [d.principalIds.second],

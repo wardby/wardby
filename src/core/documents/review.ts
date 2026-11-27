@@ -25,7 +25,7 @@ import { preferIndexScans, withSerializableRetry } from "../serializable-retry.j
 import { documentAccess, requireDocumentAccess, type Viewer } from "./access.js";
 import { mentionCandidates, principalNames } from "./comments.js";
 import { notifyDocumentChange } from "./events.js";
-import { planReviewHook } from "../plans/approval.js";
+import { runReviewHooks } from "./review-hooks.js";
 import { loadContent } from "./files.js";
 import { formatFor } from "./formats/index.js";
 import { DOCUMENT_WRITE_ATTEMPTS, MAX_REVIEW_EVENTS, MAX_REVIEW_NOTE_CHARS, MAX_REVIEWERS } from "./limits.js";
@@ -225,11 +225,12 @@ async function record(
     overridden?: string[];
     extra?: Prisma.DocumentUpdateInput;
   },
-): Promise<void> {
+): Promise<string> {
   if (input.from !== input.to || input.extra) {
     await tx.document.update({ where: { id: input.documentId }, data: { reviewState: input.to, ...input.extra } });
   }
-  await tx.documentReviewEvent.create({
+  const event = await tx.documentReviewEvent.create({
+    select: { id: true },
     data: {
       documentId: input.documentId,
       actorPrincipalId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
@@ -244,6 +245,7 @@ async function record(
       ...(input.overridden ? { overridden: input.overridden } : {}),
     },
   });
+  return event.id;
 }
 
 /** A note as it will be stored: length-checked, then redacted against the document agent's secret values. */
@@ -302,7 +304,14 @@ async function denyAgent(db: PrismaClient, documentId: string, viewer: Viewer): 
 
 export async function submitForReview(
   db: PrismaClient,
-  input: { documentId: string; viewer: Viewer; reviewers: string[]; finalApproverId?: string | null },
+  cipher: Cipher,
+  input: {
+    documentId: string;
+    viewer: Viewer;
+    reviewers: string[];
+    finalApproverId?: string | null;
+    note?: string;
+  },
 ): Promise<ReviewView> {
   // An agent needs write on the document; a person needs to own it.
   const need = input.viewer.kind === "agent" ? "write" : "owner";
@@ -315,6 +324,10 @@ export async function submitForReview(
   const principalIds = parsed.flatMap((r) => ("principalId" in r ? [r.principalId] : []));
   const guestIds = parsed.flatMap((r) => ("guestId" in r ? [r.guestId] : []));
   const approver = input.finalApproverId;
+  const docRow = await db.document.findUnique({ where: { id: input.documentId }, select: { agentId: true } });
+  if (!docRow) throw new Error("document_not_found");
+  const note = await storedNote(db, cipher, docRow.agentId, input.note);
+  const eventIds: string[] = [];
   await inReviewTx(db, async (tx) => {
     await requireDocumentAccess(tx, input.documentId, input.viewer, need);
     const { doc, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
@@ -357,7 +370,7 @@ export async function submitForReview(
     }
     if (approver) await ensureCommentAccess(tx, doc, approver, grantedBy);
     const next = await readReview(tx, doc.id);
-    await record(tx, {
+    const id = await record(tx, {
       documentId: doc.id,
       viewer: input.viewer,
       kind: doc.reviewState === "draft" ? "submitted" : "reviewers_changed",
@@ -365,11 +378,17 @@ export async function submitForReview(
       to: computeReviewState(next.rule),
       versionNumber: rule.currentVersion,
       at: await actionTime(tx, lastEventAt),
+      note,
       ...(approver !== undefined ? { extra: { finalApproverId: approver } } : {}),
     });
+    eventIds.push(id);
   });
   await notifyDocumentChange(db, input.documentId, "review");
-  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
+  await runReviewHooks(db, {
+    documentId: input.documentId,
+    eventIds,
+    actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
+  });
   return getReviewView(db, input.documentId, input.viewer);
 }
 
@@ -380,7 +399,7 @@ export async function submitForReview(
 async function applyVerdict(
   tx: Tx,
   input: { documentId: string; viewer: Viewer; verdict: Verdict; versionNumber: number; note: string | null },
-): Promise<boolean> {
+): Promise<string | null> {
   // Live access decides inside the transaction: a grant or link revoked since the early check is seen here.
   await requireDocumentAccess(tx, input.documentId, input.viewer, "comment");
   const { doc: row, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
@@ -396,7 +415,7 @@ async function applyVerdict(
   if (input.versionNumber !== rule.currentVersion) throw new ReviewVersionConflictError(rule.currentVersion);
   // A repeat of the verdict that counts now changes nothing: no row update, no event (a new note is dropped).
   const counted = rule.reviewers.find((r) => r.id === mine.id);
-  if (counted && counted.verdict === verdict && reviewerCounts(counted, rule)) return false;
+  if (counted && counted.verdict === verdict && reviewerCounts(counted, rule)) return null;
   // One clock for the verdict and its event (see the file header).
   const at = await actionTime(tx, lastEventAt);
   await tx.documentReviewer.update({
@@ -404,7 +423,7 @@ async function applyVerdict(
     data: { verdict, versionNumber: rule.currentVersion, note, verdictAt: at },
   });
   const next = await readReview(tx, row.id);
-  await record(tx, {
+  return record(tx, {
     documentId: row.id,
     viewer,
     kind: verdict === "approved" ? "approved" : "changes_requested",
@@ -414,7 +433,6 @@ async function applyVerdict(
     at,
     note,
   });
-  return true;
 }
 
 /**
@@ -425,7 +443,7 @@ async function applyVerdict(
 async function applyReject(
   tx: Tx,
   input: { documentId: string; viewer: Viewer & { kind: "principal" }; note: string | null; memberOf?: string },
-): Promise<void> {
+): Promise<string> {
   const { viewer } = input;
   const principalId = viewer.principalId;
   const accessNow = await documentAccess(tx, input.documentId, viewer);
@@ -439,7 +457,7 @@ async function applyReject(
     throw new Error("document_reject_not_plan_document");
   }
   if (!REJECTABLE.has(doc.reviewState)) invalid();
-  await record(tx, {
+  return record(tx, {
     documentId: doc.id,
     viewer,
     kind: "rejected",
@@ -468,19 +486,27 @@ export async function reviewDocument(
   const doc = await requireDocumentAccess(db, input.documentId, viewer, "comment");
   const note = await storedNote(db, cipher, doc.agentId, input.note);
   const verdict: Verdict = input.verdict === "approve" ? "approved" : "changes_requested";
-  const changed = await inReviewTx(db, (tx) =>
-    applyVerdict(tx, {
+  const eventIds: string[] = [];
+  const changed = await inReviewTx(db, async (tx) => {
+    const id = await applyVerdict(tx, {
       documentId: input.documentId,
       viewer: input.viewer,
       verdict,
       versionNumber: input.versionNumber,
       note,
-    }),
-  );
+    });
+    if (id === null) return false;
+    eventIds.push(id);
+    return true;
+  });
   if (changed) {
     await notifyDocumentChange(db, input.documentId, "review");
     // Spec §7b: the verdict that approves a plan set's last document notifies or starts a build.
-    await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
+    await runReviewHooks(db, {
+      documentId: input.documentId,
+      eventIds,
+      actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
+    });
   }
   return getReviewView(db, input.documentId, input.viewer);
 }
@@ -506,6 +532,7 @@ export async function forceApprove(
   if (access !== "owner" && !isApprover) throw new Error("document_review_forbidden");
   if (input.note.trim() === "") invalid();
   const note = await storedNote(db, cipher, docRow.agentId, input.note);
+  const eventIds: string[] = [];
   const overridden = await inReviewTx(db, async (tx) => {
     // Force rights follow live access, the current owner and the current final approver, read in the transaction.
     const accessNow = await documentAccess(tx, input.documentId, viewer);
@@ -515,7 +542,7 @@ export async function forceApprove(
     if (accessNow !== "owner" && !approverNow) throw new Error("document_review_forbidden");
     if (!FORCEABLE.has(doc.reviewState)) invalid();
     const ids = overriddenReviewerIds(rule);
-    await record(tx, {
+    const eventId = await record(tx, {
       documentId: doc.id,
       viewer: input.viewer,
       kind: "force_approved",
@@ -526,10 +553,15 @@ export async function forceApprove(
       note,
       overridden: ids,
     });
+    eventIds.push(eventId);
     return ids;
   });
   await notifyDocumentChange(db, input.documentId, "review");
-  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
+  await runReviewHooks(db, {
+    documentId: input.documentId,
+    eventIds,
+    actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
+  });
   return { view: await getReviewView(db, input.documentId, input.viewer), overridden };
 }
 
@@ -557,9 +589,12 @@ export async function rejectDocument(
   if (!docRow) throw new Error("document_not_found");
   if (input.note.trim() === "") invalid();
   const note = await storedNote(db, cipher, docRow.agentId, input.note);
-  await inReviewTx(db, (tx) => applyReject(tx, { documentId: input.documentId, viewer, note }));
+  const eventIds: string[] = [];
+  await inReviewTx(db, async (tx) => {
+    eventIds.push(await applyReject(tx, { documentId: input.documentId, viewer, note }));
+  });
   await notifyDocumentChange(db, input.documentId, "review");
-  await planReviewHook()?.(db, input.documentId, principalId);
+  await runReviewHooks(db, { documentId: input.documentId, eventIds, actorId: principalId });
   return getReviewView(db, input.documentId, viewer);
 }
 
@@ -605,25 +640,27 @@ export async function chooseOption(
   // Each rejected document's note is redacted against its own agent's secret values, before the transaction.
   const notes = new Map<string, string | null>();
   for (const r of rows) if (r.id !== input.documentId) notes.set(r.id, await storedNote(db, cipher, r.agentId, text));
+  const eventIds: string[] = [];
   await inReviewTx(db, async (tx) => {
     const { doc: chosen } = await readReview(tx, input.documentId);
     const set = memberOf(chosen);
     if (!rejectablePlacement(chosen) || set === null) throw new Error("document_reject_not_plan_document");
     if (chosen.reviewState !== "approved") {
-      await applyVerdict(tx, {
+      const approved = await applyVerdict(tx, {
         documentId: chosen.id,
         viewer,
         verdict: "approved",
         versionNumber: input.versionNumber,
         note: null,
       });
+      if (approved !== null) eventIds.push(approved);
     }
     for (const id of rejectIds) {
-      await applyReject(tx, { documentId: id, viewer, note: notes.get(id) ?? null, memberOf: set });
+      eventIds.push(await applyReject(tx, { documentId: id, viewer, note: notes.get(id) ?? null, memberOf: set }));
     }
   });
   for (const id of [input.documentId, ...rejectIds]) await notifyDocumentChange(db, id, "review");
-  await planReviewHook()?.(db, input.documentId, viewer.principalId);
+  await runReviewHooks(db, { documentId: input.documentId, eventIds, actorId: viewer.principalId });
   return { view: await getReviewView(db, input.documentId, viewer), rejected: rejectIds };
 }
 
@@ -650,6 +687,7 @@ export async function reopenDocument(
     throw new Error("document_review_forbidden");
   }
   const principalId = input.viewer.principalId;
+  const eventIds: string[] = [];
   for (let attempt = 1; ; attempt++) {
     // Staged before the transaction, as a publish is (re-anchoring a design parses it).
     const row = await db.document.findUnique({
@@ -681,7 +719,7 @@ export async function reopenDocument(
           summary: reopenedSummary(approved.number),
           expectedNumber: approved.number,
         });
-        await record(tx, {
+        const eventId = await record(tx, {
           documentId: doc.id,
           viewer: input.viewer,
           kind: "reopened",
@@ -692,6 +730,8 @@ export async function reopenDocument(
           // A rejected document goes back into its plan (rejectDocument took it out).
           ...(doc.reviewState === "rejected" ? { extra: { removedFromPlan: false } } : {}),
         });
+        eventIds.length = 0;
+        eventIds.push(eventId);
       });
       break;
     } catch (err) {
@@ -704,7 +744,11 @@ export async function reopenDocument(
   // As a publish does (open pages load the new version), and as a review action does.
   await notifyDocumentChange(db, input.documentId, "version");
   await notifyDocumentChange(db, input.documentId, "review");
-  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
+  await runReviewHooks(db, {
+    documentId: input.documentId,
+    eventIds,
+    actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
+  });
   return getReviewView(db, input.documentId, input.viewer);
 }
 
@@ -717,6 +761,7 @@ export async function setArchived(
 ): Promise<ReviewView> {
   if (input.viewer.kind === "agent") return denyAgent(db, input.documentId, input.viewer);
   await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
+  const eventIds: string[] = [];
   await inReviewTx(db, async (tx) => {
     await requireDocumentAccess(tx, input.documentId, input.viewer, "owner");
     const { doc, rule, lastEventAt } = await readReview(tx, input.documentId);
@@ -727,7 +772,7 @@ export async function setArchived(
       : back && isReviewState(back) && back !== "archived"
         ? back
         : "draft";
-    await record(tx, {
+    const eventId = await record(tx, {
       documentId: doc.id,
       viewer: input.viewer,
       kind: input.archived ? "archived" : "unarchived",
@@ -737,9 +782,14 @@ export async function setArchived(
       at: await actionTime(tx, lastEventAt),
       extra: { reviewStateBeforeArchive: input.archived ? doc.reviewState : null },
     });
+    eventIds.push(eventId);
   });
   await notifyDocumentChange(db, input.documentId, "review");
-  await planReviewHook()?.(db, input.documentId, input.viewer.kind === "principal" ? input.viewer.principalId : null);
+  await runReviewHooks(db, {
+    documentId: input.documentId,
+    eventIds,
+    actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
+  });
   return getReviewView(db, input.documentId, input.viewer);
 }
 
