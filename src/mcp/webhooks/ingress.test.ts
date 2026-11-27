@@ -55,7 +55,17 @@ function fakeDb(agents: FakeAgentRow[]) {
       findUnique: async ({ where }: { where: { id?: string; name?: string } }) => {
         const row = where.id ? agentsById.get(where.id) : agents.find((a) => a.name === where.name);
         // Owned by "p1", the creator every test uses, so the fire-time creator check passes.
-        if (row) return { kind: "native", codingProfile: null, budgetUsd: 1, model: "m", ownerId: "p1", ...row };
+        if (row)
+          return {
+            kind: "native",
+            codingProfile: null,
+            budgetUsd: 1,
+            model: "m",
+            ownerId: "p1",
+            ...row,
+            // Columns every stored profile row carries (database defaults).
+            ...(row.codingProfile ? { codingProfile: { webTools: "off", subAgents: true, ...row.codingProfile } } : {}),
+          };
         return null;
       },
     },

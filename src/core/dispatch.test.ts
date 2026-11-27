@@ -54,6 +54,11 @@ function fakeDb(
   budget: FakeBudget = {},
   catalog: Record<string, any>[] = [],
 ) {
+  // Columns every stored profile row carries (database defaults), filled in place so test references stay live.
+  if (agent.codingProfile) {
+    agent.codingProfile.webTools ??= "off";
+    agent.codingProfile.subAgents ??= true;
+  }
   let transactionActive = false;
   const rawStatements: string[] = [];
   const budgetEvents: Record<string, any>[] = [];
@@ -987,7 +992,6 @@ describe("dispatchRun", () => {
   it.each([
     ["web search, sub-agents off", "search", false, "search", false],
     ["web search and fetch, sub-agents on", "search-and-fetch", true, "search-and-fetch", true],
-    ["an unreadable stored webTools (fails closed)", "everything", true, "off", true],
   ] as const)(
     "fixes webTools and subAgents on the run at dispatch from %s",
     async (_label, webTools, subAgents, expectedWebTools, expectedSubAgents) => {
@@ -1014,6 +1018,33 @@ describe("dispatchRun", () => {
       ]);
     },
   );
+
+  it("refuses a coding agent whose stored webTools is unreadable, naming the agent but not the value", async () => {
+    const stored = "x".repeat(500);
+    const agent = {
+      ...nativeAgent(),
+      kind: "coding",
+      budgetUsd: 1.25,
+      codingProfile: {
+        provider: "gemini-cli",
+        repository: "openai/wardby",
+        baseRef: "main",
+        defaultTask: "Fix the failing tests",
+        timeoutSec: 900,
+        protectedPaths: [],
+        webTools: stored,
+      },
+    };
+    const state = fakeDb(agent);
+    const executor: Executor = { start: vi.fn(async () => {}), async stop() {} };
+    const attempt = dispatchRun({ db: state.db, executor, agentId: agent.id });
+    await expect(attempt).rejects.toThrow(
+      `Coding agent "${agent.id}" cannot run: the stored webTools setting is invalid; set codingProfile.webTools to off, search or search-and-fetch with update_agent.`,
+    );
+    await expect(attempt).rejects.not.toThrow(stored);
+    expect(state.codingRuns).toEqual([]);
+    expect(executor.start).not.toHaveBeenCalled();
+  });
 
   it.each([
     ["bare mode on", true, true],

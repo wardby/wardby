@@ -74,6 +74,8 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
             model: "gpt-5.6-luna",
             ownerId: "p1",
             ...row,
+            // Columns every stored profile row carries (database defaults).
+            ...(row.codingProfile ? { codingProfile: { webTools: "off", subAgents: true, ...row.codingProfile } } : {}),
           };
         }
         return null;

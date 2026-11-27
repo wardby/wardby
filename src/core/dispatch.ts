@@ -12,7 +12,7 @@ import {
 } from "../coding/protocol.js";
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
 import { isPackageAuditActive } from "../coding/registry/audit-mode.js";
-import { isWebTools } from "../coding/google-web-tools.js";
+import { WEB_TOOLS_SETTING_INVALID, isWebTools } from "../coding/google-web-tools.js";
 import { ModelUnavailableError, entryOf, type ResolvedCatalogEntry } from "../providers/llm/catalog-types.js";
 import {
   parseAllowedServiceNames,
@@ -1392,6 +1392,10 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
           if (!agent.codingProfile) throw new Error(`Coding agent "${agent.id}" has no coding profile.`);
           // An unknown coding provider is a broken profile, not a catalog state: still thrown.
           assertCodingProvider(agent.codingProfile.provider);
+          // Same for an unreadable webTools: refused, never run with a setting the operator did not choose.
+          if (!isWebTools(agent.codingProfile.webTools)) {
+            throw new Error(`Coding agent "${agent.id}" cannot run: ${WEB_TOOLS_SETTING_INVALID}.`);
+          }
           // Resolved again inside the transaction: an unlink since the preview refuses the run here.
           target = await codingTarget(tx, options, agent.codingProfile);
           if (options.continuesCodingRunId === undefined) {
@@ -1603,12 +1607,13 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               maxOutputTokens: agent.codingProfile.maxOutputTokens,
               repoSkills: agent.codingProfile.repoSkills,
               claudeBareMode: agent.codingProfile.claudeBareMode,
-              // An unreadable stored value fails closed: no web tools.
-              webTools: isWebTools(agent.codingProfile.webTools) ? agent.codingProfile.webTools : "off",
+              // Checked above: an unreadable stored value refused the run.
+              webTools: agent.codingProfile.webTools,
               subAgents: agent.codingProfile.subAgents,
               dependencyCache: agent.codingProfile.dependencyCache,
               sessionResume: agent.codingProfile.sessionResume,
-              // A continuation keeps its root's setting, matching the rows copied from it.
+              // A continuation keeps its root's git history, matching the rows copied from it; every other
+              // setting here (webTools and subAgents included) follows the profile as it is now.
               gitHistoryDepth: gitHistory ? gitHistory.depth : agent.codingProfile.gitHistoryDepth,
               gitHistoryFull: gitHistory ? gitHistory.full : agent.codingProfile.gitHistoryFull,
               // Fixed here (#582): the workflow a run executes never changes mid-run.

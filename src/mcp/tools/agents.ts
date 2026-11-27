@@ -7,6 +7,7 @@
  */
 import { Prisma, type CodingAgentProfile, type NativeExecutionMode } from "#prisma";
 import { codingProfileColumns } from "../../coding/profile-columns.js";
+import { WEB_TOOLS_SETTING_INVALID, isWebTools } from "../../coding/google-web-tools.js";
 import { z } from "zod";
 import {
   RUN_STEPS_LEVELS,
@@ -803,6 +804,18 @@ function requireModelAvailable(ctx: McpRequestContext, model: string, kind: "nat
   }
 }
 
+/**
+ * update_agent's merge base for a stored profile. An unreadable stored webTools (only a direct database
+ * write can make one: the column has no CHECK) is left out so a patch that sets webTools repairs it; a
+ * patch that does not set it is refused with a fixed message (never the stored value, never a silent "off").
+ */
+export function profileMergeBase(profile: CodingAgentProfile, patch: { webTools?: unknown }): CodingProfile {
+  if (!isWebTools(profile.webTools) && patch.webTools === undefined) {
+    throw new McpError(400, `Invalid coding profile: ${WEB_TOOLS_SETTING_INVALID}.`);
+  }
+  return storedProfile(profile);
+}
+
 function storedProfile(profile: CodingAgentProfile): CodingProfile {
   return CodingProfileSchema.parse({
     provider: profile.provider,
@@ -842,7 +855,7 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
             ...(profile.workflowReplyField ? { replyField: profile.workflowReplyField } : {}),
           },
     tunnelHosts: profile.tunnelHosts,
-    webTools: profile.webTools,
+    webTools: isWebTools(profile.webTools) ? profile.webTools : undefined,
     subAgents: profile.subAgents,
   });
 }
@@ -1324,7 +1337,6 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           if (nextKind === "coding") {
             // Attached native tools stay: a Claude Code run serves them through its MCP token (#622); a
             // Codex run leaves them out, and the answer warns below.
-            const currentProfile = existing.codingProfile ? storedProfile(existing.codingProfile) : undefined;
             const {
               debugTraceMinutes: _minutes,
               debugTraceMaxMb: _maxMb,
@@ -1332,6 +1344,9 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               packageAuditMinutes: _auditMinutes,
               ...profilePatch
             } = args.codingProfile ?? {};
+            const currentProfile = existing.codingProfile
+              ? profileMergeBase(existing.codingProfile, profilePatch)
+              : undefined;
             const profileResult = CodingProfileSchema.safeParse({ ...currentProfile, ...profilePatch });
             if (!profileResult.success) throw invalidArguments("coding profile", profileResult.error);
             nextProfile = profileResult.data;

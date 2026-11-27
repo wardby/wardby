@@ -472,6 +472,38 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     }
   });
 
+  it("loads the run's webTools and subAgents; an unreadable stored webTools loads as off", async () => {
+    const runId = `container-webtools-${randomUUID()}`;
+    try {
+      await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
+      await db.codingRun.create({
+        data: {
+          runId,
+          task: "Fix it.",
+          repository: "openai/example",
+          baseRef: "main",
+          headRef: `wardby/run-${runId}`,
+          provider: "gemini-cli",
+          model: "gemini-4-neon",
+          timeoutSec: 900,
+          allowedEgress: [],
+          protectedPaths: ["CODEOWNERS"],
+          budgetReservedUsd: 1,
+          webTools: "search-and-fetch",
+          subAgents: true,
+        },
+      });
+      const store = new PrismaContainerExecutionStore(db);
+      await expect(store.load(runId)).resolves.toMatchObject({ webTools: "search-and-fetch", subAgents: true });
+      // Only a direct database write gets here (dispatch refuses such a profile); the snapshot still says off.
+      await db.codingRun.update({ where: { runId }, data: { webTools: "everything" } });
+      await expect(store.load(runId)).resolves.toMatchObject({ webTools: "off" });
+    } finally {
+      await db.codingRun.deleteMany({ where: { runId } });
+      await db.run.deleteMany({ where: { id: runId } });
+    }
+  });
+
   it("loads no repositories for a single-repository run", async () => {
     const runId = `container-single-${randomUUID()}`;
     try {

@@ -98,7 +98,16 @@ function fakeDb(
       findUnique: async ({ where }: { where: { id?: string; name?: string } }) => {
         const row = where.id ? agentsById.get(where.id) : agents.find((a) => a.name === where.name);
         if (row)
-          return { kind: "native", codingProfile: null, budgetUsd: 1, allowedOverrunPercent: 0, model: "m", ...row };
+          return {
+            kind: "native",
+            codingProfile: null,
+            budgetUsd: 1,
+            allowedOverrunPercent: 0,
+            model: "m",
+            ...row,
+            // Columns every stored profile row carries (database defaults).
+            ...(row.codingProfile ? { codingProfile: { webTools: "off", subAgents: true, ...row.codingProfile } } : {}),
+          };
         return null;
       },
     },

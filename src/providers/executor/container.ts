@@ -1216,7 +1216,7 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       maxOutputTokens: row.codingRun.maxOutputTokens,
       repoSkills: row.codingRun.repoSkills,
       claudeBareMode: row.codingRun.claudeBareMode,
-      // An unreadable stored value fails closed: no web tools.
+      // Defence in depth: dispatch already refuses an agent whose stored webTools is unreadable.
       webTools: isWebTools(row.codingRun.webTools) ? row.codingRun.webTools : "off",
       subAgents: row.codingRun.subAgents,
       dependencyCache: row.codingRun.dependencyCache,

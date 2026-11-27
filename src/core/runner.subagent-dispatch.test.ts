@@ -137,6 +137,14 @@ function fakeDb(
   // Like the real column, allowedOverrunPercent defaults to 0. Set in place:
   // tests mutate their agent objects mid-run and expect the db to see it.
   for (const a of agents) a.allowedOverrunPercent ??= 0;
+  // Columns every stored profile row carries (database defaults), filled in place so test references stay live.
+  for (const a of agents) {
+    const profile = a.codingProfile as Record<string, unknown> | undefined;
+    if (profile) {
+      profile.webTools ??= "off";
+      profile.subAgents ??= true;
+    }
+  }
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map(priorRuns.map((r) => [r.id, r]));
   const codingRuns = new Map(seedCodingRuns.map((r) => [r.runId, r]));

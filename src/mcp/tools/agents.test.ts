@@ -14,8 +14,10 @@ import {
   SESSION_RESUME_IMAGE_WARNING,
   SESSION_RESUME_NO_STORE_WARNING,
   SUBSTRATE_IMAGE_WARNING,
+  profileMergeBase,
   registerAgentTools,
 } from "./agents.js";
+import { CodingProfileSchema } from "../../coding/profile.js";
 import type { McpRequestContext } from "../context.js";
 import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 import { CatalogStore, installModelCatalog, uninstallModelCatalogForTests } from "../../providers/llm/catalog-store.js";
@@ -102,6 +104,9 @@ interface FakeCodingProfile {
   workerImageRef?: string | null;
   repoSkills?: boolean;
   claudeBareMode?: boolean;
+  /** A text column with no CHECK: tests store unreadable values to prove the repair path. */
+  webTools?: string;
+  subAgents?: boolean;
 }
 
 type FakeAgentSeed = Omit<FakeAgentRow, "kind" | "codingProfile" | "scheduleEnabled" | "budgetGroupId"> &
@@ -124,6 +129,8 @@ function fakeDb(
         scheduleEnabled: true,
         budgetGroupId: null,
         ...r,
+        // Columns every stored profile row carries (database defaults).
+        ...(r.codingProfile ? { codingProfile: { webTools: "off", subAgents: true, ...r.codingProfile } } : {}),
       },
     ]),
   );
@@ -1697,6 +1704,59 @@ describe("agent CRUD tools", () => {
       timeoutSec: 1800,
       protectedPaths: ["CODEOWNERS"],
     },
+  });
+
+  describe("an unreadable stored webTools (a direct database write)", () => {
+    async function clientFor() {
+      const seed = codingAgentSeed();
+      const db = fakeDb([{ ...seed, codingProfile: { ...seed.codingProfile, webTools: "y".repeat(300) } }]);
+      const mcp = buildMcpServer({ providers: fakeProviders, db, config: { canonicalUri: CANONICAL_URI } });
+      mcp.setFixedContext(fakeCtx(db, "p1", ["agents:write", "agents:read"]));
+      registerAgentTools(mcp);
+      return connectClient(mcp);
+    }
+
+    it("the merge base leaves an unreadable webTools out so a patch that sets it repairs the profile", () => {
+      const seed = codingAgentSeed();
+      const stored = {
+        ...seed.codingProfile,
+        allowWebhookTaskOverride: false,
+        collectExclude: [],
+        toolchain: "node",
+        packageAllowlist: {},
+        packagePolicy: {},
+        services: [],
+        tunnelHosts: [],
+        webTools: "y".repeat(300),
+        subAgents: false,
+      };
+      const base = profileMergeBase(stored as never, { webTools: "search" });
+      expect(CodingProfileSchema.parse({ ...base, webTools: "search" })).toMatchObject({
+        webTools: "search",
+        subAgents: false,
+      });
+      expect(() => profileMergeBase(stored as never, {})).toThrow(
+        "Invalid coding profile: the stored webTools setting is invalid; set codingProfile.webTools to off, search or search-and-fetch with update_agent.",
+      );
+      expect(profileMergeBase({ ...stored, webTools: "search-and-fetch" } as never, {}).webTools).toBe(
+        "search-and-fetch",
+      );
+    });
+
+    it("update_agent without webTools refuses and asks for the setting, never echoing the stored value", async () => {
+      const client = await clientFor();
+      const refused = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { timeoutSec: 900 } },
+      });
+      expect(refused.isError).toBe(true);
+      const message = (refused.content as { text: string }[])[0].text;
+      expect(message).toContain(
+        "the stored webTools setting is invalid; set codingProfile.webTools to off, search or search-and-fetch",
+      );
+      expect(message).not.toContain("yyyy");
+      await client.close();
+    });
   });
 
   describe("warm rounds: an agent's retained coding sandboxes", () => {
