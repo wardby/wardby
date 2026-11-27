@@ -21,7 +21,10 @@ export function refuseAgentViewer(viewer: Viewer): asserts viewer is Exclude<Vie
 }
 
 export type DocumentAccess = "none" | "read" | "comment" | "write" | "owner";
-export type DocumentDb = Pick<PrismaClient, "agent" | "document" | "documentShareLink" | "resourceGrant">;
+export type DocumentDb = Pick<
+  PrismaClient,
+  "agent" | "document" | "documentShareLink" | "resourceGrant" | "run" | "runDocumentGrant"
+>;
 
 export async function documentAccess(db: DocumentDb, documentId: string, viewer: Viewer): Promise<DocumentAccess> {
   const doc = await db.document.findUnique({
@@ -75,7 +78,12 @@ async function planAccess(db: DocumentDb, doc: AccessDoc, principalId: string): 
  * execute the agent, and a planner only while the agent's owner may execute it. No setting, or a non-native
  * agent, means none; access "read" caps at read.
  */
-export async function agentDocumentAccess(db: DocumentDb, doc: AccessDoc, agentId: string): Promise<DocumentAccess> {
+export async function agentDocumentAccess(
+  db: DocumentDb,
+  doc: AccessDoc,
+  agentId: string,
+  runId?: string,
+): Promise<DocumentAccess> {
   const agent = await db.agent.findUnique({
     where: { id: agentId },
     select: { id: true, ownerId: true, kind: true, documentTools: true },
@@ -117,8 +125,35 @@ export async function agentDocumentAccess(db: DocumentDb, doc: AccessDoc, agentI
     });
     if (planner && (await canExecute(db, planner, agent.ownerId))) best = higher(best, "comment");
   }
+  // A routed run (#646) reads the documents its review action covers, via a grant on its run or an ancestor.
+  if (runId && (await runTreeGrant(db, runId, doc.id))) best = higher(best, "read");
   if (setting.access === "read" && accessRank("document", best) > accessRank("document", "read")) best = "read";
   return best;
+}
+
+/** A routed run's read access (#646): a grant on this run or any run above it in its tree. */
+export async function runTreeGrant(
+  db: Pick<PrismaClient, "run" | "runDocumentGrant">,
+  runId: string,
+  documentId: string,
+): Promise<boolean> {
+  let id: string | null = runId;
+  for (let i = 0; id && i < 32; i++) {
+    if (
+      await db.runDocumentGrant.findUnique({
+        where: { runId_documentId: { runId: id, documentId } },
+        select: { id: true },
+      })
+    ) {
+      return true;
+    }
+    const row: { parentRunId: string | null } | null = await db.run.findUnique({
+      where: { id },
+      select: { parentRunId: true },
+    });
+    id = row?.parentRunId ?? null;
+  }
+  return false;
 }
 
 export async function canExecute(
@@ -130,7 +165,7 @@ export async function canExecute(
 }
 
 async function accessTo(db: DocumentDb, doc: AccessDoc, viewer: Viewer): Promise<DocumentAccess> {
-  if (viewer.kind === "agent") return agentDocumentAccess(db, doc, viewer.agentId);
+  if (viewer.kind === "agent") return agentDocumentAccess(db, doc, viewer.agentId, viewer.runId);
   if (viewer.kind !== "principal") return linkAccess(db, doc, viewer.shareLinkId);
   let best: DocumentAccess = await effectiveAccess(db, "document", doc, viewer.principalId, {
     operator: viewer.operator,

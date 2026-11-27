@@ -177,4 +177,27 @@ describe.skipIf(!process.env.DATABASE_URL)("agent viewer: access never comes fro
     await expect(requireDocumentAccess(db, d2, viewer(C), "read")).rejects.toThrow("document_not_found");
     await expect(requireDocumentAccess(db, d1, viewer(B), "read")).rejects.toThrow("document_not_found");
   });
+
+  it("a grant on a run above gives read to its tree, never to other runs, and still needs the tool setting", async () => {
+    const [gp, parent, child, other] = ["gp", "pa", "ch", "ot"].map((n) => `rt-${n}-${s}`);
+    const mkRun = (id: string, agentId: string, parentRunId?: string) =>
+      db.run.create({ data: { id, agentId, ...(parentRunId ? { parentRunId } : {}) } });
+    await mkRun(gp, B);
+    await mkRun(parent, B, gp);
+    await mkRun(child, B, parent);
+    await mkRun(other, B);
+    await mkRun(`${child}-c`, C, parent);
+    const d4 = (await db.document.create({ data: { title: "D4", ownerId: o.id } })).id;
+    await db.runDocumentGrant.create({ data: { runId: gp, documentId: d4 } });
+    try {
+      const v = (agentId: string, runId: string): Viewer => ({ kind: "agent", agentId, runId });
+      expect(await documentAccess(db, d4, viewer(B))).toBe("none");
+      expect(await documentAccess(db, d4, v(B, child))).toBe("read");
+      expect(await documentAccess(db, d4, v(B, other))).toBe("none");
+      expect(await documentAccess(db, d4, v(C, `${child}-c`))).toBe("none");
+    } finally {
+      await db.runDocumentGrant.deleteMany({ where: { documentId: d4 } });
+      await db.run.deleteMany({ where: { id: { in: [gp, parent, child, other, `${child}-c`] } } });
+    }
+  });
 });

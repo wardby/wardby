@@ -170,6 +170,8 @@ type GrantTx = Pick<
   | "agentTool"
   | "codingAgentProfile"
   | "agentMcpServer"
+  | "run"
+  | "runDocumentGrant"
 >;
 
 /**
