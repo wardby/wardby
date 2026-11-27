@@ -161,6 +161,23 @@ describe("mergePublish", () => {
       expect((abs?.type as Y.XmlText).toString().slice(abs!.index, abs!.index + 5)).toBe("notes");
     });
 
+    it("a paragraph edited next to a new one is paired by its words and updated in place, keeping typing in it", () => {
+      const state = Y.encodeStateAsUpdate(seedLiveDoc(md(paras)));
+      const live = fromState(state);
+      const t = para(live, 3);
+      t.insert(t.length, " TYPED-SINCE");
+      // The publish edits paragraph 3 and adds one after it: one old block against two new ones.
+      const edited = paras.map((p, i) => (i === 3 ? p.replace("part 3", "part three") : p));
+      Y.applyUpdate(
+        live,
+        mergePublish(state, md([...edited.slice(0, 4), "Brand new words.", ...edited.slice(4)])).update,
+      );
+      expect(liveDocToMarkdown(live)).toContain(
+        "part three: hiring notes that read nothing like the others. TYPED-SINCE",
+      );
+      expect(liveDocToMarkdown(live)).toContain("Brand new words.");
+    });
+
     it("a block Markdown rewrites (bold starting with a space) does not spread to the others", () => {
       const start = seedLiveDoc(md(paras));
       const live = fromState(Y.encodeStateAsUpdate(start));

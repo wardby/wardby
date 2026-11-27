@@ -128,8 +128,9 @@ function updateBlock(doc: Y.Doc, y: Y.XmlElement, p: PMNode) {
 function yText(y: Y.XmlElement): string {
   let out = "";
   const walk = (n: Y.XmlElement | Y.XmlText) => {
-    if (n instanceof Y.XmlText) out += String(n.toString()).replace(/<[^>]*>/g, "");
-    else for (const c of n.toArray()) walk(c as Y.XmlElement | Y.XmlText);
+    if (n instanceof Y.XmlText) {
+      for (const op of n.toDelta() as { insert?: unknown }[]) if (typeof op.insert === "string") out += op.insert;
+    } else for (const c of n.toArray()) walk(c as Y.XmlElement | Y.XmlText);
   };
   walk(y);
   return out;

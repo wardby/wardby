@@ -107,6 +107,7 @@ function typeByTag(el: DomElement, inSvg: boolean): string | undefined {
     case "video":
       return "video";
     case "iframe":
+      // GrapesJS's own type rules, kept exactly (unanchored): this picks an element type, never a trust decision.
       if (/maps\.google\.com/.test(src)) return "map";
       if (/youtube\.com\/embed|youtube-nocookie\.com\/embed|player\.vimeo\.com\/video/.test(src)) return "video";
       return "iframe";
