@@ -20,25 +20,25 @@ datasource db {
 }
 
 model Agent {
-  id                    String              @id @default(cuid())
-  name                  String              @unique
+  id                    String               @id @default(cuid())
+  name                  String               @unique
   systemPrompt          String
   model                 String
-  budgetUsd             Decimal             @db.Decimal(10, 4)
+  budgetUsd             Decimal              @db.Decimal(10, 4)
   /// Percent above budgetUsd a run may spend: each coding run's limit, or (on a lead agent) its run tree's ceiling for coding sub-agents; native model calls are unaffected; group caps still apply.
-  allowedOverrunPercent Int                 @default(0)
-  createdAt             DateTime            @default(now())
-  updatedAt             DateTime            @updatedAt
+  allowedOverrunPercent Int                  @default(0)
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
   runs                  Run[]
-  kind                  AgentKind           @default(native)
+  kind                  AgentKind            @default(native)
   codingProfile         CodingAgentProfile?
-  planSets              PlanSet[]           @relation("PlanSetPlanner")
-  accessPlanSets        PlanSet[]           @relation("PlanSetAccess")
+  planSets              PlanSet[]            @relation("PlanSetPlanner")
+  accessPlanSets        PlanSet[]            @relation("PlanSetAccess")
   promptVersions        AgentPromptVersion[]
   /// Built-in doc_* tools for native agents (#625): { access, reviewers, finalApproverId, maxNewPerRun, plans }.
   /// Null = off. Validated at save (src/core/documents/tools-setting.ts).
   documentTools         Json?
-  documentGrants        ResourceGrant[]     @relation("AgentResourceGrants")
+  documentGrants        ResourceGrant[]      @relation("AgentResourceGrants")
 
   // Phase 2: scheduling. `schedule` is a cron expression; null = manual-only.
   schedule        String?
@@ -784,28 +784,32 @@ model RunTranscript {
 /// RunStepWriter, after exact-value redaction against the run's secret values
 /// (docs/debugging-agent-runs.md#run-steps). Never tool output at the summary level.
 model RunStep {
-  id        String   @id @default(cuid())
-  runId     String
-  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  id              String    @id @default(cuid())
+  runId           String
+  run             Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
   /// Order within the run, from 1.
-  seq       Int
-  at        DateTime @default(now())
-  /// "tool" | "said"
-  kind      String
+  seq             Int
+  at              DateTime  @default(now())
+  /// "tool" | "said", or join's "join" | "leave" | "message" | "interrupt" (a person joined to the run)
+  kind            String
   /// The tool's display name (Bash for every agent's shell tool, mcp:<name>, Edit, ...); null for "said".
-  tool      String?
+  tool            String?
   /// The provider's call id (to attach the result), or a said:<key> id; never returned by MCP.
-  callId    String?
+  callId          String?
   /// Redacted, at most 300 characters.
-  summary   String
+  summary         String
   /// ok | error | exit N, set when the result arrives.
-  status    String?
+  status          String?
   /// The detail level's text: redacted tool input (~4 KB), then the last ~2 KB of its output once
   /// the result is back, or the model's text (~8 KB). At most 16,384 characters. Null below detail.
-  detail    String?
+  detail          String?
   /// A workflow run's sub-agent that produced the step (#582): an id in CodingRun.workflowProgress.agents; null = the main session.
-  agentRef  String?
-  expiresAt DateTime
+  agentRef        String?
+  /// Join steps only: the principal who joined, left, or sent the message. Null on every other step.
+  fromPrincipalId String?
+  /// Join message/interrupt steps only: when the run's worker first received it. Null until then.
+  deliveredAt     DateTime?
+  expiresAt       DateTime
 
   @@unique([runId, seq])
   @@index([runId, callId])
@@ -2664,30 +2668,30 @@ model TeamAudit {
 }
 
 model Document {
-  id                       String                @id @default(cuid())
+  id                       String                     @id @default(cuid())
   /// "document" | "design"
-  kind                     String                @default("document")
+  kind                     String                     @default("document")
   title                    String
   ownerId                  String
-  owner                    Principal             @relation("DocumentOwner", fields: [ownerId], references: [id])
+  owner                    Principal                  @relation("DocumentOwner", fields: [ownerId], references: [id])
   agentId                  String?
-  agent                    Agent?                @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  agent                    Agent?                     @relation(fields: [agentId], references: [id], onDelete: SetNull)
   /// e.g. "owner/repo" or "local:/abs/path"; with path, enables send-to-agent
   repository               String?
   /// repo-relative Markdown file (documents) or design directory (designs)
   path                     String?
   baseRef                  String?
   /// draft | in_review | changes_requested | approved | archived (src/core/documents/review-state.ts)
-  reviewState              String                @default("draft")
+  reviewState              String                     @default("draft")
   /// the state when it was archived; unarchive returns to it
   reviewStateBeforeArchive String?
   /// a principal id (plain text, like DocumentVersion.createdById): may force approve
   finalApproverId          String?
-  currentVersionId         String?               @unique
-  createdAt                DateTime              @default(now())
-  updatedAt                DateTime              @updatedAt
-  versions                 DocumentVersion[]     @relation("DocumentVersions")
-  currentVersion           DocumentVersion?      @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  currentVersionId         String?                    @unique
+  createdAt                DateTime                   @default(now())
+  updatedAt                DateTime                   @updatedAt
+  versions                 DocumentVersion[]          @relation("DocumentVersions")
+  currentVersion           DocumentVersion?           @relation("CurrentVersion", fields: [currentVersionId], references: [id])
   threads                  CommentThread[]
   shareLinks               DocumentShareLink[]
   contents                 DocumentContent[]
@@ -2699,9 +2703,9 @@ model Document {
   liveLease                DocumentLiveLease?
   liveTickets              DocumentLiveTicket[]
   planSetId                String?
-  planSet                  PlanSet?              @relation(fields: [planSetId], references: [id], onDelete: SetNull)
+  planSet                  PlanSet?                   @relation(fields: [planSetId], references: [id], onDelete: SetNull)
   planPath                 String?
-  removedFromPlan          Boolean               @default(false)
+  removedFromPlan          Boolean                    @default(false)
 
   /// One document per plan path in a set. Postgres treats NULLs as distinct, so documents outside a set are unaffected.
   @@unique([planSetId, planPath])

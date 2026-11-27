@@ -217,8 +217,8 @@ article for how links are worked out.
   time. An open command shows "$ command", its exit status and its output;
   Codex's framing lines (chunk id, wall time, token count) are left out, and
   **Copy** still copies the detail exactly as stored. Detail appears only for
-  the agent's owner and the run's starter (and the stdio operator), on a
-  server at the detail level. An open detail shows its last 40 lines, with a
+  people with execute access to the agent (its owner included), the run's
+  starter and the stdio operator, on a server at the detail level. An open detail shows its last 40 lines, with a
   count of the lines above them.
 - **Last step**: in the list, a running or failed run shows its newest step
   under the agent's name.

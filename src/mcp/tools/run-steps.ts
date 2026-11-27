@@ -36,7 +36,9 @@ export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOpt
       `${RUN_STEPS_MAX_LIMIT}. dropped counts steps past the per-run limit. Same access as get_run. ` +
       "A workflow run (codingProfile.workflow) also returns workflow: its phases ({ index, title }) and sub-agents " +
       "({ id, label, phaseIndex, state, attempt }); a step a sub-agent made has agent set to that sub-agent's id, " +
-      "a step with no agent is the main session's. Titles and labels come from the repository's script.",
+      "a step with no agent is the main session's. Titles and labels come from the repository's script. " +
+      "People joined to the run (join_run) add steps of kind join, leave, message and interrupt, with from set to " +
+      "the person's principal id; a message's full text is its detail.",
     inputSchema: {
       type: "object",
       properties: {
@@ -70,6 +72,7 @@ export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOpt
           summary: true,
           status: true,
           agentRef: true,
+          fromPrincipalId: true,
           ...(showDetail ? { detail: true } : {}),
         },
       });
@@ -97,6 +100,8 @@ export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOpt
           summary: s.summary,
           status: s.status,
           ...(s.agentRef ? { agent: s.agentRef } : {}),
+          // Join steps (join, leave, message, interrupt): the principal who joined, left or sent it.
+          ...(s.fromPrincipalId ? { from: s.fromPrincipalId } : {}),
           ...(showDetail ? { detail: s.detail ?? null } : {}),
         })),
         ...(workflow ? { workflow } : {}),

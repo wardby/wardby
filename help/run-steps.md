@@ -88,12 +88,23 @@ runs record no steps; native runs are not affected. A slow or unreachable listen
   steps (see `admin-viewer`). The Wardby Viewer app shows them in a **Steps**
   section of a run's detail.
 
-At `detail`, `get_run_steps` also returns each step's `detail` to the agent's
-owner and to the person who started the run (and to the stdio operator); anyone
-else, including an admin who does not own the agent, gets the lines only. `lastStep`, the admin viewer API
+At `detail`, `get_run_steps` also returns each step's `detail` to anyone with
+execute access to the agent (its owner included), to the person who started the
+run, and to the stdio operator; anyone else, including an admin without execute
+on the agent, gets the lines only. `lastStep`, the admin viewer API
 and its `step` events never include detail.
 
-You can read a run's steps when you can read the run with `get_run`.
+You can read a run's steps when you can read the run with `get_run`: with
+execute access to the agent you see every run of it, whoever started it; with
+read access only the runs you started.
+
+### People joined to a run
+
+People can join a running Claude Code run and send its agent messages (see
+`join-runs`). Their actions are steps too: `join`, `leave`, `message` and
+`interrupt`, with `from` set to the person's principal id. A message's full
+text is its `detail`, and is kept whatever the run's level, so the agent and
+the people in the run can read it.
 
 ### Workflow runs
 

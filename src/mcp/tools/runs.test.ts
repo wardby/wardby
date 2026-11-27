@@ -1211,12 +1211,22 @@ describe("run observability tools", () => {
         .map((r) => r.id)
         .sort();
 
-    it("A6: others' runs hidden -- an execute-grantee sees only the runs it triggered", async () => {
+    it("join widening: an execute-grantee sees every run of the agent, whoever started it", async () => {
       const client = await as("alice", { id: "a1", ownerId: "owner" }, [
         { resourceType: "agent", resourceId: "a1", principalId: "alice", level: "execute" },
       ]);
+      expect(await listIds(client)).toEqual(["r-alice", "r-bob", "r-sched"]);
+      for (const runId of ["r-alice", "r-bob", "r-sched"]) {
+        expect((await client.callTool({ name: "get_run", arguments: { runId } })).isError).toBeFalsy();
+      }
+      await client.close();
+    });
+
+    it("A6: a read-grantee sees only the runs it triggered", async () => {
+      const client = await as("alice", { id: "a1", ownerId: "owner" }, [
+        { resourceType: "agent", resourceId: "a1", principalId: "alice", level: "read" },
+      ]);
       expect(await listIds(client)).toEqual(["r-alice"]);
-      expect((await client.callTool({ name: "get_run", arguments: { runId: "r-alice" } })).isError).toBeFalsy();
       for (const runId of ["r-bob", "r-sched"]) {
         const hidden = await client.callTool({ name: "get_run", arguments: { runId } });
         expect(hidden.isError).toBe(true);
@@ -1226,7 +1236,7 @@ describe("run observability tools", () => {
       await client.close();
     });
 
-    it("A6: others' runs hidden on a formerly public agent (everyone-execute)", async () => {
+    it("A6: others' runs hidden on a formerly public agent (everyone-execute): an everyone grant never widens", async () => {
       const client = await as("alice", { id: "a1", ownerId: null }, [
         { resourceType: "agent", resourceId: "a1", granteeKind: "everyone", level: "execute" },
       ]);

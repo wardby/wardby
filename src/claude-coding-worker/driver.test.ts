@@ -1,7 +1,7 @@
 import { access, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, join as join_ } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS,
@@ -20,6 +20,14 @@ import {
   type ClaudeQueryOptions,
 } from "./driver.js";
 import { callGitCheck, callResultBundle } from "./tool-socket.js";
+import {
+  JOIN_DEADLINE_MARGIN_MS,
+  JOINED_MESSAGE_PREFIX,
+  joinedMessageText,
+  type ClaudeUserMessage,
+  type JoinEvents,
+  type JoinSource,
+} from "./join.js";
 
 const input: CodingTaskInput = {
   schemaVersion: 1,
@@ -1621,5 +1629,226 @@ describe("runClaudeCodingWorker workflow runs (#582)", () => {
       expect(result.summary).toBe("Body.");
       expect(((result as { commitTitle?: string }).commitTitle ?? "").length).toBeLessThan(500);
     });
+  });
+});
+
+describe("runClaudeCodingWorker join (phase 1)", () => {
+  const answer = (summary: string, outcome = "no_changes") => ({
+    type: "result",
+    subtype: "success",
+    result: JSON.stringify({ schemaVersion: 1, runId: input.runId, outcome, summary, tests: [] }),
+  });
+
+  /** A join source the test drives: joined state and messages, as the proxy poll would deliver them. */
+  class FakeJoin implements JoinSource {
+    events: JoinEvents | undefined;
+    stopped = false;
+    start(events: JoinEvents) {
+      this.events = events;
+    }
+    stop() {
+      this.stopped = true;
+    }
+    joined(value: boolean) {
+      this.events?.joinedChanged(value);
+    }
+    send(text: string, interrupt = false) {
+      this.events?.message({ text, interrupt });
+    }
+  }
+
+  /** A session that reads its streamed input and answers each message with the script's messages. */
+  const sessionOf =
+    (
+      script: (message: ClaudeUserMessage, index: number) => Array<Record<string, unknown>>,
+      seen: ClaudeUserMessage[],
+    ) =>
+    (options: ClaudeQueryOptions) =>
+      (async function* () {
+        expect(options.input).toBeDefined();
+        const iterator = (options.input as AsyncIterable<ClaudeUserMessage>)[Symbol.asyncIterator]();
+        for (let index = 0; ; index += 1) {
+          const next = await iterator.next();
+          if (next.done) return;
+          seen.push(next.value);
+          for (const message of script(next.value, index)) yield message as never;
+        }
+      })();
+
+  const later = (fn: () => void) => void setTimeout(fn, 5);
+
+  const run = (join: JoinSource, createQuery: ClaudeQueryFactory, deadlineAt = "2999-01-01T00:00:00.000Z") =>
+    runClaudeCodingWorker({
+      input: { ...input, deadlineAt },
+      proxyBaseUrl: "http://wardby-proxy:8787/",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      createQuery,
+      join,
+    });
+
+  it("ends after the first answer when nobody joined, and stops polling", async () => {
+    const join = new FakeJoin();
+    const seen: ClaudeUserMessage[] = [];
+    const result = await run(
+      join,
+      sessionOf(() => [answer("First.")], seen),
+    );
+    expect(result.summary).toBe("First.");
+    expect(seen).toHaveLength(1);
+    // Text blocks, never a plain string: the proxy refuses string user content outside workflows.
+    expect(seen[0].message.content).toEqual([{ type: "text", text: expect.stringContaining(input.task) }]);
+    expect(seen[0].priority).toBeUndefined();
+    expect(join.stopped).toBe(true);
+  });
+
+  it("tells the agent people may join, only on a joinable run", async () => {
+    let instructions = "";
+    await run(new FakeJoin(), (options) => {
+      instructions = options.developerInstructions;
+      return sessionOf(() => [answer("First.")], [])(options);
+    });
+    expect(instructions).toContain(JOINED_MESSAGE_PREFIX);
+    expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).not.toContain(JOINED_MESSAGE_PREFIX);
+  });
+
+  it("stays open while someone is joined, delivers their message, and ends with the last answer when they leave", async () => {
+    const join = new FakeJoin();
+    const seen: ClaudeUserMessage[] = [];
+    const result = await run(
+      join,
+      sessionOf((_message, index) => {
+        if (index === 0) {
+          join.joined(true);
+          later(() => join.send("Please also update the README."));
+          return [answer("First.")];
+        }
+        later(() => join.joined(false));
+        return [answer("Second.")];
+      }, seen),
+    );
+    expect(result.summary).toBe("Second.");
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toEqual({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: joinedMessageText("Please also update the README.") }] },
+      parent_tool_use_id: null,
+      priority: "next",
+    });
+    expect(join.stopped).toBe(true);
+  });
+
+  it("never lets a joined question's no_changes answer replace the run's changes_ready answer", async () => {
+    const join = new FakeJoin();
+    const result = await run(
+      join,
+      sessionOf((_message, index) => {
+        if (index === 0) {
+          join.joined(true);
+          later(() => join.send("How many lines does notes.txt have?"));
+          return [answer("Wrote notes.txt.", "changes_ready")];
+        }
+        if (index === 1) {
+          later(() => join.send("Also add a footer."));
+          return [answer("It has 6 lines.")];
+        }
+        later(() => join.joined(false));
+        return [answer("Added the footer.", "changes_ready")];
+      }, []),
+    );
+    // A later changes_ready answer still wins; a no_changes one in between is kept out.
+    expect(result).toMatchObject({ outcome: "changes_ready", summary: "Added the footer." });
+  });
+
+  it("keeps the changes_ready answer when the last joined turn only answered a question", async () => {
+    const join = new FakeJoin();
+    const result = await run(
+      join,
+      sessionOf((_message, index) => {
+        if (index === 0) {
+          join.joined(true);
+          later(() => join.send("How many lines does notes.txt have?"));
+          return [answer("Wrote notes.txt.", "changes_ready")];
+        }
+        later(() => join.joined(false));
+        return [answer("It has 6 lines.")];
+      }, []),
+    );
+    expect(result).toMatchObject({ outcome: "changes_ready", summary: "Wrote notes.txt." });
+  });
+
+  it("sends an interrupt with priority now", async () => {
+    const join = new FakeJoin();
+    const seen: ClaudeUserMessage[] = [];
+    await run(
+      join,
+      sessionOf((_message, index) => {
+        if (index === 0) {
+          join.joined(true);
+          later(() => join.send("Stop that.", true));
+          return [answer("First.")];
+        }
+        later(() => join.joined(false));
+        return [answer("Stopped.")];
+      }, seen),
+    );
+    expect(seen[1].priority).toBe("now");
+  });
+
+  it("keeps the last valid answer when a joined turn hits its turn limit or gives no answer", async () => {
+    const join = new FakeJoin();
+    const result = await run(
+      join,
+      sessionOf((_message, index) => {
+        if (index === 0) {
+          join.joined(true);
+          later(() => join.send("One more thing."));
+          return [answer("First.")];
+        }
+        if (index === 1) {
+          later(() => join.send("And another."));
+          return [{ type: "result", subtype: "error_max_turns" }];
+        }
+        later(() => join.joined(false));
+        return [{ type: "result", subtype: "success", result: "not json" }];
+      }, []),
+    );
+    expect(result.summary).toBe("First.");
+  });
+
+  it("closes the session at the deadline margin even while someone is still joined", async () => {
+    const join = new FakeJoin();
+    const deadlineAt = new Date(Date.now() + JOIN_DEADLINE_MARGIN_MS + 30).toISOString();
+    const result = await run(
+      join,
+      sessionOf(() => {
+        join.joined(true);
+        return [answer("First.")];
+      }, []),
+      deadlineAt,
+    );
+    expect(result.summary).toBe("First.");
+    expect(join.stopped).toBe(true);
+  });
+
+  it("keeps a workflow run's string prompt: nobody can join it", async () => {
+    let captured: ClaudeQueryOptions | undefined;
+    const join = new FakeJoin();
+    await runClaudeCodingWorker({
+      input: { ...input, workflow: { name: "fix-bug", args: {} } },
+      proxyBaseUrl: "http://wardby-proxy:8787/",
+      capability: "rrp_worker_capability",
+      signal: new AbortController().signal,
+      contextRoot: await mkdtemp(join_(tmpdir(), "wardby-join-")),
+      createQuery: (options) => {
+        captured = options;
+        return (async function* () {
+          yield { type: "result", subtype: "success", result: "{}" };
+        })();
+      },
+      join,
+    }).catch(() => undefined);
+    expect(captured?.input).toBeUndefined();
+    expect(join.events).toBeUndefined();
   });
 });

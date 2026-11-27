@@ -65,7 +65,7 @@ see tool output without a transcript.
 ## Who can read it
 
 Transcripts are stored from the first run with `sessionResume` on. Anyone
-who can read a run (its triggerer and the agent's owner, as for `get_run`)
+who can read a run (its triggerer and anyone with execute access to the agent, as for `get_run`)
 can download its transcript, which includes
 what the agent saw in the repository and in command output. Redaction removes secret
 values, not other sensitive text. Turn this on only for agents whose runs you

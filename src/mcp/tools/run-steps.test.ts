@@ -104,10 +104,10 @@ async function setup(db: PrismaClient, principalId: string, opts: { level?: RunS
 }
 
 describe("get_run_steps", () => {
-  it("gives the triggerer and the owner the steps, and another reader the not-found get_run gives", async () => {
+  it("gives the triggerer and the owner the steps, and a read-only reader the not-found get_run gives", async () => {
     const db = fakeStepsDb(
       [run()],
-      [{ resourceType: "agent", resourceId: "a1", level: "execute", principalId: "reader" }],
+      [{ resourceType: "agent", resourceId: "a1", level: "read", principalId: "reader" }],
     );
     const asTriggerer = await (await setup(db, "trig"))({ runId: "r1" });
     expect(asTriggerer.isError).toBe(false);
@@ -120,6 +120,7 @@ describe("get_run_steps", () => {
     expect(body).toMatchObject({ level: "summary", next: null, dropped: 0 });
     expect(body.steps).toHaveLength(5);
     expect(Object.keys(body.steps[0]).sort()).toEqual(["at", "detail", "kind", "seq", "status", "summary", "tool"]);
+    // join widening: an execute-grantee sees another person's run too.
     expect(asTriggerer.text).not.toContain("callId");
     expect((await (await setup(db, "owner"))({ runId: "r1" })).isError).toBe(false);
     const other = await (await setup(db, "reader"))({ runId: "r1" });
@@ -190,14 +191,29 @@ describe("get_run_steps", () => {
     }
   });
 
-  it("canReadRunDetail: a reader with read access but neither owner nor starter gets no detail", async () => {
-    const fakeAgentDb = (ownerId: string | null) => ({ agent: { findUnique: async () => ({ ownerId }) } }) as never;
+  it("canReadRunDetail: execute (owner included) or the starter gets detail; read alone does not", async () => {
+    const fakeAgentDb = (ownerId: string | null, grants: Record<string, string> = {}) =>
+      ({
+        agent: { findUnique: async () => ({ id: "a1", ownerId }) },
+        resourceGrant: {
+          findMany: async ({ where }: { where: { granteeKey: { in: string[] } } }) =>
+            Object.entries(grants)
+              .filter(([key]) => where.granteeKey.in.includes(key))
+              .map(([granteeKey, level]) => ({ granteeKey, level })),
+        },
+      }) as never;
     const r = (triggeredById: string | null) => ({ agentId: "a1", triggeredById });
     expect(await canReadRunDetail(fakeAgentDb("o"), r("s"), { principalId: "someone" })).toBe(false);
     expect(await canReadRunDetail(fakeAgentDb("o"), r(null), { principalId: "o" })).toBe(true);
     expect(await canReadRunDetail(fakeAgentDb("o"), r("s"), { principalId: "s" })).toBe(true);
     expect(await canReadRunDetail(fakeAgentDb(null), r(null), { principalId: "x", operator: true })).toBe(true);
     expect(await canReadRunDetail(fakeAgentDb(null), r(null), { principalId: "x" })).toBe(false);
+    expect(await canReadRunDetail(fakeAgentDb("o", { "principal:g": "read" }), r("s"), { principalId: "g" })).toBe(
+      false,
+    );
+    expect(await canReadRunDetail(fakeAgentDb("o", { "principal:g": "execute" }), r("s"), { principalId: "g" })).toBe(
+      true,
+    );
   });
 
   it("a reader who can read the run but not its detail gets no detail key, and the column is not selected", async () => {

@@ -74,9 +74,9 @@ are off on this server." See `run-steps`. Steps need Wardby 0.9.0 or later
 on the server. From 0.9.0, a step with detail, or a longer message, has a ▸ at
 its right that opens it; in the terminal, `j`/`k` also move between such steps
 and `e` shows or hides one. An open command shows "$ command", its exit status
-and its output, without Codex's framing lines. Detail appears only for the
-agent's owner and the run's starter (and the stdio operator), on a server at
-the detail level. An open detail shows its last 40 lines, with a count of the
+and its output, without Codex's framing lines. Detail appears only for
+people with execute access to the agent (its owner included), the run's
+starter and the stdio operator, on a server at the detail level. An open detail shows its last 40 lines, with a count of the
 lines above them.
 
 Each section of a run's detail is a card, coloured by its kind (a bar on the

@@ -1443,8 +1443,8 @@ already gone is recorded as `not_captured` without retries (see
 [Availability](availability.md#failures-and-recovery)).
 
 **Who can read it.** Transcripts are stored from the first run
-with `sessionResume` on. Anyone who can read a run (its triggerer and the
-agent's owner, as for `get_run`) can download its transcript, and so everything the agent saw and wrote, including file
+with `sessionResume` on. Anyone who can read a run (its triggerer and
+anyone with execute access to the agent, as for `get_run`) can download its transcript, and so everything the agent saw and wrote, including file
 contents and command output from the repository. Redaction covers secret
 values, not other sensitive text. Enable `sessionResume` only for agents whose
 runs you are comfortable sharing with everyone who can read them.
@@ -1535,7 +1535,7 @@ input (`worker_input_failed`). `update_agent` warns about this when you turn
 ### Continue a run on your machine
 
 Ask your MCP client to call `get_run_transcript` with the run's id. It takes
-the same access as `get_run` (the run's triggerer or the agent's owner) and
+the same access as `get_run` (the run's triggerer, or execute access to the agent) and
 returns:
 
 - `status`: `stored` when the transcript can be resumed. Otherwise the status
@@ -1662,6 +1662,35 @@ safely, [Run steps in Security deployment](security-deployment.md#run-steps).
 For a coding agent whose owner sets `runSteps` to `detail`, also set
 `WARDBY_RUN_STEPS=detail` on the proxy, or no tool output is sent; see
 [Run steps](debugging-agent-runs.md#run-steps).
+
+## Join a running run
+
+People with execute access to a Claude Code agent can join one of its running
+runs and talk to the agent while it works: `join_run`, then `send_to_run` with a
+message (picked up at the agent's next step) or `interrupt: true` (stops the
+current turn first), and `leave_run`. Follow the agent's replies with
+`get_run_steps`. Workflow runs, Codex runs and native agents cannot be joined
+yet.
+
+- **The run stays open while anyone is joined.** After the agent finishes its
+  task it waits for more messages, until the last person leaves or the run's
+  `codingProfile.timeoutSec` is reached; then it wraps up and opens or updates
+  its pull request as usual. Raise `timeoutSec` for longer sessions.
+- **Limits.** The run's budget caps everything; joining never raises it. The
+  turn limit (`maxTurns`) applies to each message on its own, so replies to
+  people do not use up the task's turns.
+- **Who sees what.** Join, leave and message steps are run steps, visible to
+  everyone who can see the run. Execute access to an agent lets a person see
+  all of its runs and their step detail, whoever started them. Secret values in
+  a message are masked before it is stored or reaches the agent.
+- **Requirements.** Joining needs the run-steps listener above
+  (`WARDBY_RUN_STEPS_LISTEN` on `wardby serve`, `WARDBY_RUN_STEPS_URL` on the
+  coding proxy) and run steps not `off`. The worker asks for messages through
+  the coding proxy, which forwards to the listener; while someone is joined that
+  request is held for up to 20 seconds, so a load balancer or proxy in front of
+  the listener must allow idle requests of at least 30 seconds.
+
+See [Join a running coding run](../help/join-runs.md) for the errors.
 
 ## Stop the setup
 

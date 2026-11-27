@@ -7,6 +7,7 @@ import { PLAN_FILES_ARTIFACT, type CodingTaskInput } from "../coding/protocol.js
 import { collectPlanOutput } from "../coding-worker/plan-output.js";
 import { CLAUDE_CONFIG_DIR, runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
+import { ProxyJoinChannel } from "./join.js";
 import { collectPlanFilesViaToolRunner } from "./plan-files.js";
 import {
   assertToolRunnerReachable,
@@ -55,6 +56,8 @@ try {
     ...(mcp?.header ? { mcpTokenHeader: mcp.header } : {}),
     signal: controller.signal,
     createQuery: createClaudeSdkQuery,
+    // Join (phase 1): joined messages, long-polled from the proxy for the whole run.
+    join: new ProxyJoinChannel({ proxyBaseUrl, capability, deadlineAt: task.deadlineAt }),
     prepareDependencies: () => callPrepareDependencies({ signal: controller.signal, deadlineAt: task.deadlineAt }),
     restorePypiLockfiles: () => callRestorePypiLockfiles({ signal: controller.signal }),
     // A run with git history (#536): the tool runner has the workspace and git; this container has neither.

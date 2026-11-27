@@ -63,8 +63,26 @@ import type {
   ListedToolPin,
 } from "./types.js";
 import { MAX_TOOL_TEXT_BYTES } from "./types.js";
+import { RUN_JOIN_POLL_PATH } from "../../core/run-steps/types.js";
+import { z } from "zod";
 
 export const PROXY_MAX_BODY_BYTES = 8 * 1024 * 1024;
+/** Join (phase 1): the control plane holds a poll up to ~20 s while someone is joined. */
+const JOIN_POLL_UPSTREAM_MS = 25_000;
+/** A worker's join poll: the last message seq it has, and whether it last saw anyone joined. */
+const JoinPollSchema = z.object({ after: z.number().int().nonnegative(), joined: z.boolean() }).strict();
+/** The control plane's answer (src/core/run-steps/join.ts). */
+const JoinPollAnswerSchema = z
+  .object({
+    joined: z.boolean(),
+    messages: z
+      .array(
+        z.object({ seq: z.number().int().positive(), text: z.string().max(65_536), interrupt: z.boolean() }).strict(),
+      )
+      .max(256),
+  })
+  .strict();
+export type JoinPollAnswer = z.infer<typeof JoinPollAnswerSchema>;
 export const PROXY_MAX_OUTPUT_TOKENS = 1_000_000;
 export const PROXY_DEFAULT_MAX_OUTPUT_TOKENS = 4_096;
 export const CLAUDE_CODE_ANTHROPIC_BETAS = [
@@ -214,6 +232,11 @@ export interface CodingProxyOptions {
   runStepsCeiling?: RunStepsLevel;
   /** Tests only: replaces the stream step extractor. */
   createStepExtractor?: (protocol: ProxyProtocol, options?: StepCaptureOptions) => StreamStepExtractor;
+  /**
+   * Join (phase 1): the control plane's run-steps listener (WARDBY_RUN_STEPS_URL), where a worker's
+   * join poll is relayed. Absent, the join route answers 404 join_unavailable.
+   */
+  join?: { url: string; fetch?: typeof fetch };
 }
 
 /** Tries per request key by default, matching the workers' own retry setting (3 retries after the first try). */
@@ -1229,6 +1252,7 @@ export class CodingProxy {
   private readonly steps?: RunStepSubmitter;
   private readonly createStepExtractor?: (protocol: ProxyProtocol, options?: StepCaptureOptions) => StreamStepExtractor;
   private readonly runStepsCeiling: RunStepsLevel;
+  private readonly join?: { url: string; fetch?: typeof fetch };
   /** Results already handed over, per session: each request resends the history. */
   private readonly seenResults = new SeenIds();
 
@@ -1241,6 +1265,7 @@ export class CodingProxy {
     this.steps = options.steps;
     this.createStepExtractor = options.createStepExtractor;
     this.runStepsCeiling = options.runStepsCeiling ?? "summary";
+    this.join = options.join;
     this.credentials = options.credentials;
     this.upstreamUrls = {
       "openai-responses": options.upstreamUrl ?? "https://api.openai.com/v1/responses",
@@ -1976,6 +2001,54 @@ export class CodingProxy {
     if (!tree.success) throw new CodingProxyError(400, "invalid_workflow_progress");
     if (stepCapture(session, this.runStepsCeiling) === "none") return;
     this.submitSteps(bearer, session.runId, () => ({ steps: [], results: [], workflow: tree.data }));
+  }
+
+  /**
+   * Join (phase 1): a worker's poll for joined messages, relayed to the control plane's run-steps
+   * listener with the run's capability, which long-polls while someone is joined. Only the shapes
+   * are checked here; the body, the answer and its message text are never logged or echoed, and
+   * every failure is a fixed code.
+   */
+  async joinPoll(bearer: string, rawBody: string): Promise<JoinPollAnswer> {
+    if (!this.join) throw new CodingProxyError(404, "join_unavailable");
+    await this.authenticate(bearer);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new CodingProxyError(400, "invalid_join_poll");
+    }
+    const poll = JoinPollSchema.safeParse(parsed);
+    if (!poll.success) throw new CodingProxyError(400, "invalid_join_poll");
+    let response: Response;
+    try {
+      response = await (this.join.fetch ?? fetch)(`${this.join.url}${RUN_JOIN_POLL_PATH}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
+        body: JSON.stringify(poll.data),
+        signal: AbortSignal.timeout(JOIN_POLL_UPSTREAM_MS),
+      });
+    } catch {
+      throw new CodingProxyError(502, "join_unavailable");
+    }
+    // The control plane's refusal codes (session_ended, run_not_joinable, ...) are fixed; only their status passes on.
+    if (response.status === 401 || response.status === 403 || response.status === 404) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new CodingProxyError(response.status === 401 ? 401 : 403, "join_refused");
+    }
+    if (response.status !== 200) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new CodingProxyError(502, "join_unavailable");
+    }
+    let answer: unknown;
+    try {
+      answer = await response.json();
+    } catch {
+      throw new CodingProxyError(502, "join_unavailable");
+    }
+    const checked = JoinPollAnswerSchema.safeParse(answer);
+    if (!checked.success) throw new CodingProxyError(502, "join_unavailable");
+    return checked.data;
   }
 
   /** Queues a step batch for the control plane. Best effort: any failure drops the steps, never the request. */

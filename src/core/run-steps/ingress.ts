@@ -29,7 +29,8 @@ import { capabilityHash } from "../../providers/coding-proxy/capability-hash.js"
 import { HTTP_LIMITS, HttpBoundaryError, readBody } from "../../mcp/transport/http-limits.js";
 import { parseListenAddress, type ListenAddress } from "../listen-address.js";
 import { logger } from "../logger.js";
-import { MAX_RUN_STEPS_POST_BYTES, RUN_STEPS_INGRESS_PATH, type RunStepSink } from "./types.js";
+import { JOIN_POLL_WINDOW_MS, pollJoin } from "./join.js";
+import { MAX_RUN_STEPS_POST_BYTES, RUN_JOIN_POLL_PATH, RUN_STEPS_INGRESS_PATH, type RunStepSink } from "./types.js";
 import { parseRunStepPost } from "./wire.js";
 
 const ingressLog = logger.child({ module: "run-steps" });
@@ -45,17 +46,22 @@ const CONNECTIONS_CHECK_MS = 2_000;
 const BOUNDARY_CODES: Record<number, string> = { 413: "payload_too_large", 415: "unsupported_encoding" };
 
 export interface RunStepIngressDeps {
-  db: Pick<PrismaClient, "codingProxySession">;
+  db: Pick<PrismaClient, "codingProxySession" | "runStep">;
   sink: RunStepSink;
   now?: () => Date;
   log?: { warn(fields: Record<string, unknown>, message: string): void };
   /** Tests only; HTTP_LIMITS.requestMs (15 s, under the forwarder's 20 s) otherwise. */
   requestTimeoutMs?: number;
+  /** Tests only; JOIN_POLL_WINDOW_MS otherwise. */
+  joinPollWindowMs?: number;
 }
 
 export interface RunStepIngressResponse {
   status: number;
-  body: { ok: true } | { error: string };
+  body:
+    | { ok: true }
+    | { error: string }
+    | { joined: boolean; messages: { seq: number; text: string; interrupt: boolean }[] };
 }
 
 /** A live session's run and the capability that names it. */
@@ -108,6 +114,46 @@ async function accept(deps: RunStepIngressDeps, caller: Caller, body: string): P
   return { status: 202, body: { ok: true } };
 }
 
+/** The largest join poll body ({ after, joined }). */
+const MAX_JOIN_POLL_BYTES = 1024;
+
+/**
+ * Join (src/core/run-steps/join.ts): the run's worker, through the coding proxy, asks for messages
+ * people sent after `after` and whether anyone is joined. Same capability rule as a step batch (its
+ * own run only, by construction: the run comes from the capability). The answer's text is the
+ * stored, already-redacted message text.
+ */
+async function acceptJoinPoll(
+  deps: RunStepIngressDeps,
+  caller: Caller,
+  body: string,
+  signal: AbortSignal,
+): Promise<RunStepIngressResponse> {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return { status: 400, body: { error: "invalid_json" } };
+  }
+  const v = value as { after?: unknown; joined?: unknown } | null;
+  if (
+    !v ||
+    typeof v !== "object" ||
+    !Number.isSafeInteger(v.after) ||
+    (v.after as number) < 0 ||
+    typeof v.joined !== "boolean"
+  ) {
+    return { status: 400, body: { error: "invalid_join_poll" } };
+  }
+  const answer = await pollJoin(
+    deps.db,
+    caller.runId,
+    { after: v.after as number, joined: v.joined },
+    { signal, ...(deps.joinPollWindowMs !== undefined ? { windowMs: deps.joinPollWindowMs } : {}) },
+  );
+  return { status: 200, body: answer };
+}
+
 export async function handleRunStepPost(
   deps: RunStepIngressDeps,
   authorization: string | undefined,
@@ -143,16 +189,24 @@ export function startRunStepIngress(listen: ListenAddress, deps: RunStepIngressD
   const log = deps.log ?? ingressLog;
   const limitMs = deps.requestTimeoutMs ?? HTTP_LIMITS.requestMs;
   const serve = async (req: IncomingMessage, res: ServerResponse) => {
-    if (req.method !== "POST" || req.url !== RUN_STEPS_INGRESS_PATH) return send(res, 404, { error: "not_found" });
+    const join = req.url === RUN_JOIN_POLL_PATH;
+    if (req.method !== "POST" || (req.url !== RUN_STEPS_INGRESS_PATH && !join))
+      return send(res, 404, { error: "not_found" });
     // One limit for the whole request (lookup, body, write), so the forwarder always gets an answer.
+    // A join poll may be held for its window, so its limit is the window plus the usual limit.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), limitMs);
+    const requestLimitMs = join ? (deps.joinPollWindowMs ?? JOIN_POLL_WINDOW_MS) + limitMs : limitMs;
+    const timer = setTimeout(() => controller.abort(), requestLimitMs);
     const timedOut = new Promise<never>((_, reject) =>
       controller.signal.addEventListener("abort", () => reject(new RequestTimeoutError()), { once: true }),
     );
     const work = (async () => {
       const caller = await authenticate(deps, req.headers.authorization);
       if ("status" in caller) return caller;
+      if (join) {
+        const body = await readBody(req, MAX_JOIN_POLL_BYTES, controller.signal);
+        return acceptJoinPoll(deps, caller, body, controller.signal);
+      }
       const body = await readBody(req, MAX_RUN_STEPS_POST_BYTES, controller.signal);
       return accept(deps, caller, body);
     })();

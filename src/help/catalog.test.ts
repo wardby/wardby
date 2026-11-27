@@ -275,6 +275,27 @@ describe("buildHelpCatalog", () => {
     expect(searchHelp(catalog, query)[0]?.page.id).toBe("run-steps");
   });
 
+  it.each(["join_run", "send_to_run", "leave_run", "join a run", "talk to a running agent", "interrupt a run"])(
+    "finds the join article for %s",
+    async (query) => {
+      const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+      expect(
+        searchHelp(catalog, query)
+          .slice(0, 3)
+          .map((r) => r.page.id),
+      ).toContain("join-runs");
+    },
+  );
+
+  it.each(["join_not_supported", "join_unavailable", "run_not_joined", "run_not_running"])(
+    "has an error page for %s",
+    async (code) => {
+      const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+      const id = `errors/${code.replaceAll("_", "-")}`;
+      expect(catalog.pages.find((entry) => entry.id === id)?.markdown, id).toContain(`\`${code}`);
+    },
+  );
+
   it.each(["get_run_text", "get_run_packages", "packageCount"])(
     "finds the run debugging article for %s",
     async (query) => {

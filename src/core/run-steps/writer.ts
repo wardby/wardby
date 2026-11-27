@@ -48,6 +48,15 @@ import {
 } from "./types.js";
 
 const stepsLog = logger.child({ module: "run-steps" });
+/** A join message's summary line, like a said step's. */
+const JOIN_SUMMARY_CHARS = 300;
+
+/** One join step to record (src/core/run-steps/join.ts). `text` only for message and interrupt. */
+export interface JoinStepInput {
+  kind: "join" | "leave" | "message" | "interrupt";
+  principalId: string;
+  text?: string;
+}
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TX = { maxWait: 5_000, timeout: 10_000 } as const;
 /** How long flush() waits for queued writes at shutdown. */
@@ -183,6 +192,95 @@ export class RunStepWriter implements RunStepSink {
     return (this.deps.now ?? (() => new Date()))();
   }
 
+  /**
+   * The agent's secret values plus `extraSecretValues`, each also as plain text, as the step text is:
+   * a value holding a control character (never a stripped form too short to redact safely). Read
+   * fresh every time, never cached: a rotated or newly attached secret must be covered. Rejects
+   * when the values can't be read: never an unredacted write.
+   */
+  private async valuesFor(agentId: string, extraSecretValues: readonly string[]): Promise<string[]> {
+    const rawValues = [...(await this.deps.secretValues(agentId)), ...extraSecretValues.filter(Boolean)];
+    return [
+      ...new Set(
+        rawValues.flatMap((value) => {
+          const plain = stripControlSequences(value);
+          return plain.length >= MIN_REDACTABLE_SECRET_LENGTH ? [value, plain] : [value];
+        }),
+      ),
+    ];
+  }
+
+  /**
+   * A join step (src/core/run-steps/join.ts): a person joined, left, or sent the agent a message.
+   * Unlike record(), it rejects, so the caller can tell the person: `join_unavailable` when the run
+   * keeps no steps (its level is off), and any write failure. Queued behind the run's other writes,
+   * under the same row lock and seq rule. A message's text is masked by exact value against the
+   * agent's secrets and made plain (plainText) before it is stored; that stored text is what every
+   * reader sees and what the worker delivers. Not held to MAX_RUN_STEPS: a message must reach the
+   * agent. Returns the step's seq and the text as stored.
+   */
+  recordJoin(runId: string, step: JoinStepInput): Promise<{ seq: number; text: string }> {
+    const previous = this.queues.get(runId) ?? Promise.resolve();
+    const next = previous.then(() => this.writeJoin(runId, step));
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.queues.set(runId, settled);
+    void settled.then(() => {
+      if (this.queues.get(runId) === settled) this.queues.delete(runId);
+    });
+    return next;
+  }
+
+  private async writeJoin(runId: string, step: JoinStepInput): Promise<{ seq: number; text: string }> {
+    const { db } = this.deps;
+    if (this.deps.level === "off") throw new Error("join_unavailable");
+    const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true, runStepsLevel: true } });
+    if (!run) throw new Error("run_not_running");
+    if (recordedRunStepsLevel(run.runStepsLevel, this.deps.level) === "off") throw new Error("join_unavailable");
+    const hasText = step.kind === "message" || step.kind === "interrupt";
+    let text = "";
+    if (hasText) {
+      const values = await this.valuesFor(run.agentId, []);
+      const premask: PremaskOf | undefined =
+        values.length > 0
+          ? (raw, headWasCut, marker) => stepDetailer(values).premask(raw, headWasCut, marker)
+          : undefined;
+      text = redactSecrets(plainText(step.text ?? "", premask), values)
+        .trim()
+        .slice(0, MAX_STEP_DETAIL_CHARS);
+    }
+    const summary =
+      step.kind === "join"
+        ? "joined"
+        : step.kind === "leave"
+          ? "left"
+          : text.length > JOIN_SUMMARY_CHARS
+            ? `${text.slice(0, JOIN_SUMMARY_CHARS - 1)}…`
+            : text;
+    const at = this.now();
+    const seq = await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
+      const last = await tx.runStep.findFirst({ where: { runId }, orderBy: { seq: "desc" }, select: { seq: true } });
+      const seq = (last?.seq ?? 0) + 1;
+      await tx.runStep.create({
+        data: {
+          runId,
+          seq,
+          at,
+          kind: step.kind,
+          summary,
+          detail: hasText ? text : null,
+          fromPrincipalId: step.principalId,
+          expiresAt: new Date(at.getTime() + this.deps.retentionDays * DAY_MS),
+        },
+      });
+      return seq;
+    }, TX);
+    return { seq, text };
+  }
+
   private async write(runId: string, batch: RunStepBatch, extraSecretValues: readonly string[]): Promise<void> {
     const { db } = this.deps;
     const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true, runStepsLevel: true } });
@@ -200,19 +298,7 @@ export class RunStepWriter implements RunStepSink {
     // rotated or newly attached secret must be covered. Rejects (and the batch is dropped) when the
     // values can't be read: never an unredacted write.
     const needsValues = extracted.length > 0 || outputs || batch.workflow !== undefined;
-    const own = needsValues ? await this.deps.secretValues(run.agentId) : [];
-    const extras = needsValues ? extraSecretValues.filter(Boolean) : [];
-    const rawValues = [...own, ...extras];
-    // Each value also as plain text, as the step text is: a value holding a control character
-    // (never a stripped form too short to redact safely).
-    const values = [
-      ...new Set(
-        rawValues.flatMap((value) => {
-          const plain = stripControlSequences(value);
-          return plain.length >= MIN_REDACTABLE_SECRET_LENGTH ? [value, plain] : [value];
-        }),
-      ),
-    ];
+    const values = needsValues ? await this.valuesFor(run.agentId, extraSecretValues) : [];
     // The summary forms are built once per batch, on the first row; the detailer (whose premask
     // every text goes through first) once per batch that has any secret value.
     let summarize: ReturnType<typeof stepSummarizer> | undefined;

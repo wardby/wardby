@@ -215,9 +215,19 @@ describe("stop_run", () => {
     await t.client.close();
   });
 
-  it("answers someone else's run exactly like a missing one, even with execute access to the agent", async () => {
+  it("join widening: an execute-grantee may stop a run someone else started", async () => {
     const t = await setup("p2", [{ id: "r1", agentId: "a1", status: "running", triggeredById: "p3" }], {
       grants: [{ resourceType: "agent", resourceId: "a1", level: "execute", principalId: "p2" }],
+    });
+    const result = await t.call({ runId: "r1" });
+    expect(result.isError).toBeFalsy();
+    expect(t.stops.length).toBeGreaterThan(0);
+    await t.client.close();
+  });
+
+  it("answers someone else's run exactly like a missing one with only an everyone-execute grant", async () => {
+    const t = await setup("p2", [{ id: "r1", agentId: "a1", status: "running", triggeredById: "p3" }], {
+      grants: [{ resourceType: "agent", resourceId: "a1", level: "execute", granteeKind: "everyone" }],
     });
     const hidden = await t.call({ runId: "r1" });
     const missing = await t.call({ runId: "nope" });
