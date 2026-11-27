@@ -270,7 +270,7 @@ describe("sub-agents (codingProfile.subAgents)", () => {
     // The run's own environment is kept.
     expect((options.env as Record<string, string>).ANTHROPIC_API_KEY).toBe("private-run-capability");
     const hooks = (options.hooks as { PreToolUse: Array<{ matcher: string }> }).PreToolUse;
-    expect(hooks.map((hook) => hook.matcher)).toContain("Agent");
+    expect(hooks.map((hook) => hook.matcher)).toContain("Agent|Task");
   });
 
   it("leaves everything as it was when sub-agents are off", () => {
@@ -308,6 +308,27 @@ describe("sub-agents (codingProfile.subAgents)", () => {
     });
   });
 
+  it("guards a call under the legacy Task name the same way", async () => {
+    const options = buildClaudeSdkOptions({ ...config(), subAgents: true });
+    const hook = (
+      options.hooks as {
+        PreToolUse: Array<{
+          matcher: string;
+          hooks: Array<(input: { tool_input?: unknown }) => Promise<{ hookSpecificOutput?: unknown }>>;
+        }>;
+      }
+    ).PreToolUse.find((entry) => new RegExp(`^(?:${entry.matcher})$`).test("Task"));
+    expect(hook).toBeDefined();
+    const result = await hook!.hooks[0]({
+      tool_input: { description: "d", prompt: "p", model: "haiku", isolation: "worktree", run_in_background: true },
+    });
+    expect(result.hookSpecificOutput).toEqual({
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      updatedInput: { description: "d", prompt: "p", run_in_background: false },
+    });
+  });
+
   it("denies a call without a prompt", async () => {
     const result = await agentGuard()({ tool_input: { description: "x" } });
     expect(result.hookSpecificOutput?.permissionDecision).toBe("deny");
@@ -318,6 +339,6 @@ describe("sub-agents (codingProfile.subAgents)", () => {
   it("keeps both guards on a workflow run with sub-agents", () => {
     const options = buildClaudeSdkOptions({ ...config(), subAgents: true, workflow: { name: "w", args: {} } });
     const matchers = (options.hooks as { PreToolUse: Array<{ matcher: string }> }).PreToolUse.map((h) => h.matcher);
-    expect(matchers.sort()).toEqual(["Agent", "Workflow"]);
+    expect(matchers.sort()).toEqual(["Agent|Task", "Workflow"]);
   });
 });

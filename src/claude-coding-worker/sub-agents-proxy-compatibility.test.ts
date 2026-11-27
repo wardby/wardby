@@ -3,9 +3,9 @@
 // model asks for a sub-agent, which asks for a nested one (each with a model override, a background
 // ask and a worktree the guard must drop); every conversation comes through the proxy, and every
 // request must pass the proxy's allowlist on the run's model. In bare mode (CLAUDE_CODE_SIMPLE) the
-// pinned CLI offers no Agent tool at all, so sub-agents take effect only with claudeBareMode off. A recording pass-through in front of the proxy keeps each request's
-// x-claude-code-agent-id header. The upstream model is a scripted in-process fake: nothing leaves
-// the machine.
+// pinned CLI offers no Agent tool at all, so sub-agents take effect only with claudeBareMode off.
+// A recording pass-through in front of the proxy keeps each request's x-claude-code-agent-id
+// header. The upstream model is a scripted in-process fake: nothing leaves the machine.
 //
 // Runs only when src/claude-coding-worker/node_modules is installed (the worker's SDK and its
 // platform binary); otherwise the suite is skipped, unless WARDBY_REQUIRE_CLAUDE_COMPAT=1, which
@@ -375,19 +375,9 @@ describe.skipIf(!loaded)("pinned Claude Code sub-agents through the coding proxy
       bare: false,
     });
 
-    // Evidence for the operator docs: the sub-agent types the pinned CLI lists, and the request sequence.
+    // The sub-agent types the pinned CLI offers (named in the operator docs).
     const init = messages.find((message) => message.type === "system") as { agents?: unknown } | undefined;
-    process.stderr.write(`[claude-sub-agents-compat] init agents: ${JSON.stringify(init?.agents ?? null)}\n`);
-    process.stderr.write(
-      `[claude-sub-agents-compat] requests: ${JSON.stringify(
-        modelRequests.map((entry) => ({
-          status: entry.status,
-          model: entry.body?.model,
-          conversation: entry.body ? conversation(entry.body) : null,
-          agentId: entry.agentId ?? null,
-        })),
-      )}\n`,
-    );
+    expect(init?.agents).toEqual(["claude", "Explore", "general-purpose", "Plan", "statusline-setup"]);
 
     // Every request Claude Code sent passed the proxy (nothing refused) and reached the upstream.
     expect(audit.filter((event) => event.type === "request.rejected")).toEqual([]);
@@ -421,6 +411,18 @@ describe.skipIf(!loaded)("pinned Claude Code sub-agents through the coding proxy
       blocks(body).find((block) => block.type === "tool_result" && block.tool_use_id === id);
     expect(JSON.stringify(resultFor(sub[1].body!, NESTED_CALL_ID))).toContain(NESTED_ANSWER);
     expect(JSON.stringify(resultFor(main[1].body!, AGENT_CALL_ID))).toContain(SUB_ANSWER);
+    // What Claude Code executed (the SDK's tool_use_result for an Agent call): in the foreground
+    // ("completed", not launched in the background), on the run's model, with no worktree.
+    const executed = messages
+      .map((message) => (message as { tool_use_result?: unknown }).tool_use_result)
+      .filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null)
+      .filter((value) => typeof value.agentId === "string");
+    // The SDK streams the main session's tool results (a nested call's result stays inside its sub-agent).
+    expect(executed.map((result) => result.prompt)).toContain(SUBTASK);
+    for (const result of executed) {
+      expect(result).toMatchObject({ status: "completed", resolvedModel: MODEL, agentType: "general-purpose" });
+      expect(JSON.stringify(result)).not.toMatch(/worktree/i);
+    }
     // The history keeps the model's original call (the guard's updatedInput applies to execution
     // only); the proxy accepts the replayed Agent block whatever input it shows.
     const replayed = blocks(main[1].body!).find((block) => block.type === "tool_use" && block.name === "Agent");

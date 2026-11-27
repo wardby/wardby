@@ -3359,11 +3359,14 @@ describe("workflow sessions (#582)", () => {
       const stringOnly = (v: Record<string, unknown>) =>
         ((v.messages as unknown[])[0] = { role: "user", content: "x" });
       const displayOnly = (v: Record<string, unknown>) => (v.thinking = { type: "adaptive", display: "omitted" });
-      for (const [key, change] of [
-        ["ag-off-string", stringOnly],
-        ["ag-off-display", displayOnly],
+      for (const [key, change, code] of [
+        ["ag-off-string", stringOnly, "invalid_anthropic_request"],
+        ["ag-off-display", displayOnly, "unsupported_anthropic_feature"],
       ] as const) {
-        await expect(execute(off, key, new TestSink(), await body(change))).rejects.toMatchObject({ status: 400 });
+        await expect(execute(off, key, new TestSink(), await body(change))).rejects.toMatchObject({
+          status: 400,
+          code,
+        });
       }
       expect(off.fetch).not.toHaveBeenCalled();
       const on = await subAgents(true);

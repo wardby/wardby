@@ -41,6 +41,11 @@ const WORKFLOW_REFUSED =
   "Wardby runs only this run's own workflow, once: call Workflow with just its name, and nothing else.";
 
 const AGENT_TOOL = "Agent";
+/**
+ * The Agent guard's hook matcher: the pinned CLI also accepts the tool's legacy name, Task (it runs it
+ * as Agent). The matcher takes alternation; both names are listed so the guard cannot be bypassed.
+ */
+const AGENT_HOOK_MATCHER = "Agent|Task";
 /** The fields of Claude Code's Agent input (pinned SDK AgentInput) a sub-agent call may keep. */
 const AGENT_KEPT_FIELDS = ["description", "prompt", "subagent_type"] as const;
 const AGENT_REFUSED = "Start a sub-agent with a description and a prompt.";
@@ -135,7 +140,7 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
   const subAgents = config.subAgents;
   const preToolUse = [
     ...(config.workflow ? [{ matcher: WORKFLOW_TOOL, hooks: [workflowGuard(config.workflow)] }] : []),
-    ...(subAgents ? [{ matcher: AGENT_TOOL, hooks: [agentGuard()] }] : []),
+    ...(subAgents ? [{ matcher: AGENT_HOOK_MATCHER, hooks: [agentGuard()] }] : []),
   ];
   return {
     abortController,
