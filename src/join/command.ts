@@ -6,7 +6,11 @@
  * Shows the run's steps live (the agent's words, its commands with their status, and what people
  * send), sends each line typed, and ends with the run's outcome. `!text` interrupts the agent first;
  * `/leave` leaves (the run finishes its work); `/quit` stops the agent after a confirmation. Ctrl-C
- * leaves, as /leave does, so a closed terminal never keeps the run open.
+ * leaves, as /leave does (a second Ctrl-C stops watching); closing the terminal (SIGHUP) or SIGTERM
+ * leaves and exits. A poll that fails is retried with backoff; if the server stays unreachable or
+ * refuses, the CLI tries to leave on the way out, so a lost connection does not hold the run open.
+ * Only a CLI cut off for longer than its token lasts (10 minutes) cannot leave; the run then stays
+ * open until its timeout.
  *
  * Runs without a database or any server configuration: node built-ins and the link helpers only.
  * The link's token is a credential: it is sent only as `Authorization: Bearer` to the join API,
@@ -44,7 +48,10 @@ export const JOIN_MESSAGES = {
     "This stops the agent now: the run ends as cancelled, and its work is not pushed to a result branch or pull request. To let it finish and keep its work, use /leave instead.",
   notStopped: "Not stopped. Still joined.",
   stopping: "Stopping the agent...",
-  left: "Left. The run finishes its work and wraps up when the agent is idle.",
+  left: "Left. The run finishes its work and wraps up when the agent is idle. This window keeps showing the run until it ends; press Ctrl-C to stop watching.",
+  lostConnection: "Lost the connection to the Wardby server. Left the run so it is not held open.",
+  lostConnectionNotLeft:
+    "Lost the connection to the Wardby server and could not leave the run; it stays open until its timeout. Join it again with a new link from join_run to leave it.",
   sendFailed: "Could not send that",
 } as const;
 
@@ -52,6 +59,10 @@ const MAX_LINK_BYTES = 8192;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 const POLL_MS = 2_000;
+/** Waits between retries of a failed poll; after the last one the CLI gives up (and leaves). */
+const RETRY_MS = [2_000, 5_000, 10_000, 20_000, 30_000];
+/** How long a best-effort leave may take on the way out. */
+const EXIT_LEAVE_MS = 5_000;
 const TERMINAL = new Set(["succeeded", "failed", "refused", "lost", "cancelled", "budget_exhausted"]);
 
 export interface JoinDeps {
@@ -60,12 +71,31 @@ export interface JoinDeps {
   input?: NodeJS.ReadableStream;
   out?: (line: string) => void;
   sleep?: (ms: number) => Promise<void>;
-  /** Called with the handler that leaves on Ctrl-C (default: process SIGINT). */
-  onInterrupt?: (handler: () => void) => void;
+  /**
+   * Called with the handler for Ctrl-C, closing the terminal and termination (default: process
+   * SIGINT, SIGHUP and SIGTERM). Ctrl-C leaves and keeps watching (a second one exits); SIGHUP and
+   * SIGTERM leave and then exit, so a closed terminal never keeps the run open.
+   */
+  onSignal?: (handler: (signal: "SIGINT" | "SIGHUP" | "SIGTERM") => void) => void;
+  /** Ends the process after a SIGHUP or SIGTERM (default: process.exit). */
+  exit?: (code: number) => void;
   pollMs?: number;
 }
 
-class JoinCliError extends Error {}
+class JoinCliError extends Error {
+  /** The HTTP status that refused the call; 0 when the server could not be reached. */
+  constructor(
+    message: string,
+    readonly status = 0,
+  ) {
+    super(message);
+  }
+}
+
+/** A failure worth retrying: the server unreachable, a timeout, or a 5xx. */
+function transient(err: unknown): boolean {
+  return err instanceof JoinCliError && (err.status === 0 || err.status >= 500);
+}
 
 function isLoopbackHost(hostname: string): boolean {
   return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
@@ -79,6 +109,8 @@ const CSI = /(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]/g;
 const OSC = /(?:\u001b\]|\u009d)[^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)?/g;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g;
+/** Bidirectional overrides and isolates, which can make text read differently from what it is. */
+const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g;
 
 /** Server text as plain text: escape sequences and control characters removed, length capped. */
 export function cleanServerText(text: unknown, max = 8_000): string {
@@ -86,7 +118,13 @@ export function cleanServerText(text: unknown, max = 8_000): string {
     .replace(CSI, "")
     .replace(OSC, "")
     .replace(CONTROL_CHARS, "")
+    .replace(BIDI_CONTROLS, "")
     .slice(0, max);
+}
+
+/** Text after its label: every line after the first indented, so no line of it can pass for a new chat line. */
+function labelled(label: string, text: string): string {
+  return `${label}${text.replace(/\n/g, "\n    ")}`;
 }
 
 interface Step {
@@ -100,7 +138,7 @@ interface Step {
 
 /** One step as a chat line. */
 export function stepLine(step: Step): string {
-  const summary = cleanServerText(step.summary, 300);
+  const summary = cleanServerText(step.summary, 300).replace(/\n/g, " ");
   const text = cleanServerText(step.detail ?? step.summary);
   switch (step.kind) {
     case "join":
@@ -108,11 +146,11 @@ export function stepLine(step: Step): string {
     case "leave":
       return "· someone left";
     case "said":
-      return `agent: ${text}`;
+      return labelled("agent: ", text);
     case "message":
-      return `person: ${text}`;
+      return labelled("person: ", text);
     case "interrupt":
-      return `person (interrupt): ${text}`;
+      return labelled("person (interrupt): ", text);
     case "tool": {
       const status = step.status ? ` (${cleanServerText(step.status, 40)})` : "";
       return `  ${cleanServerText(step.tool ?? "tool", 128)}: ${summary}${status}`;
@@ -145,7 +183,7 @@ class JoinSession {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch {
-      throw new JoinCliError(JOIN_MESSAGES.unreachable);
+      throw new JoinCliError(JOIN_MESSAGES.unreachable, 0);
     }
     let json: Record<string, unknown> = {};
     try {
@@ -178,7 +216,7 @@ function refusalText(status: number, json: Record<string, unknown>): string {
 
 async function expectOk(session: JoinSession, action: JoinApiAction, body?: unknown): Promise<Record<string, unknown>> {
   const { status, json } = await session.call(action, body);
-  if (status !== 200) throw new JoinCliError(refusalText(status, json));
+  if (status !== 200) throw new JoinCliError(refusalText(status, json), status);
   return json;
 }
 
@@ -237,7 +275,23 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
       );
       return leaving;
     };
-    (deps.onInterrupt ?? ((handler) => process.once("SIGINT", handler)))(() => void leave());
+    const exit = deps.exit ?? ((code: number) => process.exit(code));
+    let interrupted = false;
+    const onSignal = (signal: "SIGINT" | "SIGHUP" | "SIGTERM") => {
+      // Ctrl-C leaves and keeps watching; a second Ctrl-C, or the terminal closing, exits after leaving.
+      if (signal === "SIGINT" && !interrupted) {
+        interrupted = true;
+        void leave();
+        return;
+      }
+      void Promise.race([leave() ?? Promise.resolve(), sleep(EXIT_LEAVE_MS)]).then(() => exit(130));
+    };
+    (
+      deps.onSignal ??
+      ((handler) => {
+        for (const signal of ["SIGINT", "SIGHUP", "SIGTERM"] as const) process.on(signal, () => handler(signal));
+      })
+    )(onSignal);
 
     // What people type: each line sent while the run is going; input ending only stops sending.
     const typing = (async () => {
@@ -287,24 +341,51 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
       }
     }
 
-    // The run's steps and status, until it ends.
+    // The run's steps and status, until it ends. A failed poll is retried with backoff; when the
+    // server stays unreachable, or refuses, the CLI leaves on the way out (best effort) so the run
+    // is not held open until its timeout.
+    let failures = 0;
     while (!ended) {
-      for (;;) {
-        const page = await expectOk(session, "steps", { after });
-        const steps = Array.isArray(page.steps) ? (page.steps as Step[]) : [];
-        for (const step of steps) {
-          if (typeof step.seq !== "number" || step.seq <= after) continue;
-          out(stepLine(step));
-          after = step.seq;
+      try {
+        for (;;) {
+          const page = await expectOk(session, "steps", { after });
+          const steps = Array.isArray(page.steps) ? (page.steps as Step[]) : [];
+          for (const step of steps) {
+            if (typeof step.seq !== "number" || step.seq <= after) continue;
+            out(stepLine(step));
+            after = step.seq;
+          }
+          if (page.next === null || page.next === undefined || steps.length === 0) break;
         }
-        if (page.next === null || page.next === undefined || steps.length === 0) break;
+        const status = await expectOk(session, "status");
+        failures = 0;
+        if (typeof status.status === "string" && TERMINAL.has(status.status)) {
+          ended = status;
+          break;
+        }
+        await sleep(pollMs);
+      } catch (err) {
+        if (transient(err) && failures < RETRY_MS.length) {
+          await sleep(RETRY_MS[failures]);
+          failures += 1;
+          continue;
+        }
+        // A rejected link (401) cannot leave either: say so instead of trying.
+        const rejected = err instanceof JoinCliError && err.status === 401;
+        const leftOk =
+          left ||
+          (!rejected &&
+            (await Promise.race([
+              expectOk(session, "leave").then(
+                () => true,
+                () => false,
+              ),
+              sleep(EXIT_LEAVE_MS).then(() => false),
+            ])));
+        if (!transient(err)) out(err instanceof JoinCliError ? err.message : JOIN_MESSAGES.unreachable);
+        out(leftOk ? JOIN_MESSAGES.lostConnection : JOIN_MESSAGES.lostConnectionNotLeft);
+        return 1;
       }
-      const status = await expectOk(session, "status");
-      if (typeof status.status === "string" && TERMINAL.has(status.status)) {
-        ended = status;
-        break;
-      }
-      await sleep(pollMs);
     }
     rl.close();
     await typing.catch(() => undefined);

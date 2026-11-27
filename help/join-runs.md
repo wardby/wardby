@@ -65,11 +65,20 @@ MCP client's agent:
    to send it; start it with `!` to interrupt. `/leave` leaves (the run
    finishes its work); `/quit` stops the agent after asking you to confirm:
    the run then ends cancelled and its work is not pushed. Ctrl-C leaves, as
-   `/leave` does.
+   `/leave` does. After leaving, the chat keeps showing the run until it
+   ends; press Ctrl-C (again) to stop watching.
+
+Closing the terminal leaves the run too. If the connection to the server drops,
+the chat retries for about a minute, then leaves the run on its way out so it
+is not held open. Only a chat cut off for longer than 10 minutes cannot leave;
+the run then stays open until its timeout, or until you join it again and
+leave.
 
 The link works until the run's timeout (plus a few minutes) and only for you.
 It is a credential: do not share it. Every request it makes is checked against
-your access again, so it stops working if you lose execute on the agent.
+your access again, so it stops working if you lose execute on the agent. An
+admin with owner-all access can join any run from a terminal too, as long as
+their admin role still grants it.
 
 ## What others see
 

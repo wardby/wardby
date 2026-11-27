@@ -108,6 +108,8 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
       principalId: ctx.principal.id,
       aud: audience,
       ...(audience === "stdio" && ctx.operator === true ? { operator: true } : {}),
+      // An owner-all admin on HTTP can join from a terminal too; the role is re-checked on every call.
+      ...(audience === "http" && isOwnerAll(ctx) ? { ownerAll: true, roles: [...(ctx.roles ?? [])].slice(0, 32) } : {}),
       exp: joinSessionExpiry(now, run?.startedAt ?? null, coding?.timeoutSec ?? 0),
     };
     const link = joinLink(await opts.link.origin(), await mcp.mintRequestState(payload));

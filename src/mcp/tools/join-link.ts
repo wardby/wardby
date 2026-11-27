@@ -46,6 +46,17 @@ export interface JoinLinkPayload {
   aud: RunTranscriptLinkAudience;
   /** The stdio local operator. Only ever on a stdio link. */
   operator?: boolean;
+  /**
+   * An owner-all caller (the owner:all scope and a role granting it) on the HTTP server. Never on a
+   * stdio link. The join API re-checks the role on every call (ownerAllStill, join-api.ts).
+   */
+  ownerAll?: boolean;
+  /**
+   * With ownerAll: the caller's direct roles when the link was made, used on later calls only when
+   * the principal has no self-hosted AuthUser to read them from live (a delegating identity
+   * provider's role claim cannot be re-read without a token). Team roles are always read live.
+   */
+  roles?: string[];
   /** Epoch ms after which the session is refused (the run's deadline plus the grace). */
   exp: number;
 }
@@ -61,8 +72,14 @@ export function isJoinLinkPayload(value: unknown): value is JoinLinkPayload {
     typeof v.exp === "number" &&
     (v.aud === "stdio" || v.aud === "http") &&
     (v.operator === undefined || typeof v.operator === "boolean") &&
-    // The operator flag belongs to stdio only.
-    !(v.aud === "http" && v.operator !== undefined)
+    // The operator flag belongs to stdio only; the owner-all flag to HTTP only.
+    !(v.aud === "http" && v.operator !== undefined) &&
+    (v.ownerAll === undefined || (v.ownerAll === true && v.aud === "http")) &&
+    (v.roles === undefined ||
+      (v.ownerAll === true &&
+        Array.isArray(v.roles) &&
+        v.roles.length <= 32 &&
+        v.roles.every((role) => typeof role === "string" && role.length <= 64)))
   );
 }
 

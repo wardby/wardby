@@ -20,7 +20,13 @@ interface Step {
 }
 
 function setup(
-  opts: { grants?: FakeGrantSeed[]; status?: string; triggeredById?: string | null; provider?: string } = {},
+  opts: {
+    grants?: FakeGrantSeed[];
+    status?: string;
+    triggeredById?: string | null;
+    provider?: string;
+    authUser?: { roles: string[]; status: string } | null;
+  } = {},
 ) {
   const steps: Step[] = [];
   const stops: string[] = [];
@@ -36,6 +42,8 @@ function setup(
   };
   const db = {
     resourceGrant: fakeResourceGrants(opts.grants ?? []),
+    authUser: { findUnique: async () => opts.authUser ?? null },
+    teamMember: { findMany: async () => [] },
     agent: { findUnique: async () => ({ id: "a1", ownerId: "owner" }) },
     run: {
       findUnique: async ({ where }: { where: { id: string } }) => (where.id === "r1" ? run : null),
@@ -170,6 +178,25 @@ describe("join API", () => {
     const answer = await call(t.deps, "join", token);
     expect(answer).toEqual({ status: 401, json: { error: "link_invalid" } });
     expect(t.steps).toEqual([]);
+  });
+
+  it("lets an owner-all admin join while their role still grants owner:all, and not once it is removed", async () => {
+    const admin = setup({ grants: [], authUser: { roles: ["wardby_owner"], status: "enabled" } });
+    const token = await mint(payload({ ownerAll: true, roles: ["wardby_owner"] }));
+    expect((await call(admin.deps, "join", token)).status).toBe(200);
+    // The role is read live from AuthUser: removed there, the same link no longer reaches the run.
+    const demoted = setup({ grants: [], authUser: { roles: [], status: "enabled" } });
+    expect((await call(demoted.deps, "join", token)).status).toBe(404);
+    const disabled = setup({ grants: [], authUser: { roles: ["wardby_owner"], status: "disabled" } });
+    expect((await call(disabled.deps, "join", token)).status).toBe(404);
+  });
+
+  it("uses the roles recorded in an owner-all link when the principal has no AuthUser (a delegating IdP)", async () => {
+    const t = setup({ grants: [], authUser: null });
+    expect((await call(t.deps, "join", await mint(payload({ ownerAll: true, roles: ["wardby_owner"] })))).status).toBe(
+      200,
+    );
+    expect((await call(t.deps, "status", await mint(payload({ ownerAll: true, roles: [] })))).status).toBe(404);
   });
 
   it("checks access on every call: a principal who lost execute gets not found, and nothing is recorded", async () => {

@@ -40,4 +40,12 @@ describe("join link", () => {
     expect(isJoinLinkPayload({ ...base, aud: "http", operator: true })).toBe(false);
     expect(isJoinLinkPayload({ ...base, kind: "run-transcript", aud: "http" })).toBe(false);
   });
+
+  it("accepts the owner-all flag (and its roles) only on an HTTP payload", () => {
+    const base = { kind: "run-join", runId: "r", principalId: "p", exp: 1 };
+    expect(isJoinLinkPayload({ ...base, aud: "http", ownerAll: true, roles: ["wardby_owner"] })).toBe(true);
+    expect(isJoinLinkPayload({ ...base, aud: "stdio", ownerAll: true })).toBe(false);
+    expect(isJoinLinkPayload({ ...base, aud: "http", roles: ["wardby_owner"] })).toBe(false);
+    expect(isJoinLinkPayload({ ...base, aud: "http", ownerAll: false })).toBe(false);
+  });
 });

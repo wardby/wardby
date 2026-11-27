@@ -45,6 +45,8 @@ import {
 } from "./join-link.js";
 import { JOIN_REFUSALS } from "./join-run.js";
 import { canReadRun, canReadRunDetail, type RunReader } from "./run-access.js";
+import { permissionsOf } from "../auth/resource-server.js";
+import { resolveStanding, type StandingDb } from "../../core/teams/standing.js";
 import type { RunTranscriptLinkAudience } from "./run-transcript-download.js";
 import { loadRunStepsPage } from "./run-steps.js";
 
@@ -53,7 +55,7 @@ export interface JoinApiDeps {
   mint: (payload: JoinLinkPayload) => Promise<string>;
   /** The host serving this route: only links minted for it are accepted. */
   audience: RunTranscriptLinkAudience;
-  db: JoinActionDb & StopRunOptions["db"] & Pick<PrismaClient, "runStep">;
+  db: JoinActionDb & StopRunOptions["db"] & Pick<PrismaClient, "runStep" | "authUser"> & StandingDb;
   recordJoin?: RunStepSink["recordJoin"];
   executor: StopRunOptions["executor"];
   now?: () => Date;
@@ -90,6 +92,23 @@ function refusal(res: ServerResponse, err: JoinActionError): void {
   send(res, 409, { error: err.code, message: JOIN_REFUSALS[err.code] ?? err.code });
 }
 
+/**
+ * Whether an owner-all link's principal still holds a role granting owner:all, read on every call.
+ * Direct roles come live from the self-hosted AuthUser (which must still be enabled); a principal
+ * without one (a delegating identity provider, whose role claim cannot be re-read without a token)
+ * uses the roles recorded when the link was made. Team roles are always read live (resolveStanding).
+ * The owner:all scope itself was checked when the link was made; the session ends with the run.
+ */
+async function ownerAllStill(db: JoinApiDeps["db"], payload: JoinLinkPayload): Promise<boolean> {
+  const user = await db.authUser.findUnique({
+    where: { principalId: payload.principalId },
+    select: { roles: true, status: true },
+  });
+  if (user && user.status !== "enabled") return false;
+  const standing = await resolveStanding(db, payload.principalId, user ? user.roles : (payload.roles ?? []));
+  return permissionsOf([...standing.roles]).has("owner:all");
+}
+
 /** A visible run (canReadRun), for steps and status: they keep working after the run ends. */
 async function readableRun(db: JoinApiDeps["db"], runId: string, reader: RunReader) {
   const run = await db.run.findUnique({
@@ -116,7 +135,10 @@ export async function handleJoinApi(request: JoinApiRequest, res: ServerResponse
   if (!isJoinLinkPayload(payload) || payload.aud !== deps.audience || payload.exp <= now.getTime()) {
     return send(res, 401, { error: "link_invalid" });
   }
-  const reader: RunReader = { principalId: payload.principalId, operator: payload.operator === true };
+  const reader: RunReader = {
+    principalId: payload.principalId,
+    operator: payload.operator === true || (payload.ownerAll === true && (await ownerAllStill(deps.db, payload))),
+  };
   const actionDeps = { db: deps.db, ...(deps.recordJoin ? { recordJoin: deps.recordJoin } : {}) };
   const runId = payload.runId;
   const body = request.body ?? {};

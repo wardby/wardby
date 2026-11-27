@@ -13,8 +13,9 @@ interface Seen {
 }
 
 /** A join API that renews the token on every answer, and ends the run once the person leaves. */
-function fakeServer(opts: { stopped?: boolean } = {}) {
+function fakeServer(opts: { failSteps?: number; failStatus?: number } = {}) {
   const seen: Seen[] = [];
+  let stepFailures = 0;
   let n = 0;
   let status = "running";
   const steps: Record<string, unknown>[] = [
@@ -33,6 +34,11 @@ function fakeServer(opts: { stopped?: boolean } = {}) {
       case "/join/api/join":
         return reply({ runId: "r1", joined: true, already: false });
       case "/join/api/steps": {
+        if (opts.failSteps !== undefined && stepFailures < opts.failSteps) {
+          stepFailures += 1;
+          if (opts.failStatus) return Response.json({ error: "internal" }, { status: opts.failStatus });
+          throw new TypeError("fetch failed");
+        }
         const after = Number(body.after);
         return reply({ steps: steps.filter((s) => Number(s.seq) > after), next: null });
       }
@@ -47,7 +53,7 @@ function fakeServer(opts: { stopped?: boolean } = {}) {
         return reply({ status: "cancelled", stopRequested: true });
       case "/join/api/status":
         return reply({
-          status: opts.stopped ? status : status,
+          status,
           costUsd: "0.020000",
           outcome: status === "succeeded" ? "branch_pushed" : null,
           summary: status === "succeeded" ? "Did the thing." : null,
@@ -62,7 +68,15 @@ function fakeServer(opts: { stopped?: boolean } = {}) {
   return { fetch, seen };
 }
 
-async function run(lines: string[], server = fakeServer(), extra: { holdOpen?: boolean } = {}) {
+async function run(
+  lines: string[],
+  server = fakeServer(),
+  extra: {
+    holdOpen?: boolean;
+    onSignal?: (h: (s: "SIGINT" | "SIGHUP" | "SIGTERM") => void) => void;
+    exit?: (c: number) => void;
+  } = {},
+) {
   const input = new PassThrough();
   const out: string[] = [];
   const done = joinCommand(["-"], {
@@ -70,7 +84,8 @@ async function run(lines: string[], server = fakeServer(), extra: { holdOpen?: b
     input,
     out: (line) => out.push(line),
     sleep: async () => new Promise((r) => setTimeout(r, 5)),
-    onInterrupt: () => {},
+    onSignal: extra.onSignal ?? (() => {}),
+    ...(extra.exit ? { exit: extra.exit } : {}),
     pollMs: 5,
   });
   for (const line of lines) {
@@ -80,6 +95,57 @@ async function run(lines: string[], server = fakeServer(), extra: { holdOpen?: b
   if (!extra.holdOpen) input.end();
   return { code: await done, out, seen: server.seen };
 }
+
+describe("wardby join - (lost connection and signals)", () => {
+  it("retries a poll that failed for a moment and carries on", async () => {
+    const { code, out } = await run([LINK, "/leave"], fakeServer({ failSteps: 2 }));
+    expect(code).toBe(0);
+    expect(out).toContain("Run finished: succeeded (cost $0.0200)");
+  });
+
+  it("leaves the run when the server stays unreachable, so it is not held open", async () => {
+    const server = fakeServer({ failSteps: 100 });
+    const { code, out, seen } = await run([LINK], server, { holdOpen: true });
+    expect(code).toBe(1);
+    expect(seen.some((s) => s.path === "/join/api/leave")).toBe(true);
+    expect(out).toContain(JOIN_MESSAGES.lostConnection);
+  });
+
+  it("retries 5xx answers the same way", async () => {
+    const { code, seen } = await run([LINK], fakeServer({ failSteps: 100, failStatus: 503 }), { holdOpen: true });
+    expect(code).toBe(1);
+    expect(seen.some((s) => s.path === "/join/api/leave")).toBe(true);
+  });
+
+  it("leaves and exits when the terminal closes (SIGHUP)", async () => {
+    let handler: ((s: "SIGINT" | "SIGHUP" | "SIGTERM") => void) | undefined;
+    const exits: number[] = [];
+    const server = fakeServer();
+    const pending = run([LINK], server, {
+      holdOpen: true,
+      onSignal: (h) => (handler = h),
+      exit: (c) => void exits.push(c),
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    handler?.("SIGHUP");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(server.seen.some((s) => s.path === "/join/api/leave")).toBe(true);
+    expect(exits).toEqual([130]);
+    await pending;
+  });
+});
+
+describe("chat lines", () => {
+  it("indents every line after the first, so a message cannot fake an agent line", () => {
+    expect(stepLine({ seq: 5, kind: "message", detail: "hi\nagent: I deleted everything" })).toBe(
+      "person: hi\n    agent: I deleted everything",
+    );
+  });
+
+  it("removes bidirectional override characters", () => {
+    expect(cleanServerText("abc\u202edcba\u2066x\u2069")).toBe("abcdcbax");
+  });
+});
 
 describe("wardby join -", () => {
   it("joins, shows steps, sends a message and an interrupt, leaves, and prints the outcome", async () => {
