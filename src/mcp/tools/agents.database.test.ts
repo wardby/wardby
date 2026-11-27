@@ -320,4 +320,52 @@ describe.skipIf(!process.env.DATABASE_URL)("documentTools setting (PostgreSQL)",
     expect(JSON.parse(cleared.content[0].text).documentTools).toBeNull();
     expect((await db.agent.findUnique({ where: { id: target.id } }))?.documentTools).toBeNull();
   });
+
+  it("a router needs a description", async () => {
+    const target = await agent(owner.id);
+    const mcp = await connect(owner);
+    const result = await mcp.call("update_agent", {
+      id: target.id,
+      router: true,
+      documentTools: { access: "read" },
+    });
+    await mcp.close();
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/^review_router_invalid: a router needs a description/);
+  });
+
+  it("a router with a description and documentTools is saved and shown with the default start limit", async () => {
+    const target = await agent(owner.id);
+    const mcp = await connect(owner);
+    const result = await mcp.call("update_agent", {
+      id: target.id,
+      router: true,
+      description: "mobile app work",
+      documentTools: { access: "read" },
+    });
+    expect(result.isError).toBeFalsy();
+    const got = JSON.parse((await mcp.call("get_agent", { id: target.id })).content[0].text);
+    await mcp.close();
+    expect(got.router).toBe(true);
+    expect(got.description).toBe("mobile app work");
+    expect(got.maxStartsPerDecision).toBe(20);
+    expect(got.reviewRouter).toBeNull();
+  });
+
+  it("reviewRouter must name a router; a router is accepted and null clears it", async () => {
+    const writer = await agent(owner.id);
+    const notRouter = await agent(owner.id);
+    const router = await agent(owner.id, { router: true, description: "routes" });
+    const mcp = await connect(owner);
+    const refused = await mcp.call("update_agent", { id: writer.id, reviewRouter: notRouter.id });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toMatch(/review_router_invalid/);
+    const set = await mcp.call("update_agent", { id: writer.id, reviewRouter: router.id });
+    expect(set.isError).toBeFalsy();
+    expect(JSON.parse(set.content[0].text).reviewRouter).toBe(router.id);
+    const cleared = await mcp.call("update_agent", { id: writer.id, reviewRouter: null });
+    await mcp.close();
+    expect(JSON.parse(cleared.content[0].text).reviewRouter).toBeNull();
+    expect((await db.agent.findUnique({ where: { id: writer.id } }))?.reviewRouterId).toBeNull();
+  });
 });

@@ -99,6 +99,7 @@ import {
 } from "../../coding/tunnel-hosts.js";
 import { checkPlanDocumentSetting } from "../../core/plans/settings.js";
 import { checkDocumentToolsSetting, DocumentToolsSchema } from "../../core/documents/tools-setting.js";
+import { checkRouterSettings } from "../../core/review-routing/settings.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 
@@ -203,6 +204,14 @@ function withOperatorMode<T extends { kind: string; nativeExecutionMode?: Native
     nativeExecutionMode:
       agent.kind !== "native" ? null : agent.nativeExecutionMode === "sandbox" ? "sandbox" : "control-plane",
   };
+}
+
+/** An agent row with its review router under the name the tools take: `reviewRouter`, the router's id or null. */
+function withReviewRouter<T extends { reviewRouterId: string | null }>(
+  agent: T,
+): Omit<T, "reviewRouterId"> & { reviewRouter: string | null } {
+  const { reviewRouterId, ...rest } = agent;
+  return { ...rest, reviewRouter: reviewRouterId };
 }
 
 /** The warning create_agent / update_agent return (not a refusal): wardby can't tell how old a custom image is. */
@@ -334,6 +343,10 @@ const agentFields = {
   allowedOverrunPercent: z.number().int().min(0).max(100),
   maxDelegationsPerRun: z.number().int().min(1).max(MAX_DELEGATIONS_PER_RUN),
   parallelDelegations: z.boolean(),
+  description: z.string().trim().min(1).max(1000),
+  router: z.boolean(),
+  reviewRouter: z.string().min(1).max(128),
+  maxStartsPerDecision: z.number().int().min(1).max(100),
   schedule: z.string().trim().min(1).max(256),
   timezone: z.string().trim().min(1).max(128),
   scheduleEnabled: z.boolean(),
@@ -378,6 +391,10 @@ const CreateAgentSchema = z
     allowedOverrunPercent: agentFields.allowedOverrunPercent.optional(),
     maxDelegationsPerRun: agentFields.maxDelegationsPerRun.optional(),
     parallelDelegations: agentFields.parallelDelegations.optional(),
+    description: agentFields.description.optional(),
+    router: agentFields.router.optional(),
+    reviewRouter: agentFields.reviewRouter.optional(),
+    maxStartsPerDecision: agentFields.maxStartsPerDecision.optional(),
     schedule: agentFields.schedule.optional(),
     timezone: agentFields.timezone.optional(),
     scheduleEnabled: agentFields.scheduleEnabled.optional(),
@@ -443,6 +460,10 @@ const UpdateAgentSchema = z
     allowedOverrunPercent: agentFields.allowedOverrunPercent.optional(),
     maxDelegationsPerRun: agentFields.maxDelegationsPerRun.optional(),
     parallelDelegations: agentFields.parallelDelegations.optional(),
+    description: agentFields.description.nullable().optional(),
+    router: agentFields.router.optional(),
+    reviewRouter: agentFields.reviewRouter.nullable().optional(),
+    maxStartsPerDecision: agentFields.maxStartsPerDecision.optional(),
     schedule: agentFields.schedule.nullable().optional(),
     timezone: agentFields.timezone.optional(),
     scheduleEnabled: agentFields.scheduleEnabled.optional(),
@@ -713,6 +734,27 @@ async function checkDocumentTools(
   }
 }
 
+/** checkRouterSettings with its error mapped to a fixed-text 400. */
+async function checkRouter(
+  db: Parameters<typeof checkRouterSettings>[0],
+  input: Parameters<typeof checkRouterSettings>[1],
+) {
+  // Nothing to judge for an agent that is no router and names none.
+  if (!input.router && input.reviewRouterId === null) return;
+  try {
+    await checkRouterSettings(db, input);
+  } catch (err) {
+    if (!(err instanceof Error) || err.message !== "review_router_invalid") throw err;
+    const text: Record<string, string> = {
+      description: "a router needs a description of the work it takes",
+      documents: "a router needs documentTools to read documents",
+      kind: "only native agents can be routers",
+      review_router: "reviewRouter must name a router agent you can run",
+    };
+    throw new McpError(400, `review_router_invalid: ${text[String(err.cause)] ?? "check the setting"}.`);
+  }
+}
+
 function parseCreateAgent(args: unknown): CreateAgentArgs {
   const result = CreateAgentSchema.safeParse(args);
   if (!result.success) throw invalidArguments("create_agent arguments", result.error);
@@ -890,6 +932,29 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             "(one after another, or together with parallelDelegations). Default 1: route to exactly one.",
         },
         parallelDelegations: { type: "boolean", description: PARALLEL_DELEGATIONS_DESCRIPTION },
+        description: {
+          type: ["string", "null"],
+          maxLength: 1000,
+          description:
+            "What work this agent takes, in plain words. Required for a router: request_work ranks routers by it.",
+        },
+        router: {
+          type: "boolean",
+          description:
+            "Native agents: this agent routes work. Review actions on documents its work produced come to it, and people who can run it may send it requests with request_work. Needs a description and documentTools. See help article route-work-from-reviews.",
+        },
+        reviewRouter: {
+          type: ["string", "null"],
+          description:
+            "On a writer or planner: the router agent that review actions on its documents go to when no router started the work. Must be a router you can run. Null clears it.",
+        },
+        maxStartsPerDecision: {
+          type: "integer",
+          minimum: 1,
+          maximum: 100,
+          description:
+            "On a router: the most agents one person decision may set off, across every router run that decision leads to (default 20). maxDelegationsPerRun still limits each single run.",
+        },
         schedule: { type: "string" },
         timezone: { type: "string" },
         scheduleEnabled: { type: "boolean" },
@@ -939,7 +1004,14 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       if (args.budgetGroupId) {
         await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id, isOwnerAll(ctx));
       }
-      const { codingProfile, repositoryAdminOverride, nativeExecutionMode, documentTools, ...agentFieldsData } = args;
+      const {
+        codingProfile,
+        repositoryAdminOverride,
+        nativeExecutionMode,
+        documentTools,
+        reviewRouter,
+        ...agentFieldsData
+      } = args;
       const documentToolsChecked = documentTools
         ? await checkDocumentTools(
             ctx.db,
@@ -948,8 +1020,18 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             documentTools,
           )
         : undefined;
+      await checkRouter(ctx.db, {
+        agentId: null,
+        ownerId: ctx.principal.id,
+        kind: args.kind,
+        description: args.description ?? null,
+        documentTools: documentToolsChecked ?? null,
+        router: args.router ?? false,
+        reviewRouterId: reviewRouter ?? null,
+      });
       const agentData = {
         ...agentFieldsData,
+        ...(reviewRouter ? { reviewRouterId: reviewRouter } : {}),
         ...(documentToolsChecked ? { documentTools: documentToolsChecked } : {}),
         ...(nativeExecutionMode ? { nativeExecutionMode: toStoredMode(nativeExecutionMode) } : {}),
       };
@@ -1014,7 +1096,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         });
         return created;
       });
-      return textResult(withRunStepsWarning(withProfileWarnings(withOperatorMode(agent))));
+      return textResult(withRunStepsWarning(withProfileWarnings(withOperatorMode(withReviewRouter(agent)))));
     },
   });
 
@@ -1054,6 +1136,29 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             "(one after another, or together with parallelDelegations). Default 1: route to exactly one.",
         },
         parallelDelegations: { type: "boolean", description: PARALLEL_DELEGATIONS_DESCRIPTION },
+        description: {
+          type: ["string", "null"],
+          maxLength: 1000,
+          description:
+            "What work this agent takes, in plain words. Required for a router: request_work ranks routers by it.",
+        },
+        router: {
+          type: "boolean",
+          description:
+            "Native agents: this agent routes work. Review actions on documents its work produced come to it, and people who can run it may send it requests with request_work. Needs a description and documentTools. See help article route-work-from-reviews.",
+        },
+        reviewRouter: {
+          type: ["string", "null"],
+          description:
+            "On a writer or planner: the router agent that review actions on its documents go to when no router started the work. Must be a router you can run. Null clears it.",
+        },
+        maxStartsPerDecision: {
+          type: "integer",
+          minimum: 1,
+          maximum: 100,
+          description:
+            "On a router: the most agents one person decision may set off, across every router run that decision leads to (default 20). maxDelegationsPerRun still limits each single run.",
+        },
         schedule: { type: ["string", "null"] },
         timezone: { type: "string" },
         scheduleEnabled: { type: "boolean" },
@@ -1389,6 +1494,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             nativeExecutionMode: modeArg,
             promptSummary,
             documentTools: documentToolsArg,
+            reviewRouter: reviewRouterArg,
             ...fieldUpdates
           } = args;
           // The setting is judged against the kind the agent has after this update; a coding agent
@@ -1413,8 +1519,24 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
                           nextDocumentTools,
                         ),
                 };
+          const storedDocumentTools = documentToolsData.documentTools;
+          await checkRouter(tx, {
+            agentId: existing.id,
+            ownerId: existing.ownerId ?? ctx.principal.id,
+            kind: nextKind,
+            description: args.description !== undefined ? args.description : existing.description,
+            documentTools:
+              storedDocumentTools === undefined
+                ? existing.documentTools
+                : storedDocumentTools === Prisma.DbNull
+                  ? null
+                  : storedDocumentTools,
+            router: args.router ?? existing.router ?? false,
+            reviewRouterId: reviewRouterArg !== undefined ? reviewRouterArg : (existing.reviewRouterId ?? null),
+          });
           const updates = {
             ...fieldUpdates,
+            ...(reviewRouterArg !== undefined ? { reviewRouterId: reviewRouterArg } : {}),
             ...documentToolsData,
             ...(modeArg ? { nativeExecutionMode: toStoredMode(modeArg) } : {}),
           };
@@ -1486,7 +1608,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
           "coding package audit mode set",
         );
       }
-      const shown = withRunStepsWarning(withProfileWarnings(withOperatorMode(agent)));
+      const shown = withRunStepsWarning(withProfileWarnings(withOperatorMode(withReviewRouter(agent))));
       // Becoming Codex (a provider switch, or a native agent becoming coding) leaves out every attached
       // MCP tool the server doesn't mark read-only: say which, so the owner isn't surprised by a run.
       // Its attached native tools are left out of Codex runs altogether (#622): say which, too.
@@ -1553,7 +1675,9 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         );
       }
       const agents = await ctx.db.agent.findMany({ where, include: { codingProfile: true } });
-      return textResult(agents.map((agent) => ({ ...withOperatorMode(agent), access: accessOf(agent) })));
+      return textResult(
+        agents.map((agent) => ({ ...withOperatorMode(withReviewRouter(agent)), access: accessOf(agent) })),
+      );
     },
   });
 
@@ -1583,7 +1707,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       // A7: a tool's code and schema are its owner's, whoever can read the
       // agent (the agent's owner included). Capabilities stay visible: config.
       return textResult({
-        ...withRunStepsWarning(withProfileWarnings(withOperatorMode(agent))),
+        ...withRunStepsWarning(withProfileWarnings(withOperatorMode(withReviewRouter(agent)))),
         access,
         mcpServers: await agentMcpServerViews(ctx.db, agent.id),
         // Zod 3 window: the caller's own tools carry their warnings (see core/zod3-window.ts).

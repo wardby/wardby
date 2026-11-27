@@ -121,7 +121,7 @@ export async function agentDocumentAccess(db: DocumentDb, doc: AccessDoc, agentI
   return best;
 }
 
-async function canExecute(
+export async function canExecute(
   db: DocumentDb,
   agent: { id: string; ownerId: string | null },
   principalId: string,
