@@ -128,4 +128,4 @@ Every document and design page shows a banner with the state and the approval co
 
 ## Related
 
-[Documents](documents.md) · [Designs](designs.md) · [Share links](document-share-links.md) · [Comment threads and agents](comment-threads-and-agents.md) · [Plan documents](plan-documents.md) · [Documents from native agents](native-agent-documents.md)
+[Documents](documents.md) · [Designs](designs.md) · [Share links](document-share-links.md) · [Comment threads and agents](comment-threads-and-agents.md) · [Plan documents](plan-documents.md) · [Documents from native agents](native-agent-documents.md) · [Route work from reviews](route-work-from-reviews.md)

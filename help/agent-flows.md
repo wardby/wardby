@@ -12,16 +12,17 @@ appliesTo: >=0.9.14
 A **flow** is a group of agents that hand work to each other. Wardby works flows out from settings
 you already have; there is nothing new to configure.
 
-| Link        | Comes from                                                                                                           |
-| ----------- | -------------------------------------------------------------------------------------------------------------------- |
-| Delegates   | A sub-agent edge (`attach_subagent`)                                                                                 |
-| Reviews     | A coding agent that can write to a repository, and an agent with the `pull_request` trigger on it                    |
-| Fix rounds  | A reviewer on a repository, and an agent with the `review_fix` trigger on it (up to `reviewFixMaxRounds`, default 2) |
-| After merge | A coding agent that can write to a repository, and an agent with the `push` trigger on it                            |
-| Status      | An agent that can move a Jira ticket to a status, and an agent on the same project that starts on it (see below)     |
+| Link           | Comes from                                                                                                             |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Delegates      | A sub-agent edge (`attach_subagent`)                                                                                   |
+| Reviews        | A coding agent that can write to a repository, and an agent with the `pull_request` trigger on it                      |
+| Fix rounds     | A reviewer on a repository, and an agent with the `review_fix` trigger on it (up to `reviewFixMaxRounds`, default 2)   |
+| After merge    | A coding agent that can write to a repository, and an agent with the `push` trigger on it                              |
+| Status         | An agent that can move a Jira ticket to a status, and an agent on the same project that starts on it (see below)       |
+| Routes reviews | A writer or planner with a `reviewRouter`, and that router (see [Route work from reviews](route-work-from-reviews.md)) |
 
 Each agent's entry points are listed too: `mention`, a Jira project with triggers, a status only a person sets, a schedule, a
-webhook, or `manual`. A reviewer or after-merge agent whose pull requests or merges come from
+webhook, or `manual` (a router always has `manual`: people start it with `request_work`). A reviewer or after-merge agent whose pull requests or merges come from
 people, not from a coding agent you can see, gets `pull_request:<repo>` or `push:<repo>` (for
 example `pull_request:github:your-org/your-repo`): it starts when a pull request is opened or a
 change is merged there. An agent's notes also name the MCP servers it uses (`mcp:<server>`) and the

@@ -60,6 +60,7 @@ directory.
 | `reopen_document`                                            | `documents:write` | Reopen an approved or rejected document for review as a new version, a copy of the current one (`write`)          |
 | `archive_document`                                           | `documents:write` | Archive or unarchive a document you own                                                                           |
 | `wait_for_review`                                            | `documents:read`  | Wait for a state change, a comment by someone else, or a timeout (default 300 s, max 600 s)                       |
+| `request_work`                                               | `runs:trigger`    | Ask for work in plain words: ranks the routers you can run, or starts one (`router`) with your request            |
 | `export_document`                                            | `documents:read`  | Export a design (board HTML, prototype HTML, PNG, PDF) or a document as PDF                                       |
 
 Text people wrote (titles, Markdown, comment bodies, names) comes back wrapped
@@ -674,6 +675,86 @@ publishes one revision and replies; threads it leaves unanswered get the usual
 no-reply note. There is no automatic merge. A send is `document_not_agent_linked`
 when the agent has no `documentTools` setting, and `document_agent_unavailable`
 when its setting is no longer `write` or the document's owner lost `execute`.
+
+## Review routing
+
+A **router** is a native agent that decides who works next when someone acts on a
+document, a design or a set in review. Wardby starts it with a short description
+of the action; it reads the documents and starts the agents that should do the
+next piece of work, each with its own task, using its `delegate_to_*` tools
+(attach them with `attach_subagent`). With no router in play, review actions
+start nothing. The short guide is the help article
+[Route work from reviews](../help/route-work-from-reviews.md).
+
+| Setting or tool                             | Who                           | Meaning                                                                                                                                     |
+| ------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `router` on `create_agent` / `update_agent` | Agent owner                   | The agent routes work. Native agents only; needs a `description` and `documentTools`. Refused with `review_router_invalid`.                 |
+| `description`                               | Anyone who can edit the agent | What work the router takes; `request_work` ranks routers by it.                                                                             |
+| `reviewRouter`                              | Agent owner                   | On a writer or planner: the router that gets reviews of its documents when no router started the work. A router the owner can run.          |
+| `maxStartsPerDecision` (1 to 100)           | Agent owner                   | The most agents one person decision may start (default 20).                                                                                 |
+| `link_document` `routerAgentId`             | Document owner                | Change or clear (`null`) the router a document's reviews go to; a router the caller can run.                                                |
+| `request_work`                              | Anyone with `runs:trigger`    | Without `router`, ranks up to 5 routers you can run by their descriptions and starts nothing; with `router`, starts it with your `request`. |
+
+**Which router.** The router whose work produced the document, found up the run
+tree when the document is created (router, then lead, then writer, at any
+depth). Otherwise the writer's `reviewRouter`, read when the action happens.
+A recorded router that is no longer `router: true` is skipped; otherwise nothing
+starts. Documents in a set route through the set.
+
+**Which actions.** Every review action: submitted, approved (and force
+approved), option chosen, changes requested, rejected, reopened, archived,
+unarchived and reviewers changed. In a set, the set entering review, the
+approval that completes the set, a choice (once, not once per document) and each
+other action once. A plan approval routes only for the action that completed
+it, and an approval completed without a review action (for example removing the
+last waiting document) does not route. Each action routes once; a failure to
+start the router never fails or undoes the person's action.
+
+**Option sets.** A native writer can put documents in an option set with
+`doc_create` `set` (a name) and `option` (a label). A person picks one with
+**Choose this option** (or `choose_plan_option`); the choice is one action for
+the router.
+
+**The note.** `submit_for_review`, an approval, a choice and a request for
+changes take an optional `note` (up to the review-note limit). It reaches the
+router labelled as that person's, with secret values removed as for any review
+note.
+
+**The router's task.** Fixed text written by Wardby: the action, the documents
+by id (and option labels), who acted, the note, and "The builder for this plan
+was already started." when the plan's `onApproved` is `build`. It carries no
+document content. The router and the agents it starts read those documents by id
+with `doc_get` for the length of their run; the documents do not appear in
+`doc_list`. A native agent it starts needs `documentTools`, else the start is
+refused with `review_route_target_no_documents`. A coding agent gets the
+documents as files in `/tmp/wardby-plan` (a planner gets none), and documents
+too large for a coding run refuse with `plan_too_large`. An agent owned by
+someone else runs its own instructions, and the router's task text is dropped.
+
+**Limits.** `maxStartsPerDecision` counts start attempts for one person decision
+across every router run that agents' own actions set off; a start refused later
+(for example for budget) still counts, and a gateway crash in the middle of a
+start can count it once more. Past it a start is refused with
+`review_route_limit`; the person's next action starts a new count.
+`maxDelegationsPerRun` still limits each run. The router run's budget covers the
+agents it starts, and it can start only its attached agents that its owner can
+run.
+
+**Asking for work.** `request_work` lets a person describe work in plain words.
+With `router` the router starts with the request as its task; `router: true`
+means people who can run it may send requests. Assistants are told to start the
+router when one clearly fits and to ask when several do. Documents the work
+produces route back to it. A Jira project, repository, schedule or webhook can
+be linked to a router like to any agent.
+
+**Visibility.** `trigger_agent` on a writer with a `reviewRouter` adds
+`reviewsGoTo` (only if you can run that router). `list_agent_links` adds
+`routes_reviews` links, and a router keeps a `manual` entry point. The page's
+Review tab has a **Routing** section: the router (or "No router: review actions
+start nothing."), each action's outcome, the agents started and the first line
+of their task (task text only for the document's owner and people who can run
+that router), and a sentence when a start was refused (`route_failed`,
+`run_refused`, `run_failed`, `review_router_invalid`, `review_route_limit`).
 
 ## Sending threads to a coding agent
 

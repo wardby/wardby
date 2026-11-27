@@ -31,6 +31,8 @@ description, tell them to search the help by tool name, feature or error code
 the code with its underscores, such as `errors/mcp_unavailable`) before guessing how a feature
 works or why a call was refused or a run failed.
 
+Call `request_work` (`runs:trigger`) to ask for work in plain words: without `router` it lists the routers you can run that fit your request; with `router` it starts that router with your request. See [Route work from reviews](route-work-from-reviews.md).
+
 Call `get_version` (also `agents:read`) to see which Wardby version the server
 is running. It returns `{ "version": "<semver>" }`, the same value as
 `wardby --version`.

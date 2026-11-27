@@ -35,6 +35,27 @@ const catalog: HelpCatalog = {
       plainText: "See how your agents work together. A flow is a group of agents that hand work to each other.",
       headings: [{ level: 1, text: "See how your agents work together", slug: "see-how-your-agents-work-together" }],
     },
+    {
+      id: "route-work-from-reviews",
+      title: "Route work from reviews (review routers)",
+      summary:
+        "A router agent decides who works next when someone acts on a document in review; request_work sends work to a router.",
+      audience: "operator",
+      tags: [
+        "review router",
+        "router",
+        "route work",
+        "request_work",
+        "onApproved",
+        "choose option agent",
+        "which agent",
+      ],
+      appliesTo: ">=0.11.0",
+      sourcePath: "route-work-from-reviews.md",
+      markdown: "# Route work from reviews\n\nA router agent decides who works next.",
+      plainText: "Route work from reviews. A router agent decides who works next.",
+      headings: [{ level: 1, text: "Route work from reviews", slug: "route-work-from-reviews" }],
+    },
   ],
 };
 
@@ -96,6 +117,17 @@ describe("help MCP tools", () => {
     expect(ids[0]).toBe("agent-flows");
     await client.close();
   });
+
+  it.each(["review router", "request work", "onApproved", "choose option agent"])(
+    "finds the route-work-from-reviews article for %j",
+    async (query) => {
+      const client = await connect();
+      const result = await client.callTool({ name: "search_help", arguments: { query } });
+      const ids = (content(result) as { results: { id: string }[] }).results.map((r) => r.id);
+      expect(ids.slice(0, 3)).toContain("route-work-from-reviews");
+      await client.close();
+    },
+  );
 
   it("returns full Markdown for an exact article id and a friendly miss", async () => {
     const client = await connect();

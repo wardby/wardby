@@ -304,6 +304,10 @@ codes): `failed`, `cancelled`, `refused`, `lost`, `budget_exhausted`,
 `no_pull_request`, `pr_closed`, `reopened`, `start_failed` and
 `plan_builder_invalid`, or the refusal code of a ticket start that was refused.
 
+## Plans and review routers
+
+A router can pick up a plan's review actions: see [Route work from reviews](route-work-from-reviews.md). `onApproved` is unchanged: with `build`, the builder starts as described above and the router is told it already started, so it does not start it again. A plan approval routes only for the action that completed it.
+
 ## Related
 
-[Documents](documents.md) · [Review and approve documents](document-review.md) · [Builder agent](builder-agent.md) · [Agent recipes](agent-recipes.md) · [Documents from native agents](native-agent-documents.md)
+[Route work from reviews](route-work-from-reviews.md) · [Documents](documents.md) · [Review and approve documents](document-review.md) · [Builder agent](builder-agent.md) · [Agent recipes](agent-recipes.md) · [Documents from native agents](native-agent-documents.md)

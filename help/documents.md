@@ -57,6 +57,7 @@ Codes such as `document_not_found`, `document_access_denied`, `document_too_larg
 
 ## Related
 
+- [Route work from reviews](route-work-from-reviews.md): a router agent decides who works next when a document is acted on in review
 - [Designs](designs.md) and the [board format](design-boards-format.md)
 - [Exporting designs and documents](document-exports.md)
 - [Document edits and restore](document-edits.md)
