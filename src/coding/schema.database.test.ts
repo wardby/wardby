@@ -376,3 +376,57 @@ describe.skipIf(!process.env.DATABASE_URL)("multi-repo migration backfills link 
     }
   }, 30_000);
 });
+
+const BEFORE_CLAUDE_BACKFILL = "20261208000400_coding_sub_agents";
+const CLAUDE_BACKFILL = "20261208000500_claude_code_sub_agents_off";
+
+describe.skipIf(!process.env.DATABASE_URL)("Claude Code sub-agents backfill (PostgreSQL)", () => {
+  it("turns sub-agents off on Claude Code profiles that existed before, and leaves new profiles on", async () => {
+    const schema = `claude_sub_agents_${randomUUID().replaceAll("-", "")}`;
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    try {
+      await client.query(`CREATE SCHEMA "${schema}"`);
+      await client.query(`SET search_path TO "${schema}"`);
+      const dirs = readdirSync(MIGRATIONS, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+        .sort();
+      expect(dirs).toContain(CLAUDE_BACKFILL);
+      for (const dir of dirs.filter((d) => d <= BEFORE_CLAUDE_BACKFILL)) {
+        await client.query(readFileSync(join(MIGRATIONS, dir, "migration.sql"), "utf8"));
+      }
+      const insertProfile = async (id: string, provider: string) => {
+        await client.query(
+          `INSERT INTO "Agent" ("id", "name", "systemPrompt", "model", "budgetUsd", "kind", "updatedAt")
+           VALUES ($1, $1, 'x', 'm', 1, 'coding', now())`,
+          [id],
+        );
+        await client.query(
+          `INSERT INTO "CodingAgentProfile" ("agentId", "provider", "repository", "protectedPaths")
+           VALUES ($1, $2, 'acme/web', '[]'::jsonb)`,
+          [id, provider],
+        );
+      };
+      await insertProfile("claude-before", "claude-code");
+      await insertProfile("codex-before", "codex");
+      await insertProfile("gemini-before", "gemini-cli");
+
+      await client.query(readFileSync(join(MIGRATIONS, CLAUDE_BACKFILL, "migration.sql"), "utf8"));
+      await insertProfile("claude-after", "claude-code");
+
+      const { rows } = await client.query<{ agentId: string; subAgents: boolean }>(
+        `SELECT "agentId", "subAgents" FROM "CodingAgentProfile" ORDER BY "agentId"`,
+      );
+      expect(Object.fromEntries(rows.map((r) => [r.agentId, r.subAgents]))).toEqual({
+        "claude-after": true,
+        "claude-before": false,
+        "codex-before": true,
+        "gemini-before": true,
+      });
+    } finally {
+      await client.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await client.end();
+    }
+  }, 60_000);
+});
