@@ -274,8 +274,11 @@ delegation, and a coding agent takes a `task` or `baseRef` from a non-owner
 only if `codingProfile.allowWebhookTaskOverride` is on (the same opt-in
 webhooks use); otherwise the run uses your `defaultTask`. Webhooks still
 accept task text for native agents (the webhook creator needs `write` to make
-one). Runs are visible to their triggerer and to you, never to other
-grantees.
+one). Runs are visible to their triggerer, to you, and to anyone you
+share the agent with at `execute` or `write`, who can also read every run's
+step detail and transcript and join its running Claude Code runs (see
+[Join a running coding run](../help/join-runs.md)). A `read` grantee sees only
+the runs they started.
 
 **What write hands over.** A write-grantee can rewrite what the agent's runs
 do, but not add to what they can reach. The prompt can make a run use

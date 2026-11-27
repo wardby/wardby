@@ -57,7 +57,7 @@ describe.skipIf(!process.env.DATABASE_URL)("review router schema (database)", ()
 });
 
 const MIGRATIONS = join(process.cwd(), "prisma", "migrations");
-const ROUTER_MIGRATION = "20261214000000_review_router";
+const ROUTER_MIGRATION = "20261228000000_review_router";
 
 function migrationSql(filter: (name: string) => boolean): string[] {
   return readdirSync(MIGRATIONS)

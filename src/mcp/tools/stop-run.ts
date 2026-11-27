@@ -3,14 +3,15 @@
  * running, and the delegated child runs it has in flight (src/core/stop-run.ts). A run that already
  * finished is returned unchanged, so calling it again is harmless.
  *
- * Access mirrors trigger_agent: stopping a run needs execute on its agent. Runs are visible only to
- * the agent's owner and to the run's triggerer (get_run's rule), so anyone else gets the same 404 as
- * for a missing run; a triggerer whose access to the agent has dropped below execute gets a 403.
+ * Access mirrors trigger_agent: stopping a run needs execute on its agent. Runs are visible to anyone
+ * with execute on the agent and to the run's triggerer (get_run's rule), so anyone else gets the same
+ * 404 as for a missing run; a triggerer whose access to the agent has dropped below execute gets a 403.
+ * TEAMS (#639, team-aware access): when team access lands, resolve this through accessFor/actsFor so a team member's execute counts too.
  */
 import { z } from "zod";
 import { atLeast } from "../../core/grants.js";
 import { stopRun } from "../../core/stop-run.js";
-import { agentAccess, insufficientAgentAccess } from "../auth/access.js";
+import { agentAccess, agentAccessResolver, insufficientAgentAccess } from "../auth/access.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -60,8 +61,10 @@ export function registerStopRunTool(mcp: WardbyMcpServer): void {
       if (!agent) throw notFound;
       const access = await agentAccess(ctx, agent);
       const isTriggerer = run.triggeredById !== null && run.triggeredById === ctx.principal.id;
-      // Visible to the agent's owner and the run's triggerer only, exactly as get_run.
-      if (access !== "owner" && !isTriggerer) throw notFound;
+      // Visible to execute-level readers (own grants, never an everyone grant) and the run's triggerer,
+      // exactly as get_run. TEAMS (#639): team access.
+      const runAccess = (await agentAccessResolver(ctx, ctx.db, { excludeEveryone: true }))(agent);
+      if (!atLeast("agent", runAccess, "execute") && !isTriggerer) throw notFound;
       if (!atLeast("agent", access, "execute")) throw insufficientAgentAccess(agent.id, "execute", access);
 
       const result = await stopRun({

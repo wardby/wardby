@@ -68,6 +68,11 @@ export interface RunStepSink {
   record(runId: string, batch: RunStepBatch, extraSecretValues?: readonly string[]): Promise<void>;
   /** Resolves when the writes queued so far settle (bounded; never rejects): before a shutdown disconnects. */
   flush?(): Promise<void>;
+  /** A join step (RunStepWriter.recordJoin): rejects with a fixed code, unlike record(). */
+  recordJoin?(
+    runId: string,
+    step: { kind: "join" | "leave" | "message" | "interrupt"; principalId: string; text?: string },
+  ): Promise<{ seq: number; text: string }>;
 }
 
 /**
@@ -111,6 +116,8 @@ export const STEP_CALL_ID = /^[\x21-\x7e]{1,600}$/;
 
 /** The control plane's run-steps listener route (WARDBY_RUN_STEPS_LISTEN). */
 export const RUN_STEPS_INGRESS_PATH = "/internal/run-steps";
+/** The listener's join route (phase 1): a run's worker long-polls it, through the proxy, for joined messages. */
+export const RUN_JOIN_POLL_PATH = "/internal/run-join/poll";
 /** One POST's bounds; the forwarder splits larger batches. */
 export const MAX_STEPS_PER_POST = 64;
 export const MAX_RESULTS_PER_POST = 256;

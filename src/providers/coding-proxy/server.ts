@@ -20,6 +20,9 @@ import { MCP_ROUTE_PATH } from "./mcp-route.js";
 /** The worker's workflow-progress route (#582) and its body bound. */
 export const WORKFLOW_PROGRESS_PATH = "/wardby/workflow-progress";
 const WORKFLOW_PROGRESS_MAX_BYTES = 1024 * 1024;
+/** Join (phase 1): a run's worker long-polls this route for joined messages (proxy.joinPoll). */
+export const JOIN_POLL_PATH = "/wardby/join/poll";
+const JOIN_POLL_MAX_BYTES = 4 * 1024;
 import { SUBSTRATE_UPLOAD_MS } from "./substrate/routes.js";
 
 const proxyLog = logger.child({ module: "coding-proxy" });
@@ -414,6 +417,26 @@ export async function startCodingProxyServer(
         );
         await proxy.workflowProgress(typeof apiKey === "string" ? apiKey : "", rawBody);
         response.writeHead(204, { "cache-control": "no-store" }).end();
+        return;
+      }
+      if (request.url === JOIN_POLL_PATH) {
+        // Join (phase 1): the worker's poll, relayed to the control plane (held there while someone
+        // is joined). The capability is the run's (x-api-key); the body is small and bounded.
+        if (request.method !== "POST") {
+          closeIfBodyUnread(request, response);
+          sendError(response, 405, "method_not_allowed");
+          return;
+        }
+        if (request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+          closeIfBodyUnread(request, response);
+          sendError(response, 415, "unsupported_content_type");
+          return;
+        }
+        const apiKey = request.headers["x-api-key"];
+        const rawBody = await readBody(request, JOIN_POLL_MAX_BYTES, AbortSignal.timeout(HTTP_LIMITS.requestMs));
+        const answer = await proxy.joinPoll(typeof apiKey === "string" ? apiKey : "", rawBody);
+        response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        response.end(JSON.stringify(answer));
         return;
       }
       if (request.method === "HEAD" && request.url === "/api/hello") {

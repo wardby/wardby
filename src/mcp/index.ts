@@ -119,6 +119,7 @@ import { oauthLoopbackStdioRoutes } from "./tools/oauth-loopback-routes.js";
 import { loadRunStepRetentionDays, loadRunStepsLevel } from "../core/run-steps/config.js";
 import { buildRunStepWriter } from "../core/run-steps/writer.js";
 import { registerRunStepsTool } from "./tools/run-steps.js";
+import { registerJoinRunTools } from "./tools/join-run.js";
 import { registerRunTranscriptTool } from "./tools/run-transcript.js";
 import { handleRunTranscriptDownload, RUN_TRANSCRIPT_DOWNLOAD_PATH } from "./tools/run-transcript-download.js";
 import { createBlobStore } from "../providers/storage/index.js";
@@ -214,6 +215,7 @@ export function registerAllTools(
   });
   registerRunStepsTool(mcp, { level: loadRunStepsLevel(), retentionDays: loadRunStepRetentionDays() });
   registerStopRunTool(mcp);
+  registerJoinRunTools(mcp);
   registerCostReportTools(mcp);
   registerDatastoreTools(mcp);
   registerSubAgentTools(mcp);
