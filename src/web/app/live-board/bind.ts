@@ -13,6 +13,7 @@
  */
 import type { Component, CssRule, Editor } from "grapesjs";
 import * as Y from "yjs";
+import { merge3 } from "../../../core/documents/boards/live/merge3.js";
 import {
   applyTextDiff,
   BOARD_ROOT,
@@ -380,14 +381,18 @@ export function bindBoard(
     Y.applyUpdate(doc, Y.encodeStateAsUpdate(nodes.doc!));
     const text = boardMaps(doc, key).nodes.get(id)?.get(F.html);
     if (!(text instanceof Y.Text)) return;
-    shadow = { id, doc, text, last: text.toJSON() };
-    pushShadow(el.innerHTML);
+    // The baseline is the box as this page shows it, which can be a moment behind the live copy (someone's newest
+    // words not drawn here yet): opening sends nothing, and each change is taken from it (pushShadow).
+    shadow = { id, doc, text, last: el.innerHTML };
   };
-  /** The box's text now: the change from what went out last is applied to the copy and sent as character changes. */
+  /** The box's text now: the person's change since the last send is applied to the copy and sent as character changes. */
   const pushShadow = (page: string) => {
     if (!shadow || destroyed || page === shadow.last) return;
     const vector = Y.encodeStateVector(shadow.doc);
-    applyTextDiff(shadow.text, page);
+    // What the person changed since the last send, applied to the box's text in the copy (which also has the newer
+    // words this page had not shown when the box opened): never the whole box as this page shows it.
+    const current = shadow.text.toJSON();
+    applyTextDiff(shadow.text, current === shadow.last ? page : merge3(shadow.last, current, page));
     Y.applyUpdate(nodes.doc!, Y.encodeStateAsUpdate(shadow.doc, vector), LOCAL);
     shadow.last = page;
     stats.out++;
