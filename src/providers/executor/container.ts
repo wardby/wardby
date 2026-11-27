@@ -16,7 +16,7 @@ import type { PlanFilesPathList, PlanFilesRecorder } from "../../coding/plan-fil
 import { loadPlanFiles, type PlanFile } from "../../coding/plan-files/store.js";
 import { withBaseCommit, withExtraRepositories, type GitHistoryWording } from "../../coding/base-commit.js";
 import { mcpTokenHash, mintMcpToken } from "../../coding/mcp-token.js";
-import type { WebTools } from "../../coding/google-web-tools.js";
+import { isWebTools, type WebTools } from "../../coding/google-web-tools.js";
 import { runsCommandsInAgentContainer, type McpToolPin } from "../../core/mcp-tools.js";
 import {
   NATIVE_TOOL_DUPLICATE_NAMES_ERROR,
@@ -861,6 +861,10 @@ export interface ContainerRunSnapshot {
   repoSkills?: boolean;
   /** Claude Code loading mode, fixed at dispatch (CodingRun.claudeBareMode); absent on older snapshots = true. */
   claudeBareMode?: boolean;
+  /** Gemini's server-side web tools, fixed at dispatch (CodingRun.webTools); absent on older snapshots = off. */
+  webTools?: WebTools;
+  /** Sub-agents, fixed at dispatch (CodingRun.subAgents); absent on older snapshots = off. */
+  subAgents?: boolean;
   /** Dependency cache, fixed at dispatch (CodingRun.dependencyCache); absent on older snapshots = false. */
   dependencyCache?: boolean;
   /** Session resume, fixed at dispatch (CodingRun.sessionResume); absent on older snapshots = false. */
@@ -1212,6 +1216,9 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
       maxOutputTokens: row.codingRun.maxOutputTokens,
       repoSkills: row.codingRun.repoSkills,
       claudeBareMode: row.codingRun.claudeBareMode,
+      // An unreadable stored value fails closed: no web tools.
+      webTools: isWebTools(row.codingRun.webTools) ? row.codingRun.webTools : "off",
+      subAgents: row.codingRun.subAgents,
       dependencyCache: row.codingRun.dependencyCache,
       sessionResume: row.codingRun.sessionResume,
       gitHistoryDepth: row.codingRun.gitHistoryDepth,

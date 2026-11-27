@@ -12,6 +12,7 @@ import {
 } from "../coding/protocol.js";
 import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
 import { isPackageAuditActive } from "../coding/registry/audit-mode.js";
+import { isWebTools } from "../coding/google-web-tools.js";
 import { ModelUnavailableError, entryOf, type ResolvedCatalogEntry } from "../providers/llm/catalog-types.js";
 import {
   parseAllowedServiceNames,
@@ -1602,6 +1603,9 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               maxOutputTokens: agent.codingProfile.maxOutputTokens,
               repoSkills: agent.codingProfile.repoSkills,
               claudeBareMode: agent.codingProfile.claudeBareMode,
+              // An unreadable stored value fails closed: no web tools.
+              webTools: isWebTools(agent.codingProfile.webTools) ? agent.codingProfile.webTools : "off",
+              subAgents: agent.codingProfile.subAgents,
               dependencyCache: agent.codingProfile.dependencyCache,
               sessionResume: agent.codingProfile.sessionResume,
               // A continuation keeps its root's setting, matching the rows copied from it.

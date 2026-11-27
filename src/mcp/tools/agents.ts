@@ -842,6 +842,8 @@ function storedProfile(profile: CodingAgentProfile): CodingProfile {
             ...(profile.workflowReplyField ? { replyField: profile.workflowReplyField } : {}),
           },
     tunnelHosts: profile.tunnelHosts,
+    webTools: profile.webTools,
+    subAgents: profile.subAgents,
   });
 }
 

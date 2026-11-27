@@ -12,6 +12,7 @@ import {
 } from "./protocol.js";
 import { MAX_COLLECT_EXCLUDE_PATHS, validateCollectExcludePath } from "./collect-exclude.js";
 import { CODING_PROVIDERS } from "./provider.js";
+import { GOOGLE_WEB_TOOLS } from "./google-web-tools.js";
 import { WARDBY_PROTECTED_PATHS, isWellFormedProtectedPath, protectsSomePath } from "./protected-paths.js";
 import { acceptedAdvisoriesSchema, parseAllowlist, resolvePolicy } from "./registry/allowlist.js";
 import { REGISTRY_ADAPTERS } from "./registry/adapters.js";
@@ -22,6 +23,9 @@ import {
   parseTunnelHostPattern,
   tunnelHostRefusalText,
 } from "./tunnel-hosts.js";
+
+/** Gemini 4's published output limit (thinking counts toward it); the proxy holds an unset request at this. */
+export const GEMINI_MAX_OUTPUT_TOKENS = 65_536;
 
 export const MIN_CODING_TIMEOUT_SEC = 60;
 export const MAX_CODING_TIMEOUT_SEC = 7200;
@@ -152,12 +156,13 @@ export const WorkflowSchema = z
   .nullable();
 export type CodingWorkflow = NonNullable<z.infer<typeof WorkflowSchema>>;
 
-/** Claude Code runs only: the most agent turns a run may take; null = the worker default (DEFAULT_CLAUDE_MAX_TURNS). */
+/** Claude Code and Gemini CLI runs: the most agent turns a run may take; null = the worker default (DEFAULT_CLAUDE_MAX_TURNS). */
 const maxTurnsSchema = z.number().int().min(1).max(MAX_CODING_TURNS).nullable();
 /**
- * Claude Code runs only: the most output tokens per model reply; null = the worker
- * default (DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS). The proxy reserves this x the output
- * price per request against the run budget.
+ * Claude Code and Gemini CLI runs: the most output tokens per model reply; null = the
+ * worker default (DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS; on Gemini CLI, GEMINI_MAX_OUTPUT_TOKENS,
+ * which is also its upper bound). The proxy reserves this x the output price per request
+ * against the run budget.
  */
 const maxOutputTokensSchema = z
   .number()
@@ -293,6 +298,10 @@ const codingProfileFields = {
   workflow: WorkflowSchema,
   /** Hosts this agent's runs may reach through the CONNECT tunnel, on top of the server list (#627). */
   tunnelHosts: tunnelHostsSchema,
+  /** Gemini's server-side web tools (googleSearch / urlContext); provider-neutral, used by Gemini CLI runs today. */
+  webTools: z.enum(GOOGLE_WEB_TOOLS),
+  /** Claude Code and Gemini CLI sub-agents (spec §3a); Codex accepts it with no effect. */
+  subAgents: z.boolean(),
 };
 
 export const CodingProfileSchema = z
@@ -323,6 +332,8 @@ export const CodingProfileSchema = z
     buildFromPlan: codingProfileFields.buildFromPlan.default(false),
     workflow: codingProfileFields.workflow.default(null),
     tunnelHosts: codingProfileFields.tunnelHosts.default([]),
+    webTools: codingProfileFields.webTools.default("off"),
+    subAgents: codingProfileFields.subAgents.default(true),
   })
   .strict()
   .superRefine((profile, ctx) => {
@@ -348,11 +359,23 @@ export const CodingProfileSchema = z
         message: "sessionResume applies to Claude Code agents only (provider claude-code); set it to false",
       });
     }
-    if (profile.maxOutputTokens !== null && profile.provider !== "claude-code") {
+    if (profile.maxOutputTokens !== null && profile.provider !== "claude-code" && profile.provider !== "gemini-cli") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["maxOutputTokens"],
-        message: "maxOutputTokens applies to Claude Code agents only (provider claude-code); set it to null",
+        message:
+          "maxOutputTokens applies to Claude Code and Gemini CLI agents only (provider claude-code or gemini-cli); set it to null",
+      });
+    }
+    if (
+      profile.maxOutputTokens !== null &&
+      profile.provider === "gemini-cli" &&
+      profile.maxOutputTokens > GEMINI_MAX_OUTPUT_TOKENS
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["maxOutputTokens"],
+        message: `a Gemini CLI agent's maxOutputTokens is at most ${GEMINI_MAX_OUTPUT_TOKENS} (Gemini 4's output limit)`,
       });
     }
   });
@@ -385,6 +408,8 @@ export const CodingProfilePatchSchema = z
     buildFromPlan: codingProfileFields.buildFromPlan.optional(),
     workflow: codingProfileFields.workflow.optional(),
     tunnelHosts: codingProfileFields.tunnelHosts.optional(),
+    webTools: codingProfileFields.webTools.optional(),
+    subAgents: codingProfileFields.subAgents.optional(),
   })
   .strict();
 

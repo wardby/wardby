@@ -985,6 +985,37 @@ describe("dispatchRun", () => {
   });
 
   it.each([
+    ["web search, sub-agents off", "search", false, "search", false],
+    ["web search and fetch, sub-agents on", "search-and-fetch", true, "search-and-fetch", true],
+    ["an unreadable stored webTools (fails closed)", "everything", true, "off", true],
+  ] as const)(
+    "fixes webTools and subAgents on the run at dispatch from %s",
+    async (_label, webTools, subAgents, expectedWebTools, expectedSubAgents) => {
+      const agent = {
+        ...nativeAgent(),
+        kind: "coding",
+        budgetUsd: 1.25,
+        codingProfile: {
+          provider: "codex",
+          repository: "openai/wardby",
+          baseRef: "main",
+          defaultTask: "Fix the failing tests",
+          timeoutSec: 900,
+          protectedPaths: [],
+          webTools,
+          subAgents,
+        },
+      };
+      const state = fakeDb(agent);
+      const executor: Executor = { async start() {}, async stop() {} };
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(state.codingRuns).toEqual([
+        expect.objectContaining({ runId: result?.run.id, webTools: expectedWebTools, subAgents: expectedSubAgents }),
+      ]);
+    },
+  );
+
+  it.each([
     ["bare mode on", true, true],
     ["bare mode off", false, false],
   ] as const)("fixes claudeBareMode on the run at dispatch from %s", async (_label, claudeBareMode, expected) => {

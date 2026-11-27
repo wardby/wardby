@@ -168,6 +168,23 @@ describe.skipIf(!process.env.DATABASE_URL)("dispatchRun repository set (database
     expect(await loadPlanFiles(db, runId, "input")).toEqual([{ path: "plan.md", content: "# P" }]);
   });
 
+  it("fixes the profile's webTools and subAgents on the coding run (defaults: off and on)", async () => {
+    const { executor } = fakeExecutor();
+    const { agentId: defaultsAgent } = await codingAgent();
+    const defaults = await dispatchRun({ db, executor, agentId: defaultsAgent, codingTask: "sync" });
+    expect(await db.codingRun.findUniqueOrThrow({ where: { runId: defaults!.run.id } })).toMatchObject({
+      webTools: "off",
+      subAgents: true,
+    });
+    const { agentId } = await codingAgent();
+    await db.codingAgentProfile.update({ where: { agentId }, data: { webTools: "search", subAgents: false } });
+    const run = await dispatchRun({ db, executor, agentId, codingTask: "sync" });
+    expect(await db.codingRun.findUniqueOrThrow({ where: { runId: run!.run.id } })).toMatchObject({
+      webTools: "search",
+      subAgents: false,
+    });
+  });
+
   it("fixes the agent's workflow and the trigger's workflowArgs on the coding run (#582)", async () => {
     const { agentId } = await codingAgent();
     await db.codingAgentProfile.update({

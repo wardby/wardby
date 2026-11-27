@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { CodingProfilePatchSchema, CodingProfileSchema, DEFAULT_PROTECTED_PATHS } from "./profile.js";
+import {
+  CodingProfilePatchSchema,
+  CodingProfileSchema,
+  DEFAULT_PROTECTED_PATHS,
+  GEMINI_MAX_OUTPUT_TOKENS,
+} from "./profile.js";
+import { GEMINI_UNSET_MAX_OUTPUT_TOKENS } from "../providers/coding-proxy/gemini-request.js";
 
 describe("CodingProfileSchema", () => {
   it("accepts a local repository and normalizes its path; GitHub validation is unchanged", () => {
@@ -37,6 +43,8 @@ describe("CodingProfileSchema", () => {
       buildFromPlan: false,
       workflow: null,
       tunnelHosts: [],
+      webTools: "off",
+      subAgents: true,
     });
   });
 
@@ -377,5 +385,86 @@ describe("workflow (#582)", () => {
     expect(CodingProfileSchema.safeParse({ ...base, workflow: { name: "ok", repository: "a\nb" } }).success).toBe(
       false,
     );
+  });
+});
+
+const geminiBase = { provider: "gemini-cli", repository: "your-org/your-repo" } as const;
+
+describe("Gemini CLI profile settings", () => {
+  it("defaults webTools off and subAgents on for every provider", () => {
+    for (const provider of ["codex", "claude-code", "gemini-cli"] as const) {
+      const profile = CodingProfileSchema.parse({ provider, repository: "your-org/your-repo" });
+      expect(profile.webTools).toBe("off");
+      expect(profile.subAgents).toBe(true);
+    }
+  });
+
+  it("accepts every web-tools policy (provider-neutral) and refuses anything else", () => {
+    for (const webTools of ["off", "search", "search-and-fetch"]) {
+      expect(CodingProfileSchema.parse({ ...geminiBase, webTools }).webTools).toBe(webTools);
+      expect(
+        CodingProfileSchema.parse({ provider: "codex", repository: "your-org/your-repo", webTools }).webTools,
+      ).toBe(webTools);
+    }
+    expect(CodingProfileSchema.safeParse({ ...geminiBase, webTools: "fetch" }).success).toBe(false);
+    expect(CodingProfilePatchSchema.safeParse({ webTools: "on" }).success).toBe(false);
+    expect(CodingProfilePatchSchema.parse({ subAgents: false })).toEqual({ subAgents: false });
+  });
+
+  it("takes maxOutputTokens on gemini-cli up to Gemini 4's output limit", () => {
+    expect(GEMINI_MAX_OUTPUT_TOKENS).toBe(65_536);
+    // One fact, two names: the proxy holds an unset request at the same limit the profile allows.
+    expect(GEMINI_UNSET_MAX_OUTPUT_TOKENS).toBe(GEMINI_MAX_OUTPUT_TOKENS);
+    expect(CodingProfileSchema.parse({ ...geminiBase, maxOutputTokens: 65_536 }).maxOutputTokens).toBe(65_536);
+    const over = CodingProfileSchema.safeParse({ ...geminiBase, maxOutputTokens: 65_537 });
+    expect(over.success).toBe(false);
+    expect(over.error?.issues).toEqual([
+      expect.objectContaining({
+        path: ["maxOutputTokens"],
+        message: expect.stringContaining("65536"),
+      }),
+    ]);
+    // Codex still refuses it; Claude Code keeps its own bound.
+    const codex = CodingProfileSchema.safeParse({
+      provider: "codex",
+      repository: "your-org/your-repo",
+      maxOutputTokens: 4096,
+    });
+    expect(codex.success).toBe(false);
+    expect(codex.error?.issues).toEqual([
+      expect.objectContaining({
+        path: ["maxOutputTokens"],
+        message: expect.stringContaining("Claude Code and Gemini CLI agents only"),
+      }),
+    ]);
+    expect(
+      CodingProfileSchema.parse({ provider: "claude-code", repository: "your-org/your-repo", maxOutputTokens: 128_000 })
+        .maxOutputTokens,
+    ).toBe(128_000);
+  });
+
+  it("keeps sessionResume and workflow Claude-only, and accepts claudeBareMode (ignored) on gemini-cli", () => {
+    const resume = CodingProfileSchema.safeParse({ ...geminiBase, sessionResume: true });
+    expect(resume.success).toBe(false);
+    expect(resume.error?.issues).toEqual([
+      expect.objectContaining({
+        path: ["sessionResume"],
+        message: expect.stringContaining("sessionResume applies to Claude Code agents only"),
+      }),
+    ]);
+    const workflow = CodingProfileSchema.safeParse({
+      ...geminiBase,
+      workflow: { name: "w" },
+      gitHistory: { depth: 1 },
+    });
+    expect(workflow.success).toBe(false);
+    expect(workflow.error?.issues).toEqual([
+      expect.objectContaining({
+        path: ["workflow"],
+        message: expect.stringContaining("workflow applies to Claude Code agents only"),
+      }),
+    ]);
+    expect(CodingProfileSchema.parse({ ...geminiBase, claudeBareMode: false }).claudeBareMode).toBe(false);
+    expect(CodingProfileSchema.parse({ ...geminiBase, maxTurns: 50 }).maxTurns).toBe(50);
   });
 });
