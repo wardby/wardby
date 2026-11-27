@@ -1309,11 +1309,14 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         (args.kind !== undefined && args.kind !== existingKind) ||
         args.budgetGroupId !== undefined ||
         args.runSteps !== undefined ||
-        args.documentTools !== undefined;
+        args.documentTools !== undefined ||
+        args.router !== undefined ||
+        args.reviewRouter !== undefined ||
+        args.maxStartsPerDecision !== undefined;
       const refuseOwnerOnly = () => {
         throw new McpError(
           403,
-          `Agent "${args.id}": only its owner can change its coding profile, kind, budget group, run steps level or document tools.`,
+          `Agent "${args.id}": only its owner can change its coding profile, kind, budget group, run steps level, document tools or router settings.`,
         );
       };
       if (!adminEdit && !isOwner && ownerOnlyChange(before.kind)) refuseOwnerOnly();

@@ -368,4 +368,52 @@ describe.skipIf(!process.env.DATABASE_URL)("documentTools setting (PostgreSQL)",
     expect(JSON.parse(cleared.content[0].text).reviewRouter).toBeNull();
     expect((await db.agent.findUnique({ where: { id: writer.id } }))?.reviewRouterId).toBeNull();
   });
+
+  it("router settings are owner-only: a write grantee gets 403 for each, the owner succeeds", async () => {
+    const target = await agent(owner.id, { description: "d" });
+    const router = await agent(owner.id, { router: true, description: "routes" });
+    await grant(target.id, stranger.id, "write");
+    const guest = await connect(stranger);
+    for (const change of [{ router: false }, { reviewRouter: router.id }, { maxStartsPerDecision: 5 }]) {
+      const result = await guest.call("update_agent", { id: target.id, ...change });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/only its owner can change/);
+    }
+    const edited = await guest.call("update_agent", { id: target.id, description: "new" });
+    await guest.close();
+    expect(edited.isError).toBeFalsy();
+    const mcp = await connect(owner);
+    const ok = await mcp.call("update_agent", { id: target.id, maxStartsPerDecision: 5, reviewRouter: router.id });
+    await mcp.close();
+    expect(ok.isError).toBeFalsy();
+  });
+
+  it("router: true is refused on a coding agent and on a native agent without documentTools", async () => {
+    const coding = await codingAgent(owner.id);
+    const native = await agent(owner.id, { description: "d" });
+    const mcp = await connect(owner);
+    const a = await mcp.call("update_agent", { id: coding.id, router: true, description: "d" });
+    const b = await mcp.call("update_agent", { id: native.id, router: true });
+    await mcp.close();
+    expect(a.isError).toBe(true);
+    expect(a.content[0].text).toMatch(/^review_router_invalid: only native agents/);
+    expect(b.isError).toBe(true);
+    expect(b.content[0].text).toMatch(/^review_router_invalid: a router needs documentTools/);
+  });
+
+  it("an existing router cannot lose its description or documentTools", async () => {
+    const router = await agent(owner.id, {
+      router: true,
+      description: "routes",
+      documentTools: { access: "read", reviewers: [owner.id], finalApproverId: null, maxNewPerRun: 5, plans: [] },
+    });
+    const mcp = await connect(owner);
+    const a = await mcp.call("update_agent", { id: router.id, description: null });
+    const b = await mcp.call("update_agent", { id: router.id, documentTools: null });
+    await mcp.close();
+    expect(a.isError).toBe(true);
+    expect(a.content[0].text).toMatch(/^review_router_invalid: a router needs a description/);
+    expect(b.isError).toBe(true);
+    expect(b.content[0].text).toMatch(/^review_router_invalid: a router needs documentTools/);
+  });
 });
