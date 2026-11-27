@@ -191,17 +191,21 @@ describe.skipIf(!process.env.DATABASE_URL)("live co-editing across replicas (dat
     annOnA.close();
     boOnB.close();
     await a.stop();
-    // A crash leaves A's lease behind (a clean stop releases it): put it back, as A had renewed it last.
-    await db.documentLiveLease.upsert({
-      where: { documentId: id },
-      create: { documentId: id, owner: `127.0.0.1:${a.port}`, expiresAt: new Date(Date.now() + 2000) },
-      update: { owner: `127.0.0.1:${a.port}`, expiresAt: new Date(Date.now() + 2000) },
-    });
+    // A crash leaves A's lease behind (a clean stop releases it): put it back, as A had renewed it last. It holds
+    // long enough for the check below however slow the machine is; the test then lets it run out.
+    const lease = (expiresAt: Date) =>
+      db.documentLiveLease.upsert({
+        where: { documentId: id },
+        create: { documentId: id, owner: `127.0.0.1:${a.port}`, expiresAt },
+        update: { owner: `127.0.0.1:${a.port}`, expiresAt },
+      });
+    await lease(new Date(Date.now() + 60_000));
     // While it holds, B hands Bo's page to A, which is gone: no connection.
     const early = await client(bo, b.port, id, held);
     expect(early.synced()).toBe(false);
     early.close();
-    await sleep(2200);
+    // A's lease runs out, as it would once A stopped renewing it.
+    await lease(new Date(Date.now() - 1000));
     // Bo's page reconnects (to B) with what it holds: B now leads, resumes the saved state, takes the rest back.
     const back = await client(bo, b.port, id, held);
     expect(back.synced()).toBe(true);
