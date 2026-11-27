@@ -43,11 +43,11 @@ The boards are tabs above the canvas (two lines of them, then "+N more" with a f
 
 A design is edited [live](live-editing.md), like a document, and the save state reads **Live**:
 
-- The first person to open a board builds its live copy from the version's file; everyone else on that board joins it. Changes arrive element by element as they are made, text as it is typed. If two people move one element at the same moment, the later move stays.
+- The first person to open a board builds its live copy from the version's file; everyone else on that board joins it, and cannot edit it until it arrives. Changes arrive element by element as they are made, text as it is typed. Two people typing in the same text box both keep every character (characters typed at the very same spot at the same moment can interleave). If two people move one element at the same moment, the later move stays.
 - Other people's selections are outlined in their colour with their name ("is typing" while they type in a text box), and each board's tab shows a dot per person on it. Adding, renaming, moving and deleting boards is shared too.
 - Undo and Redo undo your own changes only.
 - The server saves the whole file set as a version after a pause in editing. The page saves nothing itself.
-- Each edit is checked first: one that breaks the [board format](design-boards-format.md), makes a board larger than 512 KB or would show a secret value is refused ([`edit_refused`](errors/edit-refused.md)) and the page reloads.
+- Each edit is checked first: one that breaks the [board format](design-boards-format.md), makes a board larger than 512 KB or would show a secret value is refused ([`edit_refused`](errors/edit-refused.md)) and the page reloads, saying why.
 - `publish_version` from an agent or MCP merges into the live boards element by element from the version it read, so people's edits made meanwhile stay. A board nobody has opened takes the published file; a publish that changes such a board after a later version also changed it is `document_version_conflict`.
 
 When the page cannot join (no WebSocket through a proxy), edits save by themselves as a new version that holds only the changed files, as before.

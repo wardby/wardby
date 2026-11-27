@@ -481,11 +481,15 @@ Everyone with the design open sees it live, and people with `write` edit it toge
 - **Boards go live when opened.** The first person to open a board builds its
   live copy from the version's file, and everyone else on that board joins it
   (a page with only `comment` or `read` access waits for someone who can
-  edit). A board nobody has opened stays as the version's file.
+  edit). Until the board's live copy reaches a page, the board cannot be
+  edited there. A board nobody has opened stays as the version's file.
 - **Element by element.** Changes reach the others as they are made, text as
   it is typed, without reloading the canvas. Two people changing different
-  properties of one element both keep their change. If two people move the
-  same element at the same moment, the later move stays.
+  properties of one element both keep their change, and two people typing in
+  the same text box both keep every character (what someone else types in a
+  box you are typing in appears when you leave the box; characters two people
+  type at the very same spot at the same moment can interleave). If two people
+  move the same element at the same moment, the later move stays.
 - **Who is where.** Other people's selected elements are outlined in their
   colour with their name ("is typing" while they type in a text box), and each
   board's tab shows a dot for everyone on it. The board list (adding,
