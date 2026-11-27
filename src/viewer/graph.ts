@@ -75,6 +75,8 @@ function triggerFor(row: RunRow, sites: IssueSites): RunTriggerInfo {
       return { kind: "subagent" };
     case "plan_approved":
       return { kind: "plan_approved" };
+    case "review_action":
+      return { kind: "review_action" };
     case "manual":
       return { kind: "manual" };
     case "comment":

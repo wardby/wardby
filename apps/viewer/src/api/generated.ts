@@ -51,6 +51,9 @@ export interface GraphSnapshot {
         }
       | {
           kind: "plan_approved";
+        }
+      | {
+          kind: "review_action";
         };
     turns: number;
     tokensIn: number;
@@ -164,6 +167,9 @@ export interface RunDetail {
       }
     | {
         kind: "plan_approved";
+      }
+    | {
+        kind: "review_action";
       };
   turns: number;
   tokensIn: number;
@@ -324,7 +330,7 @@ export interface InfraInfo {
     };
   } | null;
   native: {
-    launcher: "docker" | "kubernetes";
+    launcher: "docker" | "kubernetes" | "substrate";
     warmPoolSize: number;
     kubernetes: {
       namespace: string;
@@ -337,6 +343,10 @@ export interface InfraInfo {
         [k: string]: string | undefined;
       };
       warmWorkerLabel: string;
+    } | null;
+    substrate: {
+      atespace: string;
+      template: string;
     } | null;
   } | null;
 }
@@ -355,7 +365,7 @@ export interface DocumentList {
     path: string | null;
     updatedAt: string;
     latestVersion: number;
-    reviewState: "draft" | "in_review" | "changes_requested" | "approved" | "archived";
+    reviewState: "draft" | "in_review" | "changes_requested" | "approved" | "rejected" | "archived";
     pagePath: string;
   }[];
   truncated: boolean;

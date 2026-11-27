@@ -122,6 +122,7 @@ const TRIGGER_LABELS: Record<string, string> = {
   host_event: "GitHub/Jira event",
   comment: "comment",
   plan_approved: "plan approved",
+  review_action: "review action",
 };
 const triggerLabel = (trigger: string): string => TRIGGER_LABELS[trigger] ?? trigger;
 

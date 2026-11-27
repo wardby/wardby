@@ -105,6 +105,23 @@ model Agent {
   /// child (is delegated to by others) independently.
   subAgentEdgesAsParent AgentSubAgent[] @relation("SubAgentParent")
   subAgentEdgesAsChild  AgentSubAgent[] @relation("SubAgentChild")
+
+  /// What work this agent takes, in plain words (request_work ranks routers by it; required for a router).
+  description          String?
+  /// The agent routes work (review actions, request_work); see docs/documents.md "Review routing".
+  router               Boolean   @default(false)
+  /// On a writer or planner: where reviews of its documents go when no router started the work.
+  reviewRouterId       String?
+  reviewRouter         Agent?    @relation("ReviewRouter", fields: [reviewRouterId], references: [id], onDelete: SetNull)
+  reviewRoutedWriters  Agent[]   @relation("ReviewRouter")
+  /// On a router: the most agents one review job (one person decision) may start.
+  maxStartsPerDecision Int       @default(20)
+  routedDocuments      Document[] @relation("DocumentRouter")
+  routedSets           DocumentSet[] @relation("DocumentSetRouter")
+  writtenSets          DocumentSet[] @relation("DocumentSetAgent")
+  reviewJobs           ReviewJob[]
+
+  @@index([reviewRouterId])
 }
 
 /// Un-phased: agent-composition edge, referenced by agent name at the
@@ -362,6 +379,7 @@ enum RunTrigger {
   host_event
   comment
   plan_approved
+  review_action
 }
 
 model Run {
@@ -2702,12 +2720,21 @@ model Document {
   planSet                  PlanSet?              @relation(fields: [planSetId], references: [id], onDelete: SetNull)
   planPath                 String?
   removedFromPlan          Boolean               @default(false)
+  /// The router whose work produced the document (spec §2); its owner may change it (link_document).
+  routerAgentId            String?
+  routerAgent              Agent?                @relation("DocumentRouter", fields: [routerAgentId], references: [id], onDelete: SetNull)
+  /// The shared set this document belongs to (plans and option sets), and its option label.
+  setId                    String?
+  set                      DocumentSet?          @relation(fields: [setId], references: [id], onDelete: SetNull)
+  option                   String?
 
   /// One document per plan path in a set. Postgres treats NULLs as distinct, so documents outside a set are unaffected.
   @@unique([planSetId, planPath])
   @@index([ownerId])
   @@index([agentId])
   @@index([planSetId])
+  @@index([routerAgentId])
+  @@index([setId])
 }
 
 /// A planner's plan for one repository and number (docs/private spec §4): its documents are Documents with planSetId.
@@ -2742,6 +2769,9 @@ model PlanSet {
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
   documents         Document[]
+  /// The shared set holding membership and review state (spec §6); coding details stay here.
+  setId             String?      @unique
+  set               DocumentSet? @relation(fields: [setId], references: [id], onDelete: Restrict)
 
   @@unique([agentId, repository, number])
   @@index([accessAgentId])
@@ -3178,4 +3208,64 @@ model SubstrateRelayEvent {
   createdAt DateTime     @default(now())
 
   @@id([runToken, queue, seq])
+}
+
+/// A set of documents reviewed together: a plan set's documents or a native writer's options (spec §6).
+model DocumentSet {
+  id             String     @id @default(cuid())
+  /// The writer or planner whose run made the set.
+  agentId        String
+  agent          Agent      @relation("DocumentSetAgent", fields: [agentId], references: [id], onDelete: Cascade)
+  ownerId        String
+  /// A native writer's set name (unique per creating run); null for plan sets.
+  name           String?
+  routerAgentId  String?
+  routerAgent    Agent?     @relation("DocumentSetRouter", fields: [routerAgentId], references: [id], onDelete: SetNull)
+  createdByRunId String?
+  /// Set when the last counted document became approved; cleared by a reopen.
+  approvedAt     DateTime?
+  approvedById   String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  documents      Document[]
+  planSet        PlanSet?
+
+  @@unique([createdByRunId, name])
+  @@index([agentId])
+  @@index([routerAgentId])
+}
+
+/// One review action that reached a router: once per action; counts the agents its work starts (spec §2, §4).
+model ReviewJob {
+  id            String   @id @default(cuid())
+  reviewEventId String   @unique
+  documentId    String?
+  setId         String?
+  routerAgentId String
+  routerAgent   Agent    @relation(fields: [routerAgentId], references: [id], onDelete: Cascade)
+  routerRunId   String?
+  /// The person's job this one continues (an agent's own action inside routed work); null for a person's action.
+  rootJobId     String?
+  startsUsed    Int      @default(0)
+  startedById   String?
+  /// "started", or a refusal code (review_router_invalid, run_refused, ...).
+  outcome       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([routerRunId])
+  @@index([rootJobId])
+  @@index([documentId, createdAt])
+  @@index([setId, createdAt])
+}
+
+/// Read access to a document for one run and every run below it in its tree (spec §2, ruling 3).
+model RunDocumentGrant {
+  id         String   @id @default(cuid())
+  runId      String
+  documentId String
+  createdAt  DateTime @default(now())
+
+  @@unique([runId, documentId])
+  @@index([documentId])
 }
