@@ -1,5 +1,5 @@
 import type { Prisma, PrismaClient } from "#prisma";
-import { agentGranteeKey, grantedIds } from "../grants.js";
+import { agentGranteeKey, grantedIds, ownedByWhere, type Acting } from "../grants.js";
 import { agentDocumentAccess } from "./access.js";
 import { parseStoredDocumentTools } from "./tools-setting.js";
 import { isReviewState, type ReviewState } from "./review-state.js";
@@ -51,26 +51,25 @@ function toListed(d: Prisma.DocumentGetPayload<{ select: typeof LISTED_SELECT }>
 /**
  * The documents and designs `principalId` owns or was granted read access to, newest first, at most
  * `limit`. One query for every caller (MCP list_documents, the Viewer's /admin/api/documents). It lists
- * ownership and grants only: the operator bypass that effectiveAccess gives admins does not widen it.
+ * ownership and grants only: the operator bypass that accessFor gives admins does not widen it.
  * Plan documents count too when the principal owns or holds any grant on their plan set's access agent
  * (the rule access.ts applies per document); `ownedOnly` leaves them out. `planNumber` keeps only the
  * documents of plan sets with that number. Titles of agent-linked documents were redacted when written.
  */
 export async function listDocumentsFor(
   db: PrismaClient,
-  principalId: string,
+  principalId: Acting,
   opts: { ownedOnly?: boolean; agentId?: string; repository?: string; planNumber?: number; limit: number },
 ): Promise<{ rows: ListedDocument[]; truncated: boolean }> {
   const granted = opts.ownedOnly ? [] : await grantedIds(db, "document", principalId, "read");
   const viaAgent = opts.ownedOnly ? [] : await grantedIds(db, "agent", principalId, "read");
+  const owned = ownedByWhere(principalId);
   const found = await db.document.findMany({
     where: {
       OR: [
-        { ownerId: principalId },
+        owned,
         { id: { in: granted } },
-        ...(opts.ownedOnly
-          ? []
-          : [{ planSet: { accessAgent: { OR: [{ ownerId: principalId }, { id: { in: viaAgent } }] } } }]),
+        ...(opts.ownedOnly ? [] : [{ planSet: { accessAgent: { OR: [owned, { id: { in: viaAgent } }] } } }]),
       ],
       ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
       ...(opts.repository !== undefined ? { repository: opts.repository } : {}),

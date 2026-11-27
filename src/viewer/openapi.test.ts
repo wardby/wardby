@@ -200,6 +200,7 @@ async function start(): Promise<string> {
       const scopes = authorization === "Bearer noscope" ? [] : ["admin:view"];
       return {
         principal: { id: "p1" },
+        canonicalUri: URI,
         scopes: new Set(scopes),
         roles: ["admin"],
         providers: { secrets: {} },

@@ -82,6 +82,18 @@ policy grants a particular client or user only a subset. Ensure granted scopes
 are emitted in the access token's `scope` or `scp` claim; defining them only in
 the provider UI is not sufficient.
 
+Wardby also accepts four tier scopes that each cover a group of permissions and
+include the tiers below them: `wardby:read` (`agents:read`, `documents:read`),
+`wardby:write` (the other non-privileged permissions), `wardby:admin` (the
+privileged permissions except `owner:all`) and `wardby:owner` (`owner:all`).
+`wardby:viewer` covers `admin:view` only. A token carrying one of the scopes in
+the table above is treated as carrying its permission's tier, so a token with
+any write scope reaches every write-tier operation its roles and resource access
+allow. A scope never grants a privileged permission on its own: the role
+requirements still apply, and `owner:all` still needs the `wardby_owner` role.
+The tier scopes are accepted but not yet advertised, so keep defining the
+scopes in the table above in the provider.
+
 `memory:write` was added after the first ten scopes. When you upgrade an
 existing deployment, define it in the provider too. Otherwise, clients that
 request every advertised scope may fail with `invalid_scope`.

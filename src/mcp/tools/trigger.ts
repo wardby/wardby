@@ -54,7 +54,7 @@ import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
 import { createTaskResult, getTask, cancelTask } from "../tasks/manager.js";
 import { requireOwnedTask } from "../auth/ownership.js";
-import { agentAccess, assertAgentAccess } from "../auth/access.js";
+import { agentAccess, assertAgentAccess, ownsAgent } from "../auth/access.js";
 import { isOwnerAll } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import type { PrismaClient } from "#prisma";
@@ -228,7 +228,7 @@ async function checkContinuePriorRun(
   priorRunId: string,
   args: { baseRef?: string; repository?: string },
 ): Promise<void> {
-  if (!isOwnerAll(ctx) && (agent.ownerId === null || agent.ownerId !== ctx.principal.id)) {
+  if (!isOwnerAll(ctx) && !ownsAgent(ctx, agent)) {
     throw new McpError(403, `Agent "${agent.id}": ${CONTINUATION_SAME_OWNER_MESSAGE}`);
   }
   if (agent.kind !== "coding") {
@@ -271,7 +271,7 @@ async function checkContinuePriorRun(
 export function registerTriggerTool(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "trigger_agent",
-    scope: "runs:trigger",
+    permission: "runs:trigger",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -348,7 +348,7 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       let review: Awaited<ReturnType<typeof resolveLocalReview>> | undefined;
       if (args.review !== undefined) {
         if (agent.kind !== "native") throw new McpError(400, "review is only valid for native review agents.");
-        if (agent.ownerId === null || agent.ownerId !== ctx.principal.id) {
+        if (!ownsAgent(ctx, agent)) {
           throw new McpError(403, `Agent "${agent.id}": only its owner can start a manual review.`);
         }
         review = await resolveLocalReview(ctx, agent.id, args.review);

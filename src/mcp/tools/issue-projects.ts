@@ -8,7 +8,7 @@
  * See docs/private/2026-09-30-jira-issue-tracker-design.md.
  */
 import { requireAgentAccess } from "../auth/access.js";
-import { requireScope } from "../auth/resource-server.js";
+import { authorize } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { ISSUE_TRACKER_PROVIDERS, PROJECT_KEY } from "../../providers/issue-tracker/types.js";
@@ -72,7 +72,7 @@ function normalizeProjectKey(projectKey: string): string {
 export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "link_issue_project",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Links a native agent to a Jira project, with its access and issue-event triggers. A wardby admin approves Jira links " +
       "(agents:admin with the admin role); the agent acts as the deployment's Jira service account, not as any person. " +
@@ -126,7 +126,7 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "projectKey", "access"],
     },
     handler: async (args: LinkArgs, ctx) => {
-      requireScope(ctx, ctx.canonicalUri, "agents:admin");
+      authorize(ctx, "agents:admin");
       const agent = await ctx.db.agent.findUnique({ where: { id: args.agentId } });
       if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
       if (agent.kind !== "native") throw new McpError(400, "Issue-project links are for native agents only.");
@@ -217,7 +217,7 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "unlink_issue_project",
-    scope: "agents:write",
+    permission: "agents:write",
     description: "Removes a native agent's link to a Jira project. Admin only (agents:admin with the admin role).",
     inputSchema: {
       type: "object",
@@ -230,7 +230,7 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
       required: ["agentId", "projectKey"],
     },
     handler: async (args: { agentId: string; provider?: string; projectKey: string }, ctx) => {
-      requireScope(ctx, ctx.canonicalUri, "agents:admin");
+      authorize(ctx, "agents:admin");
       const agent = await ctx.db.agent.findUnique({ where: { id: args.agentId } });
       if (!agent) throw new McpError(404, `Agent "${args.agentId}" not found.`);
       const { count } = await ctx.db.agentIssueProject.deleteMany({
@@ -246,7 +246,7 @@ export function registerIssueProjectTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_issue_projects",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       additionalProperties: false,

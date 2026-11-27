@@ -147,7 +147,7 @@ describe("startHttpServer (delegating mode)", () => {
     let seenClientSupportsTasks: boolean | undefined;
     mcp.registerTool({
       name: "report_tasks_capability",
-      scope: "agents:read",
+      permission: "agents:read",
       inputSchema: { type: "object", properties: {} },
       handler: async (_args, ctx) => {
         seenClientSupportsTasks = ctx.clientSupportsTasks;
@@ -316,6 +316,8 @@ describe("startHttpServer (webhook ingress)", () => {
     let webhookCounter = 0;
     let runCounter = 0;
     const webhookDb: any = {
+      // The webhook creator check reads Team membership; nobody here is in a Team.
+      teamMember: { findMany: async () => [] },
       webhook: {
         create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
           const row: FakeWebhookRow = {

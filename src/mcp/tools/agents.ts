@@ -58,9 +58,11 @@ import { claudeCodeUnofferedTools } from "../../core/tool-names.js";
 import { isCodexCoding } from "../../core/mcp-tools.js";
 import { PROJECT_KEY } from "../../providers/issue-tracker/types.js";
 import { LLM_EFFORT_LEVELS, isLlmEffort } from "../../providers/llm/types.js";
-import { requireReadableBudgetGroup } from "../auth/ownership.js";
+import { requireBudgetGroupUsableBy } from "../auth/ownership.js";
 import {
+  actsForOf,
   agentAccessResolver,
+  ownsAgent,
   agentNotFound,
   assertAgentAccess,
   readableAgentsWhere,
@@ -71,13 +73,13 @@ import {
   atLeast,
   canDelegate,
   deleteGrantsFor,
-  effectiveAccess,
+  accessFor,
   isPublicWritable,
   filterUnusableMcpServers,
 } from "../../core/grants.js";
 import { projectTool, TOOL_GRANTS_INCLUDE } from "./tools.js";
 import { withZod3ToolWarnings } from "../../core/zod3-window.js";
-import { isOwnerAll, requireAnyScope, requireScope } from "../auth/resource-server.js";
+import { isOwnerAll, authorizeAny, authorize } from "../auth/resource-server.js";
 import { logger } from "../../core/logger.js";
 import { recordPromptVersion } from "../../core/agent-prompt-versions.js";
 import { removeRetainedRounds } from "./retained-rounds.js";
@@ -121,14 +123,14 @@ function validateWorkspaceDiskMb(workspaceDiskMb: number | null | undefined): vo
 // changing it requires a step-up beyond agents:write, the same pattern make_owner below uses
 // for its own sensitive, ownership-bypassing mutation.
 function requireWorkerImageRefScope(ctx: McpRequestContext): void {
-  requireScope(ctx, ctx.canonicalUri, "agents:admin");
+  authorize(ctx, "agents:admin");
 }
 
 // A debug trace makes the worker log prompts and repository content to its
 // pod log, so turning it on (or off) is an admin action, gated like
 // workerImageRef and audited.
 function requireDebugTraceScope(ctx: McpRequestContext): void {
-  requireScope(ctx, ctx.canonicalUri, "agents:admin");
+  authorize(ctx, "agents:admin");
 }
 
 const agentsLog = logger.child({ module: "mcp-agents" });
@@ -172,7 +174,7 @@ const MAX_DEBUG_TRACE_MINUTES = 24 * 60;
 
 /** Package allowlists widen what a run may download, so they need their own approval. */
 function requirePackageApproval(ctx: McpRequestContext): void {
-  requireAnyScope(ctx, ctx.canonicalUri, "packages:approve", "agents:admin");
+  authorizeAny(ctx, "packages:approve", "agents:admin");
 }
 
 const MAX_AGENT_NAME_CHARS = 200;
@@ -506,7 +508,7 @@ function tunnelHostsStamp(
   if (!next.includes("*")) return { tunnelAnyHostAuthorizedById: null, tunnelAnyHostAuthorizedAt: null };
   if (before.includes("*") && previous?.tunnelAnyHostAuthorizedById) return undefined;
   // Role-gated: the scope alone never suffices (resource-server.ts), as for repositoryAdminOverride.
-  if (!isOwnerAll(ctx)) requireScope(ctx, ctx.canonicalUri, "agents:admin");
+  if (!isOwnerAll(ctx)) authorize(ctx, "agents:admin");
   return { tunnelAnyHostAuthorizedById: ctx.principal.id, tunnelAnyHostAuthorizedAt: new Date() };
 }
 
@@ -864,7 +866,7 @@ async function requireCatalogServiceNames(
 export function registerAgentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_agent",
-    scope: "agents:write",
+    permission: "agents:write",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -937,7 +939,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       validateWorkspaceDiskMb(args.codingProfile?.workspaceDiskMb);
       if (args.codingProfile) await requireCatalogServiceNames(ctx.db, args.codingProfile.services);
       if (args.budgetGroupId) {
-        await requireReadableBudgetGroup(ctx.db, args.budgetGroupId, ctx.principal.id, isOwnerAll(ctx));
+        await requireBudgetGroupUsableBy(ctx, args.budgetGroupId, ctx.principal.id);
       }
       const { codingProfile, repositoryAdminOverride, nativeExecutionMode, documentTools, ...agentFieldsData } = args;
       const documentToolsChecked = documentTools
@@ -1020,7 +1022,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "update_agent",
-    scope: "agents:write",
+    permission: "agents:write",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1157,12 +1159,12 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       // An owner-all caller (owner:all + wardby_owner) acts as the owner of every agent, so no
       // owner-only field or binding is refused to it; its repository is approved as an admin's.
       const ownerAll = isOwnerAll(ctx);
-      const isOwner = ownerAll || (before.ownerId !== null && before.ownerId === ctx.principal.id);
+      const isOwner = ownerAll || ownsAgent(ctx, before);
       // An admin may approve a repository (repositoryAdminOverride) on an agent
       // they don't own, but change nothing else on it.
       const adminEdit = args.repositoryAdminOverride === true && !isOwner;
       if (adminEdit) {
-        requireScope(ctx, ctx.canonicalUri, "agents:admin");
+        authorize(ctx, "agents:admin");
         const { id: _id, repositoryAdminOverride: _flag, codingProfile, ...others } = args;
         const profileKeys = Object.keys(codingProfile ?? {});
         if (
@@ -1219,9 +1221,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
               provider: codeProviderOf(plannedRepository),
               repository: plannedRepository,
               kind: "coding",
-              adminOverride:
-                args.repositoryAdminOverride === true ||
-                (ownerAll && !(before.ownerId !== null && before.ownerId === ctx.principal.id)),
+              adminOverride: args.repositoryAdminOverride === true || (ownerAll && !ownsAgent(ctx, before)),
             })
           : null;
       if (args.repositoryAdminOverride === true && !authorization) {
@@ -1254,7 +1254,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             throw new McpError(409, `Agent "${args.id}" changed while it was being updated; try again.`);
           }
           if (args.budgetGroupId) {
-            await requireReadableBudgetGroup(tx, args.budgetGroupId, ctx.principal.id, isOwnerAll(ctx));
+            await requireBudgetGroupUsableBy(ctx, args.budgetGroupId, existing.ownerId, tx);
           }
 
           const nextKind = args.kind ?? existing.kind;
@@ -1512,7 +1512,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_agents",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "Lists the agents you can see. Each row has an `access` field, your level on that agent: owner > write > execute > read. When showing the agents as a table, include `access` as a column. " +
       "summary: true returns only id, name, kind, model, codingProvider, budgetUsd, ownerId, runSteps and access per agent, for listings that don't need the full configuration. " +
@@ -1523,7 +1523,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       additionalProperties: false,
     },
     handler: async (args: { summary?: boolean; all?: boolean }, ctx) => {
-      if (args.all === true && !ctx.operator && !isOwnerAll(ctx)) requireScope(ctx, ctx.canonicalUri, "admin:view");
+      if (args.all === true && !ctx.operator && !isOwnerAll(ctx)) authorize(ctx, "admin:view");
       const [where, accessOf] = await Promise.all([
         args.all === true ? Promise.resolve({}) : readableAgentsWhere(ctx),
         agentAccessResolver(ctx),
@@ -1559,7 +1559,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "get_agent",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -1590,7 +1590,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         tools: await Promise.all(
           agent.tools.map(async (attachment) => ({
             ...attachment,
-            tool: await withZod3ToolWarnings(projectTool(attachment.tool, ctx.principal.id, isOwnerAll(ctx))),
+            tool: await withZod3ToolWarnings(projectTool(attachment.tool, actsForOf(ctx), isOwnerAll(ctx))),
           })),
         ),
       });
@@ -1599,7 +1599,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "delete_agent",
-    scope: "agents:write",
+    permission: "agents:write",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -1642,9 +1642,9 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
   // new owner doesn't own (resource-sharing grants spec §3.6, R2-1).
   mcp.registerTool({
     name: "make_owner",
-    scope: "agents:admin",
+    permission: "agents:admin",
     description:
-      "Admins: gives an agent a new owner (an existing principal id). Secret, datastore and MCP server bindings the new owner doesn't own are removed; tool capabilities the new owner never granted are suspended until they re-run attach_tool; sub-agent edges the new owner can't delegate are removed; between two owners every grant on the agent is reset, its document tools (documentTools) are turned off, and document grants shared with the agent are removed except on the new owner's own documents (documentGrantsRemoved; adopting an owner-less agent keeps all of these). Returns what changed.",
+      "Admins: gives an agent a new owner (an existing principal id; for a team, the principalId that create_team and list_teams return, not the team id). Secret, datastore and MCP server bindings the new owner doesn't own are removed; tool capabilities the new owner never granted are suspended until they re-run attach_tool; sub-agent edges the new owner can't delegate are removed; between two owners every grant on the agent is reset, its document tools (documentTools) are turned off, and document grants shared with the agent are removed except on the new owner's own documents (documentGrantsRemoved; adopting an owner-less agent keeps all of these). Returns what changed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1849,7 +1849,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             const webhooksInactive: { id: string; createdBy: string | null }[] = [];
             for (const webhook of webhooks) {
               if (webhook.ownerId === newOwner) continue;
-              const creatorAccess = await effectiveAccess(tx, "agent", updated, webhook.ownerId);
+              const creatorAccess = await accessFor(tx, "agent", updated, webhook.ownerId);
               if (!atLeast("agent", creatorAccess, "execute")) {
                 webhooksInactive.push({ id: webhook.id, createdBy: webhook.ownerId });
               }

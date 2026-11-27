@@ -962,9 +962,14 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     const viewer = { kind: "principal" as const, principalId: owner.id };
     const unlinked = (await call("create_document", { title: "U", markdown: "hello world" })).json;
     const ut = await createThread(db, cipher, { documentId: unlinked.documentId, viewer, anchor, body: "x" });
-    const noScope = await call("send_threads_to_agent", { documentId: unlinked.documentId, threadIds: [ut.threadId] });
+    // A read-tier token is refused at the door; runs:trigger and documents:write share the write tier.
+    const readOnly = await connect(owner, ["documents:read"]);
+    const noScope = await readOnly("send_threads_to_agent", {
+      documentId: unlinked.documentId,
+      threadIds: [ut.threadId],
+    });
     expect(noScope.isError).toBe(true);
-    expect(noScope.text).toContain("runs:trigger");
+    expect(noScope.text).toContain("documents:write");
 
     const sender = await connect(owner, ["documents:read", "documents:write", "runs:trigger"]);
     const refused = await sender("send_threads_to_agent", {

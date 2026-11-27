@@ -42,13 +42,15 @@ import {
 } from "../../core/tool-admin.js";
 import type { WardbyMcpServer } from "../server.js";
 import { McpError } from "../errors.js";
-import { requireOwnedTool, assertStrictlyOwnedTool, visibleTo, canReadFor } from "../auth/ownership.js";
-import { agentAccessResolver, assertAgentAccess, requireAgentAccess } from "../auth/access.js";
+import { actsForOwner, grantedIds, type Acting } from "../../core/grants.js";
+import { assertStrictlyOwnedTool, canReadFor, readableToolsWhere, requireToolAccess } from "../auth/ownership.js";
+import { actsForOf, agentAccessResolver, assertAgentAccess, ownsAgent, requireAgentAccess } from "../auth/access.js";
 import { atLeast, isPublicWritable } from "../../core/grants.js";
 import type { McpRequestContext } from "../context.js";
-import { isOwnerAll, permissionsOf } from "../auth/resource-server.js";
+import { isOwnerAll } from "../auth/resource-server.js";
 import { textResult } from "./text-result.js";
 import { brokerCompatibilityWarnings } from "./secret-broker-compat.js";
+import { check } from "../../authz/index.js";
 
 /**
  * Names the agents the caller can read (its own and ones granted to it)
@@ -70,9 +72,9 @@ async function describeAgents(agents: AttachedAgent[], ctx: McpRequestContext): 
  * tool apart from the caller's own same-named one (names are unique per
  * owner, not globally). Shared by list_tools and get_agent.
  */
-export function projectTool(tool: ToolWithGrants, principalId: string, ownerAll = false) {
+export function projectTool(tool: ToolWithGrants, principal: Acting, ownerAll = false) {
   const { connectionGrants, ...row } = tool;
-  if (ownerAll || (row.ownerId !== null && row.ownerId === principalId)) return row;
+  if (ownerAll || actsForOwner(principal, row.ownerId)) return row;
   // timeoutMs is not code: anyone who sees the tool sees how long its calls may take.
   const shown = { id: row.id, name: row.name, description: row.description, timeoutMs: row.timeoutMs };
   if (row.ownerId !== null) return { ...shown, public: false, ownerIsCaller: false };
@@ -85,6 +87,16 @@ export function projectTool(tool: ToolWithGrants, principalId: string, ownerAll 
   return { ...shown, public: true, ...(connections.length ? { connections } : {}) };
 }
 
+/** The ids of the tools the caller holds at least read on through a Grant (ownership and public tools are separate). */
+async function readableToolIds(ctx: McpRequestContext, db: Pick<PrismaClient, "resourceGrant"> = ctx.db) {
+  return new Set(await grantedIds(db, "tool", actsForOf(ctx), "read"));
+}
+
+/** Whether the caller may see a tool: its own, public, granted, or anything for an owner-all caller. */
+function canSeeTool(ctx: McpRequestContext, granted: Set<string>, tool: { id: string; ownerId: string | null }) {
+  return canReadFor(ctx, tool.ownerId) || granted.has(tool.id);
+}
+
 /** A tool row, with its connection grants when the query included them. */
 export type ToolWithGrants = Tool & { connectionGrants?: { connection: string; channels: string[] }[] };
 
@@ -93,7 +105,7 @@ export const TOOL_GRANTS_INCLUDE = { connectionGrants: { select: { connection: t
 
 /** agents:admin with the admin role: may change and delete public tools over MCP (#529). */
 function isToolAdmin(ctx: McpRequestContext): boolean {
-  return ctx.scopes.has("agents:admin") && permissionsOf(ctx.roles).has("agents:admin");
+  return check(ctx, ["agents:admin"]) === null;
 }
 
 /**
@@ -102,7 +114,7 @@ function isToolAdmin(ctx: McpRequestContext): boolean {
  */
 function assertChangeableTool(tool: Tool | null, id: string, ctx: McpRequestContext): Tool {
   if (tool && tool.ownerId === null && isToolAdmin(ctx)) return tool;
-  return assertStrictlyOwnedTool(tool, id, ctx.principal.id, isOwnerAll(ctx));
+  return assertStrictlyOwnedTool(tool, id, actsForOf(ctx), isOwnerAll(ctx));
 }
 
 const TIMEOUT_MS_DESCRIPTION =
@@ -169,7 +181,7 @@ function assertToolNameAllowed(name: string): void {
 export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_tool",
-    scope: "tools:write",
+    permission: "tools:write",
     inputSchema: {
       type: "object",
       properties: {
@@ -216,7 +228,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "update_tool",
-    scope: "tools:write",
+    permission: "tools:write",
     description:
       "Replaces a tool's description, paramsZod, code and/or timeoutMs (null: back to the default limit) in place (its name can't change: agents' prompts call it by name). Your own tools; a public tool only for an admin (agents:admin with the admin role). An owned tool is refused while it is attached to (or hooked on) any agent you don't own, including owner-less ones and agents shared with you, since the change would reach another owner's agent; detach it there first or create a new tool. A public tool is updated anyway, and every attachment and run hook on an agent with an owner loses that owner's capability grants (secrets, hosts) until they grant them again; the result's consentCleared counts them. Runs already started keep the version they loaded for their whole lifetime; the next run picks up the new one.",
     inputSchema: {
@@ -280,7 +292,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "delete_tool",
-    scope: "tools:write",
+    permission: "tools:write",
     description:
       "Deletes a tool you own (an admin may delete a public tool). Refused while it is attached to any agent; pass detach: true to detach it from your own agents first. It is never detached from an agent you don't own -- use detach_tool where you hold write on the agent, or ask its owner. Past runs are unaffected, and a run already under way keeps the version it loaded.",
     inputSchema: {
@@ -321,7 +333,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "dry_run_tool",
-    scope: "tools:write",
+    permission: "tools:write",
     description:
       "Test-runs tool code against sample args without persisting it, with the same time limit a run would give it (timeoutMs, as on create_tool). Fetch is denied by default, same as a freshly attached tool — pass allowedHosts to test code that calls fetch(). For this release a paramsZod is still compiled with Zod 3; a `warnings` list in the result means the next release, which compiles it with Zod 4 only, will reject it or treat the sample args differently.",
     inputSchema: {
@@ -398,7 +410,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "attach_tool",
-    scope: "tools:write",
+    permission: "tools:write",
     description:
       "Attaches a tool to an agent (needs write on the agent). The four capability fields (allowedSecrets, allowedDatastorePrefixes, allowedHosts, allowedSharedDatastorePrefixes) are the agent owner's to grant: anyone else passing one gets 403, and their attachment runs with none until the owner re-runs attach_tool with the capabilities. When the owner grants an attachment it had not granted before (someone else attached it, or the agent changed owner), every capability not passed is reset to empty, so state each one you want. Granting capabilities to a tool someone else owns vouches for code you can't read (only its owner sees it); the tool's owner can't change it while it's attached to your agent, and detaching drops your grant. Granting a brokered secret lets the tool send it only via fetch(url, { secrets: [name] }), never read it; the result includes warnings when the tool calls secrets.get() on one. A coding agent can take native tools only when it runs Claude Code: its runs call the tool as mcp__wardby_mcp__<tool name>, through the same gateway and per-run call limit as its MCP tools (Codex agents are refused for now).",
     inputSchema: {
@@ -455,7 +467,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           // spec §3.4.2). Strict ownership: neither a write-grantee nor the
           // stdio operator may hand the owner's secrets, datastores or
           // network to code on the agent.
-          const isOwner = agent.ownerId !== null && agent.ownerId === ctx.principal.id;
+          const isOwner = ownsAgent(ctx, agent);
           if (capabilitiesPassed && !isOwner) {
             throw new McpError(
               403,
@@ -478,7 +490,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
           // make_owner transfer, so the tool check does not apply.
           const tool = existing
             ? await tx.tool.findUniqueOrThrow({ where: { id: args.toolId } })
-            : await requireOwnedTool(tx, args.toolId, ctx.principal.id, isOwnerAll(ctx));
+            : await requireToolAccess(ctx, args.toolId, "use", tx);
           // The runtime dispatches by name, and names are only unique per
           // owner: a second same-named tool on one agent would be a
           // duplicate tool name to the model and silently shadow one of them.
@@ -492,7 +504,9 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
             // The clashing tool may be another principal's private one (a
             // write-grantee's, or one left from before a transfer): name its
             // id only when the caller could read it anyway.
-            const which = canReadFor(ctx, clash.ownerId) ? ` (${clash.id})` : " (a tool owned by another principal)";
+            const which = canSeeTool(ctx, await readableToolIds(ctx, tx), clash)
+              ? ` (${clash.id})`
+              : " (a tool owned by another principal)";
             throw new McpError(
               409,
               `Agent "${args.agentId}" already has a different tool named "${tool.name}" attached${which}; detach it first.`,
@@ -541,7 +555,7 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "detach_tool",
-    scope: "tools:write",
+    permission: "tools:write",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, toolId: { type: "string" } },
@@ -558,12 +572,12 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_tools",
-    scope: "tools:write",
+    permission: "tools:write",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } } },
     handler: async (args: { agentId?: string }, ctx) => {
       // Zod 3 window: the caller's own tools carry their warnings (cached per paramsZod text).
       const project = (tool: ToolWithGrants) =>
-        withZod3ToolWarnings(projectTool(tool, ctx.principal.id, isOwnerAll(ctx)));
+        withZod3ToolWarnings(projectTool(tool, actsForOf(ctx), isOwnerAll(ctx)));
       if (args.agentId) {
         const { access } = await requireAgentAccess(ctx, args.agentId, "read");
         const rows = await ctx.db.agentTool.findMany({
@@ -572,20 +586,21 @@ export function registerToolAuthoringTools(mcp: WardbyMcpServer): void {
         });
         // The agent's owner sees every tool on it (projected: code only for
         // the tool's own owner); anyone else only tools they could see anyway.
+        const readable = await readableToolIds(ctx);
         return textResult(
           await Promise.all(
             rows
               .map((r) => r.tool)
-              .filter((tool) => access === "owner" || canReadFor(ctx, tool.ownerId))
+              .filter((tool) => access === "owner" || canSeeTool(ctx, readable, tool))
               .map(project),
           ),
         );
       }
       const tools = await ctx.db.tool.findMany({
-        where: visibleTo(ctx),
+        where: await readableToolsWhere(ctx),
         include: TOOL_GRANTS_INCLUDE,
       });
-      return textResult(await Promise.all(tools.filter((tool) => canReadFor(ctx, tool.ownerId)).map(project)));
+      return textResult(await Promise.all(tools.map(project)));
     },
   });
 }

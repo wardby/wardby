@@ -440,7 +440,7 @@ describe("grant_access / revoke_access / list_access", () => {
     expect(badLevel.isError).toBe(true);
     const tool = await client.callTool({
       name: "grant_access",
-      arguments: { resourceType: "tool", resourceId: "t1", grantee: "everyone", level: "use" },
+      arguments: { resourceType: "task", resourceId: "t1", grantee: "everyone", level: "use" },
     });
     expect(tool.isError).toBe(true);
     expect(text(tool)).toMatch(/not shareable yet/);

@@ -7,6 +7,7 @@
  * scope, never globally.
  */
 import { Prisma, type PrismaClient, type Secret } from "#prisma";
+import { deleteGrantsFor } from "./grants.js";
 import type { SecretCipher } from "../providers/secrets/types.js";
 import { boundedString } from "../sandbox/bounded-json.js";
 import type { safeFetch, SafeFetchOptions } from "../sandbox/safe-fetch.js";
@@ -249,9 +250,9 @@ export async function setSecretBroker(
 export async function listSecrets(
   ownerId: string,
   db: PrismaClient,
-  opts: { all?: boolean } = {},
+  opts: { all?: boolean; where?: Prisma.SecretWhereInput } = {},
 ): Promise<SecretMetadata[]> {
-  const secrets = await db.secret.findMany({ where: opts.all ? {} : { ownerId } });
+  const secrets = await db.secret.findMany({ where: opts.where ?? (opts.all ? {} : { ownerId }) });
   return secrets.map((s) => ({
     id: s.id,
     name: s.name,
@@ -342,7 +343,10 @@ export async function deleteSecret(
 ): Promise<void> {
   const row = await db.secret.findUnique({ where: { id: secretId } });
   if (!row || row.oauth == null) {
-    await db.secret.delete({ where: { id: secretId } });
+    await db.$transaction(async (tx) => {
+      await deleteGrantsFor(tx, "secret", secretId);
+      await tx.secret.delete({ where: { id: secretId } });
+    });
     return;
   }
   if (options.cipher) {
@@ -369,6 +373,7 @@ export async function deleteSecret(
         via: "mcp",
       },
     });
+    await deleteGrantsFor(tx, "secret", secretId);
     await tx.secret.delete({ where: { id: secretId } });
   });
 }

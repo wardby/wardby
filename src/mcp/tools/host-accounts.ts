@@ -37,7 +37,7 @@ export function callbackOrigin(canonicalUri: string): string | null {
 export function registerHostAccountTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "link_host_account",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Links your GitHub account to your wardby identity, so agents you own can be given repositories your GitHub account can access. " +
       "Call it with no confirmationCode to get an authorizeUrl; open that in a browser signed in to GitHub. The page you land on shows a " +
@@ -99,7 +99,7 @@ export function registerHostAccountTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "get_host_account",
-    scope: "agents:read",
+    permission: "agents:read",
     description: "Shows the GitHub account linked to your wardby identity, if any.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
@@ -120,7 +120,7 @@ export function registerHostAccountTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "unlink_host_account",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Unlinks your GitHub account. Repositories your agents were given through its access stop working until you link again.",
     inputSchema: { type: "object", additionalProperties: false, properties: { provider: PROVIDER_PROP } },

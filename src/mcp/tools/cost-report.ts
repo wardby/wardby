@@ -14,7 +14,7 @@ import { textResult } from "./text-result.js";
 export function registerCostReportTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "cost_report",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "Agent spend (USD) and tokens by kind, grouped by issue, parent (epic), scope (project/team), agent, model, or run, " +
       "over a time window (default: last 30 days). Combine filters with groupBy to drill down, e.g. groupBy=issue with parentKey. " +

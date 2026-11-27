@@ -6,14 +6,15 @@ import {
   assertCanMutate,
   visibleToPrincipal,
   requireOwnedTask,
-  requireOwnedSecret,
-  requireOwnedWebhook,
-  requireOwnedTool,
+  requireSecretAccess,
+  requireDatastoreAccess,
+  requireWebhookAccess,
+  requireToolAccess,
   requireStrictlyOwnedTool,
-  requireOwnedBudgetGroup,
-  requireReadableBudgetGroup,
+  requireBudgetGroupAccess,
 } from "./ownership.js";
 import { McpError } from "../errors.js";
+import { fakeResourceGrants, type FakeGrantSeed } from "../../core/grants.test-support.js";
 
 describe("canRead", () => {
   it("null owner (public) is readable by anyone", () => {
@@ -110,94 +111,169 @@ describe("requireOwnedTask", () => {
   });
 });
 
-describe("requireOwnedSecret", () => {
-  it("resolves for the owner", async () => {
-    const db = fakeDb({}, {}, { s1: { id: "s1", ownerId: "p1" } });
-    await expect(requireOwnedSecret(db, "s1", "p1")).resolves.toBeUndefined();
+describe("requireSecretAccess, requireDatastoreAccess and requireWebhookAccess", () => {
+  type Row = { id: string; ownerId: string | null };
+  const rows = (map: Record<string, Row>) => ({
+    findUnique: async ({ where }: { where: { id: string } }) => map[where.id] ?? null,
   });
-  it("403s for a missing secret", async () => {
-    const db = fakeDb({}, {}, {});
-    await expect(requireOwnedSecret(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  const callerCtx = (
+    principalId: string,
+    opts: {
+      actsFor?: string[];
+      grants?: FakeGrantSeed[];
+      webhooks?: Record<string, Row & { agentOwner: string | null }>;
+    } = {},
+  ) =>
+    ({
+      principal: { id: principalId },
+      actsFor: opts.actsFor,
+      scopes: new Set<string>(),
+      roles: [],
+      db: {
+        resourceGrant: fakeResourceGrants(opts.grants ?? []),
+        secret: rows({
+          mine: { id: "mine", ownerId: "p1" },
+          theirs: { id: "theirs", ownerId: "owner-1" },
+          team: { id: "team", ownerId: "team-p" },
+          public: { id: "public", ownerId: null },
+        }),
+        datastore: rows({ mine: { id: "mine", ownerId: "p1" }, theirs: { id: "theirs", ownerId: "owner-1" } }),
+        webhook: {
+          findUnique: async ({ where }: { where: { id: string } }) => {
+            const w = opts.webhooks?.[where.id];
+            return w ? { id: w.id, ownerId: w.ownerId, agent: { ownerId: w.agentOwner } } : null;
+          },
+        },
+      },
+    }) as unknown as import("../context.js").McpRequestContext;
+
+  it("the owner holds every level; a missing or someone else's row is 404, not 403", async () => {
+    await expect(requireSecretAccess(callerCtx("p1"), "mine", "owner")).resolves.toMatchObject({ id: "mine" });
+    await expect(requireSecretAccess(callerCtx("p1"), "missing", "owner")).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(requireSecretAccess(callerCtx("p1"), "theirs", "owner")).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(requireDatastoreAccess(callerCtx("p1"), "theirs", "read")).rejects.toMatchObject({ httpStatus: 404 });
   });
-  it("403s for a different owner", async () => {
-    const db = fakeDb({}, {}, { s1: { id: "s1", ownerId: "owner-1" } });
-    await expect(requireOwnedSecret(db, "s1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  it("a Team the caller acts for owns what the Team owns", async () => {
+    await expect(
+      requireSecretAccess(callerCtx("p1", { actsFor: ["p1", "team-p"] }), "team", "owner"),
+    ).resolves.toMatchObject({
+      id: "team",
+    });
   });
-  it("resolves for any principal on a public (null-owner) secret", async () => {
-    const db = fakeDb({}, {}, { s1: { id: "s1", ownerId: null } });
-    await expect(requireOwnedSecret(db, "s1", "anyone")).resolves.toBeUndefined();
+  it("a public (no owner) row stays open to everyone, as before", async () => {
+    await expect(requireSecretAccess(callerCtx("anyone"), "public", "owner")).resolves.toMatchObject({ id: "public" });
+  });
+  it("a read grant shows the row but makes the caller no owner (403 naming both)", async () => {
+    const grants: FakeGrantSeed[] = [
+      { resourceType: "secret", resourceId: "theirs", level: "read", principalId: "p1" },
+    ];
+    const ctx = callerCtx("p1", { grants });
+    await expect(requireSecretAccess(ctx, "theirs", "read")).resolves.toMatchObject({ id: "theirs" });
+    await expect(requireSecretAccess(ctx, "theirs", "owner")).rejects.toMatchObject({ httpStatus: 403 });
+  });
+  it("a webhook is owned by its creator and by the owner of the agent it fires", async () => {
+    const webhooks = { w1: { id: "w1", ownerId: "creator", agentOwner: "p1" } };
+    await expect(requireWebhookAccess(callerCtx("p1", { webhooks }), "w1", "owner")).resolves.toMatchObject({
+      id: "w1",
+    });
+    await expect(requireWebhookAccess(callerCtx("stranger", { webhooks }), "w1", "owner")).rejects.toMatchObject({
+      httpStatus: 404,
+    });
   });
 });
 
-describe("requireOwnedWebhook", () => {
-  it("resolves for the owner", async () => {
-    const db = fakeDb({}, {}, {}, { w1: { id: "w1", ownerId: "p1" } });
-    await expect(requireOwnedWebhook(db, "w1", "p1")).resolves.toBeUndefined();
+describe("requireToolAccess", () => {
+  const tools: Record<string, { id: string; ownerId: string | null }> = {
+    mine: { id: "mine", ownerId: "p1" },
+    theirs: { id: "theirs", ownerId: "owner-1" },
+    team: { id: "team", ownerId: "team-p" },
+    public: { id: "public", ownerId: null },
+  };
+  const toolCtx = (principalId: string, actsFor?: string[], grants: FakeGrantSeed[] = []) =>
+    ({
+      principal: { id: principalId },
+      actsFor,
+      scopes: new Set<string>(),
+      roles: [],
+      db: {
+        resourceGrant: fakeResourceGrants(grants),
+        tool: { findUnique: async ({ where }: { where: { id: string } }) => tools[where.id] ?? null },
+      },
+    }) as unknown as import("../context.js").McpRequestContext;
+
+  it("returns the tool for its owner at every level", async () => {
+    await expect(requireToolAccess(toolCtx("p1"), "mine", "owner")).resolves.toMatchObject({ id: "mine" });
   });
-  it("403s for a missing webhook", async () => {
-    const db = fakeDb({}, {}, {}, {});
-    await expect(requireOwnedWebhook(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  it("404s a missing tool and one the caller cannot read", async () => {
+    await expect(requireToolAccess(toolCtx("p1"), "missing", "read")).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(requireToolAccess(toolCtx("p1"), "theirs", "read")).rejects.toMatchObject({ httpStatus: 404 });
   });
-  it("403s for a different owner", async () => {
-    const db = fakeDb({}, {}, {}, { w1: { id: "w1", ownerId: "owner-1" } });
-    await expect(requireOwnedWebhook(db, "w1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  it("a Team the caller acts for owns it", async () => {
+    await expect(requireToolAccess(toolCtx("p1", ["p1", "team-p"]), "team", "owner")).resolves.toMatchObject({
+      id: "team",
+    });
   });
-  it("resolves for any principal on a public (null-owner) webhook", async () => {
-    const db = fakeDb({}, {}, {}, { w1: { id: "w1", ownerId: null } });
-    await expect(requireOwnedWebhook(db, "w1", "anyone")).resolves.toBeUndefined();
+  it("a public (null-owner) tool is usable by anyone but never owned", async () => {
+    await expect(requireToolAccess(toolCtx("anyone"), "public", "use")).resolves.toMatchObject({ id: "public" });
+    await expect(requireToolAccess(toolCtx("anyone"), "public", "write")).rejects.toMatchObject({ httpStatus: 403 });
+  });
+  it("a grant confers its level and no more", async () => {
+    const ctx = toolCtx("p1", undefined, [
+      { resourceType: "tool", resourceId: "theirs", level: "read", principalId: "p1" },
+    ]);
+    await expect(requireToolAccess(ctx, "theirs", "read")).resolves.toMatchObject({ id: "theirs" });
+    await expect(requireToolAccess(ctx, "theirs", "use")).rejects.toMatchObject({ httpStatus: 403 });
   });
 });
 
-describe("requireOwnedTool", () => {
-  it("returns the tool for its owner", async () => {
-    const db = fakeDb({}, {}, {}, {}, {}, { t1: { id: "t1", ownerId: "p1" } });
-    await expect(requireOwnedTool(db, "t1", "p1")).resolves.toMatchObject({ id: "t1" });
-  });
-  it("404s for a missing tool", async () => {
-    const db = fakeDb({}, {}, {}, {}, {}, {});
-    await expect(requireOwnedTool(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 404 });
-  });
-  it("403s for a different owner", async () => {
-    const db = fakeDb({}, {}, {}, {}, {}, { t1: { id: "t1", ownerId: "owner-1" } });
-    await expect(requireOwnedTool(db, "t1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
-  });
-  it("returns a public (null-owner) tool for any principal", async () => {
-    const db = fakeDb({}, {}, {}, {}, {}, { t1: { id: "t1", ownerId: null } });
-    await expect(requireOwnedTool(db, "t1", "anyone")).resolves.toMatchObject({ id: "t1" });
-  });
-});
+describe("requireBudgetGroupAccess", () => {
+  const groupCtx = (principalId: string, actsFor?: string[], grants: FakeGrantSeed[] = []) =>
+    ({
+      principal: { id: principalId },
+      actsFor,
+      scopes: new Set<string>(),
+      roles: [],
+      db: {
+        resourceGrant: fakeResourceGrants(grants),
+        budgetGroup: {
+          findUnique: async ({ where }: { where: { id: string } }) => groups[where.id] ?? null,
+        },
+      },
+    }) as unknown as import("../context.js").McpRequestContext;
+  const groups: Record<string, { id: string; ownerId: string | null }> = {
+    mine: { id: "mine", ownerId: "p1" },
+    theirs: { id: "theirs", ownerId: "someone-else" },
+    team: { id: "team", ownerId: "team-p" },
+    public: { id: "public", ownerId: null },
+  };
 
-describe("requireOwnedBudgetGroup", () => {
-  it("returns the group when the caller owns it", async () => {
-    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: "p1" } });
-    await expect(requireOwnedBudgetGroup(db, "g1", "p1")).resolves.toMatchObject({ id: "g1" });
+  it("the owner holds every level", async () => {
+    await expect(requireBudgetGroupAccess(groupCtx("p1"), "mine", "owner")).resolves.toMatchObject({ id: "mine" });
   });
-  it("throws 404 when the group doesn't exist", async () => {
-    const db = fakeDb({}, {}, {}, {}, {});
-    await expect(requireOwnedBudgetGroup(db, "missing", "p1")).rejects.toMatchObject({ httpStatus: 404 });
+  it("404s a missing group and a group the caller cannot read", async () => {
+    await expect(requireBudgetGroupAccess(groupCtx("p1"), "missing", "read")).rejects.toMatchObject({
+      httpStatus: 404,
+    });
+    await expect(requireBudgetGroupAccess(groupCtx("p1"), "theirs", "read")).rejects.toMatchObject({
+      httpStatus: 404,
+    });
   });
-  it("throws 403 when the caller doesn't own a group someone else owns", async () => {
-    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: "someone-else" } });
-    await expect(requireOwnedBudgetGroup(db, "g1", "p1")).rejects.toMatchObject({ httpStatus: 403 });
+  it("a Team the caller acts for owns it", async () => {
+    await expect(requireBudgetGroupAccess(groupCtx("p1", ["p1", "team-p"]), "team", "owner")).resolves.toMatchObject({
+      id: "team",
+    });
   });
-  it("returns a public (null-owner) group for any caller — public rows are mutable by anyone", async () => {
-    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: null } });
-    await expect(requireOwnedBudgetGroup(db, "g1", "anyone")).resolves.toMatchObject({ id: "g1" });
+  it("a public (no owner) group is open to everyone, as before", async () => {
+    await expect(requireBudgetGroupAccess(groupCtx("anyone"), "public", "owner")).resolves.toMatchObject({
+      id: "public",
+    });
   });
-});
-
-describe("requireReadableBudgetGroup", () => {
-  it("returns a public (null-owner) group for any caller", async () => {
-    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: null } });
-    await expect(requireReadableBudgetGroup(db, "g1", "p1")).resolves.toMatchObject({ id: "g1" });
-  });
-  it("returns the group when the caller owns it", async () => {
-    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: "p1" } });
-    await expect(requireReadableBudgetGroup(db, "g1", "p1")).resolves.toMatchObject({ id: "g1" });
-  });
-  it("404s for a group owned by someone else", async () => {
-    const db = fakeDb({}, {}, {}, {}, { g1: { id: "g1", ownerId: "someone-else" } });
-    await expect(requireReadableBudgetGroup(db, "g1", "p1")).rejects.toMatchObject({ httpStatus: 404 });
+  it("a grant confers its level and no more: use reads and uses but cannot write, and 403 names both", async () => {
+    const ctx = groupCtx("p1", undefined, [
+      { resourceType: "budget_group", resourceId: "theirs", level: "use", principalId: "p1" },
+    ]);
+    await expect(requireBudgetGroupAccess(ctx, "theirs", "use")).resolves.toMatchObject({ id: "theirs" });
+    await expect(requireBudgetGroupAccess(ctx, "theirs", "write")).rejects.toMatchObject({ httpStatus: 403 });
   });
 });
 

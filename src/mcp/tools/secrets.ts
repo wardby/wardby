@@ -29,8 +29,8 @@ import { brokerConfigHash, parseSecretBrokerConfig, type SecretBrokerConfig } fr
 import type { WardbyMcpServer } from "../server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
-import { requireOwnedSecret } from "../auth/ownership.js";
-import { isOwnerAll, requireScope } from "../auth/resource-server.js";
+import { readableOwnedWhere, requireSecretAccess } from "../auth/ownership.js";
+import { authorize } from "../auth/resource-server.js";
 import { requireAgentAccess, requireBindable, requireBindingOwner } from "../auth/access.js";
 import {
   clearSecretElicitationOutcome,
@@ -190,7 +190,7 @@ async function requireHostsAdminIfProviderSecret(ctx: McpRequestContext, name: s
     select: { id: true },
   });
   if (!secret || (await hostProvidersUsingSecret(ctx.db, secret.id)).providers.length === 0) return false;
-  requireScope(ctx, ctx.canonicalUri, "hosts:admin");
+  authorize(ctx, "hosts:admin");
   return true;
 }
 
@@ -219,7 +219,7 @@ export interface SecretsToolsOptions {
 export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOptions): void {
   mcp.registerTool({
     name: "create_secret",
-    scope: "secrets:write",
+    permission: "secrets:write",
     description:
       'Creates a secret. Omit "value" to enter it securely via a one-time browser link instead of passing it as a plaintext argument. Pass "broker" ({ hosts, pathPrefixes?, placement }) to make it brokered: tools can then only send it to those hosts with fetch(url, { secrets: [name] }) and can never read it. A secret a host provider uses also needs hosts:admin. Pass `oauth: { resource }` to connect an OAuth-only service (for example a hosted MCP server) instead: it returns a sign-in link, then call again with `confirmationCode`. With `oauth.callback: "loopback"` (for providers that only accept a 127.0.0.1 redirect) it returns a command for the user to run in a terminal on their own computer, and a link to paste when the command asks; the command prints the confirmationCode. See the help article "brokered-secrets".',
     inputSchema: {
@@ -429,7 +429,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
 
   mcp.registerTool({
     name: "set_secret_broker",
-    scope: "secrets:write",
+    permission: "secrets:write",
     description:
       'Sets or changes a secret\'s broker config ({ hosts, pathPrefixes?, placement }), so tools can only send it to those hosts with fetch(url, { secrets: [name] }) and never read it. broker: null removes brokering, which must be confirmed by a person in the browser link this returns. Every change is audited. A secret a host provider uses also needs hosts:admin. See the help article "brokered-secrets".',
     inputSchema: {
@@ -530,17 +530,17 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
 
   mcp.registerTool({
     name: "list_secrets",
-    scope: "secrets:write",
+    permission: "secrets:write",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args: Record<string, never>, ctx) => {
-      const secrets = await listSecrets(ctx.principal.id, ctx.db, { all: isOwnerAll(ctx) });
+      const secrets = await listSecrets(ctx.principal.id, ctx.db, { where: await readableOwnedWhere(ctx, "secret") });
       return textResult(secrets);
     },
   });
 
   mcp.registerTool({
     name: "attach_secret",
-    scope: "secrets:write",
+    permission: "secrets:write",
     inputSchema: {
       type: "object",
       properties: {
@@ -572,7 +572,7 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
 
   mcp.registerTool({
     name: "detach_secret",
-    scope: "secrets:write",
+    permission: "secrets:write",
     description:
       "Detaches a secret from an agent. `name` is the alias it was attached under; the secret's own name also works when no attachment has that alias.",
     inputSchema: {
@@ -596,10 +596,10 @@ export function registerSecretsTools(mcp: WardbyMcpServer, opts: SecretsToolsOpt
 
   mcp.registerTool({
     name: "delete_secret",
-    scope: "secrets:write",
+    permission: "secrets:write",
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
     handler: async (args: { id: string }, ctx) => {
-      await requireOwnedSecret(ctx.db, args.id, ctx.principal.id, isOwnerAll(ctx));
+      await requireSecretAccess(ctx, args.id, "owner");
       const { providers } = await hostProvidersUsingSecret(ctx.db, args.id);
       if (providers.length > 0) {
         throw new McpError(

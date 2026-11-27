@@ -35,7 +35,7 @@ import { hkdfSync, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Agent, PrismaClient, Principal } from "#prisma";
 import type { McpRequestContext, McpProviders } from "./context.js";
-import { effectiveScopes, parseOwnerAllRoleOnly, requireScope } from "./auth/resource-server.js";
+import { effectiveScopes, parseOwnerAllRoleOnly, authorize } from "./auth/resource-server.js";
 import { McpError, mapPrismaError } from "./errors.js";
 import { TASKS_EXTENSION_ID, clientSupportsTasks } from "./capabilities.js";
 import { readableAgentsWhere } from "./auth/access.js";
@@ -59,8 +59,11 @@ export const MAX_TOOL_INPUT_ELEMENTS = 100_000;
 export interface ToolSpec<Args = Record<string, unknown>> {
   name: string;
   description?: string;
-  /** Scope(s) required to call this tool — checked before the handler ever runs. */
-  scope: string | string[];
+  /**
+   * Permission(s) required to call this tool, checked before the handler ever runs: the token's scope
+   * tier must reach each and a role must grant it (src/authz). A tool names permissions, never scopes.
+   */
+  permission: string | string[];
   /**
    * A plain JSON Schema object (matching this codebase's existing
    * JSON-Schema-first tool convention — see src/sandbox/deriveJsonSchema).
@@ -112,13 +115,13 @@ export interface WardbyMcpServer {
    * tasks/get, tasks/cancel, tasks/update — there is no npm runtime package
    * for the extension, see Task 6's ledger note, so these are hand-wired
    * the same way this SDK itself expects any custom method to be added:
-   * `Server.setRequestHandler`). Scope is enforced BEFORE the handler runs,
+   * `Server.setRequestHandler`). The permission is enforced BEFORE the handler runs,
    * exactly like registerTool — a custom method is not exempt from the
-   * scope gate just because it isn't a tool.
+   * permission gate just because it isn't a tool.
    */
   registerRequestHandler(
     method: string,
-    scope: string | string[],
+    permission: string | string[],
     handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown>,
   ): void;
   /** Passed directly to createMcpHandler (Task 7) / serveStdio (below). */
@@ -214,7 +217,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
   const specs: ToolSpec<never>[] = [];
   const requestHandlers: {
     method: string;
-    scope: string[];
+    permission: string[];
     handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown>;
   }[] = [];
   let fixedContext: McpRequestContext | undefined;
@@ -276,10 +279,10 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
 
   function registerRequestHandler(
     method: string,
-    scope: string | string[],
+    permission: string | string[],
     handler: (params: unknown, ctx: McpRequestContext) => Promise<unknown>,
   ): void {
-    requestHandlers.push({ method, scope: Array.isArray(scope) ? scope : [scope], handler });
+    requestHandlers.push({ method, permission: Array.isArray(permission) ? permission : [permission], handler });
   }
 
   const factory: McpServerFactory = async () => {
@@ -294,7 +297,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
     mcpServer.server.registerCapabilities({ extensions: { [TASKS_EXTENSION_ID]: {} } });
 
     for (const spec of specs) {
-      const requiredScopes = Array.isArray(spec.scope) ? spec.scope : [spec.scope];
+      const requiredPermissions = Array.isArray(spec.permission) ? spec.permission : [spec.permission];
       mcpServer.registerTool(
         spec.name,
         {
@@ -303,7 +306,7 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
         },
         async (args: unknown, sdkCtx: ServerContext) => {
           const ctx = resolveCtx(sdkCtx);
-          requireScope(ctx, opts.config.canonicalUri, ...requiredScopes);
+          authorize(ctx, ...requiredPermissions);
           try {
             return await spec.handler(args as never, ctx);
           } catch (err) {
@@ -321,13 +324,13 @@ export function buildMcpServer(opts: BuildMcpServerOptions): WardbyMcpServer {
     // passthrough JSON Schema on both sides keeps this generic: real
     // validation of taskId/etc. happens inside each handler, not here.
     const PERMISSIVE_SCHEMA = fromJsonSchema<Record<string, unknown>>({ type: "object", additionalProperties: true });
-    for (const { method, scope, handler } of requestHandlers) {
+    for (const { method, permission, handler } of requestHandlers) {
       mcpServer.server.setRequestHandler(
         method,
         { params: PERMISSIVE_SCHEMA },
         async (params: unknown, sdkCtx: ServerContext) => {
           const ctx = resolveCtx(sdkCtx);
-          requireScope(ctx, opts.config.canonicalUri, ...scope);
+          authorize(ctx, ...permission);
           try {
             return (await handler(params, ctx)) as Record<string, unknown>;
           } catch (err) {

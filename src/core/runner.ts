@@ -530,6 +530,7 @@ export type RunnerDb = Pick<
   | "runBudgetEvent"
   | "runHostStatus"
   | "hostIdentity"
+  | "team"
   | "agentIssueProject"
   | "issuePullRequest"
   | "runIssueStatus"

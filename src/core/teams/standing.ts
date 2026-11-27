@@ -8,7 +8,7 @@
  * nothing.
  */
 import type { PrismaClient } from "#prisma";
-import { isRoleName } from "../../mcp/auth/resource-server.js";
+import { isRoleName } from "../../authz/index.js";
 
 export type StandingDb = Pick<PrismaClient, "teamMember">;
 

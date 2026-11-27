@@ -68,7 +68,7 @@ function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
   const datastores = new Map<string, FakeDatastoreRow>();
   const agentDatastores: FakeAgentDatastoreRow[] = [];
   let counter = 0;
-  return {
+  const fake = {
     resourceGrant: fakeResourceGrants(grants),
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null,
@@ -145,6 +145,8 @@ function fakeDb(agents: FakeAgentRow[], grants: FakeGrantSeed[] = []) {
       },
     },
   } as unknown as import("#prisma").PrismaClient;
+  Object.assign(fake, { $transaction: async (fn: (tx: unknown) => unknown) => fn(fake) });
+  return fake;
 }
 
 function fakeCtx(

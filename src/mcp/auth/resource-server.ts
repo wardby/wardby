@@ -10,6 +10,16 @@ import { resolvePrincipal } from "./principal.js";
 import { resolveStanding } from "../../core/teams/standing.js";
 import { McpError, unauthorized, insufficientScope } from "../errors.js";
 import type { McpRequestContext, McpProviders } from "../context.js";
+import {
+  ROLE_NAMES,
+  ROLE_PERMISSIONS,
+  check,
+  checkAny,
+  isOwnerAll as callerIsOwnerAll,
+  isRoleName,
+  permissionsOf,
+  type Denial,
+} from "../../authz/index.js";
 
 /** The initial capability tiers (§Scopes → capability tiers in the design doc). */
 export const SCOPES_SUPPORTED = [
@@ -52,91 +62,13 @@ export const SCOPES_SUPPORTED = [
   "owner:all",
 ];
 
-/**
- * Scopes whose operations reach beyond the caller's own (or public)
- * resources — they double as the permission names roles grant:
- * agents:admin reassigns ANY agent's owner (make_owner) and sets a BYO
- * workerImageRef; packages:approve widens coding agents' package allowlists;
- * services:manage changes the coding-run service catalog, which decides what
- * runs next to every coding run that names an entry; admin:view reads every
- * owner's runs (the admin viewer API); models:admin changes the model catalog,
- * which prices every principal's runs; power:manage scales the shared coding
- * proxy and native gateway to zero (power_sleep) and reads their state;
- * hosts:admin registers host providers, whose approved tools run in the push
- * and pull request flow; teams:manage creates, renames and deletes teams and
- * edits their membership (assigning a team's roles stays admin-only);
- * owner:all acts as the owner of every owner's management resources (isOwnerAll).
- * A token scope only DELEGATES — it never authorizes on its own:
- * requireScope/requireAnyScope honour one only when one of the caller's
- * roles (McpRequestContext.roles, resolved live per request) grants it.
- */
-export const PRIVILEGED_SCOPES: readonly string[] = [
-  "agents:admin",
-  "packages:approve",
-  "services:manage",
-  "admin:view",
-  "models:admin",
-  "power:manage",
-  "hosts:admin",
-  "teams:manage",
-  "owner:all",
-];
-
-/**
- * The built-in roles and the permissions (privileged scope names) each
- * grants. No roles = member: every non-privileged scope, nothing privileged.
- */
-export const ROLE_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
-  admin: [
-    "agents:admin",
-    "packages:approve",
-    "services:manage",
-    "admin:view",
-    "models:admin",
-    "power:manage",
-    "hosts:admin",
-    "teams:manage",
-  ],
-  // Superset of admin: also read/write on every owner's management resources
-  // (agents, runs, tools, budget groups, MCP servers, documents, webhooks,
-  // grants, datastores, secrets metadata), owner-only fields, bindings and task
-  // ownership. Secret values are never returned. Assign to people, not broad teams.
-  wardby_owner: [
-    "agents:admin",
-    "packages:approve",
-    "services:manage",
-    "admin:view",
-    "models:admin",
-    "power:manage",
-    "hosts:admin",
-    "teams:manage",
-    "owner:all",
-  ],
-  "package-approver": ["packages:approve"],
-  "service-manager": ["services:manage"],
-  "model-manager": ["models:admin"],
-  // Read-only, deployment-wide viewer access (admin:view) without the rest of admin.
-  viewer: ["admin:view"],
-  "host-manager": ["hosts:admin"],
-  // Team create/rename/delete and membership; assigning a team's roles stays admin-only.
-  "team-manager": ["teams:manage"],
-};
-export const ROLE_NAMES: readonly string[] = Object.keys(ROLE_PERMISSIONS);
-
-export function isRoleName(name: string): boolean {
-  return Object.prototype.hasOwnProperty.call(ROLE_PERMISSIONS, name);
-}
-
-/** The permissions granted by `roles`; unknown role names grant nothing. */
-export function permissionsOf(roles: readonly string[] | null | undefined): Set<string> {
-  return new Set((roles ?? []).filter(isRoleName).flatMap((r) => ROLE_PERMISSIONS[r]));
-}
+export { ROLE_NAMES, ROLE_PERMISSIONS, isRoleName, permissionsOf };
 
 /**
  * AUTH_OWNER_ALL_ROLE_ONLY: `true` lets a caller whose roles grant owner:all act as
  * owner-all without the owner:all scope on the token, for deployments whose identity
  * provider cannot issue that scope yet. Unset or `false` keeps the scope required.
- * Anything else is a startup error.
+ * Anything else is a startup error, like WARDBY_ADMIN_UI_TRUSTED_PROXY.
  */
 export function parseOwnerAllRoleOnly(env: NodeJS.ProcessEnv): boolean {
   const raw = env.AUTH_OWNER_ALL_ROLE_ONLY?.trim();
@@ -157,11 +89,12 @@ export function effectiveScopes(
 }
 
 /**
- * True when the caller holds the owner:all scope AND a role granting it
- * (wardby_owner): treated like the stdio operator for access checks.
+ * True when the caller holds the owner tier (the owner scope, or the legacy owner:all)
+ * AND a role granting owner:all (wardby_owner): treated like the stdio operator for
+ * access checks.
  */
 export function isOwnerAll(ctx: Pick<McpRequestContext, "scopes" | "roles">): boolean {
-  return ctx.scopes.has("owner:all") && permissionsOf(ctx.roles).has("owner:all");
+  return callerIsOwnerAll(ctx);
 }
 
 /** Intersects a space-delimited scope string with `allowed`, deduplicated, keeping request order. */
@@ -256,64 +189,31 @@ export async function authenticate(headers: AuthenticateHeaders, deps: Authentic
 }
 
 /**
- * Whether the token carries `scope`. An owner-all caller (owner:all + wardby_owner)
- * holds every privileged scope implicitly: owner:all is the consent to act as an
- * owner of everything, so it never needs to be re-consented scope by scope. The role
- * check (requirePermission) still applies, and wardby_owner grants all of them.
+ * Throws the McpError for a failed check. A scope denial is a 403 insufficient_scope
+ * listing every permission the operation needs (not just the ones missing), so a
+ * client can re-auth once with the full set; a role denial carries no scope
+ * challenge, because re-authorizing cannot fix it, an operator must grant a role.
  */
-function holdsScope(ctx: McpRequestContext, scope: string): boolean {
-  return ctx.scopes.has(scope) || (PRIVILEGED_SCOPES.includes(scope) && isOwnerAll(ctx));
+function raise(denial: Denial | null, canonicalUri: string): void {
+  if (!denial) return;
+  if (denial.kind === "scope") throw insufficientScope(denial.permissions, protectedResourceMetadataUrl(canonicalUri));
+  throw forbidden(denial.permissions);
 }
 
 /**
- * Whether the caller may use `scope` now: the token holds it (owner:all holds every privileged
- * scope) and, for a privileged scope, a role grants it. The same rule requireScope enforces, as a
- * yes or no, for answers such as whoami's.
+ * Throws unless every permission is reached by the token's scope tier and granted by a role (src/authz).
+ * The 403 for a missing tier names every permission the operation needs, so a client can re-auth once.
  */
-export function scopeAllowed(ctx: McpRequestContext, scope: string): boolean {
-  return holdsScope(ctx, scope) && (!PRIVILEGED_SCOPES.includes(scope) || permissionsOf(ctx.roles).has(scope));
+export function authorize(ctx: McpRequestContext, ...permissions: string[]): void {
+  raise(check(ctx, permissions), ctx.canonicalUri);
 }
 
 /**
- * Throws a 403 insufficient_scope McpError listing every scope this
- * operation needs (not just the ones the caller is missing) — so a client
- * can re-auth once with the full required set instead of round-tripping
- * per missing scope.
+ * Like authorize, but any ONE of `alternatives` suffices (e.g. package
+ * approval: packages:approve or agents:admin).
  */
-export function requireScope(ctx: McpRequestContext, canonicalUri: string, ...scopes: string[]): void {
-  const held = scopes.every((s) => holdsScope(ctx, s));
-  if (!held) throw insufficientScope(scopes, protectedResourceMetadataUrl(canonicalUri));
-  requirePermission(ctx, scopes);
-}
-
-/**
- * Like requireScope, but any ONE of `alternatives` suffices (e.g. package
- * approval: packages:approve or agents:admin). The first alternative is the
- * one named in the insufficient_scope challenge.
- */
-export function requireAnyScope(ctx: McpRequestContext, canonicalUri: string, ...alternatives: string[]): void {
-  const held = alternatives.filter((s) => holdsScope(ctx, s));
-  if (held.length === 0) throw insufficientScope(alternatives.slice(0, 1), protectedResourceMetadataUrl(canonicalUri));
-  // One held alternative that is non-privileged, or that a role permits, suffices.
-  const permitted = permissionsOf(ctx.roles);
-  if (held.some((s) => !PRIVILEGED_SCOPES.includes(s) || permitted.has(s))) return;
-  // A role DOES grant one of the unheld alternatives: re-authorizing for that
-  // scope is the fix, so say so with a scope challenge, not a role 403.
-  const reachable = alternatives.find((s) => !ctx.scopes.has(s) && permitted.has(s));
-  if (reachable) throw insufficientScope([reachable], protectedResourceMetadataUrl(canonicalUri));
-  throw forbidden(held);
-}
-
-/**
- * The one role check: a privileged scope is honoured only when one of the
- * caller's roles grants it as a permission. This is authorization, not
- * delegation, so the 403 carries no scope challenge — a client re-authorizing
- * for more scopes can't fix it; an operator must grant a role.
- */
-function requirePermission(ctx: McpRequestContext, scopes: readonly string[]): void {
-  const permitted = permissionsOf(ctx.roles);
-  const missing = scopes.filter((s) => PRIVILEGED_SCOPES.includes(s) && !permitted.has(s));
-  if (missing.length > 0) throw forbidden(missing);
+export function authorizeAny(ctx: McpRequestContext, ...alternatives: string[]): void {
+  raise(checkAny(ctx, alternatives), ctx.canonicalUri);
 }
 
 function forbidden(permissions: readonly string[]): McpError {

@@ -42,7 +42,7 @@ import type { Executor } from "../../providers/executor/types.js";
 import { loadPlanFiles } from "../../coding/plan-files/store.js";
 import { RepositoryChoiceRefusedError } from "../coding-repository.js";
 import { dispatchRun, type DispatchRunOptions } from "../dispatch.js";
-import { atLeast, effectiveAccess } from "../grants.js";
+import { atLeast, accessFor } from "../grants.js";
 import { TERMINAL_RUN_STATUSES } from "../host-status.js";
 import { logger } from "../logger.js";
 import { parsePlanLayout } from "../plans/layout.js";
@@ -312,7 +312,7 @@ async function sendableLink(db: PrismaClient, documentId: string, viewer: Viewer
   if (agent?.kind !== "coding") throw new Error("document_not_agent_linked");
   // The owner linked the agent while holding execute on it and the right to give it task text (trigger_agent's
   // rule); the link is only good while they still hold both.
-  if (!atLeast("agent", await effectiveAccess(db, "agent", agent, doc.ownerId), "execute")) {
+  if (!atLeast("agent", await accessFor(db, "agent", agent, doc.ownerId), "execute")) {
     throw new Error("document_agent_unavailable");
   }
   assertDocumentAgentOverride(doc.ownerId, agent);

@@ -23,6 +23,7 @@ import { resolvePrincipal } from "../auth/principal.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
+import { scopesCover } from "../../authz/index.js";
 
 const id = z.string().min(1).max(128);
 const name = z.string().max(200);
@@ -50,7 +51,7 @@ function parse<T>(schema: z.ZodType<T, unknown>, label: string, value: unknown):
 function actorOf(ctx: McpRequestContext): TeamActor {
   return {
     principalId: ctx.principal.id,
-    roles: new Set(ctx.scopes.has("teams:manage") ? (ctx.roles ?? []) : []),
+    roles: new Set(scopesCover(ctx.scopes, "teams:manage") ? (ctx.roles ?? []) : []),
   };
 }
 
@@ -76,20 +77,21 @@ function teamView(team: {
   id: string;
   name: string;
   personal: boolean;
+  principalId: string;
   roles: string[];
   createdAt: Date;
   updatedAt: Date;
 }) {
-  const { id, name, personal, roles, createdAt, updatedAt } = team;
-  return { id, name, personal, roles, createdAt, updatedAt };
+  const { id, name, personal, principalId, roles, createdAt, updatedAt } = team;
+  return { id, name, personal, principalId, roles, createdAt, updatedAt };
 }
 
 export function registerTeamTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_team",
-    scope: "teams:manage",
+    permission: "teams:manage",
     description:
-      "Admins and team-managers (teams:manage): create a team. A team owns resources, receives access grants and can carry wardby roles. Names are unique, 1 to 64 characters, and cannot start with the reserved prefix personal: (every user already has a personal team of one).",
+      "Admins and team-managers (teams:manage): create a team. A team owns resources, receives access grants and can carry wardby roles. The result's principalId is the team's owner id: pass it to make_owner to move an agent to the team. Names are unique, 1 to 64 characters, and cannot start with the reserved prefix personal: (every user already has a personal team of one).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -104,9 +106,9 @@ export function registerTeamTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_teams",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
-      "List teams. You see the teams you belong to (including your personal team). A caller holding teams:manage as an admin or team-manager sees every team, each with its members' subjects.",
+      "List teams, each with its id and principalId (the owner id make_owner takes to move an agent to that team). You see the teams you belong to (including your personal team). A caller holding teams:manage as an admin or team-manager sees every team, each with its members' subjects.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (rawArgs: unknown, ctx) => {
       parse(ListSchema, "list_teams arguments", rawArgs);
@@ -119,7 +121,7 @@ export function registerTeamTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "rename_team",
-    scope: "teams:manage",
+    permission: "teams:manage",
     description: "Admins and team-managers (teams:manage): rename a team. A personal team cannot be renamed.",
     inputSchema: {
       type: "object",
@@ -135,7 +137,7 @@ export function registerTeamTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "delete_team",
-    scope: "teams:manage",
+    permission: "teams:manage",
     description:
       "Admins and team-managers (teams:manage): delete a team, its memberships and its grants. Refused (409) while the team still owns any resource: transfer those first. A personal team cannot be deleted.",
     inputSchema: {
@@ -153,7 +155,7 @@ export function registerTeamTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "add_team_member",
-    scope: "teams:manage",
+    permission: "teams:manage",
     description:
       "Admins and team-managers (teams:manage): add a user, named by their login subject, to a team. A user who has not signed in yet is created, so access can be arranged ahead of their first login. Adding someone already in the team does nothing. A personal team takes no other members.",
     inputSchema: {
@@ -173,7 +175,7 @@ export function registerTeamTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "remove_team_member",
-    scope: "teams:manage",
+    permission: "teams:manage",
     description:
       "Admins and team-managers (teams:manage): remove a user, named by their login subject, from a team. Removing someone who is not a member does nothing. A personal team's only member cannot be removed.",
     inputSchema: {
@@ -193,7 +195,7 @@ export function registerTeamTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "set_team_roles",
-    scope: "teams:manage",
+    permission: "teams:manage",
     description:
       "Admins (teams:manage): replace the wardby roles a team carries; every member holds them in addition to their own. Admin only, so a team-manager cannot grant roles. Unknown role names are refused. A personal team carries no roles.",
     inputSchema: {

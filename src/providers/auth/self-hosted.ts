@@ -439,7 +439,7 @@ export class SelfHostedAuthProvider implements AuthProvider {
     // Roles are read from the database on every request (no caching), so a
     // grant or revocation applies to live tokens immediately. Scopes stay
     // exactly what the user consented to; roles decide whether the
-    // privileged ones are honoured (resource-server.ts requireScope).
+    // privileged ones are honoured (resource-server.ts authorize).
     return {
       subject,
       scopes: family.scope.split(/\s+/).filter(Boolean),

@@ -14,7 +14,7 @@ import { McpError } from "../errors.js";
 export function registerMemoryTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "get_agent_memory",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, key: { type: "string" } },
@@ -29,7 +29,7 @@ export function registerMemoryTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_agent_memory",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" } },
@@ -44,7 +44,7 @@ export function registerMemoryTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "set_agent_memory",
-    scope: "memory:write",
+    permission: "memory:write",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, key: { type: "string" }, content: { type: "string" } },
@@ -66,7 +66,7 @@ export function registerMemoryTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "delete_agent_memory",
-    scope: "memory:write",
+    permission: "memory:write",
     inputSchema: {
       type: "object",
       properties: { agentId: { type: "string" }, key: { type: "string" } },

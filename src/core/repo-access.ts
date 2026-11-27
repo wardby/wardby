@@ -12,6 +12,11 @@
  * Host answers are cached per (provider, repository, host user id) for a
  * short TTL, positive and negative alike; set-time checks bypass the cache
  * and refresh it. A host error always denies: fail closed.
+ *
+ * A shared team has no linked identity of its own, so a team-owned agent
+ * passes when at least one current member's linked identity has enough
+ * permission (membership is read on every check; a removed member stops
+ * counting at once, while their host answer may linger for the TTL).
  * See docs/private/2026-09-26-repo-access-authorization-spec-and-plan.md.
  */
 import type { PrismaClient } from "#prisma";
@@ -113,7 +118,7 @@ export interface RepoAccessGate {
 }
 
 export interface RepoAccessGateOptions {
-  db: Pick<PrismaClient, "hostIdentity">;
+  db: Pick<PrismaClient, "hostIdentity" | "team">;
   hosts: ReviewHostRegistry;
   /** Trusted roots for `local:` repositories, read at each check (default: LOCAL_REPO_ROOTS). */
   localRoots?: () => readonly string[];
@@ -153,7 +158,8 @@ export function trustedAccountsFailure(err: unknown): string {
   return "unexpected_error";
 }
 
-type LevelAnswer = { ok: true; level: HostPermission; login: string } | { ok: false; transient: boolean };
+type LevelAnswer =
+  { ok: true; level: HostPermission; login: string; cached: boolean } | { ok: false; transient: boolean };
 
 interface CacheEntry {
   level: HostPermission;
@@ -163,6 +169,12 @@ interface CacheEntry {
 const defaultLocalRoots = (): readonly string[] => loadLocalRepoRoots(process.env).roots;
 
 export const DEFAULT_REPO_ACCESS_TTL_MS = 5 * 60_000;
+
+/**
+ * How many members of a shared team are looked up per check (oldest members
+ * first). Bounds the host calls a large team can cost; the answers are cached.
+ */
+export const MAX_TEAM_MEMBERS_CHECKED = 20;
 
 export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccessGate {
   const ttlMs = options.ttlMs ?? DEFAULT_REPO_ACCESS_TTL_MS;
@@ -214,7 +226,7 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
   ): Promise<LevelAnswer> {
     const key = `${provider}\u0000${repository}\u0000${user.id}`;
     const hit = cache.get(key);
-    if (!fresh && hit && hit.expiresAt > now()) return { ok: true, level: hit.level, login: user.login };
+    if (!fresh && hit && hit.expiresAt > now()) return { ok: true, level: hit.level, login: user.login, cached: true };
     const host = options.hosts[provider];
     if (!host) {
       log.warn({ provider, repository }, "no review host configured for a repository access check");
@@ -238,7 +250,7 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
     cache.delete(key);
     cache.set(key, { level: answer.level, expiresAt: now() + ttlMs });
     while (cache.size > maxEntries) cache.delete(cache.keys().next().value!);
-    return { ok: true, ...answer };
+    return { ok: true, ...answer, cached: false };
   }
 
   const unavailable = (answer: { transient: boolean }): RepoAccessDecision => ({
@@ -250,26 +262,20 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
     return atLeast(level, required) ? { ok: true, level } : { ok: false, reason: "insufficient_permission", level };
   }
 
-  async function authorizePrincipal(input: {
+  type PrincipalInput = {
     principalId: string;
     provider: string;
     repository: string;
     required: HostPermission;
     fresh?: boolean;
     retryTransient?: boolean;
-  }): Promise<RepoAccessDecision> {
-    const denied = await checkAccount(input.provider, input.repository);
-    if (denied) return denied;
-    let identity;
-    try {
-      identity = await options.db.hostIdentity.findUnique({
-        where: { principalId_provider: { principalId: input.principalId, provider: input.provider } },
-      });
-    } catch (err) {
-      log.warn({ err, provider: input.provider }, "could not read a host identity; denying");
-      return { ok: false, reason: "check_failed" };
-    }
-    if (!identity) return { ok: false, reason: "identity_not_linked" };
+  };
+
+  /** One linked identity's decision and where it came from; also records a renamed host login. */
+  async function decideIdentityWithSource(
+    identity: { principalId: string; hostUserId: string; login: string },
+    input: PrincipalInput,
+  ): Promise<{ decision: RepoAccessDecision; hostUserId: string; cached: boolean }> {
     const answer = await levelOf(
       input.provider,
       input.repository,
@@ -277,16 +283,125 @@ export function createRepoAccessGate(options: RepoAccessGateOptions): RepoAccess
       input.fresh === true,
       input.retryTransient === true,
     );
-    if (!answer.ok) return unavailable(answer);
+    if (!answer.ok) return { decision: unavailable(answer), hostUserId: identity.hostUserId, cached: false };
     if (answer.login !== identity.login) {
       await options.db.hostIdentity
         .updateMany({
-          where: { principalId: input.principalId, provider: input.provider, hostUserId: identity.hostUserId },
+          where: { principalId: identity.principalId, provider: input.provider, hostUserId: identity.hostUserId },
           data: { login: answer.login },
         })
         .catch((err: unknown) => log.warn({ err }, "could not record a renamed host login"));
     }
-    return decide(answer.level, input.required);
+    return {
+      decision: decide(answer.level, input.required),
+      hostUserId: identity.hostUserId,
+      cached: answer.cached,
+    };
+  }
+
+  async function decideIdentity(
+    identity: { principalId: string; hostUserId: string; login: string },
+    input: PrincipalInput,
+  ): Promise<RepoAccessDecision> {
+    return (await decideIdentityWithSource(identity, input)).decision;
+  }
+
+  /**
+   * The members of the shared team backed by this principal, or undefined when
+   * it is not one (a user, or a personal team, which is the user themself).
+   */
+  async function sharedTeamMembers(principalId: string): Promise<string[] | undefined> {
+    const team = await options.db.team.findUnique({
+      where: { principalId },
+      select: {
+        personal: true,
+        members: { orderBy: { createdAt: "asc" }, take: MAX_TEAM_MEMBERS_CHECKED + 1, select: { principalId: true } },
+      },
+    });
+    if (!team || team.personal) return undefined;
+    if (team.members.length > MAX_TEAM_MEMBERS_CHECKED) {
+      log.warn(
+        { teamPrincipalId: principalId, cap: MAX_TEAM_MEMBERS_CHECKED },
+        "team larger than the access check cap",
+      );
+    }
+    return team.members.slice(0, MAX_TEAM_MEMBERS_CHECKED).map((m) => m.principalId);
+  }
+
+  /** Passes when any member passes; otherwise the most informative denial. */
+  async function authorizeTeam(memberIds: string[], input: PrincipalInput): Promise<RepoAccessDecision> {
+    const found = memberIds.length
+      ? await options.db.hostIdentity.findMany({
+          where: { provider: input.provider, principalId: { in: memberIds } },
+        })
+      : [];
+    // The query has no order; sort by membership (oldest first) so the logged line does not depend on it.
+    const identities = found.sort((a, b) => memberIds.indexOf(a.principalId) - memberIds.indexOf(b.principalId));
+    // Members without a linked account are skipped, not an error.
+    const answers = await Promise.all(identities.map((identity) => decideIdentityWithSource(identity, input)));
+    const decisions = answers.map((a) => a.decision);
+    const passed = answers.filter((a) => a.decision.ok);
+    if (passed.length) {
+      // Only ids, counts and levels: no login, name, email or host response.
+      log.debug(
+        {
+          provider: input.provider,
+          repository: input.repository,
+          members: memberIds.length,
+          linked: identities.length,
+          passed: passed.map((a) => ({ hostUserId: a.hostUserId, level: a.decision.level, cached: a.cached })),
+        },
+        "team members passed the repository access check",
+      );
+      return passed[0].decision;
+    }
+    log.info(
+      {
+        provider: input.provider,
+        repository: input.repository,
+        members: memberIds.length,
+        linked: identities.length,
+        reasons: decisions.map((d) => (d.ok ? "ok" : d.reason)),
+      },
+      "no team member passed the repository access check",
+    );
+    // A failed lookup could have hidden a passing member: report it ahead of a plain "not enough".
+    const failed = decisions.find((d) => !d.ok && (d.reason === "check_unavailable" || d.reason === "check_failed"));
+    if (failed) return failed;
+    const levels = decisions.flatMap((d) => (d.level ? [d.level] : []));
+    if (levels.length) {
+      const best = levels.reduce((a, b) => (HOST_PERMISSION_RANK[a] >= HOST_PERMISSION_RANK[b] ? a : b));
+      return { ok: false, reason: "insufficient_permission", level: best };
+    }
+    return { ok: false, reason: "identity_not_linked" };
+  }
+
+  async function authorizePrincipal(input: PrincipalInput): Promise<RepoAccessDecision> {
+    const denied = await checkAccount(input.provider, input.repository);
+    if (denied) return denied;
+    let identity;
+    let members: string[] | undefined;
+    try {
+      members = await sharedTeamMembers(input.principalId);
+      if (!members) {
+        identity = await options.db.hostIdentity.findUnique({
+          where: { principalId_provider: { principalId: input.principalId, provider: input.provider } },
+        });
+      }
+    } catch (err) {
+      log.warn({ err, provider: input.provider }, "could not read a host identity; denying");
+      return { ok: false, reason: "check_failed" };
+    }
+    if (members) {
+      try {
+        return await authorizeTeam(members, input);
+      } catch (err) {
+        log.warn({ err, provider: input.provider }, "could not read team members' host identities; denying");
+        return { ok: false, reason: "check_failed" };
+      }
+    }
+    if (!identity) return { ok: false, reason: "identity_not_linked" };
+    return decideIdentity(identity, input);
   }
 
   return {
@@ -334,9 +449,9 @@ export function describeDenial(decision: Extract<RepoAccessDecision, { ok: false
     case "not_authorized":
       return `This agent's access to ${repository} was never authorized; re-link it (link_repository) or update the coding profile.`;
     case "identity_not_linked":
-      return `The agent owner has not linked a GitHub account; run link_host_account first.`;
+      return `No linked GitHub account can vouch for this agent: the owner (or, for a team, none of its members) has not run link_host_account.`;
     case "insufficient_permission":
-      return `The agent owner's GitHub account has ${decision.level ?? "no"} access to ${repository}, which is not enough.`;
+      return `The best linked GitHub account among the agent's owner (or its team's members) has ${decision.level ?? "no"} access to ${repository}, which is not enough.`;
     case "local_repo_not_allowed":
       return `local_repo_not_allowed: ${repository} is not a git repository inside the configured local roots (LOCAL_REPO_ROOTS).`;
     case "github_account_not_allowed":

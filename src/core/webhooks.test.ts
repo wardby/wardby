@@ -23,7 +23,10 @@ interface FakeAgentRow {
   ownerId?: string | null;
 }
 
-function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
+/** principalId -> the backing principal ids of the Teams it belongs to. */
+type FakeMemberships = Map<string, string[]>;
+
+function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = [], memberships: FakeMemberships = new Map()) {
   const webhooks = new Map<string, FakeWebhookRow>();
   const agentsById = new Map(agents.map((a) => [a.id, a]));
   const runs = new Map<string, any>();
@@ -96,6 +99,13 @@ function fakeDb(agents: FakeAgentRow[] = [], grants: FakeGrantSeed[] = []) {
     },
     $queryRaw: async () => [],
     resourceGrant: fakeResourceGrants(grants),
+    // Read live, as resolveStanding does, so a test can remove a member between fires.
+    teamMember: {
+      findMany: async ({ where }: { where: { principalId: string } }) =>
+        (memberships.get(where.principalId) ?? []).map((teamPrincipal, i) => ({
+          team: { id: `team_${i}`, principalId: teamPrincipal, roles: [] },
+        })),
+    },
     runs,
   };
   db.$transaction = async (fn: (tx: any) => unknown) => fn(db);
@@ -315,6 +325,17 @@ describe("core/webhooks", () => {
     );
     const old = await createWebhook("a1", "anyone", legacy);
     expect((await resolveWebhookRun(old.id, old.secret, legacy, executor)).ok).toBe(true);
+  });
+
+  it("fires a Team member's webhook on a Team agent, and stops once the member leaves the Team", async () => {
+    const memberships: FakeMemberships = new Map([["member", ["team-principal"]]]);
+    const db = fakeDb([{ id: "a1", name: "greeter", ownerId: "team-principal" }], [], memberships);
+    const { id, secret } = await createWebhook("a1", "member", db);
+    expect((await resolveWebhookRun(id, secret, db, executor)).ok).toBe(true);
+
+    memberships.delete("member");
+    expect(await resolveWebhookRun(id, secret, db, executor)).toEqual({ ok: false, reason: "disabled" });
+    expect((db as any).runs.size).toBe(1);
   });
 
   it("deleteWebhook removes it from listWebhooks", async () => {

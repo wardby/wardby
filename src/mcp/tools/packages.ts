@@ -19,8 +19,8 @@ import { matchRoot, parseAllowlist, type PackageAllowlist } from "../../coding/r
 import { UNKNOWN_RELATION_LABEL } from "../../coding/registry/audit-mode.js";
 import { REGISTRY_ADAPTERS } from "../../coding/registry/adapters.js";
 import { logger } from "../../core/logger.js";
-import { agentAccess } from "../auth/access.js";
-import { requireAnyScope } from "../auth/resource-server.js";
+import { agentAccess, ownsAgent } from "../auth/access.js";
+import { authorizeAny } from "../auth/resource-server.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -40,7 +40,7 @@ const ApproveSchema = z
 export function registerPackageTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "approve_audited_packages",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Add the packages a run installed under package audit mode to its agent's codingProfile.packageAllowlist, as " +
       "bare names (the top-level records in get_run's packageAudit; their dependencies then follow through the " +
@@ -71,7 +71,7 @@ export function registerPackageTools(mcp: WardbyMcpServer): void {
       }
       const { runId, names } = parsed.data;
       // The same gate as changing packageAllowlist through update_agent.
-      requireAnyScope(ctx, ctx.canonicalUri, "packages:approve", "agents:admin");
+      authorizeAny(ctx, "packages:approve", "agents:admin");
 
       // Visible to the agent's owner and the run's triggerer only, exactly as get_run.
       const notFound = new McpError(404, `Run "${runId}" not found.`);
@@ -141,7 +141,7 @@ export function registerPackageTools(mcp: WardbyMcpServer): void {
               throw new McpError(400, `Agent "${agentId}" is not a coding agent.`);
             }
             // Strict, like update_agent's coding profile: the owner only.
-            if (agent.ownerId === null || agent.ownerId !== ctx.principal.id) {
+            if (!ownsAgent(ctx, agent)) {
               throw new McpError(403, `Agent "${agentId}": only its owner can change its package allowlist.`);
             }
             const current = (agent.codingProfile.packageAllowlist ?? {}) as PackageAllowlist;

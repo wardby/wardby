@@ -379,6 +379,8 @@ function buildFakeDb() {
           : null;
       },
     },
+    // The webhook creator check reads Team membership; nobody here is in a Team.
+    teamMember: { findMany: async () => [] },
     webhook: {
       create: async ({ data }: { data: Partial<FakeWebhookRow> & { agentId: string; secretHash: string } }) => {
         const row: FakeWebhookRow = {

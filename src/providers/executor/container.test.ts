@@ -215,6 +215,7 @@ function gateWith(
   const linked = level !== undefined;
   const gate = createRepoAccessGate({
     db: {
+      team: { findUnique: async () => null },
       hostIdentity: {
         findUnique: async () =>
           linked ? { principalId: "principal-1", provider: "github", hostUserId: "42", login: "octo" } : null,
@@ -6764,7 +6765,10 @@ describe("ContainerExecutor with several repositories (#537)", () => {
 
   it("refuses a read row outside the GitHub allowlist even when it is admin-approved, before any clone", async () => {
     const gate = createRepoAccessGate({
-      db: { hostIdentity: { findUnique: async () => null, updateMany: async () => ({ count: 0 }) } } as never,
+      db: {
+        team: { findUnique: async () => null },
+        hostIdentity: { findUnique: async () => null, updateMany: async () => ({ count: 0 }) },
+      } as never,
       hosts: {},
       trustedAccounts: async () => new Set(["openai"]),
     });

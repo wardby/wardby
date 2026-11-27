@@ -20,9 +20,16 @@ each push; the first one denied refuses the run. See
 [Several repositories in one coding run](../multi-repository-runs.md).
 
 1. Confirm the agent has an owner and the intended repository is attached.
-2. Confirm that owner has linked their GitHub account to Wardby.
+2. Confirm that owner has linked their GitHub account to Wardby. For a
+   team-owned agent, at least one current team member must have linked theirs
+   (`link_host_account`); members without a linked account are skipped.
 3. Confirm the GitHub App is installed on the repository and the owner has the
-   required permission: write for coding work, read for a read-only link.
+   required permission: write for coding work, read for a read-only link. For a
+   team, one current member with that permission is enough, and removing the
+   last such member makes the check fail again. To find out which members are
+   vouching, set `LOG_LEVEL=debug` and read the "team members passed the
+   repository access check" line: it lists each passing member's GitHub user
+   id and permission level.
 4. If no individual owner can hold the access, ask a Wardby administrator to
    record an explicit repository approval.
 5. Trigger a fresh run after the correction.

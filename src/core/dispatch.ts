@@ -128,6 +128,7 @@ export type DispatchTx = Pick<
   | "webhook"
   | "budgetGroup"
   | "resourceGrant"
+  | "teamMember"
   | "workItem"
   | "localPullRequest"
   | "issuePullRequest"

@@ -8,7 +8,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PrismaClient } from "#prisma";
 import type { McpRequestContext } from "../mcp/context.js";
-import { requireScope } from "../mcp/auth/resource-server.js";
+import { authorize } from "../mcp/auth/resource-server.js";
 import { sendJson } from "../mcp/transport/streamable-http.js";
 import type { InfraInfo } from "./api-schema.js";
 import { loadViewerDocuments } from "./documents.js";
@@ -90,7 +90,7 @@ export function createViewerApi(deps: ViewerApiDeps): ViewerApi {
       if (!isGraph && !isEvents && !isInfra && !isDocuments && !runMatch) return false;
 
       const ctx = await deps.authenticate(req.headers.authorization);
-      requireScope(ctx, deps.canonicalUri, "admin:view");
+      authorize(ctx, "admin:view");
 
       if (req.method !== "GET") {
         sendJson(res, 405, { error: "method_not_allowed" }, { allow: "GET" });

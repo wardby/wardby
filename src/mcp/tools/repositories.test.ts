@@ -1499,8 +1499,9 @@ describe("link_repository admin override on someone else's agent (M-3)", () => {
     const c2 = await connectClient(admin.mcp);
     const noOverride = await c2.callTool({ ...call, arguments: { ...call.arguments, adminOverride: undefined } });
     expect(noOverride.isError).toBeTruthy();
-    // Admins get no implicit access to others' agents: the agent is hidden.
-    expect(errorText(noOverride as never)).toContain("not found");
+    // Admins get no implicit access to others' agents. They can list it (admin:view), so they are
+    // told they have no access rather than that it doesn't exist.
+    expect(errorText(noOverride as never)).toContain("no access to this agent (access: none)");
     await c2.close();
   });
 });

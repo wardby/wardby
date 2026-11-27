@@ -103,7 +103,8 @@ describe.skipIf(!process.env.DATABASE_URL)("share-link MCP tools (database)", ()
   });
 
   it("needs the documents scopes", async () => {
-    const call = await connect(owner, ["agents:read"]);
+    // No scope at all; a read-tier scope such as agents:read now reaches documents:read too.
+    const call = await connect(owner, []);
     expect((await call("list_share_links", { documentId: docId })).isError).toBe(true);
   });
 });

@@ -35,7 +35,7 @@ function parse<T>(schema: z.ZodType<T, unknown>, label: string, value: unknown):
 export function registerPowerTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "power_status",
-    scope: "power:manage",
+    permission: "power:manage",
     description:
       "Admins (power:manage): low-power mode state. For the coding proxy, the native gateway and (when WARDBY_RENDERER_URL is set) the export renderer: replicas, whether a ready endpoint exists, when it last woke (wokeAt), and blockers (run ids keeping it busy; for the gateway: sandbox runs, coding runs with MCP tools and runs with an active gateway session; for the renderer: queued or running export ids). Returns { enabled: false } when low-power mode is off.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
@@ -47,7 +47,7 @@ export function registerPowerTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "power_sleep",
-    scope: "power:manage",
+    permission: "power:manage",
     description:
       "Admins (power:manage): scale the coding proxy, native gateway and export renderer (or one named target) to zero now, skipping low-power mode's idle window. It never stops a run: a target is refused while it has active or queued runs (for the gateway: sandbox runs and coding runs with MCP tools, and also an active gateway session), and those run ids are returned under blocked. Recently finished runs do not block it. The next run wakes the target again. Fails (409 low_power_disabled) when low-power mode is off.",
     inputSchema: {

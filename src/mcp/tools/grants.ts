@@ -20,6 +20,7 @@ import {
   EVERYONE_KEY,
   EVERYONE_MAX,
   LEVELS,
+  NO_EVERYONE_TYPES,
   agentGranteeKey,
   agentOwnerBindings,
   SHAREABLE_TYPES,
@@ -28,17 +29,21 @@ import {
   isLevel,
   isResourceType,
   principalGranteeKey,
+  pruneUnusableBudgetGroupMembers,
   pruneUnusableMcpAttachments,
+  pruneUnusableToolAttachments,
   type ResourceType,
 } from "../../core/grants.js";
 import { preferIndexScans, withSerializableRetry } from "../../core/serializable-retry.js";
 import { documentAccess } from "../../core/documents/access.js";
-import { agentNotFound, assertAgentAccess, agentAccess } from "../auth/access.js";
-import { isOwnerAll, permissionsOf } from "../auth/resource-server.js";
+import { agentAccess, agentNotFound, assertAgentAccess, ownsResource } from "../auth/access.js";
+import { isOwnerAll } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
+import { check } from "../../authz/index.js";
+import { requireDatastoreAccess, requireSecretAccess, requireWebhookAccess } from "../auth/ownership.js";
 
 const GranteeSchema = z.union([
   z.literal("everyone"),
@@ -117,7 +122,20 @@ async function resolveGrantee(db: GrantTx, grantee: Grantee): Promise<Principal 
   return principal;
 }
 
-/** Grant management is the owner's (or the stdio operator's). Agents, MCP servers and documents. */
+/** Types whose attachments depend on use: lowering a grant below it can remove them. */
+const PRUNE_BELOW_USE: ReadonlySet<ResourceType> = new Set<ResourceType>(["mcp_server", "budget_group", "tool"]);
+
+/** What an agent loses when its owner can no longer use a shared resource: MCP server attachments, budget group membership. */
+async function pruneUnusable(tx: GrantTx, type: ResourceType, resourceId: string, level?: string): Promise<number> {
+  // A grant at or above use keeps every attachment; a revoke (no level) re-checks them all.
+  if (level !== undefined && PRUNE_BELOW_USE.has(type) && atLeast(type, level, "use")) return 0;
+  if (type === "mcp_server") return pruneUnusableMcpAttachments(tx, resourceId);
+  if (type === "budget_group") return pruneUnusableBudgetGroupMembers(tx, resourceId);
+  if (type === "tool") return pruneUnusableToolAttachments(tx, resourceId);
+  return 0;
+}
+
+/** Grant management is the owner's (or the stdio operator's). Agents, MCP servers, documents and budget groups. */
 async function requireOwnedResource(
   ctx: McpRequestContext,
   db: GrantTx,
@@ -127,7 +145,7 @@ async function requireOwnedResource(
   if (type === "mcp_server") {
     const server = await db.mcpServer.findUnique({ where: { id } });
     // Missing and someone else's look the same. The stdio operator owns everything.
-    if (!server || (!ctx.operator && !isOwnerAll(ctx) && server.ownerId !== ctx.principal.id)) {
+    if (!server || (!ctx.operator && !isOwnerAll(ctx) && !ownsResource(ctx, server.ownerId))) {
       throw new McpError(404, `MCP server "${id}" not found.`);
     }
     return server;
@@ -139,6 +157,7 @@ async function requireOwnedResource(
       ? await documentAccess(db, doc.id, {
           kind: "principal",
           principalId: ctx.principal.id,
+          ...(ctx.actsFor ? { actsFor: ctx.actsFor } : {}),
           operator: ctx.operator === true || isOwnerAll(ctx),
         })
       : "none";
@@ -150,7 +169,36 @@ async function requireOwnedResource(
     }
     return doc;
   }
-  // Only "agent" and "mcp_server" reach here (shareableType).
+  if (type === "secret" || type === "datastore" || type === "webhook") {
+    // 404 if missing or invisible, 403 for a read grantee; a row with no owner is the operator's to share.
+    const row =
+      type === "secret"
+        ? await requireSecretAccess(ctx, id, "owner", db)
+        : type === "datastore"
+          ? await requireDatastoreAccess(ctx, id, "owner", db)
+          : await requireWebhookAccess(ctx, id, "owner", db);
+    if (row.ownerId === null && !ctx.operator && !isOwnerAll(ctx)) {
+      throw new McpError(404, `${type} "${id}" not found.`);
+    }
+    return row;
+  }
+  if (type === "tool") {
+    const tool = await db.tool.findUnique({ where: { id } });
+    // Missing and someone else's look the same. A public tool has no owner: only the operator manages it.
+    if (!tool || (!ctx.operator && !isOwnerAll(ctx) && !ownsResource(ctx, tool.ownerId))) {
+      throw new McpError(404, `Tool "${id}" not found.`);
+    }
+    return tool;
+  }
+  if (type === "budget_group") {
+    const group = await db.budgetGroup.findUnique({ where: { id } });
+    // Missing and someone else's look the same. A public group has no owner: only the operator manages it.
+    if (!group || (!ctx.operator && !isOwnerAll(ctx) && !ownsResource(ctx, group.ownerId))) {
+      throw new McpError(404, `Budget group "${id}" not found.`);
+    }
+    return group;
+  }
+  // Only "agent" reaches here (shareableType).
   const row = await db.agent.findUnique({ where: { id } });
   return (await assertAgentAccess(ctx, row, id, "owner", db)).agent;
 }
@@ -159,6 +207,13 @@ type GrantTx = Pick<
   PrismaClient,
   | "agent"
   | "mcpServer"
+  | "budgetGroup"
+  | "tool"
+  | "secret"
+  | "datastore"
+  | "webhook"
+  | "runHook"
+  | "teamMember"
   | "document"
   | "documentShareLink"
   | "principal"
@@ -192,14 +247,15 @@ function inSerializable<T>(ctx: McpRequestContext, fn: (tx: GrantTx) => Promise<
 }
 
 function isAdmin(ctx: McpRequestContext): boolean {
-  return ctx.scopes.has("agents:admin") && permissionsOf(ctx.roles).has("agents:admin");
+  return check(ctx, ["agents:admin"]) === null;
 }
 
 const TYPE_PROPERTIES = {
   // No enum: another type gets a clear "not shareable yet" from the handler.
   resourceType: {
     type: "string",
-    description: 'Agents, MCP servers and documents are shareable: "agent", "mcp_server" or "document".',
+    description:
+      'Shareable: "agent", "mcp_server", "document", "budget_group", "tool", "secret", "datastore" or "webhook".',
   },
   resourceId: { type: "string" },
 };
@@ -232,15 +288,18 @@ const GRANTEE_PROPERTY = {
 export function registerGrantTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "grant_access",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
-      "Shares an agent or MCP server you own with one principal or with everyone, at a level: " +
+      "Shares an agent, MCP server, document, budget group or tool you own with one principal or with everyone, at a level: " +
       "read (see its config, never secret values or other owners' tool code); " +
       "execute (also trigger runs and see the runs they triggered); " +
       "write (also change its name, prompt, model, budget amount, max turns, effort, memory on/off and schedule, attach tools they can use and detach tools, and create webhooks). " +
       "Owner-only whatever the level: the coding profile (task, base ref, protected paths, task-override opt-in, image, packages, limits), kind, budget group, sub-agents, secret/datastore/repository bindings, tool capabilities, memory and datastore contents, grants, delete. " +
       "Consequences: execute lets them run your agent with your tools, secrets, datastores and repository, and every run shares the agent's memory; they supply no task text unless it's a coding agent with allowWebhookTaskOverride. " +
       "Write lets them rewrite what those runs do: the prompt can make a run use everything the agent can already reach (the capabilities you granted, its memory, its linked repositories), and on a coding agent the prompt is part of every coding task, so write directs work done with your GitHub access. " +
+      "Secrets, datastores and webhooks (resourceType secret, datastore or webhook): read only, and never for everyone; read shows that the resource exists and its name and metadata, never a value, and a grantee binds, changes and deletes nothing (only the owner, or a Team it belongs to, does). " +
+      "Tools (resourceType tool): read < use < write; read shows the tool's name, description and time limit, never its code; use lets them attach it to their own agents and run hooks, where it runs with the capabilities they grant it; write adds nothing beyond use: only the owner updates, deletes or re-grants a tool, and not while it is attached to someone else's agent. Lowering a grant to read (including everyone from use to read) detaches the tool from every agent and hook whose owner can no longer use it. " +
+      "Budget groups (resourceType budget_group): read < use < write; use lets them put their own agents in the group, so those agents' runs count against it and its cap; write also lets them rename it and change its caps; only the owner deletes it or re-grants. Lowering a grant to read (including everyone from use to read) removes the group from every agent whose owner can no longer use it. " +
       "MCP servers (resourceType mcp_server): read < use < write; use on an MCP server lets them attach it to their own agents; its tools then run with your server's credentials. Write adds nothing beyond use: only the owner updates, refreshes, deletes or re-grants a server. Lowering a grant to read (including everyone from use to read) detaches the server from every agent whose owner can no longer use it, and their runs' next call to it is refused. " +
       "Documents (resourceType document): read < comment < write; everyone may get at most comment. An agent may be granted read or comment with {agentId}; to make an agent the writer, link it with link_document. Only the owner manages grants. " +
       "Granting again replaces the level. Everyone may get write only on a native agent with no secrets, datastores, repositories, sub-agents, MCP servers, tool capabilities or document tools. The grantee must have signed in once.",
@@ -253,7 +312,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
         level: {
           type: "string",
           description:
-            "Agents: read < execute < write. MCP servers: read < use < write. Documents: read < comment < write.",
+            "Agents: read < execute < write. MCP servers, budget groups and tools: read < use < write. Documents: read < comment < write.",
         },
       },
       required: ["resourceType", "resourceId", "grantee", "level"],
@@ -274,6 +333,9 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
             400,
             "The owner already has full access; a grant to yourself or the owner changes nothing.",
           );
+        }
+        if (!principal && !agent && NO_EVERYONE_TYPES.has(type)) {
+          throw new McpError(400, `A ${type} cannot be shared with everyone; name the people it is for.`);
         }
         if (!principal && !agent && accessRank(type, args.level) > accessRank(type, EVERYONE_MAX[type])) {
           throw new McpError(400, `An everyone grant can be at most ${EVERYONE_MAX[type]}.`);
@@ -307,11 +369,8 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
           },
           update: { level: args.level, source: "owner", grantedById: ctx.principal.id },
         });
-        // Below use, agents whose owner can no longer use the server lose it now (C1).
-        const attachmentsRemoved =
-          type === "mcp_server" && !atLeast(type, args.level, "use")
-            ? await pruneUnusableMcpAttachments(tx, resource.id)
-            : 0;
+        // Below use, agents whose owner can no longer use the server (or the budget group) lose it now (C1).
+        const attachmentsRemoved = await pruneUnusable(tx, type, resource.id, args.level);
         return { resource, principal, agent, grant, attachmentsRemoved };
       });
       return textResult({
@@ -334,9 +393,9 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "revoke_access",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
-      "Removes a grant on an agent, MCP server or document you own. Idempotent. Takes effect on the next check (trigger, delegation, webhook fire); runs already in flight keep going. For an MCP server the check is every tool call: the server is detached from every agent whose owner can no longer use it (your own agents are untouched), and a run's next call to it is refused with mcp_tool_not_allowed.",
+      "Removes a grant on an agent, MCP server, budget group, tool or document you own. Idempotent. Takes effect on the next check (trigger, delegation, webhook fire); runs already in flight keep going. For an MCP server the check is every tool call: the server is detached from every agent whose owner can no longer use it (your own agents are untouched), and a run's next call to it is refused with mcp_tool_not_allowed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -359,8 +418,8 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
         const { count } = await tx.resourceGrant.deleteMany({
           where: { resourceType: type, resourceId: resource.id, granteeKey },
         });
-        // Agents whose owner can no longer use the server lose it now (C1).
-        const attachmentsRemoved = type === "mcp_server" ? await pruneUnusableMcpAttachments(tx, resource.id) : 0;
+        // Agents whose owner can no longer use the server (or the budget group) lose it now (C1).
+        const attachmentsRemoved = await pruneUnusable(tx, type, resource.id);
         return { count, attachmentsRemoved };
       });
       return textResult({ revoked: count > 0, ...(attachmentsRemoved > 0 ? { attachmentsRemoved } : {}) });
@@ -369,9 +428,9 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_access",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
-      "Lists who an agent, MCP server or document is shared with (grant metadata only). For its owner, the stdio operator, and admins (incident response).",
+      "Lists who an agent, MCP server, budget group, tool or document is shared with (grant metadata only). For its owner, the stdio operator, and admins (incident response).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -385,7 +444,7 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
       if (type === "mcp_server") {
         const server = await ctx.db.mcpServer.findUnique({ where: { id: args.resourceId } });
         // Owner, stdio operator or admin; anyone else sees a missing server.
-        if (!server || (!ctx.operator && !isOwnerAll(ctx) && !isAdmin(ctx) && server.ownerId !== ctx.principal.id)) {
+        if (!server || (!ctx.operator && !isOwnerAll(ctx) && !isAdmin(ctx) && !ownsResource(ctx, server.ownerId))) {
           throw new McpError(404, `MCP server "${args.resourceId}" not found.`);
         }
         resource = server;
@@ -395,10 +454,39 @@ export function registerGrantTools(mcp: WardbyMcpServer): void {
           select: { id: true, ownerId: true },
         });
         // Owner, stdio operator or admin; anyone else sees a missing document.
-        if (!doc || (!ctx.operator && !isOwnerAll(ctx) && !isAdmin(ctx) && doc.ownerId !== ctx.principal.id)) {
+        if (!doc || (!ctx.operator && !isOwnerAll(ctx) && !isAdmin(ctx) && !ownsResource(ctx, doc.ownerId))) {
           throw new McpError(404, `Document "${args.resourceId}" not found.`);
         }
         resource = doc;
+      } else if (type === "secret" || type === "datastore" || type === "webhook") {
+        // Owner, stdio operator or admin; anyone else sees a missing row.
+        const row = isAdmin(ctx)
+          ? await (type === "secret"
+              ? ctx.db.secret.findUnique({ where: { id: args.resourceId } })
+              : type === "datastore"
+                ? ctx.db.datastore.findUnique({ where: { id: args.resourceId } })
+                : ctx.db.webhook.findUnique({ where: { id: args.resourceId } }))
+          : type === "secret"
+            ? await requireSecretAccess(ctx, args.resourceId, "owner")
+            : type === "datastore"
+              ? await requireDatastoreAccess(ctx, args.resourceId, "owner")
+              : await requireWebhookAccess(ctx, args.resourceId, "owner");
+        if (!row) throw new McpError(404, `${type} "${args.resourceId}" not found.`);
+        resource = row;
+      } else if (type === "tool") {
+        const tool = await ctx.db.tool.findUnique({ where: { id: args.resourceId } });
+        // Owner, stdio operator or admin; anyone else sees a missing tool.
+        if (!tool || (!ctx.operator && !isOwnerAll(ctx) && !isAdmin(ctx) && !ownsResource(ctx, tool.ownerId))) {
+          throw new McpError(404, `Tool "${args.resourceId}" not found.`);
+        }
+        resource = tool;
+      } else if (type === "budget_group") {
+        const group = await ctx.db.budgetGroup.findUnique({ where: { id: args.resourceId } });
+        // Owner, stdio operator or admin; anyone else sees a missing group.
+        if (!group || (!ctx.operator && !isOwnerAll(ctx) && !isAdmin(ctx) && !ownsResource(ctx, group.ownerId))) {
+          throw new McpError(404, `Budget group "${args.resourceId}" not found.`);
+        }
+        resource = group;
       } else {
         const agent = await ctx.db.agent.findUnique({ where: { id: args.resourceId } });
         if (!agent) throw agentNotFound(args.resourceId);

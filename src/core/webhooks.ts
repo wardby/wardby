@@ -10,7 +10,8 @@
  */
 import type { SecretCipher } from "./plans/publish.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { AgentKind, CodingAgentProfile, PrismaClient, Webhook } from "#prisma";
+import type { AgentKind, CodingAgentProfile, Prisma, PrismaClient, Webhook } from "#prisma";
+import { deleteGrantsFor } from "./grants.js";
 import type { Executor } from "../providers/executor/types.js";
 import type { IssueTrackerRegistry } from "../providers/issue-tracker/types.js";
 import {
@@ -27,7 +28,8 @@ import {
 } from "./coding-repository-set.js";
 import { dispatchRun } from "./dispatch.js";
 import { PlanRefusedError, type PlanRefusalCode } from "./plans/refusal.js";
-import { atLeast, effectiveAccess } from "./grants.js";
+import { atLeast, accessFor } from "./grants.js";
+import { resolveStanding } from "./teams/standing.js";
 
 export type WebhookMetadata = Pick<Webhook, "id" | "agentId" | "status" | "ownerId" | "createdAt" | "lastFiredAt">;
 
@@ -74,10 +76,10 @@ export async function createWebhook(
 export async function listWebhooks(
   principalId: string,
   db: PrismaClient,
-  opts: { all?: boolean } = {},
+  opts: { all?: boolean; where?: Prisma.WebhookWhereInput } = {},
 ): Promise<WebhookMetadata[]> {
   const webhooks = await db.webhook.findMany({
-    where: opts.all ? {} : { OR: [{ ownerId: principalId }, { agent: { ownerId: principalId } }] },
+    where: opts.where ?? (opts.all ? {} : { OR: [{ ownerId: principalId }, { agent: { ownerId: principalId } }] }),
   });
   return webhooks.map(({ id, agentId, status, ownerId: owner, createdAt, lastFiredAt }) => ({
     id,
@@ -90,7 +92,10 @@ export async function listWebhooks(
 }
 
 export async function deleteWebhook(id: string, db: PrismaClient): Promise<void> {
-  await db.webhook.delete({ where: { id } });
+  await db.$transaction(async (tx) => {
+    await deleteGrantsFor(tx, "webhook", id);
+    await tx.webhook.delete({ where: { id } });
+  });
 }
 
 export type ResolveWebhookRunResult =
@@ -205,8 +210,11 @@ export async function resolveWebhookRun(
         // sharing grants spec §3.10): its owner, or a holder of execute. Read
         // through tx, so a revoke or make_owner takes effect on the next fire.
         // A webhook on a formerly public agent keeps firing through the
-        // migration's everyone-execute grant.
-        const creatorAccess = await effectiveAccess(tx, "agent", currentAgent, current.ownerId);
+        // migration's everyone-execute grant. The creator acts for its Teams
+        // too, read live: a member's webhook on a Team agent keeps firing
+        // while the member stays in the Team, and stops once it leaves.
+        const creator = current.ownerId === null ? null : (await resolveStanding(tx, current.ownerId)).actsFor;
+        const creatorAccess = await accessFor(tx, "agent", currentAgent, creator);
         if (!atLeast("agent", creatorAccess, "execute")) {
           rejected = "disabled";
           return false;

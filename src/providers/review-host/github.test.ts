@@ -639,7 +639,7 @@ describe("GitHubReviewHost writes", () => {
         path: "a.py",
         line: 2,
         side: "RIGHT",
-        body: "**[MAJOR]** off by one\n```suggestion\nnew 2\n```\n\n<!-- wardby:finding:agent1 -->",
+        body: "**MAJOR:** off by one\n```suggestion\nnew 2\n```\n\n<!-- wardby:finding:agent1 -->",
       },
     ]);
     const summary = calls.find((c) => c.method === "POST" && c.path === `${BASE}/issues/7/comments`)!.body as {

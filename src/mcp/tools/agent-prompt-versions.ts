@@ -47,7 +47,7 @@ async function mapped<T>(run: () => Promise<T>): Promise<T> {
 export function registerAgentPromptVersionTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_agent_prompt_versions",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "Lists an agent's system-prompt history, newest first: number, how it was made (via), who, the optional summary, " +
       "size and time; never the text (read one with get_agent_prompt_version). Every prompt change is kept.",
@@ -75,7 +75,7 @@ export function registerAgentPromptVersionTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "get_agent_prompt_version",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "Reads one version of an agent's system prompt. The text is in systemPromptText with the agent's secret values " +
       "masked, so it can differ from what restore_agent_prompt_version would put back (restore copies the stored text as is).",
@@ -98,7 +98,7 @@ export function registerAgentPromptVersionTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "restore_agent_prompt_version",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Restores an earlier system prompt of an agent you can write: it becomes the live prompt AND a NEW version " +
       '(summary "Restored v<N>"); nothing is deleted. Give baseNumber (required: the latest version you saw); it refuses with ' +

@@ -54,6 +54,18 @@ models. Seven sensitive permissions have an additional role requirement:
   `power_sleep`); see
   [Low-power mode](../docs/getting-started-gke.md#low-power-mode).
 
+Wardby also accepts four tier scopes that each cover a group of permissions and
+include the tiers below them: `wardby:read` (`agents:read`, `documents:read`),
+`wardby:write` (the other non-privileged permissions), `wardby:admin` (the
+privileged permissions above except `owner:all`) and `wardby:owner`
+(`owner:all`). `wardby:viewer` covers `admin:view` only. A token carrying one of
+the scopes listed above is treated as carrying its permission's tier, so a token
+with any write scope reaches every write-tier operation its roles and resource
+access allow. A scope never grants a privileged permission on its own: the role
+requirements above still apply, and `owner:all` still needs the `wardby_owner`
+role. The tier scopes are accepted but not yet advertised, so keep defining the
+scopes listed above in the provider.
+
 Map roles only from an IdP claim that users cannot self-assign. Removing a
 role affects the next token the caller receives.
 

@@ -19,9 +19,9 @@ import { isPublicWritable } from "../../core/grants.js";
 import { HOOK_EVENT_KINDS, RUN_END_STATUSES, type HookEventKind } from "../../core/workflow-events.js";
 import { validateParams } from "../../sandbox/zod-params.js";
 import { ToolCapabilitiesPatchSchema } from "../../sandbox/tool-capabilities.js";
-import { assertAgentAccess } from "../auth/access.js";
-import { requireOwnedTool } from "../auth/ownership.js";
-import { isOwnerAll, requireScope } from "../auth/resource-server.js";
+import { assertAgentAccess, ownsAgent } from "../auth/access.js";
+import { requireToolAccess } from "../auth/ownership.js";
+import { authorize } from "../auth/resource-server.js";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
@@ -136,7 +136,7 @@ async function assertToolAcceptsConfig(
 
 function requireFinalTextAdmin(ctx: McpRequestContext): void {
   try {
-    requireScope(ctx, ctx.canonicalUri, "agents:admin");
+    authorize(ctx, "agents:admin");
   } catch {
     throw new McpError(
       403,
@@ -191,7 +191,7 @@ const SERIALIZABLE = { isolationLevel: Prisma.TransactionIsolationLevel.Serializ
 export function registerRunHookTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "create_run_hook",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Ties a sandbox tool to an agent's workflow events: wardby (not the model) calls the tool with { event, config } when one happens. Needs write on the agent and a tool you may attach. events: any of " +
       `${HOOK_EVENT_KINDS.join(", ")} (empty = all); run_completed fires for every finished run, filtered by statuses (empty = all) and runs ("top_level", the default, or "all" to include child runs). ` +
@@ -215,7 +215,7 @@ export function registerRunHookTools(mcp: WardbyMcpServer): void {
           "write",
           tx,
         );
-        const isOwner = agent.ownerId !== null && agent.ownerId === ctx.principal.id;
+        const isOwner = ownsAgent(ctx, agent);
         if (capabilitiesPassed && !isOwner) {
           throw new McpError(
             403,
@@ -228,7 +228,7 @@ export function registerRunHookTools(mcp: WardbyMcpServer): void {
             `Agent "${agent.id}" is writable by everyone, so hook capabilities cannot be granted on it; revoke or lower the everyone grant first.`,
           );
         }
-        const tool = await requireOwnedTool(tx, args.toolId, ctx.principal.id, isOwnerAll(ctx));
+        const tool = await requireToolAccess(ctx, args.toolId, "use", tx);
         await assertToolAcceptsConfig(tool, agent, parsed);
         const hook = await tx.runHook.create({
           data: {
@@ -256,7 +256,7 @@ export function registerRunHookTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "update_run_hook",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Replaces a run hook's settings with the full desired state (fields left out take their defaults, as in create_run_hook) and clears its lastError. Needs write on the hook's agent. " +
       "Only the agent's owner can set allowedSecrets/allowedHosts; when anyone else updates, the hook's capabilities are left as they are. Turning includeFinalText on needs agents:admin with the admin role.",
@@ -280,7 +280,7 @@ export function registerRunHookTools(mcp: WardbyMcpServer): void {
           "write",
           tx,
         );
-        const isOwner = agent.ownerId !== null && agent.ownerId === ctx.principal.id;
+        const isOwner = ownsAgent(ctx, agent);
         if (capabilitiesPassed && !isOwner) {
           throw new McpError(403, "Only the agent's owner can grant a hook secrets or hosts.");
         }
@@ -327,7 +327,7 @@ export function registerRunHookTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "delete_run_hook",
-    scope: "agents:write",
+    permission: "agents:write",
     description: "Deletes a run hook and its pending deliveries. Needs write on the hook's agent.",
     inputSchema: { type: "object", properties: { hookId: { type: "string" } }, required: ["hookId"] },
     handler: async (args: { hookId: string }, ctx) => {
@@ -346,7 +346,7 @@ export function registerRunHookTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_run_hooks",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "Lists an agent's run hooks (needs read on the agent), each with its settings, whether its secrets and hosts are granted by the agent's current owner (capabilitiesGranted), lastError, and its pending and failed delivery counts.",
     inputSchema: { type: "object", properties: { agentId: { type: "string" } }, required: ["agentId"] },
@@ -381,7 +381,7 @@ export function registerRunHookTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "test_run_hook",
-    scope: "agents:write",
+    permission: "agents:write",
     description:
       "Calls a run hook's tool now with a synthetic run_completed event (event.test is true; with includeFinalText, a placeholder final text, never a real run's output) and its config, the same way a real delivery does, and returns { ok } or the masked error. Records nothing. Needs write on the hook's agent.",
     inputSchema: { type: "object", properties: { hookId: { type: "string" } }, required: ["hookId"] },

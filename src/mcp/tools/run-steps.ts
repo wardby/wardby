@@ -24,7 +24,7 @@ export interface RunStepsToolOptions {
 export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOptions): void {
   mcp.registerTool({
     name: "get_run_steps",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "What a run did, one line per step, oldest first: each tool call (the tool and its command, file or first " +
       "argument, cut short) with its status once known (ok, error or exit N), and what the model said, cut short. " +
@@ -53,6 +53,7 @@ export function registerRunStepsTool(mcp: WardbyMcpServer, opts: RunStepsToolOpt
       const run = await findReadableRun(ctx, args.runId);
       const showDetail = await canReadRunDetail(ctx.db, run, {
         principalId: ctx.principal.id,
+        actsFor: ctx.actsFor,
         operator: ctx.operator,
       });
       const after = Number.isFinite(args.after) ? Math.max(0, Math.floor(args.after as number)) : 0;

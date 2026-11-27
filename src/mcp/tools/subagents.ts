@@ -62,7 +62,7 @@ async function canReach(db: SubAgentDb, fromAgentId: string, toAgentId: string):
 export function registerSubAgentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "attach_subagent",
-    scope: "agents:write",
+    permission: "agents:write",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -115,7 +115,7 @@ export function registerSubAgentTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "detach_subagent",
-    scope: "agents:write",
+    permission: "agents:write",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -148,7 +148,7 @@ export function registerSubAgentTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "list_subagents",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: {
       type: "object",
       additionalProperties: false,

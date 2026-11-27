@@ -36,6 +36,30 @@ grants it: `admin` or `team-manager`.
   nothing.
 - A team cannot be a member of another team.
 
+## Agents and other resources a team owns
+
+A team can own agents, budget groups, tools, MCP servers, documents, secrets, datastores and webhooks. Every
+member acts as an owner of what their team owns: they can read and change it and
+grant access to it, with no per-person grant. A grant made to a team reaches every member at the granted level.
+Removing a member takes this away on their next request. The token's scope still
+caps what a member can do, so a member whose token only carries a read scope
+cannot change a team agent. Members bind the team's own secrets and datastores
+to the team's agents and grant tool capabilities as the team (the runner honours
+them while the team still owns the agent); a member's personal secret or datastore
+cannot be bound to a team agent.
+
+A team that owns an agent also stands in for its owner on repository access.
+The team has no GitHub account, so wardby checks the linked GitHub account of
+each member (the oldest 20; members without one are skipped) and the agent may
+use a repository when at least one current member has the access it needs: write
+for a write link, read for a read link. Removing a member takes effect on the
+next check; losing GitHub access takes effect when the cached answer expires
+(5 minutes). Moving an agent to a team with `make_owner` keeps its repository
+links working with no re-linking. `make_owner` takes a principal id, not a team
+id: read the team's `principalId` from `create_team` or `list_teams` and pass it
+as `ownerId`. See
+[code-review-agents.md](code-review-agents.md#who-may-give-an-agent-a-repository).
+
 ## Roles carried by a team
 
 A team can carry any Wardby role. Every member holds the team's roles in

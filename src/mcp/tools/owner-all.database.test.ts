@@ -134,7 +134,8 @@ describe.skipIf(!process.env.DATABASE_URL)("wardby_owner (owner:all + role) over
     const updated = await call(client, "update_agent", { id: agent.id, model: "claude-haiku-4-5" });
     await client.close();
     expect(got.isError).toBe(true);
-    expect(got.content[0].text).toMatch(/not found/);
+    // Hidden, or (admin alone, which reaches admin:view and so can list it) no access.
+    expect(got.content[0].text).toMatch(/not found|no access to this agent \(access: none\)/);
     expect(updated.isError).toBe(true);
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).model).toBe("gpt-5.6-luna");
   });

@@ -2,7 +2,7 @@ import { normalizeHostedRepository } from "../../coding/code-host.js";
 import { isSafeFilePath } from "../../coding/file-path.js";
 import { normalizeGitRef } from "../../coding/protocol.js";
 import { codingOverrideAllowed, type CodingOverrideAgent } from "../coding-override.js";
-import { atLeast, effectiveAccess } from "../grants.js";
+import { atLeast, accessFor } from "../grants.js";
 import type { PrismaClient } from "#prisma";
 import { parseStoredDocumentTools } from "./tools-setting.js";
 
@@ -141,7 +141,7 @@ export async function assertNativeWriter(
   });
   const setting = agent?.kind === "native" ? parseStoredDocumentTools(agent.documentTools) : null;
   if (!agent || setting?.access !== "write") throw new Error("document_agent_unavailable");
-  if (!atLeast("agent", await effectiveAccess(db, "agent", agent, linkerId), "execute")) {
+  if (!atLeast("agent", await accessFor(db, "agent", agent, linkerId), "execute")) {
     throw new Error("document_agent_unavailable");
   }
 }

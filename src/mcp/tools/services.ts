@@ -241,7 +241,7 @@ const definitionProperties = {
 export function registerServiceTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "list_services",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "The coding-run service catalog (name, version, kind, image, substrateImage when set, waitFor for a setup job, built in or not): the names a coding agent's codingProfile.services can allow. kind is sidecar (a service started next to each run), toolchain (the image a run's commands run in), docker (a rootless Docker daemon for each run) or setup (a one-off job, such as migrations, run after the services are ready and before the agent starts).",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
@@ -266,7 +266,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "get_service",
-    scope: "agents:read",
+    permission: "agents:read",
     description:
       "One catalog entry in full, including the variables (testEnv) a run's shells receive — the contract a repository's tests rely on — its startCommand and substrateImage, if set (used only on the Substrate job launcher), and for a setup job its command, waitFor and timeoutSeconds.",
     inputSchema: {
@@ -283,7 +283,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "create_service",
-    scope: "services:manage",
+    permission: "services:manage",
     description:
       "Service managers (services:manage): add a catalog entry repositories can then declare in .wardby/services.yaml. The image must be pinned by digest. kind is sidecar (the default: a fresh instance next to each run, declared under services:, needing port, readiness and dataPath; set startCommand for deployments on the Substrate job launcher), toolchain (a team's own dev image the run's commands run in, sharing its workspace, declared under toolchain:; no port, readiness, startCommand or dataPath; optional setupCommand and hostAliases), docker (a rootless Docker daemon in each run's pod whose socket the agent's shells use, declared under services:; Kubernetes job launcher with the gVisor runtime class only; takes only name, version, kind, image and resources, as wardby sets the rest) or setup (a one-off job run after the run's services are ready and before its agent starts, declared under setup:; needing command and waitFor, optional timeoutSeconds (default 600); no port, readiness, startCommand, setupCommand, hostAliases, dataPath, testEnv or substrateImage). Packages already in a toolchain image did not pass the proxy's checks.",
     inputSchema: {
@@ -320,7 +320,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "update_service",
-    scope: "services:manage",
+    permission: "services:manage",
     description:
       "Service managers (services:manage): change a non-built-in catalog entry (name and version identify it, and kind, never change). Runs already dispatched keep the entry they started with. Set startCommand on a sidecar for deployments on the Substrate job launcher, setupCommand and hostAliases on a toolchain, or command, waitFor and timeoutSeconds on a setup job. A docker entry takes only image and resources.",
     inputSchema: {
@@ -344,7 +344,7 @@ export function registerServiceTools(mcp: WardbyMcpServer): void {
 
   mcp.registerTool({
     name: "delete_service",
-    scope: "services:manage",
+    permission: "services:manage",
     description:
       "Service managers (services:manage): remove a non-built-in catalog entry. Repositories still declaring it are refused at their next run (service_unknown).",
     inputSchema: {

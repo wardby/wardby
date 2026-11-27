@@ -14,7 +14,7 @@ import { formatFor } from "../documents/formats/index.js";
 import { documentSecretValues } from "../documents/redact.js";
 import { submitForReview } from "../documents/review.js";
 import { createDocument, publishVersion } from "../documents/service.js";
-import { atLeast, effectiveAccess } from "../grants.js";
+import { atLeast, accessFor } from "../grants.js";
 import { TERMINAL_RUN_STATUSES } from "../host-status.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { planSetChanged } from "./approval.js";
@@ -238,7 +238,7 @@ export async function reviewersWithAccess(
   const reviewers: string[] = [];
   const skippedReviewers: string[] = [];
   for (const id of new Set(ids)) {
-    const access = await effectiveAccess(db, "agent", agent, id);
+    const access = await accessFor(db, "agent", agent, id);
     (atLeast("agent", access, "read") ? reviewers : skippedReviewers).push(id);
   }
   return { reviewers, skippedReviewers };
@@ -251,7 +251,7 @@ async function approverHasAccess(db: PrismaClient, agentId: string, principalId:
     db.agent.findUnique({ where: { id: agentId }, select: { id: true, ownerId: true } }),
   ]);
   if (!principal || !agent) return false;
-  return atLeast("agent", await effectiveAccess(db, "agent", agent, principalId), "read");
+  return atLeast("agent", await accessFor(db, "agent", agent, principalId), "read");
 }
 
 /**

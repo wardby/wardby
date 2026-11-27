@@ -2,11 +2,13 @@ import type { PrismaClient, Run } from "#prisma";
 import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import { isOwnerAll } from "../auth/resource-server.js";
-import { effectiveAccess, type GrantDb } from "../../core/grants.js";
+import { actsForOwner, accessFor, type GrantDb } from "../../core/grants.js";
 
 /** Who is asking to read a run: a principal, and whether it is the stdio local operator. */
 export interface RunReader {
   principalId: string;
+  /** Every principal id the reader acts for (its own, then its Teams'); absent = just `principalId`. */
+  actsFor?: readonly string[];
   operator?: boolean;
 }
 
@@ -24,7 +26,9 @@ export async function canReadRun(
   const agent = await db.agent.findUnique({ where: { id: run.agentId }, select: { id: true, ownerId: true } });
   if (!agent) return false;
   return (
-    (await effectiveAccess(db, "agent", agent, reader.principalId, { operator: reader.operator === true })) === "owner"
+    (await accessFor(db, "agent", agent, reader.actsFor ?? reader.principalId, {
+      operator: reader.operator === true,
+    })) === "owner"
   );
 }
 
@@ -42,7 +46,7 @@ export async function canReadRunDetail(
   if (reader.operator === true) return true;
   if (run.triggeredById !== null && run.triggeredById === reader.principalId) return true;
   const agent = await db.agent.findUnique({ where: { id: run.agentId }, select: { ownerId: true } });
-  return agent?.ownerId != null && agent.ownerId === reader.principalId;
+  return agent?.ownerId != null && actsForOwner(reader.actsFor ?? reader.principalId, agent.ownerId);
 }
 
 /** The run, when the caller may read it (canReadRun); otherwise the same 404 a missing run gets. */
@@ -53,6 +57,7 @@ export async function findReadableRun(ctx: McpRequestContext, runId: string): Pr
   if (
     !(await canReadRun(ctx.db, run, {
       principalId: ctx.principal.id,
+      actsFor: ctx.actsFor,
       operator: ctx.operator === true || isOwnerAll(ctx),
     }))
   )

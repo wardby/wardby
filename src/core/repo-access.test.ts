@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CodeReviewHost, HostPermission } from "../providers/review-host/types.js";
 import { ReviewHostError } from "../providers/review-host/types.js";
-import { atLeast, createRepoAccessGate, describeDenial, requiredLevel, trustedAccountsFailure } from "./repo-access.js";
+
+const log = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }));
+vi.mock("./logger.js", () => ({ logger: { child: () => log } }));
+
+const { atLeast, createRepoAccessGate, describeDenial, requiredLevel, trustedAccountsFailure } =
+  await import("./repo-access.js");
 
 const REPO = "chfields/knock-knock-jokes";
 
@@ -19,6 +24,9 @@ interface Identity {
 function setup(
   opts: {
     identities?: Identity[];
+    teams?: { principalId: string; personal?: boolean; members: string[] }[];
+    /** A host user id's level, overriding `level`. */
+    levels?: Record<string, HostPermission>;
     level?: HostPermission | (() => HostPermission);
     ttlMs?: number;
     maxEntries?: number;
@@ -30,12 +38,22 @@ function setup(
   ];
   let clock = 1_000_000;
   const repositoryPermission = vi.fn(async (_repository: string, user: { id: string; login: string }) => ({
-    level: typeof opts.level === "function" ? opts.level() : (opts.level ?? "write"),
+    level: opts.levels?.[user.id] ?? (typeof opts.level === "function" ? opts.level() : (opts.level ?? "write")),
     login: user.login,
   }));
   const host = { provider: "github", repositoryPermission } as unknown as CodeReviewHost;
+  const teams = opts.teams ?? [];
   const db = {
+    team: {
+      findUnique: vi.fn(async ({ where }: { where: { principalId: string } }) => {
+        const t = teams.find((x) => x.principalId === where.principalId);
+        return t ? { personal: t.personal ?? false, members: t.members.map((principalId) => ({ principalId })) } : null;
+      }),
+    },
     hostIdentity: {
+      findMany: vi.fn(async ({ where }: { where: { provider: string; principalId: { in: string[] } } }) =>
+        identities.filter((i) => i.provider === where.provider && where.principalId.in.includes(i.principalId)),
+      ),
       findUnique: vi.fn(
         async ({ where }: { where: { principalId_provider: { principalId: string; provider: string } } }) => {
           const k = where.principalId_provider;
@@ -68,6 +86,210 @@ const use = (overrides: Record<string, unknown> = {}) => ({
   required: "write" as HostPermission,
   authorizedVia: "host_permission" as string | null,
   ...overrides,
+});
+
+describe("team-owned agents", () => {
+  const ident = (principalId: string, hostUserId: string): Identity => ({
+    principalId,
+    provider: "github",
+    hostUserId,
+    login: `login-${hostUserId}`,
+  });
+  const team = (members: string[], personal = false) => [{ principalId: "team1", personal, members }];
+
+  it("passes when one member has enough access and the rest have none or are unlinked", async () => {
+    const { gate } = setup({
+      identities: [ident("m1", "1"), ident("m2", "2")],
+      teams: team(["m1", "m2", "m3"]),
+      levels: { "1": "read", "2": "write" },
+    });
+    expect(await gate.authorizeUse(use({ ownerId: "team1" }))).toEqual({ ok: true, level: "write" });
+  });
+
+  it("needs only read for a read link", async () => {
+    const { gate } = setup({ identities: [ident("m1", "1")], teams: team(["m1"]), levels: { "1": "read" } });
+    expect(await gate.authorizeUse(use({ ownerId: "team1", required: "read" }))).toEqual({ ok: true, level: "read" });
+    expect(await gate.authorizeUse(use({ ownerId: "team1", required: "write" }))).toEqual({
+      ok: false,
+      reason: "insufficient_permission",
+      level: "read",
+    });
+  });
+
+  it("fails again once the last member with access is removed", async () => {
+    const members = ["m1", "m2"];
+    const teams = [{ principalId: "team1", members }];
+    const { gate } = setup({
+      identities: [ident("m1", "1"), ident("m2", "2")],
+      teams,
+      levels: { "1": "write", "2": "read" },
+    });
+    expect((await gate.authorizeUse(use({ ownerId: "team1" }))).ok).toBe(true);
+    members.splice(0, 1); // m1 leaves; the cached GitHub answer for m1 must not count
+    expect(await gate.authorizeUse(use({ ownerId: "team1" }))).toEqual({
+      ok: false,
+      reason: "insufficient_permission",
+      level: "read",
+    });
+  });
+
+  it("is identity_not_linked when no member has a linked account, or the team is empty", async () => {
+    const none = setup({ identities: [], teams: team(["m1", "m2"]) });
+    expect(await none.gate.authorizeUse(use({ ownerId: "team1" }))).toEqual({
+      ok: false,
+      reason: "identity_not_linked",
+    });
+    expect(none.repositoryPermission).not.toHaveBeenCalled();
+    const empty = setup({ identities: [], teams: team([]) });
+    expect(await empty.gate.authorizeUse(use({ ownerId: "team1" }))).toEqual({
+      ok: false,
+      reason: "identity_not_linked",
+    });
+  });
+
+  it("denies when a member's lookup fails and nobody else passes (fail closed)", async () => {
+    const { gate, repositoryPermission } = setup({
+      identities: [ident("m1", "1"), ident("m2", "2")],
+      teams: team(["m1", "m2"]),
+      levels: { "2": "read" },
+    });
+    repositoryPermission.mockImplementationOnce(async () => {
+      throw new ReviewHostError("host_api_error", "github_api_error:500");
+    });
+    expect(await gate.authorizeUse(use({ ownerId: "team1" }))).toEqual({ ok: false, reason: "check_failed" });
+  });
+
+  it("still passes when one member's lookup fails but another has access", async () => {
+    const { gate, repositoryPermission } = setup({
+      identities: [ident("m1", "1"), ident("m2", "2")],
+      teams: team(["m1", "m2"]),
+      levels: { "2": "write" },
+    });
+    repositoryPermission.mockImplementationOnce(async () => {
+      throw new ReviewHostError("host_api_error", "github_api_error:500");
+    });
+    expect((await gate.authorizeUse(use({ ownerId: "team1" }))).ok).toBe(true);
+  });
+
+  describe("which members passed", () => {
+    const passedLines = () => log.debug.mock.calls.filter(([, msg]) => /passed the repository access check/.test(msg));
+
+    it("logs only the member who passed, with their id and level, at debug level", async () => {
+      log.debug.mockClear();
+      log.info.mockClear();
+      const { gate } = setup({
+        identities: [ident("m1", "1"), ident("m2", "2")],
+        teams: team(["m1", "m2", "m3"]),
+        levels: { "1": "read", "2": "admin" },
+      });
+      await gate.authorizeUse(use({ ownerId: "team1" }));
+      expect(passedLines()).toHaveLength(1);
+      expect(passedLines()[0][0]).toEqual({
+        provider: "github",
+        repository: REPO,
+        members: 3,
+        linked: 2,
+        passed: [{ hostUserId: "2", level: "admin", cached: false }],
+      });
+      expect(log.info).not.toHaveBeenCalled();
+    });
+
+    it("logs every member who passed, the same line whatever order the database returns them in", async () => {
+      const lineFor = async (identities: Identity[]) => {
+        log.debug.mockClear();
+        const { gate } = setup({
+          identities,
+          teams: team(["m1", "m2", "m3"]),
+          levels: { "1": "write", "2": "write", "3": "read" },
+        });
+        await gate.authorizeUse(use({ ownerId: "team1" }));
+        return passedLines().map(([fields]) => fields);
+      };
+      const forward = await lineFor([ident("m1", "1"), ident("m2", "2"), ident("m3", "3")]);
+      const reversed = await lineFor([ident("m3", "3"), ident("m2", "2"), ident("m1", "1")]);
+      expect(forward).toEqual([
+        {
+          provider: "github",
+          repository: REPO,
+          members: 3,
+          linked: 3,
+          passed: [
+            { hostUserId: "1", level: "write", cached: false },
+            { hostUserId: "2", level: "write", cached: false },
+          ],
+        },
+      ]);
+      expect(reversed).toEqual(forward);
+    });
+
+    it("says per member when the answer came from the cache", async () => {
+      log.debug.mockClear();
+      const { gate } = setup({ identities: [ident("m1", "1")], teams: team(["m1"]) });
+      await gate.authorizeUse(use({ ownerId: "team1" }));
+      await gate.authorizeUse(use({ ownerId: "team1" }));
+      expect(passedLines().map(([fields]) => fields.passed)).toEqual([
+        [{ hostUserId: "1", level: "write", cached: false }],
+        [{ hostUserId: "1", level: "write", cached: true }],
+      ]);
+    });
+
+    it("lists no unlinked or under-privileged member, and logs nothing at debug when none passes", async () => {
+      log.debug.mockClear();
+      log.info.mockClear();
+      const { gate } = setup({ identities: [ident("m1", "1")], teams: team(["m1", "m2"]), level: "read" });
+      await gate.authorizeUse(use({ ownerId: "team1" }));
+      expect(passedLines()).toHaveLength(0);
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({ members: 2, linked: 1, reasons: ["insufficient_permission"] }),
+        "no team member passed the repository access check",
+      );
+    });
+
+    it("never logs a fake secret from a host error, or a login", async () => {
+      for (const fn of Object.values(log)) fn.mockClear();
+      const { gate, repositoryPermission } = setup({
+        identities: [ident("m1", "1"), ident("m2", "2")],
+        teams: team(["m1", "m2"]),
+        levels: { "2": "write" },
+      });
+      repositoryPermission.mockImplementationOnce(async () => {
+        throw new ReviewHostError("host_api_error", "github_api_error:500 ghs_FAKEINSTALLATIONTOKEN");
+      });
+      expect((await gate.authorizeUse(use({ ownerId: "team1" }))).ok).toBe(true);
+      const debugLines = JSON.stringify(log.debug.mock.calls);
+      expect(debugLines).toContain('"hostUserId":"2"');
+      expect(debugLines).toContain('"level":"write"');
+      expect(debugLines).not.toContain("ghs_FAKEINSTALLATIONTOKEN");
+      expect(debugLines).not.toContain("login-");
+    });
+  });
+
+  it("treats a personal team as the user: the owner's own identity decides", async () => {
+    const { gate, db } = setup({
+      identities: [ident("p1", "1")],
+      teams: [{ principalId: "p1", personal: true, members: ["p1"] }],
+    });
+    expect((await gate.authorizeUse(use({ ownerId: "p1" }))).ok).toBe(true);
+    expect(db.hostIdentity.findMany).not.toHaveBeenCalled();
+  });
+
+  it("checks at most the oldest 20 members", async () => {
+    const members = Array.from({ length: 30 }, (_, i) => `m${i}`);
+    const { gate, db } = setup({
+      identities: members.map((m, i) => ident(m, String(i))),
+      teams: team(members),
+      level: "read",
+    });
+    await gate.authorizeUse(use({ ownerId: "team1" }));
+    const asked = db.hostIdentity.findMany.mock.calls[0][0].where.principalId.in;
+    expect(asked).toHaveLength(20);
+  });
+
+  it("denies when the member lookup itself throws", async () => {
+    const { gate, db } = setup({ teams: team(["m1"]) });
+    db.team.findUnique.mockRejectedValueOnce(new Error("db down"));
+    expect(await gate.authorizeUse(use({ ownerId: "team1" }))).toEqual({ ok: false, reason: "check_failed" });
+  });
 });
 
 describe("permission ranks", () => {

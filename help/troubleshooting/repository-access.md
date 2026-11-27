@@ -17,7 +17,12 @@ repository approval when no individual's access is appropriate.
 `repo_access` means the current owner no longer has the required permission,
 has unlinked their account, or the repository was not authorized. Restore the
 owner's GitHub link and permission, or have an administrator review and record
-the appropriate repository authorization.
+the appropriate repository authorization. A team-owned agent passes when at
+least one current team member has a linked account with the permission, so check
+that someone on the team has linked GitHub and still has access. To see who
+that is, run with `LOG_LEVEL=debug`: a passing team check logs the GitHub user
+id and permission level of every member who passed, so you know whose access
+has to be kept.
 
 `repo_access_unavailable` means Wardby could not verify GitHub access after its
 retry. Do not treat it as permission granted: resolve the GitHub/API condition

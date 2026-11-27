@@ -1,4 +1,4 @@
-import { SCOPES_SUPPORTED, isOwnerAll, scopeAllowed } from "../auth/resource-server.js";
+import { PERMISSION_TIER, check, isOwnerAll } from "../../authz/index.js";
 import { principalNames } from "../../core/documents/comments.js";
 import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
@@ -19,7 +19,7 @@ export function registerWhoamiTool(mcp: WardbyMcpServer): void {
       "both a scope and a role (a token with admin scopes but only the viewer role can't act as admin). " +
       "ownerAll is true when you act as owner of every owner's resources. Never returns the token. Compare principal.subject with " +
       "/web/whoami in the browser: if they differ, the two sign-ins are different Wardby people.",
-    scope: "agents:read",
+    permission: "agents:read",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (_args, ctx) => {
       const names = await principalNames(ctx.db, [ctx.principal.id]);
@@ -34,8 +34,10 @@ export function registerWhoamiTool(mcp: WardbyMcpServer): void {
         token: ctx.tokenIdentity ?? null,
         roles: [...(ctx.roles ?? [])].sort(),
         scopes: [...ctx.scopes].sort(),
-        // What the scopes and roles allow together: requireScope() requires both.
-        permissions: SCOPES_SUPPORTED.filter((scope) => scopeAllowed(ctx, scope)).sort(),
+        // What the scopes and roles allow together: authorize() requires both.
+        permissions: Object.keys(PERMISSION_TIER)
+          .filter((permission) => check(ctx, [permission]) === null)
+          .sort(),
         ownerAll: isOwnerAll(ctx),
         teamIds: [...(ctx.teamIds ?? [])],
         operator: ctx.operator ?? false,

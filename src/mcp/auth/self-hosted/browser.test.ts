@@ -41,7 +41,7 @@ describe.skipIf(!process.env.DATABASE_URL)("browser HTTP OAuth flow (database)",
     const mcp = buildMcpServer({ providers, db, config: { canonicalUri: origin + "/mcp" } });
     mcp.registerTool({
       name: "identity",
-      scope: "agents:read",
+      permission: "agents:read",
       inputSchema: { type: "object" },
       handler: async (_, ctx) => ({ content: [{ type: "text", text: ctx.principal.subject }] }),
     });
