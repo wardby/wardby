@@ -653,7 +653,7 @@ export class SubstrateJobLauncher implements WorkspaceJobLauncher {
     this.sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
   }
 
-  /** Kubernetes, Docker and Substrate start services for Codex and Claude Code. */
+  /** Kubernetes, Docker and Substrate start services for every coding provider (Codex, Claude Code, Gemini CLI). */
   supportsServicesFor(_provider: CodingProvider): boolean {
     return true;
   }

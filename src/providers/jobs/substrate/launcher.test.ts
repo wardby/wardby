@@ -3672,10 +3672,11 @@ describe("coding services", () => {
     expect((await h.runs.get("run-1"))?.services).toEqual(["fakedb", "postgres"]);
   });
 
-  it("supports services on both providers", async () => {
+  it("supports services on every coding provider", async () => {
     const h = await makeHarness();
     expect(h.launcher.supportsServicesFor("claude-code")).toBe(true);
     expect(h.launcher.supportsServicesFor("codex")).toBe(true);
+    expect(h.launcher.supportsServicesFor("gemini-cli")).toBe(true);
     // Never a docker service: that kind needs Kubernetes with gVisor.
     expect(h.launcher.supportsServiceKind("sidecar")).toBe(true);
     expect(h.launcher.supportsServiceKind("docker")).toBe(false);

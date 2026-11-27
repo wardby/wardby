@@ -10,7 +10,13 @@ import {
   PLAN_FOLDER_PATH,
   publicCodingRunResult,
 } from "../coding/protocol.js";
-import { assertCodingProvider, assertCodingProviderModel, type CodingProvider } from "../coding/provider.js";
+import {
+  assertCodingProvider,
+  assertCodingProviderModel,
+  codingProviderHasToolRunner,
+  type CodingProvider,
+} from "../coding/provider.js";
+import { geminiReservedServiceVariable } from "../coding/gemini-cli-env.js";
 import { isPackageAuditActive } from "../coding/registry/audit-mode.js";
 import { WEB_TOOLS_SETTING_INVALID, isWebTools } from "../coding/google-web-tools.js";
 import { ModelUnavailableError, entryOf, type ResolvedCatalogEntry } from "../providers/llm/catalog-types.js";
@@ -18,6 +24,7 @@ import {
   parseAllowedServiceNames,
   runningServices,
   runToolchain,
+  serviceTestEnv,
   unsupportedKindService,
   workerServices,
   type ResolvedCodingService,
@@ -34,7 +41,8 @@ import { resolveRunServices, type ServiceResolution } from "../coding/services/r
 import {
   DECLARATION_UNAVAILABLE_SENTENCE,
   LAUNCHER_UNSUPPORTED_SENTENCE,
-  codexToolchainSentence,
+  geminiReservedVariableSentence,
+  inContainerToolchainSentence,
   invalidDeclarationSentence,
   serviceRefusal,
   kindUnsupportedSentence,
@@ -918,6 +926,7 @@ export async function resolveDispatchServices(
   allowed: unknown,
   executor: Executor,
   provider: CodingProvider,
+  model: string,
   request: string,
   instructions: string | null,
 ): Promise<ServiceResolution> {
@@ -934,11 +943,27 @@ export async function resolveDispatchServices(
     instructions,
   );
   if ("services" in resolution) {
-    // Codex forwarding is a follow-up: until it lands a Codex run with a toolchain is refused, never
-    // run in the worker's own image as if the repository had declared none.
+    // A toolchain runs the commands only a separate tool runner forwards (Claude Code). A run whose
+    // commands run next to the agent (Codex, Gemini CLI) with a toolchain is refused, never run in the
+    // worker's own image as if the repository had declared none.
     const toolchain = runToolchain(resolution.services);
-    if (toolchain && provider === "codex") {
-      return { refusal: serviceRefusal("service_launcher_unsupported", codexToolchainSentence(toolchain.name)) };
+    if (toolchain && !codingProviderHasToolRunner(provider)) {
+      return { refusal: serviceRefusal("service_launcher_unsupported", inContainerToolchainSentence(toolchain.name)) };
+    }
+    // Gemini CLI: a testEnv name the driver sets or blanks (coding/gemini-cli-env.ts) would be lost in
+    // the agent's shells, so the run is refused instead of dropping it.
+    if (provider === "gemini-cli") {
+      for (const service of resolution.services) {
+        const variable = geminiReservedServiceVariable(Object.keys(serviceTestEnv(service)), model);
+        if (variable) {
+          return {
+            refusal: serviceRefusal(
+              "service_declaration_invalid",
+              geminiReservedVariableSentence(service.name, variable),
+            ),
+          };
+        }
+      }
     }
     // Unknown and disallowed services were refused above with their own codes; the launcher is
     // asked only about the validated catalog snapshot, and only a validated name reaches a sentence.
@@ -1436,6 +1461,7 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
               agent.codingProfile.services,
               options.executor,
               agent.codingProfile.provider,
+              agent.model,
               request,
               agent.systemPrompt,
             );

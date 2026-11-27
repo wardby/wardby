@@ -5,6 +5,8 @@ import {
   GEMINI_GUARD_VARIABLES,
   geminiCliEnvironment,
 } from "./environment.js";
+import { geminiReservedServiceVariable } from "../coding/gemini-cli-env.js";
+import { CODING_SERVICE_ENV_NAME, isReservedServiceEnvName } from "../coding/protocol.js";
 
 const CAPABILITY = "rrp_FAKEcapability0123456789";
 const agentEnvironment = {
@@ -213,6 +215,21 @@ describe("geminiCliEnvironment", () => {
       agentEnvironment: { ...agentEnvironment, NO_PROXY: "localhost,127.0.0.1,::1,wardby-proxy" },
     });
     expect(tunnel.NO_PROXY).toBe("localhost,127.0.0.1,::1,wardby-proxy");
+  });
+
+  it("every variable it sets or removes is one a service's testEnv can't set for that backend", () => {
+    // Dispatch refuses the rest (geminiReservedServiceVariable); the catalog refuses wardby's own names.
+    const models = { "ai-studio": "google-ai-studio.gemini-4-neon", vertex: "gemini-4-neon" } as const;
+    for (const backend of ["ai-studio", "vertex"] as const) {
+      const env = build({ backend, agentEnvironment: {}, mcpToken: "rmt_FAKEmcp0123456789abcdef" });
+      const names = [...Object.keys(env), ...GEMINI_GUARD_UNSET].filter((name) => CODING_SERVICE_ENV_NAME.test(name));
+      const open = names.filter(
+        (name) => !isReservedServiceEnvName(name) && geminiReservedServiceVariable([name], models[backend]) !== name,
+      );
+      expect(open, backend).toEqual([]);
+    }
+    // AI Studio leaves GOOGLE_CLOUD_LOCATION alone, so a service may set it there.
+    expect(build({ backend: "ai-studio" }).GOOGLE_CLOUD_LOCATION).toBe("us-central1");
   });
 
   it("the capability appears only in the backend's key variable", () => {

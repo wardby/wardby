@@ -1418,10 +1418,11 @@ function commands(docker: FakeDocker, group: string, action: string): Array<read
 }
 
 describe("Docker launcher with services", () => {
-  it("starts services for Codex and Claude Code runs", async () => {
+  it("starts services for every coding provider's runs", async () => {
     const { launcher } = await harness("docker-supports-services");
     expect(launcher.supportsServicesFor("codex")).toBe(true);
     expect(launcher.supportsServicesFor("claude-code")).toBe(true);
+    expect(launcher.supportsServicesFor("gemini-cli")).toBe(true);
   });
 
   it("starts sidecars and a toolchain, never a docker service: that is refused at dispatch (Kubernetes with gVisor only)", async () => {

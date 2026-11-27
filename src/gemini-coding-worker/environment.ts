@@ -1,79 +1,14 @@
 import { MCP_TOKEN_ENV } from "../coding-worker/mcp-config.js";
 import { tunnelNoProxy } from "../coding/tunnel-env.js";
 import { GEMINI_AUTH_TYPE_ENV, type GeminiBackend } from "./cli.js";
+import {
+  GEMINI_GUARD_UNSET,
+  GEMINI_GUARD_VALUES,
+  GEMINI_GUARD_VARIABLES,
+  GEMINI_VERTEX_BLANKED,
+} from "../coding/gemini-cli-env.js";
 
-/**
- * CLI-read variables a service's testEnv or the agent environment could otherwise set: each is
- * set empty, last (Decision 14), and 0.70.0 reads an empty value as unset. The repository's .env
- * is already blocked (ignoreLocalEnv); these also cover what reaches the CLI's own process
- * environment.
- */
-export const GEMINI_GUARD_VARIABLES = [
-  "GEMINI_SYSTEM_MD",
-  "GEMINI_WRITE_SYSTEM_MD",
-  "GEMINI_CLI_CUSTOM_HEADERS",
-  "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
-  "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
-  "GEMINI_CLI_TRUSTED_FOLDERS_PATH",
-  "GEMINI_CLI_HOME",
-  "GEMINI_CLI_TRUST_WORKSPACE",
-  "GEMINI_SANDBOX",
-  "GEMINI_CLI_ACTIVITY_LOG_TARGET",
-  "GEMINI_DEBUG_LOG_FILE",
-  "GEMINI_MODEL",
-  // How the key is sent (bearer would move it out of x-goog-api-key) and which API version path.
-  "GEMINI_API_KEY_AUTH_MECHANISM",
-  "GOOGLE_GENAI_API_VERSION",
-  // Other auth routes; security.auth.enforcedType already pins the type.
-  "GOOGLE_GENAI_USE_GCA",
-  "GEMINI_CLI_USE_COMPUTE_ADC",
-  // An experiments file that flips the CLI's feature flags, and a context trace written to disk.
-  "GEMINI_EXP",
-  "GEMINI_CONTEXT_TRACE_DIR",
-  // IDE companion connection (ide.enabled is off; these stay off too).
-  "GEMINI_CLI_IDE_SERVER_PORT",
-  "GEMINI_CLI_IDE_SERVER_STDIO_COMMAND",
-  "GEMINI_CLI_IDE_SERVER_STDIO_ARGS",
-  // Each read only as "true" or non-empty in 0.70.0 (gemini-AYDYW6NZ.js, chunk-UF44X63P.js,
-  // chunk-LMNAB62M.js, chunk-3VGGGCOZ.js): the experimental ADK agent runner, an auth type that
-  // overrides the settings, restricted mode, an extension registry, and "standalone binary" mode
-  // (which changes how the CLI reads its own arguments).
-  "GEMINI_CLI_EXP_AGENT",
-  "GEMINI_CLI_AUTH_OVERRIDE",
-  "GEMINI_RESTRICTED_MODE",
-  "GEMINI_CLI_EXTENSION_REGISTRY_URI",
-  "IS_BINARY",
-  // Telemetry string values the CLI reads ahead of settings (0.70.0 ALLOWED_TELEMETRY_ENV_KEYS);
-  // telemetry is off below, and empty headers are ignored.
-  "GEMINI_TELEMETRY_OTLP_ENDPOINT",
-  "OTEL_EXPORTER_OTLP_ENDPOINT",
-  "GEMINI_TELEMETRY_OTLP_HEADERS",
-  "OTEL_EXPORTER_OTLP_HEADERS",
-  "GEMINI_TELEMETRY_OUTFILE",
-] as const;
-
-/**
- * Guards where an empty value would not mean "off": the CLI reads these telemetry flags ahead of
- * the system settings' `telemetry.enabled: false`, so each is fixed to its off value; and the
- * relaunch switch, fixed on.
- */
-export const GEMINI_GUARD_VALUES: Readonly<Record<string, string>> = {
-  GEMINI_TELEMETRY_ENABLED: "false",
-  GEMINI_TELEMETRY_TRACES_ENABLED: "false",
-  GEMINI_TELEMETRY_LOG_PROMPTS: "false",
-  GEMINI_TELEMETRY_USE_COLLECTOR: "false",
-  GEMINI_TELEMETRY_USE_CLI_AUTH: "false",
-  OTEL_SDK_DISABLED: "true",
-  // gemini.js otherwise relaunches itself in a child that inherits stdio (the runner also kills the
-  // whole process group). Without it the CLI runs in-process, without the relaunch's heap-size flag.
-  GEMINI_CLI_NO_RELAUNCH: "true",
-};
-
-/**
- * Guards removed instead: an empty target or protocol is a fatal configuration error in 0.70.0,
- * while an absent one falls back to the system settings.
- */
-export const GEMINI_GUARD_UNSET = ["GEMINI_TELEMETRY_TARGET", "GEMINI_TELEMETRY_OTLP_PROTOCOL"] as const;
+export { GEMINI_GUARD_UNSET, GEMINI_GUARD_VALUES, GEMINI_GUARD_VARIABLES };
 
 /**
  * An inherited NO_PROXY (the tunnel's, or one the agent environment brings) with the machine's and
@@ -116,8 +51,9 @@ export function geminiCliEnvironment(input: {
           GOOGLE_GENAI_USE_VERTEXAI: "true",
           GOOGLE_API_KEY: input.capability,
           GOOGLE_VERTEX_BASE_URL: base,
-          // Express mode (the proxy's /v1beta1/publishers/... route) ends when project and location are both set.
-          GOOGLE_CLOUD_LOCATION: "",
+          // Express mode (the proxy's /v1beta1/publishers/... route) ends when project and location are
+          // both set (GEMINI_VERTEX_BLANKED, coding/gemini-cli-env.ts).
+          ...Object.fromEntries(GEMINI_VERTEX_BLANKED.map((name) => [name, ""])),
           GEMINI_API_KEY: "",
           GOOGLE_GEMINI_BASE_URL: "",
         }

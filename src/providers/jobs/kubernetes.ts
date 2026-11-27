@@ -715,11 +715,12 @@ export class KubernetesJobLauncher implements WorkspaceJobLauncher {
   }
 
   /**
-   * Services run as native sidecars in the run pod (kubernetes-isolation.ts), for either provider:
-   * Claude Code's tool runner is a sidecar in the same pod, so it reaches them on 127.0.0.1 too.
+   * Services run as native sidecars in the run pod (kubernetes-isolation.ts), for every coding
+   * provider: Codex's and Gemini CLI's worker reach them on 127.0.0.1, and Claude Code's tool runner
+   * is a sidecar in the same pod, so it does too.
    */
-  supportsServicesFor(provider: CodingProvider): boolean {
-    return provider === "codex" || provider === "claude-code";
+  supportsServicesFor(_provider: CodingProvider): boolean {
+    return true;
   }
 
   /**

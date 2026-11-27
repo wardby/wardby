@@ -806,9 +806,10 @@ describe("Docker isolation with services", () => {
     ).toThrow("docker_isolation_unsupported");
   });
 
-  it("offers services to Codex and Claude Code runs", () => {
+  it("offers services to every coding provider's runs", () => {
     expect(dockerSupportsServicesFor("codex")).toBe(true);
     expect(dockerSupportsServicesFor("claude-code")).toBe(true);
+    expect(dockerSupportsServicesFor("gemini-cli")).toBe(true);
   });
 });
 

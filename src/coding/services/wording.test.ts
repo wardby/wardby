@@ -15,7 +15,8 @@ import {
   setupFailedSentence,
   unknownServiceSentence,
   unstartableServiceSentence,
-  codexToolchainSentence,
+  geminiReservedVariableSentence,
+  inContainerToolchainSentence,
   misplacedServiceSentence,
   setupWaitForSentence,
 } from "./wording.js";
@@ -94,15 +95,21 @@ describe("service refusals", () => {
     );
   });
 
+  it("names the service and the variable a Gemini CLI run can't take", () => {
+    expect(geminiReservedVariableSentence("postgres", "OTEL_EXPORTER_OTLP_ENDPOINT")).toBe(
+      "The service `postgres` sets `OTEL_EXPORTER_OTLP_ENDPOINT` in testEnv, which a Gemini CLI agent's runs reserve for the CLI's own configuration. Remove it from .wardby/services.yaml, or use a Codex or Claude Code agent for this repository.",
+    );
+  });
+
   it("words the toolchain refusals with only the toolchain's name", () => {
     expect(unstartableServiceSentence({ name: "python-dev", reason: "toolchain_unsupported" })).toBe(
       "This repository asks for the toolchain `python-dev`, which this wardby deployment can't start: toolchains are not supported on this launcher yet.",
     );
-    expect(codexToolchainSentence("python-dev")).toBe(
-      "This repository asks for the toolchain `python-dev`, which this agent can't use: toolchains are not supported for Codex agents yet.",
+    expect(inContainerToolchainSentence("python-dev")).toBe(
+      "This repository asks for the toolchain `python-dev`, which this agent can't use: toolchains need a coding agent with a separate tool runner (Claude Code), and this agent runs its commands next to the agent (Codex, Gemini CLI).",
     );
-    expect(codexToolchainSentence("Bad Name`")).toBe(
-      "This repository asks for the toolchain, which this agent can't use: toolchains are not supported for Codex agents yet.",
+    expect(inContainerToolchainSentence("Bad Name`")).toBe(
+      "This repository asks for the toolchain, which this agent can't use: toolchains need a coding agent with a separate tool runner (Claude Code), and this agent runs its commands next to the agent (Codex, Gemini CLI).",
     );
     expect(misplacedServiceSentence("python-dev", "toolchain")).toBe(
       "`.wardby/services.yaml` is invalid: `python-dev` is a toolchain; declare it under `toolchain:`.",

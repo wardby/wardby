@@ -107,6 +107,7 @@ export async function resolveDeferredCodingRun({ db, executor, runId }: ResolveD
       profile.services,
       executor,
       coding.provider,
+      coding.model,
       coding.task,
       run.agent.systemPrompt,
     );

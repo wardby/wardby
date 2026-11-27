@@ -126,10 +126,22 @@ export function unstartableServiceSentence(service: UnstartableService): string 
   return `This repository asks for ${what}\`${service.name}\`, which this wardby deployment can't start: ${UNSTARTABLE_REASON_CLAUSES[service.reason]}.`;
 }
 
-/** service_launcher_unsupported for a Codex agent whose repository declares a toolchain (until Codex forwarding lands). */
-export function codexToolchainSentence(name: string): string {
+/**
+ * service_launcher_unsupported for an agent without a separate tool runner (Codex, Gemini CLI) whose
+ * repository declares a toolchain: its commands run next to the agent, in the worker's own image.
+ */
+export function inContainerToolchainSentence(name: string): string {
   const named = CODING_SERVICE_NAME.test(name) ? ` \`${name}\`` : "";
-  return `This repository asks for the toolchain${named}, which this agent can't use: toolchains are not supported for Codex agents yet.`;
+  return `This repository asks for the toolchain${named}, which this agent can't use: toolchains need a coding agent with a separate tool runner (Claude Code), and this agent runs its commands next to the agent (Codex, Gemini CLI).`;
+}
+
+/**
+ * service_declaration_invalid for a Gemini CLI run whose service sets a variable the driver owns
+ * (coding/gemini-cli-env.ts). Only validated names reach it: a service name (CODING_SERVICE_NAME) and
+ * an env name (CODING_SERVICE_ENV_NAME).
+ */
+export function geminiReservedVariableSentence(service: string, variable: string): string {
+  return `The service \`${service}\` sets \`${variable}\` in testEnv, which a Gemini CLI agent's runs reserve for the CLI's own configuration. Remove it from .wardby/services.yaml, or use a Codex or Claude Code agent for this repository.`;
 }
 
 /** The launcher's error when a service's sidecar never became ready: `coding_service_unready:<name>`. */

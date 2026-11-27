@@ -241,12 +241,12 @@ function assertIntegerRange(value: number, min: number, max: number): void {
 }
 
 /**
- * Which runs the Docker launcher starts services for: Codex and Claude Code. The container that runs
- * the run's commands (Codex's worker, Claude Code's tool runner) joins the network keeper's
- * namespace and reaches the services on 127.0.0.1; Claude Code's agent stays on the run network.
+ * Which runs the Docker launcher starts services for: every coding provider. The container that runs
+ * the run's commands (Codex's and Gemini CLI's worker, Claude Code's tool runner) joins the network
+ * keeper's namespace and reaches the services on 127.0.0.1; Claude Code's agent stays on the run network.
  */
-export function dockerSupportsServicesFor(provider: CodingProvider): boolean {
-  return provider === "codex" || provider === "claude-code";
+export function dockerSupportsServicesFor(_provider: CodingProvider): boolean {
+  return true;
 }
 
 function validateSpec(spec: JobSpec): void {

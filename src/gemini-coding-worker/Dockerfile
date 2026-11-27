@@ -51,6 +51,7 @@ COPY --from=build /build/dist/coding-worker ./coding-worker
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
 COPY --from=build /build/dist/coding/commit-subject.js ./coding/commit-subject.js
 COPY --from=build /build/dist/coding/google-web-tools.js ./coding/google-web-tools.js
+COPY --from=build /build/dist/coding/gemini-cli-env.js ./coding/gemini-cli-env.js
 COPY --from=build /build/dist/coding/redact.js ./coding/redact.js
 COPY --from=build /build/dist/core/secret-spans.js ./core/secret-spans.js
 COPY --from=build /build/dist/coding/registry ./coding/registry

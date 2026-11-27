@@ -15,6 +15,8 @@ import {
   LAUNCHER_UNSUPPORTED_SENTENCE,
   SERVICE_INSTRUCTIONS_TOO_LARGE_SENTENCE,
   TOO_MANY_DOCKER_SERVICES_SENTENCE,
+  geminiReservedVariableSentence,
+  inContainerToolchainSentence,
   kindUnsupportedSentence,
   unstartableServiceSentence,
 } from "../coding/services/wording.js";
@@ -2579,8 +2581,27 @@ describe("coding-run services", () => {
       expect(result?.run).toMatchObject({
         status: "refused",
         error:
-          "service_launcher_unsupported: This repository asks for the toolchain `python-dev`, which this agent can't use: toolchains are not supported for Codex agents yet.",
+          "service_launcher_unsupported: This repository asks for the toolchain `python-dev`, which this agent can't use: toolchains need a coding agent with a separate tool runner (Claude Code), and this agent runs its commands next to the agent (Codex, Gemini CLI).",
       });
+      expect(unstartableCodingServices).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+    });
+
+    it("refuses a Gemini CLI agent's run the same way", async () => {
+      const base = servicesAgent(["postgres", "python-dev"]);
+      const agent = {
+        ...base,
+        model: "gemini-4-neon",
+        codingProfile: { ...base.codingProfile, provider: "gemini-cli" },
+      };
+      const state = fakeDb(agent, [], {}, [...CATALOG, TOOLCHAIN_ROW]);
+      const { executor, start, unstartableCodingServices } = servicesExecutor(WITH_TOOLCHAIN);
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run).toMatchObject({
+        status: "refused",
+        error: `service_launcher_unsupported: ${inContainerToolchainSentence("python-dev")}`,
+      });
+      expect(state.codingRuns).toEqual([]);
       expect(unstartableCodingServices).not.toHaveBeenCalled();
       expect(start).not.toHaveBeenCalled();
     });
@@ -2819,9 +2840,9 @@ describe("coding-run services", () => {
   });
 
   // What the job launchers answer (jobs/types.ts supportsServicesFor): Kubernetes and Docker start
-  // services for both providers; a deployment without a coding job launcher (local) for neither.
+  // services for every provider; a deployment without a coding job launcher (local) for none.
   const kubernetesSupport = () => true;
-  const dockerSupport = (provider: string) => provider === "codex" || provider === "claude-code";
+  const dockerSupport = () => true;
   const noLauncherSupport = () => false;
 
   it.each([
@@ -2829,12 +2850,14 @@ describe("coding-run services", () => {
     ["Kubernetes", "codex", kubernetesSupport, "pending"],
     ["Docker", "codex", dockerSupport, "pending"],
     ["Docker", "claude-code", dockerSupport, "pending"],
+    ["Kubernetes", "gemini-cli", kubernetesSupport, "pending"],
+    ["Docker", "gemini-cli", dockerSupport, "pending"],
     ["local (no job launcher)", "claude-code", noLauncherSupport, "refused"],
   ] as const)("on the %s launcher, a %s run with services is %s", async (_launcher, provider, supports, status) => {
     const base = servicesAgent();
     const agent = {
       ...base,
-      model: provider === "claude-code" ? "claude-sonnet-5" : base.model,
+      model: provider === "claude-code" ? "claude-sonnet-5" : provider === "gemini-cli" ? "gemini-4-neon" : base.model,
       codingProfile: { ...base.codingProfile, provider },
     };
     const state = fakeDb(agent, [], {}, CATALOG);
@@ -2856,6 +2879,78 @@ describe("coding-run services", () => {
         services: [resolvedFromDefinition(POSTGRES_16, CATALOG[0])],
       });
     }
+  });
+
+  describe("a service whose testEnv sets a Gemini-reserved variable", () => {
+    const COLLECTOR_ROW = {
+      ...CATALOG[0],
+      id: "svc-collector",
+      builtin: false,
+      name: "collector",
+      testEnv: { OTEL_EXPORTER_OTLP_ENDPOINT: "http://127.0.0.1:4318", COLLECTOR_URL: "http://127.0.0.1:4318" },
+    };
+    const LOCATION_ROW = {
+      ...CATALOG[0],
+      id: "svc-emulator",
+      builtin: false,
+      name: "emulator",
+      testEnv: { GOOGLE_CLOUD_LOCATION: "us-central1" },
+    };
+    const declaring = (name: string) => `services:\n  ${name}: "16"\n`;
+    const agentFor = (provider: string, model: string, service: string) => {
+      const base = servicesAgent([service]);
+      return { ...base, model, codingProfile: { ...base.codingProfile, provider } };
+    };
+
+    it("refuses a Gemini CLI agent's run, naming the service and the variable", async () => {
+      const agent = agentFor("gemini-cli", "google-ai-studio.gemini-4-neon", "collector");
+      const state = fakeDb(agent, [], {}, [COLLECTOR_ROW]);
+      const { executor, start } = servicesExecutor(declaring("collector"));
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run).toMatchObject({
+        status: "refused",
+        error: `service_declaration_invalid: ${geminiReservedVariableSentence("collector", "OTEL_EXPORTER_OTLP_ENDPOINT")}`,
+      });
+      expect(state.codingRuns).toEqual([]);
+      expect(start).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["codex", "gpt-5.6-luna"],
+      ["claude-code", "claude-sonnet-5"],
+    ] as const)("still dispatches a %s agent's run with the same service", async (provider, model) => {
+      const agent = agentFor(provider, model, "collector");
+      const state = fakeDb(agent, [], {}, [COLLECTOR_ROW]);
+      const { executor } = servicesExecutor(declaring("collector"));
+      const result = await dispatchRun({ db: state.db, executor, agentId: agent.id });
+      expect(result?.run.status).toBe("pending");
+      expect(state.codingRuns[0]).toMatchObject({
+        provider,
+        services: [expect.objectContaining({ name: "collector" })],
+      });
+    });
+
+    it("refuses GOOGLE_CLOUD_LOCATION on a Vertex model only, where the driver blanks it", async () => {
+      const vertex = agentFor("gemini-cli", "gemini-4-neon", "emulator");
+      const vertexState = fakeDb(vertex, [], {}, [LOCATION_ROW]);
+      const refused = await dispatchRun({
+        db: vertexState.db,
+        executor: servicesExecutor(declaring("emulator")).executor,
+        agentId: vertex.id,
+      });
+      expect(refused?.run).toMatchObject({
+        status: "refused",
+        error: `service_declaration_invalid: ${geminiReservedVariableSentence("emulator", "GOOGLE_CLOUD_LOCATION")}`,
+      });
+      const studio = agentFor("gemini-cli", "google-ai-studio.gemini-4-neon", "emulator");
+      const studioState = fakeDb(studio, [], {}, [LOCATION_ROW]);
+      const dispatched = await dispatchRun({
+        db: studioState.db,
+        executor: servicesExecutor(declaring("emulator")).executor,
+        agentId: studio.id,
+      });
+      expect(dispatched?.run.status).toBe("pending");
+    });
   });
 
   describe("a coding repository list", () => {
