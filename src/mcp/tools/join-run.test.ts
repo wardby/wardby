@@ -106,9 +106,10 @@ describe("join_run / send_to_run / leave_run", () => {
   it("returns the terminal command and a join link, token in the fragment, when the server serves the join API", async () => {
     const t = await setup("owner", { link: true });
     const joined = JSON.parse((await t.call("join_run", { runId: "r1" })).text) as {
-      terminal?: { command: string; link: string };
+      terminal?: { command: string; pasteCommand: string; link: string };
     };
-    expect(joined.terminal?.command).toBe("npx @wardby/cli@latest join -");
+    expect(joined.terminal?.command).toBe(`npx @wardby/cli@latest join '${joined.terminal?.link}'`);
+    expect(joined.terminal?.pasteCommand).toBe("npx @wardby/cli@latest join -");
     expect(joined.terminal?.link).toMatch(/^https:\/\/wardby\.example\.com\/join#.+/);
     await t.client.close();
   });

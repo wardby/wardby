@@ -26,7 +26,7 @@ import type { McpRequestContext } from "../context.js";
 import { McpError } from "../errors.js";
 import type { WardbyMcpServer } from "../server.js";
 import { JoinActionError, joinRunAs, leaveRunAs, sendToRunAs, type JoinActionDeps } from "./join-actions.js";
-import { JOIN_COMMAND, joinLink, joinSessionExpiry, type JoinLinkPayload } from "./join-link.js";
+import { JOIN_COMMAND, joinCommandWithLink, joinLink, joinSessionExpiry, type JoinLinkPayload } from "./join-link.js";
 import type { RunReader } from "./run-access.js";
 import type { RunTranscriptLinkAudience } from "./run-transcript-download.js";
 import { textResult } from "./text-result.js";
@@ -115,11 +115,13 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
     const link = joinLink(await opts.link.origin(), await mcp.mintRequestState(payload));
     return {
       terminal: {
-        command: JOIN_COMMAND,
+        command: joinCommandWithLink(link),
+        pasteCommand: JOIN_COMMAND,
         link,
         note:
-          "To join from a terminal instead, run the command and paste the link when it asks. The link is a " +
-          "credential for this run until it ends: do not share it.",
+          "To join from a terminal instead, copy and run command. To keep the link out of your shell history " +
+          "and the process list, run pasteCommand and paste the link when it asks. The link is a credential for " +
+          "this run until it ends: do not share it.",
       },
     };
   }
@@ -131,8 +133,9 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
       "Join a running Claude Code coding run so you can send its agent messages (send_to_run) while it works. " +
       "While anyone is joined the run stays open after the agent finishes its task, until the last person leaves " +
       "(leave_run) or the run's timeout. Follow the agent's replies with get_run_steps. Joining twice is harmless. " +
-      `The answer also has terminal: a command (${JOIN_COMMAND}) and a link for joining from a terminal chat; give ` +
-      "both to the user when they want that, and do not open the link yourself. " +
+      "The answer also has terminal, for joining from a terminal chat: command (npx @wardby/cli@latest join with " +
+      `the link, ready to copy), pasteCommand (${JOIN_COMMAND}, which asks for the link instead) and link. Give ` +
+      "command to the user when they want that (or pasteCommand and link), and do not open the link yourself. " +
       "Needs execute access to the run's agent. Workflow runs and other coding agents cannot be joined yet.",
     inputSchema: {
       type: "object",

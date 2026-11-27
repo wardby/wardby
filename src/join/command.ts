@@ -1,7 +1,8 @@
 /**
  * `wardby join -`: join a running wardby run from a terminal and talk to its agent. The link comes
- * from the join_run MCP tool (its `terminal.link`) and is pasted on stdin, never taken as an
- * argument, so it stays out of shell history and the process list.
+ * from the join_run MCP tool: `terminal.command` is this command with the link as its argument, ready
+ * to copy; with `-` the link is pasted on stdin instead, which keeps it out of shell history and the
+ * process list (as `wardby resume` offers both).
  *
  * Shows the run's steps live (the agent's words, its commands with their status, and what people
  * send), sends each line typed, and ends with the run's outcome. `!text` interrupts the agent first;
@@ -21,11 +22,14 @@ import { createInterface, type Interface } from "node:readline";
 import { parseArgs } from "node:util";
 import { JOIN_API_PATHS, parseJoinLink, type JoinApiAction } from "../mcp/tools/join-link.js";
 
-export const JOIN_USAGE = `usage: wardby join -
+export const JOIN_USAGE = `usage: wardby join '<link>'
+       wardby join -
 
 Join a running wardby run from this terminal and talk to its agent. Run the join_run MCP tool
-first: its answer has terminal.link. Paste the link when asked (or pipe it in); it is never taken as
-an argument, so it stays out of your shell history and the process list.
+first: its terminal.command is this command with the link, ready to copy. With "-", paste the link
+when asked instead (or pipe it in): this keeps it out of your shell history and the process list,
+where a link given as an argument stays (its first token works for 10 minutes; the chat renews it in
+memory after that).
 
 In the chat:
   a line + Enter   send it to the agent (it reads it at its next step)
@@ -234,11 +238,12 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
     out(JOIN_USAGE);
     return 0;
   }
-  // The link is never an argument: only "-" (read it from standard input).
-  if (parsed.positionals.length !== 1 || parsed.positionals[0] !== "-") {
+  // The link as the one argument, or "-" to read it from standard input (out of history and ps).
+  if (parsed.positionals.length !== 1) {
     out(JOIN_USAGE);
     return 2;
   }
+  const argLink = parsed.positionals[0] === "-" ? undefined : parsed.positionals[0];
   const input = deps.input ?? process.stdin;
   const tty = input === process.stdin && process.stdin.isTTY === true;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -246,9 +251,14 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
   const rl: Interface = createInterface({ input, terminal: false });
   const lines = rl[Symbol.asyncIterator]();
   try {
-    if (tty) out("Paste the join link from join_run:");
-    const first = await lines.next();
-    const raw = (first.done ? "" : String(first.value)).slice(0, MAX_LINK_BYTES).trim();
+    let raw: string;
+    if (argLink !== undefined) {
+      raw = argLink.slice(0, MAX_LINK_BYTES).trim();
+    } else {
+      if (tty) out("Paste the join link from join_run:");
+      const first = await lines.next();
+      raw = (first.done ? "" : String(first.value)).slice(0, MAX_LINK_BYTES).trim();
+    }
     if (raw === "") throw new JoinCliError(JOIN_MESSAGES.noLink);
     const link = parseJoinLink(raw);
     if (!link) throw new JoinCliError(JOIN_MESSAGES.badLink);
