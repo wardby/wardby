@@ -4,7 +4,7 @@ title: Join unavailable (join_unavailable)
 summary: The run keeps no run steps, so it cannot be joined.
 audience: operator
 tags: [error, join, join_run, send_to_run, join_unavailable]
-appliesTo: ">=0.10.3"
+appliesTo: ">=0.10.2"
 ---
 
 # Join unavailable

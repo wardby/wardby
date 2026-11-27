@@ -4,7 +4,7 @@ title: Run is not running (run_not_running)
 summary: Only a running run can be joined or sent messages.
 audience: operator
 tags: [error, join, join_run, send_to_run, run_not_running]
-appliesTo: ">=0.10.3"
+appliesTo: ">=0.10.2"
 ---
 
 # Run is not running

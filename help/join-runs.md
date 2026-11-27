@@ -15,7 +15,7 @@ tags:
     interrupt a run,
     message a running agent,
   ]
-appliesTo: ">=0.10.3"
+appliesTo: ">=0.10.2"
 ---
 
 # Join a running coding run
