@@ -11,6 +11,11 @@ export interface ReviewAction {
   eventIds: string[];
   /** The person who acted, or null for an agent or guest. */
   actorId: string | null;
+  /**
+   * The run the action was made for, when its events record none: a plan publish submits as the plan's owner
+   * for the planner run, so routing continues that run's job. Attribution in the events is unchanged.
+   */
+  actorRunId?: string;
   /** Set by runReviewHooks: this action completed its plan set's approval (the plan hook claimed it). */
   planApprovalClaimed?: boolean;
 }

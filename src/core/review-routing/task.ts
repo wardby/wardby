@@ -33,7 +33,8 @@ export function routerTask(input: RouterTaskInput): string {
     lines.push(`Option "${input.chosen.option}" was chosen${rejected}.`);
   }
   lines.push(`By: ${who}.`);
-  if (input.note) lines.push(`Note from ${who}: "${input.note}"`);
+  // One line: a multi-line note cannot imitate the task's own lines.
+  if (input.note) lines.push(`Note from ${who}: "${oneLine(input.note)}"`);
   if (input.builderStarted) lines.push("The builder for this plan was already started.");
   lines.push(
     "Read the documents and decide who gets the work next, and what the work is. You may start only your attached agents. Do nothing if nothing is needed.",

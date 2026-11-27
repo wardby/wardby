@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "#prisma";
 import { startRouterRun } from "./start.js";
 
+const { warn } = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock("../logger.js", () => ({ logger: { child: () => ({ warn, info: vi.fn() }) } }));
+
 const input = {
   routerAgentId: "r",
   task: "t",
@@ -52,5 +55,19 @@ describe("startRouterRun job outcomes", () => {
     });
     expect(await run()).toEqual({ refused: "review_router_invalid" });
     expect(update).toHaveBeenCalledWith({ where: { id: "j" }, data: { outcome: "review_router_invalid" } });
+  });
+
+  it("a failed outcome write logs the job id and the error's name only, and still returns the result", async () => {
+    warn.mockClear();
+    const update = vi.fn(async () => {
+      throw new TypeError("db down: secret-ish detail");
+    });
+    const db = { reviewJob: { update } } as unknown as PrismaClient;
+    const dispatch = async () => ({ run: { id: "run-9", status: "pending" } });
+    expect(await startRouterRun({ db, executor: {} as never, dispatch: dispatch as never }, input)).toEqual({
+      runId: "run-9",
+    });
+    expect(warn).toHaveBeenCalledWith({ jobId: "j", errorName: "TypeError" }, "review job outcome not recorded");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("db down");
   });
 });

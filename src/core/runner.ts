@@ -357,7 +357,8 @@ export type DelegationChildAgent = Prisma.AgentGetPayload<{ select: typeof DELEG
 
 /**
  * Routed work (#646, spec §4): a delegation from a run that belongs to a review job (its router run or a run below
- * it). Not routed: nothing changes. Routed: a native child without documentTools is refused; a coding child of a
+ * it). Not routed: nothing changes. Routed: a native child without documentTools is refused when the job's router
+ * run was given documents (a request_work job has none, so any child may take it); a coding child of a
  * call with no planNumber gets the job's documents as plan files (null when the child's secret values cannot be
  * read: the caller refuses); then the start is counted against the decision's maxStartsPerDecision, last, so a
  * delegation refused before it uses none of the count. A start counted here and refused later (budget) still counts.
@@ -371,7 +372,13 @@ async function routedDelegation(
 ): Promise<{ refusal: string } | { routedInputFiles?: PlanFile[] }> {
   const job = await jobForRun(db, runId);
   if (!job) return {};
-  if (childAgent.kind === "native" && childAgent.documentTools === null) {
+  // Only work that carries documents needs a reader: a job whose router run was given none (request_work) does not.
+  if (
+    childAgent.kind === "native" &&
+    childAgent.documentTools === null &&
+    job.routerRunId !== null &&
+    (await db.runDocumentGrant.count({ where: { runId: job.routerRunId } })) > 0
+  ) {
     return { refusal: REVIEW_ROUTE_TARGET_NO_DOCUMENTS_REFUSAL };
   }
   let routedFiles: PlanFile[] | undefined;
@@ -598,8 +605,9 @@ export type RunnerDb = Pick<
   | "principal"
   | "documentVersion"
   | "documentFile"
-  // Routed work (#646): the review job a delegating run belongs to, and its start count.
+  // Routed work (#646): the review job a delegating run belongs to, its start count, and its router run's grants.
   | "reviewJob"
+  | "runDocumentGrant"
 >;
 
 /** The providers a native run needs; `executor`, `reviewHosts` and `issueTrackers` are optional capabilities. */

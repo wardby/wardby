@@ -165,6 +165,18 @@ describe.skipIf(!process.env.DATABASE_URL)("routed delegation limits (database)"
       expect((await db.reviewJob.findUniqueOrThrow({ where: { id: root.id } })).startsUsed).toBe(2);
     });
 
+    it("a refused start keeps a job that already started an agent as started; one that started none records the limit", async () => {
+      const r = await routerRun();
+      const busy = await job(r.id, null, 2);
+      await db.run.create({ data: { agentId: readerId, parentRunId: r.id } });
+      expect(await countRoutedStart(db, r.id)).toEqual({ refusal: expect.stringContaining("review_route_limit") });
+      expect((await db.reviewJob.findUniqueOrThrow({ where: { id: busy.id } })).outcome).toBe("started");
+      const idle = await routerRun();
+      const none = await job(idle.id, null, 2);
+      expect(await countRoutedStart(db, idle.id)).toEqual({ refusal: expect.stringContaining("review_route_limit") });
+      expect((await db.reviewJob.findUniqueOrThrow({ where: { id: none.id } })).outcome).toBe("review_route_limit");
+    });
+
     it("a run that belongs to no job has no limit", async () => {
       const r = await routerRun();
       for (let i = 0; i < 4; i++) expect(await countRoutedStart(db, r.id)).toBeNull();
@@ -230,6 +242,7 @@ describe.skipIf(!process.env.DATABASE_URL)("routed delegation limits (database)"
 
     it("refuses a native child without documentTools, starting nothing and counting nothing", async () => {
       const r = await sandboxedRouter(0);
+      await grantedDocument(r.run.id, "# Epic\n");
       const outcome = await durableDelegate(r.ctx, "g-1", "delegate_to_bare", task);
       expect(outcome).toEqual({
         result: JSON.stringify({
@@ -251,7 +264,16 @@ describe.skipIf(!process.env.DATABASE_URL)("routed delegation limits (database)"
       const refused = await durableDelegate(r.ctx, "g-2", "delegate_to_coder", task);
       expect(refused).toEqual({ result: expect.stringContaining('"error":"review_route_limit"') });
       expect(r.started).toHaveLength(1);
-      expect((await db.reviewJob.findUniqueOrThrow({ where: { id: r.job!.id } })).outcome).toBe("review_route_limit");
+      // The job started an agent: it stays started (the refusal went back to the router as the tool's result).
+      expect((await db.reviewJob.findUniqueOrThrow({ where: { id: r.job!.id } })).outcome).toBe("started");
+    });
+
+    it("a job whose router run was given no documents (request_work) may start a native child without documentTools", async () => {
+      const r = await sandboxedRouter(0);
+      expect(await durableDelegate(r.ctx, "g-1", "delegate_to_bare", task)).toEqual({ pending: true });
+      expect(r.started).toHaveLength(1);
+      // Still a start of the decision: counted.
+      expect((await db.reviewJob.findUniqueOrThrow({ where: { id: r.job!.id } })).startsUsed).toBe(1);
     });
 
     it("leaves an unrouted run's delegation as it was: a native child without documentTools starts", async () => {
@@ -327,7 +349,9 @@ describe.skipIf(!process.env.DATABASE_URL)("routed delegation limits (database)"
     }
 
     it("refuses a native child without documentTools and a start past the limit, as tool results", async () => {
-      const out = await run([call("c1", "bare"), call("c2", "reader"), say("done")], 2);
+      const out = await run([call("c1", "bare"), call("c2", "reader"), say("done")], 2, async (runId) => {
+        await grantedDocument(runId, "# Epic\n");
+      });
       expect(out.finished.status).toBe("succeeded");
       expect(out.toolResults[0]).toContain("review_route_target_no_documents");
       expect(out.toolResults.at(-1)).toContain("review_route_limit");

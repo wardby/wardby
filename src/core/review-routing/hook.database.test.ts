@@ -24,6 +24,7 @@ import { documentSecretValues } from "../documents/redact.js";
 import { createDocument } from "../documents/service.js";
 import { createPlanReviewHook, setPlanReviewHook } from "../plans/approval.js";
 import { createPlanSetFixture } from "../plans/build.test-support.js";
+import { publishPlanFromRun } from "../plans/publish.js";
 import { reviewRouterStarter } from "../../providers/executor/composition.js";
 import { createReviewRouterHook, type StartRouter } from "./hook.js";
 
@@ -35,6 +36,7 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
   const s = randomUUID().slice(0, 8);
   let owner: Principal;
   let ann: Principal;
+  let bob: Principal;
   const agents: string[] = [];
   let router: string;
   let router2: string;
@@ -60,6 +62,7 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
   beforeAll(async () => {
     owner = await db.principal.create({ data: { subject: `rr-owner-${s}` } });
     ann = await db.principal.create({ data: { subject: `rr-ann-${s}` } });
+    bob = await db.principal.create({ data: { subject: `rr-bob-${s}` } });
     await db.principalProfile.create({ data: { principalId: owner.id, displayName: "Olive Owner", source: "oidc" } });
     await db.principalProfile.create({ data: { principalId: ann.id, displayName: "Ann Lead", source: "oidc" } });
     router = await agent({ router: true, description: "routes work" });
@@ -103,14 +106,20 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     secretValues = (agentId) => documentSecretValues(db, cipher, agentId);
   });
   afterAll(async () => {
-    const ids = [owner.id, ann.id];
+    const ids = [owner.id, ann.id, bob.id];
     await db.reviewJob.deleteMany({ where: { routerAgentId: { in: agents } } });
+    const agentRuns = (await db.run.findMany({ where: { agentId: { in: agents } }, select: { id: true } })).map(
+      (r) => r.id,
+    );
+    await db.codingRunPlanFile.deleteMany({ where: { runId: { in: agentRuns } } });
+    await db.codingRun.deleteMany({ where: { runId: { in: agentRuns } } });
     await db.document.deleteMany({ where: { ownerId: owner.id } });
     await db.planSet.deleteMany({ where: { agentId: { in: agents } } });
     await db.documentSet.deleteMany({ where: { agentId: { in: agents } } });
     await db.run.deleteMany({ where: { agentId: { in: agents }, parentRunId: { not: null } } });
     await db.run.deleteMany({ where: { agentId: { in: agents } } });
     await db.resourceGrant.deleteMany({ where: { granteePrincipalId: { in: ids } } });
+    await db.runDocumentGrant.deleteMany({ where: { runId: { in: agentRuns } } });
     await db.agentSecret.deleteMany({ where: { agentId: { in: agents } } });
     await db.secret.deleteMany({ where: { ownerId: owner.id } });
     await db.agent.deleteMany({ where: { id: { in: agents } } });
@@ -195,7 +204,8 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     await submit(a);
     await submit(b);
     await settle();
-    expect(calls).toHaveLength(2);
+    // The set enters review once: the second member's submit does not route again.
+    expect(calls).toHaveLength(1);
     expect(calls[0].task).toContain(`Review action: submitted on Concepts ${s} (version 1).`);
     calls = [];
     await approve(a);
@@ -568,5 +578,154 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     } finally {
       await db.agent.update({ where: { id: router }, data: { router: true } });
     }
+  });
+
+  /** A planner run under `parentRunId` whose stored output is the given plan files (as a coding run stores them). */
+  async function plannerRun(plannerId: string, parentRunId: string, paths: string[]) {
+    const run = await db.run.create({
+      data: { agentId: plannerId, status: "succeeded", trigger: "manual", parentRunId },
+    });
+    await db.codingRun.create({
+      data: {
+        runId: run.id,
+        task: "t",
+        repository: `o/rr-${s}`,
+        baseRef: "main",
+        headRef: `wardby/run-${run.id}`,
+        provider: "codex",
+        model: "m",
+        timeoutSec: 60,
+        protectedPaths: [],
+        budgetReservedUsd: 0.1,
+        collectPlanFiles: true,
+        planNumber: ++planNumber,
+        issueProvider: "github",
+        issueKey: `o/rr-${s}#${planNumber}`,
+        planFilesStatus: "stored",
+      },
+    });
+    await db.codingRunPlanFile.createMany({
+      data: paths.map((path) => ({ runId: run.id, direction: "output", path, content: `# ${path}\n` })),
+    });
+    return run.id;
+  }
+
+  it("a plan published under a router's job routes once, continuing that job (no new person's job)", async () => {
+    install();
+    const plannerId = await agent({
+      kind: "coding",
+      codingProfile: {
+        create: {
+          repository: `o/rr-${s}`,
+          protectedPaths: [],
+          planDocument: { store: "wardby", reviewers: [owner.id], onApproved: "notify" },
+        },
+      },
+    });
+    const routerRun = await db.run.create({ data: { agentId: router, status: "running", trigger: "review_action" } });
+    const root = await db.reviewJob.create({
+      data: {
+        reviewEventId: `rr-root-${randomUUID()}`,
+        routerAgentId: router,
+        routerRunId: routerRun.id,
+        startedById: ann.id,
+        outcome: "started",
+      },
+    });
+    const runId = await plannerRun(plannerId, routerRun.id, ["plan.md", "api.md", "ui.md"]);
+    const published = await publishPlanFromRun(db, { cipher, origin: null }, runId);
+    expect(published && "documents" in published ? published.documents : []).toHaveLength(3);
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].routerAgentId).toBe(router);
+    expect(calls[0].documentIds).toHaveLength(3);
+    const job = await db.reviewJob.findUniqueOrThrow({ where: { id: calls[0].jobId } });
+    expect(job.rootJobId).toBe(root.id);
+    // The job's person, not the plan's owner, and the root counted the start.
+    expect(job.startedById).toBe(ann.id);
+    expect((await db.reviewJob.findUniqueOrThrow({ where: { id: root.id } })).startsUsed).toBe(1);
+    const jobs = await db.reviewJob.findMany({ where: { routerAgentId: router, createdAt: { gte: root.createdAt } } });
+    expect(jobs.filter((j) => j.rootJobId === null).map((j) => j.id)).toEqual([root.id]);
+  });
+
+  it("agent-made review actions inside one job stop at the router's maxStartsPerDecision", async () => {
+    install();
+    const limited = await agent({ router: true, description: "limited", maxStartsPerDecision: 2 });
+    const routedDoc = async () => {
+      const id = await doc();
+      await db.document.update({ where: { id }, data: { routerAgentId: limited } });
+      return id;
+    };
+    await submit(await routedDoc());
+    await settle();
+    expect(calls).toHaveLength(1);
+    const rootJobId = calls[0].jobId;
+    // Each router run's child submits another routed document: every such run continues the job.
+    for (let i = 0; i < 3; i++) {
+      const parent = (await db.reviewJob.findUniqueOrThrow({ where: { id: calls.at(-1)!.jobId } })).routerRunId!;
+      const child = await db.run.create({ data: { agentId: writer, parentRunId: parent } });
+      await submitForReview(db, cipher, {
+        documentId: await routedDoc(),
+        viewer: { kind: "agent", agentId: writer, runId: child.id },
+        reviewers: [ann.id],
+      });
+      await settle();
+    }
+    expect(calls).toHaveLength(3);
+    expect((await db.reviewJob.findUniqueOrThrow({ where: { id: rootJobId } })).startsUsed).toBe(2);
+    const stopped = await db.reviewJob.findMany({ where: { rootJobId, outcome: "review_route_limit" } });
+    expect(stopped).toHaveLength(1);
+    expect(stopped[0].routerRunId).toBeNull();
+  });
+
+  it("a router its owner revoked execute on is no longer reached: the writer's reviewRouter and a document's routerAgentId", async () => {
+    install();
+    const bobRouter = await agent({ router: true, description: "bob routes", ownerId: bob.id });
+    const grant = await db.resourceGrant.create({
+      data: {
+        resourceType: "agent",
+        resourceId: bobRouter,
+        granteeKind: "principal",
+        granteePrincipalId: owner.id,
+        granteeKey: `principal:${owner.id}`,
+        level: "execute",
+        grantedById: bob.id,
+      },
+    });
+    const fallbackWriter = await agent({ reviewRouterId: bobRouter });
+    const id = await doc({ agentId: fallbackWriter });
+    await submit(id);
+    await settle();
+    expect(calls.map((c) => c.routerAgentId)).toEqual([bobRouter]);
+    // Bob revokes: the writer's reviews no longer start Bob's router, and no job is claimed.
+    await db.resourceGrant.delete({ where: { id: grant.id } });
+    await approve(id);
+    await settle();
+    expect(calls).toHaveLength(1);
+    const approved = (await eventsOf(id)).find((e) => e.kind === "approved")!;
+    expect(await db.reviewJob.count({ where: { reviewEventId: approved.id } })).toBe(0);
+
+    // A document's own router (as link_document sets it) needs execute too...
+    const linked = await doc();
+    await db.document.update({ where: { id: linked }, data: { routerAgentId: bobRouter } });
+    await submit(linked);
+    await settle();
+    expect(calls).toHaveLength(1);
+    // ...unless the router's own run tree wrote it (recorded at creation).
+    const bobRun = await db.run.create({ data: { agentId: bobRouter } });
+    const writerRun = await db.run.create({ data: { agentId: writer, parentRunId: bobRun.id } });
+    const fromTree = (
+      await createDocument(db, cipher, {
+        ownerId: owner.id,
+        title: "From the tree",
+        markdown: "# t",
+        agentId: writer,
+        runId: writerRun.id,
+      })
+    ).id;
+    expect((await db.document.findUniqueOrThrow({ where: { id: fromTree } })).routerAgentId).toBe(bobRouter);
+    await submit(fromTree);
+    await settle();
+    expect(calls.map((c) => c.routerAgentId)).toEqual([bobRouter, bobRouter]);
   });
 });

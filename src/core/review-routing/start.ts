@@ -7,6 +7,9 @@
  */
 import type { PrismaClient } from "#prisma";
 import { dispatchRun, type DispatchTx } from "../dispatch.js";
+import { logger } from "../logger.js";
+
+const log = logger.child({ module: "review-routing" });
 
 type BeforePersistAgent = Parameters<NonNullable<Parameters<typeof dispatchRun>[0]["beforePersist"]>>[1];
 
@@ -40,8 +43,12 @@ export async function startRouterRun(
         where: { id: input.jobId },
         data: routerRunId ? { routerRunId, outcome } : { outcome },
       });
-    } catch {
-      /* the caller still gets the result */
+    } catch (err) {
+      // The caller still gets the result; the job id and the error's name only (never its message).
+      log.warn(
+        { jobId: input.jobId, errorName: err instanceof Error ? err.name : typeof err },
+        "review job outcome not recorded",
+      );
     }
   };
   let dispatched: Awaited<ReturnType<typeof dispatchRun>>;

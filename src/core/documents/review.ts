@@ -336,6 +336,8 @@ export async function submitForReview(
     reviewers: string[];
     finalApproverId?: string | null;
     note?: string;
+    /** The run this submit is made for (plan publish): routing continues its job (ReviewAction.actorRunId). */
+    routingRunId?: string;
   },
 ): Promise<ReviewView> {
   // An agent needs write on the document; a person needs to own it.
@@ -417,6 +419,7 @@ export async function submitForReview(
     documentId: input.documentId,
     eventIds,
     actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
+    ...(input.routingRunId ? { actorRunId: input.routingRunId } : {}),
   });
   return getReviewView(db, input.documentId, input.viewer);
 }
@@ -880,9 +883,15 @@ async function routingView(
     where: { id: documentId },
     select: {
       agentId: true,
+      ownerId: true,
       routerAgentId: true,
-      set: { select: { id: true, agentId: true, routerAgentId: true } },
-      planSet: { select: { set: { select: { id: true, agentId: true, routerAgentId: true } } } },
+      versions: { where: { number: 1 }, select: { runId: true } },
+      set: { select: { id: true, agentId: true, ownerId: true, routerAgentId: true, createdByRunId: true } },
+      planSet: {
+        select: {
+          set: { select: { id: true, agentId: true, ownerId: true, routerAgentId: true, createdByRunId: true } },
+        },
+      },
     },
   });
   if (!doc) return { router: null, jobs: [] };
@@ -891,8 +900,18 @@ async function routingView(
   const routerId = await resolveRouter(
     db,
     set
-      ? { routerAgentId: set.routerAgentId, writerAgentId: set.agentId }
-      : { routerAgentId: doc.routerAgentId, writerAgentId: doc.agentId },
+      ? {
+          routerAgentId: set.routerAgentId,
+          writerAgentId: set.agentId,
+          ownerId: set.ownerId,
+          recordedByRunId: set.createdByRunId,
+        }
+      : {
+          routerAgentId: doc.routerAgentId,
+          writerAgentId: doc.agentId,
+          ownerId: doc.ownerId,
+          recordedByRunId: doc.versions[0]?.runId ?? null,
+        },
   );
   const router = routerId
     ? await db.agent.findUnique({ where: { id: routerId }, select: { id: true, name: true } })

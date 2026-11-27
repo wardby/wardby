@@ -5,7 +5,9 @@
  *
  * A set routes as one piece of work (spec §3.1): an action made only of approvals routes only when it completed
  * the set's approval (a plan set's is claimed by the plan hook, which runs first; a native option set's is claimed
- * here), a choice (chooseOption) routes once, and every other action routes once as that action on the set.
+ * here), a choice (chooseOption) routes once, a submit routes only when the set first enters review, and every
+ * other action routes once as that action on the set. An action that continues a job (an agent's own, or a plan
+ * publish's submits for the planner run) is one more start of that job, counted against the router's limit.
  */
 import type { PrismaClient } from "#prisma";
 import { readPlanDocument } from "../../coding/profile.js";
@@ -16,7 +18,7 @@ import { choiceNote } from "../documents/review.js";
 import { claimSetApproval } from "../documents/sets.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { resolveRouter } from "./lineage.js";
-import { claimJob, continuedJob } from "./jobs.js";
+import { claimJob, continuedJob, countJobStart } from "./jobs.js";
 import { routerTask } from "./task.js";
 
 const log = logger.child({ module: "review-routing" });
@@ -55,7 +57,9 @@ export function createReviewRouterHook(deps: {
   };
 }
 
-const setSelect = { select: { id: true, name: true, agentId: true, routerAgentId: true } } as const;
+const setSelect = {
+  select: { id: true, name: true, agentId: true, ownerId: true, routerAgentId: true, createdByRunId: true },
+} as const;
 
 /** The user's own words in a choice's stored note ("Chose <option>: <note>"), or the whole note if it differs. */
 function choiceWords(note: string | null, option: string): string | null {
@@ -68,7 +72,15 @@ async function route(db: PrismaClient, deps: ReviewRouterDeps, action: ReviewAct
   const events = await db.documentReviewEvent.findMany({
     where: { id: { in: action.eventIds } },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    select: { id: true, kind: true, versionNumber: true, note: true, documentId: true, actorGuestId: true },
+    select: {
+      id: true,
+      kind: true,
+      versionNumber: true,
+      note: true,
+      documentId: true,
+      actorGuestId: true,
+      createdAt: true,
+    },
   });
   const doc = await db.document.findUnique({
     where: { id: action.documentId },
@@ -76,8 +88,10 @@ async function route(db: PrismaClient, deps: ReviewRouterDeps, action: ReviewAct
       id: true,
       title: true,
       agentId: true,
+      ownerId: true,
       routerAgentId: true,
       option: true,
+      versions: { where: { number: 1 }, select: { runId: true } },
       planPath: true,
       set: setSelect,
       planSet: {
@@ -113,18 +127,34 @@ async function route(db: PrismaClient, deps: ReviewRouterDeps, action: ReviewAct
     const claim = await claimSetApproval(db, { kind: "documents", setId: set.id }, action.actorId);
     if (approvalsOnly && claim?.approved !== true) return;
   }
+  // A set enters review once (spec §3.1): a submit after another member's routes nothing.
+  if (set && kinds.every((k) => k === "submitted") && (await setAlreadySubmitted(db, doc, events[0]))) return;
 
+  // Checked before any job is claimed: a router its person can no longer run is no router.
   const routerAgentId = await resolveRouter(
     db,
     set
-      ? { routerAgentId: set.routerAgentId, writerAgentId: set.agentId }
-      : { routerAgentId: doc.routerAgentId, writerAgentId: doc.agentId },
+      ? {
+          routerAgentId: set.routerAgentId,
+          writerAgentId: set.agentId,
+          ownerId: set.ownerId,
+          recordedByRunId: set.createdByRunId,
+        }
+      : {
+          routerAgentId: doc.routerAgentId,
+          writerAgentId: doc.agentId,
+          ownerId: doc.ownerId,
+          recordedByRunId: doc.versions[0]?.runId ?? null,
+        },
   );
   if (!routerAgentId) return;
 
-  const continued = await continuedJob(db, firstEventId);
+  const continued = await continuedJob(db, firstEventId, action.actorRunId);
   const rootJobId = continued ? (continued.rootJobId ?? continued.id) : null;
-  const startedById = action.actorId ?? (await agentActionStarter(db, firstEventId, rootJobId));
+  // An action that continues a job is attributed to that job's person (spec §3.5), even when made as the owner.
+  const startedById = rootJobId
+    ? await agentActionStarter(db, firstEventId, rootJobId)
+    : (action.actorId ?? (await agentActionStarter(db, firstEventId, null)));
   const job = await claimJob(db, {
     reviewEventId: firstEventId,
     documentId: set ? null : doc.id,
@@ -135,6 +165,15 @@ async function route(db: PrismaClient, deps: ReviewRouterDeps, action: ReviewAct
   });
   if (!job) return;
   try {
+    // A router run that continues a job is a start of that job (spec §4): counted on the root, refused past it.
+    if (rootJobId) {
+      const counted = await countJobStart(db, { id: job.id, routerAgentId, rootJobId, routerRunId: null });
+      if (counted) {
+        await db.reviewJob.update({ where: { id: job.id }, data: { outcome: "review_route_limit" } });
+        log.info({ jobId: job.id, routerAgentId, code: "review_route_limit" }, "router not started");
+        return;
+      }
+    }
     const eventDocumentIds = [...new Set(events.map((e) => e.documentId))];
     const members = planSet
       ? await db.document.findMany({ where: { planSetId: planSet.id, removedFromPlan: false }, select: { id: true } })
@@ -213,6 +252,32 @@ async function route(db: PrismaClient, deps: ReviewRouterDeps, action: ReviewAct
       "review routing failed",
     );
   }
+}
+
+/**
+ * Whether another member of the document's set has a submitted event before this one (by time, then id): the set
+ * entered review then. Plan sets by planSetId, native option sets by setId.
+ */
+async function setAlreadySubmitted(
+  db: PrismaClient,
+  doc: { id: string; planSet: { id: string } | null; set: { id: string } | null },
+  first: { id: string; createdAt: Date },
+): Promise<boolean> {
+  const members = await db.document.findMany({
+    where: doc.planSet ? { planSetId: doc.planSet.id } : { setId: doc.set!.id },
+    select: { id: true },
+  });
+  const others = members.map((m) => m.id).filter((id) => id !== doc.id);
+  if (others.length === 0) return false;
+  const earlier = await db.documentReviewEvent.findFirst({
+    where: {
+      documentId: { in: others },
+      kind: "submitted",
+      OR: [{ createdAt: { lt: first.createdAt } }, { createdAt: first.createdAt, id: { lt: first.id } }],
+    },
+    select: { id: true },
+  });
+  return earlier !== null;
 }
 
 /** The planner's onApproved, read as plans/approval.ts reads it; an unreadable setting is none. */

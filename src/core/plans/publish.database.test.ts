@@ -642,7 +642,7 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     const { submitForReview: realSubmit } =
       await vi.importActual<typeof import("../documents/review.js")>("../documents/review.js");
     let planB: Awaited<ReturnType<typeof publishPlanFromRun>> = null;
-    // a stalls in its first submit (plan.md) past its lease; b takes the set over and finishes.
+    // a writes both documents, then stalls in its first submit (plan.md) past its lease; b takes the set over and finishes.
     vi.mocked(submitForReview).mockImplementationOnce(async (...args) => {
       t += PLAN_PUBLISH_LEASE_MS + 1;
       planB = await publishPlanFromRun(db, { ...deps, clock }, b);
@@ -659,11 +659,15 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     expect(await planSummaryForRun(db, a, null)).toEqual({ number: 12, error: "plan_publish_busy" });
     const set = await db.planSet.findFirstOrThrow({ where: { agentId } });
     expect(set).toMatchObject({ publishLeaseRunId: null, publishLeaseUntil: null });
-    // a stopped before api.md: b made it, and no document has a version from a past its first step.
-    const docs = await db.document.findMany({ where: { planSetId: set.id }, select: { id: true, planPath: true } });
-    expect(docs.map((d) => d.planPath).sort()).toEqual(["api.md", "plan.md"]);
-    const api = docs.find((d) => d.planPath === "api.md")!;
-    expect(await db.documentVersion.count({ where: { documentId: api.id, runId: a } })).toBe(0);
+    // a stopped before submitting api.md: b's version is current on both, and b left neither in draft.
+    const docs = await db.document.findMany({
+      where: { planSetId: set.id },
+      select: { planPath: true, reviewState: true, currentVersion: { select: { runId: true } } },
+    });
+    expect(docs.map((d) => [d.planPath, d.reviewState, d.currentVersion?.runId]).sort()).toEqual([
+      ["api.md", "in_review", b],
+      ["plan.md", "in_review", b],
+    ]);
   });
 
   it("a lease another publish keeps renewing: the waiter gives up at the bound with plan_publish_busy", async () => {

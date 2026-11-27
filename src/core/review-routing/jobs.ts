@@ -53,13 +53,18 @@ export async function jobForRun(db: Pick<PrismaClient, "run" | "reviewJob">, run
   return null;
 }
 
-/** The job an agent's own action continues; null for a person's (or guest's) action. */
+/**
+ * The job an agent's own action continues; null for a person's (or guest's) action. `runId` is the run the action
+ * was made for when its event records none (a plan publish submits as the plan's owner for the planner run).
+ */
 export async function continuedJob(
   db: Pick<PrismaClient, "run" | "reviewJob" | "documentReviewEvent">,
   reviewEventId: string,
+  runId?: string | null,
 ): Promise<JobRef | null> {
   const event = await db.documentReviewEvent.findUnique({ where: { id: reviewEventId }, select: { actorRunId: true } });
-  return event?.actorRunId ? jobForRun(db, event.actorRunId) : null;
+  const actorRunId = event?.actorRunId ?? runId ?? null;
+  return actorRunId ? jobForRun(db, actorRunId) : null;
 }
 
 /** The refusal of a start past the router's maxStartsPerDecision (fixed text: never a caller's value). */
@@ -78,10 +83,11 @@ export const REVIEW_ROUTE_TARGET_NO_DOCUMENTS_REFUSAL = JSON.stringify({
 
 /**
  * Counts one start against the decision's limit (spec §4): on the root job (`rootJobId ?? id`), atomically, only
- * while under the router's maxStartsPerDecision. Past it, the start is refused and the job records it.
+ * while under the router's maxStartsPerDecision. Past it, the start is refused. A job whose router run has started
+ * no agent records review_route_limit as its outcome; one that started some keeps `started` (its agents show).
  */
 export async function countJobStart(
-  db: Pick<PrismaClient, "reviewJob" | "$queryRaw">,
+  db: Pick<PrismaClient, "reviewJob" | "run" | "$queryRaw">,
   job: JobRef,
 ): Promise<{ refusal: string } | null> {
   const rootId = job.rootJobId ?? job.id;
@@ -90,7 +96,13 @@ export async function countJobStart(
     FROM "Agent" a WHERE j."id" = ${rootId} AND a."id" = j."routerAgentId" AND j."startsUsed" < a."maxStartsPerDecision"
     RETURNING j."id"`;
   if (counted.length > 0) return null;
-  await db.reviewJob.updateMany({ where: { id: job.id, outcome: "started" }, data: { outcome: "review_route_limit" } });
+  const startedAny = job.routerRunId !== null && (await db.run.count({ where: { parentRunId: job.routerRunId } })) > 0;
+  if (!startedAny) {
+    await db.reviewJob.updateMany({
+      where: { id: job.id, outcome: "started" },
+      data: { outcome: "review_route_limit" },
+    });
+  }
   return { refusal: REVIEW_ROUTE_LIMIT_REFUSAL };
 }
 
