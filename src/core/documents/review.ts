@@ -31,6 +31,7 @@ import { loadContent } from "./files.js";
 import { formatFor } from "./formats/index.js";
 import { DOCUMENT_WRITE_ATTEMPTS, MAX_REVIEW_EVENTS, MAX_REVIEW_NOTE_CHARS, MAX_REVIEWERS } from "./limits.js";
 import { documentSecretValues, redactForDocumentAgent } from "./redact.js";
+import { redactExactSecretValues } from "../secret-spans.js";
 import { stageVersion, writeVersion } from "./version-write.js";
 import {
   approvedCount,
@@ -132,7 +133,7 @@ export interface ReviewRoutingView {
 }
 
 const MAX_ROUTING_JOBS = 20;
-const MAX_ROUTING_CHILDREN = 50;
+const MAX_ROUTING_CHILDREN_PER_JOB = 10;
 const MAX_TASK_LINE_CHARS = 200;
 
 const SUBMITTABLE = new Set<string>(["draft", "in_review", "changes_requested"]);
@@ -421,7 +422,7 @@ export async function submitForReview(
     actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
     ...(input.routingRunId ? { actorRunId: input.routingRunId } : {}),
   });
-  return getReviewView(db, input.documentId, input.viewer);
+  return getReviewView(db, input.documentId, input.viewer, cipher);
 }
 
 /**
@@ -544,7 +545,7 @@ export async function reviewDocument(
       actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
     });
   }
-  return getReviewView(db, input.documentId, input.viewer);
+  return getReviewView(db, input.documentId, input.viewer, cipher);
 }
 
 export async function forceApprove(
@@ -602,7 +603,7 @@ export async function forceApprove(
     eventIds,
     actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
   });
-  return { view: await getReviewView(db, input.documentId, input.viewer), overridden };
+  return { view: await getReviewView(db, input.documentId, input.viewer, cipher), overridden };
 }
 
 /**
@@ -639,7 +640,7 @@ export async function rejectDocument(
   );
   await notifyDocumentChange(db, input.documentId, "review");
   await runReviewHooks(db, { documentId: input.documentId, eventIds, actorId: principalId });
-  return getReviewView(db, input.documentId, viewer);
+  return getReviewView(db, input.documentId, viewer, cipher);
 }
 
 /** The most documents one choice may reject. */
@@ -709,7 +710,7 @@ export async function chooseOption(
   );
   for (const id of [input.documentId, ...rejectIds]) await notifyDocumentChange(db, id, "review");
   await runReviewHooks(db, { documentId: input.documentId, eventIds, actorId: viewer.principalId });
-  return { view: await getReviewView(db, input.documentId, viewer), rejected: rejectIds };
+  return { view: await getReviewView(db, input.documentId, viewer, cipher), rejected: rejectIds };
 }
 
 /**
@@ -797,7 +798,7 @@ export async function reopenDocument(
     eventIds,
     actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
   });
-  return getReviewView(db, input.documentId, input.viewer);
+  return getReviewView(db, input.documentId, input.viewer, cipher);
 }
 
 /** The summary of the version a reopen starts. */
@@ -805,7 +806,8 @@ export const reopenedSummary = (number: number) => `Reopened for review from v${
 
 export async function setArchived(
   db: PrismaClient,
-  input: { documentId: string; viewer: Viewer; archived: boolean },
+  /** `cipher` only for the returned view's routed task lines (getReviewView). */
+  input: { documentId: string; viewer: Viewer; archived: boolean; cipher?: Cipher },
 ): Promise<ReviewView> {
   if (input.viewer.kind === "agent") return denyAgent(db, input.documentId, input.viewer);
   await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
@@ -842,7 +844,7 @@ export async function setArchived(
     eventIds,
     actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
   });
-  return getReviewView(db, input.documentId, input.viewer);
+  return getReviewView(db, input.documentId, input.viewer, input.cipher);
 }
 
 /** In publishVersion's transaction, before the version is written: refuses an approved or archived document. */
@@ -878,7 +880,11 @@ async function routingView(
   documentId: string,
   viewer: Viewer,
   owner: boolean,
+  cipher: Cipher | undefined,
 ): Promise<ReviewRoutingView> {
+  const setSelect = {
+    select: { id: true, agentId: true, ownerId: true, routerAgentId: true, createdByRunId: true },
+  } as const;
   const doc = await db.document.findUnique({
     where: { id: documentId },
     select: {
@@ -886,12 +892,8 @@ async function routingView(
       ownerId: true,
       routerAgentId: true,
       versions: { where: { number: 1 }, select: { runId: true } },
-      set: { select: { id: true, agentId: true, ownerId: true, routerAgentId: true, createdByRunId: true } },
-      planSet: {
-        select: {
-          set: { select: { id: true, agentId: true, ownerId: true, routerAgentId: true, createdByRunId: true } },
-        },
-      },
+      set: setSelect,
+      planSet: { select: { set: setSelect } },
     },
   });
   if (!doc) return { router: null, jobs: [] };
@@ -923,14 +925,23 @@ async function routingView(
     select: { createdAt: true, reviewEventId: true, outcome: true, routerRunId: true, routerAgentId: true },
   });
   const runIds = [...new Set(jobs.flatMap((j) => (j.routerRunId ? [j.routerRunId] : [])))];
-  const children = runIds.length
-    ? await db.run.findMany({
-        where: { parentRunId: { in: runIds } },
-        orderBy: [{ startedAt: "asc" }, { id: "asc" }],
-        take: MAX_ROUTING_CHILDREN,
-        select: { id: true, parentRunId: true, taskOverride: true, agent: { select: { name: true } } },
-      })
-    : [];
+  // Each job's newest started agents, capped per job, so a busy older job never hides a newer one's.
+  const childrenOf = new Map(
+    await Promise.all(
+      runIds.map(
+        async (runId) =>
+          [
+            runId,
+            await db.run.findMany({
+              where: { parentRunId: runId },
+              orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+              take: MAX_ROUTING_CHILDREN_PER_JOB,
+              select: { id: true, agentId: true, taskOverride: true, agent: { select: { name: true } } },
+            }),
+          ] as const,
+      ),
+    ),
+  );
   const routerIds = [...new Set(jobs.map((j) => j.routerAgentId))];
   const routers = new Map(
     (
@@ -947,26 +958,57 @@ async function routingView(
         (principalId !== null && atLeast("agent", await effectiveAccess(db, "agent", a, principalId), "execute")),
     );
   }
+  // Task text is model-written and stored raw: redacted by exact value against the router's and the started
+  // agent's secret values. No cipher, or values that cannot be read, shows no task text (fail closed).
+  const secretsOf = new Map<string, Promise<readonly string[] | null>>();
+  const secrets = (agentId: string) => {
+    let got = secretsOf.get(agentId);
+    if (!got) {
+      got = cipher ? documentSecretValues(db, cipher, agentId).catch(() => null) : Promise.resolve(null);
+      secretsOf.set(agentId, got);
+    }
+    return got;
+  };
+  const taskLine = async (routerAgentId: string, child: { agentId: string; taskOverride: string | null }) => {
+    if (!seeTask.get(routerAgentId) || !child.taskOverride) return null;
+    const [a, b] = await Promise.all([secrets(routerAgentId), secrets(child.agentId)]);
+    if (a === null || b === null) return null;
+    const first = child.taskOverride.split("\n", 1)[0] ?? "";
+    return (
+      redactExactSecretValues(first, [...a, ...b])
+        .trim()
+        .slice(0, MAX_TASK_LINE_CHARS) || null
+    );
+  };
   return {
     router,
-    jobs: jobs.map((j) => ({
-      at: j.createdAt,
-      eventId: j.reviewEventId,
-      outcome: j.outcome,
-      routerName: routers.get(j.routerAgentId)?.name ?? "The router",
-      started: children
-        .filter((c) => c.parentRunId === j.routerRunId)
-        .map((c) => ({
-          agentName: c.agent.name,
-          task: seeTask.get(j.routerAgentId)
-            ? c.taskOverride?.split("\n", 1)[0]?.trim().slice(0, MAX_TASK_LINE_CHARS) || null
-            : null,
-        })),
-    })),
+    jobs: await Promise.all(
+      jobs.map(async (j) => ({
+        at: j.createdAt,
+        eventId: j.reviewEventId,
+        outcome: j.outcome,
+        routerName: routers.get(j.routerAgentId)?.name ?? "The router",
+        started: await Promise.all(
+          (j.routerRunId ? (childrenOf.get(j.routerRunId) ?? []) : []).map(async (c) => ({
+            agentName: c.agent.name,
+            task: await taskLine(j.routerAgentId, c),
+          })),
+        ),
+      })),
+    ),
   };
 }
 
-export async function getReviewView(db: PrismaClient, documentId: string, viewer: Viewer): Promise<ReviewView> {
+/**
+ * `cipher` reads the secret values a routed agent's task line is redacted against; without it the routing block
+ * shows no task text.
+ */
+export async function getReviewView(
+  db: PrismaClient,
+  documentId: string,
+  viewer: Viewer,
+  cipher?: Cipher,
+): Promise<ReviewView> {
   await requireDocumentAccess(db, documentId, viewer, "read");
   const access = await documentAccess(db, documentId, viewer);
   // One snapshot: state, reviewers, the force banner and the events agree with each other.
@@ -1082,7 +1124,7 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
       overridden: (e.overridden as string[] | null) ?? [],
       createdAt: e.createdAt,
     })),
-    routing: await routingView(db, documentId, viewer, owner),
+    routing: await routingView(db, documentId, viewer, owner, cipher),
     can: {
       submit: (owner || (viewer.kind === "agent" && atLeast("document", access, "write"))) && SUBMITTABLE.has(state),
       review: canReview,

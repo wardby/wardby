@@ -693,6 +693,110 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     expect(await db.documentVersion.count({ where: { documentId: id } })).toBe(1);
   });
 
+  it("a started agent's task line is redacted against the router's and the agent's secret values; no cipher or a failed load shows none", async () => {
+    const id = await doc();
+    const routerId = `rv-rrouter-${s}`;
+    const childAgent = `rv-rchild-${s}`;
+    const base = { systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner.id };
+    await db.agent.create({ data: { id: routerId, name: "Secret router", router: true, ...base } });
+    await db.agent.create({ data: { id: childAgent, name: "Secret child", ...base } });
+    const ROUTER_SECRET = "fake-router-secret-9911";
+    await createSecret(`RV_RKEY_${s.slice(0, 8)}`, ROUTER_SECRET, owner.id, cipher, db);
+    await attachSecret(routerId, `RV_RKEY_${s.slice(0, 8)}`, owner.id, db);
+    await attachSecret(childAgent, `RV_KEY_${s.slice(0, 8)}`, owner.id, db);
+    const event = await db.documentReviewEvent.create({
+      data: { documentId: id, kind: "approved", fromState: "in_review", toState: "approved", versionNumber: 1 },
+    });
+    const routerRun = await db.run.create({ data: { agentId: routerId } });
+    await db.run.create({
+      data: {
+        agentId: childAgent,
+        parentRunId: routerRun.id,
+        taskOverride: `Use ${ROUTER_SECRET} and ${SECRET} to deploy\nmore`,
+      },
+    });
+    await db.reviewJob.create({
+      data: {
+        reviewEventId: event.id,
+        documentId: id,
+        routerAgentId: routerId,
+        routerRunId: routerRun.id,
+        outcome: "started",
+      },
+    });
+    try {
+      const view = await getReviewView(db, id, as(owner), cipher);
+      expect(view.routing.jobs[0].started).toEqual([
+        { agentName: "Secret child", task: "Use [REDACTED] and [REDACTED] to deploy" },
+      ]);
+      // Fail closed: no cipher, or a cipher that cannot read the values, shows no task text.
+      expect((await getReviewView(db, id, as(owner))).routing.jobs[0].started).toEqual([
+        { agentName: "Secret child", task: null },
+      ]);
+      const broken = { ...cipher, decrypt: async () => Promise.reject(new Error("no key")) };
+      const failed = await getReviewView(db, id, as(owner), broken);
+      expect(failed.routing.jobs[0].started).toEqual([{ agentName: "Secret child", task: null }]);
+      expect(JSON.stringify([view, failed])).not.toContain(ROUTER_SECRET);
+    } finally {
+      await db.reviewJob.deleteMany({ where: { documentId: id } });
+      await db.run.deleteMany({ where: { agentId: childAgent } });
+      await db.run.deleteMany({ where: { agentId: routerId } });
+      await db.agentSecret.deleteMany({ where: { agentId: { in: [routerId, childAgent] } } });
+      await db.secret.deleteMany({ where: { name: `RV_RKEY_${s.slice(0, 8)}` } });
+      await db.agent.deleteMany({ where: { id: { in: [routerId, childAgent] } } });
+    }
+  });
+
+  it("each job keeps its own newest started agents (a per-job cap), newest first", async () => {
+    const id = await doc();
+    const routerId = `rv-crouter-${s}`;
+    const childAgent = `rv-cchild-${s}`;
+    const base = { systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner.id };
+    await db.agent.create({ data: { id: routerId, name: "Cap router", router: true, ...base } });
+    await db.agent.create({ data: { id: childAgent, name: "Cap child", ...base } });
+    try {
+      const t0 = Date.now() - 3_600_000;
+      // An older job whose router started 60 agents, and a newer one that started 2.
+      const jobWith = async (n: number, at: number) => {
+        const event = await db.documentReviewEvent.create({
+          data: { documentId: id, kind: "approved", fromState: "in_review", toState: "approved", versionNumber: 1 },
+        });
+        const run = await db.run.create({ data: { agentId: routerId } });
+        for (let i = 0; i < n; i++) {
+          await db.run.create({
+            data: {
+              agentId: childAgent,
+              parentRunId: run.id,
+              taskOverride: `task ${i}`,
+              startedAt: new Date(at + i * 1000),
+            },
+          });
+        }
+        await db.reviewJob.create({
+          data: {
+            reviewEventId: event.id,
+            documentId: id,
+            routerAgentId: routerId,
+            routerRunId: run.id,
+            outcome: "started",
+            createdAt: new Date(at),
+          },
+        });
+      };
+      await jobWith(60, t0);
+      await jobWith(2, t0 + 600_000);
+      const jobs = (await getReviewView(db, id, as(owner), cipher)).routing.jobs;
+      expect(jobs.map((j) => j.started.length)).toEqual([2, 10]);
+      expect(jobs[0].started.map((c) => c.task)).toEqual(["task 1", "task 0"]);
+      expect(jobs[1].started[0].task).toBe("task 59");
+    } finally {
+      await db.reviewJob.deleteMany({ where: { documentId: id } });
+      await db.run.deleteMany({ where: { agentId: childAgent } });
+      await db.run.deleteMany({ where: { agentId: routerId } });
+      await db.agent.deleteMany({ where: { id: { in: [routerId, childAgent] } } });
+    }
+  });
+
   it("the view shows the routing: the router now, each job's outcome, and the agents it started with their task's first line", async () => {
     const id = await doc();
     const none = await getReviewView(db, id, as(owner));
@@ -761,7 +865,9 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       // A read-only viewer sees the names and the outcome, not the task; the owner sees the task's first line.
       expect(started.started).toEqual([{ agentName: "Builder bee", task: null }]);
       expect(started.routerName).toBe("Release router");
-      const ownerJob = (await getReviewView(db, id, as(owner))).routing.jobs.find((j) => j.outcome === "started")!;
+      const ownerJob = (await getReviewView(db, id, as(owner), cipher)).routing.jobs.find(
+        (j) => j.outcome === "started",
+      )!;
       expect(ownerJob.started).toEqual([{ agentName: "Builder bee", task: "Build it now" }]);
       expect(view.routing.jobs.find((j) => j.outcome === "review_route_limit")!.started).toEqual([]);
       // Someone who can execute the router (not the document's owner) sees the task line too.
@@ -775,7 +881,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
           level: "execute",
         },
       });
-      const annJob = (await getReviewView(db, id, as(ann))).routing.jobs.find((j) => j.outcome === "started")!;
+      const annJob = (await getReviewView(db, id, as(ann), cipher)).routing.jobs.find((j) => j.outcome === "started")!;
       expect(annJob.started).toEqual([{ agentName: "Builder bee", task: "Build it now" }]);
       // A router turned off is no longer what would happen now; its jobs stay listed.
       await db.agent.update({ where: { id: routerId }, data: { router: false } });

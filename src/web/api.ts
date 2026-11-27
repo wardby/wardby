@@ -120,7 +120,7 @@ export async function documentPayload(deps: WebDeps, documentId: string, viewer:
   );
   const member = viewer.kind === "principal";
   const design = document.kind === "design";
-  const review = await getReviewView(deps.db, documentId, viewer);
+  const review = await getReviewView(deps.db, documentId, viewer, deps.cipher);
   const planSet = document.planSetId
     ? await deps.db.planSet.findUnique({ where: { id: document.planSetId }, select: { store: true, agentId: true } })
     : null;
@@ -345,7 +345,7 @@ export async function postReview(
       break;
     case "archive":
       if (typeof body.archived !== "boolean") return invalid();
-      view = await setArchived(deps.db, { documentId, viewer, archived: body.archived });
+      view = await setArchived(deps.db, { documentId, viewer, archived: body.archived, cipher: deps.cipher });
       break;
     default:
       return invalid();
