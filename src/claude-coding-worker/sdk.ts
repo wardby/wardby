@@ -40,6 +40,11 @@ const WORKFLOW_TOOL = "Workflow";
 const WORKFLOW_REFUSED =
   "Wardby runs only this run's own workflow, once: call Workflow with just its name, and nothing else.";
 
+const AGENT_TOOL = "Agent";
+/** The fields of Claude Code's Agent input (pinned SDK AgentInput) a sub-agent call may keep. */
+const AGENT_KEPT_FIELDS = ["description", "prompt", "subagent_type"] as const;
+const AGENT_REFUSED = "Start a sub-agent with a description and a prompt.";
+
 type PreToolUseResult = {
   hookSpecificOutput?: {
     hookEventName: "PreToolUse";
@@ -86,6 +91,38 @@ export function workflowGuard(workflow: {
   };
 }
 
+/**
+ * The PreToolUse guard on Claude Code's Agent tool, on a run with sub-agents on. It keeps the
+ * description, prompt and sub-agent type, and runs the sub-agent in the foreground. It drops `model`
+ * (the run's model is the only one the coding proxy allows; CLAUDE_CODE_SUBAGENT_MODEL pins it),
+ * `isolation` (a git worktree changes the run's Git metadata; `remote` leaves the sandbox), and the
+ * team/name/mode fields. In-process (an SDK hook), so repository settings can't remove it.
+ */
+export function agentGuard(): (input: { tool_input?: unknown }) => Promise<PreToolUseResult> {
+  return async (input) => {
+    const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
+    if (typeof toolInput.prompt !== "string" || toolInput.prompt.length === 0) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: AGENT_REFUSED,
+        },
+      };
+    }
+    const kept = Object.fromEntries(
+      AGENT_KEPT_FIELDS.filter((key) => typeof toolInput[key] === "string").map((key) => [key, toolInput[key]]),
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        updatedInput: { ...kept, run_in_background: false },
+      },
+    };
+  };
+}
+
 export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string, unknown> {
   // Claude Code passes the MCP config on its own command line: in header mode (Substrate) only the
   // gateway's placeholder may ever go there.
@@ -95,6 +132,11 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
   else config.signal.addEventListener("abort", () => abortController.abort(), { once: true });
   const context = config.contextDirectory;
   const skills = context !== null && config.skills;
+  const subAgents = config.subAgents;
+  const preToolUse = [
+    ...(config.workflow ? [{ matcher: WORKFLOW_TOOL, hooks: [workflowGuard(config.workflow)] }] : []),
+    ...(subAgents ? [{ matcher: AGENT_TOOL, hooks: [agentGuard()] }] : []),
+  ];
   return {
     abortController,
     // Native mode with repo context: Claude Code loads CLAUDE.md (and skills) from a directory the
@@ -104,13 +146,18 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     model: config.model,
     maxTurns: config.maxTurns,
     maxBudgetUsd: config.budgetUsd,
-    tools: [...(skills ? ["Skill"] : []), ...(config.workflow ? [WORKFLOW_TOOL] : [])],
+    tools: [
+      ...(skills ? ["Skill"] : []),
+      ...(config.workflow ? [WORKFLOW_TOOL] : []),
+      ...(subAgents ? [AGENT_TOOL] : []),
+    ],
     // On a run with MCP tools, the server-level rule allows every tool of wardby_mcp: the proxy and
     // the gateway allow only the run's pinned tools, and dontAsk denies anything not allowed here.
     allowedTools: [
       TOOL_NAME,
       ...(skills ? ["Skill"] : []),
       ...(config.workflow ? [WORKFLOW_TOOL] : []),
+      ...(subAgents ? [AGENT_TOOL] : []),
       ...(config.mcp ? [`mcp__${WARDBY_MCP_SERVER}`] : []),
     ],
     disallowedTools: [PREPARE_DEPENDENCIES_TOOL_NAME, ...WORKER_TOOL_NAMES],
@@ -145,10 +192,8 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     // a hook in any project file (settings or SKILL.md frontmatter) is ignored. This SDK's
     // managedSettings keeps only restrictive keys; allowManagedHooksOnly is the hook lock it accepts.
     ...(context ? { managedSettings: { allowManagedHooksOnly: true } } : {}),
-    // Only on a workflow run (#582): the guard is the one in-process hook.
-    ...(config.workflow
-      ? { hooks: { PreToolUse: [{ matcher: WORKFLOW_TOOL, hooks: [workflowGuard(config.workflow)] }] } }
-      : {}),
+    // In-process guards only: the Workflow guard on a workflow run (#582), the Agent guard with sub-agents.
+    ...(preToolUse.length > 0 ? { hooks: { PreToolUse: preToolUse } } : {}),
     systemPrompt: config.developerInstructions,
     outputFormat: { type: "json_schema", schema: config.outputSchema },
     permissionMode: "dontAsk",
@@ -156,7 +201,8 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     persistSession: config.persistSession,
     // Only on a warm Substrate follow-up round: continue the previous round's conversation.
     ...(config.resumeSessionId ? { resume: config.resumeSessionId } : {}),
-    env: config.environment,
+    // Sub-agents use the run's model: the coding proxy allows no other.
+    env: subAgents ? { ...config.environment, CLAUDE_CODE_SUBAGENT_MODEL: config.model } : config.environment,
     // Only on a traced run; otherwise the SDK's default handling is unchanged.
     ...(config.stderr ? { stderr: config.stderr } : {}),
   };

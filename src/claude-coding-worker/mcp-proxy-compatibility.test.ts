@@ -299,6 +299,7 @@ describe.skipIf(!loaded)("pinned Claude Code calling wardby_mcp through the codi
       contextDirectory: null,
       skills: false,
       persistSession: false,
+      subAgents: false,
       mcp: { url: wardbyMcpUrl(proxyBaseUrl), token },
     });
     const mcpServers = options.mcpServers as Record<string, unknown>;
@@ -489,6 +490,7 @@ describe.skipIf(!loaded)("pinned Claude Code calling wardby_mcp through the codi
       contextDirectory: null,
       skills: false,
       persistSession: false,
+      subAgents: false,
       mcp: { url: wardbyMcpUrl(sim.url), token: "rmt_placeholder_injected_by_gateway", header: "x-wardby-mcp-token" },
     });
     const mcpServers = options.mcpServers as Record<string, unknown>;
@@ -633,6 +635,7 @@ describe.skipIf(!loaded)("pinned Claude Code calling wardby_mcp through the codi
       contextDirectory: null,
       skills: false,
       persistSession: false,
+      subAgents: false,
       mcp: { url: wardbyMcpUrl(proxyBaseUrl), token: INJECTED_MCP_TOKEN_PLACEHOLDER },
     });
     // wardby_mcp pointed at the recording stub, the placeholder in a custom header and no Authorization.

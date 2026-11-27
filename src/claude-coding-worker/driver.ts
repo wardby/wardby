@@ -176,6 +176,8 @@ export interface ClaudeQueryOptions {
    * tool and a guard that allows exactly one call, for this name, and puts these args in it.
    */
   workflow?: { name: string; args: unknown };
+  /** Sub-agents on (WARDBY_SUB_AGENTS): the Agent tool, its guard and the sub-agent model (sdk.ts). */
+  subAgents: boolean;
 }
 
 export type ClaudeQueryFactory = (options: ClaudeQueryOptions) => AsyncIterable<ClaudeSdkMessage>;
@@ -229,6 +231,8 @@ export interface ClaudeWorkerRunOptions {
   resultBundle?: (repository: GitHistoryInput["repositories"][number], timeoutMs: number) => Promise<unknown>;
   /** One operator log line (a fixed-code JSON object); stderr by default. */
   operatorLog?: (event: Record<string, string>) => void;
+  /** WARDBY_SUB_AGENTS (codingProfile.subAgents), read by main.ts. Absent = off. */
+  subAgents?: boolean;
 }
 
 /** Whether the session's final JSON passes the output schema. */
@@ -664,6 +668,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     ...(options.trace ? { stderr: (data: string) => options.trace?.record("sdk_stderr", data) } : {}),
     ...(mcp ? { mcp } : {}),
     ...(workflow ? { workflow: { name: workflow.name, args: workflow.args } } : {}),
+    subAgents: options.subAgents === true,
   });
   let finalJson: string | undefined;
   let failed = false;

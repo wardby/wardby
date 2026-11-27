@@ -49,6 +49,7 @@ COPY --from=worker-dependencies /worker/node_modules ./node_modules
 COPY --from=build /build/dist/gemini-coding-worker ./gemini-coding-worker
 COPY --from=build /build/dist/coding-worker ./coding-worker
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
+COPY --from=build /build/dist/coding/run-settings.js ./coding/run-settings.js
 COPY --from=build /build/dist/coding/commit-subject.js ./coding/commit-subject.js
 COPY --from=build /build/dist/coding/google-web-tools.js ./coding/google-web-tools.js
 COPY --from=build /build/dist/coding/gemini-cli-env.js ./coding/gemini-cli-env.js

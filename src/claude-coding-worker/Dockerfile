@@ -57,6 +57,8 @@ COPY --from=build /build/dist/coding-worker/mcp-config.js ./coding-worker/mcp-co
 COPY --from=build /build/dist/coding-worker/security-instructions.js ./coding-worker/security-instructions.js
 COPY --from=build /build/dist/coding-worker/plan-output.js ./coding-worker/plan-output.js
 COPY --from=build /build/dist/coding/protocol.js ./coding/protocol.js
+# The per-run settings main.js reads from its environment (WARDBY_SUB_AGENTS); imports nothing.
+COPY --from=build /build/dist/coding/run-settings.js ./coding/run-settings.js
 # The driver imports the conventional-commit subject builder, which imports protocol.js.
 COPY --from=build /build/dist/coding/commit-subject.js ./coding/commit-subject.js
 # Session-resume transcript capture (claude-coding-worker/transcript.js); neither imports anything.
@@ -76,7 +78,7 @@ RUN node --input-type=module -e 'const m = await import("/opt/wardby/claude-codi
 # Fail the build, not every run, when a module the worker imports is missing (a missing COPY
 # otherwise exits every run at startup with ERR_MODULE_NOT_FOUND). main.js runs on import, so this
 # loads everything it imports rather than main.js itself.
-RUN node --input-type=module -e 'await Promise.all(["claude-coding-worker/driver", "claude-coding-worker/sdk", "claude-coding-worker/transcript", "claude-coding-worker/plan-files", "coding-worker/debug-trace", "coding-worker/artifact", "coding-worker/errors", "coding-worker/mcp-config", "coding-worker/plan-output"].map((name) => import(`/opt/wardby/${name}.js`)))'
+RUN node --input-type=module -e 'await Promise.all(["claude-coding-worker/driver", "claude-coding-worker/sdk", "claude-coding-worker/transcript", "claude-coding-worker/plan-files", "coding-worker/debug-trace", "coding-worker/artifact", "coding-worker/errors", "coding-worker/mcp-config", "coding-worker/plan-output", "coding/run-settings"].map((name) => import(`/opt/wardby/${name}.js`)))'
 # wardby-cmd (the command-agent stage above): the launchers copy it into a toolchain container.
 COPY --from=command-agent /wardby-cmd /opt/wardby/bin/wardby-cmd
 RUN /opt/wardby/bin/wardby-cmd --version | grep -q "protocol 1"

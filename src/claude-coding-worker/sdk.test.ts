@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ClaudeQueryOptions } from "./driver.js";
-import { buildClaudeSdkOptions, WARDBY_TOOLS_TIMEOUT_MS, workflowGuard } from "./sdk.js";
+import { agentGuard, buildClaudeSdkOptions, WARDBY_TOOLS_TIMEOUT_MS, workflowGuard } from "./sdk.js";
 import { MAX_CLAUDE_COMMAND_TIMEOUT_MS } from "../coding/command-timeouts.js";
 import { KILL_GRACE_MS, MAX_COMMAND_TIMEOUT_MS } from "../claude-tool-runner/command.mjs";
 
@@ -18,6 +18,7 @@ function config(signal = new AbortController().signal): ClaudeQueryOptions {
     contextDirectory: null,
     skills: false,
     persistSession: false,
+    subAgents: false,
   };
 }
 
@@ -257,5 +258,66 @@ describe("workflow runs (#582)", () => {
       const result = await workflowGuard(workflow)({ tool_input: toolInput });
       expect(result.hookSpecificOutput?.permissionDecision, JSON.stringify(toolInput)).toBe("deny");
     }
+  });
+});
+
+describe("sub-agents (codingProfile.subAgents)", () => {
+  it("offers and allows Agent, pins sub-agents to the run model and guards every call", () => {
+    const options = buildClaudeSdkOptions({ ...config(), subAgents: true });
+    expect(options.tools).toContain("Agent");
+    expect(options.allowedTools).toContain("Agent");
+    expect((options.env as Record<string, string>).CLAUDE_CODE_SUBAGENT_MODEL).toBe(config().model);
+    // The run's own environment is kept.
+    expect((options.env as Record<string, string>).ANTHROPIC_API_KEY).toBe("private-run-capability");
+    const hooks = (options.hooks as { PreToolUse: Array<{ matcher: string }> }).PreToolUse;
+    expect(hooks.map((hook) => hook.matcher)).toContain("Agent");
+  });
+
+  it("leaves everything as it was when sub-agents are off", () => {
+    const options = buildClaudeSdkOptions({ ...config(), subAgents: false });
+    expect(options.tools).not.toContain("Agent");
+    expect(options.allowedTools).not.toContain("Agent");
+    expect((options.env as Record<string, string>).CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
+    expect(options.env).toEqual(config().environment);
+    expect(options.hooks).toBeUndefined();
+  });
+
+  it("keeps only description, prompt and subagent_type, and runs the sub-agent in the foreground", async () => {
+    const result = await agentGuard()({
+      tool_input: {
+        description: "find tests",
+        prompt: "List the test files",
+        subagent_type: "Explore",
+        model: "haiku",
+        isolation: "remote",
+        run_in_background: true,
+        name: "x",
+        team_name: "t",
+        mode: "bypassPermissions",
+      },
+    });
+    expect(result.hookSpecificOutput).toEqual({
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      updatedInput: {
+        description: "find tests",
+        prompt: "List the test files",
+        subagent_type: "Explore",
+        run_in_background: false,
+      },
+    });
+  });
+
+  it("denies a call without a prompt", async () => {
+    const result = await agentGuard()({ tool_input: { description: "x" } });
+    expect(result.hookSpecificOutput?.permissionDecision).toBe("deny");
+    const empty = await agentGuard()({ tool_input: { description: "x", prompt: "" } });
+    expect(empty.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("keeps both guards on a workflow run with sub-agents", () => {
+    const options = buildClaudeSdkOptions({ ...config(), subAgents: true, workflow: { name: "w", args: {} } });
+    const matchers = (options.hooks as { PreToolUse: Array<{ matcher: string }> }).PreToolUse.map((h) => h.matcher);
+    expect(matchers.sort()).toEqual(["Agent", "Workflow"]);
   });
 });

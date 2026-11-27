@@ -19,7 +19,7 @@ import { shippedCatalog } from "../llm/catalog.js";
 import { entryOf } from "../llm/catalog-types.js";
 import { WardbyMetrics } from "../../observability/metrics.js";
 import type { LlmEffort } from "../llm/types.js";
-import type { ProxyAuditEvent, ProxyModelTerms, ProxyProtocol } from "./types.js";
+import { MAX_TOOL_TEXT_BYTES, type ProxyAuditEvent, type ProxyModelTerms, type ProxyProtocol } from "./types.js";
 import type { McpToolPin } from "../../core/mcp-tools.js";
 import type { CodingToolPin, NativeToolPin } from "../../core/coding-native-tools.js";
 
@@ -3329,6 +3329,64 @@ describe("workflow sessions (#582)", () => {
         code: "unsupported_anthropic_feature",
       });
       expect(off.fetch).not.toHaveBeenCalled();
+    });
+
+    // What the pinned Claude Code sends on a sub-agent's own requests (sub-agents-proxy-compatibility.test.ts):
+    // the sub-agent's prompt as a plain-string user message, and thinking.display "omitted".
+    const subAgentShape = (v: Record<string, unknown>) => {
+      withAgentTool(v);
+      (v.messages as unknown[])[0] = { role: "user", content: "List the test files" };
+      v.thinking = { type: "adaptive", display: "omitted" };
+    };
+
+    it("forwards a sub-agent's plain-string prompt and thinking.display on a subAgents session, unchanged", async () => {
+      const h = await subAgents(true);
+      await execute(h, "ag-shape", new TestSink(), await body(subAgentShape));
+      expect(h.fetch).toHaveBeenCalledTimes(1);
+      const forwarded = JSON.parse((h.fetch.mock.calls[0][1] as RequestInit).body as string);
+      expect(forwarded.messages[0]).toEqual({ role: "user", content: "List the test files" });
+      expect(forwarded.thinking).toEqual({ type: "adaptive", display: "omitted" });
+      const summarized = (v: Record<string, unknown>) => {
+        subAgentShape(v);
+        v.thinking = { type: "adaptive", display: "summarized" };
+      };
+      await execute(h, "ag-shape-summarized", new TestSink(), await body(summarized));
+      expect(h.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("refuses both shapes on a session without sub-agents, and an unknown display or an oversized prompt on one with them", async () => {
+      const off = await subAgents(false);
+      const stringOnly = (v: Record<string, unknown>) =>
+        ((v.messages as unknown[])[0] = { role: "user", content: "x" });
+      const displayOnly = (v: Record<string, unknown>) => (v.thinking = { type: "adaptive", display: "omitted" });
+      for (const [key, change] of [
+        ["ag-off-string", stringOnly],
+        ["ag-off-display", displayOnly],
+      ] as const) {
+        await expect(execute(off, key, new TestSink(), await body(change))).rejects.toMatchObject({ status: 400 });
+      }
+      expect(off.fetch).not.toHaveBeenCalled();
+      const on = await subAgents(true);
+      const unknownDisplay = (v: Record<string, unknown>) => {
+        subAgentShape(v);
+        v.thinking = { type: "adaptive", display: "full" };
+      };
+      const oversized = (v: Record<string, unknown>) => {
+        subAgentShape(v);
+        (v.messages as unknown[])[0] = { role: "user", content: "x".repeat(MAX_TOOL_TEXT_BYTES + 1) };
+      };
+      const assistantString = (v: Record<string, unknown>) => {
+        subAgentShape(v);
+        (v.messages as unknown[]).push({ role: "assistant", content: "plain" });
+      };
+      for (const [key, change] of [
+        ["ag-on-display", unknownDisplay],
+        ["ag-on-oversized", oversized],
+        ["ag-on-assistant-string", assistantString],
+      ] as const) {
+        await expect(execute(on, key, new TestSink(), await body(change))).rejects.toMatchObject({ status: 400 });
+      }
+      expect(on.fetch).not.toHaveBeenCalled();
     });
 
     it("counts Agent in the tool cap with Skill and Workflow, and still refuses one more tool", async () => {

@@ -129,7 +129,7 @@ interface AnthropicToolPolicy {
   subAgents: boolean;
 }
 
-/** The thinking.display values Claude Code's workflow sub-agents send (#582). */
+/** The thinking.display values Claude Code's sub-agents send (workflow sessions, #582, and sub-agents sessions). */
 const WORKFLOW_THINKING_DISPLAY = new Set(["omitted", "summarized"]);
 const MAX_COMMAND_BYTES = 16 * 1024;
 /**
@@ -1126,9 +1126,10 @@ function parseAnthropicRequest(
         continue;
       }
     }
-    // A workflow session (#582): Claude Code tells the session a workflow finished in a user
-    // message with plain string content. Bounded like any tool text; any other session keeps blocks only.
-    if (policy.workflow && message.role === "user" && typeof message.content === "string") {
+    // Plain string user content: a workflow session (#582), where Claude Code tells the session a
+    // workflow finished, and a sub-agents session, where an Agent sub-agent's prompt opens its own
+    // conversation. Bounded like any tool text; any other session keeps blocks only.
+    if ((policy.workflow || policy.subAgents) && message.role === "user" && typeof message.content === "string") {
       if (Buffer.byteLength(message.content) > MAX_TOOL_TEXT_BYTES) {
         throw new CodingProxyError(400, "unsupported_anthropic_feature");
       }
@@ -1161,15 +1162,17 @@ function parseAnthropicRequest(
     requireAnthropicBeta(beta.values, "interleaved-thinking-2025-05-14");
     requireAnthropicBeta(beta.values, "thinking-token-count-2026-05-13");
     const thinking = record(body.thinking);
-    // A workflow session's sub-agents also send thinking.display (#582): one of two fixed values.
+    // Claude Code's sub-agents send thinking.display: a workflow session's (#582) and, on a run with
+    // sub-agents on, the Agent tool's. One of two fixed values; any other session keeps the plain shape.
+    const subAgentShapes = policy.workflow || policy.subAgents;
     if (
-      policy.workflow &&
+      subAgentShapes &&
       thinking.display !== undefined &&
       !WORKFLOW_THINKING_DISPLAY.has(thinking.display as string)
     ) {
       throw new CodingProxyError(400, "unsupported_anthropic_feature");
     }
-    const thinkingKeys = policy.workflow ? ["display"] : [];
+    const thinkingKeys = subAgentShapes ? ["display"] : [];
     if (manualThinking) {
       onlyKeys(thinking, ["type", "budget_tokens", ...thinkingKeys]);
       const budget = thinking.budget_tokens;

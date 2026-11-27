@@ -618,7 +618,7 @@ export const profileJsonSchema = {
     claudeBareMode: {
       type: "boolean",
       description:
-        "Claude Code runs only; accepted and ignored on Codex and Gemini CLI agents. Default true: Claude Code runs in bare mode and wardby adds the repository's CLAUDE.md and its skill list to the system prompt; the model reads a skill's SKILL.md with run_command. False: bare mode is off and Claude Code loads CLAUDE.md and skills itself (native Skill tool). Repository settings, hooks, and MCP config are never loaded either way.",
+        "Claude Code runs only; accepted and ignored on Codex and Gemini CLI agents. Default true: Claude Code runs in bare mode and wardby adds the repository's CLAUDE.md and its skill list to the system prompt; the model reads a skill's SKILL.md with run_command. False: bare mode is off and Claude Code loads CLAUDE.md and skills itself (native Skill tool). Repository settings, hooks, and MCP config are never loaded either way. On Claude Code, sub-agents need claudeBareMode off.",
     },
     webTools: {
       type: "string",
@@ -629,7 +629,7 @@ export const profileJsonSchema = {
     subAgents: {
       type: "boolean",
       description:
-        "Let the agent start sub-agents. Applies to Claude Code and Gemini CLI runs; Codex accepts it with no effect. Default true. Sub-agents use the run's model, and their model calls go through the coding proxy and count against the run's budget. False turns sub-agents off.",
+        "Let the agent start sub-agents. Applies to Claude Code and Gemini CLI runs; Codex accepts it with no effect. Default true. On Claude Code, sub-agents need claudeBareMode off: in bare mode the setting is accepted and has no effect. Claude Code agents that existed before this setting keep it off. Sub-agents use the run's model (a sub-agent may start its own), and their model calls go through the coding proxy and count against the run's budget. False turns sub-agents off.",
     },
     dependencyCache: {
       type: "boolean",

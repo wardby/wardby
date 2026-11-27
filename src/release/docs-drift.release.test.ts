@@ -212,6 +212,10 @@ const INTERNAL_ENV: Record<string, string> = {
   WARDBY_REGISTRY_TOKEN: "set by the Substrate bridges for the coding worker they start (package registry)",
   WARDBY_SUBSTRATE_WARM_ROUNDS:
     "set by the Substrate launcher in a template's env to switch the bridges into warm rounds",
+  WARDBY_SUB_AGENTS: "set by the launchers for the coding worker they start, from codingProfile.subAgents",
+  WARDBY_WEB_TOOLS: "set by the launchers for the Gemini CLI worker they start, from codingProfile.webTools",
+  WARDBY_COMMAND_TIMEOUT_MS:
+    "set by the launchers for the Gemini CLI worker they start, from the run's command timeout",
   WARDBY_DOCKER_SEED_DEBUG: "test-only: read only when NODE_ENV=test",
   WARDBY_MERGE_STATE_MSG: "not a variable: the name of a file in a git directory",
   WARDBY_TEST_SIMULATORS: "test-only: the release suite's simulator switch, refused alongside production configuration",

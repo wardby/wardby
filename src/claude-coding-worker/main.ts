@@ -4,6 +4,7 @@ import { describeError, workerDebugTracer, type DebugTracer } from "../coding-wo
 import { safeOutputIssues, safeWorkerErrorCode } from "../coding-worker/errors.js";
 import { readMcpConfig } from "../coding-worker/mcp-config.js";
 import { PLAN_FILES_ARTIFACT, type CodingTaskInput } from "../coding/protocol.js";
+import { readSubAgentsSetting } from "../coding/run-settings.js";
 import { collectPlanOutput } from "../coding-worker/plan-output.js";
 import { CLAUDE_CONFIG_DIR, runClaudeCodingWorker } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
@@ -46,6 +47,8 @@ try {
   // is the gateway's placeholder, in header mode (readMcpConfig refuses anything else).
   const mcp = readMcpConfig();
   trace = workerDebugTracer(task, capability, (line) => process.stdout.write(line), mcp ? [mcp.token] : []);
+  // codingProfile.subAgents, from the launcher (unset = off: an older launcher never offered sub-agents).
+  const subAgents = readSubAgentsSetting(process.env, false);
   await assertToolRunnerReachable();
   const output = await runClaudeCodingWorker({
     input: task,
@@ -55,6 +58,7 @@ try {
     ...(mcp?.header ? { mcpTokenHeader: mcp.header } : {}),
     signal: controller.signal,
     createQuery: createClaudeSdkQuery,
+    subAgents,
     prepareDependencies: () => callPrepareDependencies({ signal: controller.signal, deadlineAt: task.deadlineAt }),
     restorePypiLockfiles: () => callRestorePypiLockfiles({ signal: controller.signal }),
     // A run with git history (#536): the tool runner has the workspace and git; this container has neither.

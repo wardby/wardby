@@ -3,6 +3,12 @@ import { join } from "node:path";
 import { isWebTools, type WebTools } from "../coding/google-web-tools.js";
 import { readBoundedRegularFile } from "../coding-worker/artifact.js";
 import {
+  COMMAND_TIMEOUT_ENV,
+  readSubAgentsSetting,
+  RUN_SETTINGS_INVALID,
+  WEB_TOOLS_ENV,
+} from "../coding/run-settings.js";
+import {
   INJECTED_MCP_TOKEN_PLACEHOLDER,
   MCP_TOKEN_ENV,
   MCP_TOKEN_HEADER,
@@ -25,15 +31,14 @@ export interface GeminiRunSettings {
 }
 
 const invalid = (): never => {
-  throw new Error("worker_run_settings_invalid");
+  throw new Error(RUN_SETTINGS_INVALID);
 };
 
 export function readGeminiRunSettings(env: NodeJS.ProcessEnv): GeminiRunSettings {
-  const sub = env.WARDBY_SUB_AGENTS;
-  const subAgents = sub === undefined || sub === "true" ? true : sub === "false" ? false : invalid();
-  const webTools = env.WARDBY_WEB_TOOLS ?? "off";
+  const subAgents = readSubAgentsSetting(env, true);
+  const webTools = env[WEB_TOOLS_ENV] ?? "off";
   if (!isWebTools(webTools)) invalid();
-  const raw = env.WARDBY_COMMAND_TIMEOUT_MS;
+  const raw = env[COMMAND_TIMEOUT_ENV];
   const commandTimeoutMs = raw === undefined ? DEFAULT_COMMAND_TIMEOUT_MS : /^\d+$/.test(raw) ? Number(raw) : invalid();
   if (commandTimeoutMs < MIN_COMMAND_TIMEOUT_MS || commandTimeoutMs > MAX_COMMAND_TIMEOUT_MS) invalid();
   return { subAgents, webTools: webTools as WebTools, commandTimeoutMs };
