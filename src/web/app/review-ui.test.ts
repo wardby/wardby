@@ -21,6 +21,7 @@ const payload = (currentVersion: number): ReviewPayload => ({
   ],
   finalApprover: null,
   forced: null,
+  routing: { router: null, jobs: [] },
   events: [],
   can: { submit: false, review: true, force: false, reopen: false, archive: false, unarchive: false },
 });

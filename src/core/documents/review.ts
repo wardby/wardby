@@ -24,6 +24,7 @@ import type { loadAgentSecretValues } from "../secret-guard.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import { documentAccess, requireDocumentAccess, type Viewer } from "./access.js";
 import { mentionCandidates, principalNames } from "./comments.js";
+import { resolveRouter } from "../review-routing/lineage.js";
 import { notifyDocumentChange } from "./events.js";
 import { runReviewHooks } from "./review-hooks.js";
 import { loadContent } from "./files.js";
@@ -109,8 +110,27 @@ export interface ReviewView {
   forced: { byName: string; versionNumber: number; notes: string[] } | null;
   /** Newest first, at most MAX_REVIEW_EVENTS. */
   events: ReviewEventView[];
+  /** Where review actions go now and where the newest went (names are stored, redacted text). */
+  routing: ReviewRoutingView;
   can: ReviewCan;
 }
+
+export interface ReviewRoutingView {
+  /** The router the next review action would reach, or null (nothing is started). */
+  router: { id: string; name: string } | null;
+  /** The document's (or its set's) newest jobs, newest first. */
+  jobs: {
+    at: Date;
+    eventId: string;
+    /** "started", or a refusal code; null while the job is being claimed. */
+    outcome: string | null;
+    routerRunId: string | null;
+    started: { runId: string; agentName: string; task: string | null }[];
+  }[];
+}
+
+const MAX_ROUTING_JOBS = 20;
+const MAX_TASK_LINE_CHARS = 200;
 
 const SUBMITTABLE = new Set<string>(["draft", "in_review", "changes_requested"]);
 const REVIEWABLE = new Set<string>(["in_review", "changes_requested", "approved"]);
@@ -846,6 +866,61 @@ export async function documentReviewState(
   return row && isReviewState(row.reviewState) ? row.reviewState : null;
 }
 
+/** The routing block: the router that applies now (as the hook resolves it) and the newest jobs with their children. */
+async function routingView(db: PrismaClient, documentId: string): Promise<ReviewRoutingView> {
+  const doc = await db.document.findUnique({
+    where: { id: documentId },
+    select: {
+      agentId: true,
+      routerAgentId: true,
+      set: { select: { id: true, agentId: true, routerAgentId: true } },
+      planSet: { select: { set: { select: { id: true, agentId: true, routerAgentId: true } } } },
+    },
+  });
+  if (!doc) return { router: null, jobs: [] };
+  // A plan set's shared set carries its router; a native option set is its own home (as the hook reads it).
+  const set = doc.planSet ? doc.planSet.set : doc.set;
+  const routerId = await resolveRouter(
+    db,
+    set
+      ? { routerAgentId: set.routerAgentId, writerAgentId: set.agentId }
+      : { routerAgentId: doc.routerAgentId, writerAgentId: doc.agentId },
+  );
+  const router = routerId
+    ? await db.agent.findUnique({ where: { id: routerId }, select: { id: true, name: true } })
+    : null;
+  const jobs = await db.reviewJob.findMany({
+    where: set ? { OR: [{ documentId }, { setId: set.id }] } : { documentId },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: MAX_ROUTING_JOBS,
+    select: { createdAt: true, reviewEventId: true, outcome: true, routerRunId: true },
+  });
+  const runIds = [...new Set(jobs.flatMap((j) => (j.routerRunId ? [j.routerRunId] : [])))];
+  const children = runIds.length
+    ? await db.run.findMany({
+        where: { parentRunId: { in: runIds } },
+        orderBy: [{ startedAt: "asc" }, { id: "asc" }],
+        select: { id: true, parentRunId: true, taskOverride: true, agent: { select: { name: true } } },
+      })
+    : [];
+  return {
+    router,
+    jobs: jobs.map((j) => ({
+      at: j.createdAt,
+      eventId: j.reviewEventId,
+      outcome: j.outcome,
+      routerRunId: j.routerRunId,
+      started: children
+        .filter((c) => c.parentRunId === j.routerRunId)
+        .map((c) => ({
+          runId: c.id,
+          agentName: c.agent.name,
+          task: c.taskOverride?.split("\n", 1)[0]?.trim().slice(0, MAX_TASK_LINE_CHARS) || null,
+        })),
+    })),
+  };
+}
+
 export async function getReviewView(db: PrismaClient, documentId: string, viewer: Viewer): Promise<ReviewView> {
   await requireDocumentAccess(db, documentId, viewer, "read");
   const access = await documentAccess(db, documentId, viewer);
@@ -962,6 +1037,7 @@ export async function getReviewView(db: PrismaClient, documentId: string, viewer
       overridden: (e.overridden as string[] | null) ?? [],
       createdAt: e.createdAt,
     })),
+    routing: await routingView(db, documentId),
     can: {
       submit: (owner || (viewer.kind === "agent" && atLeast("document", access, "write"))) && SUBMITTABLE.has(state),
       review: canReview,

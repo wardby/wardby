@@ -34,6 +34,15 @@ import {
   verdictControls,
 } from "./review-model.js";
 
+/** A job's refusal code in plain words. */
+const ROUTING_REFUSAL: Record<string, string> = {
+  review_route_limit: "Stopped: this decision started the most agents its router allows.",
+  review_router_invalid: "Not routed: the router is no longer a router.",
+  run_refused: "Not routed: the router's run was refused (budget).",
+  run_failed: "Not routed: the router's run failed to start.",
+  route_failed: "Not routed: something went wrong starting the router.",
+};
+
 /** The review panel's button styles (styles.css, under .rv-panel / .review-banner). */
 type ButtonVariant = "primary" | "tonal" | "neutral" | "danger";
 
@@ -219,6 +228,40 @@ export class ReviewPanel {
         ),
       );
     }
+    this.routingSection(panel);
+  }
+
+  /** Where review actions go: the router now, and for each recent action what it started or why it did not. */
+  private routingSection(panel: HTMLElement): void {
+    const { router, jobs } = this.review.routing;
+    if (!router && !jobs.length) return;
+    panel.append(
+      h("h3", {}, "Routing"),
+      h("div", { class: "rv-final" }, router ? `Routed to ${router.name}` : "No router: review actions start nothing."),
+    );
+    if (!jobs.length) return;
+    panel.append(
+      h(
+        "ul",
+        { class: "rv-events" },
+        ...jobs.map((j) =>
+          h(
+            "li",
+            {},
+            h("span", { class: "rv-when", title: j.at }, relativeTime(j.at)),
+            j.outcome === "started" || j.outcome === null
+              ? j.started.length
+                ? j.started
+                    .map(
+                      (c) => ` ${router?.name ?? "The router"} started: ${c.agentName}${c.task ? ` — ${c.task}` : ""}`,
+                    )
+                    .join(";")
+                : " Routed; no agent started."
+              : ` ${ROUTING_REFUSAL[j.outcome] ?? "Not routed."}`,
+          ),
+        ),
+      ),
+    );
   }
 
   /** The note and verdict buttons; with `choose`, "Choose this option" is the primary action and the verdicts plain. */

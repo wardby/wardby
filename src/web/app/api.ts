@@ -109,6 +109,16 @@ export interface ReviewPayload {
   finalApprover: { name: string; me: boolean; ref?: string } | null;
   forced: { byName: string; versionNumber: number; notes: string[] } | null;
   events: ReviewEventPayload[];
+  routing: {
+    router: { id: string; name: string } | null;
+    jobs: {
+      at: string;
+      eventId: string;
+      outcome: string | null;
+      routerRunId: string | null;
+      started: { runId: string; agentName: string; task: string | null }[];
+    }[];
+  };
   can: {
     submit: boolean;
     review: boolean;

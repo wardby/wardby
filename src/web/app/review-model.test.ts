@@ -38,6 +38,7 @@ const review = (over: Partial<ReviewPayload>): ReviewPayload => ({
   reviewers: [],
   finalApprover: null,
   forced: null,
+  routing: { router: null, jobs: [] },
   events: [],
   can: { submit: false, review: false, force: false, reopen: false, archive: false, unarchive: false },
   ...over,

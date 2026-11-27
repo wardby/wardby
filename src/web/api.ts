@@ -254,6 +254,10 @@ export function reviewJson(view: ReviewView) {
       note: e.note,
       createdAt: e.createdAt.toISOString(),
     })),
+    routing: {
+      router: view.routing.router,
+      jobs: view.routing.jobs.map((j) => ({ ...j, at: j.at.toISOString() })),
+    },
     can: view.can,
   };
 }

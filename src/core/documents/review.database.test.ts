@@ -693,6 +693,85 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     expect(await db.documentVersion.count({ where: { documentId: id } })).toBe(1);
   });
 
+  it("the view shows the routing: the router now, each job's outcome, and the agents it started with their task's first line", async () => {
+    const id = await doc();
+    const none = await getReviewView(db, id, as(owner));
+    expect(none.routing).toEqual({ router: null, jobs: [] });
+
+    const routerId = `rv-router-${s}`;
+    const childAgent = `rv-child-${s}`;
+    await db.agent.create({
+      data: {
+        id: routerId,
+        name: "Release router",
+        systemPrompt: "t",
+        model: "t",
+        budgetUsd: 1,
+        ownerId: owner.id,
+        router: true,
+      },
+    });
+    await db.agent.create({
+      data: { id: childAgent, name: "Builder bee", systemPrompt: "t", model: "t", budgetUsd: 1, ownerId: owner.id },
+    });
+    await db.document.update({ where: { id }, data: { routerAgentId: routerId } });
+    const event = await db.documentReviewEvent.create({
+      data: { documentId: id, kind: "approved", fromState: "in_review", toState: "approved", versionNumber: 1 },
+    });
+    const event2 = await db.documentReviewEvent.create({
+      data: { documentId: id, kind: "approved", fromState: "in_review", toState: "approved", versionNumber: 1 },
+    });
+    const routerRun = await db.run.create({ data: { agentId: routerId } });
+    await db.run.create({
+      data: {
+        agentId: childAgent,
+        parentRunId: routerRun.id,
+        taskOverride: `Build it now\nsecond line ${"x".repeat(300)}`,
+      },
+    });
+    await db.reviewJob.create({
+      data: {
+        reviewEventId: event.id,
+        documentId: id,
+        routerAgentId: routerId,
+        routerRunId: routerRun.id,
+        outcome: "started",
+      },
+    });
+    await db.reviewJob.create({
+      data: { reviewEventId: event2.id, documentId: id, routerAgentId: routerId, outcome: "review_route_limit" },
+    });
+    try {
+      // A viewer who only reads (no access to the router agent) sees the same names.
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "document",
+          resourceId: id,
+          granteeKind: "principal",
+          granteePrincipalId: ann.id,
+          granteeKey: `principal:${ann.id}`,
+          level: "read",
+        },
+      });
+      const view = await getReviewView(db, id, as(ann));
+      expect(view.routing.router).toEqual({ id: routerId, name: "Release router" });
+      expect(view.routing.jobs).toHaveLength(2);
+      const started = view.routing.jobs.find((j) => j.outcome === "started")!;
+      expect(started.eventId).toBe(event.id);
+      expect(started.started).toEqual([{ runId: expect.any(String), agentName: "Builder bee", task: "Build it now" }]);
+      expect(view.routing.jobs.find((j) => j.outcome === "review_route_limit")!.started).toEqual([]);
+      // A router turned off is no longer what would happen now; its jobs stay listed.
+      await db.agent.update({ where: { id: routerId }, data: { router: false } });
+      expect((await getReviewView(db, id, as(owner))).routing.router).toBeNull();
+      await expect(getReviewView(db, id, as(outsider))).rejects.toThrow("document_not_found");
+    } finally {
+      await db.reviewJob.deleteMany({ where: { documentId: id } });
+      await db.run.deleteMany({ where: { agentId: childAgent } });
+      await db.run.deleteMany({ where: { agentId: routerId } });
+      await db.agent.deleteMany({ where: { id: { in: [routerId, childAgent] } } });
+    }
+  });
+
   it("a view's permissions follow the viewer", async () => {
     const id = await doc();
     await submitForReview(db, cipher, {

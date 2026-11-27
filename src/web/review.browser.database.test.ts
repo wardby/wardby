@@ -127,6 +127,58 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       expect(await verdicts.textContent()).toContain("You requested changes on v1");
     }, 90_000);
 
+    it("the Review tab shows where review actions were routed and the agent each one started", async () => {
+      const d = await server.design({ title: "Routed", kind: "document", markdown: "# R\n\nx\n", access: "comment" });
+      const tag = d.documentId.slice(-8);
+      const agent = (name: string, router: boolean) =>
+        server.db.agent.create({
+          data: {
+            name: `${name} ${tag}`,
+            systemPrompt: "t",
+            model: "t",
+            budgetUsd: 1,
+            ownerId: d.principalIds.owner,
+            router,
+          },
+        });
+      const router = await agent("Review router", true);
+      const child = await agent("Builder bee", false);
+      await server.db.document.update({ where: { id: d.documentId }, data: { routerAgentId: router.id } });
+      await submitForReview(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.first],
+      });
+      const event = await server.db.documentReviewEvent.findFirstOrThrow({ where: { documentId: d.documentId } });
+      const routerRun = await server.db.run.create({ data: { agentId: router.id } });
+      await server.db.run.create({
+        data: { agentId: child.id, parentRunId: routerRun.id, taskOverride: "Draft the rollout\nmore detail" },
+      });
+      await server.db.reviewJob.create({
+        data: {
+          reviewEventId: event.id,
+          documentId: d.documentId,
+          routerAgentId: router.id,
+          routerRunId: routerRun.id,
+          outcome: "started",
+        },
+      });
+      try {
+        const o = await open(d.ownerCookie, d.documentId);
+        await o.getByRole("tab", { name: "Review" }).click();
+        const panel = o.locator(".rv-panel");
+        await expect.poll(() => panel.textContent()).toContain(`Routed to Review router ${tag}`);
+        const text = (await panel.textContent()) ?? "";
+        expect(text).toContain(`started: Builder bee ${tag} — Draft the rollout`);
+        expect(text).not.toContain("more detail");
+      } finally {
+        await server.db.reviewJob.deleteMany({ where: { documentId: d.documentId } });
+        await server.db.run.deleteMany({ where: { agentId: { in: [router.id, child.id] } } });
+        await server.db.document.update({ where: { id: d.documentId }, data: { routerAgentId: null } });
+        await server.db.agent.deleteMany({ where: { id: { in: [router.id, child.id] } } });
+      }
+    }, 90_000);
+
     it("an outdated thread takes a reply from the page", async () => {
       const d = await server.design({
         title: "Out",
