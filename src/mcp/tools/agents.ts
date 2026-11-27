@@ -7,7 +7,7 @@
  */
 import { Prisma, type CodingAgentProfile, type NativeExecutionMode } from "#prisma";
 import { codingProfileColumns } from "../../coding/profile-columns.js";
-import { WEB_TOOLS_SETTING_INVALID, isWebTools } from "../../coding/google-web-tools.js";
+import { GOOGLE_WEB_TOOLS, WEB_TOOLS_SETTING_INVALID, isWebTools } from "../../coding/google-web-tools.js";
 import { z } from "zod";
 import {
   RUN_STEPS_LEVELS,
@@ -19,6 +19,7 @@ import { codeProviderOf } from "../../coding/code-host.js";
 import {
   CodingProfilePatchSchema,
   CodingProfileSchema,
+  GEMINI_MAX_OUTPUT_TOKENS,
   MAX_GIT_HISTORY_DEPTH,
   type CodingProfile,
   type PlanDocument,
@@ -34,7 +35,7 @@ import {
   isLocalRepository,
 } from "../../coding/protocol.js";
 import { loadBlobStoreConfig, loadContainerExecutorConfig, loadProviderConfig } from "../../config/providers.js";
-import { codingProviderSupportsModel } from "../../coding/provider.js";
+import { CODING_PROVIDERS, codingProviderSupportsModel } from "../../coding/provider.js";
 import { ACCEPTED_ADVISORY_ID, MAX_ACCEPTED_ADVISORIES } from "../../coding/registry/allowlist.js";
 import {
   DEFAULT_PACKAGE_AUDIT_MINUTES,
@@ -119,10 +120,10 @@ function validateWorkspaceDiskMb(workspaceDiskMb: number | null | undefined): vo
 }
 
 // workerImageRef is the BYO-arbitrary-image escape hatch (see
-// resolveCodingWorkerImage/resolveCodingToolImage in container.ts). For a Codex agent it
-// replaces the one container that runs the whole agent; for a Claude Code agent it replaces
-// only the tool-runner container that runs the agent's commands, never the agent container
-// (which always stays the deployment's standard Claude Code image). Either way, setting or
+// resolveCodingWorkerImage/resolveCodingToolImage in container.ts). For a Codex or Gemini CLI
+// agent it replaces the one container that runs the whole agent; for a Claude Code agent it
+// replaces only the tool-runner container that runs the agent's commands, never the agent
+// container (which always stays the deployment's standard Claude Code image). Either way, setting or
 // changing it requires a step-up beyond agents:write, the same pattern make_owner below uses
 // for its own sensitive, ownership-bypassing mutation.
 function requireWorkerImageRefScope(ctx: McpRequestContext): void {
@@ -548,7 +549,7 @@ export const profileJsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    provider: { type: "string", enum: ["codex", "claude-code"] },
+    provider: { type: "string", enum: [...CODING_PROVIDERS] },
     repository: {
       type: "string",
       description:
@@ -572,7 +573,7 @@ export const profileJsonSchema = {
     workerImageRef: {
       type: ["string", "null"],
       description:
-        "A digest-pinned custom image that this agent's commands run in, for your own languages and tools. Codex: build it FROM the coding-worker driver image; it runs the whole agent. Claude Code: build it FROM this release's wardby-claude-tool-runner image; it runs the agent's commands, while Claude Code itself stays on the standard image. Needs agents:admin. Null uses the toolchain's standard image.",
+        "A digest-pinned custom image that this agent's commands run in, for your own languages and tools. Codex: build it FROM the coding-worker driver image; it runs the whole agent. Gemini CLI: build it FROM this release's wardby-gemini-coding-worker image and keep its /etc/gemini-cli files and Gemini CLI version unchanged (the worker refuses the run otherwise, worker_agent_cli_incompatible); it runs the whole agent. Claude Code: build it FROM this release's wardby-claude-tool-runner image; it runs the agent's commands, while Claude Code itself stays on the standard image. Needs agents:admin. Null uses the toolchain's standard image.",
     },
     workspaceDiskMb: {
       type: ["integer", "null"],
@@ -601,23 +602,34 @@ export const profileJsonSchema = {
       type: ["integer", "null"],
       minimum: 1,
       maximum: MAX_CODING_TURNS,
-      description: `Claude Code runs only: the most agent turns (model calls) a run may take before it stops with coding_turn_limit. Null uses the worker default (${DEFAULT_CLAUDE_MAX_TURNS}). The run's budget and timeout still apply. Codex runs have no turn limit.`,
+      description: `Claude Code and Gemini CLI runs: the most agent turns (model calls) a run may take before it stops with coding_turn_limit. Null uses the worker default (${DEFAULT_CLAUDE_MAX_TURNS}). The run's budget and timeout still apply. Codex runs have no turn limit.`,
     },
     maxOutputTokens: {
       type: ["integer", "null"],
       minimum: MIN_CLAUDE_MAX_OUTPUT_TOKENS,
       maximum: MAX_CLAUDE_MAX_OUTPUT_TOKENS,
-      description: `Claude Code runs only: the most output tokens per model reply (default ${DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS}, up to ${MAX_CLAUDE_MAX_OUTPUT_TOKENS}). The coding proxy reserves this × the model's output price per request against the run budget, so higher values need a larger budgetUsd. Refused on a Codex agent. Null uses the default.`,
+      description: `Claude Code and Gemini CLI runs: the most output tokens per model reply (default ${DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS}; up to ${MAX_CLAUDE_MAX_OUTPUT_TOKENS} on Claude Code, ${GEMINI_MAX_OUTPUT_TOKENS} on Gemini CLI). The coding proxy reserves this × the model's output price per request against the run budget, so higher values need a larger budgetUsd. Refused on a Codex agent. Null uses the default.`,
     },
     repoSkills: {
       type: "boolean",
       description:
-        "Load the repository's agent skills into runs (Codex: .agents/skills and .codex/skills; Claude Code: .claude/skills). Default true. Repository instructions (AGENTS.md for Codex, CLAUDE.md for Claude Code) load either way.",
+        "Load the repository's agent skills into runs (Codex: .agents/skills and .codex/skills; Claude Code: .claude/skills; Gemini CLI: .gemini/skills and .agents/skills). Default true. Repository instructions (AGENTS.md for Codex, CLAUDE.md for Claude Code, GEMINI.md, AGENTS.md and CLAUDE.md for Gemini CLI) load either way.",
     },
     claudeBareMode: {
       type: "boolean",
       description:
-        "Claude Code runs only. Default true: Claude Code runs in bare mode and wardby adds the repository's CLAUDE.md and its skill list to the system prompt; the model reads a skill's SKILL.md with run_command. False: bare mode is off and Claude Code loads CLAUDE.md and skills itself (native Skill tool). Repository settings, hooks, and MCP config are never loaded either way.",
+        "Claude Code runs only; accepted and ignored on Codex and Gemini CLI agents. Default true: Claude Code runs in bare mode and wardby adds the repository's CLAUDE.md and its skill list to the system prompt; the model reads a skill's SKILL.md with run_command. False: bare mode is off and Claude Code loads CLAUDE.md and skills itself (native Skill tool). Repository settings, hooks, and MCP config are never loaded either way.",
+    },
+    webTools: {
+      type: "string",
+      enum: [...GOOGLE_WEB_TOOLS],
+      description:
+        "Server-side web tools for this agent's runs. Takes effect on Gemini CLI runs today; Codex and Claude Code accept it with no effect yet. off (default): none. search: Google Search grounding (google_web_search). search-and-fetch: search plus URL fetch (web_fetch; the run's pod must resolve public DNS names). Google runs the search or fetch itself, outside the run's tunnel hosts, and grounded queries are billed by Google separately from tokens: wardby's budget does not see that charge.",
+    },
+    subAgents: {
+      type: "boolean",
+      description:
+        "Let the agent start sub-agents. Applies to Claude Code and Gemini CLI runs; Codex accepts it with no effect. Default true. Sub-agents use the run's model, and their model calls go through the coding proxy and count against the run's budget. False turns sub-agents off.",
     },
     dependencyCache: {
       type: "boolean",

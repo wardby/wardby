@@ -14,6 +14,7 @@ import {
   SESSION_RESUME_IMAGE_WARNING,
   SESSION_RESUME_NO_STORE_WARNING,
   SUBSTRATE_IMAGE_WARNING,
+  profileJsonSchema,
   profileMergeBase,
   registerAgentTools,
 } from "./agents.js";
@@ -1743,6 +1744,24 @@ describe("agent CRUD tools", () => {
       );
     });
 
+    it("update_agent with webTools repairs the unreadable value", async () => {
+      const client = await clientFor();
+      const repaired = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { webTools: "search" } },
+      });
+      expect(repaired.isError).toBeFalsy();
+      expect(JSON.parse((repaired.content as { text: string }[])[0].text).codingProfile.webTools).toBe("search");
+      const fetched = await client.callTool({ name: "get_agent", arguments: { id: "a1" } });
+      expect(JSON.parse((fetched.content as { text: string }[])[0].text).codingProfile.webTools).toBe("search");
+      const later = await client.callTool({
+        name: "update_agent",
+        arguments: { id: "a1", codingProfile: { timeoutSec: 900 } },
+      });
+      expect(later.isError).toBeFalsy();
+      await client.close();
+    });
+
     it("update_agent without webTools refuses and asks for the setting, never echoing the stored value", async () => {
       const client = await clientFor();
       const refused = await client.callTool({
@@ -1753,6 +1772,9 @@ describe("agent CRUD tools", () => {
       const message = (refused.content as { text: string }[])[0].text;
       expect(message).toContain(
         "the stored webTools setting is invalid; set codingProfile.webTools to off, search or search-and-fetch",
+      );
+      expect(message).toContain(
+        "Invalid coding profile: the stored webTools setting is invalid; set codingProfile.webTools to off, search or search-and-fetch with update_agent.",
       );
       expect(message).not.toContain("yyyy");
       await client.close();
@@ -4507,5 +4529,27 @@ describe("codingProfile.tunnelHosts (#627)", () => {
     expect(property.description).toMatch(/^Up to 50 hosts/);
     expect(property.description).toMatch(/CODING_TUNNEL_AGENT_HOSTS/);
     expect(property.description).toMatch(/tunnel_hosts_invalid/);
+  });
+});
+
+describe("codingProfile JSON schema for Gemini CLI", () => {
+  it("offers gemini-cli and both shared settings, with their effects described", () => {
+    const props = profileJsonSchema.properties as Record<
+      string,
+      { enum?: string[]; description?: string; type?: unknown }
+    >;
+    expect(props.provider.enum).toEqual(["codex", "claude-code", "gemini-cli"]);
+    expect(props.webTools.enum).toEqual(["off", "search", "search-and-fetch"]);
+    expect(props.webTools.description).toMatch(/Gemini CLI runs today/);
+    expect(props.webTools.description).toMatch(/Codex and Claude Code accept it with no effect/);
+    expect(props.webTools.description).toMatch(/billed/);
+    expect(props.subAgents.type).toBe("boolean");
+    expect(props.subAgents.description).toMatch(/Claude Code and Gemini CLI/);
+    expect(props.subAgents.description).toMatch(/Codex/);
+    expect(props.maxTurns.description).toMatch(/Gemini CLI/);
+    expect(props.maxOutputTokens.description).toMatch(/65536/);
+    expect(props.claudeBareMode.description).toMatch(/ignored on Codex and Gemini CLI/);
+    expect(props.repoSkills.description).toMatch(/\.gemini\/skills/);
+    expect(props.workerImageRef.description).toMatch(/Gemini CLI/);
   });
 });
