@@ -4,7 +4,7 @@ title: Run cannot be joined (join_not_supported)
 summary: Joining works on Claude Code coding runs that are not workflow runs.
 audience: operator
 tags: [error, join, join_run, send_to_run, join_not_supported]
-appliesTo: ">=0.10.2"
+appliesTo: ">=0.11.0"
 ---
 
 # Run cannot be joined
