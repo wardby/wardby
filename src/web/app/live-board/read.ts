@@ -61,11 +61,15 @@ export function rulesInOrder(editor: Editor): [string, CssRule][] {
   const used = new Set(models.map((r) => r.get(RULE_KEY) as unknown).filter((k) => typeof k === "string"));
   const out: [string, CssRule][] = [];
   const seen = new Map<string, number>();
+  // A copied rule (GrapesJS copies an element's own rules when the element is duplicated) carries its original's
+  // key: the later of two rules with one key gets its own.
+  const taken = new Set<string>();
   for (const r of models) {
     const base = [r.selectorsToString(), r.getAtRule(), r.get("singleAtRule") ? 1 : 0].join("@@");
     const n = seen.get(base) ?? 0;
     seen.set(base, n + 1);
     let key = r.get(RULE_KEY) as unknown;
+    if (typeof key === "string" && taken.has(key)) key = undefined;
     if (typeof key !== "string") {
       let m = n;
       while (used.has(`${base}#${m}`)) m++;
@@ -73,6 +77,7 @@ export function rulesInOrder(editor: Editor): [string, CssRule][] {
       used.add(key as string);
       r.set(RULE_KEY, key, { silent: true });
     }
+    taken.add(key as string);
     out.push([key as string, r]);
   }
   return out;

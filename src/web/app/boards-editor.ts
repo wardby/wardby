@@ -24,6 +24,7 @@ import grapesjs, {
   type SelectorProps,
 } from "grapesjs";
 import parserPostCSS from "grapesjs-parser-postcss";
+import { RULE_KEY } from "./live-board/read.js";
 import { BOARD_ID } from "../../core/documents/boards/ids.js";
 import {
   boardIdFor,
@@ -449,6 +450,36 @@ export function createBoardsEditor(opts: {
   const base = editor.Components.getType("default")?.model as unknown as
     | { getIncrementId?: (id: string, list: Record<string, unknown>, opts?: { keepIds?: string[] }) => string }
     | undefined;
+  // A copy takes its original's id first and is then renamed (GrapesJS's _idUpdated), which also renamed the "#id"
+  // selector: but the original still has that id, so its own style rules moved to the copy. When another element
+  // still has the old id, its selector and its place in the id registry stay; the copy is registered under the new
+  // id and takes the rules GrapesJS copied for it.
+  const proto = (base as unknown as { prototype?: Record<string, unknown> } | undefined)?.prototype;
+  if (proto && typeof proto._idUpdated === "function") {
+    const original = proto._idUpdated as (
+      this: Component,
+      m: unknown,
+      v: unknown,
+      opts?: { idUpdate?: boolean },
+    ) => void;
+    proto._idUpdated = function (this: Component, m: unknown, v: unknown, opts: { idUpdate?: boolean } = {}) {
+      const self = this as Component & { ccid: string; previous(k: string): unknown };
+      const list = (editor.Components as unknown as { allById(): Record<string, Component | undefined> }).allById();
+      const id = (self.get("attributes") as { id?: string } | undefined)?.id;
+      const idPrev = (self.previous("attributes") as { id?: string } | undefined)?.id ?? self.ccid;
+      const other = idPrev ? list[idPrev] : undefined;
+      if (opts.idUpdate || !id || !idPrev || !other || other === self || list[id])
+        return original.call(this, m, v, opts);
+      list[id] = self;
+      self.ccid = id;
+      // GrapesJS copied the original's rules while the copy still had its id: those copies are the copy's own.
+      const rules = editor.Css.getRules(`#${idPrev}`);
+      for (const r of rules.slice(Math.ceil(rules.length / 2))) {
+        r.set("selectors", [`#${id}`] as never);
+        r.unset(RULE_KEY);
+      }
+    };
+  }
   if (base?.getIncrementId) {
     const token = Math.random().toString(36).slice(2, 6);
     let n = 0;

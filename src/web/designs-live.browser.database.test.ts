@@ -562,5 +562,78 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         .toContain("contained a secret value");
       await expect.poll(() => h1Text(a), { timeout: 20_000 }).not.toContain(FAKE);
     }, 120_000);
+
+    it("a styled element duplicated, then its copy duplicated: everyone sees the same styles and the original keeps its own", async () => {
+      const { documentId, cookie, secondCookie } = await server.design({
+        title: "Coffee",
+        files: files(),
+        access: "write",
+      });
+      const a = await open(cookie, documentId);
+      const b = await open(secondCookie, documentId);
+      const cards = (p: Page) => p.frameLocator(CANVAS).locator(".grid > *");
+      // Ann gives the first card its own font size through the Style tab (a rule for that element's id).
+      await cards(a)
+        .first()
+        .click({ position: { x: 5, y: 5 } });
+      await a
+        .getByRole("tab", { name: /^style$/i })
+        .first()
+        .click();
+      const typo = a.locator(".gjs-sm-sector", { hasText: "Typography" }).first();
+      if (
+        !(await typo
+          .locator(".gjs-sm-property__font-size input")
+          .isVisible()
+          .catch(() => false))
+      )
+        await typo.locator(".gjs-sm-sector-title, .gjs-sm-title").first().click();
+      const size = typo.locator(".gjs-sm-property__font-size input").first();
+      await size.fill("31px");
+      await size.press("Enter");
+      await a.waitForTimeout(600);
+      // Duplicates it, then duplicates the copy.
+      const duplicate = async (i: number) => {
+        await cards(a)
+          .nth(i)
+          .click({ position: { x: 5, y: 5 } });
+        await a.waitForTimeout(200);
+        await a.locator(".gjs-toolbar-item").nth(2).click();
+        await a.waitForTimeout(700);
+      };
+      await duplicate(0);
+      await duplicate(1);
+      const fontSizes = (p: Page) =>
+        cards(p).evaluateAll((els) =>
+          els.map(
+            (e) =>
+              (
+                e.ownerDocument.defaultView as unknown as { getComputedStyle(x: unknown): { fontSize: string } }
+              ).getComputedStyle(e).fontSize,
+          ),
+        );
+      const css = (p: Page) =>
+        p
+          .frameLocator(CANVAS)
+          .locator("body")
+          .evaluate((body) =>
+            Array.from(
+              body.ownerDocument.styleSheets as unknown as ArrayLike<{ cssRules: ArrayLike<{ cssText: string }> }>,
+            )
+              .flatMap((sh) => Array.from(sh.cssRules).map((r) => r.cssText))
+              .filter((t) => t.startsWith("#"))
+              .sort()
+              .join("\n"),
+          );
+      // The original and both copies are 31px on Ann's page and on Bo's, and the two pages have the same rules.
+      await expect
+        .poll(async () => (await fontSizes(a)).slice(0, 3), { timeout: 10_000 })
+        .toEqual(["31px", "31px", "31px"]);
+      await expect
+        .poll(async () => (await fontSizes(b)).slice(0, 3), { timeout: 10_000 })
+        .toEqual(["31px", "31px", "31px"]);
+      await expect.poll(() => css(b), { timeout: 10_000 }).toBe(await css(a));
+      expect([...a.errors, ...b.errors]).toEqual([]);
+    }, 120_000);
   },
 );

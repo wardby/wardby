@@ -351,9 +351,21 @@ export function bindBoard(
     };
     walk(root);
     const fix = (k: Component) => {
-      if ((count.get(k.getId()) ?? 0) > 1) {
-        count.set(k.getId(), (count.get(k.getId()) ?? 1) - 1);
-        k.setId(`i${Math.random().toString(36).slice(2, 10)}`);
+      const old = k.getId();
+      if ((count.get(old) ?? 0) > 1) {
+        count.set(old, (count.get(old) ?? 1) - 1);
+        const fresh = `i${Math.random().toString(36).slice(2, 10)}`;
+        // Renamed without GrapesJS's id update: that renames the "#old" selector, which the original element shares
+        // with the copy's rules, so the original's style would move to the copy. The registry is updated here instead.
+        k.setId(fresh, { idUpdate: true });
+        (k as unknown as { ccid: string }).ccid = fresh;
+        (editor.Components as unknown as { allById(): Record<string, Component> }).allById()[fresh] = k;
+        // GrapesJS copied the original's own rules for the copy, under the same "#old" selector: they become the copy's.
+        const own = editor.Css.getRules(`#${old}`);
+        for (const r of own.slice(own.length / 2)) {
+          r.set("selectors", [`#${fresh}`] as never);
+          r.unset(RULE_KEY);
+        }
       }
       k.components().forEach(fix);
     };
