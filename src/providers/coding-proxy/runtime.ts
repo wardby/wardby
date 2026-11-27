@@ -474,6 +474,8 @@ export async function startConfiguredCodingProxy(options: CodingProxyRuntimeOpti
     ...(seal ? { onModelRequest: (runId: string) => seal.onModelRequest(runId) } : {}),
     ...(steps ? { steps } : {}),
     runStepsCeiling,
+    // Join (phase 1): workers' polls go to the same listener as the run steps, whatever the step level.
+    ...(runStepsUrl ? { join: { url: runStepsUrl } } : {}),
   });
   const startServer = options.startServer ?? startCodingProxyServer;
   let server: CodingProxyServerHandle;

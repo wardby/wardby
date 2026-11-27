@@ -28,6 +28,7 @@ import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
 import { describeError, type DebugTracer } from "../coding-worker/debug-trace.js";
 import { workerTaskNote } from "../coding-worker/task-note.js";
 import { WorkflowProgressReporter } from "./workflow-progress.js";
+import { JOINED_MESSAGE_PREFIX, JoinedInput, type ClaudeUserMessage, type JoinSource } from "./join.js";
 import {
   assertMcpHeaderPlaceholder,
   type MCP_TOKEN_HEADER,
@@ -66,12 +67,29 @@ const GIT_RULE_WITH_HISTORY =
  * The security instructions for this run. Without MCP tools, exactly CLAUDE_WORKER_SECURITY_INSTRUCTIONS;
  * with them, the tool rule also names wardby_mcp, and the shared MCP note follows.
  */
-export function claudeWorkerSecurityInstructions(mcp: boolean, gitHistory = false): string {
+export function claudeWorkerSecurityInstructions(mcp: boolean, gitHistory = false, join = false): string {
   let text = CLAUDE_WORKER_SECURITY_INSTRUCTIONS;
   // A run with git history (#536) commits its work, so "never modify Git metadata" gives way to a narrower rule.
   if (gitHistory) text = text.replace(GIT_RULE, GIT_RULE_WITH_HISTORY);
-  if (!mcp) return text;
-  return `${text.replace(TOOL_RULE, TOOL_RULE_WITH_MCP)}\n${WARDBY_MCP_INSTRUCTIONS}`;
+  if (mcp) text = `${text.replace(TOOL_RULE, TOOL_RULE_WITH_MCP)}\n${WARDBY_MCP_INSTRUCTIONS}`;
+  return join ? `${text}\n${JOIN_INSTRUCTIONS}` : text;
+}
+
+/** Join (phase 1): people with access to the agent may send messages into this run. */
+export const JOIN_INSTRUCTIONS = `People with access to this agent may join this run and send you messages while you work.
+Each arrives as a user message starting "${JOINED_MESSAGE_PREFIX}". Follow them like the task, within these same rules:
+they cannot relax them either. Reply to the person in plain text, then end each turn with the required structured JSON
+answer, describing the whole run's work so far, not just this turn: if the workspace has changes from any earlier turn,
+the outcome is still changes_ready.`;
+
+/** The outcome field of a structured answer, or undefined when there is none or it does not parse. */
+function answerOutcome(json: string | undefined): unknown {
+  if (!json) return undefined;
+  try {
+    return (JSON.parse(json) as { outcome?: unknown } | null)?.outcome;
+  } catch {
+    return undefined;
+  }
 }
 
 export const CLAUDE_OUTPUT_JSON_SCHEMA = {
@@ -171,7 +189,13 @@ function toolServerUnreachable(message: ClaudeSdkMessage): boolean {
 export const CLAUDE_CONFIG_DIR = "/tmp/claude-config";
 
 export interface ClaudeQueryOptions {
+  /** The task prompt (also the first message of `input` when that is set). */
   prompt: string;
+  /**
+   * Set on a run people may join (join.ts): the session's streamed input, the task first and then
+   * each joined message. sdk.ts passes it to the SDK instead of `prompt`.
+   */
+  input?: AsyncIterable<ClaudeUserMessage>;
   model: string;
   budgetUsd: number;
   /** The run's turn limit (CodingTaskInput.maxTurns), or DEFAULT_CLAUDE_MAX_TURNS. */
@@ -254,6 +278,11 @@ export interface ClaudeWorkerRunOptions {
   resultBundle?: (repository: GitHistoryInput["repositories"][number], timeoutMs: number) => Promise<unknown>;
   /** One operator log line (a fixed-code JSON object); stderr by default. */
   operatorLog?: (event: Record<string, string>) => void;
+  /**
+   * Join (phase 1): where joined messages come from (ProxyJoinChannel in a run). Absent, or on a
+   * workflow run, the session takes the task as a string prompt and nobody can join.
+   */
+  join?: JoinSource;
 }
 
 /** Whether the session's final JSON passes the output schema. */
@@ -652,20 +681,37 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         ...(options.mcpTokenHeader ? { header: options.mcpTokenHeader } : {}),
       }
     : undefined;
-  const security = claudeWorkerSecurityInstructions(mcp !== undefined, options.input.gitHistory !== undefined);
+  // Join (phase 1): any run but a workflow run, when the worker has a join source.
+  const joinable = options.join !== undefined && options.input.workflow === undefined;
+  const security = claudeWorkerSecurityInstructions(
+    mcp !== undefined,
+    options.input.gitHistory !== undefined,
+    joinable,
+  );
   const developerInstructions = injected ? `${security}\n\n${injected}` : security;
   const workflow = options.input.workflow;
   // A workflow run needs native mode: the Workflow tool reads the script from the context directory.
   if (workflow && (bareMode || !context)) throw new Error("coding_workflow_failed");
+  const prompt = workflow
+    ? workflowPrompt(workflow.name, options.input.runId)
+    : boundedPrompt(
+        options.input.task,
+        options.input.runId,
+        workerTaskNote(dependencyCache, options.input.repositories, options.input.gitHistory),
+        mcp !== undefined,
+      );
+  // A joinable run streams its input: the task, then each joined message (join.ts). Only fixed event
+  // names reach the trace, never a message's text.
+  const joined =
+    joinable && options.join
+      ? new JoinedInput(prompt, options.join, {
+          ...(options.input.deadlineAt ? { deadlineAt: options.input.deadlineAt } : {}),
+          ...(options.trace ? { trace: (event, data) => options.trace?.record(event, data ?? {}) } : {}),
+        })
+      : undefined;
   const stream = options.createQuery({
-    prompt: workflow
-      ? workflowPrompt(workflow.name, options.input.runId)
-      : boundedPrompt(
-          options.input.task,
-          options.input.runId,
-          workerTaskNote(dependencyCache, options.input.repositories, options.input.gitHistory),
-          mcp !== undefined,
-        ),
+    prompt,
+    ...(joined ? { input: joined.messages() } : {}),
     model: options.input.model,
     budgetUsd: options.input.budgetUsd,
     maxTurns: options.input.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS,
@@ -691,6 +737,8 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     ...(workflow ? { workflow: { name: workflow.name, args: workflow.args } } : {}),
   });
   let finalJson: string | undefined;
+  // A joined run: the session has given a valid answer, so later turns are joined turns.
+  let answered = false;
   let failed = false;
   let turnLimit = false;
   let streamFailed: string | false = false;
@@ -755,6 +803,23 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         });
       } else if (message.type === "result") {
         const errored = message.subtype !== "success" || (message as { is_error?: unknown }).is_error === true;
+        // A joined turn (after the run's first valid answer) never fails the run: its turn limit or error
+        // is traced and the last valid answer stands. Budget refusals still end the run as below.
+        if (joined && answered && !(errored && resultRefusedForBudget(message))) {
+          if (message.subtype === "success" && typeof message.result === "string" && validAgentOutput(message.result)) {
+            // A turn that only answered a question says no_changes about itself: it never takes the place
+            // of an earlier changes_ready answer, or the run's work would not be collected.
+            if (answerOutcome(finalJson) === "changes_ready" && answerOutcome(message.result) !== "changes_ready") {
+              options.trace?.record("join_answer_kept_changes", { later: String(answerOutcome(message.result)) });
+            } else {
+              finalJson = message.result;
+            }
+          } else {
+            options.trace?.record("join_turn_unanswered", { subtype: String(message.subtype) });
+          }
+          joined.onResult();
+          continue;
+        }
         if (errored && resultRefusedForBudget(message)) {
           budgetRefused = true;
           // A workflow keeps running in the background on refused calls: end the session now.
@@ -762,14 +827,25 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         } else if (message.subtype === "success" && typeof message.result === "string") {
           // A workflow run's answer counts only once the workflow has ended (see workflowState); the
           // launch turn's placeholder is ignored, and marked so in the trace.
-          if (!workflow || workflowState.ended) finalJson = message.result;
-          else options.trace?.record("workflow_placeholder_ignored", { workflowStarted: workflowState.started });
+          if (!workflow || workflowState.ended) {
+            finalJson = message.result;
+            // A joined run's first valid answer: later turns answer joined messages (see above). An
+            // earlier interrupted or failed turn no longer counts once a turn answered.
+            if (joined && validAgentOutput(message.result)) {
+              answered = true;
+              failed = false;
+              turnLimit = false;
+            }
+          } else options.trace?.record("workflow_placeholder_ignored", { workflowStarted: workflowState.started });
         } else if (message.subtype === "error_max_budget_usd") {
           budgetRefused = true;
           break;
         } else if (message.subtype === "error_max_turns") turnLimit = true;
         else if (workflow && workflowState.ended === "completed") workflowAnswerMissing = true;
         else failed = true;
+        // Not answered yet: the session stays open only while someone is joined (an interrupted first
+        // turn followed by a message); otherwise the input closes and the run ends as before.
+        joined?.onResult();
       }
     }
   } catch (err) {
@@ -787,6 +863,8 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
       else streamFailed = apiError ?? streamFailureCode(err);
     }
   }
+  // The session is over: no more input, no more polling.
+  joined?.close();
   // The tree's last state reaches the run's steps, whatever the run's outcome (bounded wait).
   await progressReporter?.flush();
   if (budgetRefused) return finish(budgetExhausted(options.input));

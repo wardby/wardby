@@ -165,10 +165,14 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
 /** Loads the pinned SDK from the worker image's private dependency directory. */
 export const createClaudeSdkQuery: ClaudeQueryFactory = (config) => {
   const sdk = runtimeRequire("@anthropic-ai/claude-agent-sdk") as {
-    query(input: { prompt: string; options: Record<string, unknown> }): AsyncIterable<ClaudeSdkMessage>;
+    query(input: {
+      prompt: string | AsyncIterable<unknown>;
+      options: Record<string, unknown>;
+    }): AsyncIterable<ClaudeSdkMessage>;
   };
   return sdk.query({
-    prompt: config.prompt,
+    // A joinable run streams its input (the task, then joined messages); otherwise the task is the prompt.
+    prompt: config.input ?? config.prompt,
     options: buildClaudeSdkOptions(config),
   });
 };

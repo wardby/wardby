@@ -112,11 +112,11 @@ describe("get_run_transcript", () => {
     expect(result.text).not.toContain("hello");
   });
 
-  it("gives the agent's owner a link; refuses another user as not found", async () => {
+  it("gives the agent's owner a link; refuses a read-only user as not found", async () => {
     const db = fakeTranscriptDb(
       AGENTS,
       [storedRun()],
-      [{ resourceType: "agent", resourceId: "a1", level: "execute", principalId: "reader" }],
+      [{ resourceType: "agent", resourceId: "a1", level: "read", principalId: "reader" }],
     );
     expect((await (await setup(db, "owner")).call("r1")).isError).toBe(false);
     const other = await (await setup(db, "reader")).call("r1");

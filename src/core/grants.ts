@@ -95,27 +95,31 @@ function best(type: ResourceType, a: string, b: string): string {
 
 export type GrantDb = Pick<PrismaClient, "resourceGrant">;
 
-function granteeKeys(principalId: string | null): string[] {
-  return principalId ? [principalGranteeKey(principalId), EVERYONE_KEY] : [EVERYONE_KEY];
+function granteeKeys(principalId: string | null, everyone = true): string[] {
+  const own = principalId ? [principalGranteeKey(principalId)] : [];
+  return everyone ? [...own, EVERYONE_KEY] : own;
 }
 
 /**
  * max(owner, principal grant, everyone grant). `principalId` null (e.g. a
  * legacy webhook with no recorded creator) gets everyone grants only.
  * `operator` is the stdio local operator (McpRequestContext.operator) or an owner-all caller (isOwnerAll),
- * owner of everything for access checks — never for binding rules.
+ * owner of everything for access checks — never for binding rules. `excludeEveryone` counts only the
+ * principal's own grants (run visibility: an everyone grant never shows one person's runs to all).
  */
 export async function effectiveAccess<T extends ResourceType>(
   db: GrantDb,
   type: T,
   resource: { id: string; ownerId: string | null },
   principalId: string | null,
-  opts?: { operator?: boolean },
+  opts?: { operator?: boolean; excludeEveryone?: boolean },
 ): Promise<Access<T>> {
   if (opts?.operator) return "owner";
   if (principalId !== null && resource.ownerId !== null && resource.ownerId === principalId) return "owner";
+  const keys = granteeKeys(principalId, opts?.excludeEveryone !== true);
+  if (keys.length === 0) return "none";
   const rows = await db.resourceGrant.findMany({
-    where: { resourceType: type, resourceId: resource.id, granteeKey: { in: granteeKeys(principalId) } },
+    where: { resourceType: type, resourceId: resource.id, granteeKey: { in: keys } },
     select: { granteeKey: true, level: true },
   });
   let access = "none";
@@ -132,9 +136,12 @@ export async function grantedAccessMap<T extends ResourceType>(
   db: GrantDb,
   type: T,
   principalId: string | null,
+  opts?: { excludeEveryone?: boolean },
 ): Promise<Map<string, Level<T>>> {
+  const keys = granteeKeys(principalId, opts?.excludeEveryone !== true);
+  if (keys.length === 0) return new Map();
   const rows = await db.resourceGrant.findMany({
-    where: { resourceType: type, granteeKey: { in: granteeKeys(principalId) } },
+    where: { resourceType: type, granteeKey: { in: keys } },
     select: { resourceId: true, granteeKey: true, level: true },
   });
   const map = new Map<string, string>();

@@ -26,16 +26,18 @@ import {
   textPiece,
   type RunTextField,
 } from "./run-pages.js";
+import { atLeast } from "../../core/grants.js";
 import { loadBudgetEvents } from "../../core/budget-events.js";
 import { requestForReader as readRequest } from "../../core/run-request.js";
 import { loadLastSteps } from "../../core/run-steps/last-step.js";
 import type { McpRequestContext } from "../context.js";
 
 /**
- * Run visibility (resource-sharing grants spec §3.5, A6): a run's output is
- * the triggerer's and the agent owner's, never every reader's. The owner
- * (and the stdio operator) sees every run; anyone else only runs with
- * Run.triggeredById equal to themselves.
+ * Run visibility (resource-sharing grants spec §3.5, A6, widened for join): a run's output is the
+ * triggerer's and execute-level readers' (the owner included), never every reader's. Anyone with
+ * execute on the agent (and the stdio operator) sees every run; a read-only grantee only runs with
+ * Run.triggeredById equal to themselves. See run-access.ts canReadRun.
+ * TEAMS (#639, team-aware access): when team access lands, resolve this through accessFor/actsFor so a team member's execute counts too.
  */
 /** A run row with its execution mode in the operator spelling agent tools use; null for coding runs. */
 function withOperatorMode<T extends { nativeExecutionMode?: NativeExecutionMode | null }>(
@@ -207,14 +209,17 @@ async function listRunsAcrossAgents(
 ) {
   const [where, accessOf] = await Promise.all([
     opts.all ? Promise.resolve({}) : readableAgentsWhere(ctx),
-    agentAccessResolver(ctx),
+    // Run visibility counts the owner and the caller's own grants, never an everyone grant.
+    agentAccessResolver(ctx, ctx.db, { excludeEveryone: true }),
   ]);
   const agents = await ctx.db.agent.findMany({
     where,
     select: { id: true, ownerId: true, name: true, budgetUsd: true },
   });
-  const owned = agents.filter((agent) => opts.all || accessOf(agent) === "owner").map((agent) => agent.id);
-  const others = agents.filter((agent) => !opts.all && accessOf(agent) !== "owner").map((agent) => agent.id);
+  // TEAMS (#639): accessOf should reflect team grants once team-aware access lands.
+  const seesAll = (agent: { id: string; ownerId: string | null }) => atLeast("agent", accessOf(agent), "execute");
+  const owned = agents.filter((agent) => opts.all || seesAll(agent)).map((agent) => agent.id);
+  const others = agents.filter((agent) => !opts.all && !seesAll(agent)).map((agent) => agent.id);
   const byId = new Map(agents.map((agent) => [agent.id, agent]));
   const take = listingTake(opts.limit);
   const status = opts.status;
@@ -364,10 +369,13 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
         });
         return textResult(await withQueuedAt(ctx, runs));
       }
-      const { access } = await requireAgentAccess(ctx, args.agentId, "read");
+      const { agent } = await requireAgentAccess(ctx, args.agentId, "read");
+      // Run visibility counts the owner and the caller's own grants, never an everyone grant.
+      const runAccess = (await agentAccessResolver(ctx, ctx.db, { excludeEveryone: true }))(agent);
       const readable: Prisma.RunWhereInput = {
         agentId: args.agentId,
-        ...(access === "owner" ? {} : { triggeredById: ctx.principal.id }),
+        // Execute (the owner included) sees every run; read only the caller's own. TEAMS (#639): team access.
+        ...(atLeast("agent", runAccess, "execute") ? {} : { triggeredById: ctx.principal.id }),
       };
       const clauses = [...filters];
       if (args.before !== undefined) {
@@ -407,7 +415,7 @@ export function registerRunTools(mcp: WardbyMcpServer): void {
     inputSchema: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"] },
     handler: async (args: { runId: string }, ctx) => {
       // Its triggerer keeps seeing it even after losing access to the agent;
-      // otherwise only the agent's owner. read on the agent is not enough.
+      // otherwise anyone with execute on the agent. read on the agent is not enough.
       const run = await findReadableRun(ctx, args.runId);
       const codingRun = await ctx.db.codingRun.findUnique({
         where: { runId: run.id },

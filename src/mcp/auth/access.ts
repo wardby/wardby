@@ -149,9 +149,10 @@ export async function readableAgentsWhere(
 export async function agentAccessResolver(
   ctx: McpRequestContext,
   db: GrantDb = ctx.db,
+  opts?: { excludeEveryone?: boolean },
 ): Promise<(agent: AgentRef) => AgentAccess> {
   if (ctx.operator || isOwnerAll(ctx)) return () => "owner";
-  const granted = await grantedAccessMap(db, "agent", ctx.principal.id);
+  const granted = await grantedAccessMap(db, "agent", ctx.principal.id, opts);
   return (agent) =>
     agent.ownerId !== null && agent.ownerId === ctx.principal.id ? "owner" : (granted.get(agent.id) ?? "none");
 }
