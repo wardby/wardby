@@ -5,7 +5,8 @@
  * live document rather than being merged (its content would be dropped).
  */
 import * as Y from "yjs";
-import { readLiveAnchors } from "../../../core/documents/live/anchors.js";
+import { parseTextAnchor } from "../../../core/documents/anchors.js";
+import { LIVE_ANCHORS, reanchorByQuote, readLiveAnchors } from "../../../core/documents/live/anchors.js";
 import { liveDocToMarkdown, normalMarkdown, seedLiveDoc } from "../../../core/documents/live/markdown.js";
 import { mergePublish } from "../../../core/documents/live/merge.js";
 import { showsSecret } from "../../../core/documents/live/text.js";
@@ -13,6 +14,15 @@ import { notifyDocumentChange } from "../../../core/documents/events.js";
 import type { WebDeps } from "../../context.js";
 import { isLosslessRoundTrip } from "../../app/roundtrip.js";
 import type { LiveFormat } from "./types.js";
+
+/** reanchorByQuote for a stored anchor (null when it is not a text anchor). */
+function quoteAgain(doc: Y.Doc, stored: unknown) {
+  try {
+    return reanchorByQuote(doc, parseTextAnchor(stored));
+  } catch {
+    return null;
+  }
+}
 
 export function markdownFormat(db: WebDeps["db"]): LiveFormat {
   return {
@@ -59,8 +69,16 @@ export function markdownFormat(db: WebDeps["db"]): LiveFormat {
       });
       let changed = 0;
       for (const th of threads) {
-        const r = readings.get(th.id);
+        let r = readings.get(th.id);
         if (!r || r === "keep") continue;
+        // Positions on deleted text: the words may have been written back the same (a paragraph's text rewritten
+        // whole); found by quote and context, the thread is anchored on them again.
+        const again = r === "gone" ? quoteAgain(doc, th.anchor) : null;
+        if (again) {
+          doc.getMap(LIVE_ANCHORS).set(th.id, again);
+          r = readLiveAnchors(doc).get(th.id) ?? r;
+          if (r === "keep") continue;
+        }
         if (r === "gone") {
           if (th.status === "open") {
             await db.commentThread.update({ where: { id: th.id }, data: { status: "outdated" } });

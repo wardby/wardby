@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { LIVE_ANCHORS, readLiveAnchors, repointRestoredAnchors } from "./anchors.js";
+import { LIVE_ANCHORS, readLiveAnchors, reanchorByQuote, repointRestoredAnchors } from "./anchors.js";
 
 /** A page and the server, kept in step by updates (the server never sees the page's undo links). */
 function pageAndServer() {
@@ -55,5 +55,44 @@ describe("repointRestoredAnchors", () => {
     t.delete(t.toString().indexOf("first week"), "first week".length);
     expect(repointRestoredAnchors(page)).toBe(0);
     expect(quoteOn(server)).toBe("gone");
+  });
+});
+
+describe("reanchorByQuote", () => {
+  const reading = (doc: Y.Doc) => readLiveAnchors(doc).get("thread-1");
+  it("finds words re-created in place (deleted and written back the same) and anchors on them again", () => {
+    const { page, server, t } = pageAndServer();
+    anchor(page, t, "morning shift");
+    const before = reading(server);
+    // Something rewrites the paragraph's text with the same text (one change).
+    page.transact(() => {
+      const s = t.toString();
+      t.delete(0, s.length);
+      t.insert(0, s);
+    });
+    expect(quoteOn(server)).toBe("gone");
+    const again = reanchorByQuote(server, before as never);
+    expect(again).toBeTruthy();
+    server.getMap(LIVE_ANCHORS).set("thread-1", again);
+    expect(quoteOn(server)).toBe("morning shift");
+  });
+
+  it("does not find words that were really deleted", () => {
+    const { page, server, t } = pageAndServer();
+    anchor(page, t, "morning shift");
+    const before = reading(server);
+    t.delete(t.toString().indexOf("morning shift"), "morning shift".length);
+    expect(reanchorByQuote(server, before as never)).toBeNull();
+  });
+
+  it("needs the words' context: the same words elsewhere with other words around them are not taken", () => {
+    const { page, server, t } = pageAndServer();
+    anchor(page, t, "first week");
+    const before = reading(server);
+    page.transact(() => {
+      t.delete(0, t.length);
+      t.insert(0, "Nothing about the first week here, only other words entirely.");
+    });
+    expect(reanchorByQuote(server, before as never)).toBeNull();
   });
 });

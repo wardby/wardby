@@ -10,6 +10,8 @@ import type { TextAnchor } from "../anchors.js";
 import { MAX_CONTEXT_CHARS, MAX_QUOTE_CHARS } from "../limits.js";
 
 export const LIVE_ANCHORS = "wardby-anchors";
+/** The shared-document field (LIVE_FIELD in markdown.ts; not imported, so the page's bundle stays small). */
+const FIELD = "default";
 
 /**
  * What a thread's positions say now: its quote (and context) as the text reads now; "gone" when its words were
@@ -107,4 +109,45 @@ export function repointRestoredAnchors(doc: Y.Doc): number {
   }
   if (changed.length) doc.transact(() => changed.forEach(([id, rel]) => positions.set(id, rel)));
   return changed.length;
+}
+
+/**
+ * Where a thread's words are now, found by its quote and context (the rule a document without live editing uses),
+ * as new positions: for words deleted and written back the same in one change (a paragraph's text rewritten
+ * whole), which leaves the old positions on deleted text. Null when the quote is not found in one paragraph with
+ * its context on at least one side.
+ */
+export function reanchorByQuote(doc: Y.Doc, anchor: TextAnchor): { from: unknown; to: unknown } | null {
+  if (!anchor.quote) return null;
+  const texts: Y.XmlText[] = [];
+  const walk = (n: Y.XmlFragment | Y.XmlElement) => {
+    for (const c of n.toArray()) {
+      if (c instanceof Y.XmlText) texts.push(c);
+      else if (c instanceof Y.XmlElement) walk(c);
+    }
+  };
+  walk(doc.getXmlFragment(FIELD));
+  for (const t of texts) {
+    // The quote and context are stored with whitespace runs as one space: search the text the same way.
+    const raw = plain(t);
+    const at: number[] = [];
+    let s = "";
+    for (let i = 0; i < raw.length; i++) {
+      if (/\s/.test(raw[i]) && /\s/.test(raw[i - 1] ?? "")) continue;
+      at.push(i);
+      s += /\s/.test(raw[i]) ? " " : raw[i];
+    }
+    at.push(raw.length);
+    for (let i = s.indexOf(anchor.quote); i >= 0; i = s.indexOf(anchor.quote, i + 1)) {
+      const before = s.slice(0, i);
+      const after = s.slice(i + anchor.quote.length);
+      const prefixOk = anchor.prefix.trim() !== "" && before.endsWith(anchor.prefix.slice(-8));
+      const suffixOk = anchor.suffix.trim() !== "" && after.startsWith(anchor.suffix.slice(0, 8));
+      if (!prefixOk && !suffixOk) continue;
+      const pos = (index: number) =>
+        Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(t, index, -1)) as unknown;
+      return { from: pos(at[i]), to: pos(at[i + anchor.quote.length]) };
+    }
+  }
+  return null;
 }

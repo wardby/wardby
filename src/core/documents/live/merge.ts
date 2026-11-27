@@ -68,23 +68,30 @@ function mergeChildren(doc: Y.Doc, parent: Y.XmlFragment | Y.XmlElement, target:
   }
 }
 
-/** Between two unchanged blocks: each live block is paired with the most alike new block of its type, in order. */
+/**
+ * Between two unchanged blocks. Deleting a live block deletes everything typed in it since the publisher's version,
+ * so blocks are updated in place whenever they can be paired: the same number of blocks of the same types are
+ * paired in order; otherwise each live block is paired with the most alike new block of its type, in order.
+ */
 function mergeGap(doc: Y.Doc, parent: Y.XmlFragment | Y.XmlElement, ys: Y.XmlElement[], at: number, ps: PMNode[]) {
   const pairs: [number, number][] = [];
   let from = 0;
-  for (let i = 0; i < ys.length; i++) {
-    let best = -1;
-    let score = 0.5;
-    for (let j = from; j < ps.length; j++) {
-      if (ps[j].type.name !== ys[i].nodeName) continue;
-      const s = alike(yText(ys[i]), ps[j].textContent);
-      if (s > score) [best, score] = [j, s];
+  if (ys.length === ps.length && ys.every((y, i) => y.nodeName === ps[i].type.name))
+    ys.forEach((_, i) => pairs.push([i, i]));
+  else
+    for (let i = 0; i < ys.length; i++) {
+      let best = -1;
+      let score = 0.5;
+      for (let j = from; j < ps.length; j++) {
+        if (ps[j].type.name !== ys[i].nodeName) continue;
+        const s = alike(yText(ys[i]), ps[j].textContent);
+        if (s > score) [best, score] = [j, s];
+      }
+      if (best >= 0) {
+        pairs.push([i, best]);
+        from = best + 1;
+      }
     }
-    if (best >= 0) {
-      pairs.push([i, best]);
-      from = best + 1;
-    }
-  }
   // Apply from the end: the paired blocks are updated in place, the others deleted or inserted.
   let yEnd = ys.length;
   let pEnd = ps.length;
@@ -128,14 +135,20 @@ function yText(y: Y.XmlElement): string {
   return out;
 }
 
-/** How alike two texts are, 0 to 1: their shared start and end over the longer one. */
+/** How alike two texts are, 0 to 1: the words they share (spacing aside), over all their words. */
 function alike(a: string, b: string): number {
-  if (a === b) return 1;
-  const max = Math.max(a.length, b.length);
-  if (!max) return 1;
-  let s = 0;
-  while (s < a.length && s < b.length && a[s] === b[s]) s++;
-  let e = 0;
-  while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
-  return (s + e) / max;
+  const wa = a.split(/\s+/).filter(Boolean);
+  const wb = b.split(/\s+/).filter(Boolean);
+  if (!wa.length && !wb.length) return 1;
+  const left = new Map<string, number>();
+  for (const w of wa) left.set(w, (left.get(w) ?? 0) + 1);
+  let shared = 0;
+  for (const w of wb) {
+    const n = left.get(w) ?? 0;
+    if (n > 0) {
+      shared++;
+      left.set(w, n - 1);
+    }
+  }
+  return (2 * shared) / (wa.length + wb.length);
 }

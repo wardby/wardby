@@ -120,6 +120,47 @@ describe("mergePublish", () => {
         deletedBy(md(paras.slice(0, 2)) + "\n" + list, md(paras.slice(0, 2)) + "\n- Opening day at six\n" + list),
       ).toBe(0);
     });
+    it("a list whose items start with a space (dropped by Markdown) is updated in place, keeping typing in it", () => {
+      const list = "- Weekdays from seven\n- Weekends from eight\n- Closed on the first Monday\n- Holidays vary\n";
+      const start = seedLiveDoc(md(paras.slice(0, 2)) + "\n" + list);
+      const page = fromState(Y.encodeStateAsUpdate(start));
+      // People typed at the start of two items far apart (Markdown drops the leading spaces).
+      const item = (doc: Y.Doc, i: number) =>
+        (((doc.getXmlFragment(LIVE_FIELD).get(2) as Y.XmlElement).get(i) as Y.XmlElement).get(0) as Y.XmlElement).get(
+          0,
+        ) as Y.XmlText;
+      item(page, 1).insert(0, " ");
+      item(page, 3).insert(0, " ");
+      const state = Y.encodeStateAsUpdate(page);
+      const published = liveDocToMarkdown(page).replace("Weekdays", "Weekday mornings");
+      // Since that version, someone typed in the list.
+      const live = fromState(state);
+      item(live, 2).insert(item(live, 2).length, " TYPED-SINCE");
+      Y.applyUpdate(live, mergePublish(state, published).update);
+      expect(liveDocToMarkdown(live)).toContain("Weekday mornings from seven");
+      expect(liveDocToMarkdown(live)).toContain("TYPED-SINCE");
+    });
+
+    it("a paragraph changed at both ends keeps the words between (a comment in the middle stays)", () => {
+      const start = seedLiveDoc(md(paras));
+      const page = fromState(Y.encodeStateAsUpdate(start));
+      // A person added a space at both ends of a paragraph (Markdown drops both).
+      const t = para(page, 4);
+      t.insert(0, " ");
+      t.insert(t.length, " ");
+      const state = Y.encodeStateAsUpdate(page);
+      const live = fromState(state);
+      const lt = para(live, 4);
+      const at = lt.toString().indexOf("notes");
+      const from = Y.createRelativePositionFromTypeIndex(lt, at);
+      let deleted = 0;
+      live.on("afterTransaction", (tr) => tr.deleteSet.clients.forEach((rs) => rs.forEach((r) => (deleted += r.len))));
+      Y.applyUpdate(live, mergePublish(state, liveDocToMarkdown(page).replace("part 9", "part nine")).update);
+      expect(deleted).toBeLessThanOrEqual(3); // the two spaces, and "9"
+      const abs = Y.createAbsolutePositionFromRelativePosition(from, live);
+      expect((abs?.type as Y.XmlText).toString().slice(abs!.index, abs!.index + 5)).toBe("notes");
+    });
+
     it("a block Markdown rewrites (bold starting with a space) does not spread to the others", () => {
       const start = seedLiveDoc(md(paras));
       const live = fromState(Y.encodeStateAsUpdate(start));

@@ -482,6 +482,36 @@ describe.skipIf(!process.env.DATABASE_URL)("live co-editing server (database)", 
     a.close();
   });
 
+  it("a comment stays open when its paragraph's text is written back the same (its words never went)", async () => {
+    const id = await newDoc();
+    const t = await createThread(db, cipher, {
+      documentId: id,
+      viewer: { kind: "principal", principalId: ann.id },
+      anchor: { type: "text", quote: "Ann writes", prefix: "", suffix: " here." },
+      body: "Who?",
+    });
+    const a = await client(ann, id);
+    a.anchor(t.threadId, "Ann writes");
+    await sleep(500);
+    // One change deletes the paragraph's text and writes the same text back: the positions are on deleted text.
+    const texts: Y.XmlText[] = [];
+    const walk = (n: Y.XmlFragment | Y.XmlElement) =>
+      n.toArray().forEach((c) => (c instanceof Y.XmlText ? texts.push(c) : c instanceof Y.XmlElement && walk(c)));
+    walk(a.ydoc.getXmlFragment("default"));
+    const p = texts.find((x) => x.toString().includes("Ann writes here."))!;
+    a.ydoc.transact(() => {
+      const s = p.toString();
+      p.delete(0, s.length);
+      p.insert(0, s);
+    });
+    a.append("Bo writes", " (a change to checkpoint.)");
+    await sleep(800);
+    const row = await db.commentThread.findUniqueOrThrow({ where: { id: t.threadId } });
+    expect(row.status).toBe("open");
+    expect((row.anchor as { quote: string }).quote).toBe("Ann writes");
+    a.close();
+  });
+
   it("after a restart the saved history resumes; a browser holding a reset history is refused", async () => {
     const id = await newDoc();
     const a = await client(ann, id);
