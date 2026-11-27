@@ -409,6 +409,22 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* write tools (database)", () =>
     ).rejects.toThrow("document_reject_not_plan_document");
   });
 
+  it("doc_create stores a set name and option label with the agent's secret values redacted", async () => {
+    const out = await call(
+      "doc_create",
+      { title: "S", markdown: "# S", set: `set ${SECRET}`, option: `opt ${SECRET}` },
+      "run-set-secret",
+    );
+    const doc = await db.document.findUniqueOrThrow({ where: { id: out.id }, include: { set: true } });
+    expect(doc.option).not.toContain(SECRET);
+    expect(doc.option).toMatch(/^opt /);
+    expect(doc.set?.name).not.toContain(SECRET);
+    expect(doc.set?.name).toMatch(/^set /);
+    // The same name from the same run is still the same set.
+    const again = await call("doc_create", { title: "T", markdown: "# T", set: `set ${SECRET}` }, "run-set-secret");
+    expect((await db.document.findUniqueOrThrow({ where: { id: again.id } })).setId).toBe(doc.setId);
+  });
+
   it("doc_create on a design refuses a bad board and strips a script with a warning; pins survive on unchanged boards", async () => {
     expect(await call("doc_create", { kind: "design", title: "Bad", files: { "manifest.json": "{}" } })).toMatchObject({
       error: "board_format_invalid",

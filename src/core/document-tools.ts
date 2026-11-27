@@ -22,7 +22,9 @@ import { listDocumentsForAgent } from "./documents/list.js";
 import type { Cipher } from "./documents/review.js";
 import { getReviewView, submitForReview } from "./documents/review.js";
 import { createDocument, getDocument, publishVersion } from "./documents/service.js";
+import { documentSecretValues } from "./documents/redact.js";
 import { ensureNamedSet } from "./documents/sets.js";
+import { redactExactSecretValues } from "./secret-spans.js";
 import { parseStoredDocumentTools, type DocumentToolsSetting } from "./documents/tools-setting.js";
 import { getVersion } from "./documents/versions.js";
 
@@ -404,7 +406,14 @@ async function handleWrite(
         runId: ctx.runId,
         ...(a.set !== undefined
           ? {
-              setId: await ensureNamedSet(db, { agentId: ctx.agentId, ownerId, runId: ctx.runId, name: a.set }),
+              // Model-written: redacted before it is stored (the same value maps to the same name, so a run's
+              // set stays one set).
+              setId: await ensureNamedSet(db, {
+                agentId: ctx.agentId,
+                ownerId,
+                runId: ctx.runId,
+                name: redactExactSecretValues(a.set, await documentSecretValues(db, cipher, ctx.agentId)),
+              }),
               option: a.option,
             }
           : {}),

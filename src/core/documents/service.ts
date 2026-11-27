@@ -79,7 +79,8 @@ export async function createDocument(
         path: input.path ?? null,
         baseRef: input.baseRef ?? null,
         setId: input.setId ?? null,
-        option: input.option ?? null,
+        // Model-written, shown with the set: redacted like the title.
+        option: input.option === undefined ? null : redactExactSecretValues(input.option, secrets),
       },
     });
     const version = await tx.documentVersion.create({
