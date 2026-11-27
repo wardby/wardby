@@ -15,6 +15,7 @@ import {
   buildSubstrateJobLauncher,
   planTicketStarter,
   reReviewOnCodingRunTerminal,
+  reviewRouterStarter,
 } from "./composition.js";
 import { RoutingExecutor } from "./routing.js";
 import type { Executor } from "./types.js";
@@ -802,5 +803,72 @@ describe("planTicketStarter", () => {
       expect(await start({ ...input, followedByChain })).toEqual({ runId: "run-9" });
       expect(write).toHaveBeenCalledTimes(followedByChain ? 1 : 0);
     }
+  });
+});
+
+describe("reviewRouterStarter", () => {
+  const input = {
+    routerAgentId: "r",
+    task: "Review action: …",
+    triggeredById: "p-1",
+    jobId: "job-1",
+    documentIds: ["d1", "d2"],
+  };
+
+  it("starts the router as a review_action run with the task, and records the run and its grants in one transaction", async () => {
+    const jobUpdate = vi.fn(async () => ({}));
+    const grants = vi.fn(async () => ({ count: 2 }));
+    const dispatch = vi.fn(async (options: Parameters<typeof dispatchRunType>[0]) => {
+      expect(await options.beforePersist!({} as never, { router: true } as never)).toBe(true);
+      const run = { id: "run-7", status: "pending", error: null };
+      await options.afterPersist!(
+        { reviewJob: { update: jobUpdate }, runDocumentGrant: { createMany: grants } } as never,
+        run as never,
+      );
+      return { run } as never;
+    });
+    const start = reviewRouterStarter({ db, executor: () => native, dispatch });
+    expect(await start(input)).toEqual({ runId: "run-7" });
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "r",
+        trigger: "review_action",
+        taskOverride: "Review action: …",
+        triggeredById: "p-1",
+      }),
+    );
+    expect(jobUpdate).toHaveBeenCalledWith({ where: { id: "job-1" }, data: { routerRunId: "run-7" } });
+    expect(grants).toHaveBeenCalledWith({
+      data: [
+        { runId: "run-7", documentId: "d1" },
+        { runId: "run-7", documentId: "d2" },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  it("an agent that is no longer a router is refused (review_router_invalid) and no run is made", async () => {
+    const dispatch = vi.fn(async (options: Parameters<typeof dispatchRunType>[0]) => {
+      expect(await options.beforePersist!({} as never, { router: false } as never)).toBe(false);
+      return null;
+    });
+    expect(await reviewRouterStarter({ db, executor: () => native, dispatch })(input)).toEqual({
+      refused: "review_router_invalid",
+    });
+  });
+
+  it("a refused or failed run, or a dispatch that throws, reports a refusal code", async () => {
+    for (const status of ["refused", "failed"]) {
+      const dispatch = vi.fn(async () => ({ run: { id: "x", status, error: "budget_exhausted: over" } }) as never);
+      expect(await reviewRouterStarter({ db, executor: () => native, dispatch })(input)).toEqual({
+        refused: `run_${status}`,
+      });
+    }
+    const throwing = vi.fn(async () => {
+      throw new Error("agent_not_found");
+    });
+    expect(await reviewRouterStarter({ db, executor: () => native, dispatch: throwing })(input)).toEqual({
+      refused: "run_refused",
+    });
   });
 });

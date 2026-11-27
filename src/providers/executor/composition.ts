@@ -36,6 +36,8 @@ import {
   type PlanApprovalDeps,
 } from "../../core/plans/approval.js";
 import { refusalOf } from "../../core/plans/refusal.js";
+import { setReviewActionHook } from "../../core/documents/review-hooks.js";
+import { createReviewRouterHook, type StartRouter } from "../../core/review-routing/hook.js";
 import { dispatchRun } from "../../core/dispatch.js";
 import { RepositorySetRefusedError } from "../../core/coding-repository-set.js";
 import { RESPONSE_PATH_SNAPSHOT_BUDGET, resolveWorkItem } from "../../core/attribution.js";
@@ -358,6 +360,55 @@ export function planTicketStarter(deps: {
 }
 
 /**
+ * Starts a review action's router run (#646, spec §3.6): a `review_action` run of the router with Wardby's fixed
+ * task, visible to the job's person. The persist transaction re-checks that the agent is still a router
+ * (review_router_invalid otherwise, and no run is made), then records the run on the job and grants it read on
+ * exactly the action's documents, so the run never exists without them. Refusals are codes only.
+ */
+export function reviewRouterStarter(deps: {
+  db: PrismaClient;
+  executor: () => Executor;
+  cipher?: ConfiguredExecutorOptions["secretCipher"];
+  dispatch?: typeof dispatchRun;
+}): StartRouter {
+  const dispatch = deps.dispatch ?? dispatchRun;
+  return async ({ routerAgentId, task, triggeredById, jobId, documentIds }) => {
+    const guard = { notRouter: false };
+    let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
+    try {
+      dispatched = await dispatch({
+        db: deps.db,
+        executor: deps.executor(),
+        ...(deps.cipher ? { secretCipher: deps.cipher } : {}),
+        agentId: routerAgentId,
+        trigger: "review_action",
+        taskOverride: task,
+        triggeredById,
+        // Read in the run's own transaction: turning `router` off stops a start that has not committed yet.
+        beforePersist: async (_tx, agent) => {
+          guard.notRouter = !agent.router;
+          return !guard.notRouter;
+        },
+        afterPersist: async (tx, run) => {
+          await tx.reviewJob.update({ where: { id: jobId }, data: { routerRunId: run.id } });
+          await tx.runDocumentGrant.createMany({
+            data: documentIds.map((documentId) => ({ runId: run.id, documentId })),
+            skipDuplicates: true,
+          });
+        },
+      });
+    } catch {
+      return { refused: "run_refused" };
+    }
+    if (!dispatched) return { refused: guard.notRouter ? "review_router_invalid" : "run_refused" };
+    if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
+      return { refused: `run_${dispatched.run.status}` };
+    }
+    return { runId: dispatched.run.id };
+  };
+}
+
+/**
  * Builds container execution only when Docker, Kubernetes or Substrate is explicitly
  * selected, and native sandbox routing whenever a sandbox executor is given.
  */
@@ -497,6 +548,15 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   setPlanReviewHook(cipher ? createPlanReviewHook(planDeps) : undefined);
   // The build chain (C3): a merged ticket PR starts the next ticket; a failed ticket run stops it.
   setPlanChainHook(cipher ? createPlanChainHook(planDeps) : undefined);
+  // Spec §3 (#646): after the plan hook, a review action starts its document's (or set's) router. Wired only with
+  // the cipher, as the plan hook is; startRouter reads `composed` only when it is called.
+  setReviewActionHook(
+    cipher
+      ? createReviewRouterHook({
+          startRouter: reviewRouterStarter({ db: options.db, executor: () => composed, cipher }),
+        })
+      : undefined,
+  );
   const transcripts = new RunTranscriptRecorder({
     db: options.db,
     blobs: blobStoreConfig && cipher ? createBlobStore(blobStoreConfig) : undefined,

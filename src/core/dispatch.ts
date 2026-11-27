@@ -133,6 +133,9 @@ export type DispatchTx = Pick<
   | "issuePullRequest"
   | "runAttribution"
   | "commentThread"
+  // A review router's start records its run on the job and the run's document grants (#646).
+  | "reviewJob"
+  | "runDocumentGrant"
   | "$queryRaw"
   | "$executeRawUnsafe"
 >;
