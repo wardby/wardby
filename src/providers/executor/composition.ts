@@ -387,6 +387,22 @@ export function reviewRouterStarter(deps: {
 }
 
 /**
+ * Spec §3 (#646): a review action starts its document's (or set's) router. Wired only with the cipher, as the
+ * plan hook is; startRouter reads the executor only when it is called, after buildConfiguredExecutor returns.
+ */
+function wireReviewRouterHook(options: ConfiguredExecutorOptions, executor: () => Executor): void {
+  const cipher = options.secretCipher;
+  setReviewActionHook(
+    cipher
+      ? createReviewRouterHook({
+          startRouter: reviewRouterStarter({ db: options.db, executor, cipher }),
+          secretValues: (agentId) => documentSecretValues(options.db, cipher, agentId),
+        })
+      : undefined,
+  );
+}
+
+/**
  * Builds container execution only when Docker, Kubernetes or Substrate is explicitly
  * selected, and native sandbox routing whenever a sandbox executor is given.
  */
@@ -394,15 +410,21 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   const env = options.env ?? process.env;
   const providerConfig = options.providerConfig ?? loadProviderConfig(env);
   if (providerConfig.jobs !== "docker" && providerConfig.jobs !== "kubernetes" && providerConfig.jobs !== "substrate") {
-    if (!options.nativeSandbox) return options.native;
+    // Routers are native agents and need no container, so review actions reach one here too.
+    if (!options.nativeSandbox) {
+      wireReviewRouterHook(options, () => options.native);
+      return options.native;
+    }
     // No coding launcher: coding runs reach the native executor, whose runner fails them with
     // the "needs a container executor" explanation, exactly as without this wrapper.
-    return new RoutingExecutor(
+    const routed: Executor = new RoutingExecutor(
       new PrismaExecutionKindResolver(options.db),
       options.native,
       options.native,
       options.nativeSandbox,
     );
+    wireReviewRouterHook(options, () => routed);
+    return routed;
   }
 
   const github = loadGitHubVcsConfig(env);
@@ -526,16 +548,7 @@ export function buildConfiguredExecutor(options: ConfiguredExecutorOptions): Exe
   setPlanReviewHook(cipher ? createPlanReviewHook(planDeps) : undefined);
   // The build chain (C3): a merged ticket PR starts the next ticket; a failed ticket run stops it.
   setPlanChainHook(cipher ? createPlanChainHook(planDeps) : undefined);
-  // Spec §3 (#646): after the plan hook, a review action starts its document's (or set's) router. Wired only with
-  // the cipher, as the plan hook is; startRouter reads `composed` only when it is called.
-  setReviewActionHook(
-    cipher
-      ? createReviewRouterHook({
-          startRouter: reviewRouterStarter({ db: options.db, executor: () => composed, cipher }),
-          secretValues: (agentId) => documentSecretValues(options.db, cipher, agentId),
-        })
-      : undefined,
-  );
+  wireReviewRouterHook(options, () => composed);
   const transcripts = new RunTranscriptRecorder({
     db: options.db,
     blobs: blobStoreConfig && cipher ? createBlobStore(blobStoreConfig) : undefined,

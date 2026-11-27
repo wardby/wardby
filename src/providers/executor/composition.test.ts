@@ -18,6 +18,7 @@ import {
   reviewRouterStarter,
 } from "./composition.js";
 import { RoutingExecutor } from "./routing.js";
+import { getReviewActionHook, setReviewActionHook } from "../../core/documents/review-hooks.js";
 import type { Executor } from "./types.js";
 import type { dispatchRun as dispatchRunType } from "../../core/dispatch.js";
 
@@ -252,6 +253,28 @@ describe("JOB_LAUNCHER=substrate", () => {
 });
 
 describe("buildConfiguredExecutor", () => {
+  const cipher = {} as unknown as NonNullable<Parameters<typeof buildConfiguredExecutor>[0]["secretCipher"]>;
+
+  it("sets the review action hook on a native-only deployment only with the cipher", () => {
+    setReviewActionHook(undefined);
+    expect(buildConfiguredExecutor({ native, db, env: { ...baseEnv } })).toBe(native);
+    expect(getReviewActionHook()).toBeUndefined();
+    expect(buildConfiguredExecutor({ native, db, env: { ...baseEnv }, secretCipher: cipher })).toBe(native);
+    expect(getReviewActionHook()).toBeTypeOf("function");
+    setReviewActionHook(undefined);
+    const sandbox: Executor = { async start() {}, async stop() {} };
+    const routed = buildConfiguredExecutor({
+      native,
+      nativeSandbox: sandbox,
+      db,
+      env: { ...baseEnv },
+      secretCipher: cipher,
+    });
+    expect(routed).toBeInstanceOf(RoutingExecutor);
+    expect(getReviewActionHook()).toBeTypeOf("function");
+    setReviewActionHook(undefined);
+  });
+
   it("returns the native executor when no container launcher is selected", () => {
     expect(buildConfiguredExecutor({ native, db, env: { ...baseEnv } })).toBe(native);
   });

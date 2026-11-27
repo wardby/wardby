@@ -32,6 +32,11 @@ export function setReviewActionHook(next: ReviewActionHook | undefined): void {
   actionHook = next;
 }
 
+/** The installed review action hook, if any (for wiring checks). */
+export function getReviewActionHook(): ReviewActionHook | undefined {
+  return actionHook;
+}
+
 /** The review action hook (the router) alone, for an action whose per-document hooks already ran. Never throws. */
 export async function runReviewActionHook(db: PrismaClient, action: ReviewAction): Promise<void> {
   try {
