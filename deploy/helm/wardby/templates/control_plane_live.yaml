@@ -1,0 +1,46 @@
+{{- $cp := .Values.controlPlane -}}
+# Live editing (docs/availability.md): a copy forwards a document's connections to the copy that holds its
+# lease, at that copy's pod IP and the server port, so the control-plane copies reach each other there. Always
+# rendered: a rolling update runs two copies even with one replica. The Redis relay, when used, needs its own
+# rule (controlPlane.liveRedis).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane-live
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "wardby.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-control-plane
+      ports:
+        - port: {{ $cp.port }}
+          protocol: TCP
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-control-plane
+      ports:
+        - port: {{ $cp.port }}
+          protocol: TCP
+    {{- with $cp.liveRedis.egressCidrs }}
+    # The Redis relay named by WARDBY_LIVE_REDIS_URL.
+    - to:
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - port: {{ $cp.liveRedis.port }}
+          protocol: TCP
+    {{- end }}

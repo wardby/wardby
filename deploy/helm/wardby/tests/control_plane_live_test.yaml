@@ -1,0 +1,56 @@
+suite: control plane live editing
+templates:
+  - control_plane_live.yaml
+values:
+  - ../ci/default-values.yaml
+tests:
+  - it: lets the control-plane copies reach each other on the server port, in and out
+    asserts:
+      - isKind:
+          of: NetworkPolicy
+      - equal:
+          path: spec.podSelector.matchLabels
+          value: { app.kubernetes.io/name: wardby-control-plane }
+      - equal:
+          path: spec.ingress
+          value:
+            - from:
+                - podSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: wardby-control-plane
+              ports:
+                - port: 8080
+                  protocol: TCP
+      - equal:
+          path: spec.egress
+          value:
+            - to:
+                - podSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: wardby-control-plane
+              ports:
+                - port: 8080
+                  protocol: TCP
+  - it: follows controlPlane.port
+    set:
+      controlPlane.port: 9000
+    asserts:
+      - equal:
+          path: spec.ingress[0].ports[0].port
+          value: 9000
+      - equal:
+          path: spec.egress[0].ports[0].port
+          value: 9000
+  - it: opens egress to the live-editing Redis only when its CIDRs are given
+    set:
+      controlPlane.liveRedis.egressCidrs: [10.1.2.3/32]
+      controlPlane.liveRedis.port: 6378
+    asserts:
+      - contains:
+          path: spec.egress
+          content:
+            to: [{ ipBlock: { cidr: 10.1.2.3/32 } }]
+            ports: [{ port: 6378, protocol: TCP }]
+      - lengthEqual:
+          path: spec.egress
+          count: 2

@@ -345,7 +345,9 @@ leaves them empty when `.env.local` has none of them, and `up.sh` then skips
 without it `up.sh` skips `secrets/external-secrets-live-redis.yaml`, the
 control plane reads `wardby-live-redis-env` with `optional: true`, and each
 document is served by one control-plane copy (see
-[Availability](../../docs/availability.md)).
+[Availability](../../docs/availability.md)). With it, `up.sh` also applies
+`live-redis-egress.yaml`, which lets the control plane reach Redis on ports
+6379 and 6378, and removes that policy again when the secret is unset.
 
 `verify-eso-kind.sh` proves the manifests, the scoping and the handover on a
 throwaway kind cluster. Run it after changing any of them or the chart version.

@@ -1,0 +1,33 @@
+# Live editing (docs/availability.md). A control-plane copy forwards a document's connections to the copy that
+# holds the document's lease, at that copy's WARDBY_LIVE_ADVERTISE_ADDRESS (its pod IP and port 8080, set in
+# control-plane.yaml), so the copies must reach each other there. Always applied: a rolling update runs two
+# copies even when the Deployment asks for one. The optional Redis relay has its own rule
+# (../../../../gke/live-redis-egress.yaml), applied by up.sh only when a Redis URL is configured.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane-live
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-control-plane
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wardby-control-plane
+      ports:
+        - protocol: TCP
+          port: 8080

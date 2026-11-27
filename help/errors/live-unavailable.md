@@ -18,6 +18,10 @@ Usual causes:
 - A proxy or load balancer between the browser and Wardby does not pass WebSocket upgrades on `/d/live/` (allow
   them, with an idle timeout of at least a minute).
 - The replica leading the document cannot be reached from the one the browser reached.
-- The document is a design (designs are not edited live).
+- The document has content the live editor cannot keep (for example images, checklists or HTML in a Markdown
+  document), so it is never edited live.
+- A version published while the page was joining could not be merged without losing content, so live editing
+  restarted for that document; reload the page.
+- Redis is configured for live editing but this replica cannot reach it (it also reports itself not ready).
 
 See [Live editing](../live-editing.md) and [Documents](../documents.md).

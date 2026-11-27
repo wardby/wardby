@@ -1,0 +1,26 @@
+# Egress from the control plane to the live-editing Redis relay (WARDBY_LIVE_REDIS_URL, from the optional
+# live-redis-url secret). up.sh applies it only when that secret is set and deletes it otherwise. The Redis host
+# is not known here (a managed instance's private IP, or a hosted service), so the rule opens the Redis ports
+# to any address, the same way the control plane's HTTPS rule opens port 443: the control plane is trusted code,
+# and these ports carry only the Redis relay.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wardby-control-plane-live-redis
+  namespace: wardby-coding
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wardby-control-plane
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        # Redis, and 6378 for a managed instance with in-transit encryption.
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 6378

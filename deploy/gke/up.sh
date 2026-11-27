@@ -786,8 +786,11 @@ if ((LIVE_REDIS_ENABLED)); then
     exit 1
   fi
   SYNCED_SECRETS+=(wardby-live-redis-env)
+  # The control plane's egress to Redis (the namespace's policies allow only what they name).
+  kubectl apply -f deploy/gke/live-redis-egress.yaml >/dev/null
 else
   kubectl -n "$NAMESPACE" delete externalsecret wardby-live-redis-env --ignore-not-found >/dev/null
+  kubectl -n "$NAMESPACE" delete networkpolicy wardby-control-plane-live-redis --ignore-not-found >/dev/null
 fi
 # The Google AI Studio (Gemini) key is optional the same way (wardby-gemini-env, optional: true).
 if ((GEMINI_ENABLED)); then

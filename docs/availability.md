@@ -322,12 +322,19 @@ controlPlane:
   address. Set it yourself (`host:port`) where that is wrong: separate
   machines with several networks or NAT. Platforms whose instances cannot
   reach each other (Cloud Run) need one copy, or `WARDBY_LIVE_REDIS_URL`.
+  Network policies must let the copies connect to each other on that port:
+  the chart and the GKE manifests add a policy for it
+  (`wardby-control-plane-live`). Add the same where you write your own.
 - A document's editors pause for up to 30 seconds when the copy leading it
   stops without warning (its lease must expire first); a graceful stop hands
   it over at once. With `WARDBY_LIVE_REDIS_URL` they do not pause: only saving
   versions waits for the lease. Redis is optional: put
   `WARDBY_LIVE_REDIS_URL` (`redis://` or `rediss://`; it may carry a password,
   so keep it in the Secret, never in values) in the control plane's Secret.
+  The control plane's network policy must also allow egress to Redis: with
+  the chart, list its addresses in `controlPlane.liveRedis.egressCidrs` (and
+  set `controlPlane.liveRedis.port` if it is not 6379); the GKE `up.sh`
+  applies a policy for it when `live-redis-url` is set.
   While Redis is configured but unreachable a copy reports itself not ready,
   instead of serving documents another way.
 
