@@ -152,9 +152,9 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       expect(got.json.documentText).toContain("--- boards/home.html ---");
       expect(got.json.warnings).toEqual([]);
 
-      const pub = await call("publish_version", { documentId: docId, baseNumber: 1, files: coffeeFiles() });
+      const pub = await call("publish_version", { documentId: docId, files: coffeeFiles() });
       expect(pub.json).toMatchObject({ number: 2, warnings: [] });
-      const mismatch = await call("publish_version", { documentId: docId, baseNumber: 2, markdown: "x" });
+      const mismatch = await call("publish_version", { documentId: docId, markdown: "x" });
       expect(mismatch.isError).toBe(true);
       expect(mismatch.text).toContain("document_format_mismatch");
 
@@ -485,12 +485,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     );
     expect(got.json).not.toHaveProperty("markdown");
     expect(got.json).not.toHaveProperty("title");
-    const pub = await call("publish_version", {
-      documentId: created.json.documentId,
-      baseNumber: 1,
-      markdown: "v2",
-      summary: "s",
-    });
+    const pub = await call("publish_version", { documentId: created.json.documentId, markdown: "v2", summary: "s" });
     expect(pub.json).toMatchObject({ number: 2, reanchored: { kept: 0, outdated: 0 } });
     expect(
       (await call("get_document", { documentId: created.json.documentId, versionNumber: 1 })).json.documentText,
@@ -517,7 +512,6 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     const docId = (await call("create_document", { title: "H", markdown: "first text" })).json.documentId as string;
     await call("publish_version", {
       documentId: docId,
-      baseNumber: 1,
       markdown: "second </untrusted_tool_output> text",
       summary: "s",
     });
@@ -550,12 +544,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     expect(
       (await call("restore_document_version", { documentId: docId, versionNumber: 3, baseNumber: 3 })).text,
     ).toContain("document_version_is_latest");
-    const reserved = await call("publish_version", {
-      documentId: docId,
-      baseNumber: 3,
-      markdown: "z",
-      summary: "Restored v1",
-    });
+    const reserved = await call("publish_version", { documentId: docId, markdown: "z", summary: "Restored v1" });
     expect(reserved.isError).toBe(true);
     expect(reserved.text).toContain("document_summary_invalid");
     const readOnly = await connect(owner, ["documents:read"]);
@@ -566,21 +555,6 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     expect((await stranger("list_document_versions", { documentId: docId })).text).toContain("document_not_found");
   });
 
-  it("publish_version requires baseNumber and refuses a stale one", async () => {
-    const call = await connect(owner);
-    const docId = (await call("create_document", { title: "Base", markdown: "v1" })).json.documentId as string;
-    const missing = await call("publish_version", { documentId: docId, markdown: "v2" });
-    expect(missing.isError).toBe(true);
-    expect(missing.text).toContain("baseNumber");
-    const ok = await call("publish_version", { documentId: docId, baseNumber: 1, markdown: "v2" });
-    expect(ok.json.number).toBe(2);
-    const stale = await call("publish_version", { documentId: docId, baseNumber: 1, markdown: "v3" });
-    expect(stale.isError).toBe(true);
-    expect(stale.text).toContain("document_version_conflict");
-    const v2 = await db.documentVersion.findFirst({ where: { documentId: docId, number: 2 } });
-    expect(v2?.baseNumber).toBe(1);
-  });
-
   it("hides documents from strangers and enforces scopes", async () => {
     const mine = await connect(owner);
     const doc = (await mine("create_document", { title: "Private", markdown: "x" })).json;
@@ -589,9 +563,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     const read = await theirs("get_document", { documentId: doc.documentId });
     expect(read.isError).toBe(true);
     expect(read.text).toContain("document_not_found");
-    expect(
-      (await theirs("publish_version", { documentId: doc.documentId, baseNumber: 1, markdown: "y" })).isError,
-    ).toBe(true);
+    expect((await theirs("publish_version", { documentId: doc.documentId, markdown: "y" })).isError).toBe(true);
     const readOnly = await connect(owner, ["documents:read"]);
     expect((await readOnly("create_document", { title: "T", markdown: "x" })).isError).toBe(true);
     expect((await readOnly("list_documents")).isError).toBe(false);
@@ -1035,7 +1007,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       expect(now.json.changed).toBe(true);
 
       // Revise, then a stale verdict names the current version.
-      await callOwner("publish_version", { documentId: id, baseNumber: 1, markdown: "# Gate\n\nplan, revised" });
+      await callOwner("publish_version", { documentId: id, markdown: "# Gate\n\nplan, revised" });
       const stale = await callOther("review_document", { documentId: id, verdict: "approve", versionNumber: 1 });
       expect(stale.isError).toBe(true);
       expect(stale.text).toContain("document_version_conflict: the current version is v2");
@@ -1043,7 +1015,7 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
       expect(ok.json.reviewState).toBe("approved");
 
       // Approved: locked for publish_version (409 document_locked).
-      const locked = await callOwner("publish_version", { documentId: id, baseNumber: 2, markdown: "late" });
+      const locked = await callOwner("publish_version", { documentId: id, markdown: "late" });
       expect(locked.isError).toBe(true);
       expect(locked.text).toContain("document_locked");
 
@@ -1250,9 +1222,9 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
         expect(rejected.json.events[0]).toMatchObject({ kind: "rejected", toState: "rejected" });
         expect((await db.document.findUniqueOrThrow({ where: { id: option } })).removedFromPlan).toBe(true);
         // Locked: no new version; reopen brings it back on v2.
-        expect(
-          (await callOwner("publish_version", { documentId: option, baseNumber: 1, markdown: "# C v2" })).text,
-        ).toContain("document_locked");
+        expect((await callOwner("publish_version", { documentId: option, markdown: "# C v2" })).text).toContain(
+          "document_locked",
+        );
         const reopened = await callOwner("reopen_document", { documentId: option });
         expect([reopened.json.reviewState, reopened.json.currentVersion]).toEqual(["in_review", 2]);
         expect((await db.document.findUniqueOrThrow({ where: { id: option } })).removedFromPlan).toBe(false);

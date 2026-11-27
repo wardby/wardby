@@ -207,31 +207,6 @@ describe("seed", () => {
     for (const call of calls) expect(call.args.join(" ")).not.toContain(slackEnv.WARDBY_SLACK_BOT_TOKEN);
   });
 
-  it("seeds the live-editing Redis URL over stdin and reports its group only when it is set", async () => {
-    const redisEnv = { WARDBY_LIVE_REDIS_URL: "rediss://default:redis-secret-value@cache:6380" };
-    const unset = fakeExec({});
-    const without = await seed({
-      ...base,
-      env: fullEnv,
-      exec: unset.exec,
-      generate: () => "c".repeat(64),
-      log: () => {},
-    });
-    expect(without.enabledGroups).not.toContain("live-redis");
-    const { exec, calls } = fakeExec({});
-    const result = await seed({
-      ...base,
-      env: { ...fullEnv, ...redisEnv },
-      exec,
-      generate: () => "c".repeat(64),
-      log: () => {},
-    });
-    expect(result.enabledGroups).toEqual(["live-redis"]);
-    const added = calls.find((c) => c.args.includes("add") && c.args.includes("wardby-live-redis-url"));
-    expect(added.input).toBe(redisEnv.WARDBY_LIVE_REDIS_URL);
-    for (const call of calls) expect(call.args.join(" ")).not.toContain("redis-secret-value");
-  });
-
   it("leaves Gemini empty when its API key is not set", async () => {
     const { exec, calls } = fakeExec({});
     const result = await seed({ ...base, env: fullEnv, exec, generate: () => "c".repeat(64), log: () => {} });

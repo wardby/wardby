@@ -14,20 +14,9 @@ import { quoteClipped, type AnchorSurface, type DraftStart } from "./surface.js"
 
 const BADGE_GAP = 24;
 /** Shown in the panel when the selection can't be commented on. */
-export const SELECT_WORDS = "Select some words to comment on (up to 10,000 characters).";
+export const SELECT_WORDS = "Select some words to comment on (up to 500 characters).";
 
 type Handlers = Parameters<AnchorSurface["connect"]>[0];
-
-/** Live co-editing: comment ranges held as positions in the shared document, so they follow everyone's edits. */
-export interface LiveAnchors {
-  has(id: string): boolean;
-  resolve(id: string): { from: number; to: number } | null;
-  store(id: string, from: number, to: number): void;
-  /** Positions for a range that are not shared yet (a draft): they follow edits until adopt() shares them. */
-  capture(from: number, to: number): unknown;
-  resolveCaptured(captured: unknown): { from: number; to: number } | null;
-  adopt(id: string, captured: unknown): void;
-}
 
 const sameText = (a: TextAnchor, b: TextAnchor) =>
   a.quote === b.quote && a.prefix === b.prefix && a.suffix === b.suffix;
@@ -40,13 +29,6 @@ export class TextSurface implements AnchorSurface {
   private suspended = false;
   /** The range draft() found, until mark() shows it. */
   private pendingDraft: { from: number; to: number } | null = null;
-  /**
-   * Live co-editing: the draft's range as positions, captured when it is shown, so it follows other people's
-   * edits until its thread exists (which then takes these positions over, even if the quoted words changed).
-   */
-  private draftLive: unknown = null;
-  /** The open draft's positions were handed to its thread already (so they are never captured again). */
-  private draftAdopted = false;
   /** The anchor of the draft last shown: the thread created from it takes over its highlight. */
   private lastDraft: TextAnchor | null = null;
   private drawQueued = false;
@@ -58,29 +40,7 @@ export class TextSurface implements AnchorSurface {
     private readonly editor: Editor,
     private readonly els: { page: HTMLElement; margin: HTMLElement; bubble: HTMLButtonElement; stage: HTMLElement },
     private readonly preview: (body: string) => string = (body) => previewText(body),
-    private readonly live?: LiveAnchors,
   ) {}
-
-  /**
-   * Live co-editing: places every open thread from its shared positions again. Another person's edit can
-   * redraw a whole paragraph, dropping the highlights mapped through it, so this starts from the threads, not
-   * from the highlights that are left.
-   */
-  private placeLive(): void {
-    const live = this.live;
-    if (!live) return;
-    const draft = this.draftLive ? live.resolveCaptured(this.draftLive) : null;
-    const others = getHighlights(this.editor).filter(
-      (r) => (r.id === "draft" && !this.draftLive) || (r.id !== "draft" && !live.has(r.id)),
-    );
-    const placed = this.threads.flatMap((t) => {
-      if (t.status !== "open" || !live.has(t.id)) return [];
-      const at = live.resolve(t.id);
-      return at && at.to > at.from ? [{ id: t.id, ...at }] : [];
-    });
-    const drafted = draft && draft.to > draft.from ? [{ id: "draft", ...draft }] : [];
-    setHighlights(this.editor, { ranges: [...others, ...placed, ...drafted] });
-  }
 
   connect(handlers: Handlers): void {
     this.handlers = handlers;
@@ -93,11 +53,7 @@ export class TextSurface implements AnchorSurface {
     bubble.addEventListener("mousedown", (e) => e.preventDefault());
     bubble.addEventListener("click", () => handlers.start());
     editor.on("selectionUpdate", () => this.updateBubble());
-    editor.on("update", () => {
-      // After the transaction is applied, never inside it.
-      if (this.live) queueMicrotask(() => this.placeLive());
-      moved();
-    });
+    editor.on("update", moved);
     editor.on("blur", () => setTimeout(() => this.updateBubble(), 120));
     document.addEventListener("selectionchange", () => this.updateBubble());
     stage.addEventListener("scroll", moved, { passive: true });
@@ -133,9 +89,6 @@ export class TextSurface implements AnchorSurface {
     const current = new Map(getHighlights(editor).map((r) => [r.id, r]));
     const draftRange = draftAnchor ? (this.pendingDraft ?? current.get("draft") ?? null) : null;
     this.pendingDraft = null;
-    if (this.live && draftRange && !this.draftLive && !this.draftAdopted) {
-      this.draftLive = this.live.capture(draftRange.from, draftRange.to);
-    }
     let ranges: Highlight[];
     if (state.threads !== this.threads) {
       let dt: ReturnType<typeof docText> | null = null;
@@ -143,52 +96,25 @@ export class TextSurface implements AnchorSurface {
       ranges = [];
       for (const t of state.threads) {
         if (t.status !== "open" || t.anchor.type !== "text") continue;
-        if (this.live?.has(t.id)) {
-          const at = this.live.resolve(t.id);
-          if (at && at.to > at.from) ranges.push({ id: t.id, ...at });
-          continue;
-        }
-        // Found the first time: in live co-editing its range is kept as shared positions from then on.
-        const keep = (r: { from: number; to: number }) => {
-          ranges.push({ id: t.id, from: r.from, to: r.to });
-          this.live?.store(t.id, r.from, r.to);
-        };
         const kept = current.get(t.id);
         if (kept) {
-          keep(kept);
+          ranges.push(kept);
           continue;
         }
         // A thread just created from the draft keeps the draft's range (no flicker while it is located again).
-        if (this.lastDraft && sameText(this.lastDraft, t.anchor)) {
-          if (this.live && this.draftLive) {
-            // Live: the draft's positions, which followed any edit made since (the quote may no longer match).
-            this.live.adopt(t.id, this.draftLive);
-            this.draftLive = null;
-            this.draftAdopted = true;
-            const at = this.live.resolve(t.id);
-            if (at && at.to > at.from) ranges.push({ id: t.id, ...at });
-            continue;
-          }
-          if (shown) {
-            keep(shown);
-            continue;
-          }
+        if (shown && this.lastDraft && sameText(this.lastDraft, t.anchor)) {
+          ranges.push({ ...shown, id: t.id });
+          continue;
         }
         dt ??= docText(editor.state.doc);
         const r = rangeForAnchor(dt, t.anchor);
-        if (r) keep(r);
+        if (r) ranges.push({ id: t.id, ...r });
       }
       this.threads = state.threads;
     } else {
       ranges = [...current.values()].filter((r) => r.id !== "draft");
     }
     if (draftRange) ranges.push({ id: "draft", ...draftRange });
-    // The composer closed: its draft's positions go (a thread made from it has taken them by now: the thread
-    // arrives either before the composer closes, from the live events, or in the reload that closes it).
-    if (!draftAnchor) {
-      this.draftLive = null;
-      this.draftAdopted = false;
-    }
     this.lastDraft = draftAnchor;
     this.active = state.active;
     this.canStart = state.canStart ?? true;

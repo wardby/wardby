@@ -70,7 +70,6 @@ import {
 import { authorLabel, listThreads, postAgentReply } from "./comments.js";
 import { contentHash, type VersionContent } from "./content.js";
 import { notifyDocumentChange } from "./events.js";
-import { holdsVersionState } from "./live/store.js";
 import { loadContent } from "./files.js";
 import { mergeContent } from "./merge.js";
 import { documentReviewState } from "./review.js";
@@ -1167,15 +1166,6 @@ async function applyRunEdit(
     // Someone published first: merge with what they published.
     const latest = await getDocument(db, documentId);
     current = latest.version;
-  }
-  // A live document keeps each version's state: publishing from the version the threads were sent with merges the
-  // edit with everything published since, word by word (publishVersion). Not yet merged live (a conflict): the
-  // line-by-line merge below, as for any document.
-  if (current.number !== sentVersion && (await holdsVersionState(db, documentId, sentVersion))) {
-    const out = await publish(prepared, sentVersion, `Agent edit for comment threads ${numbers} (merged live)`);
-    if (out === "published") return { kind: "published" };
-    if (out === "locked") return locked();
-    current = (await getDocument(db, documentId)).version;
   }
   // Layer 1: the per-file three-way merge with the version the threads were sent with. Base and
   // theirs are prepared with the same secret values as ours, so a value that became a secret since

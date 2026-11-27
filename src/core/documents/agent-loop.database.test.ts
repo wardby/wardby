@@ -9,7 +9,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import * as Y from "yjs";
 import type { Principal } from "#prisma";
 import type { Executor } from "../../providers/executor/types.js";
 import { RateLimitError, type RateLimiter } from "../../mcp/auth/self-hosted/rate-limit.js";
@@ -17,9 +16,6 @@ import { createPrismaClient } from "../db.js";
 import { attachSecret, createSecret, detachSecret } from "../secrets.js";
 import { UNTRUSTED_CONTEXT_TAG } from "../untrusted-content.js";
 import type { Viewer } from "./access.js";
-import { seedLiveDoc } from "./live/markdown.js";
-import { mergePublish } from "./live/merge.js";
-import { createLiveState, putVersionState } from "./live/store.js";
 import { markRunFailedFromExecutorError } from "../dispatch.js";
 import {
   AGENT_EDITED_NO_REPLY,
@@ -675,46 +671,6 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect((await db.comment.findMany({ where: { threadId: t1.threadId, runId } })).map((c) => c.body)).toEqual([
       reconcilingReply(3),
     ]);
-  });
-
-  it("a live document: an agent edit and a person's edit to one paragraph merge word by word, no reconcile run", async () => {
-    const PARA = "The launch moves to April and the price stays the same.\n";
-    const docId = await linkedDoc("Draft.\n");
-    await publishVersion(db, cipher, { documentId: docId, markdown: PARA, via: "editor" });
-    const t1 = await thread(docId, "launch", "Warmer");
-    const { runId } = await sendThreadsToAgent(db, deps, {
-      documentId: docId,
-      viewer: asWriter(),
-      threadIds: [t1.threadId],
-    });
-    // The document is live from v2 (what the live server keeps), and a person's edit arrives as v3.
-    const v2 = seedLiveDoc(PARA);
-    await createLiveState(db, { documentId: docId, epoch: "e", state: Y.encodeStateAsUpdate(v2), versionNumber: 2 });
-    const editor = PARA.replace("the price stays", "the price surely stays");
-    await publishVersion(db, cipher, { documentId: docId, markdown: editor, via: "editor", expectedNumber: 2 });
-    const v3 = mergePublish(Y.encodeStateAsUpdate(v2), editor).versionState;
-    await putVersionState(db, { documentId: docId, versionNumber: 3, state: v3 });
-    const sha = await finish(
-      runId,
-      "succeeded",
-      repliesBlock([{ thread: t1.number, reply: "Warmer.", resolved: true }]),
-    );
-    files.set(`${sha}:${path}`, PARA.replace("The launch moves", "The big launch moves"));
-    const before = await runsOf();
-    await onDocumentRunFinished(db, deps, runId);
-    const doc = await db.document.findUniqueOrThrow({ where: { id: docId }, include: { currentVersion: true } });
-    expect(doc.currentVersion).toMatchObject({
-      number: 4,
-      via: "agent",
-      runId,
-      baseNumber: 3,
-      summary: `Agent edit for comment threads #${t1.number} (merged live)`,
-    });
-    // Both edits, in the editor's own Markdown form (the merged text is written as the editor writes it).
-    expect(doc.currentVersion!.markdown!.trimEnd()).toBe(
-      "The big launch moves to April and the price surely stays the same.",
-    );
-    expect(await runsOf()).toBe(before);
   });
 
   it("a Markdown document both changed starts one reconcile run as the sender, on the latest version", async () => {

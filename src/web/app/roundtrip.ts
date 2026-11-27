@@ -44,12 +44,7 @@ const NAMED_ENTITY = /&(?!(?:amp|lt|gt|quot);)[A-Za-z][A-Za-z0-9]*;/;
  * equals the source's.
  */
 export function isLosslessRoundTrip(source: string, serialized: string): boolean {
-  if (hasUnkeepableSyntax(source)) return false;
-  return markdownToPlainText(serialized) === markdownToPlainText(source);
-}
-
-/** Syntax the editor has no place for (images, task lists, raw HTML, other named entities), outside code. */
-export function hasUnkeepableSyntax(source: string): boolean {
   const text = outsideCode(source);
-  return IMAGE.test(text) || TASK_ITEM.test(text) || HTML_TAG.test(text) || NAMED_ENTITY.test(text);
+  if (IMAGE.test(text) || TASK_ITEM.test(text) || HTML_TAG.test(text) || NAMED_ENTITY.test(text)) return false;
+  return markdownToPlainText(serialized) === markdownToPlainText(source);
 }

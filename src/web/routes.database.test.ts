@@ -11,7 +11,6 @@ import type { Principal } from "#prisma";
 import { createPrismaClient } from "../core/db.js";
 import { createDocument } from "../core/documents/service.js";
 import { attachSecret, createSecret } from "../core/secrets.js";
-import { redeemLiveTicket } from "../core/documents/live/store.js";
 import { createShareLink, revokeShareLink } from "../core/documents/share-links.js";
 import { sendThreadsToAgent } from "../core/documents/agent-loop.js";
 import { RateLimitError, type RateLimiter } from "../mcp/auth/self-hosted/rate-limit.js";
@@ -1810,38 +1809,6 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       ).toBe(404);
       expect((await call(`/d/api/${id}/share-links`, { method: "POST", jar: o.jar, body: {} })).status).toBe(403);
       expect(await db.documentShareLink.count({ where: { documentId: id } })).toBe(1);
-    });
-
-    it("issues a single-use live ticket carrying the request's access, a share link included", async () => {
-      const id = await newDoc();
-      const o = await session(owner.id);
-      const res = await call(`/d/api/${id}/live-ticket`, { method: "POST", jar: o.jar, csrf: o.csrf, body: {} });
-      expect(res.status).toBe(200);
-      expect(res.headers.get("cache-control")).toBe("no-store");
-      const mine = (await res.json()) as { ticket: string; readOnly: boolean };
-      expect(mine.readOnly).toBe(false);
-      // Only its hash is stored, and it works once.
-      expect(JSON.stringify(await db.documentLiveTicket.findMany({ where: { documentId: id } }))).not.toContain(
-        mine.ticket,
-      );
-      expect(await redeemLiveTicket(db, { token: mine.ticket, documentId: id, principalId: owner.id })).toEqual({
-        readOnly: false,
-      });
-      // An outsider: refused on their own, read-only through a comment link.
-      const out = await session(outsider.id);
-      const post = (headers: Record<string, string> = {}) =>
-        call(`/d/api/${id}/live-ticket`, { method: "POST", jar: out.jar, csrf: out.csrf, body: {}, headers });
-      expect((await post()).status).toBe(404);
-      const link = await createShareLink(db, {
-        documentId: id,
-        viewer: { kind: "principal", principalId: owner.id },
-        permission: "comment",
-      });
-      const viaLink = await post({ "x-wardby-share": link.token });
-      expect(viaLink.status).toBe(200);
-      expect(((await viaLink.json()) as { readOnly: boolean }).readOnly).toBe(true);
-      // No CSRF value: refused.
-      expect((await call(`/d/api/${id}/live-ticket`, { method: "POST", jar: o.jar, body: {} })).status).toBe(403);
     });
 
     it("answers the review codes with their statuses and refuses malformed bodies", async () => {
