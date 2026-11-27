@@ -268,6 +268,21 @@ describe("list_agent_links", () => {
     });
   });
 
+  it("keeps a router's manual entry and counts a routes_reviews link to a router the caller cannot read (#646)", async () => {
+    const me = await principal();
+    const other = await principal();
+    const router = await agent(me.id, "router2", { router: true, description: "routes" });
+    const writer = await agent(me.id, "writer2", { reviewRouterId: router.id });
+    const hiddenRouter = await agent(other.id, "hidden-router", { router: true, description: "routes" });
+    const writer3 = await agent(me.id, "writer3", { reviewRouterId: hiddenRouter.id });
+    const { value, text } = await (await connect(me))();
+    expect(value.agents.find((r: { id: string }) => r.id === router.id).entry).toContain("manual");
+    expect(value.hidden.edges).toBeGreaterThanOrEqual(1);
+    expect(text).not.toContain(hiddenRouter.id);
+    expect(value.edges.some((e: { from: string }) => e.from === writer3.id)).toBe(false);
+    expect(value.edges.some((e: { from: string }) => e.from === writer.id)).toBe(true);
+  });
+
   it("strips terminal control sequences from the prompt's first line", async () => {
     const me = await principal();
     const a = await agent(me.id, "escapes", {

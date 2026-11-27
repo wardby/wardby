@@ -411,9 +411,17 @@ export function registerTriggerTool(mcp: WardbyMcpServer): void {
       }
       // A writer or planner with a review router: say where its documents' reviews go (#646).
       const reviewRouterId = (agent as { reviewRouterId?: string | null }).reviewRouterId ?? null;
-      const reviewsGoTo = reviewRouterId
-        ? await ctx.db.agent.findUnique({ where: { id: reviewRouterId }, select: { id: true, name: true } })
+      const routerRow = reviewRouterId
+        ? await ctx.db.agent.findUnique({
+            where: { id: reviewRouterId },
+            select: { id: true, name: true, ownerId: true },
+          })
         : null;
+      // Named only to a caller who can run the router: an id and name are not for anyone else.
+      const reviewsGoTo =
+        routerRow && atLeast("agent", await agentAccess(ctx, routerRow), "execute")
+          ? { id: routerRow.id, name: routerRow.name }
+          : null;
       const withWarnings = <T extends object>(result: T) => {
         const out = warnings.length > 0 ? { ...result, warnings } : result;
         return reviewsGoTo ? { ...out, reviewsGoTo } : out;

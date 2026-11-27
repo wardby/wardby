@@ -173,4 +173,44 @@ describe("request_work", () => {
     expect(await db.run.count({ where: { agentId: { in: [theirs.id, readOnly.id] } } })).toBe(0);
     expect(await db.reviewJob.count({ where: { routerAgentId: { in: [theirs.id, readOnly.id] } } })).toBe(0);
   });
+
+  it("lists a router everyone may run, and caps the no-match list at 20 names", async () => {
+    const me = await principal();
+    const other = await principal();
+    const open = await agent(other.id, "open-router", { router: true, description: "zebra stripes" });
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "agent",
+        resourceId: open.id,
+        granteeKind: "everyone",
+        granteeKey: "everyone",
+        level: "execute",
+      },
+    });
+    const call = await connect(me);
+    const ranked = JSON.parse((await call({ request: "zebra stripes" })).text);
+    expect(ranked.routers.map((r: { id: string }) => r.id)).toContain(open.id);
+    for (let i = 0; i < 21; i++)
+      await agent(me.id, `many-${String(i).padStart(2, "0")}`, { router: true, description: "q" });
+    const none = JSON.parse((await call({ request: "nothing matches this wording" })).text);
+    expect(none.yours).toHaveLength(20);
+    expect([...none.yours].sort()).toEqual(none.yours);
+  });
+
+  it("refuses at persist when the router was switched off mid-dispatch, and keeps the job with its outcome", async () => {
+    const me = await principal();
+    const router = await agent(me.id, "flipped", { router: true, description: "x" });
+    const stale = await db.agent.findUniqueOrThrow({ where: { id: router.id }, include: { codingProfile: true } });
+    await db.agent.update({ where: { id: router.id }, data: { router: false } });
+    const spy = vi.spyOn(db.agent, "findUnique").mockResolvedValueOnce(stale);
+    const call = await connect(me);
+    const out = await call({ request: "SECRET-REQUEST-TEXT", router: router.id });
+    spy.mockRestore();
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain("review_router_invalid");
+    expect(await db.run.count({ where: { agentId: router.id } })).toBe(0);
+    const job = await db.reviewJob.findFirstOrThrow({ where: { routerAgentId: router.id } });
+    expect(job.outcome).toBe("review_router_invalid");
+    expect(job.routerRunId).toBeNull();
+  });
 });

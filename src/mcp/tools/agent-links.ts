@@ -55,6 +55,7 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
           budgetUsd: true,
           ownerId: true,
           reviewRouterId: true,
+          router: true,
           systemPrompt: true,
           schedule: true,
           scheduleEnabled: true,
@@ -106,6 +107,12 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
           hiddenAgents.add(parentSeen ? e.childAgentId : e.parentAgentId);
         }
       }
+      // A routes_reviews link to a router the caller cannot read is counted, never named.
+      for (const r of rows)
+        if (r.reviewRouterId && !ids.has(r.reviewRouterId)) {
+          hiddenEdges++;
+          hiddenAgents.add(r.reviewRouterId);
+        }
       const facts: AgentLinkFacts[] = rows.map((r) => ({
         id: r.id,
         name: r.name,
@@ -117,6 +124,7 @@ export function registerAgentLinkTools(mcp: WardbyMcpServer): void {
         repositories: r.repositories.map((l) => ({ ...l, access: l.access === "write" ? "write" : "read" })),
         issueProjects: r.issueProjects,
         reviewRouterId: r.reviewRouterId,
+        router: r.router,
       }));
       const flows = buildAgentFlows(facts, subAgents);
       return textResult({

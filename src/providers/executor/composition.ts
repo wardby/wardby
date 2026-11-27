@@ -38,6 +38,7 @@ import {
 import { refusalOf } from "../../core/plans/refusal.js";
 import { setReviewActionHook } from "../../core/documents/review-hooks.js";
 import { createReviewRouterHook, type StartRouter } from "../../core/review-routing/hook.js";
+import { startRouterRun } from "../../core/review-routing/start.js";
 import { dispatchRun } from "../../core/dispatch.js";
 import { RepositorySetRefusedError } from "../../core/coding-repository-set.js";
 import { RESPONSE_PATH_SNAPSHOT_BUDGET, resolveWorkItem } from "../../core/attribution.js";
@@ -371,40 +372,20 @@ export function reviewRouterStarter(deps: {
   cipher?: ConfiguredExecutorOptions["secretCipher"];
   dispatch?: typeof dispatchRun;
 }): StartRouter {
-  const dispatch = deps.dispatch ?? dispatchRun;
   return async ({ routerAgentId, task, triggeredById, jobId, documentIds }) => {
-    const guard = { notRouter: false };
-    let dispatched: Awaited<ReturnType<typeof dispatchRun>>;
     try {
-      dispatched = await dispatch({
-        db: deps.db,
-        executor: deps.executor(),
-        ...(deps.cipher ? { secretCipher: deps.cipher } : {}),
-        agentId: routerAgentId,
-        trigger: "review_action",
-        taskOverride: task,
-        triggeredById,
-        // Read in the run's own transaction: turning `router` off stops a start that has not committed yet.
-        beforePersist: async (_tx, agent) => {
-          guard.notRouter = !agent.router;
-          return !guard.notRouter;
+      return await startRouterRun(
+        {
+          db: deps.db,
+          executor: deps.executor(),
+          ...(deps.cipher ? { cipher: deps.cipher } : {}),
+          ...(deps.dispatch ? { dispatch: deps.dispatch } : {}),
         },
-        afterPersist: async (tx, run) => {
-          await tx.reviewJob.update({ where: { id: jobId }, data: { routerRunId: run.id } });
-          await tx.runDocumentGrant.createMany({
-            data: documentIds.map((documentId) => ({ runId: run.id, documentId })),
-            skipDuplicates: true,
-          });
-        },
-      });
+        { routerAgentId, task, triggeredById, jobId, documentIds, trigger: "review_action" },
+      );
     } catch {
       return { refused: "run_refused" };
     }
-    if (!dispatched) return { refused: guard.notRouter ? "review_router_invalid" : "run_refused" };
-    if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
-      return { refused: `run_${dispatched.run.status}` };
-    }
-    return { runId: dispatched.run.id };
   };
 }
 

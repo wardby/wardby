@@ -37,6 +37,8 @@ export interface AgentLinkFacts {
   issueProjects: IssueLinkFact[];
   /** The router that gets the reviews of this agent's documents (#646). */
   reviewRouterId?: string | null;
+  /** The agent is a router (people start it through reviews and request_work). */
+  router?: boolean;
 }
 export interface SubAgentFact {
   parentId: string;
@@ -199,6 +201,8 @@ export function entryPoints(agent: AgentLinkFacts, edges: FlowEdge[]): string[] 
     if (link!.triggers.includes("push") && !incoming.some((e) => e.kind === "after_merge" && e.repository === key))
       out.push(`push:${key}`);
   }
+  // A router is started by people (review actions, request_work), whatever links point at it.
+  if (agent.router) out.push("manual");
   if (out.length === 0 && incoming.length === 0) return ["manual"];
   return out;
 }

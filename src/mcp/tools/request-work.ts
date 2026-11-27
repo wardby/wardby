@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { dispatchRun } from "../../core/dispatch.js";
 import { atLeast } from "../../core/grants.js";
 import { MAX_REVIEW_NOTE_CHARS } from "../../core/documents/limits.js";
 import { claimJob } from "../../core/review-routing/jobs.js";
+import { startRouterRun } from "../../core/review-routing/start.js";
 import { rankRouters } from "../../core/review-routing/request.js";
 import { agentAccessResolver } from "../auth/access.js";
 import { McpError } from "../errors.js";
@@ -11,6 +11,8 @@ import type { WardbyMcpServer } from "../server.js";
 import { textResult } from "./text-result.js";
 import { requireTriggerable } from "./trigger.js";
 
+/** The most router names a no-match answer lists. */
+const MAX_YOURS = 20;
 const INVALID_ROUTER = "review_router_invalid: router must name a router agent you can run.";
 
 /** The routers the caller can run, with their owners' names. A router the caller cannot run never appears. */
@@ -82,7 +84,13 @@ export function registerRequestWorkTool(mcp: WardbyMcpServer): void {
         const routers = await runnableRouters(ctx);
         const ranked = rankRouters(request, routers);
         if (ranked.length > 0) return textResult({ routers: ranked });
-        return textResult({ routers: [], yours: routers.map((r) => r.name).sort() });
+        return textResult({
+          routers: [],
+          yours: routers
+            .map((r) => r.name)
+            .sort()
+            .slice(0, MAX_YOURS),
+        });
       }
 
       const routerId = args.router;
@@ -100,42 +108,27 @@ export function registerRequestWorkTool(mcp: WardbyMcpServer): void {
         rootJobId: null,
       });
       if (!job) throw new Error("request_work: the request key was already claimed.");
-      let dispatched;
-      try {
-        dispatched = await dispatchRun({
-          db: ctx.db,
-          executor: ctx.providers.executor,
-          secretCipher: ctx.providers.secrets,
-          selfDefects: { db: ctx.db, issueTrackers: ctx.providers.issueTrackers },
-          agentId: agent.id,
-          trigger: "manual",
-          taskOverride: request,
+      const selfDefects = { db: ctx.db, issueTrackers: ctx.providers.issueTrackers };
+      // The shared router-start path: the job keeps its outcome (started, a refusal code, route_failed).
+      const started = await startRouterRun(
+        { db: ctx.db, executor: ctx.providers.executor, cipher: ctx.providers.secrets, selfDefects },
+        {
+          routerAgentId: agent.id,
+          task: request,
           triggeredById: ctx.principal.id,
-          afterPersist: async (tx, run) => {
-            await tx.reviewJob.update({ where: { id: job.id }, data: { routerRunId: run.id, outcome: "started" } });
+          jobId: job.id,
+          documentIds: [],
+          trigger: "manual",
+          // Re-checked through the transaction: a concurrent revoke or make_owner conflicts.
+          recheck: async (tx, current) => {
+            await requireTriggerable(ctx, current, agent.id, {}, tx);
           },
-          // Re-checked through the transaction: a concurrent revoke, make_owner or router: false conflicts.
-          beforePersist: async (tx, current) => {
-            const again = await requireTriggerable(ctx, current, agent.id, {}, tx);
-            if (!(again as { router?: boolean }).router) throw new McpError(400, INVALID_ROUTER);
-            return true;
-          },
-        });
-        if (!dispatched) throw new Error("Run dispatch was not claimed.");
-      } catch (err) {
-        await ctx.db.reviewJob.deleteMany({ where: { id: job.id } }).catch(() => {});
-        throw err;
-      }
-      const started = { router: { id: agent.id, name: agent.name } };
-      if (dispatched.run.status === "refused" || dispatched.run.status === "failed") {
-        return textResult({
-          runId: dispatched.run.id,
-          status: dispatched.run.status,
-          error: dispatched.run.error,
-          ...started,
-        });
-      }
-      return textResult({ runId: dispatched.run.id, ...started });
+        },
+      );
+      const router = { id: agent.id, name: agent.name };
+      if ("runId" in started) return textResult({ runId: started.runId, router });
+      if (started.refused === "review_router_invalid") throw new McpError(400, INVALID_ROUTER);
+      return textResult({ status: started.refused, router });
     },
   });
 }
