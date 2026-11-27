@@ -5,7 +5,7 @@ import { McpError } from "../errors.js";
 import { createShareLink, listShareLinks, MAX_SHARE_DAYS, revokeShareLink } from "../../core/documents/share-links.js";
 import type { Viewer } from "../../core/documents/access.js";
 import { textResult } from "./text-result.js";
-import { requireDocumentAccess } from "../../core/documents/access.js";
+import { canExecute, requireDocumentAccess } from "../../core/documents/access.js";
 import { createDocument, linkDocument, publishVersion } from "../../core/documents/service.js";
 import { type VersionContent } from "../../core/documents/content.js";
 import { loadContent } from "../../core/documents/files.js";
@@ -380,6 +380,7 @@ const linkArgs = z.object({
   path: z.string().min(1).optional(),
   baseRef: z.string().min(1).optional(),
   unlink: z.boolean().optional(),
+  routerAgentId: id.nullable().optional(),
 });
 const createDocArgs = z.object({
   title: z.string().trim().min(1).max(200),
@@ -633,6 +634,11 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         path: { type: "string", description: "repo-relative Markdown path, or a design's directory (. for the root)" },
         baseRef: { type: "string" },
         unlink: { type: "boolean", description: "true clears the agent and repository link" },
+        routerAgentId: {
+          type: ["string", "null"],
+          description:
+            "The router that review actions on this document go to; null clears it (then the writer's reviewRouter applies). Must be a router you can run.",
+        },
       },
       required: ["documentId"],
     },
@@ -642,8 +648,19 @@ function registerContentTools(mcp: WardbyMcpServer): void {
       const doc = await mapped(() => requireDocumentAccess(ctx.db, input.documentId, viewer, "owner"));
       const design = doc.kind === "design";
       const given = [input.agentId, input.repository, input.path, input.baseRef].some((v) => v !== undefined);
-      if (input.unlink === true ? given : !given || input.agentId === undefined) {
+      // routerAgentId alone changes only the router; the agent and repository link stay as they are.
+      const routerOnly = input.routerAgentId !== undefined && !given && input.unlink !== true;
+      if (!routerOnly && (input.unlink === true ? given : !given || input.agentId === undefined)) {
         throw new McpError(400, "document_repo_link_invalid");
+      }
+      if (input.routerAgentId) {
+        const router = await ctx.db.agent.findUnique({
+          where: { id: input.routerAgentId },
+          select: { id: true, ownerId: true, router: true },
+        });
+        if (!router?.router || !(await canExecute(ctx.db, router, ctx.principal.id))) {
+          throw new McpError(400, "review_router_invalid: routerAgentId must name a router agent you can run.");
+        }
       }
       let link = {
         agentId: null as string | null,
@@ -651,7 +668,7 @@ function registerContentTools(mcp: WardbyMcpServer): void {
         path: null as string | null,
         baseRef: null as string | null,
       };
-      if (input.unlink !== true) {
+      if (!routerOnly && input.unlink !== true) {
         // A design is read from its directory at baseRef when sent, so a design link needs one.
         if (design && input.repository !== undefined && input.baseRef === undefined) {
           throw new McpError(400, "document_repo_link_invalid");
@@ -670,11 +687,21 @@ function registerContentTools(mcp: WardbyMcpServer): void {
           };
         }
       }
-      await mapped(() => linkDocument(ctx.db, { documentId: input.documentId, viewer, link }));
+      if (!routerOnly) await mapped(() => linkDocument(ctx.db, { documentId: input.documentId, viewer, link }));
+      if (input.routerAgentId !== undefined) {
+        await ctx.db.document.update({
+          where: { id: input.documentId },
+          data: { routerAgentId: input.routerAgentId },
+        });
+      }
+      const current = routerOnly
+        ? { agentId: doc.agentId, repository: doc.repository, path: doc.path, baseRef: doc.baseRef }
+        : link;
       return textResult({
         documentId: input.documentId,
-        linked: link.agentId !== null,
-        ...link,
+        linked: current.agentId !== null,
+        ...current,
+        ...(input.routerAgentId !== undefined ? { routerAgentId: input.routerAgentId } : {}),
         ...pageLink(ctx, `/d/${input.documentId}`),
         ...linkNote(ctx),
       });

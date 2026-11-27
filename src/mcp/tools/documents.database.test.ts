@@ -684,6 +684,43 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     expect(mine.isError).toBe(false);
   });
 
+  it("link_document sets and clears the router, and refuses a non-router, an unrunnable one and a non-owner", async () => {
+    const call = await connect(owner);
+    const mk = (router: boolean, ownerId: string) =>
+      db.agent.create({
+        data: {
+          name: `docmcp-rt-${randomUUID()}`,
+          systemPrompt: "t",
+          model: "t",
+          budgetUsd: 1,
+          ownerId,
+          router,
+          ...(router ? { description: "routes" } : {}),
+        },
+      });
+    const router = await mk(true, owner.id);
+    const plain = await mk(false, owner.id);
+    const foreign = await mk(true, other.id);
+    const documentId = (await call("create_document", { title: "R", markdown: "# R\n" })).json.documentId as string;
+    const routerOf = async () => (await db.document.findUniqueOrThrow({ where: { id: documentId } })).routerAgentId;
+    const set = await call("link_document", { documentId, routerAgentId: router.id });
+    expect(set.isError).toBe(false);
+    expect(set.json).toMatchObject({ routerAgentId: router.id });
+    expect(await routerOf()).toBe(router.id);
+    for (const bad of [plain.id, foreign.id]) {
+      const refused = await call("link_document", { documentId, routerAgentId: bad });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("review_router_invalid");
+    }
+    expect(await routerOf()).toBe(router.id);
+    expect((await call("link_document", { documentId, routerAgentId: null })).isError).toBe(false);
+    expect(await routerOf()).toBeNull();
+    // A non-owner is refused as link_document already refuses.
+    const nonOwner = await (await connect(other))("link_document", { documentId, routerAgentId: foreign.id });
+    expect(nonOwner.isError).toBe(true);
+    expect(await routerOf()).toBeNull();
+  });
+
   it("link_document links a native agent with documentTools write as the writer, and refuses the rest", async () => {
     const call = await connect(owner);
     const documentId = (await call("create_document", { title: "N", markdown: "# N\n" })).json.documentId as string;

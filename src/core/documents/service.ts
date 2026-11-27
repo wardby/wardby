@@ -2,6 +2,7 @@ import { Prisma } from "#prisma";
 import type { Document, DocumentVersion, PrismaClient } from "#prisma";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { redactExactSecretValues } from "../secret-spans.js";
+import { routerForRun } from "../review-routing/lineage.js";
 import { preferIndexScans, withSerializableRetry } from "../serializable-retry.js";
 import type { VersionContent } from "./content.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
@@ -61,9 +62,12 @@ export async function createDocument(
   const prepared = fmt.prepare(content, secrets);
   // The title is shown on pages, share pages and MCP lists: redacted like the body.
   const title = redactExactSecretValues(input.title, secrets);
+  // The router whose work produced this document (#646): its review actions go there.
+  const routerAgentId = await routerForRun(db, input.runId ?? null);
   return db.$transaction(async (tx) => {
     const doc = await tx.document.create({
       data: {
+        routerAgentId,
         kind: fmt.kind,
         title,
         ownerId: input.ownerId,

@@ -41,6 +41,33 @@ describe.skipIf(!process.env.DATABASE_URL)("document service (database)", () => 
     expect((await getDocument(db, id)).version.markdown).toBe("hello 2");
   });
 
+  it("records the router whose work created the document", async () => {
+    const mk = (router: boolean) =>
+      db.agent.create({
+        data: {
+          name: `docsvc-r-${randomUUID()}`,
+          systemPrompt: "t",
+          model: "t",
+          budgetUsd: 1,
+          router,
+          ...(router ? { description: "routes" } : {}),
+        },
+      });
+    const router = await mk(true);
+    const writer = await mk(false);
+    const routerRun = await db.run.create({ data: { agentId: router.id } });
+    const writerRun = await db.run.create({ data: { agentId: writer.id, parentRunId: routerRun.id } });
+    const under = await createDocument(db, cipher, {
+      ownerId: owner.id,
+      title: "R",
+      markdown: "x",
+      runId: writerRun.id,
+    });
+    expect((await db.document.findUniqueOrThrow({ where: { id: under.id } })).routerAgentId).toBe(router.id);
+    const without = await createDocument(db, cipher, { ownerId: owner.id, title: "R", markdown: "x" });
+    expect((await db.document.findUniqueOrThrow({ where: { id: without.id } })).routerAgentId).toBeNull();
+  });
+
   it("refuses oversize markdown and Markdown for a design", async () => {
     await expect(
       createDocument(db, cipher, { ownerId: owner.id, title: "T", markdown: "x".repeat(MAX_MARKDOWN_BYTES + 1) }),
