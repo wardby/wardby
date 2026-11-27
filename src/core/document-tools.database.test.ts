@@ -27,7 +27,7 @@ import type { Viewer } from "./documents/access.js";
 import { attachSecret, createSecret } from "./secrets.js";
 import { createThread, listThreads } from "./documents/comments.js";
 import { anchorForElement, type ElementLike } from "./documents/element-anchors.js";
-import { reviewDocument, submitForReview } from "./documents/review.js";
+import { chooseOption, reviewDocument, submitForReview } from "./documents/review.js";
 import { MAX_SEND_MARKDOWN_CHARS } from "./documents/agent-formats.js";
 import { createDocument } from "./documents/service.js";
 import { DOCUMENT_TOOL_NAMES, documentToolDefsFor, handleDocumentTool } from "./document-tools.js";
@@ -354,6 +354,59 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* write tools (database)", () =>
     const v1 = await db.documentVersion.findFirstOrThrow({ where: { documentId: out.id, number: 1 } });
     expect(v1).toMatchObject({ via: "agent", runId: "run-create" });
     expect(await call("doc_create", { title: "   ", markdown: "x" })).toMatchObject({ error: "invalid_arguments" });
+  });
+
+  it("doc_create with set and option: one set per run and name; a person's choice approves one and rejects the rest", async () => {
+    const a = await call(
+      "doc_create",
+      { title: "A", markdown: "# A", set: "concepts", option: "concept-a" },
+      "run-set",
+    );
+    const b = await call(
+      "doc_create",
+      { title: "B", markdown: "# B", set: " concepts ", option: "concept-b" },
+      "run-set",
+    );
+    const [docA, docB] = await Promise.all(
+      [a.id, b.id].map((id: string) => db.document.findUniqueOrThrow({ where: { id }, include: { set: true } })),
+    );
+    expect(docA.setId).not.toBeNull();
+    expect(docB.setId).toBe(docA.setId);
+    expect([docA.option, docB.option]).toEqual(["concept-a", "concept-b"]);
+    expect(docA.set).toMatchObject({ agentId: W, ownerId: o.id, name: "concepts", createdByRunId: "run-set" });
+    // Another run's set of the same name is its own; option needs a set.
+    const c = await call("doc_create", { title: "C", markdown: "# C", set: "concepts" }, "run-set-2");
+    expect((await db.document.findUniqueOrThrow({ where: { id: c.id } })).setId).not.toBe(docA.setId);
+    expect(await call("doc_create", { title: "D", markdown: "# D", option: "solo" })).toMatchObject({
+      error: "invalid_arguments",
+    });
+    for (const id of [a.id, b.id]) await submitForReview(db, { documentId: id, viewer: owner(), reviewers: [rev.id] });
+    const chose = await chooseOption(db, cipher, {
+      documentId: b.id,
+      viewer: { kind: "principal", principalId: rev.id },
+      versionNumber: 1,
+      reject: [a.id],
+    });
+    expect(chose.rejected).toEqual([a.id]);
+    const after = await db.document.findMany({
+      where: { id: { in: [a.id, b.id] } },
+      select: { id: true, reviewState: true, removedFromPlan: true },
+    });
+    expect(Object.fromEntries(after.map((d) => [d.id, [d.reviewState, d.removedFromPlan]]))).toEqual({
+      [a.id]: ["rejected", true],
+      [b.id]: ["approved", false],
+    });
+    const rejected = await db.documentReviewEvent.findFirstOrThrow({ where: { documentId: a.id, kind: "rejected" } });
+    expect(rejected.note).toBe("Chose concept-b");
+    // A document outside the set is never rejected by a choice in it, even by the owner of both.
+    await expect(
+      chooseOption(db, cipher, {
+        documentId: b.id,
+        viewer: owner(),
+        versionNumber: 1,
+        reject: [c.id],
+      }),
+    ).rejects.toThrow("document_reject_not_plan_document");
   });
 
   it("doc_create on a design refuses a bad board and strips a script with a warning; pins survive on unchanged boards", async () => {

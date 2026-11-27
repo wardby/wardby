@@ -22,6 +22,7 @@ import { listDocumentsForAgent } from "./documents/list.js";
 import type { Cipher } from "./documents/review.js";
 import { getReviewView, submitForReview } from "./documents/review.js";
 import { createDocument, getDocument, publishVersion } from "./documents/service.js";
+import { ensureNamedSet } from "./documents/sets.js";
 import { parseStoredDocumentTools, type DocumentToolsSetting } from "./documents/tools-setting.js";
 import { getVersion } from "./documents/versions.js";
 
@@ -86,8 +87,12 @@ const CreateArgs = z
     title: z.string().trim().min(1).max(200),
     markdown: z.string().optional(),
     files: Files.optional(),
+    set: z.string().trim().min(1).max(100).optional(),
+    option: z.string().trim().min(1).max(100).optional(),
   })
-  .strict();
+  .strict()
+  // An option is a label within a set: never on its own.
+  .refine((a) => a.option === undefined || a.set !== undefined, { path: ["option"] });
 const PublishArgs = z
   .object({
     documentId: Id,
@@ -171,6 +176,19 @@ export const DOCUMENT_WRITE_TOOL_DEFS: LoadedTool[] = [
         title: { type: "string", minLength: 1, maxLength: 200 },
         markdown: { type: "string", description: "The content of a document." },
         files: filesProp,
+        set: {
+          type: "string",
+          minLength: 1,
+          maxLength: 100,
+          description:
+            "Publish alternatives as one set: documents with the same set name from this run are reviewed together and a person can choose one; option is its label, such as concept-a or go.",
+        },
+        option: {
+          type: "string",
+          minLength: 1,
+          maxLength: 100,
+          description: "This document's label in its set, such as concept-a or go. Only with set.",
+        },
       },
       required: ["title"],
       additionalProperties: false,
@@ -384,6 +402,12 @@ async function handleWrite(
         agentId: ctx.agentId,
         via: "agent",
         runId: ctx.runId,
+        ...(a.set !== undefined
+          ? {
+              setId: await ensureNamedSet(db, { agentId: ctx.agentId, ownerId, runId: ctx.runId, name: a.set }),
+              option: a.option,
+            }
+          : {}),
       });
       return JSON.stringify({ id: out.id, number: 1, warnings: out.warnings });
     }
