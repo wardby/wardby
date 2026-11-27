@@ -103,6 +103,7 @@ async function harness(
     mcpTools?: CodingToolPin[];
     skills?: boolean;
     workflow?: boolean;
+    subAgents?: boolean;
   } = {},
 ): Promise<Harness> {
   const ledger = overrides.ledger ?? new MemoryProxyLedger({ now: overrides.now ?? (() => NOW) });
@@ -137,6 +138,7 @@ async function harness(
     ...(overrides.mcpTools ? { mcpTools: overrides.mcpTools, mcpTokenHash: `mcp-hash-${Math.random()}` } : {}),
     ...(overrides.workflow ? { workflow: true } : {}),
     ...(overrides.skills ? { skills: true } : {}),
+    ...(overrides.subAgents ? { subAgents: true } : {}),
   });
   return { proxy, ledger, session, fetch, events };
 }
@@ -3284,6 +3286,112 @@ describe("workflow sessions (#582)", () => {
           await body((v) => (v.tools = [runCommandTool, structuredOutputTool, workflowTool, skillTool, extra])),
         ),
       ).rejects.toMatchObject({ status: 400, code: "tools_not_allowed" });
+    });
+  });
+
+  describe("Claude Code sub-agents (codingProfile.subAgents)", () => {
+    const agentTool = {
+      name: "Agent",
+      description: "Launch a new agent to handle a task",
+      input_schema: { type: "object", properties: { prompt: { type: "string" } } },
+    };
+    const subAgents = async (on: boolean) =>
+      harness({ protocol: "anthropic-messages", fetch: await anthropicReply(), subAgents: on });
+    const withAgentTool = (v: Record<string, unknown>) => (v.tools = [runCommandTool, structuredOutputTool, agentTool]);
+    const withAgentCall = (v: Record<string, unknown>) =>
+      (v.messages as unknown[]).push(
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_ag_1",
+              name: "Agent",
+              input: { description: "find tests", prompt: "List the test files", subagent_type: "general-purpose" },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ag_1", content: "test/a.test.ts" }] },
+      );
+
+    it("forwards the Agent tool and a replayed Agent call for a subAgents session, and refuses both otherwise", async () => {
+      const on = await subAgents(true);
+      await execute(on, "ag-tool", new TestSink(), await body(withAgentTool));
+      await execute(on, "ag-call", new TestSink(), await body(withAgentCall));
+      expect(on.fetch).toHaveBeenCalledTimes(2);
+      const off = await subAgents(false);
+      await expect(execute(off, "ag-off-tool", new TestSink(), await body(withAgentTool))).rejects.toMatchObject({
+        status: 400,
+        code: "tools_not_allowed",
+      });
+      await expect(execute(off, "ag-off-call", new TestSink(), await body(withAgentCall))).rejects.toMatchObject({
+        status: 400,
+        code: "unsupported_anthropic_feature",
+      });
+      expect(off.fetch).not.toHaveBeenCalled();
+    });
+
+    it("counts Agent in the tool cap with Skill and Workflow, and still refuses one more tool", async () => {
+      const h = await harness({
+        protocol: "anthropic-messages",
+        fetch: await anthropicReply(),
+        subAgents: true,
+        skills: true,
+        workflow: true,
+      });
+      const skillTool = { name: "Skill", description: "Load a skill", input_schema: { type: "object" } };
+      const all = (v: Record<string, unknown>) =>
+        (v.tools = [runCommandTool, structuredOutputTool, workflowTool, skillTool, agentTool]);
+      await execute(h, "ag-cap", new TestSink(), await body(all));
+      const extra = { name: "Bash", description: "shell", input_schema: { type: "object" } };
+      const tooMany = (v: Record<string, unknown>) =>
+        (v.tools = [runCommandTool, structuredOutputTool, workflowTool, skillTool, agentTool, extra]);
+      await expect(execute(h, "ag-cap-2", new TestSink(), await body(tooMany))).rejects.toMatchObject({
+        code: "tools_not_allowed",
+      });
+    });
+
+    it("refuses a sub-agent request that names a model outside the session's allowed models", async () => {
+      // Claude Code's Agent input can pick another model; the worker strips it, and the proxy refuses it anyway.
+      const h = await subAgents(true);
+      const otherModel = (v: Record<string, unknown>) => {
+        withAgentTool(v);
+        v.model = "claude-opus-5-5";
+      };
+      await expect(execute(h, "ag-model", new TestSink(), await body(otherModel))).rejects.toMatchObject({
+        status: 403,
+        code: "model_not_allowed",
+      });
+      expect(h.fetch).not.toHaveBeenCalled();
+    });
+
+    it("does not let a subAgents session use the Workflow or Skill tool", async () => {
+      const h = await subAgents(true);
+      const workflowOnly = (v: Record<string, unknown>) =>
+        (v.tools = [runCommandTool, structuredOutputTool, workflowTool]);
+      const skillTool = { name: "Skill", description: "Load a skill", input_schema: { type: "object" } };
+      const skillOnly = (v: Record<string, unknown>) => (v.tools = [runCommandTool, structuredOutputTool, skillTool]);
+      for (const [key, change] of [
+        ["ag-wf", workflowOnly],
+        ["ag-sk", skillOnly],
+      ] as const) {
+        await expect(execute(h, key, new TestSink(), await body(change))).rejects.toMatchObject({
+          status: 400,
+          code: "tools_not_allowed",
+        });
+      }
+      expect(h.fetch).not.toHaveBeenCalled();
+    });
+
+    it("accepts subAgents on any protocol's session; only the Anthropic allowlist reads it", async () => {
+      // Gemini CLI sessions carry it too (Substrate bridges read it, Task 12); Gemini's invoke_agent is a
+      // function declaration, which the Gemini parser shape-checks like any other.
+      const h = await harness({ protocol: "openai-responses", subAgents: true });
+      expect((await h.ledger.findSessionByCapabilityHash(capabilityHash(h.session.capability)))?.subAgents).toBe(true);
+      const plain = await harness({ protocol: "openai-responses" });
+      expect(
+        (await plain.ledger.findSessionByCapabilityHash(capabilityHash(plain.session.capability)))?.subAgents,
+      ).toBe(false);
     });
   });
 

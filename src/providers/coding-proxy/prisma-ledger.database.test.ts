@@ -61,9 +61,10 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
       protocol: "openai-responses",
       // Created without a level, as a session from before run steps detail.
       runStepsLevel: null,
-      // Not a workflow run (#582), and no Skill tool.
+      // Not a workflow run (#582), no Skill tool, and sub-agents off.
       workflow: false,
       skills: false,
+      subAgents: false,
       requestRefusal: null,
       budgetExhaustedAt: null,
       upstreamFailure: null,
@@ -190,6 +191,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         runStepsLevel: "detail",
         workflow: true,
         skills: true,
+        subAgents: true,
         webTools: "search-and-fetch",
       });
       expect(await ledger.findSessionByCapabilityHash(`level-hash-${suffix}`)).toMatchObject({
@@ -197,6 +199,7 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaProxyLedger (PostgreSQL)", () 
         runStepsLevel: "detail",
         workflow: true,
         skills: true,
+        subAgents: true,
         webTools: "search-and-fetch",
       });
       // The first refusal is kept; a later one does not replace it.

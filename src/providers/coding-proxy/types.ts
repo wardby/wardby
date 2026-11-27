@@ -110,6 +110,11 @@ export interface ProxySession {
   workflow: boolean;
   /** Native mode with repository skills (#582): its requests may use the Skill tool. False on older sessions. */
   skills: boolean;
+  /**
+   * Claude Code or Gemini CLI sub-agents on (codingProfile.subAgents): an Anthropic session's requests may use
+   * the Agent tool. False on older sessions.
+   */
+  subAgents: boolean;
   /** Gemini's server-side web tools this run may use (gemini-generate-content only); "off" on other and older sessions. */
   webTools: WebTools;
 }
@@ -183,6 +188,8 @@ export interface CreateProxySessionInput {
   workflow?: boolean;
   /** Native mode with repository skills on; absent = false. */
   skills?: boolean;
+  /** Sub-agents on; absent = false. */
+  subAgents?: boolean;
   /** Gemini's server-side web tools the run may use; absent = "off". */
   webTools?: WebTools;
 }

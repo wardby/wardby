@@ -104,6 +104,7 @@ async function harness(
     runStepsCeiling?: RunStepsLevel;
     audit?: (event: ProxyAuditEvent) => void;
     workflow?: boolean;
+    subAgents?: boolean;
   } = {},
 ) {
   const events: ProxyAuditEvent[] = [];
@@ -159,6 +160,7 @@ async function harness(
       : {}),
     ...(opts.runStepsLevel ? { runStepsLevel: opts.runStepsLevel } : {}),
     ...(opts.workflow ? { workflow: true } : {}),
+    ...(opts.subAgents ? { subAgents: true } : {}),
   });
   const execute = async (rawBody: string, requestKey: string, agentId?: string) => {
     const sink = new TestSink();
@@ -390,6 +392,15 @@ describe("CodingProxy run steps", () => {
     it("tags a workflow session's steps with the request's sub-agent id", async () => {
       const stream = await stepsFixture("anthropic-run-command-stream.txt");
       const h = await harness("anthropic-messages", sse(stream), { workflow: true });
+      await h.execute(await stepsFixture("anthropic-tool-result-request.json"), "k1", "ab1d62e7e65c99f79");
+      const steps = h.stepBatches().flatMap((s) => s.batch.steps);
+      expect(steps.length).toBeGreaterThan(0);
+      expect(steps.every((step) => step.agent === "ab1d62e7e65c99f79")).toBe(true);
+    });
+
+    it("tags a sub-agents session's steps with the request's sub-agent id", async () => {
+      const stream = await stepsFixture("anthropic-run-command-stream.txt");
+      const h = await harness("anthropic-messages", sse(stream), { subAgents: true });
       await h.execute(await stepsFixture("anthropic-tool-result-request.json"), "k1", "ab1d62e7e65c99f79");
       const steps = h.stepBatches().flatMap((s) => s.batch.steps);
       expect(steps.length).toBeGreaterThan(0);

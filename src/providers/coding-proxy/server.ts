@@ -459,7 +459,7 @@ export async function startCodingProxyServer(
       const apiKeyHeader = request.headers["x-api-key"];
       const googApiKeyHeader = request.headers["x-goog-api-key"];
       const anthropicBetaHeader = request.headers["anthropic-beta"];
-      // Claude Code's sub-agent id (#582): read only for a workflow session's steps, never forwarded.
+      // Claude Code's sub-agent id (#582): read only for a workflow or sub-agents session's steps, never forwarded.
       const agentIdHeader = request.headers["x-claude-code-agent-id"];
       // The capability travels in exactly one header. Claude sends x-api-key; Codex sends a Bearer,
       // except on Substrate, where the egress gateway injects the run's capability as X-Api-Key and

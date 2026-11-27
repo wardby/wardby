@@ -1904,6 +1904,8 @@ export interface CodingSessionController {
     runStepsLevel?: RunStepsLevel;
     /** A workflow run (#582): the proxy accepts the Workflow tool's request shapes for it alone. */
     workflow?: boolean;
+    /** Sub-agents on (codingProfile.subAgents): an Anthropic session accepts Claude Code's Agent tool. */
+    subAgents?: boolean;
     /** The run's tunnel host patterns, fixed at dispatch (codingProfile.tunnelHosts within the ceiling). */
     tunnelHosts?: string[];
     /** Gemini's server-side web tools the run may use; gemini-generate-content only (set from phase 4). */

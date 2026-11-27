@@ -114,6 +114,21 @@ const STRUCTURED_OUTPUT_TOOL = CLAUDE_RESULT_TOOL;
 const WORKFLOW_TOOL = "Workflow";
 /** Claude Code's Skill tool: allowed only for a session whose run has repository skills in native mode (#582). */
 export const SKILL_TOOL = "Skill";
+/** Claude Code's sub-agent tool: allowed only for a session whose run has sub-agents on (codingProfile.subAgents). */
+export const AGENT_TOOL = "Agent";
+
+/** Which of Claude Code's optional tools a session's Anthropic requests may carry. */
+interface AnthropicToolPolicy {
+  /** The Claude tool names of the session's pinned MCP tools. */
+  mcpTools: ReadonlySet<string>;
+  /** A workflow session (#582): the Workflow tool and its task-notification turns. */
+  workflow: boolean;
+  /** Native mode with repository skills: the Skill tool. */
+  skills: boolean;
+  /** codingProfile.subAgents: Claude Code's Agent tool. */
+  subAgents: boolean;
+}
+
 /** The thinking.display values Claude Code's workflow sub-agents send (#582). */
 const WORKFLOW_THINKING_DISPLAY = new Set(["omitted", "summarized"]);
 const MAX_COMMAND_BYTES = 16 * 1024;
@@ -150,7 +165,7 @@ export interface ExecuteProxyRequest {
   rawBody: string;
   requestKey?: string;
   anthropicBeta?: string;
-  /** Claude Code's x-claude-code-agent-id: on a workflow session, the sub-agent its steps belong to (#582). */
+  /** Claude Code's x-claude-code-agent-id: on a workflow or sub-agents session, the sub-agent its steps belong to. */
   agentId?: string;
   /** gemini-generate-content: the route the server read from the path (surface, Google model, method). */
   gemini?: GeminiRoute;
@@ -187,6 +202,8 @@ export interface CreateCodingProxySession {
   workflow?: boolean;
   /** Native mode with repository skills (#582): its requests may use the Skill tool. Absent = false. */
   skills?: boolean;
+  /** Sub-agents on (codingProfile.subAgents): an Anthropic session's requests may use the Agent tool. Absent = false. */
+  subAgents?: boolean;
   /** Gemini's server-side web tools the run may use; gemini-generate-content only; absent = off. */
   webTools?: WebTools;
   /**
@@ -899,35 +916,46 @@ function validateSkillTool(tool: Record<string, unknown>): void {
   validateWorkflowTool(tool);
 }
 
-function validateApprovedTool(value: unknown, mcpTools: ReadonlySet<string>, workflow: boolean, skills = false): void {
+/**
+ * Claude Code's sub-agent tool (pinned SDK AgentInput), offered when the run has sub-agents on: a plain
+ * client tool. Its calls start a sub-agent whose requests come through this proxy like the main
+ * session's (same run model, same budget). The worker's guard strips model, isolation and naming
+ * fields before a call runs (claude-coding-worker/sdk.ts agentGuard); a request naming another model
+ * is still refused model_not_allowed here.
+ */
+function validateAgentTool(tool: Record<string, unknown>): void {
+  validateWorkflowTool(tool);
+}
+
+function validateApprovedTool(value: unknown, policy: AnthropicToolPolicy): void {
   const tool = record(value, "tools_not_allowed");
   if (tool.name === WARDBY_COMMAND_TOOL) return validateCommandTool(tool);
   if (tool.name === STRUCTURED_OUTPUT_TOOL) return validateStructuredOutputTool(tool);
-  if (typeof tool.name === "string" && mcpTools.has(tool.name)) return validateMcpTool(tool);
-  if (workflow && tool.name === WORKFLOW_TOOL) return validateWorkflowTool(tool);
-  if (skills && tool.name === SKILL_TOOL) return validateSkillTool(tool);
+  if (typeof tool.name === "string" && policy.mcpTools.has(tool.name)) return validateMcpTool(tool);
+  if (policy.workflow && tool.name === WORKFLOW_TOOL) return validateWorkflowTool(tool);
+  if (policy.skills && tool.name === SKILL_TOOL) return validateSkillTool(tool);
+  if (policy.subAgents && tool.name === AGENT_TOOL) return validateAgentTool(tool);
   throw new CodingProxyError(400, "tools_not_allowed");
 }
 
-function validateToolUseBlock(
-  value: Record<string, unknown>,
-  mcpTools: ReadonlySet<string>,
-  workflow: boolean,
-  skills = false,
-): void {
+function validateToolUseBlock(value: Record<string, unknown>, policy: AnthropicToolPolicy): void {
   onlyKeys(value, ["type", "id", "name", "input"]);
   if (typeof value.id !== "string" || value.id.length < 1 || value.id.length > 512) {
     throw new CodingProxyError(400, "unsupported_anthropic_feature");
   }
   if (value.name === WARDBY_COMMAND_TOOL) return validateCommandInput(value.input);
   if (value.name === STRUCTURED_OUTPUT_TOOL) return void record(value.input, "unsupported_anthropic_feature");
-  if (typeof value.name === "string" && mcpTools.has(value.name)) {
+  if (typeof value.name === "string" && policy.mcpTools.has(value.name)) {
     return void record(value.input, "unsupported_anthropic_feature");
   }
   // A workflow session's earlier Workflow call, replayed in the conversation history (#582).
-  if (workflow && value.name === WORKFLOW_TOOL) return void record(value.input, "unsupported_anthropic_feature");
+  if (policy.workflow && value.name === WORKFLOW_TOOL) {
+    return void record(value.input, "unsupported_anthropic_feature");
+  }
   // A skills session's earlier Skill call, replayed in the conversation history.
-  if (skills && value.name === SKILL_TOOL) return void record(value.input, "unsupported_anthropic_feature");
+  if (policy.skills && value.name === SKILL_TOOL) return void record(value.input, "unsupported_anthropic_feature");
+  // A sub-agents session's earlier Agent call, replayed in the conversation history.
+  if (policy.subAgents && value.name === AGENT_TOOL) return void record(value.input, "unsupported_anthropic_feature");
   throw new CodingProxyError(400, "unsupported_anthropic_feature");
 }
 
@@ -954,20 +982,14 @@ function validateThinkingBlock(value: Record<string, unknown>): void {
   }
 }
 
-function validateMessageBlocks(
-  value: unknown,
-  role: unknown,
-  mcpTools: ReadonlySet<string>,
-  workflow: boolean,
-  skills = false,
-): void {
+function validateMessageBlocks(value: unknown, role: unknown, policy: AnthropicToolPolicy): void {
   if (!Array.isArray(value) || value.length > 10_000) throw new CodingProxyError(400, "invalid_anthropic_request");
   for (const candidate of value) {
     const block = record(candidate);
     if (block.type === "text") {
       validateTextBlock(block);
     } else if (block.type === "tool_use" && role === "assistant") {
-      validateToolUseBlock(block, mcpTools, workflow, skills);
+      validateToolUseBlock(block, policy);
     } else if (block.type === "tool_result" && role === "user") {
       validateToolResultBlock(block);
     } else if (block.type === "thinking" && role === "assistant") {
@@ -1041,11 +1063,8 @@ function parseAnthropicRequest(
   rawBody: string,
   betaHeader: string | undefined,
   shape: AnthropicModelShape,
-  mcpTools: ReadonlySet<string>,
-  /** A workflow session (#582): accept the Workflow tool's request shapes, and only then. */
-  workflow = false,
-  /** A session with repository skills in native mode: accept the Skill tool, and only then. */
-  skills = false,
+  /** The optional tools (and, for a workflow session, request shapes) the session may use, and only those. */
+  policy: AnthropicToolPolicy,
 ): ParsedRequest {
   const beta = parseAnthropicBeta(betaHeader);
   if (Buffer.byteLength(rawBody) > PROXY_MAX_BODY_BYTES) throw new CodingProxyError(413, "payload_too_large");
@@ -1109,28 +1128,27 @@ function parseAnthropicRequest(
     }
     // A workflow session (#582): Claude Code tells the session a workflow finished in a user
     // message with plain string content. Bounded like any tool text; any other session keeps blocks only.
-    if (workflow && message.role === "user" && typeof message.content === "string") {
+    if (policy.workflow && message.role === "user" && typeof message.content === "string") {
       if (Buffer.byteLength(message.content) > MAX_TOOL_TEXT_BYTES) {
         throw new CodingProxyError(400, "unsupported_anthropic_feature");
       }
       continue;
     }
-    validateMessageBlocks(message.content, message.role, mcpTools, workflow, skills);
+    validateMessageBlocks(message.content, message.role, policy);
   }
   if (body.tools !== undefined) {
-    // run_command and StructuredOutput, plus one per pinned MCP tool.
-    // A workflow session also has the Workflow tool (#582).
-    // A skills session also has the Skill tool.
-    if (!Array.isArray(body.tools) || body.tools.length > 2 + mcpTools.size + (workflow ? 1 : 0) + (skills ? 1 : 0)) {
-      throw new CodingProxyError(400, "tools_not_allowed");
-    }
+    // run_command and StructuredOutput, one per pinned MCP tool, and Workflow (#582), Skill and Agent where the
+    // session has them.
+    const cap =
+      2 + policy.mcpTools.size + (policy.workflow ? 1 : 0) + (policy.skills ? 1 : 0) + (policy.subAgents ? 1 : 0);
+    if (!Array.isArray(body.tools) || body.tools.length > cap) throw new CodingProxyError(400, "tools_not_allowed");
     const names = new Set<string>();
     for (const tool of body.tools) {
       const definition = record(tool, "tools_not_allowed");
       if (typeof definition.name !== "string" || names.has(definition.name))
         throw new CodingProxyError(400, "tools_not_allowed");
       names.add(definition.name);
-      validateApprovedTool(definition, mcpTools, workflow, skills);
+      validateApprovedTool(definition, policy);
     }
   }
   if (body.metadata !== undefined) {
@@ -1144,10 +1162,14 @@ function parseAnthropicRequest(
     requireAnthropicBeta(beta.values, "thinking-token-count-2026-05-13");
     const thinking = record(body.thinking);
     // A workflow session's sub-agents also send thinking.display (#582): one of two fixed values.
-    if (workflow && thinking.display !== undefined && !WORKFLOW_THINKING_DISPLAY.has(thinking.display as string)) {
+    if (
+      policy.workflow &&
+      thinking.display !== undefined &&
+      !WORKFLOW_THINKING_DISPLAY.has(thinking.display as string)
+    ) {
       throw new CodingProxyError(400, "unsupported_anthropic_feature");
     }
-    const thinkingKeys = workflow ? ["display"] : [];
+    const thinkingKeys = policy.workflow ? ["display"] : [];
     if (manualThinking) {
       onlyKeys(thinking, ["type", "budget_tokens", ...thinkingKeys]);
       const budget = thinking.budget_tokens;
@@ -1203,9 +1225,7 @@ function parseRequest(
   rawBody: string,
   anthropicBeta: string | undefined,
   shape: AnthropicModelShape,
-  mcpTools: ReadonlySet<string>,
-  workflow = false,
-  skills = false,
+  policy: AnthropicToolPolicy,
   gemini?: GeminiParseContext,
 ): ParsedRequest {
   if (protocol !== "anthropic-messages" && anthropicBeta !== undefined) {
@@ -1217,7 +1237,7 @@ function parseRequest(
       return parseGeminiRequest(rawBody, gemini);
     }
     return protocol === "anthropic-messages"
-      ? parseAnthropicRequest(rawBody, anthropicBeta, shape, mcpTools, workflow, skills)
+      ? parseAnthropicRequest(rawBody, anthropicBeta, shape, policy)
       : parseOpenAiRequest(rawBody);
   } catch (error) {
     if (error instanceof GeminiRequestRefused) throw new CodingProxyError(error.status, error.code);
@@ -1402,6 +1422,7 @@ export class CodingProxy {
       ...(input.runStepsLevel ? { runStepsLevel: input.runStepsLevel } : {}),
       ...(input.workflow === true ? { workflow: true } : {}),
       ...(input.skills === true ? { skills: true } : {}),
+      ...(input.subAgents === true ? { subAgents: true } : {}),
       ...(input.webTools && input.webTools !== "off" ? { webTools: input.webTools } : {}),
     });
     this.audit({ type: "session.created", runId: input.runId });
@@ -1479,9 +1500,12 @@ export class CodingProxy {
         input.rawBody,
         input.anthropicBeta,
         shape,
-        claudeMcpToolNames(session.mcpTools),
-        session.workflow === true,
-        session.skills === true,
+        {
+          mcpTools: claudeMcpToolNames(session.mcpTools),
+          workflow: session.workflow === true,
+          skills: session.skills === true,
+          subAgents: session.subAgents === true,
+        },
         geminiContext,
       );
     } catch (error) {
@@ -1734,10 +1758,13 @@ export class CodingProxy {
     }
 
     try {
-      // A workflow session's sub-agent (#582): a well-formed id tags this reply's steps; any other value is
-      // ignored. A Gemini CLI sub-agent sends no id; its request's shape gives it one (gemini-sub-agent.ts).
+      // A Claude Code sub-agent (#582 workflow runs, and runs with sub-agents on): a well-formed id tags
+      // this reply's steps; any other value is ignored. A Gemini CLI sub-agent sends no id; its request's
+      // shape gives it one (gemini-sub-agent.ts).
       const agent =
-        session.workflow === true && input.agentId !== undefined && STEP_AGENT_REF.test(input.agentId)
+        (session.workflow === true || session.subAgents === true) &&
+        input.agentId !== undefined &&
+        STEP_AGENT_REF.test(input.agentId)
           ? input.agentId
           : session.protocol === "gemini-generate-content"
             ? geminiSubAgentRef(parsed.body)

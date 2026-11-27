@@ -149,6 +149,16 @@ describe("conversationKey", () => {
     expect(conversationKey("anthropic-messages", turn2)).toBe(key);
   });
 
+  // Characterization test (already passes before sub-agents): a Claude Code sub-agent starts its own conversation,
+  // so its hold never borrows the main conversation's cached share.
+  it("keeps a Claude Code sub-agent's conversation apart from the main one", () => {
+    const main = { messages: [{ role: "user", content: [{ type: "text", text: "Fix the failing test" }] }] };
+    const sub = { messages: [{ role: "user", content: [{ type: "text", text: "List the test files" }] }] };
+    const later = { messages: [...main.messages, { role: "assistant", content: [{ type: "text", text: "ok" }] }] };
+    expect(conversationKey("anthropic-messages", main)).not.toBe(conversationKey("anthropic-messages", sub));
+    expect(conversationKey("anthropic-messages", later)).toBe(conversationKey("anthropic-messages", main));
+  });
+
   it("keys an OpenAI conversation by prompt_cache_key, else instructions and the first input item", () => {
     expect(conversationKey("openai-responses", { prompt_cache_key: "c1", input: ["a"] })).toBe(
       conversationKey("openai-responses", { prompt_cache_key: "c1", input: ["b"] }),
