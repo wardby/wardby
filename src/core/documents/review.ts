@@ -337,8 +337,11 @@ export async function submitForReview(
     reviewers: string[];
     finalApproverId?: string | null;
     note?: string;
-    /** The run this submit is made for (plan publish): routing continues its job (ReviewAction.actorRunId). */
-    routingRunId?: string;
+    /**
+     * Plan publish: the router hook skips this submit (ReviewAction.deferRouting) and its event ids are added
+     * here, so the publish routes all its submits once at the end.
+     */
+    deferRouting?: { eventIds: string[] };
   },
 ): Promise<ReviewView> {
   // An agent needs write on the document; a person needs to own it.
@@ -420,8 +423,9 @@ export async function submitForReview(
     documentId: input.documentId,
     eventIds,
     actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
-    ...(input.routingRunId ? { actorRunId: input.routingRunId } : {}),
+    ...(input.deferRouting ? { deferRouting: true } : {}),
   });
+  input.deferRouting?.eventIds.push(...eventIds);
   return getReviewView(db, input.documentId, input.viewer, cipher);
 }
 

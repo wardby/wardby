@@ -46,7 +46,7 @@ export function createReviewRouterHook(deps: {
   track?: (work: Promise<void>) => void;
 }): ReviewActionHook {
   return async (db, action) => {
-    if (action.eventIds.length === 0) return;
+    if (action.eventIds.length === 0 || action.deferRouting) return;
     const work = route(db, deps, action).catch((err: unknown) => {
       log.warn(
         { documentId: action.documentId, errorName: err instanceof Error ? err.name : typeof err },

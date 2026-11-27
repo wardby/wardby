@@ -16,6 +16,11 @@ export interface ReviewAction {
    * for the planner run, so routing continues that run's job. Attribution in the events is unchanged.
    */
   actorRunId?: string;
+  /**
+   * The router hook skips this action: a plan publish routes its documents' submits once, after the last one
+   * (runReviewActionHook), so the router starts once and sees the whole plan.
+   */
+  deferRouting?: boolean;
   /** Set by runReviewHooks: this action completed its plan set's approval (the plan hook claimed it). */
   planApprovalClaimed?: boolean;
 }
@@ -25,6 +30,15 @@ let actionHook: ReviewActionHook | undefined;
 
 export function setReviewActionHook(next: ReviewActionHook | undefined): void {
   actionHook = next;
+}
+
+/** The review action hook (the router) alone, for an action whose per-document hooks already ran. Never throws. */
+export async function runReviewActionHook(db: PrismaClient, action: ReviewAction): Promise<void> {
+  try {
+    await actionHook?.(db, action);
+  } catch {
+    // The action hook logs its own failures by name.
+  }
 }
 
 export async function runReviewHooks(db: PrismaClient, action: ReviewAction): Promise<void> {

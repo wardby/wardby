@@ -14,6 +14,7 @@ import { formatFor } from "../documents/formats/index.js";
 import { documentSecretValues } from "../documents/redact.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { submitForReview } from "../documents/review.js";
+import { runReviewActionHook } from "../documents/review-hooks.js";
 import { createDocument, publishVersion } from "../documents/service.js";
 import { atLeast, effectiveAccess } from "../grants.js";
 import { TERMINAL_RUN_STATUSES } from "../host-status.js";
@@ -495,14 +496,15 @@ async function publishSet(
     },
   });
   const review = await planReviewers(db, { id: agentId, ownerId }, set.accessAgentId ?? agentId, setting);
+  // Every submit's events: routed once, after the last submit (#646), so the router starts once for the set.
+  const submitted: string[] = [];
   const submit = (documentId: string) =>
     submitForReview(db, deps.cipher, {
       documentId,
       viewer: { kind: "principal", principalId: ownerId },
       reviewers: review.reviewers.length ? review.reviewers : [ownerId],
       ...(review.finalApproverId ? { finalApproverId: review.finalApproverId } : {}),
-      // Routing continues the planner run's job (#646): the submit is the run's, made as the owner.
-      routingRunId: runId,
+      deferRouting: { eventIds: submitted },
     });
   // Store repository: a document that gets a version from this run links to this run's plan folder and branch.
   const linkToRun = async (documentId: string, path: string) => {
@@ -514,23 +516,11 @@ async function publishSet(
   };
   const secrets = await documentSecretValues(db, deps.cipher, agentId);
   const byPath = new Map(documents.flatMap((d) => (d.planPath ? [[d.planPath, d] as const] : [])));
-  // A slot per document in layout order; a document submitted last fills its slot then (undefined if that failed).
-  const results: (PublishedPlanDocument | undefined)[] = [];
+  const results: PublishedPlanDocument[] = [];
   let failure: Error | undefined;
   const asError = (err: unknown) => (err instanceof Error ? err : new Error(PLAN_PUBLISH_FAILED));
   const report = async (id: string, doc: { kind: "document" | "design"; path: string }, change: PlanDocumentChange) =>
     results.push(await describePlanDocument(db, deps.origin, id, doc, change));
-  // Submitted after every document is written and in the set (#646): the set enters review once, and its router
-  // is given the whole plan, not the first document alone.
-  const toSubmit: {
-    id: string;
-    doc: { kind: "document" | "design"; path: string };
-    change: PlanDocumentChange;
-    slot: number;
-  }[] = [];
-  const submitLater = (id: string, doc: { kind: "document" | "design"; path: string }, change: PlanDocumentChange) => {
-    toSubmit.push({ id, doc, change, slot: results.push(undefined) - 1 });
-  };
 
   const publishOne = async (doc: PlanLayoutDocument): Promise<void> => {
     const existing = byPath.get(doc.path);
@@ -562,7 +552,8 @@ async function publishSet(
         // Version 1 records the run that wrote it, like every later version (R11, planSummaryForRun).
         db.documentVersion.update({ where: { id: created.versionId }, data: { runId } }),
       ]);
-      submitLater(created.id, doc, "created");
+      await submit(created.id);
+      await report(created.id, doc, "created");
       return;
     }
     // R11: one writer per version. A version this run already wrote (B8's revision publish, or an
@@ -593,10 +584,9 @@ async function publishSet(
       await db.document.update({ where: { id: existing.id }, data: { removedFromPlan: false } });
     }
     if (own) {
+      if (existing.reviewState === "draft") await submit(existing.id);
       await linkToRun(existing.id, doc.path);
-      const change = own.number === 1 ? "created" : "updated";
-      if (existing.reviewState === "draft") submitLater(existing.id, doc, change);
-      else await report(existing.id, doc, change);
+      await report(existing.id, doc, own.number === 1 ? "created" : "updated");
       return;
     }
     // R21: an archived document is never reported as approved.
@@ -656,9 +646,7 @@ async function publishSet(
       throw err;
     }
     await linkToRun(existing.id, doc.path);
-    // A draft left by an interrupted publish (another run's, whose lease this one took over) is submitted too.
-    if (existing.reviewState === "draft") submitLater(existing.id, doc, "updated");
-    else await report(existing.id, doc, "updated");
+    await report(existing.id, doc, "updated");
   };
 
   // A step that throws does not abandon the rest of the set: the first error is thrown at the end.
@@ -694,13 +682,20 @@ async function publishSet(
       failure ??= asError(err);
     }
   }
-  for (const next of toSubmit) {
-    await hold();
-    try {
-      await submit(next.id);
-      results[next.slot] = await describePlanDocument(db, deps.origin, next.id, next.doc, next.change);
-    } catch (err) {
-      failure ??= asError(err);
+  // One review action for the router: every document this publish submitted, made as the owner for this run, so
+  // it continues the run's job. Before a failure is thrown, so what was submitted still routes. Never throws.
+  const [firstEvent] = submitted;
+  if (firstEvent) {
+    const first = await db.documentReviewEvent
+      .findUnique({ where: { id: firstEvent }, select: { documentId: true } })
+      .catch(() => null);
+    if (first) {
+      await runReviewActionHook(db, {
+        documentId: first.documentId,
+        eventIds: [...submitted],
+        actorId: ownerId,
+        actorRunId: runId,
+      });
     }
   }
   if (failure) throw failure;
@@ -709,7 +704,7 @@ async function publishSet(
   return {
     number,
     planSetId: set.id,
-    documents: results.filter((d): d is PublishedPlanDocument => d !== undefined),
+    documents: results,
     ignored,
     withheld: withheldPaths(coding.planFilesWithheld),
     skippedReviewers: review.skippedReviewers,
