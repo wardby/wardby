@@ -7,6 +7,11 @@ export interface RouterTaskInput {
   action: string;
   subject: { kind: "document" | "set"; title: string };
   versions: number[];
+  /**
+   * The documents the router run may read (its grants), by id for doc_get: a set member's (redacted) option
+   * label, null outside a set. doc_list does not list them.
+   */
+  documents: { id: string; label: string | null }[];
   chosen?: { option: string; rejected: string[] };
   byName: string | null;
   note: string | null;
@@ -21,6 +26,8 @@ export function routerTask(input: RouterTaskInput): string {
     input.versions.length === 1 ? `version ${input.versions[0]}` : `versions ${input.versions.join(", ")}`;
   const who = input.byName ? oneLine(input.byName) : "an agent";
   const lines = [`Review action: ${label} on ${oneLine(input.subject.title)} (${versions}).`];
+  const named = input.documents.map((d) => (d.label ? `${d.id} (${oneLine(d.label)})` : d.id));
+  lines.push(`Documents: ${named.join(", ")}.`);
   if (input.chosen) {
     const rejected = input.chosen.rejected.length ? `; ${input.chosen.rejected.join(", ")} were rejected` : "";
     lines.push(`Option "${input.chosen.option}" was chosen${rejected}.`);

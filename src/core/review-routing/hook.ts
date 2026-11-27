@@ -152,6 +152,17 @@ async function route(db: PrismaClient, deps: ReviewRouterDeps, action: ReviewAct
     // (the catch below records route_failed and nothing starts).
     const planSecrets = planSet ? await deps.secretValues(planSet.agentId) : [];
     const label = (value: string | null) => (value && planSet ? redactExactSecretValues(value, planSecrets) : value);
+    // The granted documents, in grant order, each with its label when it is a set's member.
+    const rows = await db.document.findMany({
+      where: { id: { in: documentIds } },
+      select: { id: true, option: true, planPath: true, planSetId: true, setId: true },
+    });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const documents = documentIds.map((id) => {
+      const row = byId.get(id);
+      const member = row && (row.planSetId !== null || row.setId !== null);
+      return { id, label: member ? label(row.option ?? row.planPath) : null };
+    });
     const chosenOption = chose ? label(doc.option ?? doc.planPath ?? null) : null;
     const rejectedEvents = events.filter((e) => e.kind === "rejected" && e.documentId !== doc.id);
     const rejected = chose
@@ -176,6 +187,7 @@ async function route(db: PrismaClient, deps: ReviewRouterDeps, action: ReviewAct
           ? { kind: "set", title: planSet ? `Plan ${planSet.number}` : (set?.name ?? doc.title) }
           : { kind: "document", title: doc.title },
       versions: [...new Set(events.map((e) => e.versionNumber))],
+      documents,
       ...(chosenOption ? { chosen: { option: chosenOption, rejected } } : {}),
       byName,
       note,

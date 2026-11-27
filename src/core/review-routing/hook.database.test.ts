@@ -159,6 +159,7 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     expect(calls[1].task).toContain("Review action: approved on Checkout spec (version 1).");
     expect(calls[1].task).toContain("By: Ann Lead.");
     expect(calls[1].documentIds).toEqual([id]);
+    expect(calls[1].task.split("\n")[1]).toBe(`Documents: ${id}.`);
     expect(calls[1].triggeredById).toBe(ann.id);
     const approvedEvent = (await eventsOf(id)).find((e) => e.kind === "approved")!;
     const job = await db.reviewJob.findUniqueOrThrow({ where: { reviewEventId: approvedEvent.id } });
@@ -205,6 +206,8 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     expect(calls).toHaveLength(1);
     expect(calls[0].task).toContain(`Review action: approved on Concepts ${s} (version 1).`);
     expect(calls[0].documentIds.sort()).toEqual([a, b].sort());
+    expect(calls[0].task).toContain(`${a} (concept-a)`);
+    expect(calls[0].task).toContain(`${b} (concept-b)`);
     const set = await db.documentSet.findUniqueOrThrow({ where: { id: setId } });
     expect(set.approvedAt).not.toBeNull();
     const job = await db.reviewJob.findUniqueOrThrow({ where: { id: calls[0].jobId } });
@@ -453,6 +456,8 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     await settle();
     expect(calls).toHaveLength(1);
     expect(calls[0].task).toContain('Option "c-[REDACTED]" was chosen; d-[REDACTED].md were rejected.');
+    expect(calls[0].task).toContain(`${c} (c-[REDACTED])`);
+    expect(calls[0].task).toContain(`${d} (d-[REDACTED].md)`);
     expect(calls[0].task).not.toContain(SECRET);
   });
 
