@@ -544,6 +544,13 @@ model CodingAgentProfile {
   /// Claude Code runs only: keep Claude Code's bare mode (CLAUDE_CODE_SIMPLE=1); wardby injects
   /// repo instructions and the skill list into the system prompt. False = Claude Code's native loading.
   claudeBareMode           Boolean           @default(true)
+  /// Gemini's server-side web tools for this agent's runs: "off" | "search" | "search-and-fetch"
+  /// (docs/coding-agent-setup.md#gemini-cli-agents). Provider-neutral; only Gemini CLI runs use it today.
+  webTools                 String            @default("off")
+  /// Claude Code and Gemini CLI: let the agent start sub-agents (Claude Code's Agent tool, Gemini CLI's
+  /// invoke_agent). Their model calls go through the coding proxy and count against the run's budget.
+  /// Codex accepts it with no effect.
+  subAgents                Boolean           @default(true)
   /// Restore node_modules from a cached snapshot (written only by trusted wardby code before the
   /// agent starts) instead of a full install. Owner-set; off by default.
   dependencyCache          Boolean           @default(false)
@@ -660,6 +667,10 @@ model CodingRun {
   repoSkills            Boolean             @default(true)
   /// Fixed at dispatch from the profile's claudeBareMode.
   claudeBareMode        Boolean             @default(true)
+  /// Fixed at dispatch from the profile's webTools; only gemini-cli runs use it.
+  webTools              String              @default("off")
+  /// Fixed at dispatch from the profile's subAgents. False on runs dispatched before it existed (their old behaviour).
+  subAgents             Boolean             @default(false)
   /// Coding-run services resolved at dispatch from the base branch's
   /// .wardby/services.yaml: one snapshot per service (the catalog entry minus
   /// kind), fixed for the run's lifetime. Empty = none.
@@ -1142,6 +1153,9 @@ model CodingProxySession {
   /// Gemini's server-side web tools the run may use ("off" | "search" | "search-and-fetch"), copied at session
   /// creation from the agent's codingProfile.webTools. Only gemini-generate-content sessions use it.
   webTools                  String                   @default("off")
+  /// A Claude Code or Gemini CLI run with sub-agents on (codingProfile.subAgents): an Anthropic session's
+  /// requests may use Claude Code's Agent tool; Substrate bridges read it from the input answer.
+  subAgents                 Boolean                  @default(false)
   /// MCP tools/call count for this run (capped by WARDBY_MCP_MAX_CALLS_PER_RUN).
   mcpCallCount              Int                      @default(0)
   /// Package registry: ecosystems where a lockfile plan of this run failed or refused an entry, so a

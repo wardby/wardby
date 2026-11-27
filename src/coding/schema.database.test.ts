@@ -126,6 +126,54 @@ describe.skipIf(!process.env.DATABASE_URL)("Phase 5 coding schema (PostgreSQL)",
     ).rejects.toThrow();
   });
 
+  it("stores a gemini-cli profile and run with the new sub-agent and web-tool columns", async () => {
+    const coding = await db.agent.create({
+      data: {
+        name: `phase4-gemini-coding-${randomUUID()}`,
+        systemPrompt: "code safely",
+        model: "gemini-3-pro",
+        budgetUsd: 0.25,
+        kind: "coding",
+        codingProfile: {
+          create: {
+            provider: "gemini-cli",
+            repository: "openai/example",
+            allowedEgress: [],
+            protectedPaths: ["CODEOWNERS"],
+          },
+        },
+      },
+      include: { codingProfile: true },
+    });
+    agentIds.push(coding.id);
+    expect(coding.codingProfile).toMatchObject({ provider: "gemini-cli", webTools: "off", subAgents: true });
+
+    const run = await db.run.create({ data: { agentId: coding.id, status: "cancelled", executionManaged: true } });
+    runIds.push(run.id);
+    await db.codingRun.create({
+      data: {
+        runId: run.id,
+        task: "Fix the unit test.",
+        repository: "openai/example",
+        baseRef: "main",
+        headRef: `wardby/run-${run.id}`,
+        provider: "gemini-cli",
+        model: "gemini-3-pro",
+        timeoutSec: 1800,
+        allowedEgress: [],
+        protectedPaths: ["CODEOWNERS"],
+        budgetReservedUsd: 0.25,
+        webTools: "search",
+        subAgents: true,
+      },
+    });
+    const snapshot = await db.codingRun.findUniqueOrThrow({ where: { runId: run.id } });
+    expect(snapshot).toMatchObject({ provider: "gemini-cli", webTools: "search", subAgents: true });
+    await expect(
+      db.$executeRaw`UPDATE "CodingRun" SET "provider" = ${"unknown"} WHERE "runId" = ${run.id}`,
+    ).rejects.toThrow();
+  });
+
   it("CodingRun stores prDescriptionSha256/RunId/Outcome as nullable text", async () => {
     const columns = await db.$queryRaw<{ column_name: string; data_type: string; is_nullable: string }[]>`
       SELECT column_name, data_type, is_nullable FROM information_schema.columns
