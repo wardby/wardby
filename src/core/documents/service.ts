@@ -54,6 +54,9 @@ export async function createDocument(
     runId?: string;
     /** Who version 1 is credited to; defaults to the owner (an agent creates for its owner). */
     createdById?: string;
+    /** The native option set it joins (sets.ts ensureNamedSet), and its option label there. */
+    setId?: string;
+    option?: string;
   },
 ): Promise<{ id: string; versionId: string; warnings: VersionWarning[] }> {
   const fmt = formatFor(input.kind ?? "document");
@@ -75,6 +78,8 @@ export async function createDocument(
         repository: input.repository ?? null,
         path: input.path ?? null,
         baseRef: input.baseRef ?? null,
+        setId: input.setId ?? null,
+        option: input.option ?? null,
       },
     });
     const version = await tx.documentVersion.create({

@@ -17,6 +17,7 @@ import { createDocument, publishVersion } from "../documents/service.js";
 import { atLeast, effectiveAccess } from "../grants.js";
 import { TERMINAL_RUN_STATUSES } from "../host-status.js";
 import type { loadAgentSecretValues } from "../secret-guard.js";
+import { createPlanDocumentSet } from "../documents/sets.js";
 import { planSetChanged } from "./approval.js";
 import { parsePlanLayout, type PlanLayoutDocument } from "./layout.js";
 
@@ -353,31 +354,36 @@ function keptChange(reviewState: string): PlanDocumentChange {
 const asKind = (kind: string): "document" | "design" => (kind === "design" ? "design" : "document");
 
 type PlannerRun = NonNullable<Awaited<ReturnType<typeof readPlannerRun>>>;
-type PlanSetRef = { id: string; accessAgentId: string | null };
+type PlanSetRef = { id: string; accessAgentId: string | null; setId: string | null };
 
 /** The run's plan set, made on the first run; a concurrent first publish's set is used when it won the insert. */
 async function findOrCreateSet(db: PrismaClient, runId: string, planner: PlannerRun): Promise<PlanSetRef> {
   const { coding, number } = planner;
   const agentId = coding.run.agentId;
   const where = { agentId_repository_number: { agentId, repository: coding.repository, number } };
-  const select = { id: true, accessAgentId: true } as const;
+  const select = { id: true, accessAgentId: true, setId: true } as const;
   const existing = await db.planSet.findUnique({ where, select });
   if (existing) return existing;
   const accessAgentId = (await topRunAgent(db, coding.run.parentRunId)) ?? agentId;
   try {
-    return await db.planSet.create({
-      data: {
-        agentId,
-        repository: coding.repository,
-        number,
-        // The store this run wrote to (B4 sets planRepositoryPath only for store "repository").
-        store: coding.planRepositoryPath ? "repository" : "wardby",
-        accessAgentId,
-        createdByRunId: runId,
-        issueProvider: coding.issueProvider,
-        issueKey: coding.issueKey,
-      },
-      select,
+    // The plan's shared set (documents/sets.ts) is made with it: it records the router of the run's tree.
+    return await db.$transaction(async (tx) => {
+      const setId = await createPlanDocumentSet(tx, { agentId, ownerId: planner.ownerId, runId });
+      return tx.planSet.create({
+        data: {
+          setId,
+          agentId,
+          repository: coding.repository,
+          number,
+          // The store this run wrote to (B4 sets planRepositoryPath only for store "repository").
+          store: coding.planRepositoryPath ? "repository" : "wardby",
+          accessAgentId,
+          createdByRunId: runId,
+          issueProvider: coding.issueProvider,
+          issueKey: coding.issueKey,
+        },
+        select,
+      });
     });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
@@ -528,7 +534,10 @@ async function publishSet(
           : {}),
       });
       await db.$transaction([
-        db.document.update({ where: { id: created.id }, data: { planSetId: set.id, planPath: doc.path } }),
+        db.document.update({
+          where: { id: created.id },
+          data: { planSetId: set.id, planPath: doc.path, setId: set.setId, option: doc.path },
+        }),
         // Version 1 records the run that wrote it, like every later version (R11, planSummaryForRun).
         db.documentVersion.update({ where: { id: created.versionId }, data: { runId } }),
       ]);

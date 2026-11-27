@@ -300,6 +300,47 @@ describe.skipIf(!process.env.DATABASE_URL)("publishing a plan set (database)", (
     expect((await db.planSet.findUniqueOrThrow({ where: { id: plan.planSetId } })).accessAgentId).toBe(lead);
   });
 
+  it("#646: the plan's shared set records the router of the run's tree; its documents join it by path", async () => {
+    const router = await makeAgent("native");
+    await db.agent.update({ where: { id: router }, data: { router: true, description: "routes" } });
+    const routerRun = await db.run.create({ data: { agentId: router, status: "running", trigger: "manual" } });
+    const agentId = await planner();
+    const runId = await makeRun(
+      agentId,
+      [
+        { path: "plan.md", content: "# P" },
+        { path: "api.md", content: "# API" },
+      ],
+      { parentRunId: routerRun.id },
+    );
+    const plan = published(await publishPlanFromRun(db, deps, runId));
+    const set = await db.planSet.findUniqueOrThrow({ where: { id: plan.planSetId }, include: { set: true } });
+    expect(set.set).toMatchObject({
+      agentId,
+      ownerId: owner.id,
+      name: null,
+      routerAgentId: router,
+      createdByRunId: runId,
+    });
+    const docs = await db.document.findMany({ where: { planSetId: set.id }, orderBy: { planPath: "asc" } });
+    expect(docs.map((d) => [d.planPath, d.setId, d.option])).toEqual([
+      ["api.md", set.setId, "api.md"],
+      ["plan.md", set.setId, "plan.md"],
+    ]);
+    // A later run's new document joins the same shared set.
+    const later = await makeRun(agentId, [
+      { path: "plan.md", content: "# P" },
+      { path: "api.md", content: "# API" },
+      { path: "ui.md", content: "# UI" },
+    ]);
+    published(await publishPlanFromRun(db, deps, later));
+    expect(await db.document.findFirstOrThrow({ where: { planSetId: set.id, planPath: "ui.md" } })).toMatchObject({
+      setId: set.setId,
+      option: "ui.md",
+    });
+    expect(await db.documentSet.count({ where: { agentId } })).toBe(1);
+  });
+
   it("no document version holds a secret value: the stored marker stays, and the publish redacts again", async () => {
     const agentId = await planner();
     const name = `PLAN_KEY_${s}`;

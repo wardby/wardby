@@ -20,6 +20,7 @@ import type { IssueTrackerRegistry } from "../../providers/issue-tracker/types.j
 import { GITHUB_ISSUE_KEY, projectOf } from "../../providers/issue-tracker/types.js";
 import type { ReviewHostRegistry } from "../../providers/review-host/types.js";
 import { principalNames } from "../documents/comments.js";
+import { claimSetApprovalIn, SET_TX } from "../documents/sets.js";
 import { logger } from "../logger.js";
 import { redactExactSecretValues } from "../secret-spans.js";
 import { newestVisiblePlanSet, planRepositoryFilter, ticketTitles, type BuildPlan } from "./build.js";
@@ -372,21 +373,19 @@ export async function planSetChanged(db: PrismaClient, planSetId: string): Promi
   if (any) await current(db, any.id, null);
 }
 
-/** Bounds for the set's row-lock transaction: a wait for the lock counts toward its timeout. */
-const PLAN_TX = { maxWait: 5_000, timeout: 20_000 } as const;
-
 type ClaimedApproval = NonNullable<Awaited<ReturnType<typeof claimApproval>>>;
 type ApprovedSet = Extract<ClaimedApproval, { approved: true }>["set"];
 
 /**
- * Under the set's row lock, so review events on one set are decided one at a time on the states they
- * see: ends the approval when a counted document is no longer approved, or claims it (approvedAt from
- * null) when every one is. Returns what it wrote: the set to the event that claimed the approval, or
- * the set and the chain's ticket to the event that stopped a live chain with "reopened"; else null.
+ * The set's approval decision (documents/sets.ts claimSetApprovalIn, on the PlanSet row) plus the plan's own
+ * part, in one transaction under the set's row lock: a reopen during a live chain stops it before its next
+ * ticket. Returns what it wrote: the set to the event that claimed the approval, or the set and the chain's
+ * ticket to the event that stopped a live chain with "reopened"; else null.
  */
 async function claimApproval(db: PrismaClient, planSetId: string, actorId: string | null) {
   return db.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT 1 FROM "PlanSet" WHERE "id" = ${planSetId} FOR UPDATE`;
+    const claimed = await claimSetApprovalIn(tx, { kind: "plan", planSetId }, actorId);
+    if (!claimed) return null;
     const set = await tx.planSet.findUnique({
       where: { id: planSetId },
       include: {
@@ -398,36 +397,20 @@ async function claimApproval(db: PrismaClient, planSetId: string, actorId: strin
       },
     });
     if (!set) return null;
-    const allApproved =
-      set.documents.length > 0 && set.documents.every((d) => d.reviewState === "approved" && d.currentVersion);
-    if (!allApproved) {
-      // A reopen (or a new waiting document) ends the approval; a running chain stops before its next
-      // ticket, unless it already stopped for a reason of its own (that code is kept).
-      if (!set.approvedAt) return null;
+    if (!claimed.approved) {
+      // The approval ended: a running chain stops before its next ticket, unless it already stopped for a
+      // reason of its own (that code is kept).
       const stopsChain = set.chainTicket !== null && set.chainStopped === null;
-      const { documents: _documents, agent: _agent, ...row } = set;
+      if (!stopsChain) return null;
       const ended = await tx.planSet.update({
         where: { id: set.id },
-        data: {
-          approvedAt: null,
-          approvedById: null,
-          ...(stopsChain ? { chainStopped: "reopened", chainRunId: null } : {}),
-        },
+        data: { chainStopped: "reopened", chainRunId: null },
       });
-      return stopsChain ? { approved: false as const, set: ended, ticket: row.chainTicket! } : null;
+      return { approved: false as const, set: ended, ticket: set.chainTicket! };
     }
-    // Exactly once per approval: only the event that sets approvedAt from null goes on.
-    if (set.approvedAt) return null;
     // The approver: the recorded starter of every ticket run this approval starts.
-    const approved = await tx.planSet.update({
-      where: { id: set.id },
-      data: { approvedAt: new Date(), approvedById: actorId },
-    });
-    return {
-      approved: true as const,
-      set: { ...set, approvedAt: approved.approvedAt, approvedById: approved.approvedById },
-    };
-  }, PLAN_TX);
+    return { approved: true as const, set };
+  }, SET_TX);
 }
 
 /** What follows a claimed approval: a notice ("notify"), or the builder check and ticket 1 ("build"). */

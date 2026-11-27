@@ -91,9 +91,9 @@ export interface ReviewCan {
   review: boolean;
   force: boolean;
   reopen: boolean;
-  /** Reject this plan document (rejectDocument): never plan.md, never outside a plan set. */
+  /** Reject this document (rejectDocument): only in a set, never a plan's plan.md. */
   reject: boolean;
-  /** Choose this plan document over others (chooseOption): approve it (or it is approved) and reject them. */
+  /** Choose this document over others in a set (chooseOption): approve it (or it is approved) and reject them. */
   choose: boolean;
   archive: boolean;
   unarchive: boolean;
@@ -136,9 +136,22 @@ async function inReviewTx<T>(db: PrismaClient, fn: (tx: Tx) => Promise<T>): Prom
   );
 }
 
-/** A document Reject applies to: one of a plan set, still in it, and not the set's plan.md. */
-function rejectablePlacement(doc: { planSetId: string | null; planPath: string | null; removedFromPlan: boolean }) {
-  return doc.planSetId !== null && doc.planPath !== null && doc.planPath !== "plan.md" && !doc.removedFromPlan;
+type Placement = { planSetId: string | null; setId: string | null; planPath: string | null; removedFromPlan: boolean };
+
+/**
+ * The set a document belongs to for choose and reject (documents/sets.ts): a plan document by its plan set,
+ * else a native option by its document set; null outside a set.
+ */
+function memberOf(doc: Placement): string | null {
+  if (doc.planSetId !== null) return `plan:${doc.planSetId}`;
+  return doc.setId !== null ? `set:${doc.setId}` : null;
+}
+
+/** A document Reject applies to: one of a set, still in it, and never a plan's plan.md. */
+function rejectablePlacement(doc: Placement) {
+  if (doc.removedFromPlan) return false;
+  if (doc.planSetId !== null) return doc.planPath !== null && doc.planPath !== "plan.md";
+  return doc.setId !== null;
 }
 
 /** Everything the state rule reads, inside the caller's transaction. */
@@ -152,9 +165,11 @@ async function readReview(tx: Tx, documentId: string) {
       reviewState: true,
       reviewStateBeforeArchive: true,
       finalApproverId: true,
-      // Plan placement, for Reject (rejectDocument and the view's can.reject read it in the same snapshot).
+      // Set placement, for Reject (rejectDocument and the view's can.reject read it in the same snapshot).
       planSetId: true,
       planPath: true,
+      setId: true,
+      option: true,
       removedFromPlan: true,
     },
   });
@@ -403,13 +418,13 @@ async function applyVerdict(
 }
 
 /**
- * Rejects one plan document inside the caller's transaction (rejectDocument, chooseOption): live access and the
+ * Rejects one document of a set inside the caller's transaction (rejectDocument, chooseOption): live access and the
  * reject rights (owner, or a named member reviewer or the final approver with comment access), its placement in
- * a plan set (`planSetId`, when given, must match) and its state are checked here.
+ * a set (`memberOf`, when given, must match: the chosen document's set) and its state are checked here.
  */
 async function applyReject(
   tx: Tx,
-  input: { documentId: string; viewer: Viewer & { kind: "principal" }; note: string | null; planSetId?: string },
+  input: { documentId: string; viewer: Viewer & { kind: "principal" }; note: string | null; memberOf?: string },
 ): Promise<void> {
   const { viewer } = input;
   const principalId = viewer.principalId;
@@ -420,7 +435,7 @@ async function applyReject(
   const isApprover = doc.finalApproverId === principalId;
   const allowed = accessNow === "owner" || ((named || isApprover) && atLeast("document", accessNow, "comment"));
   if (!allowed) throw new Error("document_review_forbidden");
-  if (!rejectablePlacement(doc) || (input.planSetId !== undefined && doc.planSetId !== input.planSetId)) {
+  if (!rejectablePlacement(doc) || (input.memberOf !== undefined && memberOf(doc) !== input.memberOf)) {
     throw new Error("document_reject_not_plan_document");
   }
   if (!REJECTABLE.has(doc.reviewState)) invalid();
@@ -519,9 +534,9 @@ export async function forceApprove(
 }
 
 /**
- * Rejects a document of a plan set: a design option nobody chose, a part the plan no longer needs. The document
- * becomes `rejected` (locked like an approved one, comments still open) and leaves the plan (`removedFromPlan`),
- * so it no longer counts toward the plan's approval and is never given to a builder. The plan set's own plan.md
+ * Rejects a document of a set: a design option nobody chose, a part the plan no longer needs. The document
+ * becomes `rejected` (locked like an approved one, comments still open) and leaves its set (`removedFromPlan`),
+ * so it no longer counts toward the set's approval and is never given to a builder. A plan set's own plan.md
  * cannot be rejected. Who may: the owner, the final approver, or a named member reviewer; a note is required.
  * Reopen undoes it. Rejecting the last waiting document completes the plan's approval exactly as an approval
  * does (the plan review hook).
@@ -556,12 +571,13 @@ export const choiceNote = (chosenPath: string, note: string | null) =>
   note ? `Chose ${chosenPath}: ${note}` : `Chose ${chosenPath}`;
 
 /**
- * Chooses one option of a plan set: the viewer's approval of `documentId` (as Approve, so only a named reviewer,
- * on `versionNumber`; skipped when it is already approved) and a reject of each document in `reject` (as Reject:
- * the same rights, the same plan set, never plan.md), all in ONE transaction, so either every change lands or none
- * does. Each rejected document gets the note "Chose <path>" (plus the viewer's note, when given). The plan review
- * hook runs once, after the commit, so a choice that decides the plan's last waiting documents completes its
- * approval the way the last single action would.
+ * Chooses one option of a set (a plan set, or a native writer's option set): the viewer's approval of
+ * `documentId` (as Approve, so only a named reviewer, on `versionNumber`; skipped when it is already approved)
+ * and a reject of each document in `reject` (as Reject: the same rights, the same set, never a plan's plan.md),
+ * all in ONE transaction, so either every change lands or none does. Each rejected document gets the note
+ * "Chose <option>" (its option label, a plan document's path; plus the viewer's note, when given). The plan
+ * review hook runs once, after the commit, so a choice that decides the plan's last waiting documents completes
+ * its approval the way the last single action would.
  */
 export async function chooseOption(
   db: PrismaClient,
@@ -579,19 +595,20 @@ export async function chooseOption(
   await requireDocumentAccess(db, input.documentId, viewer, "comment");
   const rows = await db.document.findMany({
     where: { id: { in: [input.documentId, ...rejectIds] } },
-    select: { id: true, agentId: true, planPath: true },
+    select: { id: true, agentId: true, planPath: true, option: true },
   });
   const chosenRow = rows.find((r) => r.id === input.documentId);
   if (!chosenRow) throw new Error("document_not_found");
   if (rows.length !== rejectIds.length + 1) throw new Error("document_not_found");
   const userNote = input.note === undefined || input.note.trim() === "" ? null : input.note.trim();
-  const text = choiceNote(chosenRow.planPath ?? "", userNote);
+  const text = choiceNote(chosenRow.option ?? chosenRow.planPath ?? "", userNote);
   // Each rejected document's note is redacted against its own agent's secret values, before the transaction.
   const notes = new Map<string, string | null>();
   for (const r of rows) if (r.id !== input.documentId) notes.set(r.id, await storedNote(db, cipher, r.agentId, text));
   await inReviewTx(db, async (tx) => {
     const { doc: chosen } = await readReview(tx, input.documentId);
-    if (!rejectablePlacement(chosen) || chosen.planSetId === null) throw new Error("document_reject_not_plan_document");
+    const set = memberOf(chosen);
+    if (!rejectablePlacement(chosen) || set === null) throw new Error("document_reject_not_plan_document");
     if (chosen.reviewState !== "approved") {
       await applyVerdict(tx, {
         documentId: chosen.id,
@@ -602,7 +619,7 @@ export async function chooseOption(
       });
     }
     for (const id of rejectIds) {
-      await applyReject(tx, { documentId: id, viewer, note: notes.get(id) ?? null, planSetId: chosen.planSetId });
+      await applyReject(tx, { documentId: id, viewer, note: notes.get(id) ?? null, memberOf: set });
     }
   });
   for (const id of [input.documentId, ...rejectIds]) await notifyDocumentChange(db, id, "review");
