@@ -122,11 +122,13 @@ const invalid = (): never => {
   throw new Error("document_review_state_invalid");
 };
 
-async function inReviewTx<T>(db: PrismaClient, fn: (tx: Tx) => Promise<T>): Promise<T> {
+async function inReviewTx<T>(db: PrismaClient, fn: (tx: Tx) => Promise<T>, eventIds?: string[]): Promise<T> {
   return withSerializableRetry(
     () =>
       db.$transaction(
         async (tx) => {
+          // A retry re-runs fn: the ids of an aborted attempt's events (rolled back) must not survive it.
+          if (eventIds) eventIds.length = 0;
           await preferIndexScans(tx);
           return fn(tx);
         },
@@ -328,61 +330,65 @@ export async function submitForReview(
   if (!docRow) throw new Error("document_not_found");
   const note = await storedNote(db, cipher, docRow.agentId, input.note);
   const eventIds: string[] = [];
-  await inReviewTx(db, async (tx) => {
-    await requireDocumentAccess(tx, input.documentId, input.viewer, need);
-    const { doc, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
-    // Grants made for the reviewers are attributed to the owner when an agent submits.
-    const grantedBy = by ?? doc.ownerId;
-    // An agent submits only its own owner's documents: the reviewer grants it makes act on the owner's behalf,
-    // so a document someone else owns (one they linked to the agent) is never shared by it.
-    if (input.viewer.kind === "agent") {
-      const agent = await tx.agent.findUnique({ where: { id: input.viewer.agentId }, select: { ownerId: true } });
-      if (!agent?.ownerId || agent.ownerId !== doc.ownerId) throw new Error("document_review_forbidden");
-    }
-    if (!SUBMITTABLE.has(doc.reviewState)) invalid();
-    const known = await tx.principal.findMany({
-      where: { id: { in: [...principalIds, ...(approver ? [approver] : [])] } },
-      select: { id: true },
-    });
-    const knownIds = new Set(known.map((p) => p.id));
-    if (principalIds.some((id) => !knownIds.has(id)) || (approver && !knownIds.has(approver))) invalid();
-    const guests = await tx.documentGuest.findMany({
-      where: { id: { in: guestIds }, shareLink: liveCommentLink(doc.id) },
-      select: { id: true },
-    });
-    if (guests.length !== guestIds.length) invalid();
-    // Replace the list: rows no longer named go (their events stay), new names start with no verdict.
-    const keep = reviewers.filter((r) =>
-      r.principalId ? principalIds.includes(r.principalId) : r.guestId ? guestIds.includes(r.guestId) : false,
-    );
-    const drop = reviewers.filter((r) => !keep.includes(r)).map((r) => r.id);
-    if (drop.length) await tx.documentReviewer.deleteMany({ where: { id: { in: drop } } });
-    for (const principalId of principalIds) {
-      if (!keep.some((r) => r.principalId === principalId)) {
-        await tx.documentReviewer.create({ data: { documentId: doc.id, principalId } });
+  await inReviewTx(
+    db,
+    async (tx) => {
+      await requireDocumentAccess(tx, input.documentId, input.viewer, need);
+      const { doc, reviewers, rule, lastEventAt } = await readReview(tx, input.documentId);
+      // Grants made for the reviewers are attributed to the owner when an agent submits.
+      const grantedBy = by ?? doc.ownerId;
+      // An agent submits only its own owner's documents: the reviewer grants it makes act on the owner's behalf,
+      // so a document someone else owns (one they linked to the agent) is never shared by it.
+      if (input.viewer.kind === "agent") {
+        const agent = await tx.agent.findUnique({ where: { id: input.viewer.agentId }, select: { ownerId: true } });
+        if (!agent?.ownerId || agent.ownerId !== doc.ownerId) throw new Error("document_review_forbidden");
       }
-      await ensureCommentAccess(tx, doc, principalId, grantedBy);
-    }
-    for (const guestId of guestIds) {
-      if (!keep.some((r) => r.guestId === guestId)) {
-        await tx.documentReviewer.create({ data: { documentId: doc.id, guestId } });
+      if (!SUBMITTABLE.has(doc.reviewState)) invalid();
+      const known = await tx.principal.findMany({
+        where: { id: { in: [...principalIds, ...(approver ? [approver] : [])] } },
+        select: { id: true },
+      });
+      const knownIds = new Set(known.map((p) => p.id));
+      if (principalIds.some((id) => !knownIds.has(id)) || (approver && !knownIds.has(approver))) invalid();
+      const guests = await tx.documentGuest.findMany({
+        where: { id: { in: guestIds }, shareLink: liveCommentLink(doc.id) },
+        select: { id: true },
+      });
+      if (guests.length !== guestIds.length) invalid();
+      // Replace the list: rows no longer named go (their events stay), new names start with no verdict.
+      const keep = reviewers.filter((r) =>
+        r.principalId ? principalIds.includes(r.principalId) : r.guestId ? guestIds.includes(r.guestId) : false,
+      );
+      const drop = reviewers.filter((r) => !keep.includes(r)).map((r) => r.id);
+      if (drop.length) await tx.documentReviewer.deleteMany({ where: { id: { in: drop } } });
+      for (const principalId of principalIds) {
+        if (!keep.some((r) => r.principalId === principalId)) {
+          await tx.documentReviewer.create({ data: { documentId: doc.id, principalId } });
+        }
+        await ensureCommentAccess(tx, doc, principalId, grantedBy);
       }
-    }
-    if (approver) await ensureCommentAccess(tx, doc, approver, grantedBy);
-    const next = await readReview(tx, doc.id);
-    const id = await record(tx, {
-      documentId: doc.id,
-      viewer: input.viewer,
-      kind: doc.reviewState === "draft" ? "submitted" : "reviewers_changed",
-      from: doc.reviewState,
-      to: computeReviewState(next.rule),
-      versionNumber: rule.currentVersion,
-      at: await actionTime(tx, lastEventAt),
-      note,
-      ...(approver !== undefined ? { extra: { finalApproverId: approver } } : {}),
-    });
-    eventIds.push(id);
-  });
+      for (const guestId of guestIds) {
+        if (!keep.some((r) => r.guestId === guestId)) {
+          await tx.documentReviewer.create({ data: { documentId: doc.id, guestId } });
+        }
+      }
+      if (approver) await ensureCommentAccess(tx, doc, approver, grantedBy);
+      const next = await readReview(tx, doc.id);
+      const id = await record(tx, {
+        documentId: doc.id,
+        viewer: input.viewer,
+        kind: doc.reviewState === "draft" ? "submitted" : "reviewers_changed",
+        from: doc.reviewState,
+        to: computeReviewState(next.rule),
+        versionNumber: rule.currentVersion,
+        at: await actionTime(tx, lastEventAt),
+        note,
+        ...(approver !== undefined ? { extra: { finalApproverId: approver } } : {}),
+      });
+      eventIds.push(id);
+    },
+    eventIds,
+  );
   await notifyDocumentChange(db, input.documentId, "review");
   await runReviewHooks(db, {
     documentId: input.documentId,
@@ -487,18 +493,22 @@ export async function reviewDocument(
   const note = await storedNote(db, cipher, doc.agentId, input.note);
   const verdict: Verdict = input.verdict === "approve" ? "approved" : "changes_requested";
   const eventIds: string[] = [];
-  const changed = await inReviewTx(db, async (tx) => {
-    const id = await applyVerdict(tx, {
-      documentId: input.documentId,
-      viewer: input.viewer,
-      verdict,
-      versionNumber: input.versionNumber,
-      note,
-    });
-    if (id === null) return false;
-    eventIds.push(id);
-    return true;
-  });
+  const changed = await inReviewTx(
+    db,
+    async (tx) => {
+      const id = await applyVerdict(tx, {
+        documentId: input.documentId,
+        viewer: input.viewer,
+        verdict,
+        versionNumber: input.versionNumber,
+        note,
+      });
+      if (id === null) return false;
+      eventIds.push(id);
+      return true;
+    },
+    eventIds,
+  );
   if (changed) {
     await notifyDocumentChange(db, input.documentId, "review");
     // Spec §7b: the verdict that approves a plan set's last document notifies or starts a build.
@@ -533,29 +543,33 @@ export async function forceApprove(
   if (input.note.trim() === "") invalid();
   const note = await storedNote(db, cipher, docRow.agentId, input.note);
   const eventIds: string[] = [];
-  const overridden = await inReviewTx(db, async (tx) => {
-    // Force rights follow live access, the current owner and the current final approver, read in the transaction.
-    const accessNow = await documentAccess(tx, input.documentId, viewer);
-    if (accessNow === "none") throw new Error("document_not_found");
-    const { doc, rule, lastEventAt } = await readReview(tx, input.documentId);
-    const approverNow = doc.finalApproverId === principalId && atLeast("document", accessNow, "comment");
-    if (accessNow !== "owner" && !approverNow) throw new Error("document_review_forbidden");
-    if (!FORCEABLE.has(doc.reviewState)) invalid();
-    const ids = overriddenReviewerIds(rule);
-    const eventId = await record(tx, {
-      documentId: doc.id,
-      viewer: input.viewer,
-      kind: "force_approved",
-      from: doc.reviewState,
-      to: "approved",
-      versionNumber: rule.currentVersion,
-      at: await actionTime(tx, lastEventAt),
-      note,
-      overridden: ids,
-    });
-    eventIds.push(eventId);
-    return ids;
-  });
+  const overridden = await inReviewTx(
+    db,
+    async (tx) => {
+      // Force rights follow live access, the current owner and the current final approver, read in the transaction.
+      const accessNow = await documentAccess(tx, input.documentId, viewer);
+      if (accessNow === "none") throw new Error("document_not_found");
+      const { doc, rule, lastEventAt } = await readReview(tx, input.documentId);
+      const approverNow = doc.finalApproverId === principalId && atLeast("document", accessNow, "comment");
+      if (accessNow !== "owner" && !approverNow) throw new Error("document_review_forbidden");
+      if (!FORCEABLE.has(doc.reviewState)) invalid();
+      const ids = overriddenReviewerIds(rule);
+      const eventId = await record(tx, {
+        documentId: doc.id,
+        viewer: input.viewer,
+        kind: "force_approved",
+        from: doc.reviewState,
+        to: "approved",
+        versionNumber: rule.currentVersion,
+        at: await actionTime(tx, lastEventAt),
+        note,
+        overridden: ids,
+      });
+      eventIds.push(eventId);
+      return ids;
+    },
+    eventIds,
+  );
   await notifyDocumentChange(db, input.documentId, "review");
   await runReviewHooks(db, {
     documentId: input.documentId,
@@ -590,9 +604,13 @@ export async function rejectDocument(
   if (input.note.trim() === "") invalid();
   const note = await storedNote(db, cipher, docRow.agentId, input.note);
   const eventIds: string[] = [];
-  await inReviewTx(db, async (tx) => {
-    eventIds.push(await applyReject(tx, { documentId: input.documentId, viewer, note }));
-  });
+  await inReviewTx(
+    db,
+    async (tx) => {
+      eventIds.push(await applyReject(tx, { documentId: input.documentId, viewer, note }));
+    },
+    eventIds,
+  );
   await notifyDocumentChange(db, input.documentId, "review");
   await runReviewHooks(db, { documentId: input.documentId, eventIds, actorId: principalId });
   return getReviewView(db, input.documentId, viewer);
@@ -641,24 +659,28 @@ export async function chooseOption(
   const notes = new Map<string, string | null>();
   for (const r of rows) if (r.id !== input.documentId) notes.set(r.id, await storedNote(db, cipher, r.agentId, text));
   const eventIds: string[] = [];
-  await inReviewTx(db, async (tx) => {
-    const { doc: chosen } = await readReview(tx, input.documentId);
-    const set = memberOf(chosen);
-    if (!rejectablePlacement(chosen) || set === null) throw new Error("document_reject_not_plan_document");
-    if (chosen.reviewState !== "approved") {
-      const approved = await applyVerdict(tx, {
-        documentId: chosen.id,
-        viewer,
-        verdict: "approved",
-        versionNumber: input.versionNumber,
-        note: null,
-      });
-      if (approved !== null) eventIds.push(approved);
-    }
-    for (const id of rejectIds) {
-      eventIds.push(await applyReject(tx, { documentId: id, viewer, note: notes.get(id) ?? null, memberOf: set }));
-    }
-  });
+  await inReviewTx(
+    db,
+    async (tx) => {
+      const { doc: chosen } = await readReview(tx, input.documentId);
+      const set = memberOf(chosen);
+      if (!rejectablePlacement(chosen) || set === null) throw new Error("document_reject_not_plan_document");
+      if (chosen.reviewState !== "approved") {
+        const approved = await applyVerdict(tx, {
+          documentId: chosen.id,
+          viewer,
+          verdict: "approved",
+          versionNumber: input.versionNumber,
+          note: null,
+        });
+        if (approved !== null) eventIds.push(approved);
+      }
+      for (const id of rejectIds) {
+        eventIds.push(await applyReject(tx, { documentId: id, viewer, note: notes.get(id) ?? null, memberOf: set }));
+      }
+    },
+    eventIds,
+  );
   for (const id of [input.documentId, ...rejectIds]) await notifyDocumentChange(db, id, "review");
   await runReviewHooks(db, { documentId: input.documentId, eventIds, actorId: viewer.principalId });
   return { view: await getReviewView(db, input.documentId, viewer), rejected: rejectIds };
@@ -762,28 +784,32 @@ export async function setArchived(
   if (input.viewer.kind === "agent") return denyAgent(db, input.documentId, input.viewer);
   await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
   const eventIds: string[] = [];
-  await inReviewTx(db, async (tx) => {
-    await requireDocumentAccess(tx, input.documentId, input.viewer, "owner");
-    const { doc, rule, lastEventAt } = await readReview(tx, input.documentId);
-    if (input.archived === (doc.reviewState === "archived")) invalid();
-    const back = doc.reviewStateBeforeArchive;
-    const to: ReviewState = input.archived
-      ? "archived"
-      : back && isReviewState(back) && back !== "archived"
-        ? back
-        : "draft";
-    const eventId = await record(tx, {
-      documentId: doc.id,
-      viewer: input.viewer,
-      kind: input.archived ? "archived" : "unarchived",
-      from: doc.reviewState,
-      to,
-      versionNumber: rule.currentVersion,
-      at: await actionTime(tx, lastEventAt),
-      extra: { reviewStateBeforeArchive: input.archived ? doc.reviewState : null },
-    });
-    eventIds.push(eventId);
-  });
+  await inReviewTx(
+    db,
+    async (tx) => {
+      await requireDocumentAccess(tx, input.documentId, input.viewer, "owner");
+      const { doc, rule, lastEventAt } = await readReview(tx, input.documentId);
+      if (input.archived === (doc.reviewState === "archived")) invalid();
+      const back = doc.reviewStateBeforeArchive;
+      const to: ReviewState = input.archived
+        ? "archived"
+        : back && isReviewState(back) && back !== "archived"
+          ? back
+          : "draft";
+      const eventId = await record(tx, {
+        documentId: doc.id,
+        viewer: input.viewer,
+        kind: input.archived ? "archived" : "unarchived",
+        from: doc.reviewState,
+        to,
+        versionNumber: rule.currentVersion,
+        at: await actionTime(tx, lastEventAt),
+        extra: { reviewStateBeforeArchive: input.archived ? doc.reviewState : null },
+      });
+      eventIds.push(eventId);
+    },
+    eventIds,
+  );
   await notifyDocumentChange(db, input.documentId, "review");
   await runReviewHooks(db, {
     documentId: input.documentId,

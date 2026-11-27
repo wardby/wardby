@@ -753,6 +753,37 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
     ).rejects.toThrow("comment_too_long");
   });
 
+  it("a serialization retry reports only the committed attempt's event ids, once", async () => {
+    const id = await doc();
+    await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id] });
+    // The first transaction runs its whole callback (writing its event), then aborts as a serialization conflict.
+    let aborted = 0;
+    const flaky = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "$transaction") return Reflect.get(target, prop, receiver);
+        return (fn: (tx: unknown) => Promise<unknown>, options: unknown) =>
+          (target.$transaction as (f: unknown, o: unknown) => Promise<unknown>)(async (tx: unknown) => {
+            const out = await fn(tx);
+            if (aborted++ === 0) throw Object.assign(new Error("conflict"), { code: "P2034" });
+            return out;
+          }, options);
+      },
+    });
+    const seen: string[][] = [];
+    setReviewActionHook(async (_db, action) => void seen.push(action.eventIds));
+    try {
+      await reviewDocument(flaky, cipher, { documentId: id, viewer: as(ann), verdict: "approve", versionNumber: 1 });
+    } finally {
+      setReviewActionHook(undefined);
+    }
+    expect(aborted).toBeGreaterThanOrEqual(2);
+    expect(seen).toHaveLength(1);
+    const ids = new Set((await eventsOf(id)).map((e) => e.id));
+    expect(new Set(seen[0]).size).toBe(seen[0]?.length);
+    expect(seen[0]).toHaveLength(1);
+    for (const eventId of seen[0] ?? []) expect(ids.has(eventId)).toBe(true);
+  });
+
   it("redacts the agent's secret values from notes before they are stored; events carry no content", async () => {
     const id = await doc(true);
     await submitForReview(db, cipher, { documentId: id, viewer: as(owner), reviewers: [ann.id, ben.id] });
