@@ -764,6 +764,19 @@ describe.skipIf(!process.env.DATABASE_URL)("document review (database)", { timeo
       const ownerJob = (await getReviewView(db, id, as(owner))).routing.jobs.find((j) => j.outcome === "started")!;
       expect(ownerJob.started).toEqual([{ agentName: "Builder bee", task: "Build it now" }]);
       expect(view.routing.jobs.find((j) => j.outcome === "review_route_limit")!.started).toEqual([]);
+      // Someone who can execute the router (not the document's owner) sees the task line too.
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "agent",
+          resourceId: routerId,
+          granteeKind: "principal",
+          granteePrincipalId: ann.id,
+          granteeKey: `principal:${ann.id}`,
+          level: "execute",
+        },
+      });
+      const annJob = (await getReviewView(db, id, as(ann))).routing.jobs.find((j) => j.outcome === "started")!;
+      expect(annJob.started).toEqual([{ agentName: "Builder bee", task: "Build it now" }]);
       // A router turned off is no longer what would happen now; its jobs stay listed.
       await db.agent.update({ where: { id: routerId }, data: { router: false } });
       expect((await getReviewView(db, id, as(owner))).routing.router).toBeNull();

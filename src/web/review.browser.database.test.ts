@@ -171,6 +171,35 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         const text = (await panel.textContent()) ?? "";
         expect(text).toContain(`started: Builder bee ${tag} — Draft the rollout`);
         expect(text).not.toContain("more detail");
+        // A job shows its own router after the document's router changed, and a null outcome shows Routing...
+        const other = await agent("Other router", true);
+        const event2 = await server.db.documentReviewEvent.create({
+          data: {
+            documentId: d.documentId,
+            kind: "approved",
+            fromState: "in_review",
+            toState: "approved",
+            versionNumber: 1,
+          },
+        });
+        await server.db.reviewJob.create({
+          data: { reviewEventId: event2.id, documentId: d.documentId, routerAgentId: router.id, outcome: null },
+        });
+        await server.db.document.update({ where: { id: d.documentId }, data: { routerAgentId: other.id } });
+        try {
+          await o.reload();
+          await o.getByRole("tab", { name: "Review" }).click();
+          await expect.poll(() => panel.textContent()).toContain(`Routed to Other router ${tag}`);
+          const after = (await panel.textContent()) ?? "";
+          expect(after).toContain(`Review router ${tag} started: Builder bee ${tag}`);
+          expect(after).not.toContain(`Other router ${tag} started`);
+          expect(after).toContain("Routing…");
+          expect(after).not.toContain("Routed; no agent started.");
+        } finally {
+          await server.db.reviewJob.deleteMany({ where: { documentId: d.documentId } });
+          await server.db.document.update({ where: { id: d.documentId }, data: { routerAgentId: null } });
+          await server.db.agent.deleteMany({ where: { id: other.id } });
+        }
       } finally {
         await server.db.reviewJob.deleteMany({ where: { documentId: d.documentId } });
         await server.db.run.deleteMany({ where: { agentId: { in: [router.id, child.id] } } });

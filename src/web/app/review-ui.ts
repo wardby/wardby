@@ -248,15 +248,15 @@ export class ReviewPanel {
             "li",
             {},
             h("span", { class: "rv-when", title: j.at }, relativeTime(j.at)),
-            j.outcome === "started" || j.outcome === null
-              ? j.started.length
-                ? j.started
-                    .map(
-                      (c) => ` ${router?.name ?? "The router"} started: ${c.agentName}${c.task ? ` — ${c.task}` : ""}`,
-                    )
-                    .join(";")
-                : " Routed; no agent started."
-              : ` ${ROUTING_REFUSAL[j.outcome] ?? "Not routed."}`,
+            j.outcome === null
+              ? " Routing…"
+              : j.outcome === "started"
+                ? j.started.length
+                  ? j.started
+                      .map((c) => ` ${j.routerName} started: ${c.agentName}${c.task ? ` — ${c.task}` : ""}`)
+                      .join(";")
+                  : " Routed; no agent started."
+                : ` ${ROUTING_REFUSAL[j.outcome] ?? "Not routed."}`,
           ),
         ),
       ),
