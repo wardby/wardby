@@ -183,11 +183,36 @@ describe("wardby join -", () => {
     expect(out).toContain("Run finished: cancelled (cost $0.0200)");
   });
 
-  it("refuses a link given as an argument, and a link that is not a join link or not https", async () => {
+  it("refuses more than one argument, and a link that is not a join link or not https", async () => {
     const out: string[] = [];
-    expect(await joinCommand([LINK], { out: (l) => out.push(l) })).toBe(2);
+    expect(await joinCommand([LINK, "extra"], { out: (l) => out.push(l) })).toBe(2);
+    expect(await joinCommand([], { out: (l) => out.push(l) })).toBe(2);
     expect((await run(["https://wardby.example.com/other#x"])).out).toContain(JOIN_MESSAGES.badLink);
     expect((await run(["http://wardby.example.com/join#x"])).out).toContain(JOIN_MESSAGES.insecureOrigin);
+  });
+
+  it("takes the link as its argument (the command join_run hands out), reading only typed lines from stdin", async () => {
+    const server = fakeServer();
+    const input = new PassThrough();
+    const out: string[] = [];
+    const done = joinCommand([LINK], {
+      fetch: server.fetch,
+      input,
+      out: (line) => out.push(line),
+      sleep: async () => new Promise((r) => setTimeout(r, 5)),
+      onSignal: () => {},
+      pollMs: 5,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    input.write("hello\n");
+    await new Promise((r) => setTimeout(r, 20));
+    input.write("/leave\n");
+    await new Promise((r) => setTimeout(r, 20));
+    input.end();
+    expect(await done).toBe(0);
+    expect(server.seen[0]).toMatchObject({ path: "/join/api/join", auth: `Bearer ${LINK_TOKEN}` });
+    expect(server.seen.filter((s) => s.path === "/join/api/send").map((s) => s.body.message)).toEqual(["hello"]);
+    expect(out.join("\n")).not.toContain(LINK_TOKEN);
   });
 
   it("explains an expired link", async () => {

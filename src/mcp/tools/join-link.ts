@@ -29,8 +29,17 @@ export const JOIN_API_PATHS = {
   status: "/join/api/status",
 } as const;
 export type JoinApiAction = keyof typeof JOIN_API_PATHS;
-/** The command join_run hands out. It reads the link from stdin, never from the command line. */
+/** The command that reads the link from stdin (out of shell history and the process list). */
 export const JOIN_COMMAND = "npx @wardby/cli@latest join -";
+
+/**
+ * The command join_run hands out to copy: the link as its argument, single-quoted. A join link is
+ * `<origin>/join#<token>` with a base64url token, so it never holds a quote; anything else gets the
+ * paste form instead.
+ */
+export function joinCommandWithLink(link: string): string {
+  return /^[A-Za-z0-9:/.#_~%-]+$/.test(link) ? `npx @wardby/cli@latest join '${link}'` : JOIN_COMMAND;
+}
 /** After the run's deadline, how long a session may still read the run's last steps and status. */
 export const JOIN_LINK_GRACE_MS = 10 * 60_000;
 /** The longest a join session may last, whatever the run's timeout. */

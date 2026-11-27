@@ -6,7 +6,7 @@ export const CLI_USAGE = `usage:
   wardby down [--volumes]
   wardby knowledge check [dir] [--root <dir>] [--strict] [--json]   Validate a knowledge bundle (offline)
   wardby resume - [--dir <path> | --here] [--force] [--print]   Continue a coding run's Claude Code session locally (paste the get_run_transcript link)
-  wardby join -   Join a running run from this terminal and talk to its agent (paste join_run's terminal.link)
+  wardby join '<link>' | -   Join a running run from this terminal and talk to its agent (join_run's terminal.command; - asks for the link)
   wardby secret connect - [--no-browser]   Sign in to an OAuth provider for a secret (paste the create_secret link)
   wardby claude-plugin install|uninstall|status [options]   Set up the wardby-runs Claude Code pane (plugin, MCP server, allow rules)
   wardby help [list]

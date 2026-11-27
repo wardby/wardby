@@ -3,6 +3,7 @@ import {
   JOIN_LINK_GRACE_MS,
   JOIN_LINK_MAX_MS,
   isJoinLinkPayload,
+  joinCommandWithLink,
   joinLink,
   joinSessionExpiry,
   parseJoinLink,
@@ -47,5 +48,13 @@ describe("join link", () => {
     expect(isJoinLinkPayload({ ...base, aud: "stdio", ownerAll: true })).toBe(false);
     expect(isJoinLinkPayload({ ...base, aud: "http", roles: ["wardby_owner"] })).toBe(false);
     expect(isJoinLinkPayload({ ...base, aud: "http", ownerAll: false })).toBe(false);
+  });
+
+  it("hands out the command with the link single-quoted, and the paste form for anything that could break the quoting", () => {
+    expect(joinCommandWithLink("https://app.example.com/join#v1.abc_DEF-123")).toBe(
+      "npx @wardby/cli@latest join 'https://app.example.com/join#v1.abc_DEF-123'",
+    );
+    expect(joinCommandWithLink("https://app.example.com/join#it's")).toBe("npx @wardby/cli@latest join -");
+    expect(joinCommandWithLink("https://app.example.com/join#a b")).toBe("npx @wardby/cli@latest join -");
   });
 });

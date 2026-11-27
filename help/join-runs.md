@@ -57,10 +57,13 @@ From 0.11.1 you can also join from a terminal chat instead of through your
 MCP client's agent:
 
 1. Ask your agent to call `join_run` for the run. Its answer has
-   `terminal.command` and `terminal.link`.
-2. Run `npx @wardby/cli@latest join -` and paste the link when it asks. The
-   link is never an argument, so it stays out of your shell history and the
-   process list.
+   `terminal.command`: `npx @wardby/cli@latest join '<link>'`, ready to copy
+   (0.11.2 or later).
+2. Run it. To keep the link out of your shell history and the process list,
+   run `terminal.pasteCommand` (`npx @wardby/cli@latest join -`) instead and
+   paste `terminal.link` when it asks. A link given as an argument starts
+   working at once; its first token expires after 10 minutes, and the chat
+   renews it in memory after that.
 3. The chat shows the run's steps as they happen. Type a line and press Enter
    to send it; start it with `!` to interrupt. `/leave` leaves (the run
    finishes its work); `/quit` stops the agent after asking you to confirm:

@@ -1673,8 +1673,10 @@ current turn first), and `leave_run`. Follow the agent's replies with
 yet.
 
 From a terminal (0.11.1 or later): `join_run`'s answer also carries
-`terminal.command` (`npx @wardby/cli@latest join -`) and `terminal.link`. Run
-the command and paste the link: it opens a terminal chat with the run (a line
+`terminal.command` (from 0.11.2, `npx @wardby/cli@latest join '<link>'`, ready
+to copy), `terminal.pasteCommand` (`npx @wardby/cli@latest join -`, which asks
+for the link so it stays out of shell history and the process list) and
+`terminal.link`. Either command opens a terminal chat with the run (a line
 sends a message, `!text` interrupts, `/leave` leaves, `/quit` stops the agent
 after a confirmation, Ctrl-C leaves). The link is `<server origin>/join#<token>`;
 the CLI sends the token only as `Authorization: Bearer` to the server's
