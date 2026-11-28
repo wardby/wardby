@@ -5,7 +5,7 @@
  * process list (as `wardby resume` offers both).
  *
  * Shows the run's steps live (the agent's words, its commands with their status, and what people
- * send), sends each line typed, and ends with the run's outcome. `!text` interrupts the agent first;
+ * send), sends each line typed, and ends with the run's outcome. `/interrupt text` (or `/i text`) interrupts the agent first;
  * `/leave` leaves (the run finishes its work); `/quit` stops the agent after a confirmation. Ctrl-C
  * leaves, as /leave does (a second Ctrl-C stops watching); closing the terminal (SIGHUP) or SIGTERM
  * leaves and exits. A poll that fails is retried with backoff; if the server stays unreachable or
@@ -33,7 +33,8 @@ memory after that).
 
 In the chat:
   a line + Enter   send it to the agent (it reads it once it finishes what it is doing now)
-  !text            interrupt: the agent stops its current turn, then handles text
+  /interrupt text  interrupt: the agent stops its current turn, then handles text
+  /i text          the same, shorter
   /leave           leave the run; it finishes its work and wraps up as usual
   /quit            stop the agent (asks first): the run ends cancelled, its work is not pushed
   /help            show these commands
@@ -342,9 +343,13 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         } else if (left) {
           out("You left this run; nothing was sent.");
         } else {
-          const interrupt = text.startsWith("!");
-          const message = interrupt ? text.slice(1).trim() : text;
-          if (message === "") return;
+          const command = /^\/(?:interrupt|i)(?:\s+|$)/.exec(text);
+          const interrupt = command !== null;
+          const message = interrupt ? text.slice(command[0].length).trim() : text;
+          if (message === "") {
+            if (interrupt) out("Type your message after /interrupt (or /i), on the same line.");
+            return;
+          }
           const { status, json } = await session.call("send", { message, interrupt });
           if (status !== 200) out(`${JOIN_MESSAGES.sendFailed}: ${refusalText(status, json)}`);
         }

@@ -149,7 +149,7 @@ describe("chat lines", () => {
 
 describe("wardby join -", () => {
   it("joins, shows steps, sends a message and an interrupt, leaves, and prints the outcome", async () => {
-    const { code, out, seen } = await run([LINK, "please add a test", "!stop that", "/leave"]);
+    const { code, out, seen } = await run([LINK, "please add a test", "/i stop that", "/leave"]);
     expect(code).toBe(0);
     expect(out.some((l) => l.startsWith(JOIN_MESSAGES.joined))).toBe(true);
     expect(out).toContain("agent: Working on it now");
@@ -165,6 +165,17 @@ describe("wardby join -", () => {
       { message: "please add a test", interrupt: false },
       { message: "stop that", interrupt: true },
     ]);
+  });
+
+  it("interrupts with /interrupt or /i, sends a leading ! as plain text, and needs text after /interrupt", async () => {
+    const { out, seen } = await run([LINK, "/interrupt stop now", "!ls", "/interrupt", "/ideas please", "/leave"]);
+    const sends = seen.filter((s) => s.path === "/join/api/send").map((s) => s.body);
+    expect(sends).toEqual([
+      { message: "stop now", interrupt: true },
+      { message: "!ls", interrupt: false },
+      { message: "/ideas please", interrupt: false },
+    ]);
+    expect(out).toContain("Type your message after /interrupt (or /i), on the same line.");
   });
 
   it("sends the link's token only as a Bearer header, then the renewed one, and never prints either", async () => {
