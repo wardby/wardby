@@ -9,7 +9,7 @@ import { BOARD_ROOT, boardMaps, manifestOf } from "../../../core/documents/board
 import type { Manifest } from "../board-file.js";
 import type { BoardsEditor } from "../boards-editor.js";
 import type { LiveJoin } from "../live-join.js";
-import { bindBoard, LOCAL, type BoardBinding } from "./bind.js";
+import { bindBoard, boardUndo, LOCAL, type BoardBinding } from "./bind.js";
 
 export interface Peer {
   name: string;
@@ -88,15 +88,32 @@ export function startDesignSession(o: {
     if (o.editable()) void boards.setEditable(true);
   };
 
+  /**
+   * Each board's Undo history, kept across bindings: switching to another board and back (or the server re-sending
+   * a board) makes a new binding, and Undo must still reach what this page changed before.
+   */
+  const histories = new Map<string, { nodes: unknown; undo: Y.UndoManager }>();
+  const historyOf = (id: string, maps: ReturnType<typeof boardMaps>) => {
+    const kept = histories.get(id);
+    // Two pages creating a board at once can leave its maps replaced: a history of the old ones undoes nothing.
+    if (kept && kept.nodes === maps.nodes) return kept.undo;
+    kept?.undo.destroy();
+    const undo = boardUndo(maps);
+    histories.set(id, { nodes: maps.nodes, undo });
+    return undo;
+  };
+
   const bind = (id: string, build: boolean) => {
     if (shown !== id) return;
     binding?.destroy();
     unlockAfterWait();
     const parts = boards.parts(id);
-    binding = bindBoard(editor, boardMaps(ydoc, id), {
+    const maps = boardMaps(ydoc, id);
+    binding = bindBoard(editor, maps, {
       build,
       baseCss: parts?.baseCss,
       parts: parts ? { lang: parts.lang, title: parts.title, bodyAttrs: parts.bodyAttrs } : undefined,
+      undo: historyOf(id, maps),
     });
   };
 
@@ -229,6 +246,8 @@ export function startDesignSession(o: {
     destroy() {
       waiting?.();
       binding?.destroy();
+      for (const h of histories.values()) h.undo.destroy();
+      histories.clear();
       manifestOf(ydoc).unobserveDeep(onManifest);
       provider.awareness?.off("change", onAwareness);
     },

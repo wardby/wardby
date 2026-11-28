@@ -498,6 +498,8 @@ Everyone with the design open sees it live, and people with `write` edit it toge
   board's tab shows a dot for everyone on it. The board list (adding,
   renaming, moving and deleting boards) is shared too.
 - **Undo** and **Redo** undo your own changes only, never someone else's.
+  Each board keeps its own history, so switching to another board and back
+  keeps what you can undo.
 - **Versions.** The server saves the whole file set as a version, as for
   documents. The page itself saves nothing while live.
 - **Checks on every edit.** An edit that breaks the [board format](../help/design-boards-format.md)
