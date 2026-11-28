@@ -42,6 +42,11 @@ const FILTERS: [Filter, string][] = [
   ["mine", "Mine"],
 ];
 const POLL_MS = 15_000;
+/** The @-list's entry for the document's agent: picking it (or typing @agent) ticks Send to agent. Never encoded. */
+const AGENT_REF = "@agent";
+const AGENT_WORD = /(^|\s)@agent\b/i;
+const NOT_SENT =
+  "Posted, but not sent to the agent: only an editor can send an open thread, on a document that isn't locked.";
 /** Shown in the composer while a guest changes their name. */
 export const GUEST_RENAME_NOTE = "Earlier comments stay under your old name.";
 /** Codes postThread returns after the thread was created, when only the send to the agent failed. */
@@ -83,6 +88,8 @@ interface Pop {
   error?: string;
   picked: MentionCandidate[];
   suggest?: { list: MentionCandidate[]; idx: number; start: number };
+  /** @agent ticked Send to agent once; unticking it afterwards is the person's choice. */
+  agentTicked?: boolean;
   returnFocus: Element | null;
 }
 
@@ -93,6 +100,8 @@ export class CommentsUI {
   /** Shown names by mention ref: members from /mentions, this document's guests from the payload. */
   private names = new Map<string, string>();
   private candidates: MentionCandidate[] = [];
+  /** The document's linked agent, for the @agent entry (members only, from the page payload). */
+  private agentName: string | null = null;
   private filter: Filter = "open";
   private selected: string | null = null;
   private checked = new Set<string>();
@@ -134,6 +143,14 @@ export class CommentsUI {
   private canResolve(t: ThreadView): boolean {
     return this.canWrite || (this.viewer.kind !== "anonymous" && t.startedByMe);
   }
+  /** Whether the open composer may send its thread now: a new comment, or a reply as the ⋯ menu offers; never an edit. */
+  private sendableHere(): boolean {
+    const pop = this.pop;
+    if (!pop || pop.editing || !this.canSend) return false;
+    if (pop.kind === "draft") return true;
+    const t = this.popThread();
+    return !!t && t.status !== "resolved" && !this.working(t);
+  }
   private working(t: ThreadView): boolean {
     if (!t.sentAt || t.status === "resolved") return false;
     return !this.replied(t);
@@ -151,6 +168,7 @@ export class CommentsUI {
   apply(payload: DocumentPayload): void {
     this.viewer = payload.me;
     this.canSend = payload.document.canSend;
+    this.agentName = payload.document.agentName ?? null;
     this.threads = payload.threads;
     for (const g of payload.mentionedGuests ?? []) this.names.set(`guest:${g.guestId}`, `${g.name} (guest)`);
     for (const id of [...this.checked]) if (!this.threads.some((t) => t.id === id)) this.checked.delete(id);
@@ -579,7 +597,10 @@ export class CommentsUI {
         maxlength: "10000",
       },
       onKeyDown: (e) => this.composerKey(e, ta),
-      onInput: () => this.mentionCheck(ta),
+      onInput: () => {
+        this.mentionCheck(ta);
+        this.agentCheck(ta);
+      },
     });
     if (editing) {
       const d = decodeMentions(editing.body, this.names);
@@ -624,13 +645,12 @@ export class CommentsUI {
         ),
       );
     }
-    // A new comment, or a reply on a thread Send to agent could send now (as the ⋯ menu offers it); never an edit.
-    const canSendHere = this.canSend && !editing && (isDraft || (!!t && t.status !== "resolved" && !this.working(t)));
+    const canSendHere = this.sendableHere();
     const send = h(
       "label",
       { hidden: !canSendHere },
       h("input", { type: "checkbox", data: { send: "1" } }),
-      "Send to agent",
+      "Send to agent (or type @agent)",
     );
     (send.querySelector("input") as HTMLInputElement).checked = keptSend;
     return h(
@@ -687,8 +707,14 @@ export class CommentsUI {
     const pop = this.pop;
     if (!pop || this.viewer.kind !== "member") return;
     const q = mentionQuery(ta.value, ta.selectionStart);
+    const query = q?.query.toLowerCase() ?? "";
+    // The agent comes first while this thread can be sent, matched by "agent" or by its name.
+    const agent =
+      q && this.sendableHere() && ("agent".includes(query) || (this.agentName ?? "").toLowerCase().includes(query))
+        ? [{ ref: AGENT_REF, name: "agent" }]
+        : [];
     const list = q
-      ? this.candidates.filter((c) => c.name.toLowerCase().includes(q.query.toLowerCase())).slice(0, 8)
+      ? [...agent, ...this.candidates.filter((c) => c.name.toLowerCase().includes(query))].slice(0, 8)
       : [];
     if (!q || list.length === 0) return this.hideSuggest();
     pop.suggest = { list, idx: 0, start: q.start };
@@ -713,8 +739,15 @@ export class CommentsUI {
               this.pickSuggest(ta, i);
             },
           },
-          h("span", { class: `av sm ${avatarClass(p.name)}`, aria: { hidden: "true" } }, initials(p.name)),
-          p.name,
+          ...(p.ref === AGENT_REF
+            ? [
+                h("span", { class: "av sm av-agent", aria: { hidden: "true" } }, "✦"),
+                this.agentName ? `agent · ${this.agentName}` : "agent · send to the document's agent",
+              ]
+            : [
+                h("span", { class: `av sm ${avatarClass(p.name)}`, aria: { hidden: "true" } }, initials(p.name)),
+                p.name,
+              ]),
         ),
       );
     });
@@ -730,9 +763,21 @@ export class CommentsUI {
     ta.value = `${ta.value.slice(0, s.start)}@${p.name} ${ta.value.slice(end)}`;
     const caret = s.start + p.name.length + 2;
     ta.setSelectionRange(caret, caret);
-    if (!pop.picked.some((x) => x.ref === p.ref)) pop.picked.push(p);
+    // @agent stays plain text in the comment; it ticks Send to agent instead of naming a person.
+    if (p.ref !== AGENT_REF && !pop.picked.some((x) => x.ref === p.ref)) pop.picked.push(p);
     this.hideSuggest();
+    this.agentCheck(ta);
     ta.focus();
+  }
+
+  /** The first @agent in the text ticks Send to agent, when this thread can be sent. */
+  private agentCheck(ta: HTMLTextAreaElement): void {
+    const pop = this.pop;
+    if (!pop || pop.agentTicked || !AGENT_WORD.test(ta.value) || !this.sendableHere()) return;
+    const box = pop.el.querySelector<HTMLInputElement>("input[data-send]");
+    if (!box) return;
+    box.checked = true;
+    pop.agentTicked = true;
   }
 
   private hideSuggest(): void {
@@ -784,8 +829,17 @@ export class CommentsUI {
         await this.host.api.editComment(pop.editing, body);
         pop.editing = undefined;
       } else {
-        const send = this.canSend && pop.el.querySelector<HTMLInputElement>("input[data-send]")?.checked === true;
+        const sendable = this.sendableHere();
+        const send = sendable && pop.el.querySelector<HTMLInputElement>("input[data-send]")?.checked === true;
+        const notSent = !sendable && AGENT_WORD.test(text);
         await this.host.api.reply(t.id, body);
+        if (notSent) {
+          ta.value = "";
+          pop.picked = [];
+          await this.reload();
+          this.setError(NOT_SENT);
+          return;
+        }
         if (send) {
           // The reply is stored; a refused send shows its reason on the thread, with the reply in it.
           ta.value = "";
@@ -809,10 +863,11 @@ export class CommentsUI {
 
   private async createThread(pop: Pop, body: string): Promise<void> {
     const send = pop.el.querySelector<HTMLInputElement>("input[data-send]")?.checked === true && this.canSend;
+    const notSent = !this.canSend && AGENT_WORD.test(body);
     const before = new Set(this.threads.map((t) => t.id));
     try {
       const r = await this.host.api.createThread(pop.start!.anchor, body, send);
-      await this.afterCreate(r.threadId, undefined);
+      await this.afterCreate(r.threadId, notSent ? NOT_SENT : undefined);
     } catch (err) {
       if (send && err instanceof ApiError && SEND_AFTER_CREATE.has(err.code)) {
         // The thread was stored; only the send failed. Show it with the reason.

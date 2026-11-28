@@ -187,6 +187,55 @@ describe("CommentsUI with a surface", () => {
     expect(document.querySelector(".cpop .status.sent")?.textContent).toBe("Agent replied");
   });
 
+  it("@agent: the @-list offers the agent first, and picking or typing it ticks Send to agent", async () => {
+    const { api, payload, ui, handlers } = setup([thread("1")]);
+    Object.assign(payload.document, { canSend: true, agentName: "epic-writer" });
+    Object.assign(payload.me, { access: "write" });
+    ui.apply(payload);
+    handlers().activate("1");
+    const pop = document.querySelector(".cpop")!;
+    const ta = pop.querySelector("textarea")!;
+    const box = pop.querySelector<HTMLInputElement>("input[data-send]")!;
+    expect(box.closest("label")!.textContent).toBe("Send to agent (or type @agent)");
+    ta.value = "@ag";
+    ta.setSelectionRange(3, 3);
+    ta.dispatchEvent(new Event("input"));
+    const first = pop.querySelector(".suggest [role=option]")!;
+    expect(first.textContent).toContain("agent · epic-writer");
+    first.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(ta.value).toBe("@agent ");
+    expect(box.checked).toBe(true);
+    // Unticking after @agent is the person's choice; typing more does not tick it again.
+    box.checked = false;
+    ta.value = "@agent shorter";
+    ta.dispatchEvent(new Event("input"));
+    expect(box.checked).toBe(false);
+    void api;
+  });
+
+  it("a typed @agent ticks the box; where sending is not possible, the comment posts with a not-sent note", async () => {
+    const sendable = setup([thread("1")]);
+    Object.assign(sendable.payload.document, { canSend: true });
+    sendable.ui.apply(sendable.payload);
+    sendable.handlers().activate("1");
+    let pop = document.querySelector(".cpop")!;
+    pop.querySelector("textarea")!.value = "@agent make it shorter";
+    pop.querySelector("textarea")!.dispatchEvent(new Event("input"));
+    expect(pop.querySelector<HTMLInputElement>("input[data-send]")!.checked).toBe(true);
+
+    const locked = setup([thread("1")]);
+    const reply = vi.fn(async () => undefined);
+    const send = vi.fn(async () => undefined);
+    Object.assign(locked.api, { reply, send });
+    locked.handlers().activate("1");
+    pop = document.querySelector(".cpop")!;
+    pop.querySelector("textarea")!.value = "@agent make it shorter";
+    pop.querySelector<HTMLButtonElement>("button.primary")!.click();
+    await vi.waitFor(() => expect(document.querySelector(".cpop")?.textContent).toContain("not sent to the agent"));
+    expect(reply).toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("finds a thread created before a failed send by its anchor, not its label", async () => {
     const element = (path: string) => ({
       type: "element" as const,
