@@ -24,6 +24,7 @@ import {
 import { atLeast, CommentsUI } from "./comments-ui.js";
 import { append, clear, h } from "./dom.js";
 import { pdfExportButton } from "./exports-menu.js";
+import { shareButton } from "./share-ui.js";
 import { EditsTray } from "./edits-ui.js";
 import { caretColor, joinLive, type Coedit } from "./coedit.js";
 import { createEditor } from "./editor.js";
@@ -120,6 +121,10 @@ function mount(
     { type: "button", hidden: payload.document.canRender !== true, data: { action: "export-pdf" } },
     "Export PDF",
   );
+  // Share: a member with write access copies a comment link in one click (share-ui.ts).
+  const share = shareButton(api);
+  const canShare = () => viewer.kind === "member" && atLeast(viewer.access, "write");
+  share.setAllowed(canShare());
   const exportNote = h("span", { class: "export-note", role: "status" });
   pdfExportButton(exportPdfBtn, exportNote, api);
   const who = h("span", { class: "who-am-i" });
@@ -214,7 +219,7 @@ function mount(
         ),
         // The review status, beside what the page is; then the page's actions.
         reviewBanner,
-        h("div", { class: "group page-actions" }, exportPdfBtn, commentBtn),
+        h("div", { class: "group page-actions" }, exportPdfBtn, share.el, commentBtn),
         exportNote,
         saveState,
         liveNote,
@@ -315,6 +320,7 @@ function mount(
 
   // ---- who is viewing ----
   const renderViewer = () => {
+    share.setAllowed(canShare());
     clear(who);
     clear(account);
     if (viewer.kind === "member") who.append(`Signed in as ${viewer.name ?? "member"}`);

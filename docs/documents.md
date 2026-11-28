@@ -32,7 +32,9 @@ directory.
   up on every open page without a refresh.
 - A History tab: every version, who made it and how, the changes each one
   made shown inline, and restore (see [Edits and restore](#edits-and-restore)).
-- Links to share a document with people who have no account.
+- Links to share a document with people who have no account: **Share** in the
+  top bar copies a comment link in one click (see
+  [Share links and guests](#share-links-and-guests)).
 - Send open threads to a coding agent that edits a file (or, for a design, a
   directory) in a repository.
 - Export a design as HTML, PNG or PDF and a Markdown document as PDF.
@@ -50,7 +52,7 @@ directory.
 | `list_documents`                                             | `documents:read`  | Documents you own or were granted (200 newest; `truncated` past that)                                             |
 | `list_comment_threads`, `get_comment_thread`                 | `documents:read`  | Read threads (`open`, `resolved`, `sent`, `mine`, `all`)                                                          |
 | `reply_to_thread`, `resolve_thread`                          | `documents:write` | Reply (needs `comment`), resolve                                                                                  |
-| `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner only)                                                                                   |
+| `create_share_link`, `list_share_links`, `revoke_share_link` | write / read      | Manage share links (owner, or writer: own links)                                                                  |
 | `send_threads_to_agent`                                      | `documents:write` | Start a coding run from threads; also needs `runs:trigger`                                                        |
 | `submit_for_review`                                          | `documents:write` | Submit a document you own for review, or replace its reviewers (`reviewers`, `finalApproverId`, `note`)           |
 | `review_document`                                            | `documents:write` | Give a verdict as a named reviewer (`approve` or `request_changes`, on `versionNumber`)                           |
@@ -75,8 +77,8 @@ only (`write` is refused with `document_agent_grant_level`; link the agent with
 to read the agent; revoking by `agentId` always works. Agent grants apply to
 documents only.
 Levels, lowest first: `read` (see), `comment` (add threads and replies), `write`
-(publish versions, resolve any thread, send to an agent). The owner also
-manages grants and share links. Granting to `everyone` is capped at `comment`.
+(publish versions, resolve any thread, send to an agent, make share links). The
+owner also manages grants and every share link. Granting to `everyone` is capped at `comment`.
 A caller without access is told `document_not_found`, so ids do not leak.
 
 The scopes `documents:read` and `documents:write` are advertised with the
@@ -591,6 +593,19 @@ guest's optional email is stored but never shown on the page. Agent replies are
 labelled as the agent.
 
 ## Share links and guests
+
+The document's owner and anyone with `write` access (people only, never an
+agent or a guest) can make share links. The owner lists and revokes every link
+on the document; a writer lists and revokes only the links they made, and
+revoking someone else's is refused with `document_access_denied`.
+
+On the document and design pages, **Share** in the top bar (shown to members
+with `write` access) makes a comment link with the default expiry and copies it
+to the clipboard in one click: "Comment link copied. Anyone with it can read and
+comment for 14 days." If the browser does not allow the copy, the link shows in
+a read-only box with **Copy**. The link is shown only while that note or box is
+open; Wardby never shows it again. For a view link or another expiry, use
+`create_share_link`.
 
 `create_share_link` returns `https://<your-host>/s/<token>` once; only a hash
 is stored, so a lost link must be replaced. Over stdio, links use the origin of

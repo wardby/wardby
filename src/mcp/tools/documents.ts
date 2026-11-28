@@ -274,7 +274,7 @@ export function registerDocumentTools(mcp: WardbyMcpServer): void {
     name: "create_share_link",
     scope: "documents:write",
     description:
-      "Creates a share link for a document you own and returns its URL once (only its path, with a note, when the server has no public address); it is never shown again. permission is view or comment; expiresInDays is 1-90 (default 14). Guests choose a name when they open it.",
+      "Creates a share link for a document you own or may write (people only) and returns its URL once (only its path, with a note, when the server has no public address); it is never shown again. permission is view or comment; expiresInDays is 1-90 (default 14). Guests choose a name when they open it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -309,7 +309,7 @@ export function registerDocumentTools(mcp: WardbyMcpServer): void {
     name: "list_share_links",
     scope: "documents:read",
     description:
-      "Lists a document's share links you own: id, permission, expiry, revoked, guest count. URLs are not stored and are never listed.",
+      "Lists a document's share links: every link for its owner, only the links you made for another person with write access. Each has id, permission, expiry, revoked, guest count. URLs are not stored and are never listed.",
     inputSchema: { type: "object", properties: { documentId: { type: "string" } }, required: ["documentId"] },
     handler: async (args: unknown, ctx) => {
       const input = listArgs.parse(args);
@@ -329,7 +329,8 @@ export function registerDocumentTools(mcp: WardbyMcpServer): void {
   mcp.registerTool({
     name: "revoke_share_link",
     scope: "documents:write",
-    description: "Revokes a share link you own. Guests who came through it are signed out immediately.",
+    description:
+      "Revokes a share link. The document's owner may revoke any of its links, another person with write access only the links they made (another's is refused with document_access_denied). Guests who came through it are signed out immediately.",
     inputSchema: { type: "object", properties: { shareLinkId: { type: "string" } }, required: ["shareLinkId"] },
     handler: async (args: unknown, ctx) => {
       const input = revokeArgs.parse(args);

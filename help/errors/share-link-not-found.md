@@ -9,6 +9,6 @@ appliesTo: ">=0.10.0"
 
 # Share link not found
 
-`share_link_not_found` (HTTP 404). `revoke_share_link` takes the link's `id` (from `create_share_link` or `list_share_links`), not its URL, and only the document's owner may revoke it.
+`share_link_not_found` (HTTP 404). `revoke_share_link` takes the link's `id` (from `create_share_link` or `list_share_links`), not its URL, and only the document's owner, or the writer who made it, may revoke it. A link on a document you cannot write is reported as not found.
 
 See [Documents](../documents.md).

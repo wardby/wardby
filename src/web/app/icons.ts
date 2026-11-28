@@ -50,6 +50,14 @@ const SHAPES = {
     ["path", "M10 14a4 4 0 0 0 5.7 0l3.1-3.1a4 4 0 0 0-5.7-5.7l-1 1"],
     ["path", "M14 10a4 4 0 0 0-5.7 0l-3.1 3.1a4 4 0 0 0 5.7 5.7l1-1"],
   ],
+  /** Share: an arrow leaving an open-top box. */
+  share: [
+    [
+      "path",
+      "M8 10H6.5A1.5 1.5 0 0 0 5 11.5v7A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-7a1.5 1.5 0 0 0-1.5-1.5H16",
+    ],
+    ["path", "M12 14.5V3.5M8.5 7 12 3.5 15.5 7"],
+  ],
   /** Overview: every board at once. */
   overview: [
     ["rect", 4, 4, 6.5, 6.5, 1],

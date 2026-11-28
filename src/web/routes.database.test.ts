@@ -1857,7 +1857,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect(JSON.stringify(review)).not.toContain(member.id);
     });
 
-    it("lets only the owner make a comment link from the page; its path is answered once and works", async () => {
+    it("lets the owner make a comment link from the page; its path is answered once and works", async () => {
       const id = await newDoc();
       const o = await session(owner.id);
       const m = await session(member.id);
@@ -1870,7 +1870,7 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect([row.documentId, row.permission, row.createdById]).toEqual([id, "comment", owner.id]);
       // Only the hash is stored.
       expect(JSON.stringify(row)).not.toContain(made.path.slice(3));
-      // A member without ownership, an outsider and a request without CSRF are refused.
+      // A commenter (here a named reviewer), an outsider and a request without CSRF are refused.
       await submitAs(id, o, member.id);
       expect(
         (await call(`/d/api/${id}/share-links`, { method: "POST", jar: m.jar, csrf: m.csrf, body: {} })).status,
@@ -1881,6 +1881,28 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       ).toBe(404);
       expect((await call(`/d/api/${id}/share-links`, { method: "POST", jar: o.jar, body: {} })).status).toBe(403);
       expect(await db.documentShareLink.count({ where: { documentId: id } })).toBe(1);
+    });
+
+    it("lets a member with write access make a comment link from the page", async () => {
+      const id = await newDoc();
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "document",
+          resourceId: id,
+          granteeKind: "principal",
+          granteePrincipalId: member.id,
+          granteeKey: `principal:${member.id}`,
+          level: "write",
+        },
+      });
+      const m = await session(member.id);
+      const res = await call(`/d/api/${id}/share-links`, { method: "POST", jar: m.jar, csrf: m.csrf, body: {} });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const made = (await res.json()) as any;
+      expect(made.path).toMatch(/^\/s\/[A-Za-z0-9_-]{43}$/);
+      const row = await db.documentShareLink.findUniqueOrThrow({ where: { id: made.id } });
+      expect([row.documentId, row.permission, row.createdById]).toEqual([id, "comment", member.id]);
     });
 
     it("issues a single-use live ticket carrying the request's access, a share link included", async () => {

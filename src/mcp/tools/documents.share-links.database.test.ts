@@ -1,5 +1,5 @@
 /**
- * Share-link MCP tools against real PostgreSQL: owner-only, the URL is
+ * Share-link MCP tools against real PostgreSQL: owner or writer, the URL is
  * returned once and never listed, revoke. Skipped without DATABASE_URL.
  */
 import { randomUUID } from "node:crypto";
@@ -19,6 +19,7 @@ describe.skipIf(!process.env.DATABASE_URL)("share-link MCP tools (database)", ()
   const s = randomUUID();
   let owner: Principal;
   let other: Principal;
+  let writer: Principal;
   let docId: string;
 
   async function connect(p: Principal, scopes: string[] = ["documents:read", "documents:write"]) {
@@ -61,11 +62,22 @@ describe.skipIf(!process.env.DATABASE_URL)("share-link MCP tools (database)", ()
   beforeAll(async () => {
     owner = await db.principal.create({ data: { subject: `slmcp-owner-${s}` } });
     other = await db.principal.create({ data: { subject: `slmcp-other-${s}` } });
+    writer = await db.principal.create({ data: { subject: `slmcp-writer-${s}` } });
     docId = (await createDocument(db, cipher, { ownerId: owner.id, title: "T", markdown: "x" })).id;
+    await db.resourceGrant.create({
+      data: {
+        resourceType: "document",
+        resourceId: docId,
+        granteeKind: "principal",
+        granteePrincipalId: writer.id,
+        granteeKey: `principal:${writer.id}`,
+        level: "write",
+      },
+    });
   });
   afterAll(async () => {
     await db.document.deleteMany({ where: { ownerId: owner.id } });
-    await db.principal.deleteMany({ where: { id: { in: [owner.id, other.id] } } });
+    await db.principal.deleteMany({ where: { id: { in: [owner.id, other.id, writer.id] } } });
     await db.$disconnect();
   });
 
@@ -87,7 +99,32 @@ describe.skipIf(!process.env.DATABASE_URL)("share-link MCP tools (database)", ()
     expect((await call("list_share_links", { documentId: docId })).json[0].revoked).toBe(true);
   });
 
-  it("refuses non-owners and bad arguments", async () => {
+  it("a writer creates view and comment links, lists only their own, and cannot revoke the owner's", async () => {
+    const mine = await connect(owner);
+    const ownerLink = (await mine("create_share_link", { documentId: docId, permission: "view" })).json;
+    const call = await connect(writer);
+    const comment = await call("create_share_link", { documentId: docId, permission: "comment" });
+    const viewLink = await call("create_share_link", { documentId: docId, permission: "view", expiresInDays: 3 });
+    expect(comment.isError).toBe(false);
+    expect(viewLink.isError).toBe(false);
+    expect(comment.json.url).toMatch(/^https:\/\/wardby\.example\/s\/[A-Za-z0-9_-]{43}$/);
+    const listed = await call("list_share_links", { documentId: docId });
+    expect(listed.text).not.toContain(comment.json.url.split("/s/")[1]);
+    expect(listed.json.map((l: { id: string }) => l.id).sort()).toEqual([comment.json.id, viewLink.json.id].sort());
+    const ownerListed = (await mine("list_share_links", { documentId: docId })).json.map((l: { id: string }) => l.id);
+    expect(ownerListed).toEqual(expect.arrayContaining([ownerLink.id, comment.json.id, viewLink.json.id]));
+    const refused = await call("revoke_share_link", { shareLinkId: ownerLink.id });
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toContain("document_access_denied");
+    expect((await call("revoke_share_link", { shareLinkId: comment.json.id })).json).toEqual({
+      revoked: comment.json.id,
+    });
+    expect((await mine("revoke_share_link", { shareLinkId: viewLink.json.id })).json).toEqual({
+      revoked: viewLink.json.id,
+    });
+  });
+
+  it("refuses readers and bad arguments", async () => {
     const mine = await connect(owner);
     const link = (await mine("create_share_link", { documentId: docId, permission: "view" })).json;
     const theirs = await connect(other);

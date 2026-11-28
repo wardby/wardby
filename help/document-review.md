@@ -95,7 +95,7 @@ Every document and design page shows a banner with the state and the approval co
 **Start review** (on a draft) and **Edit reviewers** (in review or changes requested) open the same picker:
 
 - It lists the members with access to this document and the guests of its live comment links who gave a name ("(guest)"). Type in **Find people** to filter by name.
-- For someone without access, **Create comment link** makes a comment share link (default expiry). It is shown once: copy it and send it. After they open it and give a name, **Refresh list** lists them.
+- For someone without access, **Create comment link** makes a comment share link (default expiry). It is shown once: copy it and send it. **Share** in the top bar makes the same kind of link in one click. After they open it and give a name, **Refresh list** lists them.
 - **Submit for review** (or **Save reviewers**) confirms the list; you may also pick a final approver.
 
 ## MCP tools

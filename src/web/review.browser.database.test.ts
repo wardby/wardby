@@ -1065,5 +1065,59 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       expect(await page.getByRole("button", { name: "Restore this version" }).count()).toBe(0);
       await page.context().close();
     }, 90_000);
+
+    it("a writer's Share copies a comment link on the document and design pages; a commenter has no Share", async () => {
+      const COPIED = "Comment link copied. Anyone with it can read and comment for 14 days.";
+      const doc = await server.design({ title: "Share", kind: "document", markdown: "# S\n\nx\n", access: "write" });
+      const design = await server.design({ title: "Coffee", files: files(), access: "write" });
+      for (const d of [doc, design]) {
+        const context = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+        await context.addCookies([d.cookie]);
+        const page = await context.newPage();
+        await page.goto(`${server.origin}/d/${d.documentId}`);
+        await expect.poll(() => page.locator(".review-banner").textContent(), { timeout: 20_000 }).toMatch(/v\d/);
+        await page.locator(".topbar").getByRole("button", { name: "Share" }).click();
+        await expect.poll(() => page.locator(".share-note").textContent()).toBe(COPIED);
+        const copied = await page.evaluate<string>("navigator.clipboard.readText()");
+        expect(copied).toMatch(new RegExp(`^${server.origin}/s/[A-Za-z0-9_-]{43}$`));
+        const row = await server.db.documentShareLink.findFirstOrThrow({ where: { documentId: d.documentId } });
+        expect([row.permission, row.createdById]).toEqual(["comment", d.principalIds.first]);
+        // The link is never put in the page's URL or storage.
+        expect(page.url()).not.toContain("/s/");
+        const stored = await page.evaluate(
+          () => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }),
+        );
+        expect(stored).not.toContain(copied.split("/s/")[1]);
+        await context.close();
+      }
+      const c = await server.design({ title: "NoShare", kind: "document", markdown: "# N\n\nx\n", access: "comment" });
+      const page = await open(c.cookie, c.documentId);
+      expect(await page.locator(".topbar").getByRole("button", { name: "Share" }).count()).toBe(0);
+      await page.context().close();
+    }, 90_000);
+
+    it("when the clipboard refuses, Share shows the link in a read-only box with Copy", async () => {
+      const d = await server.design({ title: "Box", kind: "document", markdown: "# B\n\nx\n", access: "write" });
+      const context = await browser.newContext();
+      await context.addInitScript(() => {
+        Object.defineProperty(navigator, "clipboard", {
+          value: { writeText: () => Promise.reject(new Error("denied")) },
+        });
+      });
+      await context.addCookies([d.cookie]);
+      const page = await context.newPage();
+      await page.goto(`${server.origin}/d/${d.documentId}`);
+      await expect.poll(() => page.locator(".review-banner").textContent(), { timeout: 20_000 }).toMatch(/v\d/);
+      await page.locator(".topbar").getByRole("button", { name: "Share" }).click();
+      const field = page.getByRole("textbox", { name: "Comment link" });
+      await expect.poll(() => field.inputValue()).toMatch(/\/s\/[A-Za-z0-9_-]{43}$/);
+      expect(await field.getAttribute("readonly")).not.toBeNull();
+      expect(await page.locator(".share-note").getByRole("button", { name: "Copy" }).count()).toBe(1);
+      // Escape closes the box, and the link goes with it.
+      await page.keyboard.press("Escape");
+      await expect.poll(() => page.locator(".share-note").isVisible()).toBe(false);
+      expect(await page.getByRole("textbox", { name: "Comment link" }).count()).toBe(0);
+      await context.close();
+    }, 90_000);
   },
 );

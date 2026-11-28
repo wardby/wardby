@@ -36,6 +36,7 @@ import { measureFidelity } from "./fidelity.js";
 import { DesignSurface } from "./design-surface.js";
 import { DesignHistory } from "./design-history.js";
 import { exportsMenu } from "./exports-menu.js";
+import { shareButton } from "./share-ui.js";
 import { openOverview } from "./overview.js";
 import { openPlay } from "./play.js";
 import {
@@ -231,6 +232,10 @@ function mount(
   const overviewBtn = h("button", { type: "button", data: { action: "overview" } }, icon("overview"), "Overview");
   const playBtn = h("button", { type: "button", data: { action: "play" } }, icon("play"), "Play");
   const exportBtn = h("button", { type: "button", data: { action: "export" } }, icon("export"), "Export ▾");
+  // Share: a member with write access copies a comment link in one click (share-ui.ts).
+  const share = shareButton(api);
+  const canShare = () => viewer.kind === "member" && atLeast(viewer.access, "write");
+  share.setAllowed(canShare());
   const commentBtn = h(
     "button",
     { type: "button", class: "primary", data: { action: "comment" } },
@@ -382,7 +387,7 @@ function mount(
         ),
         // The review status, beside what the page is; then the page's actions.
         reviewBanner,
-        h("div", { class: "group page-actions" }, overviewBtn, playBtn, exportBtn, commentBtn),
+        h("div", { class: "group page-actions" }, overviewBtn, playBtn, exportBtn, share.el, commentBtn),
         saveState,
         liveNote,
         who,
@@ -703,6 +708,7 @@ function mount(
 
   // ---- who is viewing ----
   const renderViewer = () => {
+    share.setAllowed(canShare());
     clear(who);
     clear(account);
     if (viewer.kind === "member") who.append(`Signed in as ${viewer.name ?? "member"}`);

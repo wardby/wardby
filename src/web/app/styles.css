@@ -1498,7 +1498,8 @@ a.plan-review:hover .plan-state {
 .topbar .page-actions {
   position: relative;
 }
-.btn-hint {
+.btn-hint,
+.share-note {
   position: absolute;
   top: calc(100% + 0.45rem);
   right: 0;
@@ -1510,6 +1511,26 @@ a.plan-review:hover .plan-state {
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 6px 20px rgb(0 0 0 / 12%);
+}
+
+/* Share (share-ui.ts): the note or the link box drops down under the button. */
+.share-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.share-wrap[hidden] {
+  display: none;
+}
+.share-note p {
+  margin: 0 0 0.4rem;
+}
+.share-note .share-row {
+  display: flex;
+  gap: 0.35rem;
+}
+.share-note .share-link {
+  flex: 1;
+  min-width: 0;
 }
 
 .rb-status .rb-more {

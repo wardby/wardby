@@ -355,7 +355,7 @@ export class Api {
     return this.request("GET", this.doc("/review-candidates"));
   }
 
-  /** Owner: a new comment link for this document. Its path (/s/<token>) is answered once, never again. */
+  /** A member with write access: a new comment link for this document. Its path (/s/<token>) is answered once, never again. */
   createCommentLink(): Promise<{ id: string; path: string; expiresAt: string }> {
     return this.request("POST", this.doc("/share-links"), {});
   }

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Document, DocumentShareLink, PrismaClient } from "#prisma";
-import { requireDocumentAccess, type Viewer } from "./access.js";
+import { documentAccess, requireDocumentAccess, type Viewer } from "./access.js";
 import { principalNames } from "./comments.js";
 import { notifyDocumentChange } from "./events.js";
 import { validateGuestName } from "./names.js";
@@ -23,7 +23,8 @@ function isLive(link: Pick<DocumentShareLink, "revokedAt" | "expiresAt">): boole
 }
 
 /**
- * Creates a link for a document the viewer owns. The token (32 random bytes,
+ * Creates a link on a document the viewer may write (owner or a write grant); people only, never an agent
+ * or a guest. The token (32 random bytes,
  * base64url) is returned here once and never stored or listed again; `url` is
  * `<origin>/s/<token>` when `origin` is given.
  */
@@ -40,7 +41,7 @@ export async function createShareLink(
   if (input.permission !== "view" && input.permission !== "comment") throw new Error("share_permission_invalid");
   const days = input.expiresInDays ?? DEFAULT_SHARE_DAYS;
   if (!Number.isInteger(days) || days < 1 || days > MAX_SHARE_DAYS) throw new Error("share_expiry_invalid");
-  await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
+  await requireDocumentAccess(db, input.documentId, input.viewer, "write");
   if (input.viewer.kind !== "principal") throw new Error("document_access_denied");
   const token = randomBytes(32).toString("base64url");
   const expiresAt = new Date(Date.now() + days * DAY_MS);
@@ -155,14 +156,35 @@ export interface ShareLinkView {
   guestCount: number;
 }
 
-/** Owner-only listing. Tokens are not stored, so they cannot appear here. */
+/**
+ * Which links on a document this viewer manages: every link for the owner, only their own for another
+ * person with write access. Refuses agents, guests and anyone below write.
+ */
+async function managedLinks(
+  db: ShareDb,
+  documentId: string,
+  viewer: Viewer,
+): Promise<{ all: true } | { all: false; createdById: string }> {
+  const access = await documentAccess(db, documentId, viewer);
+  if (access === "none") throw new Error("document_not_found");
+  if ((access !== "write" && access !== "owner") || viewer.kind !== "principal") {
+    throw new Error("document_access_denied");
+  }
+  if (access === "owner") return { all: true };
+  return { all: false, createdById: viewer.principalId };
+}
+
+/**
+ * Listing for the owner (every link) or a writer (the links they made). Tokens are not stored, so they
+ * cannot appear here.
+ */
 export async function listShareLinks(
   db: ShareDb,
   input: { documentId: string; viewer: Viewer },
 ): Promise<ShareLinkView[]> {
-  await requireDocumentAccess(db, input.documentId, input.viewer, "owner");
+  const managed = await managedLinks(db, input.documentId, input.viewer);
   const rows = await db.documentShareLink.findMany({
-    where: { documentId: input.documentId },
+    where: { documentId: input.documentId, ...(managed.all ? {} : { createdById: managed.createdById }) },
     orderBy: { createdAt: "desc" },
     include: { _count: { select: { guests: true } } },
   });
@@ -176,16 +198,20 @@ export async function listShareLinks(
   }));
 }
 
-/** Owner-only. Marks the link revoked and deletes every browser session that came through it, in one transaction. */
+/**
+ * The owner revokes any link on the document, a writer only a link they made (another's is refused with
+ * document_access_denied). Marks the link revoked and deletes every browser session that came through it, in one transaction. */
 export async function revokeShareLink(db: ShareDb, input: { shareLinkId: string; viewer: Viewer }): Promise<void> {
   const link = await db.documentShareLink.findUnique({ where: { id: input.shareLinkId } });
   if (!link) throw new Error("share_link_not_found");
+  let managed: Awaited<ReturnType<typeof managedLinks>>;
   try {
-    await requireDocumentAccess(db, link.documentId, input.viewer, "owner");
+    managed = await managedLinks(db, link.documentId, input.viewer);
   } catch {
     // Do not reveal links on documents the caller cannot manage.
     throw new Error("share_link_not_found");
   }
+  if (!managed.all && link.createdById !== managed.createdById) throw new Error("document_access_denied");
   await db.$transaction(async (tx) => {
     await tx.documentShareLink.updateMany({
       where: { id: link.id, revokedAt: null },

@@ -23,12 +23,16 @@ describe.skipIf(!process.env.DATABASE_URL)("share links (database)", () => {
   const s = randomUUID();
   let owner: Principal;
   let other: Principal;
+  let writer: Principal;
+  let writer2: Principal;
   let docId: string;
   const view = (p: Principal) => ({ kind: "principal" as const, principalId: p.id });
 
   beforeAll(async () => {
     owner = await db.principal.create({ data: { subject: `sl-owner-${s}` } });
     other = await db.principal.create({ data: { subject: `sl-other-${s}` } });
+    writer = await db.principal.create({ data: { subject: `sl-writer-${s}` } });
+    writer2 = await db.principal.create({ data: { subject: `sl-writer2-${s}` } });
     await upsertProfile(db, owner.id, { displayName: "Olive Owner", source: "operator" });
     await upsertProfile(db, other.id, { displayName: "Grace Grantee", source: "operator" });
     docId = (await createDocument(db, cipher, { ownerId: owner.id, title: "T", markdown: "x" })).id;
@@ -42,14 +46,29 @@ describe.skipIf(!process.env.DATABASE_URL)("share links (database)", () => {
         level: "read",
       },
     });
+    for (const [p, level] of [
+      [writer, "write"],
+      [writer2, "write"],
+    ] as const) {
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "document",
+          resourceId: docId,
+          granteeKind: "principal",
+          granteePrincipalId: p.id,
+          granteeKey: `principal:${p.id}`,
+          level,
+        },
+      });
+    }
   });
   afterAll(async () => {
     await db.document.deleteMany({ where: { ownerId: owner.id } });
-    await db.principal.deleteMany({ where: { id: { in: [owner.id, other.id] } } });
+    await db.principal.deleteMany({ where: { id: { in: [owner.id, other.id, writer.id, writer2.id] } } });
     await db.$disconnect();
   });
 
-  it("only the owner can create, list or revoke", async () => {
+  it("a reader cannot create, list or revoke; a stranger does not see the document", async () => {
     await expect(createShareLink(db, { documentId: docId, viewer: view(other), permission: "view" })).rejects.toThrow(
       "document_access_denied",
     );
@@ -58,11 +77,56 @@ describe.skipIf(!process.env.DATABASE_URL)("share links (database)", () => {
       createShareLink(db, { documentId: docId, viewer: view(stranger), permission: "view" }),
     ).rejects.toThrow("document_not_found");
     const link = await createShareLink(db, { documentId: docId, viewer: view(owner), permission: "view" });
-    await expect(listShareLinks(db, { documentId: docId, viewer: view(other) })).rejects.toThrow();
+    await expect(listShareLinks(db, { documentId: docId, viewer: view(other) })).rejects.toThrow(
+      "document_access_denied",
+    );
     await expect(revokeShareLink(db, { shareLinkId: link.id, viewer: view(other) })).rejects.toThrow(
       "share_link_not_found",
     );
+    await expect(revokeShareLink(db, { shareLinkId: link.id, viewer: view(stranger) })).rejects.toThrow(
+      "share_link_not_found",
+    );
     await db.principal.delete({ where: { id: stranger.id } });
+  });
+
+  it("a writer creates links (view and comment) and lists and revokes only their own; the owner sees and revokes all", async () => {
+    const byWriter = await createShareLink(db, { documentId: docId, viewer: view(writer), permission: "comment" });
+    const byWriterView = await createShareLink(db, { documentId: docId, viewer: view(writer), permission: "view" });
+    const byWriter2 = await createShareLink(db, { documentId: docId, viewer: view(writer2), permission: "comment" });
+    const byOwner = await createShareLink(db, { documentId: docId, viewer: view(owner), permission: "comment" });
+    expect((await db.documentShareLink.findUniqueOrThrow({ where: { id: byWriter.id } })).createdById).toBe(writer.id);
+
+    const writerList = (await listShareLinks(db, { documentId: docId, viewer: view(writer) })).map((l) => l.id);
+    expect(writerList.sort()).toEqual([byWriter.id, byWriterView.id].sort());
+    const ownerList = (await listShareLinks(db, { documentId: docId, viewer: view(owner) })).map((l) => l.id);
+    expect(ownerList).toEqual(expect.arrayContaining([byWriter.id, byWriterView.id, byWriter2.id, byOwner.id]));
+    expect(JSON.stringify(await listShareLinks(db, { documentId: docId, viewer: view(writer) }))).not.toContain(
+      byWriter.token,
+    );
+
+    await expect(revokeShareLink(db, { shareLinkId: byWriter2.id, viewer: view(writer) })).rejects.toThrow(
+      "document_access_denied",
+    );
+    await expect(revokeShareLink(db, { shareLinkId: byOwner.id, viewer: view(writer) })).rejects.toThrow(
+      "document_access_denied",
+    );
+    expect((await db.documentShareLink.findUniqueOrThrow({ where: { id: byWriter2.id } })).revokedAt).toBeNull();
+    await revokeShareLink(db, { shareLinkId: byWriter.id, viewer: view(writer) });
+    expect((await db.documentShareLink.findUniqueOrThrow({ where: { id: byWriter.id } })).revokedAt).not.toBeNull();
+    await revokeShareLink(db, { shareLinkId: byWriter2.id, viewer: view(owner) });
+    expect((await db.documentShareLink.findUniqueOrThrow({ where: { id: byWriter2.id } })).revokedAt).not.toBeNull();
+  });
+
+  it("agents and guests cannot create, list or revoke links", async () => {
+    const link = await createShareLink(db, { documentId: docId, viewer: view(owner), permission: "comment" });
+    const guestViewer = { kind: "guest" as const, guestId: "g", shareLinkId: link.id, permission: "comment" as const };
+    const agentViewer = { kind: "agent" as const, agentId: "a", runId: "r" };
+    for (const viewer of [guestViewer, agentViewer]) {
+      await expect(createShareLink(db, { documentId: docId, viewer, permission: "comment" })).rejects.toThrow();
+      await expect(listShareLinks(db, { documentId: docId, viewer })).rejects.toThrow();
+      await expect(revokeShareLink(db, { shareLinkId: link.id, viewer })).rejects.toThrow();
+    }
+    expect((await db.documentShareLink.findUniqueOrThrow({ where: { id: link.id } })).revokedAt).toBeNull();
   });
 
   it("stores only the hash, never lists the token, and builds /s/<token>", async () => {

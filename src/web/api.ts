@@ -400,8 +400,8 @@ export async function getReviewCandidates(
 }
 
 /**
- * POST /d/api/<id>/share-links: the owner makes a comment link from the reviewer picker, for a reviewer
- * with no account. Answers the link's path (the page adds its own origin) once; it is never shown again
+ * POST /d/api/<id>/share-links: a member with write access (the owner included) makes a comment link, from
+ * the Share button or the reviewer picker, for a reader with no account. Answers the link's path (the page adds its own origin) once; it is never shown again
  * and never logged. Comment permission and the default expiry; the MCP tool create_share_link has the options.
  */
 export async function postShareLink(
