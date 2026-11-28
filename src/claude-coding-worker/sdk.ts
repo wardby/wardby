@@ -42,7 +42,8 @@ const WORKFLOW_REFUSED =
   "Wardby runs only this run's own workflow, once: call Workflow with just its name, and nothing else.";
 const RELAUNCH_REFUSED =
   "Wardby runs only this run's own workflow: call Workflow with just its name, and only when no launch of it is running (stop it first with TaskStop).";
-const TASK_STOP_REFUSED = "TaskStop may stop only this run's own running workflow, by its task id.";
+const TASK_STOP_REFUSED =
+  "TaskStop may stop only this run's own running workflow, by its task id, when a person who joined the run asked.";
 /** The most launches of a run's workflow (#657): the first and up to four restarts. */
 export const MAX_WORKFLOW_LAUNCHES = 5;
 
@@ -108,7 +109,13 @@ export function taskStopGuard(
     const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
     const keys = Object.keys(toolInput);
     const taskId = toolInput.task_id;
-    const allowed = keys.length === 1 && typeof taskId === "string" && control.ownsTask(taskId) && control.running();
+    // Only once a joined person has said something to the lead: nobody asked, nothing is stopped.
+    const allowed =
+      keys.length === 1 &&
+      typeof taskId === "string" &&
+      control.ownsTask(taskId) &&
+      control.running() &&
+      (control.asked?.() ?? false);
     if (allowed) control.stopping?.(taskId);
     return {
       hookSpecificOutput: allowed

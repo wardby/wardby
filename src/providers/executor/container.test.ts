@@ -3954,6 +3954,28 @@ describe("ContainerExecutor", () => {
       ]);
     });
 
+    it("names the sender of the joined message the worker reports for the stop, over the latest sender", async () => {
+      const created = await harness({});
+      const store = created.store as unknown as {
+        latestJoinSender: () => Promise<string | null>;
+        joinSenderAt: (runId: string, seq: number) => Promise<string | null>;
+      };
+      store.latestJoinSender = async () => "latest-person";
+      store.joinSenderAt = async (_runId, seq) => (seq === 4 ? "asker" : null);
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = {
+        exitCode: 1,
+        reason: "failed",
+        diagnostic: "coding_workflow_stopped",
+        diagnosticJoinSeq: 4,
+      };
+      await created.executor.start("run-1");
+      expect(created.store.terminations[0]).toMatchObject({
+        status: "cancelled",
+        error: "Stopped by asker from a joined chat: the workflow was stopped and not started again.",
+      });
+    });
+
     it("describes a workflow stopped from a joined chat without a name when the sender is unknown", () => {
       expect(workflowStoppedError(null)).toBe(
         "Stopped from a joined chat: the workflow was stopped and not started again.",

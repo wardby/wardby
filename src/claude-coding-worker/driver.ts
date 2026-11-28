@@ -236,6 +236,19 @@ export interface WorkflowControl {
   ownsTask(taskId: string): boolean;
   /** The TaskStop guard allowed the lead to stop `taskId` (a joined person asked it to). */
   stopping?(taskId: string): void;
+  /** A joined message has reached the lead: TaskStop is allowed only then (someone asked). */
+  asked?(): boolean;
+}
+
+/**
+ * The lead stopped its workflow for a joined person and did not start it again (#657). `joinSeq` is
+ * the run step seq of the joined message delivered before the stop, so the control plane can name
+ * who asked; main.ts reports it with the fixed code.
+ */
+export class WorkflowStoppedError extends Error {
+  constructor(readonly joinSeq?: number) {
+    super("coding_workflow_stopped");
+  }
 }
 
 export type ClaudeQueryFactory = (options: ClaudeQueryOptions) => AsyncIterable<ClaudeSdkMessage>;
@@ -737,9 +750,13 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     tree: null as ReturnType<typeof workflowTreeOf>,
     // The lead has answered since the latest launch ended (its final turn came).
     resultAfterEnd: false,
-    // Launches the lead stopped through the TaskStop guard, and whether the latest ended that way.
-    stopsAllowed: new Set<string>(),
+    // Launches the lead stopped through the TaskStop guard (with the seq of the joined message
+    // delivered before each stop), and whether the latest ended that way.
+    stopsAllowed: new Map<string, number | undefined>(),
     stoppedByLead: false,
+    // Results still due from turns already in flight when the latest launch ended: those are not
+    // the lead's answer to the end (it has not seen the notice yet).
+    resultsBeforeNotice: 0,
   };
   const workflowRunning = () => workflowState.started && workflowState.ended === undefined;
   const workflowControl: WorkflowControl | undefined =
@@ -747,7 +764,8 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
       ? {
           running: workflowRunning,
           ownsTask: (taskId) => workflowState.taskIds.has(taskId),
-          stopping: (taskId) => void workflowState.stopsAllowed.add(taskId),
+          stopping: (taskId) => void workflowState.stopsAllowed.set(taskId, joined?.lastDeliveredSeq),
+          asked: () => (joined?.deliveredCount ?? 0) > 0,
         }
       : undefined;
   // A joinable run streams its input: the task, then each joined message (join.ts). Only fixed event
@@ -865,6 +883,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
           workflowState.tree = null;
           workflowState.resultAfterEnd = false;
           workflowState.stoppedByLead = false;
+          workflowState.resultsBeforeNotice = 0;
           workflowState.launches += 1;
           workflowState.taskId = taskId;
           if (taskId) workflowState.taskIds.add(taskId);
@@ -879,6 +898,10 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
           if (typeof task.output_file === "string") workflowState.outputFile = task.output_file;
           workflowState.stoppedByLead =
             workflowState.ended === "stopped" && taskId !== undefined && workflowState.stopsAllowed.has(taskId);
+          // A turn in flight now (a joined question, or the launch turn) ends before the lead's turn
+          // with the notice: its result is not the answer to the end. Not when the lead stopped the
+          // launch itself: that turn called TaskStop, so it already knows.
+          workflowState.resultsBeforeNotice = joined?.inFlight && !workflowState.stoppedByLead ? 1 : 0;
           // The launch ended: with nobody joined, the input may close once the lead has answered.
           joined?.recheck();
         }
@@ -896,7 +919,15 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
           status: "in_progress",
         });
       } else if (message.type === "result") {
-        if (workflow && workflowState.ended) workflowState.resultAfterEnd = true;
+        // A workflow run's answer is the lead's turn after it has seen the launch's end notice.
+        let afterNotice = false;
+        if (workflow && workflowState.ended) {
+          if (workflowState.resultsBeforeNotice > 0) workflowState.resultsBeforeNotice -= 1;
+          else {
+            workflowState.resultAfterEnd = true;
+            afterNotice = true;
+          }
+        }
         const errored = message.subtype !== "success" || (message as { is_error?: unknown }).is_error === true;
         // A joined turn (after the run's first valid answer) never fails the run: its turn limit or error
         // is traced and the last valid answer stands. Budget refusals still end the run as below.
@@ -922,7 +953,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
         } else if (message.subtype === "success" && typeof message.result === "string") {
           // A workflow run's answer counts only once the workflow has ended (see workflowState); the
           // launch turn's placeholder is ignored, and marked so in the trace.
-          if (!workflow || workflowState.ended) {
+          if (!workflow || afterNotice) {
             finalJson = message.result;
             // A joined run's first valid answer: later turns answer joined messages (see above). An
             // earlier interrupted or failed turn no longer counts once a turn answered.
@@ -936,7 +967,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
           budgetRefused = true;
           break;
         } else if (message.subtype === "error_max_turns") turnLimit = true;
-        else if (workflow && workflowState.ended === "completed") workflowAnswerMissing = true;
+        else if (workflow && afterNotice && workflowState.ended === "completed") workflowAnswerMissing = true;
         else failed = true;
         // Not answered yet: the session stays open only while someone is joined (an interrupted first
         // turn followed by a message); otherwise the input closes and the run ends as before.
@@ -970,7 +1001,9 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   // A joined person had the lead stop the workflow, and it was not started again (#657): the run ends
   // cancelled, as a stop would (the executor maps the code), and nothing is collected.
   if (workflow && workflowState.ended === "stopped" && workflowState.stoppedByLead) {
-    throw new Error("coding_workflow_stopped");
+    throw new WorkflowStoppedError(
+      workflowState.taskId === undefined ? undefined : workflowState.stopsAllowed.get(workflowState.taskId),
+    );
   }
   // The workflow never started, never ended, or ended failed or stopped: the run did not do its work.
   if (workflow && workflowState.ended !== "completed") throw new Error("coding_workflow_failed");

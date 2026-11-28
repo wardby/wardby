@@ -75,8 +75,8 @@ describe("ProxyJoinChannel", () => {
     expect(sleeps).toEqual([IDLE_POLL_MS]);
     expect(log).toEqual([
       ["joined", true],
-      ["message", { text: "hi", interrupt: false }],
-      ["message", { text: "stop", interrupt: true }],
+      ["message", { text: "hi", interrupt: false, seq: 4 }],
+      ["message", { text: "stop", interrupt: true, seq: 5 }],
       ["joined", false],
     ]);
   });

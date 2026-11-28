@@ -35,6 +35,8 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
 export interface JoinedMessage {
   text: string;
   interrupt: boolean;
+  /** The message's run step seq, when the source knows it (the proxy poll does). */
+  seq?: number;
 }
 
 export interface JoinEvents {
@@ -157,7 +159,7 @@ export class ProxyJoinChannel implements JoinSource {
       for (const message of answer.messages) {
         if (message.seq <= this.after) continue;
         this.after = message.seq;
-        events.message({ text: message.text, interrupt: message.interrupt });
+        events.message({ text: message.text, interrupt: message.interrupt, seq: message.seq });
       }
       if (answer.joined !== this.joined) {
         this.joined = answer.joined;
@@ -213,7 +215,8 @@ export interface JoinedInputOptions {
  * deadline margin, or when the run ends.
  */
 export class JoinedInput {
-  private readonly queue: { text: string; interrupt: boolean }[] = [];
+  private readonly queue: { text: string; interrupt: boolean; seq?: number }[] = [];
+  private lastSeq: number | undefined;
   private joined = false;
   /** A message has been handed to the session and no result has followed it yet. */
   private busy = true;
@@ -240,7 +243,11 @@ export class JoinedInput {
     source.start({
       message: (message) => {
         if (this.closed) return;
-        this.queue.push({ text: message.text, interrupt: message.interrupt });
+        this.queue.push({
+          text: message.text,
+          interrupt: message.interrupt,
+          ...(message.seq !== undefined ? { seq: message.seq } : {}),
+        });
         this.signal();
       },
       joinedChanged: (joined) => {
@@ -254,6 +261,16 @@ export class JoinedInput {
   /** Whether any joined message has reached the session (later turns are joined turns). */
   get deliveredCount(): number {
     return this.delivered;
+  }
+
+  /** The run step seq of the joined message handed to the session last, when known. */
+  get lastDeliveredSeq(): number | undefined {
+    return this.lastSeq;
+  }
+
+  /** A message (the task, or a joined one) has been handed to the session and its turn has not ended. */
+  get inFlight(): boolean {
+    return this.busy;
   }
 
   /** The session's answer for the work so far arrived: the agent is idle until the next message. */
@@ -280,12 +297,13 @@ export class JoinedInput {
     yield userMessage(this.prompt);
     while (true) {
       while (this.queue.length > 0 && !this.closed) {
-        const queued = this.queue.shift() as { text: string; interrupt: boolean };
+        const queued = this.queue.shift() as { text: string; interrupt: boolean; seq?: number };
         const note = this.options.annotate?.();
         const text = joinedMessageText(queued.text);
         const next = userMessage(note ? `${text}\n\n${note}` : text, queued.interrupt ? "now" : "later");
         this.busy = true;
         this.delivered += 1;
+        this.lastSeq = queued.seq;
         this.options.trace?.("join_message_delivered", { interrupt: queued.interrupt });
         yield next;
       }

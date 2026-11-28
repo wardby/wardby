@@ -5,7 +5,7 @@ import { safeOutputIssues, safeWorkerErrorCode } from "../coding-worker/errors.j
 import { readMcpConfig } from "../coding-worker/mcp-config.js";
 import { PLAN_FILES_ARTIFACT, type CodingTaskInput } from "../coding/protocol.js";
 import { collectPlanOutput } from "../coding-worker/plan-output.js";
-import { CLAUDE_CONFIG_DIR, runClaudeCodingWorker } from "./driver.js";
+import { CLAUDE_CONFIG_DIR, runClaudeCodingWorker, WorkflowStoppedError } from "./driver.js";
 import { createClaudeSdkQuery } from "./sdk.js";
 import { ProxyJoinChannel } from "./join.js";
 import { collectPlanFilesViaToolRunner } from "./plan-files.js";
@@ -81,7 +81,14 @@ try {
       ? `worker_${stage}_failed`
       : safeCode;
   const issues = code === "coding_output_invalid" ? safeOutputIssues(error) : undefined;
-  process.stderr.write(`${JSON.stringify({ error: code, ...(issues ? { issues } : {}) })}\n`);
+  // A workflow stopped for a joined person (#657): the seq of the message that asked, a plain integer.
+  const joinSeq =
+    code === "coding_workflow_stopped" && error instanceof WorkflowStoppedError && Number.isSafeInteger(error.joinSeq)
+      ? error.joinSeq
+      : undefined;
+  process.stderr.write(
+    `${JSON.stringify({ error: code, ...(issues ? { issues } : {}), ...(joinSeq !== undefined ? { joinSeq } : {}) })}\n`,
+  );
   process.exitCode = controller.signal.aborted ? 143 : 1;
 }
 // Session resume: after the result (or failure) is written, so a capture problem never changes the

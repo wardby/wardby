@@ -268,7 +268,7 @@ describe("workflow runs (#582)", () => {
 
 describe("joinable workflow runs (#657)", () => {
   const state = { running: false, tasks: new Set(["w1"]) };
-  const control = { running: () => state.running, ownsTask: (id: string) => state.tasks.has(id) };
+  const control = { running: () => state.running, ownsTask: (id: string) => state.tasks.has(id), asked: () => true };
   const workflow = { name: "fix-bug", args: { ticket: "X-1" }, control };
 
   it("adds TaskStop and its guard next to Workflow", () => {
@@ -317,5 +317,13 @@ describe("joinable workflow runs (#657)", () => {
     }
     state.running = false;
     expect((await guard({ tool_input: { task_id: "w1" } })).hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("refuses TaskStop until a joined person has said something to the lead", async () => {
+    state.running = true;
+    const unasked = taskStopGuard({ ...control, asked: () => false });
+    expect((await unasked({ tool_input: { task_id: "w1" } })).hookSpecificOutput?.permissionDecision).toBe("deny");
+    const noAskedHook = taskStopGuard({ running: control.running, ownsTask: control.ownsTask });
+    expect((await noAskedHook({ tool_input: { task_id: "w1" } })).hookSpecificOutput?.permissionDecision).toBe("deny");
   });
 });

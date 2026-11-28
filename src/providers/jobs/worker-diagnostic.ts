@@ -11,6 +11,8 @@ export const SAFE_WORKER_DIAGNOSTIC = /^(?:worker_[a-z_]+|coding_[a-z_]+|wardby_
 export interface WorkerDiagnostic {
   diagnostic: string;
   diagnosticIssues?: string[];
+  /** coding_workflow_stopped only (#657): the run step seq of the joined message that asked for the stop. */
+  diagnosticJoinSeq?: number;
 }
 
 /**
@@ -19,7 +21,7 @@ export interface WorkerDiagnostic {
  * many entries) is dropped whole rather than filtered, so a malformed worker cannot smuggle a partial
  * value through.
  */
-export function workerDiagnosticOf(error: unknown, issues: unknown): WorkerDiagnostic | undefined {
+export function workerDiagnosticOf(error: unknown, issues: unknown, joinSeq?: unknown): WorkerDiagnostic | undefined {
   if (typeof error !== "string" || !SAFE_WORKER_DIAGNOSTIC.test(error)) return undefined;
   const safeIssues =
     Array.isArray(issues) &&
@@ -28,17 +30,25 @@ export function workerDiagnosticOf(error: unknown, issues: unknown): WorkerDiagn
     issues.every((issue) => typeof issue === "string" && SAFE_CODING_OUTPUT_ISSUE.test(issue))
       ? (issues as string[])
       : undefined;
-  return { diagnostic: error, ...(safeIssues ? { diagnosticIssues: [...safeIssues] } : {}) };
+  const safeSeq =
+    error === "coding_workflow_stopped" && typeof joinSeq === "number" && Number.isSafeInteger(joinSeq) && joinSeq >= 1
+      ? joinSeq
+      : undefined;
+  return {
+    diagnostic: error,
+    ...(safeIssues ? { diagnosticIssues: [...safeIssues] } : {}),
+    ...(safeSeq !== undefined ? { diagnosticJoinSeq: safeSeq } : {}),
+  };
 }
 
 /** Recognizes only the fixed `{"error": code}` line (see workerDiagnosticOf); anything else is undefined. */
 export function parseWorkerDiagnosticLine(line: string): WorkerDiagnostic | undefined {
-  let value: { error?: unknown; issues?: unknown } | null;
+  let value: { error?: unknown; issues?: unknown; joinSeq?: unknown } | null;
   try {
-    value = JSON.parse(line) as { error?: unknown; issues?: unknown } | null;
+    value = JSON.parse(line) as { error?: unknown; issues?: unknown; joinSeq?: unknown } | null;
   } catch {
     return undefined;
   }
   if (value === null || typeof value !== "object") return undefined;
-  return workerDiagnosticOf(value.error, value.issues);
+  return workerDiagnosticOf(value.error, value.issues, value.joinSeq);
 }

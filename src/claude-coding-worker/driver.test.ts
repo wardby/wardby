@@ -19,6 +19,7 @@ import {
   runClaudeCodingWorker,
   type ClaudeQueryFactory,
   type ClaudeQueryOptions,
+  WorkflowStoppedError,
 } from "./driver.js";
 import { callGitCheck, callResultBundle } from "./tool-socket.js";
 import {
@@ -1652,8 +1653,8 @@ describe("runClaudeCodingWorker join (phase 1)", () => {
     joined(value: boolean) {
       this.events?.joinedChanged(value);
     }
-    send(text: string, interrupt = false) {
-      this.events?.message({ text, interrupt });
+    send(text: string, interrupt = false, seq?: number) {
+      this.events?.message({ text, interrupt, ...(seq !== undefined ? { seq } : {}) });
     }
   }
 
@@ -1967,6 +1968,43 @@ describe("runClaudeCodingWorker join (phase 1)", () => {
           })(),
         ),
       ).rejects.toThrow("coding_workflow_stopped");
+    });
+
+    it("names the joined message that asked for the stop, by its seq", async () => {
+      const join = new FakeJoin();
+      const error = await runWorkflow(join, (options) =>
+        sessionOf((_message, index) => {
+          if (index === 0) {
+            join.joined(true);
+            later(() => join.send("Please stop the workflow.", false, 7));
+            return [started("w1"), placeholder];
+          }
+          // The lead stops w1 for that message and does not start it again.
+          options.workflow?.control?.stopping?.("w1");
+          later(() => join.joined(false));
+          return [ended("w1", "stopped"), answer("Stopped as asked.")];
+        }, [])(options),
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(WorkflowStoppedError);
+      expect((error as WorkflowStoppedError).joinSeq).toBe(7);
+    });
+
+    it("never takes a joined turn that was in flight when the workflow ended for the run's answer", async () => {
+      const join = new FakeJoin();
+      const result = await runWorkflow(join, (options) =>
+        sessionOf((_message, index) => {
+          if (index === 0) {
+            join.joined(true);
+            later(() => join.send("How is it going?"));
+            return [started("w1"), placeholder];
+          }
+          later(() => join.joined(false));
+          // The workflow ends while the question's turn runs: that turn's answer comes first, then the
+          // lead's turn with the end notice.
+          return [ended("w1", "completed"), answer("Still running, phase 2."), answer("All done.", "changes_ready")];
+        }, [])(options),
+      );
+      expect(result).toMatchObject({ outcome: "changes_ready", summary: "All done." });
     });
 
     it("never takes a sub-agent's notice for the workflow's end, and fails a run whose last launch was stopped", async () => {
