@@ -3,6 +3,7 @@ import { PassThrough } from "node:stream";
 import {
   ANSI_PAINT,
   agentLines,
+  chatHelpLines,
   cleanServerText,
   colourWanted,
   joinCommand,
@@ -208,6 +209,20 @@ describe("chat colours", () => {
     );
     const lines = agentLines({ agent: { name: "w\u001b[31mx", kind: "native", model: "m" }, run: {} }, 0, ANSI_PAINT);
     expect(lines[0]).toBe("\u001b[1mAgent:\u001b[22m wx (native, m)");
+  });
+
+  it("shows /help as the chat's commands, each command bold and its description dimmed", async () => {
+    const plain = chatHelpLines();
+    expect(plain[0]).toBe("In the chat:");
+    expect(plain).toContain("  /i text          the same, shorter");
+    expect(plain.join("\n")).not.toContain("usage:");
+    expect(chatHelpLines(ANSI_PAINT)).toContain(
+      "  \u001b[1m/i text\u001b[22m          \u001b[2mthe same, shorter\u001b[22m",
+    );
+    const { out } = await run([LINK, "/help", "/leave"]);
+    expect(out).toContain(
+      "  /agent           details of the agent and this run: model, budget, turns, time left, who is joined",
+    );
   });
 
   it("prints no colour codes when the output is captured", async () => {

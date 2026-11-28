@@ -42,6 +42,19 @@ In the chat:
   /help            show these commands
   Ctrl-C           leave, as /leave`;
 
+/**
+ * /help in the chat: the chat's commands only (how to start the CLI is no use once joined), each
+ * command bold and its description dimmed.
+ */
+export function chatHelpLines(paint: Paint = PLAIN_PAINT): string[] {
+  const section = JOIN_USAGE.slice(JOIN_USAGE.indexOf("In the chat:"));
+  return section.split("\n").map((line, index) => {
+    if (index === 0) return paint.bold(line);
+    const match = /^( {2})(\S.*?)( {2,})(.*)$/.exec(line);
+    return match ? `${match[1]}${paint.bold(match[2])}${match[3]}${paint.dim(match[4])}` : line;
+  });
+}
+
 export const JOIN_MESSAGES = {
   noLink: "No link was given. Paste the terminal.link that join_run returned.",
   badLink: "That is not a Wardby join link.",
@@ -496,7 +509,7 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         }
         if (text === "") return;
         if (text === "/help") {
-          out(JOIN_USAGE);
+          for (const line of chatHelpLines(paint)) out(line);
         } else if (text === "/agent") {
           for (const line of agentLines(await expectOk(session, "agent"), Date.now(), paint)) out(line);
         } else if (text === "/prompt") {
