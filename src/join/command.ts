@@ -48,7 +48,9 @@ export const JOIN_MESSAGES = {
   linkRejected: "The join link is invalid or has expired. Ask for a new one with join_run.",
   notFound: "The run was not found, or you cannot see it.",
   noAccess: "You need execute access to this run's agent to join it.",
-  joined: "Joined. Type a message and press Enter; /help lists the commands.",
+  joined:
+    "Joined. Type a message and press Enter. /i text interrupts, /leave leaves (the run finishes its work), " +
+    "/quit stops the agent, /help lists every command.",
   confirmQuit:
     "This stops the agent now: the run ends as cancelled, and its work is not pushed to a result branch or pull request. To let it finish and keep its work, use /leave instead.",
   notStopped: "Not stopped. Still joined.",
