@@ -25,16 +25,28 @@ async function setup(
     triggeredById?: string | null;
     noWriter?: boolean;
     link?: boolean;
+    /** A native agent run: no CodingRun, its own time limit on the run. */
+    native?: boolean;
   } = {},
 ) {
   const steps: Step[] = [];
-  const run = { id: "r1", agentId: "a1", status: opts.status ?? "running", triggeredById: opts.triggeredById ?? null };
+  const run = {
+    id: "r1",
+    agentId: "a1",
+    status: opts.status ?? "running",
+    triggeredById: opts.triggeredById ?? null,
+    startedAt: new Date(),
+    timeoutSec: opts.native ? 1800 : null,
+  };
   const db = {
     resourceGrant: fakeResourceGrants(opts.grants ?? []),
     agent: { findUnique: async () => ({ id: "a1", ownerId: "owner" }) },
     run: { findUnique: async ({ where }: { where: { id: string } }) => (where.id === "r1" ? run : null) },
     codingRun: {
-      findUnique: async () => ({ provider: opts.provider ?? "claude-code", workflowName: opts.workflowName ?? null }),
+      findUnique: async () =>
+        opts.native
+          ? null
+          : { provider: opts.provider ?? "claude-code", workflowName: opts.workflowName ?? null, timeoutSec: 600 },
     },
     runStep: {
       findMany: async () => steps.filter((s) => s.kind === "join" || s.kind === "leave"),
@@ -79,7 +91,7 @@ async function setup(
     };
     return { isError: result.isError === true, text: result.content[0].text };
   };
-  return { call, steps, client };
+  return { call, steps, client, mcp };
 }
 
 describe("join_run / send_to_run / leave_run", () => {
@@ -111,6 +123,17 @@ describe("join_run / send_to_run / leave_run", () => {
     expect(joined.terminal?.command).toBe(`npx @wardby/cli@latest join '${joined.terminal?.link}'`);
     expect(joined.terminal?.pasteCommand).toBe("npx @wardby/cli@latest join -");
     expect(joined.terminal?.link).toMatch(/^https:\/\/wardby\.example\.com\/join#.+/);
+    await t.client.close();
+  });
+
+  it("joins a native agent run; its link lasts until the run's own time limit plus the grace", async () => {
+    const t = await setup("owner", { native: true, link: true });
+    const joined = JSON.parse((await t.call("join_run", { runId: "r1" })).text) as { terminal: { link: string } };
+    const token = decodeURIComponent(joined.terminal.link.split("#")[1]);
+    const { exp } = await t.mcp.verifyRequestState<{ exp: number }>(token);
+    // 1800 s (the run's timeoutSec), not the coding default: well past 30 minutes from now.
+    expect(exp - Date.now()).toBeGreaterThan(1_700_000);
+    expect((await t.call("send_to_run", { runId: "r1", message: "hello" })).isError).toBe(false);
     await t.client.close();
   });
 

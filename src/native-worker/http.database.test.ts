@@ -424,6 +424,68 @@ describe.skipIf(!process.env.DATABASE_URL)("native sandbox gateway over HTTP (da
     expect(oversized === null || oversized.status === 400).toBe(true);
   });
 
+  it("fails a control-plane run past its time limit with native_run_timeout, before any model call", async () => {
+    freshRun();
+    const run = await db.run.create({
+      data: {
+        agentId,
+        trigger: "manual",
+        nativeExecutionMode: "control_plane",
+        timeoutSec: 60,
+        startedAt: new Date(Date.now() - 120_000),
+      },
+    });
+    const finished = await executeRun(run.id, providers, db);
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/^native_run_timeout: /);
+    expect(Number(finished.costUsd)).toBe(0);
+  });
+
+  it("serves join.poll and join.peek for the session's own run, never logging the text; the deadline is the run's", async () => {
+    const { RunStepWriter } = await import("../core/run-steps/writer.js");
+    const run = await db.run.create({
+      data: { agentId, nativeExecutionMode: "sandbox", status: "running", runStepsLevel: "summary", timeoutSec: 120 },
+    });
+    const { createSandboxSession } = await import("../core/runner.js");
+    const { PrismaGatewayLedger } = await import("./ledger.js");
+    const ledger = new PrismaGatewayLedger(db);
+    const live = await createSandboxSession({ runId: run.id, providers, db, ledger, gatewayUrl: serviceUrl });
+    if (live.kind !== "started") throw new Error("expected a session");
+    await ledger.markNetworkReadyForRun(run.id);
+    const session = await db.nativeGatewaySession.findUniqueOrThrow({ where: { runId: run.id } });
+    expect(session.deadlineAt.getTime()).toBe(run.startedAt.getTime() + 120_000);
+    expect(live.input.deadlineAt).toBe(session.deadlineAt.getTime());
+
+    const writer = new RunStepWriter({ db, secretValues: async () => [], level: "summary", retentionDays: 1 });
+    await writer.recordJoin(run.id, { kind: "join", principalId: ownerId });
+    const sent = await writer.recordJoin(run.id, { kind: "interrupt", principalId: ownerId, text: "JOINED-TEXT-77" });
+    const spies = [vi.spyOn(httpLog, "info"), vi.spyOn(gatewayLog, "info"), vi.spyOn(gatewayLog, "warn")];
+    const call = async (method: string, params: unknown, runId = run.id) => {
+      const response = await fetch(`${urlB}${NATIVE_GATEWAY_PATH}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${live.capability}`, "content-type": "application/json" },
+        body: JSON.stringify({ v: 1, runId, callId: `${method}-${randomUUID()}`, method, params }),
+      });
+      return { status: response.status, body: (await response.json()) as { ok: boolean; result?: unknown } };
+    };
+    try {
+      expect((await call("join.peek", { after: 0 })).body.result).toBe(true);
+      const polled = await call("join.poll", { after: 0, joined: false, wait: false });
+      expect(polled.body.result).toMatchObject({
+        joined: true,
+        messages: [{ seq: sent.seq, text: "JOINED-TEXT-77", interrupt: true }],
+      });
+      // Delivered now: the peek no longer sees it.
+      expect((await call("join.peek", { after: 0 })).body.result).toBe(false);
+      expect((await call("join.peek", { after: 0 }, "another-run")).status).toBe(403);
+      expect(JSON.stringify(spies.flatMap((spy) => spy.mock.calls))).not.toContain("JOINED-TEXT-77");
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+      await ledger.endSession(live.sessionId, "finished");
+      await db.runStep.deleteMany({ where: { runId: run.id } });
+    }
+  });
+
   it("serves a sandbox session's input once authenticated, and nothing else", async () => {
     const run = await db.run.create({ data: { agentId, nativeExecutionMode: "sandbox", status: "running" } });
     const { createSandboxSession } = await import("../core/runner.js");

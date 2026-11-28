@@ -11,7 +11,7 @@
  * sandbox bridges are served only by name from the run's own surface.
  */
 
-import type { EngineProgress, EngineResult, EngineRunContext } from "../providers/engine/types.js";
+import type { EngineJoin, EngineProgress, EngineResult, EngineRunContext } from "../providers/engine/types.js";
 import type { LlmStreamEvent } from "../providers/llm/types.js";
 import pino from "pino";
 import { NativeStreamSteps, recordStreamSteps } from "../core/run-steps/native.js";
@@ -131,6 +131,8 @@ export interface SandboxedEngineOptions {
   launcher: WorkerLauncher;
   /** Records the run's steps (src/core/run-steps); absent = none. */
   runSteps?: RunStepSink;
+  /** Serves join.poll and join.peek (joined messages); absent = nobody is ever joined. */
+  join?: EngineJoin;
 }
 
 interface MeteredUsage {
@@ -306,6 +308,14 @@ export async function runSandboxedEngine(options: SandboxedEngineOptions): Promi
           claim(request.callId);
           finished ??= params as GatewayParams<"finish">;
           return null;
+        }
+        case "join.poll": {
+          const p = params as GatewayParams<"join.poll">;
+          return options.join ? options.join.poll(p) : { joined: false, messages: [], now: Date.now() };
+        }
+        case "join.peek": {
+          const p = params as GatewayParams<"join.peek">;
+          return options.join ? options.join.interruptPending(p.after) : false;
         }
         default:
           throw new GatewayError("invalid_request", `"${request.method}" is a streaming method.`);

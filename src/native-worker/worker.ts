@@ -8,7 +8,7 @@
  */
 
 import { NativeEngine } from "../core/engine-native.js";
-import type { EngineRunContext } from "../providers/engine/types.js";
+import type { EngineJoin, EngineRunContext } from "../providers/engine/types.js";
 import type { LlmProvider, LlmStreamEvent } from "../providers/llm/types.js";
 import { computeCost } from "../providers/llm/pricing-core.js";
 import { PRIVILEGED_BRIDGE_NAMES, type PrivilegedHost } from "../sandbox/host-functions.js";
@@ -16,6 +16,7 @@ import { runUserToolCall } from "../sandbox/user-tool.js";
 import { rememberSecretValue } from "./stderr-redaction.js";
 import {
   GatewayError,
+  JoinPollResultSchema,
   NATIVE_WORKER_PROTOCOL_VERSION,
   type GatewayMethod,
   type GatewayParams,
@@ -31,6 +32,30 @@ export interface GatewayTransport {
 
 const isPending = (value: unknown): boolean =>
   typeof value === "object" && value !== null && (value as { pending?: unknown }).pending === true;
+
+/**
+ * Join over the gateway. A poll that fails (other than the run ending) answers "nothing new" with
+ * the joined state last seen, so a passing network fault never ends a run; the next poll asks again.
+ * Joined text is never logged here.
+ */
+export function gatewayJoin(
+  call: <M extends GatewayMethod>(method: M, params: GatewayParams<M>) => Promise<unknown>,
+): EngineJoin {
+  let lastJoined = false;
+  return {
+    poll: async (params) => {
+      try {
+        const answer = JoinPollResultSchema.parse(await call("join.poll", params));
+        lastJoined = answer.joined;
+        return answer;
+      } catch (err) {
+        if (err instanceof GatewayError && err.code === "run_not_drivable") throw err;
+        return { joined: lastJoined, messages: [], now: Date.now() };
+      }
+    },
+    interruptPending: async (after) => (await call("join.peek", { after })) === true,
+  };
+}
 
 /** Runs one native run to its result and reports it with `finish`. Resolves when done. */
 export async function runNativeWorker(input: WorkerInput, transport: GatewayTransport): Promise<void> {
@@ -135,6 +160,8 @@ export async function runNativeWorker(input: WorkerInput, transport: GatewayTran
     onProgress: async (progress) => {
       await call("progress", { turns: progress.turns, usage: progress.usage });
     },
+    ...(input.join ? { join: gatewayJoin(call) } : {}),
+    ...(input.deadlineAt !== undefined ? { deadlineAt: input.deadlineAt } : {}),
   };
 
   let result: Awaited<ReturnType<NativeEngine["run"]>>;

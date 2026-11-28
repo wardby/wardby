@@ -16,8 +16,9 @@
 
 /** The proxy route (src/providers/coding-proxy/server.ts JOIN_POLL_PATH). */
 export const JOIN_POLL_ROUTE = "wardby/join/poll";
-/** How a joined message is introduced to the model (the security instructions name this prefix). */
-export const JOINED_MESSAGE_PREFIX = "Message from a person who joined this run:";
+import { JOINED_MESSAGE_PREFIX, joinedMessageText } from "../core/join-wording.js";
+
+export { JOINED_MESSAGE_PREFIX, joinedMessageText };
 /** While someone is joined the proxy holds a poll up to ~25 s; this bounds one request. */
 const POLL_TIMEOUT_MS = 35_000;
 /** The wait between polls while nobody is joined (the control plane answers those at once). */
@@ -191,9 +192,6 @@ const userMessage = (text: string, priority?: "now" | "next"): ClaudeUserMessage
   parent_tool_use_id: null,
   ...(priority ? { priority } : {}),
 });
-
-/** The text the model sees for one joined message. */
-export const joinedMessageText = (text: string): string => `${JOINED_MESSAGE_PREFIX}\n\n${text}`;
 
 export interface JoinedInputOptions {
   /** The run's deadline; the input closes JOIN_DEADLINE_MARGIN_MS before it. */

@@ -284,6 +284,8 @@ describe("buildHelpCatalog", () => {
     "interrupt a run",
     "wardby join",
     "join from a terminal",
+    "join native agent",
+    "join a native agent run",
   ])("finds the join article for %s", async (query) => {
     const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
     expect(
@@ -293,7 +295,16 @@ describe("buildHelpCatalog", () => {
     ).toContain("join-runs");
   });
 
-  it.each(["join_not_supported", "join_unavailable", "run_not_joined", "run_not_running"])(
+  it.each(["native_run_timeout", "timeoutSec native"])("finds the native run time limit for %s", async (query) => {
+    const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));
+    expect(
+      searchHelp(catalog, query)
+        .slice(0, 3)
+        .map((r) => r.page.id),
+    ).toContain("errors/native-run-timeout");
+  });
+
+  it.each(["join_not_supported", "join_unavailable", "run_not_joined", "run_not_running", "native_run_timeout"])(
     "has an error page for %s",
     async (code) => {
       const catalog = await buildHelpCatalog(fileURLToPath(new URL("../../help/", import.meta.url)));

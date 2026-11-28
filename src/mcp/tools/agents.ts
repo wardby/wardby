@@ -325,12 +325,22 @@ function withRunStepsWarning<T extends { runSteps?: RunStepsLevel | null; warnin
   return warning ? { ...agent, warnings: [...(agent.warnings ?? []), warning] } : agent;
 }
 
+/** A native agent's run time limit (Agent.timeoutSec): at most the native sandbox's own ceiling (SANDBOX_RUN_MAX_SEC). */
+const MIN_NATIVE_TIMEOUT_SEC = 60;
+const MAX_NATIVE_TIMEOUT_SEC = 3600;
+const NATIVE_TIMEOUT_DESCRIPTION =
+  "Native agents: a run's time limit in seconds, from when it starts (default 1800; 60-3600). A run still going " +
+  "then fails with native_run_timeout. Coding agents use codingProfile.timeoutSec instead.";
+const NATIVE_TIMEOUT_CODING =
+  "timeoutSec is only valid for native agents; coding agents set their run time limit with codingProfile.timeoutSec.";
+
 const agentFields = {
   name: z.string().trim().min(1).max(MAX_AGENT_NAME_CHARS),
   systemPrompt: z.string().min(1).max(MAX_SYSTEM_PROMPT_CHARS),
   model: z.string().trim().min(1).max(MAX_MODEL_CHARS),
   budgetUsd: z.number().finite().positive().max(MAX_BUDGET_USD),
   maxTurns: z.number().int().min(1).max(100),
+  timeoutSec: z.number().int().min(MIN_NATIVE_TIMEOUT_SEC).max(MAX_NATIVE_TIMEOUT_SEC),
   allowedOverrunPercent: z.number().int().min(0).max(100),
   maxDelegationsPerRun: z.number().int().min(1).max(MAX_DELEGATIONS_PER_RUN),
   parallelDelegations: z.boolean(),
@@ -375,6 +385,7 @@ const CreateAgentSchema = z
     model: agentFields.model,
     budgetUsd: agentFields.budgetUsd,
     maxTurns: agentFields.maxTurns.optional(),
+    timeoutSec: agentFields.timeoutSec.optional(),
     allowedOverrunPercent: agentFields.allowedOverrunPercent.optional(),
     maxDelegationsPerRun: agentFields.maxDelegationsPerRun.optional(),
     parallelDelegations: agentFields.parallelDelegations.optional(),
@@ -440,6 +451,7 @@ const UpdateAgentSchema = z
     model: agentFields.model.optional(),
     budgetUsd: agentFields.budgetUsd.optional(),
     maxTurns: agentFields.maxTurns.optional(),
+    timeoutSec: agentFields.timeoutSec.optional(),
     allowedOverrunPercent: agentFields.allowedOverrunPercent.optional(),
     maxDelegationsPerRun: agentFields.maxDelegationsPerRun.optional(),
     parallelDelegations: agentFields.parallelDelegations.optional(),
@@ -874,6 +886,12 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         model: { type: "string" },
         budgetUsd: { type: "number" },
         maxTurns: { type: "integer" },
+        timeoutSec: {
+          type: "integer",
+          minimum: MIN_NATIVE_TIMEOUT_SEC,
+          maximum: MAX_NATIVE_TIMEOUT_SEC,
+          description: NATIVE_TIMEOUT_DESCRIPTION,
+        },
         allowedOverrunPercent: {
           type: "integer",
           minimum: 0,
@@ -934,6 +952,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
       requireModelAvailable(ctx, args.model, args.kind);
       validateEffort(args.kind, args.model, args.effort);
       validateNativeExecutionMode(ctx, args.kind, args.nativeExecutionMode);
+      if (args.timeoutSec !== undefined && args.kind !== "native") throw new McpError(400, NATIVE_TIMEOUT_CODING);
       validateWorkspaceDiskMb(args.codingProfile?.workspaceDiskMb);
       if (args.codingProfile) await requireCatalogServiceNames(ctx.db, args.codingProfile.services);
       if (args.budgetGroupId) {
@@ -1038,6 +1057,12 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
         model: { type: "string" },
         budgetUsd: { type: "number" },
         maxTurns: { type: "integer" },
+        timeoutSec: {
+          type: "integer",
+          minimum: MIN_NATIVE_TIMEOUT_SEC,
+          maximum: MAX_NATIVE_TIMEOUT_SEC,
+          description: NATIVE_TIMEOUT_DESCRIPTION,
+        },
         allowedOverrunPercent: {
           type: "integer",
           minimum: 0,
@@ -1304,6 +1329,7 @@ export function registerAgentTools(mcp: WardbyMcpServer): void {
             );
           }
 
+          if (args.timeoutSec !== undefined && nextKind !== "native") throw new McpError(400, NATIVE_TIMEOUT_CODING);
           if (args.nativeExecutionMode !== undefined) {
             validateNativeExecutionMode(ctx, nextKind, args.nativeExecutionMode);
           } else if (nextKind === "coding" && existing.nativeExecutionMode === "sandbox") {

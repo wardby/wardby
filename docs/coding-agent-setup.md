@@ -1669,8 +1669,9 @@ People with execute access to a Claude Code agent can join one of its running
 runs and talk to the agent while it works: `join_run`, then `send_to_run` with a
 message (picked up at the agent's next step) or `interrupt: true` (stops the
 current turn first), and `leave_run`. Follow the agent's replies with
-`get_run_steps`. Workflow runs, Codex runs and native agents cannot be joined
-yet.
+`get_run_steps`. Native agent runs can be joined the same way (from 0.11.3;
+see [Join a running run](../help/join-runs.md)). Workflow runs and Codex runs
+cannot be joined yet.
 
 From a terminal (0.11.1 or later): `join_run`'s answer also carries
 `terminal.command` (from 0.11.2, `npx @wardby/cli@latest join '<link>'`, ready

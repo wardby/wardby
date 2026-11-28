@@ -1,13 +1,14 @@
 /**
- * Join (phase 1: Claude Code coding runs): people with execute on an agent join one of its running
- * runs and send it messages. Every join event is a RunStep, so it shows in the run's steps where it
+ * Join (Claude Code coding runs and native agent runs): people with execute on an agent join one of
+ * its running runs and send it messages. Every join event is a RunStep, so it shows in the run's steps where it
  * happened:
  *
- * - "join" / "leave": a person joined or left (fromPrincipalId). While anyone is joined the worker
- *   keeps the session open, until the last person leaves or the run's timeout.
- * - "message" / "interrupt": text for the agent. The worker receives it over the run-steps listener
- *   (RUN_JOIN_POLL_PATH, through the coding proxy) and feeds it into the running session: a message
- *   at the agent's next step, an interrupt at once. deliveredAt is set the first time it is sent.
+ * - "join" / "leave": a person joined or left (fromPrincipalId). While anyone is joined the run
+ *   stays open, until the last person leaves or the run's timeout.
+ * - "message" / "interrupt": text for the agent, a message at the agent's next step, an interrupt
+ *   at once. deliveredAt is set the first time it is sent. A Claude Code worker receives it over
+ *   the run-steps listener (RUN_JOIN_POLL_PATH, through the coding proxy); a native run's engine
+ *   reads it here (control plane) or through the native gateway's join methods (sandbox).
  *
  * Writing is RunStepWriter.recordJoin's (the one writer of RunStep rows): a message is masked by
  * exact value against the agent's secrets there before it is stored, and only that stored text is
@@ -27,8 +28,8 @@ const JOIN_POLL_INTERVAL_MS = 1_000;
 export type JoinRefusal = "run_not_running" | "join_not_supported";
 
 /**
- * Whether people can join this run now: phase 1 is a running Claude Code coding run that is not a
- * workflow run. Other coding agents (Codex, Gemini CLI) and native agents come in later phases.
+ * Whether people can join this run now: a running native agent run, or a running Claude Code coding
+ * run that is not a workflow run. Other coding agents (Codex, Gemini CLI) come in a later phase.
  */
 export async function joinRefusal(
   db: Pick<PrismaClient, "run" | "codingRun">,
@@ -37,7 +38,8 @@ export async function joinRefusal(
   const run = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
   if (!run || run.status !== "running") return "run_not_running";
   const coding = await db.codingRun.findUnique({ where: { runId }, select: { provider: true, workflowName: true } });
-  if (!coding || coding.provider !== "claude-code" || coding.workflowName) return "join_not_supported";
+  // No CodingRun: a native agent run.
+  if (coding && (coding.provider !== "claude-code" || coding.workflowName)) return "join_not_supported";
   return null;
 }
 
@@ -67,6 +69,19 @@ export interface JoinPollRequest {
 export interface JoinPollAnswer {
   joined: boolean;
   messages: { seq: number; text: string; interrupt: boolean }[];
+}
+
+/** Whether an interrupt after `after` has not been delivered yet. Only reads. */
+export async function interruptPending(
+  db: Pick<PrismaClient, "runStep">,
+  runId: string,
+  after: number,
+): Promise<boolean> {
+  const row = await db.runStep.findFirst({
+    where: { runId, kind: "interrupt", seq: { gt: after }, deliveredAt: null },
+    select: { id: true },
+  });
+  return row !== null;
 }
 
 async function pollOnce(

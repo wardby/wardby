@@ -154,6 +154,43 @@ export interface EngineRunContext {
     capture(toolName: string): unknown;
     restore(state: unknown): void;
   };
+  /**
+   * Join: people with execute access send this run messages while it runs (src/core/run-steps/join.ts).
+   * Absent: the run cannot be joined and the engine behaves exactly as before.
+   */
+  join?: EngineJoin;
+  /** The run's deadline (epoch ms). The engine stops waiting for joined messages JOIN_DEADLINE_MARGIN_MS before it. */
+  deadlineAt?: number;
+}
+
+/** One joined message as the engine receives it (text already masked against the agent's secrets). */
+export interface EngineJoinMessage {
+  seq: number;
+  text: string;
+  interrupt: boolean;
+}
+
+export interface EngineJoinAnswer {
+  /** Whether anyone is joined now. */
+  joined: boolean;
+  /** Messages after the request's `after`, in order; each is marked delivered. */
+  messages: EngineJoinMessage[];
+  /** The clock when the answer was made (epoch ms): the engine's only clock, recorded with the step. */
+  now: number;
+}
+
+/**
+ * Where joined messages come from: the database in the control plane, the native gateway in a
+ * sandbox. `poll` delivers; the engine calls it only inside a named step so a replay sees the same
+ * messages. `interruptPending` only looks, never delivers, and may run outside a step.
+ */
+export interface EngineJoin {
+  /** With `wait`, holds while someone is joined until there is news or the poll window ends. */
+  poll(request: { after: number; joined: boolean; wait: boolean }): Promise<EngineJoinAnswer>;
+  /** Whether an interrupt after `after` waits to be delivered. */
+  interruptPending(after: number): Promise<boolean>;
+  /** How often to look for an interrupt; tests shorten it. Default: the engine's own intervals. */
+  interruptCheckMs?: number;
 }
 
 /** What EngineRunContext.onTurn receives: a turn's output, then (if it called tools) their results in call order. */

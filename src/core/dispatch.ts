@@ -1454,6 +1454,8 @@ export async function dispatchRun(options: DispatchRunOptions): Promise<Dispatch
             nativeExecutionMode: agent.kind === "native" ? agent.nativeExecutionMode : null,
             // Fixed for the run's life, like nativeExecutionMode: a later runSteps change reaches only later runs.
             runStepsLevel: dispatchRunStepsLevel(agent),
+            // Fixed for the run's life too: the run's time limit (coding runs keep theirs on CodingRun).
+            timeoutSec: agent.kind === "native" ? agent.timeoutSec : null,
             parentRunId: options.parentRunId,
             parentCallId: options.parentCallId,
             grantedParentMemoryKeys: options.grantedParentMemoryKeys ?? [],

@@ -95,3 +95,31 @@ describe("runNativeWorker gateway errors", () => {
     expect(finishes).toHaveLength(0);
   });
 });
+
+describe("gatewayJoin", () => {
+  it("answers 'nothing new' with the last joined state when a poll fails, and rethrows the run ending", async () => {
+    const { gatewayJoin } = await import("./worker.js");
+    const { GatewayError } = await import("./protocol.js");
+    const answers: unknown[] = [
+      { joined: true, messages: [{ seq: 1, text: "hi", interrupt: false }], now: 5 },
+      new GatewayError("internal", "boom"),
+      new GatewayError("run_not_drivable", "ended"),
+    ];
+    const call = (async () => {
+      const next = answers.shift();
+      if (next instanceof Error) throw next;
+      return next;
+    }) as Parameters<typeof gatewayJoin>[0];
+    const join = gatewayJoin(call);
+    expect(await join.poll({ after: 0, joined: false, wait: false })).toMatchObject({ joined: true });
+    const failed = await join.poll({ after: 1, joined: true, wait: true });
+    expect(failed).toMatchObject({ joined: true, messages: [] });
+    await expect(join.poll({ after: 1, joined: true, wait: true })).rejects.toThrow("ended");
+  });
+
+  it("rejects a malformed answer as nothing new rather than trusting it", async () => {
+    const { gatewayJoin } = await import("./worker.js");
+    const join = gatewayJoin(async () => ({ joined: "yes" }));
+    expect(await join.poll({ after: 0, joined: false, wait: false })).toMatchObject({ joined: false, messages: [] });
+  });
+});

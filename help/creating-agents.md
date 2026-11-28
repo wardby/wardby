@@ -33,6 +33,16 @@ Examples include an architecture reviewer that writes findings to a datastore,
 a release monitor that investigates an alert, or a triage agent that turns
 incoming information into a report for a person to act on.
 
+From 0.11.3 a native agent also has a run time limit, `timeoutSec` (default
+1800 seconds, 60 to 3600): a run still going after that long, counted from when
+it was created, fails with
+[`native_run_timeout`](errors/native-run-timeout.md) (in a sandbox,
+[`native_sandbox_deadline_exceeded`](errors/native-sandbox-deadline-exceeded.md)).
+Set it with `create_agent` or `update_agent`. A coding agent's limit is
+`codingProfile.timeoutSec` instead. People with execute access can join a
+running native agent run and talk to it; see
+[Join a running run](join-runs.md).
+
 ## Use a coding agent for repository work
 
 Coding agents use a `codingProfile` that selects Codex or Claude Code and names

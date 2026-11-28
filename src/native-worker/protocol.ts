@@ -219,6 +219,10 @@ export const WorkerInputSchema = z
     runsConcurrently: z.array(z.string()),
     /** The run's pinned catalog entry, so the engine's local budget checks price without a network call. */
     pricing: PricingSchema,
+    /** The run's deadline (epoch ms): the engine stops waiting for joined messages a minute before it. */
+    deadlineAt: z.number().int().positive().optional(),
+    /** Whether people can join this run: the engine then asks the gateway for joined messages (join.poll, join.peek). */
+    join: z.boolean().optional(),
     /**
      * Where and how to reach the HTTP gateway. Absent: the gateway is on this process's stdio.
      * The capability is given once, here, on the worker's stdin; it is never in its environment,
@@ -334,6 +338,13 @@ export const GatewayParamsSchemas = {
     })
     .strict(),
   progress: z.object({ turns: z.number().int().nonnegative(), usage: UsageTotalsSchema }).strict(),
+  /**
+   * Join: delivers the joined messages after `after` (held up to the poll window while someone is
+   * joined, with `wait`). Answers { joined, messages: [{ seq, text, interrupt }], now }.
+   */
+  "join.poll": z.object({ after: z.number().int().nonnegative(), joined: z.boolean(), wait: z.boolean() }).strict(),
+  /** Join: whether an interrupt after `after` waits to be delivered. Answers a boolean; delivers nothing. */
+  "join.peek": z.object({ after: z.number().int().nonnegative() }).strict(),
   text: z.object({ seq: z.number().int().nonnegative(), delta: z.string() }).strict(),
   finish: z
     .object({
@@ -357,6 +368,17 @@ export const GatewayRequestSchema = z
   })
   .strict();
 export type GatewayRequest = z.infer<typeof GatewayRequestSchema>;
+
+/** The join.poll answer (validated by the worker: it comes over the network). */
+export const JoinPollResultSchema = z
+  .object({
+    joined: z.boolean(),
+    messages: z.array(
+      z.object({ seq: z.number().int().nonnegative(), text: z.string(), interrupt: z.boolean() }).strict(),
+    ),
+    now: z.number(),
+  })
+  .strict();
 
 /** Rejects before parsing a message too large to accept. */
 export function assertMessageSize(text: string): void {
