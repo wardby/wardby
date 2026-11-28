@@ -130,3 +130,50 @@ export class WorkflowProgressReporter {
     return this.inflight;
   }
 }
+
+/** Where a run's workflow is, for the status line (#657). */
+export type WorkflowPhaseState = "not_started" | "running" | "completed" | "failed" | "stopped";
+
+// Control characters (C0 and DEL) become spaces, so a phase title stays one plain line.
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f]+/g;
+const plain = (value: string, max: number): string => value.replace(CONTROL, " ").trim().slice(0, max);
+
+/**
+ * The "Workflow status: ..." line added to each joined message in a workflow run (#657), so the
+ * lead can answer how the workflow is going without reading files. Built only from the script's
+ * phase titles, the sub-agents' states and the launch's task id, in fixed wording: never a prompt,
+ * a label, a step's text or a result.
+ */
+export function workflowStatusLine(
+  state: WorkflowPhaseState,
+  tree: WorkflowProgress | null,
+  taskId?: string,
+  launches = 1,
+): string {
+  const task = taskId && AGENT_REF.test(taskId) ? ` (task id ${taskId})` : "";
+  const restart = launches > 1 ? `, launch ${launches}` : "";
+  if (state === "not_started") return "Workflow status: not started yet.";
+  if (state !== "running") return `Workflow status: ${state}${restart}${task}.`;
+  const parts: string[] = [];
+  const phases = tree?.phases ?? [];
+  const agents = tree?.agents ?? [];
+  // The phase of the latest agent that is not done, else of the latest agent.
+  const active = [...agents].reverse().find((a) => a.state !== "completed" && a.state !== "done") ?? agents.at(-1);
+  if (phases.length > 0) {
+    const index = active?.phaseIndex ?? null;
+    const position = index === null ? -1 : phases.findIndex((p) => p.index === index);
+    if (position >= 0) {
+      const title = plain(phases[position].title, 80);
+      parts.push(`phase ${position + 1} of ${phases.length}${title ? ` (${title})` : ""}`);
+    } else {
+      parts.push(`${phases.length} phases`);
+    }
+  }
+  if (agents.length > 0) {
+    const counts = new Map<string, number>();
+    for (const agent of agents) counts.set(agent.state, (counts.get(agent.state) ?? 0) + 1);
+    parts.push(`agents: ${[...counts].map(([name, n]) => `${n} ${name.replace(/_/g, " ")}`).join(", ")}`);
+  }
+  return `Workflow status: running${restart}${task}${parts.length > 0 ? `; ${parts.join("; ")}` : ""}.`;
+}

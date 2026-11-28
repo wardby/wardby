@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import type { ClaudeQueryFactory, ClaudeQueryOptions, ClaudeSdkMessage } from "./driver.js";
+import type { ClaudeQueryFactory, ClaudeQueryOptions, ClaudeSdkMessage, WorkflowControl } from "./driver.js";
 import {
   GIT_CHECK_TOOL,
   PLAN_LIST_TOOL,
@@ -37,8 +37,15 @@ const WORKER_TOOL_NAMES = [
 export const WARDBY_TOOLS_TIMEOUT_MS = 7_200_000 + 60_000;
 
 const WORKFLOW_TOOL = "Workflow";
+const TASK_STOP_TOOL = "TaskStop";
 const WORKFLOW_REFUSED =
   "Wardby runs only this run's own workflow, once: call Workflow with just its name, and nothing else.";
+const RELAUNCH_REFUSED =
+  "Wardby runs only this run's own workflow: call Workflow with just its name, and only when no launch of it is running (stop it first with TaskStop).";
+const TASK_STOP_REFUSED =
+  "TaskStop may stop only this run's own running workflow, by its task id, when a person who joined the run asked.";
+/** The most launches of a run's workflow (#657): the first and up to four restarts. */
+export const MAX_WORKFLOW_LAUNCHES = 5;
 
 type PreToolUseResult = {
   hookSpecificOutput?: {
@@ -59,23 +66,27 @@ type PreToolUseResult = {
 export function workflowGuard(workflow: {
   name: string;
   args: unknown;
+  control?: WorkflowControl;
 }): (input: { tool_input?: unknown }) => Promise<PreToolUseResult> {
-  let launched = false;
+  let launches = 0;
   return async (input) => {
     const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
     const keys = Object.keys(toolInput);
-    const allowed =
-      !launched && toolInput.name === workflow.name && keys.every((key) => key === "name" || key === "args");
+    const shape = toolInput.name === workflow.name && keys.every((key) => key === "name" || key === "args");
+    // Joinable (#657): a restart, once the last launch has ended, up to MAX_WORKFLOW_LAUNCHES in all.
+    const allowed = workflow.control
+      ? shape && launches < MAX_WORKFLOW_LAUNCHES && !workflow.control.running()
+      : shape && launches === 0;
     if (!allowed) {
       return {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
-          permissionDecisionReason: WORKFLOW_REFUSED,
+          permissionDecisionReason: workflow.control ? RELAUNCH_REFUSED : WORKFLOW_REFUSED,
         },
       };
     }
-    launched = true;
+    launches += 1;
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -84,6 +95,40 @@ export function workflowGuard(workflow: {
       },
     };
   };
+}
+
+/**
+ * The PreToolUse guard on TaskStop in a joinable workflow run (#657): the lead may stop only a
+ * running launch of its own workflow, named by its task id, and nothing else (no shell, no other
+ * task). In-process, like workflowGuard.
+ */
+export function taskStopGuard(
+  control: WorkflowControl,
+): (input: { tool_input?: unknown }) => Promise<PreToolUseResult> {
+  return async (input) => {
+    const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
+    const keys = Object.keys(toolInput);
+    const taskId = toolInput.task_id;
+    // Only once a joined person has said something to the lead: nobody asked, nothing is stopped.
+    const allowed =
+      keys.length === 1 &&
+      typeof taskId === "string" &&
+      control.ownsTask(taskId) &&
+      control.running() &&
+      (control.asked?.() ?? false);
+    if (allowed) control.stopping?.(taskId);
+    return {
+      hookSpecificOutput: allowed
+        ? { hookEventName: "PreToolUse", permissionDecision: "allow" }
+        : { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: TASK_STOP_REFUSED },
+    };
+  };
+}
+
+/** The workflow tools a run gets: Workflow on a workflow run, and TaskStop when it can be joined (#657). */
+function workflowTools(config: ClaudeQueryOptions): string[] {
+  if (!config.workflow) return [];
+  return config.workflow.control ? [WORKFLOW_TOOL, TASK_STOP_TOOL] : [WORKFLOW_TOOL];
 }
 
 export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string, unknown> {
@@ -104,13 +149,13 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     model: config.model,
     maxTurns: config.maxTurns,
     maxBudgetUsd: config.budgetUsd,
-    tools: [...(skills ? ["Skill"] : []), ...(config.workflow ? [WORKFLOW_TOOL] : [])],
+    tools: [...(skills ? ["Skill"] : []), ...workflowTools(config)],
     // On a run with MCP tools, the server-level rule allows every tool of wardby_mcp: the proxy and
     // the gateway allow only the run's pinned tools, and dontAsk denies anything not allowed here.
     allowedTools: [
       TOOL_NAME,
       ...(skills ? ["Skill"] : []),
-      ...(config.workflow ? [WORKFLOW_TOOL] : []),
+      ...workflowTools(config),
       ...(config.mcp ? [`mcp__${WARDBY_MCP_SERVER}`] : []),
     ],
     disallowedTools: [PREPARE_DEPENDENCIES_TOOL_NAME, ...WORKER_TOOL_NAMES],
@@ -147,7 +192,16 @@ export function buildClaudeSdkOptions(config: ClaudeQueryOptions): Record<string
     ...(context ? { managedSettings: { allowManagedHooksOnly: true } } : {}),
     // Only on a workflow run (#582): the guard is the one in-process hook.
     ...(config.workflow
-      ? { hooks: { PreToolUse: [{ matcher: WORKFLOW_TOOL, hooks: [workflowGuard(config.workflow)] }] } }
+      ? {
+          hooks: {
+            PreToolUse: [
+              { matcher: WORKFLOW_TOOL, hooks: [workflowGuard(config.workflow)] },
+              ...(config.workflow.control
+                ? [{ matcher: TASK_STOP_TOOL, hooks: [taskStopGuard(config.workflow.control)] }]
+                : []),
+            ],
+          },
+        }
       : {}),
     systemPrompt: config.developerInstructions,
     outputFormat: { type: "json_schema", schema: config.outputSchema },

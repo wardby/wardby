@@ -179,6 +179,8 @@ export interface JobResult {
   diagnostic?: string;
   /** Output-schema failure locations (`path:code`) that passed SAFE_CODING_OUTPUT_ISSUE; never values. */
   diagnosticIssues?: string[];
+  /** See WorkerDiagnostic.diagnosticJoinSeq. */
+  diagnosticJoinSeq?: number;
 }
 
 /**

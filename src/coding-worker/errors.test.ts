@@ -5,6 +5,8 @@ import { safeOutputIssues, safeWorkerErrorCode } from "./errors.js";
 describe("safeWorkerErrorCode", () => {
   it("preserves only fixed worker-owned codes", () => {
     expect(safeWorkerErrorCode(new Error("coding_turn_failed"))).toBe("coding_turn_failed");
+    expect(safeWorkerErrorCode(new Error("coding_workflow_failed"))).toBe("coding_workflow_failed");
+    expect(safeWorkerErrorCode(new Error("coding_workflow_stopped"))).toBe("coding_workflow_stopped");
     expect(safeWorkerErrorCode(new Error("coding_stream_failed"))).toBe("coding_stream_failed");
     for (const code of [
       "coding_stream_proxy_denied",

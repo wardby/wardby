@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ClaudeQueryOptions } from "./driver.js";
-import { buildClaudeSdkOptions, WARDBY_TOOLS_TIMEOUT_MS, workflowGuard } from "./sdk.js";
+import {
+  buildClaudeSdkOptions,
+  MAX_WORKFLOW_LAUNCHES,
+  taskStopGuard,
+  WARDBY_TOOLS_TIMEOUT_MS,
+  workflowGuard,
+} from "./sdk.js";
 import { MAX_CLAUDE_COMMAND_TIMEOUT_MS } from "../coding/command-timeouts.js";
 import { KILL_GRACE_MS, MAX_COMMAND_TIMEOUT_MS } from "../claude-tool-runner/command.mjs";
 
@@ -257,5 +263,67 @@ describe("workflow runs (#582)", () => {
       const result = await workflowGuard(workflow)({ tool_input: toolInput });
       expect(result.hookSpecificOutput?.permissionDecision, JSON.stringify(toolInput)).toBe("deny");
     }
+  });
+});
+
+describe("joinable workflow runs (#657)", () => {
+  const state = { running: false, tasks: new Set(["w1"]) };
+  const control = { running: () => state.running, ownsTask: (id: string) => state.tasks.has(id), asked: () => true };
+  const workflow = { name: "fix-bug", args: { ticket: "X-1" }, control };
+
+  it("adds TaskStop and its guard next to Workflow", () => {
+    const options = buildClaudeSdkOptions({ ...config(), contextDirectory: "/tmp/wardby-context", workflow });
+    expect(options.tools).toEqual(expect.arrayContaining(["Workflow", "TaskStop"]));
+    expect(options.allowedTools).toEqual(expect.arrayContaining(["Workflow", "TaskStop"]));
+    const hooks = options.hooks as { PreToolUse: { matcher: string }[] };
+    expect(hooks.PreToolUse.map((h) => h.matcher)).toEqual(["Workflow", "TaskStop"]);
+    const plain = buildClaudeSdkOptions({
+      ...config(),
+      contextDirectory: "/tmp/wardby-context",
+      workflow: { name: "fix-bug", args: {} },
+    });
+    expect(plain.tools).not.toContain("TaskStop");
+  });
+
+  it("allows a restart only once no launch is running, with the run's args, up to the launch limit", async () => {
+    const guard = workflowGuard(workflow);
+    state.running = false;
+    const first = await guard({ tool_input: { name: "fix-bug", args: { ticket: "OTHER" } } });
+    expect(first.hookSpecificOutput?.updatedInput).toEqual({ name: "fix-bug", args: { ticket: "X-1" } });
+    state.running = true;
+    expect((await guard({ tool_input: { name: "fix-bug" } })).hookSpecificOutput?.permissionDecision).toBe("deny");
+    state.running = false;
+    for (let launch = 2; launch <= MAX_WORKFLOW_LAUNCHES; launch += 1) {
+      const again = await guard({ tool_input: { name: "fix-bug", args: { ticket: "OTHER" } } });
+      expect(again.hookSpecificOutput?.updatedInput).toEqual({ name: "fix-bug", args: { ticket: "X-1" } });
+    }
+    expect((await guard({ tool_input: { name: "fix-bug" } })).hookSpecificOutput?.permissionDecision).toBe("deny");
+    for (const toolInput of [{ name: "other" }, { script: "x" }, { name: "fix-bug", resumeFromRunId: "wf_1" }]) {
+      expect((await workflowGuard(workflow)({ tool_input: toolInput })).hookSpecificOutput?.permissionDecision).toBe(
+        "deny",
+      );
+    }
+  });
+
+  it("lets TaskStop stop only a running launch of the run's own workflow", async () => {
+    const stopped: string[] = [];
+    const guard = taskStopGuard({ ...control, stopping: (id) => void stopped.push(id) });
+    state.running = true;
+    expect((await guard({ tool_input: { task_id: "w1" } })).hookSpecificOutput?.permissionDecision).toBe("allow");
+    // The driver hears of each allowed stop (a refused one is not reported).
+    expect(stopped).toEqual(["w1"]);
+    for (const toolInput of [{ task_id: "b9" }, { shell_id: "w1" }, { task_id: "w1", extra: 1 }, {}]) {
+      expect((await guard({ tool_input: toolInput })).hookSpecificOutput?.permissionDecision).toBe("deny");
+    }
+    state.running = false;
+    expect((await guard({ tool_input: { task_id: "w1" } })).hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("refuses TaskStop until a joined person has said something to the lead", async () => {
+    state.running = true;
+    const unasked = taskStopGuard({ ...control, asked: () => false });
+    expect((await unasked({ tool_input: { task_id: "w1" } })).hookSpecificOutput?.permissionDecision).toBe("deny");
+    const noAskedHook = taskStopGuard({ running: control.running, ownsTask: control.ownsTask });
+    expect((await noAskedHook({ tool_input: { task_id: "w1" } })).hookSpecificOutput?.permissionDecision).toBe("deny");
   });
 });

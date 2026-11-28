@@ -8,6 +8,7 @@ import {
   MAX_PHASES,
   WORKFLOW_PROGRESS_ROUTE,
   WorkflowProgressReporter,
+  workflowStatusLine,
   workflowTreeOf,
 } from "./workflow-progress.js";
 import { WORKFLOW_PROGRESS_PATH } from "../providers/coding-proxy/server.js";
@@ -106,5 +107,37 @@ describe("WorkflowProgressReporter (#582)", () => {
     reporter.update({ not: "a list" });
     reporter.update(progress);
     await expect(reporter.flush()).resolves.toBeUndefined();
+  });
+});
+
+describe("workflowStatusLine (#657)", () => {
+  const tree = {
+    phases: [
+      { index: 1, title: "Draft" },
+      { index: 2, title: "Re\nview\u001b[31m" },
+    ],
+    agents: [
+      { id: "a1", label: "secret-looking label", phaseIndex: 1, state: "completed", attempt: 0 },
+      { id: "a2", label: "another label", phaseIndex: 2, state: "running", attempt: 0 },
+    ],
+  };
+
+  it("says where a running workflow is, from phase titles and agent states only", () => {
+    const line = workflowStatusLine("running", tree, "w1");
+    expect(line).toBe(
+      "Workflow status: running (task id w1); phase 2 of 2 (Re view [31m); agents: 1 completed, 1 running.",
+    );
+    expect(line).not.toContain("label");
+  });
+
+  it("names a restart, an ended launch, and a workflow not started yet", () => {
+    expect(workflowStatusLine("running", null, "w2", 2)).toBe("Workflow status: running, launch 2 (task id w2).");
+    expect(workflowStatusLine("completed", tree, "w1")).toBe("Workflow status: completed (task id w1).");
+    expect(workflowStatusLine("stopped", tree, "w1", 2)).toBe("Workflow status: stopped, launch 2 (task id w1).");
+    expect(workflowStatusLine("not_started", null)).toBe("Workflow status: not started yet.");
+  });
+
+  it("leaves out a task id that is not a plain id", () => {
+    expect(workflowStatusLine("completed", null, "w1; rm -rf /")).toBe("Workflow status: completed.");
   });
 });

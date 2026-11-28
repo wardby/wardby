@@ -29,7 +29,8 @@ export type JoinRefusal = "run_not_running" | "join_not_supported";
 
 /**
  * Whether people can join this run now: a running native agent run, or a running Claude Code coding
- * run that is not a workflow run. Other coding agents (Codex, Gemini CLI) come in a later phase.
+ * run, workflow runs included (#657: messages reach the run's lead session). Other coding agents
+ * (Codex, Gemini CLI) come in a later phase.
  */
 export async function joinRefusal(
   db: Pick<PrismaClient, "run" | "codingRun">,
@@ -37,9 +38,9 @@ export async function joinRefusal(
 ): Promise<JoinRefusal | null> {
   const run = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
   if (!run || run.status !== "running") return "run_not_running";
-  const coding = await db.codingRun.findUnique({ where: { runId }, select: { provider: true, workflowName: true } });
+  const coding = await db.codingRun.findUnique({ where: { runId }, select: { provider: true } });
   // No CodingRun: a native agent run.
-  if (coding && (coding.provider !== "claude-code" || coding.workflowName)) return "join_not_supported";
+  if (coding && coding.provider !== "claude-code") return "join_not_supported";
   return null;
 }
 

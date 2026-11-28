@@ -176,6 +176,7 @@ async function agentDetails(db: JoinApiDeps["db"], runId: string, reader: RunRea
         maxTurns: true,
         budgetBaseUsd: true,
         repoSkills: true,
+        workflowName: true,
       },
     }),
     joinedPrincipals(db, runId),
@@ -203,6 +204,8 @@ async function agentDetails(db: JoinApiDeps["db"], runId: string, reader: RunRea
       repositories: agent.repositories.map((r) => ({ repository: `${r.provider}:${r.repository}`, access: r.access })),
       // Coding runs: whether the run loads the repository's own skills (codingProfile.repoSkills).
       repoSkills: coding ? coding.repoSkills : null,
+      // A workflow run (#657): the repository workflow script its lead session runs.
+      workflow: coding?.workflowName ?? null,
     },
     run: {
       status: run.status,

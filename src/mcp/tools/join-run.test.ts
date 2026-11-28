@@ -168,13 +168,20 @@ describe("join_run / send_to_run / leave_run", () => {
   it.each([
     [{ status: "succeeded" }, "run_not_running"],
     [{ provider: "codex" }, "join_not_supported"],
-    [{ workflowName: "release" }, "join_not_supported"],
     [{ noWriter: true }, "join_unavailable"],
   ] as const)("refuses %o with %s", async (opts, code) => {
     const t = await setup("owner", opts);
     const joined = await t.call("join_run", { runId: "r1" });
     expect(joined.isError).toBe(true);
     expect(joined.text).toContain(code);
+    await t.client.close();
+  });
+
+  it("joins a Claude Code workflow run (#657)", async () => {
+    const t = await setup("owner", { workflowName: "release" });
+    const joined = await t.call("join_run", { runId: "r1" });
+    expect(joined.isError).toBeFalsy();
+    expect(joined.text).toContain('"joined":true');
     await t.client.close();
   });
 

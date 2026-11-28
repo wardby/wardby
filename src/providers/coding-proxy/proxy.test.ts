@@ -3128,8 +3128,30 @@ describe("workflow sessions (#582)", () => {
     change(value);
     return JSON.stringify(value);
   };
+  const taskStopTool = {
+    name: "TaskStop",
+    description: "Stop a running background task",
+    input_schema: { type: "object" },
+  };
   const shapes: [string, (value: Record<string, unknown>) => void, string][] = [
     ["the Workflow tool", (v) => (v.tools = [runCommandTool, structuredOutputTool, workflowTool]), "tools_not_allowed"],
+    [
+      "the Workflow and TaskStop tools (#657)",
+      (v) => (v.tools = [runCommandTool, structuredOutputTool, workflowTool, taskStopTool]),
+      "tools_not_allowed",
+    ],
+    [
+      "a TaskStop tool_use in the history (#657)",
+      (v) =>
+        (v.messages as unknown[]).push(
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "toolu_ts_1", name: "TaskStop", input: { task_id: "w1" } }],
+          },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ts_1", content: "stopped" }] },
+        ),
+      "unsupported_anthropic_feature",
+    ],
     [
       "a Workflow tool_use in the history",
       (v) =>
@@ -3179,6 +3201,33 @@ describe("workflow sessions (#582)", () => {
       status: 400,
       code: "invalid_anthropic_request",
     });
+  });
+
+  it("keys a workflow sub-agent's unkeyed request by its agent id, so a relaunch's same body is forwarded (#657)", async () => {
+    const same = await body(() => undefined);
+    const send = (h: Awaited<ReturnType<typeof claude>>, agentId?: string) =>
+      h.proxy.execute(
+        {
+          bearer: h.session.capability,
+          protocol: h.session.protocol,
+          rawBody: same,
+          requestKey: undefined,
+          anthropicBeta: CLAUDE_CODE_ANTHROPIC_BETAS.join(","),
+          ...(agentId ? { agentId } : {}),
+        },
+        new TestSink(),
+      );
+    const workflow = await claude(true);
+    await send(workflow, "agentlaunch1");
+    // The relaunch's sub-agent: the same body under a new agent id.
+    await send(workflow, "agentlaunch2");
+    expect(workflow.fetch).toHaveBeenCalledTimes(2);
+    // The same sub-agent again is still a duplicate.
+    await expect(send(workflow, "agentlaunch2")).rejects.toMatchObject({ status: 409, code: "duplicate_completed" });
+    // Any other session ignores the header: the body alone is the key.
+    const plain = await claude(false);
+    await send(plain, "agentlaunch1");
+    await expect(send(plain, "agentlaunch2")).rejects.toMatchObject({ status: 409, code: "duplicate_completed" });
   });
 
   describe("repository skills in native mode", () => {

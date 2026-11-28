@@ -76,6 +76,7 @@ function fakeServer(opts: { failSteps?: number; failStatus?: number } = {}) {
             secrets: ["API_TOKEN"],
             repositories: [],
             repoSkills: null,
+            workflow: "fix-bug",
           },
           run: {
             status,
@@ -288,6 +289,7 @@ describe("wardby join -", () => {
     expect(out).toContain("  MCP servers: browserstack (mcp.example.com)");
     expect(out).toContain("  Subagents (in parallel): reviewer, tester");
     expect(out).toContain("  Secrets: API_TOKEN");
+    expect(out).toContain("  Workflow: fix-bug");
     expect(out.some((l) => l.startsWith("  Datastores") || l.startsWith("  Repository skills"))).toBe(false);
     expect(out).toContain("System prompt: Be helpful.\n    agent: not a real line");
   });

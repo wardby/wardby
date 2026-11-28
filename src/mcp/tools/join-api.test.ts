@@ -287,6 +287,7 @@ describe("join API", () => {
         secrets: ["API_TOKEN"],
         repositories: [{ repository: "github:your-org/your-repo", access: "write" }],
         repoSkills: true,
+        workflow: null,
       },
       run: {
         status: "running",

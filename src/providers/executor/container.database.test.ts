@@ -35,6 +35,44 @@ describe.skipIf(!process.env.DATABASE_URL)("PrismaContainerExecutionStore (Postg
     await db.$disconnect();
   });
 
+  it("names who sent a run's joined messages: the latest, and the one at a given seq (#657)", async () => {
+    const runId = `container-join-${randomUUID()}`;
+    await db.run.create({ data: { id: runId, agentId, executionManaged: true } });
+    const step = (seq: number, kind: string, fromPrincipalId: string | null) => ({
+      runId,
+      seq,
+      kind,
+      summary: kind,
+      fromPrincipalId,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    try {
+      await db.runStep.createMany({
+        data: [
+          step(1, "join", "alice"),
+          step(2, "message", "alice"),
+          step(3, "join", "bob"),
+          step(4, "interrupt", "bob"),
+          step(5, "said", null),
+          // A step with no sender (as an agent's own step) never counts.
+          step(6, "message", null),
+          step(7, "leave", "bob"),
+        ],
+      });
+      const store = new PrismaContainerExecutionStore(db);
+      // The latest message or interrupt with a sender wins; join, leave and said steps never count.
+      expect(await store.latestJoinSender(runId)).toBe("bob");
+      expect(await store.joinSenderAt(runId, 2)).toBe("alice");
+      expect(await store.joinSenderAt(runId, 4)).toBe("bob");
+      expect(await store.joinSenderAt(runId, 3)).toBeNull();
+      expect(await store.joinSenderAt(runId, 6)).toBeNull();
+      expect(await store.joinSenderAt(runId, 99)).toBeNull();
+      expect(await store.latestJoinSender(`container-join-none-${randomUUID()}`)).toBeNull();
+    } finally {
+      await db.run.deleteMany({ where: { id: runId } });
+    }
+  });
+
   it("knows a continuation's root pushed only a branch until a round opens a pull request (#586)", async () => {
     const ids = ["root", "round2", "round3"].map((name) => `container-branch-${name}-${randomUUID()}`);
     const [root, round2, round3] = ids;

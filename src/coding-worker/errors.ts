@@ -33,6 +33,11 @@ const SAFE_WORKER_ERROR_CODES = new Set([
   "worker_git_unavailable",
   // The input plan files could not be placed in the plan folder.
   "worker_plan_files_failed",
+  // A workflow run (#582) whose workflow did not complete (the executor files it as workflow_failed).
+  "coding_workflow_failed",
+  // A joined workflow run (#657) whose lead stopped its workflow at a person's request and did not start
+  // it again: the executor ends the run cancelled, as a stop would.
+  "coding_workflow_stopped",
 ]);
 
 /**

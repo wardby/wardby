@@ -109,6 +109,8 @@ const WARDBY_COMMAND_TOOL = "mcp__wardby_tools__run_command";
 const STRUCTURED_OUTPUT_TOOL = CLAUDE_RESULT_TOOL;
 /** Claude Code's Workflow tool (#582): allowed only for a workflow session. */
 const WORKFLOW_TOOL = "Workflow";
+/** Claude Code's TaskStop (#657): a joinable workflow run's lead may stop its own workflow; the worker's guard checks which. */
+const TASK_STOP_TOOL = "TaskStop";
 /** Claude Code's Skill tool: allowed only for a session whose run has repository skills in native mode (#582). */
 export const SKILL_TOOL = "Skill";
 /** The thinking.display values Claude Code's workflow sub-agents send (#582). */
@@ -882,6 +884,7 @@ function validateApprovedTool(value: unknown, mcpTools: ReadonlySet<string>, wor
   if (tool.name === STRUCTURED_OUTPUT_TOOL) return validateStructuredOutputTool(tool);
   if (typeof tool.name === "string" && mcpTools.has(tool.name)) return validateMcpTool(tool);
   if (workflow && tool.name === WORKFLOW_TOOL) return validateWorkflowTool(tool);
+  if (workflow && tool.name === TASK_STOP_TOOL) return validateWorkflowTool(tool);
   if (skills && tool.name === SKILL_TOOL) return validateSkillTool(tool);
   throw new CodingProxyError(400, "tools_not_allowed");
 }
@@ -903,6 +906,8 @@ function validateToolUseBlock(
   }
   // A workflow session's earlier Workflow call, replayed in the conversation history (#582).
   if (workflow && value.name === WORKFLOW_TOOL) return void record(value.input, "unsupported_anthropic_feature");
+  // A workflow session's earlier TaskStop call (#657), replayed in the conversation history.
+  if (workflow && value.name === TASK_STOP_TOOL) return void record(value.input, "unsupported_anthropic_feature");
   // A skills session's earlier Skill call, replayed in the conversation history.
   if (skills && value.name === SKILL_TOOL) return void record(value.input, "unsupported_anthropic_feature");
   throw new CodingProxyError(400, "unsupported_anthropic_feature");
@@ -1098,9 +1103,9 @@ function parseAnthropicRequest(
   }
   if (body.tools !== undefined) {
     // run_command and StructuredOutput, plus one per pinned MCP tool.
-    // A workflow session also has the Workflow tool (#582).
+    // A workflow session also has the Workflow tool (#582) and TaskStop (#657).
     // A skills session also has the Skill tool.
-    if (!Array.isArray(body.tools) || body.tools.length > 2 + mcpTools.size + (workflow ? 1 : 0) + (skills ? 1 : 0)) {
+    if (!Array.isArray(body.tools) || body.tools.length > 2 + mcpTools.size + (workflow ? 2 : 0) + (skills ? 1 : 0)) {
       throw new CodingProxyError(400, "tools_not_allowed");
     }
     const names = new Set<string>();
@@ -1201,8 +1206,11 @@ function parseRequest(
   }
 }
 
-function safeRequestKey(value: string | undefined, fingerprint: string): string {
-  if (value === undefined) return `body:${fingerprint}`;
+function safeRequestKey(value: string | undefined, fingerprint: string, workflowAgent?: string): string {
+  // A workflow session's sub-agent (#657): a relaunched workflow's sub-agents send the same bodies as
+  // the first launch's, under new agent ids, so the id joins the key. A retry by the same sub-agent
+  // still matches its earlier request.
+  if (value === undefined) return workflowAgent ? `body:${fingerprint}:agent:${workflowAgent}` : `body:${fingerprint}`;
   if (!REQUEST_KEY_PATTERN.test(value)) throw new CodingProxyError(400, "invalid_idempotency_key");
   return value;
 }
@@ -1440,7 +1448,13 @@ export class CodingProxy {
       this.audit({ type: "request.rejected", runId: session.runId, model: parsed.model, reason: "unknown_model" });
       throw new CodingProxyError(400, "unknown_model");
     }
-    const requestKey = safeRequestKey(input.requestKey, parsed.fingerprint);
+    const requestKey = safeRequestKey(
+      input.requestKey,
+      parsed.fingerprint,
+      session.workflow === true && input.agentId !== undefined && STEP_AGENT_REF.test(input.agentId)
+        ? input.agentId
+        : undefined,
+    );
     const snapshot = pricingSnapshot(terms.version, terms.pricing);
     const bodyBytes = Buffer.byteLength(parsed.encoded);
     const conversation = conversationKey(session.protocol, parsed.body);
