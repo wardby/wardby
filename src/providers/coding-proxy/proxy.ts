@@ -1206,8 +1206,11 @@ function parseRequest(
   }
 }
 
-function safeRequestKey(value: string | undefined, fingerprint: string): string {
-  if (value === undefined) return `body:${fingerprint}`;
+function safeRequestKey(value: string | undefined, fingerprint: string, workflowAgent?: string): string {
+  // A workflow session's sub-agent (#657): a relaunched workflow's sub-agents send the same bodies as
+  // the first launch's, under new agent ids, so the id joins the key. A retry by the same sub-agent
+  // still matches its earlier request.
+  if (value === undefined) return workflowAgent ? `body:${fingerprint}:agent:${workflowAgent}` : `body:${fingerprint}`;
   if (!REQUEST_KEY_PATTERN.test(value)) throw new CodingProxyError(400, "invalid_idempotency_key");
   return value;
 }
@@ -1445,7 +1448,13 @@ export class CodingProxy {
       this.audit({ type: "request.rejected", runId: session.runId, model: parsed.model, reason: "unknown_model" });
       throw new CodingProxyError(400, "unknown_model");
     }
-    const requestKey = safeRequestKey(input.requestKey, parsed.fingerprint);
+    const requestKey = safeRequestKey(
+      input.requestKey,
+      parsed.fingerprint,
+      session.workflow === true && input.agentId !== undefined && STEP_AGENT_REF.test(input.agentId)
+        ? input.agentId
+        : undefined,
+    );
     const snapshot = pricingSnapshot(terms.version, terms.pricing);
     const bodyBytes = Buffer.byteLength(parsed.encoded);
     const conversation = conversationKey(session.protocol, parsed.body);

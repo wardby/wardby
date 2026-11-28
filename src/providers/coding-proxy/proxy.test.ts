@@ -3203,6 +3203,33 @@ describe("workflow sessions (#582)", () => {
     });
   });
 
+  it("keys a workflow sub-agent's unkeyed request by its agent id, so a relaunch's same body is forwarded (#657)", async () => {
+    const same = await body(() => undefined);
+    const send = (h: Awaited<ReturnType<typeof claude>>, agentId?: string) =>
+      h.proxy.execute(
+        {
+          bearer: h.session.capability,
+          protocol: h.session.protocol,
+          rawBody: same,
+          requestKey: undefined,
+          anthropicBeta: CLAUDE_CODE_ANTHROPIC_BETAS.join(","),
+          ...(agentId ? { agentId } : {}),
+        },
+        new TestSink(),
+      );
+    const workflow = await claude(true);
+    await send(workflow, "agentlaunch1");
+    // The relaunch's sub-agent: the same body under a new agent id.
+    await send(workflow, "agentlaunch2");
+    expect(workflow.fetch).toHaveBeenCalledTimes(2);
+    // The same sub-agent again is still a duplicate.
+    await expect(send(workflow, "agentlaunch2")).rejects.toMatchObject({ status: 409, code: "duplicate_completed" });
+    // Any other session ignores the header: the body alone is the key.
+    const plain = await claude(false);
+    await send(plain, "agentlaunch1");
+    await expect(send(plain, "agentlaunch2")).rejects.toMatchObject({ status: 409, code: "duplicate_completed" });
+  });
+
   describe("repository skills in native mode", () => {
     const skillTool = { name: "Skill", description: "Load a skill", input_schema: { type: "object" } };
     const skills = async (on: boolean, workflow = false) =>
