@@ -1679,8 +1679,8 @@ From a terminal (0.11.1 or later): `join_run`'s answer also carries
 to copy), `terminal.pasteCommand` (`npx @wardby/cli@latest join -`, which asks
 for the link so it stays out of shell history and the process list) and
 `terminal.link`. Either command opens a terminal chat with the run (a line
-sends a message, `/interrupt text` (or `/i text`) interrupts, `/agent` shows the agent and the
-run's budget, turns and time left, `/prompt` shows the system prompt, `/leave` leaves, `/quit` stops the agent
+sends a message, `/interrupt text` (or `/i text`) interrupts, `/agent` shows the agent (model, tools, MCP servers, subagents, datastores, secret
+names, repositories, repository skills on or off) and the run's budget, turns and time left, `/prompt` shows the system prompt, `/leave` leaves, `/quit` stops the agent
 after a confirmation, Ctrl-C leaves). The link is `<server origin>/join#<token>`;
 the CLI sends the token only as `Authorization: Bearer` to the server's
 `/join/api/*` routes, which check the person's access on every call, and each

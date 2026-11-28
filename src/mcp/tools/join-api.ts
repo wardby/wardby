@@ -123,6 +123,14 @@ async function readableRun(db: JoinApiDeps["db"], runId: string, reader: RunRead
   return run;
 }
 
+function urlHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
 /** How a principal is shown in the chat: their display name, else their id. */
 async function principalLabels(db: JoinApiDeps["db"], ids: string[]): Promise<Record<string, string>> {
   const users = await db.authUser.findMany({
@@ -143,11 +151,32 @@ async function agentDetails(db: JoinApiDeps["db"], runId: string, reader: RunRea
     }),
     db.agent.findUnique({
       where: { id: access.agentId },
-      select: { id: true, name: true, model: true, budgetUsd: true, maxTurns: true },
+      select: {
+        id: true,
+        name: true,
+        model: true,
+        budgetUsd: true,
+        maxTurns: true,
+        parallelDelegations: true,
+        tools: { select: { tool: { select: { name: true } } } },
+        mcpServers: { select: { server: { select: { name: true, url: true } } } },
+        subAgentEdgesAsParent: { select: { boundName: true } },
+        datastores: { select: { boundName: true } },
+        secrets: { select: { boundName: true } },
+        repositories: { select: { provider: true, repository: true, access: true } },
+      },
     }),
     db.codingRun.findUnique({
       where: { runId },
-      select: { provider: true, model: true, repository: true, timeoutSec: true, maxTurns: true, budgetBaseUsd: true },
+      select: {
+        provider: true,
+        model: true,
+        repository: true,
+        timeoutSec: true,
+        maxTurns: true,
+        budgetBaseUsd: true,
+        repoSkills: true,
+      },
     }),
     joinedPrincipals(db, runId),
   ]);
@@ -163,6 +192,17 @@ async function agentDetails(db: JoinApiDeps["db"], runId: string, reader: RunRea
       kind: coding ? coding.provider : "native",
       model: coding?.model ?? agent.model,
       repository: coding?.repository ?? null,
+      tools: agent.tools.map((t) => t.tool.name).sort(),
+      // The server's host only: a URL can carry credentials in its path or query.
+      mcpServers: agent.mcpServers.map((m) => ({ name: m.server.name, host: urlHost(m.server.url) })),
+      subagents: agent.subAgentEdgesAsParent.map((e) => e.boundName).sort(),
+      parallelDelegations: agent.parallelDelegations,
+      datastores: agent.datastores.map((d) => d.boundName).sort(),
+      // Names only, as get_agent shows them; never a value.
+      secrets: agent.secrets.map((x) => x.boundName).sort(),
+      repositories: agent.repositories.map((r) => ({ repository: `${r.provider}:${r.repository}`, access: r.access })),
+      // Coding runs: whether the run loads the repository's own skills (codingProfile.repoSkills).
+      repoSkills: coding ? coding.repoSkills : null,
     },
     run: {
       status: run.status,

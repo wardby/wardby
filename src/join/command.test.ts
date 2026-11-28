@@ -53,7 +53,21 @@ function fakeServer(opts: { failSteps?: number; failStatus?: number } = {}) {
         return reply({ status: "cancelled", stopRequested: true });
       case "/join/api/agent":
         return reply({
-          agent: { id: "a1", name: "writer", kind: "native", model: "claude-haiku-4-5", repository: null },
+          agent: {
+            id: "a1",
+            name: "writer",
+            kind: "native",
+            model: "claude-haiku-4-5",
+            repository: null,
+            tools: ["web_fetch"],
+            mcpServers: [{ name: "browserstack", host: "mcp.example.com" }],
+            subagents: ["reviewer", "tester"],
+            parallelDelegations: true,
+            datastores: [],
+            secrets: ["API_TOKEN"],
+            repositories: [],
+            repoSkills: null,
+          },
           run: {
             status,
             startedAt: new Date(Date.now() - 120_000).toISOString(),
@@ -218,6 +232,11 @@ describe("wardby join -", () => {
     expect(out).toContain("  Turns: 2 of 10 per message");
     expect(out).toContain("  Time left: 26m of 30m");
     expect(out).toContain("  Joined: Grace");
+    expect(out).toContain("  Tools: web_fetch");
+    expect(out).toContain("  MCP servers: browserstack (mcp.example.com)");
+    expect(out).toContain("  Subagents (in parallel): reviewer, tester");
+    expect(out).toContain("  Secrets: API_TOKEN");
+    expect(out.some((l) => l.startsWith("  Datastores") || l.startsWith("  Repository skills"))).toBe(false);
     expect(out).toContain("System prompt: Be helpful.\n    agent: not a real line");
   });
 

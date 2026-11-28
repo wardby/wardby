@@ -211,6 +211,30 @@ export function agentLines(answer: Record<string, unknown>, now = Date.now()): s
   if (Number.isFinite(deadline) && typeof run.timeoutSec === "number") {
     lines.push(`  Time left: ${duration(deadline - now)} of ${duration(run.timeoutSec * 1000)}`);
   }
+  const names = (value: unknown): string[] => (Array.isArray(value) ? value.map((v) => str(v, 200)) : []);
+  const list = (label: string, items: string[]) => {
+    if (items.length > 0) lines.push(`  ${label}: ${items.join(", ")}`);
+  };
+  list("Tools", names(agent.tools));
+  list(
+    "MCP servers",
+    (Array.isArray(agent.mcpServers) ? (agent.mcpServers as Record<string, unknown>[]) : []).map((m) =>
+      m.host ? `${str(m.name, 200)} (${str(m.host, 200)})` : str(m.name, 200),
+    ),
+  );
+  const subagents = names(agent.subagents);
+  list(agent.parallelDelegations === true ? "Subagents (in parallel)" : "Subagents", subagents);
+  list("Datastores", names(agent.datastores));
+  list("Secrets", names(agent.secrets));
+  list(
+    "Repositories",
+    (Array.isArray(agent.repositories) ? (agent.repositories as Record<string, unknown>[]) : []).map(
+      (r) => `${str(r.repository, 500)} (${str(r.access, 40)})`,
+    ),
+  );
+  if (typeof agent.repoSkills === "boolean") {
+    lines.push(`  Repository skills: ${agent.repoSkills ? "loaded from the repository" : "off"}`);
+  }
   const joined = Array.isArray(run.joined) ? run.joined.map((p) => str(p, 200)) : [];
   lines.push(`  Joined: ${joined.length > 0 ? joined.join(", ") : "nobody"}`);
   return lines;

@@ -59,6 +59,13 @@ function setup(
         budgetUsd: { toString: () => "0.5000" },
         maxTurns: 10,
         systemPrompt: "You are a careful builder.",
+        parallelDelegations: true,
+        tools: [{ tool: { name: "web_fetch" } }, { tool: { name: "csv_parse" } }],
+        mcpServers: [{ server: { name: "browserstack", url: "https://mcp.example.com/sse?token=fake-secret" } }],
+        subAgentEdgesAsParent: [{ boundName: "reviewer" }],
+        datastores: [{ boundName: "notes" }],
+        secrets: [{ boundName: "API_TOKEN" }],
+        repositories: [{ provider: "github", repository: "your-org/your-repo", access: "write" }],
       }),
     },
     run: {
@@ -77,6 +84,7 @@ function setup(
         timeoutSec: 1800,
         maxTurns: 200,
         budgetBaseUsd: { toString: () => "1.0000" },
+        repoSkills: true,
       }),
     },
     runStep: {
@@ -271,6 +279,14 @@ describe("join API", () => {
         kind: "claude-code",
         model: "claude-sonnet-5-5",
         repository: "your-org/your-repo",
+        tools: ["csv_parse", "web_fetch"],
+        mcpServers: [{ name: "browserstack", host: "mcp.example.com" }],
+        subagents: ["reviewer"],
+        parallelDelegations: true,
+        datastores: ["notes"],
+        secrets: ["API_TOKEN"],
+        repositories: [{ repository: "github:your-org/your-repo", access: "write" }],
+        repoSkills: true,
       },
       run: {
         status: "running",
@@ -284,6 +300,8 @@ describe("join API", () => {
         joined: ["you"],
       },
     });
+    // An MCP server's URL is cut to its host: a query string can carry a credential.
+    expect(JSON.stringify(agent.json)).not.toContain("fake-secret");
     const prompt = await call(t.deps, "prompt", await mint(payload()));
     expect(prompt.json).toMatchObject({ systemPrompt: "You are a careful builder." });
   });
