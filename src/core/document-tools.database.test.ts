@@ -134,12 +134,25 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* read tools (database)", () => 
     expect(ids).toContain(design);
     expect(ids).not.toContain(other);
     const row = out.documents.find((d: { id: string }) => d.id === linked);
-    expect(row).toMatchObject({ title: "Linked", kind: "document", access: "write", reviewState: "draft" });
+    expect(row).toMatchObject({
+      title: "Linked",
+      kind: "document",
+      pagePath: `/d/${linked}`,
+      access: "write",
+      reviewState: "draft",
+    });
   });
 
   it("doc_get returns markdown, a chosen version, and reviewer names, verdicts and notes", async () => {
     const got = await call("doc_get", { documentId: linked });
-    expect(got).toMatchObject({ id: linked, title: "Linked", kind: "document", number: 1, markdown: "hello world" });
+    expect(got).toMatchObject({
+      id: linked,
+      title: "Linked",
+      kind: "document",
+      pagePath: `/d/${linked}`,
+      number: 1,
+      markdown: "hello world",
+    });
     expect(got.verdicts).toEqual([]);
     expect(await call("doc_get", { documentId: linked, version: 1 })).toMatchObject({ number: 1 });
     expect(await call("doc_get", { documentId: linked, version: 9 })).toMatchObject({
@@ -480,6 +493,7 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* write tools (database)", () =>
     files["boards/about.html"] = files["boards/about.html"].replace("</body>", "<script>alert(1)</script></body>");
     const made = await call("doc_create", { kind: "design", title: "Coffee", files }, "run-design");
     expect(made.error).toBeUndefined();
+    expect(made.pagePath).toBe(`/d/${made.id}`);
     expect(JSON.stringify(made.warnings)).toMatch(/script/i);
     const stored = await db.documentContent.findMany({ where: { documentId: made.id }, select: { text: true } });
     expect(stored.some((r) => r.text.includes("alert(1)"))).toBe(false);

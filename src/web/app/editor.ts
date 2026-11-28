@@ -9,6 +9,7 @@ import CollaborationCaret from "@tiptap/extension-collaboration-caret";
 import type * as Y from "yjs";
 import { Markdown } from "@tiptap/markdown";
 import { keepPlainText } from "../../core/documents/markdown-text.js";
+import { linkOpening } from "./link-open.js";
 import { Plugin, PluginKey, type EditorState, type Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { documentExtensions, type PlanLinkTargets } from "./extensions.js";
@@ -116,6 +117,7 @@ export function createEditor(
     editable,
     extensions: [
       ...documentExtensions(planLinks, { collab: Boolean(collab) }),
+      linkOpening(planLinks ?? (() => null)),
       Markdown,
       CommentHighlights,
       ...(collab
@@ -201,7 +203,7 @@ export function createVersionViewer(element: HTMLElement, markdown: string, befo
     element,
     injectCSS: false,
     editable: false,
-    extensions: [...documentExtensions(), Markdown, DiffMarksExt],
+    extensions: [...documentExtensions(), linkOpening(() => null), Markdown, DiffMarksExt],
     content: markdown,
     contentType: "markdown",
   });

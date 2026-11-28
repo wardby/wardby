@@ -287,6 +287,35 @@ a {
   font-weight: 600;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
 }
+/* The card under a link with the cursor in it (link-open.ts). */
+.link-card {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: min(32rem, calc(100vw - 16px));
+  padding: 0.35rem 0.6rem;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  font-size: 0.85rem;
+}
+.link-card-href {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.link-card-open {
+  font-weight: 600;
+  flex: none;
+}
+.link-card .muted {
+  flex: none;
+}
 .fatal {
   max-width: 560px;
   margin: 15vh auto;

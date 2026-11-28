@@ -1149,6 +1149,55 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await page.context().close();
     }, 90_000);
 
+    it("opens links: a click edits, the card and ⌘/Ctrl-click open; Wardby pages in this tab, others in a new one", async () => {
+      const d = await server.design({
+        title: "Links",
+        kind: "document",
+        markdown: "# L\n\nSee [the wireframes](/d/elsewhere) and [the site](https://example.com/x).\n",
+        access: "write",
+      });
+      const context = await browser.newContext();
+      await context.addInitScript(() => {
+        // Runs in the page: record window.open instead of opening a tab.
+        const w = globalThis as unknown as { opened: string[]; open: (url?: string) => null };
+        w.opened = [];
+        w.open = (url?: string) => {
+          w.opened.push(String(url));
+          return null;
+        };
+      });
+      await context.addCookies([d.cookie]);
+      const page = await context.newPage();
+      await page.goto(`${server.origin}/d/${d.documentId}`);
+      await expect.poll(() => page.locator(".review-banner").textContent(), { timeout: 20_000 }).toMatch(/v\d/);
+      expect(await page.locator(".editor .ProseMirror").getAttribute("contenteditable")).toBe("true");
+      const local = page.locator(".editor .ProseMirror a", { hasText: "the wireframes" });
+      const site = page.locator(".editor .ProseMirror a", { hasText: "the site" });
+
+      // A plain click places the cursor: the page stays, and the card shows where the link goes.
+      await local.click();
+      expect(new URL(page.url()).pathname).toBe(`/d/${d.documentId}`);
+      const card = page.locator(".link-card");
+      await expect.poll(() => card.isVisible()).toBe(true);
+      expect(await card.locator(".link-card-href").textContent()).toBe("/d/elsewhere");
+      expect(await card.getByRole("link", { name: "Open" }).getAttribute("href")).toBe("/d/elsewhere");
+      expect(await card.getByRole("link", { name: "Open" }).getAttribute("target")).toBeNull();
+
+      // Another site opens in a new tab, without an opener.
+      const mod = process.platform === "darwin" ? "Meta" : "Control";
+      await site.click({ modifiers: [mod] });
+      await expect
+        .poll(() => page.evaluate(() => (globalThis as unknown as { opened: string[] }).opened))
+        .toEqual(["https://example.com/x"]);
+      await site.click();
+      expect(await card.getByRole("link", { name: "Open" }).getAttribute("rel")).toBe("noopener noreferrer");
+
+      // A Wardby page opens in this tab.
+      await local.click({ modifiers: [mod] });
+      await expect.poll(() => new URL(page.url()).pathname).toBe("/d/elsewhere");
+      await context.close();
+    }, 90_000);
+
     it("when the clipboard refuses, Share shows the link in a read-only box with Copy", async () => {
       const d = await server.design({ title: "Box", kind: "document", markdown: "# B\n\nx\n", access: "write" });
       const context = await browser.newContext();

@@ -30,6 +30,8 @@ A document is a Markdown file (or a [design](designs.md): a set of HTML boards) 
 4. Share: `grant_access` with `resourceType: "document"` at `read`, `comment` or `write` for a person, or a [share link](document-share-links.md) for people who have no account (**Share** in the page's top bar copies a comment link; owners and writers).
 5. `publish_version` replaces the content (the page also saves versions). Pass `baseNumber`, the version you read: a newer version published since refuses the call with `document_version_conflict`.
 
+To link one document or design from another, use its page path in a Markdown link, such as `[Wireframes](/d/<documentId>)`: it works on any host that serves Wardby. In the page, a link opens with a plain click when the page is read-only; while editing, a click places the cursor, so Cmd-click (Ctrl-click on Windows and Linux) opens it, or use **Open** on the card that shows where a link goes when the cursor is in it. A Wardby page opens in the same tab, any other site in a new tab.
+
 ## Tools
 
 - Documents and designs (`kind: "design"` takes `files` instead of `markdown`): `create_document`, `publish_version`, `get_document` (`versionNumber` for an earlier version), `list_documents`, and `link_document` to link a document you own to a coding agent and repository file later (or change or clear the link).

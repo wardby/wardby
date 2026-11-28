@@ -84,6 +84,10 @@ it, and detach the old one.
 Document and comment text reaches the model as untrusted data, never as
 instructions.
 
+`doc_list`, `doc_get` and `doc_create` return each document's `pagePath`
+(`/d/<id>`). An agent links one document to another with it, as
+`[Wireframes](/d/<id>)`, so a link works on whatever host serves Wardby.
+
 `doc_create` and `doc_publish_version` describe the
 [board format](design-boards-format.md) a design's files must follow. When a
 design's files break it, the result is `board_format_invalid` with the first
