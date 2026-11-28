@@ -1084,9 +1084,11 @@ function parseAnthropicRequest(
         continue;
       }
     }
-    // A workflow session (#582): Claude Code tells the session a workflow finished in a user
-    // message with plain string content. Bounded like any tool text; any other session keeps blocks only.
-    if (workflow && message.role === "user" && typeof message.content === "string") {
+    // A user message with plain string content: plain text, the same as one text block. Claude Code
+    // sends it in a workflow session (#582: a workflow finished) and when it replays an earlier user
+    // turn in the history, such as a message a person who joined the run sent. Bounded like any tool
+    // text. An assistant message still needs blocks.
+    if (message.role === "user" && typeof message.content === "string") {
       if (Buffer.byteLength(message.content) > MAX_TOOL_TEXT_BYTES) {
         throw new CodingProxyError(400, "unsupported_anthropic_feature");
       }
