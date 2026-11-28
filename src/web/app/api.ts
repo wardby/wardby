@@ -58,6 +58,8 @@ export interface DocumentPayload {
     repository?: string | null;
     path?: string | null;
     canSend: boolean;
+    /** The linked agent's name (members only, on a document Send to agent could reach): the lock banner names it. */
+    agentName?: string;
     /** Whether PNG and PDF export is available on this server (a renderer is set up). */
     canRender?: boolean;
   };

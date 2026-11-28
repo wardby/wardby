@@ -126,6 +126,9 @@ function mount(
   const account = h("span", { class: "account" });
   const reviewBanner = h("div", { class: "review-banner", role: "status" });
   const banner = h("div", { class: "banner", hidden: true, role: "note" });
+  // Why a locked document can't be edited, and Reopen for review or Unarchive when the viewer may (review-ui.ts).
+  const lockBanner = h("div", { class: "banner lock-banner", hidden: true, role: "note" });
+  let agentName = payload.document.agentName ?? null;
   const lossyNotice = h("div", { class: "banner", hidden: true, role: "note" }, LOSSY_NOTICE);
   const planBar = planBarHost();
   // "Pick an option…" posts the choice to the chosen option (a guest's partial bar never offers it).
@@ -218,6 +221,7 @@ function mount(
         who,
         account,
       ),
+      lockBanner,
       banner,
       changedBanner,
       lossyNotice,
@@ -581,6 +585,7 @@ function mount(
     }
     // The plan bar follows every refetch, also while a newer version waits for unsaved edits.
     renderPlan(next);
+    agentName = next.document.agentName ?? null;
     const act = versionAction({
       shown: baseNumber,
       latest: next.version.number,
@@ -640,6 +645,8 @@ function mount(
       },
       loadLatest: () => refresh(),
       onLock: applyLock,
+      lockBanner,
+      agentName: () => agentName,
       onState: (s) => root.querySelector(".app")?.classList.toggle("archived", s === "archived"),
     },
     payload.review,

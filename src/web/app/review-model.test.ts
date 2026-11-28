@@ -21,6 +21,8 @@ import {
   optionSets,
   optionSetWords,
   planAlternatives,
+  ASK_TO_REOPEN,
+  lockBannerText,
 } from "./review-model.js";
 
 const rv = (over: Partial<ReviewerPayload>): ReviewerPayload => ({
@@ -356,5 +358,56 @@ describe("native option sets", () => {
       "You chose concept-b. Rejected: concept-a. Still waiting: concept-c.",
     );
     expect(choiceResult(base)).toBe("You chose concept-b. Rejected: concept-a. The plan is ready to build.");
+  });
+});
+
+describe("lockBannerText", () => {
+  const say = (b: ReturnType<typeof lockBannerText>) =>
+    b ? `${b.text}${b.action ? ` [${b.action.label}]${b.action.after}` : ""}` : null;
+
+  it("says nothing while the document is open", () => {
+    for (const state of ["draft", "in_review", "changes_requested"] as const)
+      expect(lockBannerText({ state, version: 2, canAct: true, agentName: "Writer" })).toBeNull();
+  });
+
+  it("an approved document: why it is locked, and Reopen for review to whoever may reopen it", () => {
+    expect(say(lockBannerText({ state: "approved", version: 5, canAct: true, agentName: "Doc writer" }))).toBe(
+      "Approved (v5). It's locked, so it can't be edited or sent to Doc writer. [Reopen for review] to make changes.",
+    );
+    expect(lockBannerText({ state: "approved", version: 5, canAct: true, agentName: null })?.text).toBe(
+      "Approved (v5). It's locked, so it can't be edited.",
+    );
+    expect(lockBannerText({ state: "approved", version: 5, canAct: true, agentName: null })?.action?.kind).toBe(
+      "reopen",
+    );
+  });
+
+  it("anyone else is told to ask, with no button and no agent", () => {
+    const b = lockBannerText({ state: "approved", version: 5, canAct: false, agentName: "Doc writer" });
+    expect(b).toEqual({
+      text: "Approved (v5) and locked. To change it, ask someone who can edit it to reopen it.",
+      action: null,
+    });
+    expect(ASK_TO_REOPEN).toBe("Approved and locked. To change it, ask someone who can edit it to reopen it.");
+  });
+
+  it("a rejected document has the same shape", () => {
+    expect(say(lockBannerText({ state: "rejected", version: 3, canAct: true, agentName: null }))).toBe(
+      "Rejected (v3). It's locked, so it can't be edited. [Reopen for review] to make changes.",
+    );
+    expect(say(lockBannerText({ state: "rejected", version: 3, canAct: false, agentName: null }))).toBe(
+      "Rejected (v3) and locked. To change it, ask someone who can edit it to reopen it.",
+    );
+  });
+
+  it("an archived document offers Unarchive, or says to ask its owner", () => {
+    const b = lockBannerText({ state: "archived", version: 4, canAct: true, agentName: "Doc writer" });
+    expect(say(b)).toBe(
+      "Archived (v4). It's locked, so it can't be edited or sent to Doc writer. [Unarchive] to make changes.",
+    );
+    expect(b?.action?.kind).toBe("unarchive");
+    expect(say(lockBannerText({ state: "archived", version: 4, canAct: false, agentName: null }))).toBe(
+      "Archived (v4) and locked. To change it, ask its owner to unarchive it.",
+    );
   });
 });

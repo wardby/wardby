@@ -191,7 +191,37 @@ export function chooseCandidates(
 }
 
 /** Shown on an approved document to anyone who can't reopen it (a guest, or a member without write access). */
-export const ASK_TO_REOPEN = "Approved and locked. To change it, ask someone who can edit it to reopen it.";
+const ASK_TO_REOPEN_TAIL = "To change it, ask someone who can edit it to reopen it.";
+export const ASK_TO_REOPEN = `Approved and locked. ${ASK_TO_REOPEN_TAIL}`;
+
+/**
+ * The banner at the top of a locked page (approved, rejected or archived): why it can't be edited and what to do.
+ * `canAct` is whether the viewer may undo the lock (Reopen for review; Unarchive for an archived one): then the
+ * banner's button reads `action.label`, followed by `action.after`. `agentName` (the linked agent the page may name,
+ * or null) is said only to that viewer, who could send it otherwise. Comments stay open, so nothing here says
+ * otherwise. Null while the document is open.
+ */
+export function lockBannerText(i: {
+  state: ReviewState;
+  version: number;
+  canAct: boolean;
+  agentName: string | null;
+}): { text: string; action: { kind: "reopen" | "unarchive"; label: string; after: string } | null } | null {
+  if (!isLockedState(i.state)) return null;
+  const head = `${STATE_LABEL[i.state]} (v${i.version})`;
+  const archived = i.state === "archived";
+  if (!i.canAct)
+    return {
+      text: `${head} and locked. ${archived ? "To change it, ask its owner to unarchive it." : ASK_TO_REOPEN_TAIL}`,
+      action: null,
+    };
+  return {
+    text: `${head}. It's locked, so it can't be edited${i.agentName ? ` or sent to ${i.agentName}` : ""}.`,
+    action: archived
+      ? { kind: "unarchive", label: "Unarchive", after: " to make changes." }
+      : { kind: "reopen", label: "Reopen for review", after: " to make changes." },
+  };
+}
 
 /** The reviewer picker's wording (review-ui.ts). */
 export const PICKER = {

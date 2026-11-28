@@ -405,10 +405,15 @@ nothing and records no event.
   threads cannot be sent to an agent: all are refused with `document_locked`. A
   document its planner removed from the plan is read-only to agents too: its
   threads cannot be sent to an agent (`document_locked`) until a later revision
-  of the plan writes its file again. Comments stay open. A page open when the
-  lock lands turns read-only in place, with no reload; edits not yet saved are
-  kept ("Read only: approved · unsaved changes"). After a reopen they show as
-  "Unsaved changes" and are saved with the next edit, never on a timer; a
+  of the plan writes its file again. Comments stay open. A locked page shows a
+  banner at the top saying why it can't be edited (naming the linked agent, for
+  members, when it could otherwise be sent to one), with **Reopen for review**
+  (which opens the Review tab's confirm step) for a writer, or **Unarchive** for
+  the owner of an archived one; anyone else is told whom to ask. A page open when
+  the lock lands turns read-only in place, with no reload, and shows the banner;
+  edits not yet saved are kept ("Read only: approved · unsaved changes"). After
+  a reopen they show as "Unsaved changes" and are saved with the next edit,
+  never on a timer; a
   Markdown page is editable again in place, and a design page that was opened
   read-only must be reloaded to edit. An agent edit that finishes after the lock
   is not applied; each thread gets a reply naming the branch with the edit.

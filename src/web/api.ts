@@ -126,6 +126,12 @@ export async function documentPayload(deps: WebDeps, documentId: string, viewer:
     : null;
   // A repository or plan link, or a native writer (Send to agent starts its native run, agent-loop.ts).
   const linked = documentLinkSendable(document, planSet) || (await nativeWriterSendable(deps.db, document));
+  // The linked agent's name as stored, for members only: the lock banner says what the lock keeps it from
+  // (Send to agent). Never to a guest or an anonymous visitor.
+  const agentName =
+    member && linked && document.agentId
+      ? ((await deps.db.agent.findUnique({ where: { id: document.agentId }, select: { name: true } }))?.name ?? null)
+      : null;
   const plan = document.planSetId
     ? await planPayload(
         deps,
@@ -146,6 +152,7 @@ export async function documentPayload(deps: WebDeps, documentId: string, viewer:
       // Where a linked document lives is for members only.
       ...(member ? { repository: document.repository, path: document.path } : {}),
       canSend: atLeast("document", me.access, "write") && linked && !isLocked(review.state),
+      ...(agentName ? { agentName } : {}),
       // Whether PNG/PDF export is available (a renderer is configured).
       canRender: deps.exports?.renderer != null,
     },

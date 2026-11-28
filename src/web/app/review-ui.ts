@@ -28,6 +28,7 @@ import {
   type SetKind,
   isLockedState,
   isReopenCopy,
+  lockBannerText,
   matchesQuery,
   myCurrentVerdict,
   myVerdictVersion,
@@ -69,6 +70,10 @@ export interface ReviewHost {
   planDocuments?(): PlanSetPayload["documents"];
   /** The kind of set the plan bar shows (a native option set's "options"); "plan" when absent. */
   planKind?(): SetKind;
+  /** The banner at the top of the page, shown while the document is locked (lockBannerText); hidden otherwise. */
+  lockBanner?: HTMLElement;
+  /** The linked agent's name the page may show (DocumentPayload.document.agentName), or null. */
+  agentName?(): string | null;
 }
 
 type Form = "none" | "submit" | "force" | "reject" | "choose" | "reopen" | "archive";
@@ -144,7 +149,51 @@ export class ReviewPanel {
 
   private render(): void {
     this.renderBanner();
+    this.renderLockBanner();
     this.renderPanel();
+  }
+
+  /**
+   * Why a locked page can't be edited, at the top of the page, and the way out when the viewer has one: Reopen
+   * for review opens the Review tab's confirm step (never a reopen in one click); Unarchive is the same action as
+   * the Archived card's.
+   */
+  private renderLockBanner(): void {
+    const el = this.host.lockBanner;
+    if (!el) return;
+    const r = this.review;
+    const b = lockBannerText({
+      state: r.state,
+      version: r.currentVersion,
+      canAct: r.state === "archived" ? r.can.unarchive : r.can.reopen,
+      agentName: this.host.agentName?.() ?? null,
+    });
+    clear(el);
+    el.hidden = b === null;
+    if (!b) return;
+    el.append(b.text);
+    if (!b.action) return;
+    const action = b.action;
+    el.append(
+      " ",
+      h(
+        "button",
+        {
+          type: "button",
+          disabled: this.busy,
+          onClick: () =>
+            action.kind === "reopen" ? this.startReopen() : void this.act({ action: "archive", archived: false }),
+        },
+        action.label,
+      ),
+      action.after,
+    );
+  }
+
+  /** Opens the Review tab on the Reopen for review confirm step (the lock banner's button). */
+  startReopen(): void {
+    this.host.showReviewTab();
+    this.open("reopen");
   }
 
   private renderBanner(): void {

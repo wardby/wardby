@@ -85,7 +85,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       expect(await o.locator(".toolbar").isVisible()).toBe(false);
       // Reopening starts v2, a copy of the approved v1, in review: the page moves to it, unlocked.
       // Reopen is a confirm step: the first click only opens it.
-      await o.getByRole("button", { name: "Reopen for review" }).click();
+      await o.locator(".rv-panel").getByRole("button", { name: "Reopen for review" }).click();
       await o.getByRole("button", { name: "Reopen", exact: true }).click();
       await expect.poll(() => banner(o)).toContain("In review · v2 · 0 of 2 approved");
       await expect.poll(() => shownVersion(o)).toBe("v2");
@@ -100,6 +100,78 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await o.keyboard.type(" again");
       await expect.poll(() => shownVersion(o), { timeout: 10_000 }).toBe("v3");
       expect(await o.locator(".save").textContent()).toBe("Saved");
+    }, 90_000);
+
+    it("an approved document says why it is locked: Reopen for review opens the confirm step; a commenter is told to ask", async () => {
+      const d = await server.design({ title: "Locked", kind: "document", markdown: "# L\n\nx\n", access: "comment" });
+      const writer = await server.db.agent.create({
+        data: {
+          name: `Doc writer ${d.documentId.slice(-8)}`,
+          systemPrompt: "t",
+          model: "t",
+          budgetUsd: 1,
+          ownerId: d.principalIds.owner,
+          kind: "native",
+          documentTools: {
+            access: "write",
+            reviewers: [d.principalIds.owner],
+            finalApproverId: null,
+            maxNewPerRun: 1,
+            plans: [],
+          },
+        },
+      });
+      await server.db.document.update({ where: { id: d.documentId }, data: { agentId: writer.id } });
+      await submitForReview(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: owner(d.principalIds),
+        reviewers: [d.principalIds.first],
+      });
+      await reviewDocument(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: { kind: "principal", principalId: d.principalIds.first },
+        verdict: "approve",
+        versionNumber: 1,
+      });
+      const lock = (p: Page) => p.locator(".lock-banner");
+      const o = await open(d.ownerCookie, d.documentId);
+      expect(await lock(o).textContent()).toBe(
+        `Approved (v1). It's locked, so it can't be edited or sent to ${writer.name}. Reopen for review to make changes.`,
+      );
+      // The button opens the Review tab's confirm step; nothing is reopened yet.
+      await lock(o).getByRole("button", { name: "Reopen for review" }).click();
+      await expect.poll(() => o.getByRole("group", { name: "Reopen for review" }).isVisible()).toBe(true);
+      expect(await o.locator("#tray-review").isVisible()).toBe(true);
+      expect(await banner(o)).toContain("Approved · v1");
+      // A commenter: the ask line, no button, no agent.
+      const c = await open(d.cookie, d.documentId);
+      expect(await lock(c).textContent()).toBe(
+        "Approved (v1) and locked. To change it, ask someone who can edit it to reopen it.",
+      );
+      expect(await lock(c).getByRole("button").count()).toBe(0);
+      // Archived: the owner is offered Unarchive, which unarchives it; the banner follows live.
+      await setArchived(server.db, { documentId: d.documentId, viewer: owner(d.principalIds), archived: true });
+      await expect
+        .poll(() => lock(c).textContent())
+        .toBe("Archived (v1) and locked. To change it, ask its owner to unarchive it.");
+      await o.getByRole("button", { name: "Cancel" }).click();
+      await expect
+        .poll(() => lock(o).textContent())
+        .toBe(
+          `Archived (v1). It's locked, so it can't be edited or sent to ${writer.name}. Unarchive to make changes.`,
+        );
+      await lock(o).getByRole("button", { name: "Unarchive" }).click();
+      await expect.poll(() => lock(o).textContent()).toContain("Approved (v1). It's locked");
+      // Confirming the reopen: the banner goes, and the page is editable.
+      await lock(o).getByRole("button", { name: "Reopen for review" }).click();
+      await o.getByRole("button", { name: "Reopen", exact: true }).click();
+      await expect.poll(() => lock(o).isVisible()).toBe(false);
+      await expect.poll(() => editable(o)).toBe("true");
+      await expect.poll(() => lock(c).isVisible()).toBe(false);
+      await o.context().close();
+      await c.context().close();
+      await server.db.document.update({ where: { id: d.documentId }, data: { agentId: null } });
+      await server.db.agent.delete({ where: { id: writer.id } });
     }, 90_000);
 
     it("a reviewer is offered only the verdict they have not given: once approved, only Request changes on vN", async () => {
@@ -614,6 +686,11 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       const h1 = page.frameLocator(CANVAS).locator("h1").first();
       await expect.poll(() => h1.textContent(), { timeout: 20_000 }).toMatch(/\S/);
       expect(await banner(page)).toContain("Approved · v1");
+      // Opened approved: the lock banner says so from the start (no agent is linked by name here).
+      expect(await page.locator(".lock-banner").textContent()).toBe(
+        "Approved (v1). It's locked, so it can't be edited. Reopen for review to make changes.",
+      );
+      expect(await page.locator(".reopen-banner").isVisible()).toBe(false);
       expect(await page.locator("[data-tab=style]").isVisible()).toBe(false);
       await h1.dblclick();
       await page.keyboard.type("x");
@@ -635,9 +712,10 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await page.keyboard.press("Escape");
       await reopenDocument(server.db, TEST_CIPHER, { documentId: d.documentId, viewer: owner(d.principalIds) });
       await expect
-        .poll(() => page.locator(".lock-banner").textContent(), { timeout: 10_000 })
+        .poll(() => page.locator(".reopen-banner").textContent(), { timeout: 10_000 })
         .toBe("This design was reopened for review. Reload to edit it. Reload");
-      expect(await page.locator(".lock-banner button", { hasText: "Reload" }).isVisible()).toBe(true);
+      expect(await page.locator(".reopen-banner button", { hasText: "Reload" }).isVisible()).toBe(true);
+      expect(await page.locator(".lock-banner").isVisible()).toBe(false);
       expect(await page.locator(".version").textContent()).toBe("design · v2");
       await context.close();
     }, 90_000);
@@ -706,6 +784,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await expect.poll(() => page.locator(".version").textContent()).toBe("design · v2");
       expect(await page.getByText("This design changed.").isVisible()).toBe(false);
       expect(await page.locator(".lock-banner").isVisible()).toBe(false);
+      expect(await page.locator(".reopen-banner").isVisible()).toBe(false);
       expect(await page.getByRole("button", { name: "Undo" }).isVisible()).toBe(true);
       await page.waitForTimeout(2500);
       expect(puts).toEqual([]);
@@ -932,7 +1011,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await context.close();
     }, 90_000);
 
-    it("a design approved while open stops saving and says it is read-only now, with no Reload", async () => {
+    it("a design approved while open stops saving and the lock banner says why, with Reopen for review and no Reload", async () => {
       const d = await server.design({ title: "Coffee", files: files(), access: "write" });
       await submitForReview(server.db, TEST_CIPHER, {
         documentId: d.documentId,
@@ -952,8 +1031,9 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       });
       await expect
         .poll(() => page.locator(".lock-banner").textContent())
-        .toBe("This design was approved, so it's read-only now. Reopen it for review to edit it.");
-      expect(await page.locator(".lock-banner button").count()).toBe(0);
+        .toBe("Approved (v1). It's locked, so it can't be edited. Reopen for review to make changes.");
+      expect(await page.locator(".lock-banner button").allTextContents()).toEqual(["Reopen for review"]);
+      expect(await page.locator(".reopen-banner").isVisible()).toBe(false);
       expect(await page.locator("[data-tab=style]").isVisible()).toBe(false);
       await context.close();
     }, 90_000);

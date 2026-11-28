@@ -197,7 +197,11 @@ function mount(
     "This design changed. Reload to see the latest version. ",
     h("button", { type: "button", onClick: () => location.reload() }, "Reload"),
   );
+  // Why a locked design can't be edited, and Reopen for review or Unarchive when the viewer may (review-ui.ts).
   const lockBanner = h("div", { class: "banner lock-banner", hidden: true, role: "note" });
+  // A design opened read-only and reopened while open: Reload to edit it.
+  const reopenBanner = h("div", { class: "banner reopen-banner", hidden: true, role: "note" });
+  let agentName = payload.document.agentName ?? null;
   const reviewBanner = h("div", { class: "review-banner", role: "status" });
   const planBar = planBarHost();
   // "Pick an option…" posts the choice to the chosen option (a guest's partial bar never offers it).
@@ -394,6 +398,7 @@ function mount(
       banner,
       changedBanner,
       lockBanner,
+      reopenBanner,
       saveBanner,
       h(
         "div",
@@ -809,6 +814,7 @@ function mount(
   /** A refetched payload (after the mount): its review too. `review` is created below, once refresh exists. */
   const applyPayload = (p: DocumentPayload) => {
     applyThreads(p);
+    agentName = p.document.agentName ?? null;
     const refused = lockedNow && !shownLock;
     review.apply(p.review);
     lockedNow = review.locked;
@@ -1153,20 +1159,18 @@ function mount(
   });
 
   // ---- the review banner and Review tab ----
-  /** The lock banner, for a lock that differs from how the page was mounted. */
-  const renderLockBanner = () => {
-    clear(lockBanner);
-    // Back to how the page was mounted (approved, then reopened, then approved again): no banner.
-    lockBanner.hidden = shownLock === startLocked;
-    if (lockBanner.hidden) return;
-    // Locked in place needs no reload; a page opened read-only must reload to edit after a reopen.
-    if (shownLock)
-      lockBanner.append(`This design was ${lockState}, so it's read-only now. Reopen it for review to edit it.`);
-    else
-      lockBanner.append(
-        "This design was reopened for review. Reload to edit it. ",
-        h("button", { type: "button", onClick: () => location.reload() }, "Reload"),
-      );
+  /**
+   * A page opened read-only must reload to edit after a reopen. (A lock, at load or in place, is the review
+   * panel's lock banner; locked in place needs no reload.)
+   */
+  const renderReopenBanner = () => {
+    clear(reopenBanner);
+    reopenBanner.hidden = shownLock || !startLocked;
+    if (reopenBanner.hidden) return;
+    reopenBanner.append(
+      "This design was reopened for review. Reload to edit it. ",
+      h("button", { type: "button", onClick: () => location.reload() }, "Reload"),
+    );
   };
   const review = new ReviewPanel(
     {
@@ -1187,11 +1191,9 @@ function mount(
         const reworded = state !== lockState;
         lockState = state;
         if (on === shownLock) {
-          // Still locked, in another word (approved to archived): the save state and banner follow.
-          if (on && reworded) {
-            if (!conflict && !saving) showSave(restingSaveText());
-            renderLockBanner();
-          }
+          // Still locked, in another word (approved to archived): the save state follows (the lock banner is the
+          // review panel's).
+          if (on && reworded && !conflict && !saving) showSave(restingSaveText());
           return;
         }
         shownLock = on;
@@ -1217,9 +1219,11 @@ function mount(
           // go with the next edit (or Overview, Play or Export).
         }
         if (!conflict) showSave(restingSaveText());
-        renderLockBanner();
+        renderReopenBanner();
       },
       onState: (s) => root.querySelector(".app")?.classList.toggle("archived", s === "archived"),
+      lockBanner,
+      agentName: () => agentName,
     },
     payload.review,
     payload.version.number,

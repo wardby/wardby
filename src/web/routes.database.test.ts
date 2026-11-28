@@ -1720,6 +1720,46 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect([back.state, back.currentVersion]).toEqual(["in_review", 2]);
     });
 
+    it("names the linked agent to members only, also while locked, and never on an unlinked document", async () => {
+      const writer = await db.agent.create({
+        data: {
+          name: `rv-web-named-${s}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+          kind: "native",
+          documentTools: { access: "write", reviewers: [owner.id], finalApproverId: null, maxNewPerRun: 5, plans: [] },
+        },
+      });
+      try {
+        const doc = await newDoc();
+        const o = await session(owner.id);
+        const load = async (jar: Jar) => ((await (await call(`/d/api/${doc}`, { jar })).json()) as any).document;
+        expect(await load(o.jar)).not.toHaveProperty("agentName");
+        await db.document.update({ where: { id: doc }, data: { agentId: writer.id } });
+        expect((await load(o.jar)).agentName).toBe(writer.name);
+        // Locked: Send is off, but the name stays, so the page can say what the lock keeps it from.
+        await submitAs(doc, o, owner.id);
+        await post(doc, o, { action: "verdict", verdict: "approve", versionNumber: 1 });
+        const locked = await load(o.jar);
+        expect([locked.canSend, locked.agentName]).toEqual([false, writer.name]);
+        // A visitor on a comment link is never told the agent's name.
+        const share = await createShareLink(db, {
+          documentId: doc,
+          viewer: { kind: "principal", principalId: owner.id },
+          permission: "comment",
+        });
+        const anon = (await (
+          await call(`/d/api/${doc}`, { headers: { "x-wardby-share": share.token } })
+        ).json()) as any;
+        expect(anon.document).not.toHaveProperty("agentName");
+        await db.document.delete({ where: { id: doc } });
+      } finally {
+        await db.agent.delete({ where: { id: writer.id } });
+      }
+    });
+
     it("offers send on a native writer's document while the writer can still write it", async () => {
       const writer = await db.agent.create({
         data: {
