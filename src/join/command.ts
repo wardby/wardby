@@ -35,6 +35,8 @@ In the chat:
   a line + Enter   send it to the agent (it reads it once it finishes what it is doing now)
   /interrupt text  interrupt: the agent stops its current turn, then handles text
   /i text          the same, shorter
+  /agent           details of the agent and this run: model, budget, turns, time left, who is joined
+  /prompt          the agent's system prompt
   /leave           leave the run; it finishes its work and wraps up as usual
   /quit            stop the agent (asks first): the run ends cancelled, its work is not pushed
   /help            show these commands
@@ -50,7 +52,7 @@ export const JOIN_MESSAGES = {
   noAccess: "You need execute access to this run's agent to join it.",
   joined:
     "Joined. Type a message and press Enter. /i text interrupts, /leave leaves (the run finishes its work), " +
-    "/quit stops the agent, /help lists every command.",
+    "/agent shows the agent, /quit stops it, /help lists every command.",
   confirmQuit:
     "This stops the agent now: the run ends as cancelled, and its work is not pushed to a result branch or pull request. To let it finish and keep its work, use /leave instead.",
   notStopped: "Not stopped. Still joined.",
@@ -165,6 +167,45 @@ export function stepLine(step: Step): string {
     default:
       return `  ${summary}`;
   }
+}
+
+const str = (value: unknown, max: number): string => cleanServerText(value, max).replace(/\n/g, " ");
+
+/** A duration as "1h 5m", "26m" or "40s". */
+function duration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+const usd = (value: unknown): string => {
+  const n = Number(value);
+  return Number.isFinite(n) ? `$${n.toFixed(4)}` : "?";
+};
+
+/** /agent's answer as chat lines. */
+export function agentLines(answer: Record<string, unknown>, now = Date.now()): string[] {
+  const agent = (answer.agent ?? {}) as Record<string, unknown>;
+  const run = (answer.run ?? {}) as Record<string, unknown>;
+  const lines = [`Agent: ${str(agent.name, 200)} (${str(agent.kind, 40)}, ${str(agent.model, 100)})`];
+  if (agent.repository) lines.push(`  Repository: ${str(agent.repository, 500)}`);
+  const started = Date.parse(String(run.startedAt));
+  const by = run.startedBy ? ` by ${str(run.startedBy, 200)}` : "";
+  lines.push(
+    `  Run: ${str(run.status, 40)}${Number.isFinite(started) ? `, started ${duration(now - started)} ago` : ""}${by}`,
+  );
+  lines.push(`  Spent: ${usd(run.costUsd)} of ${usd(run.budgetUsd)}`);
+  const turns = Number(run.turns);
+  const maxTurns = typeof run.maxTurns === "number" ? ` of ${run.maxTurns} per message` : "";
+  lines.push(`  Turns: ${Number.isFinite(turns) ? turns : "?"}${maxTurns}`);
+  const deadline = Date.parse(String(run.deadlineAt));
+  if (Number.isFinite(deadline) && typeof run.timeoutSec === "number") {
+    lines.push(`  Time left: ${duration(deadline - now)} of ${duration(run.timeoutSec * 1000)}`);
+  }
+  const joined = Array.isArray(run.joined) ? run.joined.map((p) => str(p, 200)) : [];
+  lines.push(`  Joined: ${joined.length > 0 ? joined.join(", ") : "nobody"}`);
+  return lines;
 }
 
 /** The join API, holding the newest token. */
@@ -368,6 +409,11 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         if (text === "") return;
         if (text === "/help") {
           out(JOIN_USAGE);
+        } else if (text === "/agent") {
+          for (const line of agentLines(await expectOk(session, "agent"))) out(line);
+        } else if (text === "/prompt") {
+          const { systemPrompt } = await expectOk(session, "prompt");
+          out(labelled("System prompt: ", cleanServerText(systemPrompt, 100_000)));
         } else if (text === "/leave") {
           await leave();
         } else if (text === "/quit") {

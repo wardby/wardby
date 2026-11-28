@@ -84,7 +84,9 @@ MCP client's agent:
    working at once; its first token expires after 10 minutes, and the chat
    renews it in memory after that.
 3. The chat shows the run's steps as they happen. Type a line and press Enter
-   to send it; start it with `/interrupt` (or `/i`) to interrupt. `/leave` leaves (the run
+   to send it; start it with `/interrupt` (or `/i`) to interrupt. `/agent` shows the agent and
+   the run (model, budget and spend, turns, time left, who is joined) and `/prompt` the agent's
+   system prompt; both need execute access to the agent, as joining does. `/leave` leaves (the run
    finishes its work); `/quit` stops the agent after asking you to confirm:
    the run then ends cancelled and its work is not pushed. Ctrl-C leaves, as
    `/leave` does. After leaving, the chat keeps showing the run until it

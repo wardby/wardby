@@ -9,6 +9,8 @@
  *   leave   {}                                 leaves the run (leave_run)
  *   stop    {}                                 stops the run (stop_run): it ends cancelled
  *   status  {}                                 the run's status, cost and outcome
+ *   agent   {}                                 the agent and the run: model, budget, limits, who is joined
+ *   prompt  {}                                 the agent's system prompt (what get_agent shows)
  *
  * Each answer carries `token`: a fresh token with the same payload, because the requestState codec's
  * own expiry is 10 minutes and a session lasts longer; the payload's `exp` still ends the session.
@@ -30,6 +32,7 @@ import { HTTP_LIMITS, HttpBoundaryError, parseBody, readBody } from "../transpor
 import type { StdioBearerRoute } from "../transport/stdio-link-host.js";
 import {
   checkJoinableRun,
+  checkRunExecuteAccess,
   JoinActionError,
   joinRunAs,
   leaveRunAs,
@@ -49,6 +52,7 @@ import { permissionsOf } from "../auth/resource-server.js";
 import { resolveStanding, type StandingDb } from "../../core/teams/standing.js";
 import type { RunTranscriptLinkAudience } from "./run-transcript-download.js";
 import { loadRunStepsPage } from "./run-steps.js";
+import { joinedPrincipals } from "../../core/run-steps/join.js";
 
 export interface JoinApiDeps {
   verify: (token: string) => Promise<unknown>;
@@ -117,6 +121,62 @@ async function readableRun(db: JoinApiDeps["db"], runId: string, reader: RunRead
   });
   if (!run || !(await canReadRun(db, run, reader))) throw new JoinActionError("not_found");
   return run;
+}
+
+/** How a principal is shown in the chat: their display name, else their id. */
+async function principalLabels(db: JoinApiDeps["db"], ids: string[]): Promise<Record<string, string>> {
+  const users = await db.authUser.findMany({
+    where: { principalId: { in: ids } },
+    select: { principalId: true, displayName: true },
+  });
+  const named = new Map(users.map((u) => [u.principalId, u.displayName]));
+  return Object.fromEntries(ids.map((id) => [id, named.get(id) || id]));
+}
+
+/** /agent: the run's agent and the run's limits, for someone with execute on the agent. */
+async function agentDetails(db: JoinApiDeps["db"], runId: string, reader: RunReader) {
+  const access = await checkRunExecuteAccess(db, runId, reader);
+  const [run, agent, coding, joined] = await Promise.all([
+    db.run.findUnique({
+      where: { id: runId },
+      select: { status: true, costUsd: true, turns: true, startedAt: true, timeoutSec: true, triggeredById: true },
+    }),
+    db.agent.findUnique({
+      where: { id: access.agentId },
+      select: { id: true, name: true, model: true, budgetUsd: true, maxTurns: true },
+    }),
+    db.codingRun.findUnique({
+      where: { runId },
+      select: { provider: true, model: true, repository: true, timeoutSec: true, maxTurns: true, budgetBaseUsd: true },
+    }),
+    joinedPrincipals(db, runId),
+  ]);
+  if (!run || !agent) throw new JoinActionError("not_found");
+  const timeoutSec = coding ? coding.timeoutSec : run.timeoutSec;
+  const people = [...joined];
+  const labels = await principalLabels(db, run.triggeredById ? [...people, run.triggeredById] : people);
+  labels[reader.principalId] = "you";
+  return {
+    agent: {
+      id: agent.id,
+      name: agent.name,
+      kind: coding ? coding.provider : "native",
+      model: coding?.model ?? agent.model,
+      repository: coding?.repository ?? null,
+    },
+    run: {
+      status: run.status,
+      startedAt: run.startedAt.toISOString(),
+      startedBy: run.triggeredById ? labels[run.triggeredById] : null,
+      costUsd: run.costUsd.toString(),
+      budgetUsd: (coding?.budgetBaseUsd ?? agent.budgetUsd).toString(),
+      turns: run.turns,
+      maxTurns: coding ? coding.maxTurns : agent.maxTurns,
+      timeoutSec: timeoutSec ?? null,
+      deadlineAt: timeoutSec ? new Date(run.startedAt.getTime() + timeoutSec * 1000).toISOString() : null,
+      joined: people.map((id) => labels[id]),
+    },
+  };
 }
 
 export async function handleJoinApi(request: JoinApiRequest, res: ServerResponse, deps: JoinApiDeps): Promise<void> {
@@ -195,6 +255,20 @@ export async function handleJoinApi(request: JoinApiRequest, res: ServerResponse
           reason: "stopped from wardby join",
         });
         answer = { runId, status: result.status, stopRequested: result.stopRequested };
+        break;
+      }
+      case "agent": {
+        if (!EmptyBody.safeParse(body).success) return send(res, 400, { error: "invalid_request" });
+        answer = { runId, ...(await agentDetails(deps.db, runId, reader)) };
+        break;
+      }
+      case "prompt": {
+        if (!EmptyBody.safeParse(body).success) return send(res, 400, { error: "invalid_request" });
+        // get_agent shows the prompt to anyone who can read the agent; joining needs execute.
+        const run = await checkRunExecuteAccess(deps.db, runId, reader);
+        const agent = await deps.db.agent.findUnique({ where: { id: run.agentId }, select: { systemPrompt: true } });
+        if (!agent) throw new JoinActionError("not_found");
+        answer = { runId, systemPrompt: agent.systemPrompt };
         break;
       }
       case "status": {

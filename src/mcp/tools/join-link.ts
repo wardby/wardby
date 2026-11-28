@@ -27,6 +27,8 @@ export const JOIN_API_PATHS = {
   leave: "/join/api/leave",
   stop: "/join/api/stop",
   status: "/join/api/status",
+  agent: "/join/api/agent",
+  prompt: "/join/api/prompt",
 } as const;
 export type JoinApiAction = keyof typeof JOIN_API_PATHS;
 /** The command that reads the link from stdin (out of shell history and the process list). */

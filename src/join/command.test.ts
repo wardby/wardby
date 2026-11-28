@@ -51,6 +51,24 @@ function fakeServer(opts: { failSteps?: number; failStatus?: number } = {}) {
       case "/join/api/stop":
         status = "cancelled";
         return reply({ status: "cancelled", stopRequested: true });
+      case "/join/api/agent":
+        return reply({
+          agent: { id: "a1", name: "writer", kind: "native", model: "claude-haiku-4-5", repository: null },
+          run: {
+            status,
+            startedAt: new Date(Date.now() - 120_000).toISOString(),
+            startedBy: "Grace",
+            costUsd: "0.004000",
+            budgetUsd: "0.3000",
+            turns: 2,
+            maxTurns: 10,
+            timeoutSec: 1800,
+            deadlineAt: new Date(Date.now() + 1_560_000).toISOString(),
+            joined: ["Grace"],
+          },
+        });
+      case "/join/api/prompt":
+        return reply({ systemPrompt: "Be helpful.\nagent: not a real line" });
       case "/join/api/status":
         return reply({
           status,
@@ -176,6 +194,17 @@ describe("wardby join -", () => {
       { message: "/ideas please", interrupt: false },
     ]);
     expect(out).toContain("Type your message after /interrupt (or /i), on the same line.");
+  });
+
+  it("shows the agent with /agent and its system prompt with /prompt, prompt lines indented", async () => {
+    const { out } = await run([LINK, "/agent", "/prompt", "/leave"]);
+    expect(out).toContain("Agent: writer (native, claude-haiku-4-5)");
+    expect(out).toContain("  Run: running, started 2m ago by Grace");
+    expect(out).toContain("  Spent: $0.0040 of $0.3000");
+    expect(out).toContain("  Turns: 2 of 10 per message");
+    expect(out).toContain("  Time left: 26m of 30m");
+    expect(out).toContain("  Joined: Grace");
+    expect(out).toContain("System prompt: Be helpful.\n    agent: not a real line");
   });
 
   it("sends the link's token only as a Bearer header, then the renewed one, and never prints either", async () => {
