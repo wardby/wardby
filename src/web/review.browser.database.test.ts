@@ -240,7 +240,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
         // concept-a's page: the set bar lists both options by label.
         const a = await open(d.ownerCookie, d.documentId);
-        const barA = a.getByRole("navigation", { name: "Plan" });
+        const barA = a.getByRole("navigation", { name: "Option set" });
         await expect.poll(() => barA.locator(".plan-count").textContent()).toBe("landing · 0 of 2 approved");
         expect(await barA.locator(".plan-title").allTextContents()).toEqual(["concept-a", "concept-b"]);
         expect(await barA.locator('[aria-current="page"] .plan-title').textContent()).toBe("concept-a");
@@ -248,7 +248,7 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
 
         // concept-b's page: Choose this option, with a note; concept-a is rejected.
         const p = await open(d.ownerCookie, b);
-        const bar = p.getByRole("navigation", { name: "Plan" });
+        const bar = p.getByRole("navigation", { name: "Option set" });
         await expect.poll(() => bar.locator(".plan-count").textContent()).toBe("landing · 0 of 2 approved");
         await p.getByRole("tab", { name: "Review" }).click();
         await p.locator(".rv-panel").getByRole("button", { name: "Choose this option" }).click();

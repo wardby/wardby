@@ -59,12 +59,12 @@ A named reviewer can also request changes on a document every reviewer approved:
 
 ## Reject
 
-A document of a [plan](plan-documents.md) can be **rejected** instead of approved, for example a design option nobody chose. The owner, the final approver or a named member reviewer chooses **Reject** in the Review tab (or calls `reject_document`) and gives a note, such as "Option B was chosen". The document becomes Rejected:
+A document of a set, a [plan](plan-documents.md) or an option set made by a native agent (`doc_create` with `set` and `option`), can be **rejected** instead of approved, for example a design option nobody chose. The owner, the final approver or a named member reviewer chooses **Reject** in the Review tab (or calls `reject_document`) and gives a note, such as "Option B was chosen". The document becomes Rejected:
 
 - It is read-only, like an approved document. Comments stay open.
-- It leaves the plan: it no longer counts toward the plan's approval, and a builder never gets it. The plan rail still lists it, struck through, as "Rejected", under **Out of the plan**.
-- Rejecting the last document the plan was waiting for approves the plan, the same as an approval does (with `onApproved: "build"`, ticket 1 starts).
-- A later planner run does not change it or bring it back.
+- It leaves the set: it no longer counts toward the set's approval, and a plan's builder never gets it. The rail still lists it, struck through, as "Rejected", under **Out of the plan** (**Out of the set** for an option set).
+- Rejecting the last document the set was waiting for approves the set, the same as an approval does (for a plan with `onApproved: "build"`, ticket 1 starts).
+- A later planner run does not change a plan's rejected document or bring it back.
 
 ### Choose this option
 
@@ -76,7 +76,7 @@ An option set made by a native agent (`doc_create` with `set` and `option`) work
 
 The top bar shows the review status beside the title; clicking it opens the Review tab. The Review tab starts with what to do next (give your review, or on a plan option choose it), then the plan and management actions you may use. Choose, Reject, Force approve, editing reviewers, Reopen and Archive each ask you to confirm first, so no single click reopens, rejects or archives anything. After a choice, the page says what it rejected and what the plan still waits for.
 
-A writer reopens a rejected document for review to bring it back into the plan: like reopening an approved one, it starts a new version and every reviewer gives their verdict again. A plan's own `plan.md`, and a document that is not part of a plan, cannot be rejected ([`document_reject_not_plan_document`](errors/document-reject-not-plan-document.md)).
+A writer reopens a rejected document for review to bring it back into its set: like reopening an approved one, it starts a new version and every reviewer gives their verdict again. A plan's own `plan.md`, and a document that is not part of a plan or an option set, cannot be rejected ([`document_reject_not_plan_document`](errors/document-reject-not-plan-document.md)).
 
 ## The lock
 

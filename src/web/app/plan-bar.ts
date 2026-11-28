@@ -212,6 +212,7 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
   host.hidden = !plan;
   if (!plan) return;
   const kind = kindOf(plan);
+  host.setAttribute("aria-label", kind === "options" ? "Option set" : "Plan");
   // A row: the name opens the document (on the side-panel tab open now); the state opens it on its Review tab.
   const row = (d: PlanSetPayload["documents"][number]) => {
     const link = h(

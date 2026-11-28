@@ -358,15 +358,15 @@ nothing and records no event.
   version over missing verdicts and requested changes. A note is required and
   the history lists who was overridden. It is only possible in review or with
   changes requested.
-- **Reject** (documents of a plan only): the owner, the final approver or a
-  named member reviewer rejects a document the plan does not need, such as a
-  design option that was not chosen (`reject_document`, or **Reject** on the
-  Review tab). A note is required. It works in review, with changes requested
-  or approved. The document becomes rejected: locked like an approved one, and
-  out of the plan, so it no longer counts toward the plan's approval and a
-  builder never gets it; rejecting the last document the plan waited for
-  approves the plan. A plan's own `plan.md`, a document outside a plan, and a
-  document already out of the plan are refused with
+- **Reject** (documents of a plan or an option set): the owner, the final
+  approver or a named member reviewer rejects a document the set does not need,
+  such as a design option that was not chosen (`reject_document`, or **Reject**
+  on the Review tab). A note is required. It works in review, with changes
+  requested or approved. The document becomes rejected: locked like an approved
+  one, and out of its set, so it no longer counts toward the set's approval and
+  a plan's builder never gets it; rejecting the last document the set waited
+  for approves the set. A plan's own `plan.md`, a document in no set, and a
+  document already out of its set are refused with
   `document_reject_not_plan_document`. Guests cannot reject.
 - **Choose this option** (alternatives in a plan): on the chosen option's
   Review tab, **Choose this option** lists the plan's other undecided or
