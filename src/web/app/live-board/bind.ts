@@ -64,10 +64,23 @@ export interface BoardBinding {
   destroy(): void;
 }
 
+/** A board's Undo history: this page's changes only (origin LOCAL). */
+export const boardUndo = (maps: BoardMaps): Y.UndoManager =>
+  new Y.UndoManager([maps.nodes, maps.rules, maps.ruleOrder], { trackedOrigins: new Set([LOCAL]) });
+
 export function bindBoard(
   editor: Editor,
   maps: BoardMaps,
-  opts: { build: boolean; baseCss?: string; parts?: ReadOptions["parts"] },
+  opts: {
+    build: boolean;
+    baseCss?: string;
+    parts?: ReadOptions["parts"];
+    /**
+     * The board's Undo history from an earlier binding (made by `boardUndo`), so Undo still reaches what this page
+     * changed before the board was switched away and back. The caller owns it: `destroy` leaves it running.
+     */
+    undo?: Y.UndoManager;
+  },
 ): BoardBinding {
   const { nodes, rules, ruleOrder, meta } = maps;
   const stats = { out: 0, in: 0, fullBuilds: 0, resent: 0, created: 0, remote: 0 };
@@ -437,7 +450,10 @@ export function bindBoard(
   editor.on("rte:disable", onDisable);
 
   // Undo: this page's changes only (Bo's are not undone by your Undo); undoing reaches GrapesJS like any remote change.
-  const undoManager = new Y.UndoManager([nodes, rules, ruleOrder], { trackedOrigins: new Set([LOCAL]) });
+  const undoManager = opts.undo ?? boardUndo(maps);
+  // Building the board is not something to undo; an edit after a re-bind never merges with one from before it.
+  if (opts.build) undoManager.clear();
+  undoManager.stopCapturing();
 
   return {
     stats,
@@ -467,7 +483,7 @@ export function bindBoard(
       editor.off("component:add", onAdd);
       editor.off("rte:enable", onEnable);
       editor.off("rte:disable", onDisable);
-      undoManager.destroy();
+      if (!opts.undo) undoManager.destroy();
     },
   };
 }

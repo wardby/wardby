@@ -145,8 +145,35 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
       await typeInHeading(a, " ANN-UNDO");
       await expect.poll(() => h1Text(b), { timeout: 10_000 }).toContain("ANN-UNDO");
       await a.locator('button[title^="Undo"], button[aria-label^="Undo"]').first().click();
-      await expect.poll(() => h1Text(b), { timeout: 10_000 }).not.toContain("ANN-UNDO");
+      // Ann's own page first: if it still shows her words, her Undo did nothing; if only Bo's does, it never reached him.
+      await expect
+        .poll(() => h1Text(a), { timeout: 10_000, message: "Ann's Undo did not undo her heading on her own page" })
+        .not.toContain("ANN-UNDO");
+      await expect
+        .poll(() => h1Text(b), { timeout: 10_000, message: "Ann's Undo did not reach Bo's page" })
+        .not.toContain("ANN-UNDO");
       expect(await para(b).textContent()).toContain("BO-PARA");
+      expect([...a.errors, ...b.errors]).toEqual([]);
+    }, 120_000);
+
+    it("Undo still undoes your change after you switch to another board and back", async () => {
+      const { documentId, cookie, secondCookie } = await server.design({
+        title: "Coffee",
+        files: files(),
+        access: "write",
+      });
+      const a = await open(cookie, documentId);
+      const b = await open(secondCookie, documentId);
+      const tab = (name: string) => a.locator(".boards .pick", { hasText: name }).first();
+      await typeInHeading(a, " ANN-UNDO");
+      await expect.poll(() => h1Text(b), { timeout: 10_000 }).toContain("ANN-UNDO");
+      await tab("Menu").click();
+      await a.waitForTimeout(1_000);
+      await tab("Home").click();
+      await expect.poll(() => h1Text(a), { timeout: 20_000 }).toContain("ANN-UNDO");
+      await a.locator('button[title^="Undo"], button[aria-label^="Undo"]').first().click();
+      await expect.poll(() => h1Text(a), { timeout: 10_000 }).not.toContain("ANN-UNDO");
+      await expect.poll(() => h1Text(b), { timeout: 10_000 }).not.toContain("ANN-UNDO");
       expect([...a.errors, ...b.errors]).toEqual([]);
     }, 120_000);
 
