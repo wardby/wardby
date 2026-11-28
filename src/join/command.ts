@@ -18,7 +18,7 @@
  * never printed or logged; every answer carries a fresh token, kept in memory only. Server text is
  * shown with control characters removed, so it cannot drive the terminal.
  */
-import { createInterface, type Interface } from "node:readline";
+import { clearLine, createInterface, cursorTo, moveCursor, type Interface } from "node:readline";
 import { parseArgs } from "node:util";
 import { JOIN_API_PATHS, parseJoinLink, type JoinApiAction } from "../mcp/tools/join-link.js";
 
@@ -227,7 +227,23 @@ async function expectOk(session: JoinSession, action: JoinApiAction, body?: unkn
 
 /** Returns the process exit code: 0 the run ended (or you left and it ended), 1 failed, 2 usage. */
 export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<number> {
-  const out = deps.out ?? ((line: string) => process.stdout.write(`${line}\n`));
+  const write = deps.out ?? ((line: string) => process.stdout.write(`${line}\n`));
+  // In a terminal the chat keeps a "> " prompt on the bottom line: a line printed while you type
+  // goes above it, and what you had typed is drawn again below (readline's prompt(true)).
+  let prompter: Interface | undefined;
+  const out = (line: string) => {
+    if (!prompter) return void write(line);
+    clearLine(process.stdout, 0);
+    cursorTo(process.stdout, 0);
+    write(line);
+    prompter.prompt(true);
+  };
+  const stopPrompt = () => {
+    if (!prompter) return;
+    prompter = undefined;
+    clearLine(process.stdout, 0);
+    cursorTo(process.stdout, 0);
+  };
   let parsed;
   try {
     parsed = parseArgs({ args: argv, allowPositionals: true, options: { help: { type: "boolean", short: "h" } } });
@@ -249,7 +265,11 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
   const tty = input === process.stdin && process.stdin.isTTY === true;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const pollMs = deps.pollMs ?? POLL_MS;
-  const rl: Interface = createInterface({ input, terminal: false });
+  // A prompt only when a person is typing into a terminal and watching it; piped input stays plain.
+  const promptMode = tty && deps.out === undefined && process.stdout.isTTY === true;
+  const rl: Interface = promptMode
+    ? createInterface({ input, output: process.stdout, terminal: true, prompt: "> " })
+    : createInterface({ input, terminal: false });
   const lines = rl[Symbol.asyncIterator]();
   try {
     let raw: string;
@@ -270,6 +290,10 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
     const session = new JoinSession(link.origin, link.token, deps.fetch ?? globalThis.fetch);
     const joined = await expectOk(session, "join");
     out(`${JOIN_MESSAGES.joined} (run ${cleanServerText(joined.runId, 128)})`);
+    if (promptMode) {
+      prompter = rl;
+      rl.prompt();
+    }
 
     let after = 0;
     let ended: Record<string, unknown> | undefined;
@@ -303,6 +327,8 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         for (const signal of ["SIGINT", "SIGHUP", "SIGTERM"] as const) process.on(signal, () => handler(signal));
       })
     )(onSignal);
+    // A terminal-mode readline takes Ctrl-C itself: pass it on as the signal.
+    if (promptMode) rl.on("SIGINT", () => onSignal("SIGINT"));
 
     // What people type: each line sent while the run is going; input ending only stops sending.
     const typing = (async () => {
@@ -310,7 +336,13 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         const next = await lines.next();
         if (next.done || ended) return;
         try {
+          if (prompter) {
+            // The typed line is shown again as "person: ..." once it is sent: drop the echo.
+            moveCursor(process.stdout, 0, -1);
+            clearLine(process.stdout, 0);
+          }
           await handleLine(String(next.value).trim());
+          prompter?.prompt();
         } catch (err) {
           out(err instanceof JoinCliError ? err.message : JOIN_MESSAGES.unreachable);
         }
@@ -402,6 +434,7 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         return 1;
       }
     }
+    stopPrompt();
     rl.close();
     await typing.catch(() => undefined);
     const cost = Number(ended.costUsd);
@@ -417,6 +450,7 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
     out(err instanceof JoinCliError ? err.message : "Something went wrong while joining the run.");
     return 1;
   } finally {
+    stopPrompt();
     rl.close();
   }
 }
