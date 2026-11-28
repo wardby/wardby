@@ -136,8 +136,13 @@ export class CommentsUI {
   }
   private working(t: ThreadView): boolean {
     if (!t.sentAt || t.status === "resolved") return false;
+    return !this.replied(t);
+  }
+  /** The agent answered the thread's latest send (a reply posted since it was sent). */
+  private replied(t: ThreadView): boolean {
+    if (!t.sentAt) return false;
     const sent = Date.parse(t.sentAt);
-    return !liveComments(t).some((c) => c.author.kind === "agent" && Date.parse(c.createdAt) >= sent);
+    return liveComments(t).some((c) => c.author.kind === "agent" && Date.parse(c.createdAt) >= sent);
   }
 
   // ---- data -----------------------------------------------------------------
@@ -369,7 +374,7 @@ export class CommentsUI {
         : t?.status === "outdated"
           ? ["out", "Outdated"]
           : t?.sentAt
-            ? ["sent", "Sent to agent"]
+            ? ["sent", this.replied(t) ? "Agent replied" : "Sent to agent"]
             : null;
     const menuItems = t ? this.menuItems(t) : [];
     append(
@@ -1076,7 +1081,13 @@ export class CommentsUI {
           { class: "m" },
           h("span", {}, `${live.length} message${live.length === 1 ? "" : "s"}`),
           last ? h("span", {}, `· ${relativeTime(last.createdAt)}`) : null,
-          t.sentAt ? h("span", { class: "chip sent" }, this.working(t) ? "✦ working" : "✦ sent") : null,
+          t.sentAt
+            ? h(
+                "span",
+                { class: "chip sent" },
+                this.working(t) ? "✦ working" : this.replied(t) ? "✦ replied" : "✦ sent",
+              )
+            : null,
           t.status === "outdated" || (t.status === "open" && !located)
             ? h("span", { class: "chip out" }, "outdated")
             : null,

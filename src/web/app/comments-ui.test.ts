@@ -159,6 +159,34 @@ describe("CommentsUI with a surface", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("a sent thread reads working until the agent replies, then replied", () => {
+    const sentAt = new Date(Date.now() - 60_000).toISOString();
+    const waiting: ThreadView = { ...thread("1"), sentAt };
+    const answered: ThreadView = {
+      ...thread("2"),
+      sentAt,
+      comments: [
+        ...thread("2").comments,
+        {
+          id: "c2b",
+          author: { kind: "agent", name: "Agent" },
+          body: "Done",
+          createdAt: new Date().toISOString(),
+          editedAt: null,
+          mine: false,
+        },
+      ],
+    };
+    const { ui, handlers } = setup([waiting, answered]);
+    ui.render();
+    const chips = [...document.querySelectorAll(".chip.sent")].map((c) => c.textContent);
+    expect(chips).toEqual(["✦ working", "✦ replied"]);
+    handlers().activate("1");
+    expect(document.querySelector(".cpop .status.sent")?.textContent).toBe("Sent to agent");
+    handlers().activate("2");
+    expect(document.querySelector(".cpop .status.sent")?.textContent).toBe("Agent replied");
+  });
+
   it("finds a thread created before a failed send by its anchor, not its label", async () => {
     const element = (path: string) => ({
       type: "element" as const,
