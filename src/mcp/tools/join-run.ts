@@ -1,6 +1,6 @@
 /**
  * Join (src/core/run-steps/join.ts): join_run, send_to_run and leave_run. A person with execute on
- * a run's agent joins one of its running runs, sends the agent messages (picked up at its next step)
+ * a run's agent joins one of its running runs, sends the agent messages (read once it finishes what it is doing now)
  * or an interrupt (stops the current turn, then the message is handled), and leaves. While anyone is
  * joined the run stays open after the agent finishes, until the last person leaves or the run's
  * timeout. Native agent runs, and Claude Code coding runs that are not workflow runs.
@@ -172,7 +172,8 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
     name: "send_to_run",
     scope: "runs:trigger",
     description:
-      "Send a message to the agent of a run you joined (join_run). The agent picks it up at its next step; with " +
+      "Send a message to the agent of a run you joined (join_run). The agent reads it once it finishes what it is " +
+      "doing now (a native agent after its current step, a Claude Code agent after its current answer); with " +
       `interrupt: true it stops what it is doing first and then handles the message. Up to ${MAX_JOIN_MESSAGE_CHARS} ` +
       "characters. The message appears in the run's steps (kind message or interrupt) for everyone who can see the " +
       "run; secret values in it are masked. Needs execute access to the run's agent.",
@@ -187,7 +188,8 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
         },
         interrupt: {
           type: "boolean",
-          description: "Stop the agent's current turn first (default false: it reads the message at its next step).",
+          description:
+            "Stop the agent's current turn first (default false: it reads the message once it finishes what it is doing now).",
         },
       },
       required: ["runId", "message"],
@@ -204,7 +206,7 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
         message:
           kind === "interrupt"
             ? "Sent. The agent stops its current turn and then handles your message."
-            : "Sent. The agent picks it up at its next step.",
+            : "Sent. The agent reads it once it finishes what it is doing now.",
       });
     },
   });

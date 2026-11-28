@@ -2,8 +2,10 @@
  * Join (phase 1, Claude Code runs): people with execute access to the agent join a running run and
  * send it messages. The control plane keeps them as the run's steps; this worker long-polls the
  * coding proxy for them (`wardby/join/poll`, relayed to the control plane's run-steps listener) and
- * feeds them into the Claude Code session as streamed user messages: a message with priority "next"
- * (picked up at the agent's next step), an interrupt with "now" (the current turn stops at once).
+ * feeds them into the Claude Code session as streamed user messages: a message with priority "later"
+ * (a user turn of its own once the agent finishes its current answer), an interrupt with "now" (the
+ * current turn stops at once). Not "next": the SDK delivers that inside the result of the tool call
+ * that is running, where the agent rightly distrusts it as possible prompt injection.
  *
  * While anyone is joined the session stays open after the agent's answer, waiting for the next
  * message; it closes when the last person leaves (once the agent is idle), or at the run's
@@ -183,10 +185,10 @@ export interface ClaudeUserMessage {
   type: "user";
   message: { role: "user"; content: { type: "text"; text: string }[] };
   parent_tool_use_id: null;
-  priority?: "now" | "next";
+  priority?: "now" | "later";
 }
 
-const userMessage = (text: string, priority?: "now" | "next"): ClaudeUserMessage => ({
+const userMessage = (text: string, priority?: "now" | "later"): ClaudeUserMessage => ({
   type: "user",
   message: { role: "user", content: [{ type: "text", text }] },
   parent_tool_use_id: null,
@@ -234,7 +236,7 @@ export class JoinedInput {
     source.start({
       message: (message) => {
         if (this.closed) return;
-        this.queue.push(userMessage(joinedMessageText(message.text), message.interrupt ? "now" : "next"));
+        this.queue.push(userMessage(joinedMessageText(message.text), message.interrupt ? "now" : "later"));
         this.signal();
       },
       joinedChanged: (joined) => {

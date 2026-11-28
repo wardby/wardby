@@ -32,7 +32,7 @@ where a link given as an argument stays (its first token works for 10 minutes; t
 memory after that).
 
 In the chat:
-  a line + Enter   send it to the agent (it reads it at its next step)
+  a line + Enter   send it to the agent (it reads it once it finishes what it is doing now)
   !text            interrupt: the agent stops its current turn, then handles text
   /leave           leave the run; it finishes its work and wraps up as usual
   /quit            stop the agent (asks first): the run ends cancelled, its work is not pushed

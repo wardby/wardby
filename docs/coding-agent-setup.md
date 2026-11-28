@@ -1667,8 +1667,9 @@ For a coding agent whose owner sets `runSteps` to `detail`, also set
 
 People with execute access to a Claude Code agent can join one of its running
 runs and talk to the agent while it works: `join_run`, then `send_to_run` with a
-message (picked up at the agent's next step) or `interrupt: true` (stops the
-current turn first), and `leave_run`. Follow the agent's replies with
+message (the agent reads it as soon as it finishes its current answer, which in
+a coding run can be near the end of the task) or `interrupt: true` (stops the
+current turn first and handles the message at once), and `leave_run`. Follow the agent's replies with
 `get_run_steps`. Native agent runs can be joined the same way (from 0.11.3;
 see [Join a running run](../help/join-runs.md)). Workflow runs and Codex runs
 cannot be joined yet.

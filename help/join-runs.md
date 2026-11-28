@@ -38,8 +38,9 @@ the agent's runs and their full step text, whoever started them.
 ## How it works
 
 1. **Join**: call `join_run` with the run's id (from `list_runs` or `trigger_agent`).
-2. **Send a message**: call `send_to_run` with your `message`. The agent picks it up at its next
-   step, without restarting the run. Add `interrupt: true` to stop what it is doing first.
+2. **Send a message**: call `send_to_run` with your `message`. The agent reads it once it finishes what
+   it is doing now, without restarting the run. Add `interrupt: true` to have it stop and handle
+   your message at once.
 3. **Follow along**: call `get_run_steps` with `after` set to the last `seq` you have. Your message
    shows as a step of kind `message` (or `interrupt`) with `from` set to you, followed by the
    agent's reply and tool calls.
@@ -57,6 +58,10 @@ budget.
 
 The turn limit (`codingProfile.maxTurns` on a coding agent, `maxTurns` on a native agent) applies to
 each message separately: the agent's turns answering you do not use up the task's turns.
+
+On a Claude Code run, a message reaches the agent as soon as it finishes its current answer. In a
+coding run that answer is often the whole task, so a message may only arrive near the end; to steer
+the agent mid-task, interrupt.
 
 On a native run, a message reaches the agent before its next model turn. An interrupt stops the
 reply it is writing at once; a tool call that is already running finishes first, and the turn's

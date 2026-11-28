@@ -1735,7 +1735,7 @@ describe("runClaudeCodingWorker join (phase 1)", () => {
       type: "user",
       message: { role: "user", content: [{ type: "text", text: joinedMessageText("Please also update the README.") }] },
       parent_tool_use_id: null,
-      priority: "next",
+      priority: "later",
     });
     expect(join.stopped).toBe(true);
   });
