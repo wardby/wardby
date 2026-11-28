@@ -26,8 +26,25 @@ You can join a running run and talk to its agent while it works: point it at som
 missed, change the plan, or ask a question.
 
 Joining works on **native agent** runs (from 0.11.3, in the control plane and in a sandbox) and on
-**Claude Code** coding runs that are not workflow runs. Codex and the Gemini CLI are not supported
-yet.
+**Claude Code** coding runs, including workflow runs (from 0.11.4; see [Workflow runs](#workflow-runs)).
+Codex and the Gemini CLI are not supported yet.
+
+## Workflow runs
+
+On a workflow run, your messages reach the run's lead session: the Claude Code session that started
+the repository workflow script and waits for it. The workflow's sub-agents do not see them.
+
+- **While the workflow runs**, each message reaches the lead with a short status line (the phase it
+  is on and how many of its agents have finished), so it can tell you how the workflow is going.
+- **Stop or restart**: ask the lead to stop the workflow, or to stop it and start it again. A
+  restart always uses the run's own workflow arguments, and a run may launch its workflow at most
+  five times. The run's result comes from the last launch; a run whose last launch was stopped ends
+  failed ([`coding_failure_workflow_failed`](errors/coding-workflow-failed.md)).
+- **After the workflow**, talk to the lead as on any coding run: ask what changed, or ask for one
+  more fix. The run stays open until the last person leaves or its timeout.
+- An interrupt (`/i`) stops the lead's current turn, not the workflow.
+
+`/agent` shows the run's workflow.
 
 ## Who can join
 

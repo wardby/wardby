@@ -295,6 +295,7 @@ export function agentLines(answer: Record<string, unknown>, now = Date.now(), pa
       (r) => `${str(r.repository, 500)} (${str(r.access, 40)})`,
     ),
   );
+  if (agent.workflow) lines.push(`  ${paint.dim("Workflow:")} ${str(agent.workflow, 100)}`);
   if (typeof agent.repoSkills === "boolean") {
     lines.push(`  ${paint.dim("Repository skills:")} ${agent.repoSkills ? "loaded from the repository" : "off"}`);
   }

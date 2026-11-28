@@ -3,7 +3,8 @@
  * a run's agent joins one of its running runs, sends the agent messages (read once it finishes what it is doing now)
  * or an interrupt (stops the current turn, then the message is handled), and leaves. While anyone is
  * joined the run stays open after the agent finishes, until the last person leaves or the run's
- * timeout. Native agent runs, and Claude Code coding runs that are not workflow runs.
+ * timeout. Native agent runs, and Claude Code coding runs (workflow runs too: messages reach the
+ * run's lead session, #657).
  *
  * The actions and their access checks are join-actions.ts's, shared with the join API that
  * `wardby join -` calls (join-api.ts); join_run also returns that command's link when this server
@@ -53,7 +54,7 @@ function parse<T>(schema: z.ZodType<T>, raw: unknown, tool: string): T {
 export const JOIN_REFUSALS: Record<string, string> = {
   run_not_running: "run_not_running: only a running run can be joined; this one is not running.",
   join_not_supported:
-    "join_not_supported: joining works on native agent runs and on Claude Code coding runs that are not workflow runs; this run is not one.",
+    "join_not_supported: joining works on native agent runs and on Claude Code coding runs; this run is neither.",
   join_unavailable:
     "join_unavailable: this run keeps no run steps (WARDBY_RUN_STEPS or the agent's runSteps is off), so it cannot be joined.",
   run_not_joined: "run_not_joined: join the run with join_run before sending it messages.",
@@ -137,7 +138,8 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
       "The answer also has terminal, for joining from a terminal chat: command (npx @wardby/cli@latest join with " +
       `the link, ready to copy), pasteCommand (${JOIN_COMMAND}, which asks for the link instead) and link. Give ` +
       "command to the user when they want that (or pasteCommand and link), and do not open the link yourself. " +
-      "Needs execute access to the run's agent. Workflow runs and Codex or Gemini CLI coding runs cannot be joined yet.",
+      "Needs execute access to the run's agent. On a workflow run, messages reach the lead session that runs the " +
+      "workflow. Codex and Gemini CLI coding runs cannot be joined yet.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

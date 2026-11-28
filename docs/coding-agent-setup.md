@@ -1671,8 +1671,10 @@ message (the agent reads it as soon as it finishes its current answer, which in
 a coding run can be near the end of the task) or `interrupt: true` (stops the
 current turn first and handles the message at once), and `leave_run`. Follow the agent's replies with
 `get_run_steps`. Native agent runs can be joined the same way (from 0.11.3;
-see [Join a running run](../help/join-runs.md)). Workflow runs and Codex runs
-cannot be joined yet.
+see [Join a running run](../help/join-runs.md)). On a workflow run (from 0.11.4),
+messages reach the lead session that runs the workflow, with a short status line
+of its progress; it can stop the workflow and launch it again with the run's own
+arguments, at most five launches in all. Codex runs cannot be joined yet.
 
 From a terminal (0.11.1 or later): `join_run`'s answer also carries
 `terminal.command` (from 0.11.2, `npx @wardby/cli@latest join '<link>'`, ready

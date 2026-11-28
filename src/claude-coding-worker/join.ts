@@ -201,6 +201,10 @@ export interface JoinedInputOptions {
   now?: () => number;
   /** Called with a fixed event name (never message text), for the run's debug trace. */
   trace?: (event: string, data?: Record<string, unknown>) => void;
+  /** A line added after each joined message when it is handed to the session (a workflow run's status, #657). */
+  annotate?: () => string | undefined;
+  /** While true the input stays open even with nobody joined (a workflow run's launch is running, #657). */
+  holdOpen?: () => boolean;
 }
 
 /**
@@ -209,7 +213,7 @@ export interface JoinedInputOptions {
  * deadline margin, or when the run ends.
  */
 export class JoinedInput {
-  private readonly queue: ClaudeUserMessage[] = [];
+  private readonly queue: { text: string; interrupt: boolean }[] = [];
   private joined = false;
   /** A message has been handed to the session and no result has followed it yet. */
   private busy = true;
@@ -236,7 +240,7 @@ export class JoinedInput {
     source.start({
       message: (message) => {
         if (this.closed) return;
-        this.queue.push(userMessage(joinedMessageText(message.text), message.interrupt ? "now" : "later"));
+        this.queue.push({ text: message.text, interrupt: message.interrupt });
         this.signal();
       },
       joinedChanged: (joined) => {
@@ -258,6 +262,11 @@ export class JoinedInput {
     this.maybeClose();
   }
 
+  /** Something holdOpen depends on changed (a workflow launch ended): close if nothing keeps the input open. */
+  recheck(): void {
+    this.maybeClose();
+  }
+
   /** Ends the input and the polling (the run is over, or the deadline margin is reached). */
   close(): void {
     if (this.closed) return;
@@ -271,10 +280,13 @@ export class JoinedInput {
     yield userMessage(this.prompt);
     while (true) {
       while (this.queue.length > 0 && !this.closed) {
-        const next = this.queue.shift() as ClaudeUserMessage;
+        const queued = this.queue.shift() as { text: string; interrupt: boolean };
+        const note = this.options.annotate?.();
+        const text = joinedMessageText(queued.text);
+        const next = userMessage(note ? `${text}\n\n${note}` : text, queued.interrupt ? "now" : "later");
         this.busy = true;
         this.delivered += 1;
-        this.options.trace?.("join_message_delivered", { interrupt: next.priority === "now" });
+        this.options.trace?.("join_message_delivered", { interrupt: queued.interrupt });
         yield next;
       }
       if (this.closed) return;
@@ -283,7 +295,7 @@ export class JoinedInput {
   }
 
   private maybeClose(): void {
-    if (!this.busy && !this.joined && this.queue.length === 0) this.close();
+    if (!this.busy && !this.joined && this.queue.length === 0 && !this.options.holdOpen?.()) this.close();
   }
 
   private signal(): void {

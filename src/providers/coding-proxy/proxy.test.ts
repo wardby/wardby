@@ -3128,8 +3128,30 @@ describe("workflow sessions (#582)", () => {
     change(value);
     return JSON.stringify(value);
   };
+  const taskStopTool = {
+    name: "TaskStop",
+    description: "Stop a running background task",
+    input_schema: { type: "object" },
+  };
   const shapes: [string, (value: Record<string, unknown>) => void, string][] = [
     ["the Workflow tool", (v) => (v.tools = [runCommandTool, structuredOutputTool, workflowTool]), "tools_not_allowed"],
+    [
+      "the Workflow and TaskStop tools (#657)",
+      (v) => (v.tools = [runCommandTool, structuredOutputTool, workflowTool, taskStopTool]),
+      "tools_not_allowed",
+    ],
+    [
+      "a TaskStop tool_use in the history (#657)",
+      (v) =>
+        (v.messages as unknown[]).push(
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "toolu_ts_1", name: "TaskStop", input: { task_id: "w1" } }],
+          },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ts_1", content: "stopped" }] },
+        ),
+      "unsupported_anthropic_feature",
+    ],
     [
       "a Workflow tool_use in the history",
       (v) =>

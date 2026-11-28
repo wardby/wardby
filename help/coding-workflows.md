@@ -100,7 +100,13 @@ returned. To use one of the script's fields word for word instead, name it:
   agents and commands under `.claude/` are never loaded.
 - The run calls the workflow once. Wardby fills in `args`. A second call,
   another workflow, an inline script, a script path or a remote run is
-  refused.
+  refused. The exception is a joined person asking the run to restart it
+  (see below): the run's own workflow again, with the run's own `args`, once
+  the last launch has ended, at most five launches in all.
+- People with execute access can [join](join-runs.md#workflow-runs) a
+  workflow run: their messages reach the session that runs the workflow, with
+  a short status line of its progress, and it can stop the workflow or start
+  it again for them. The run's result comes from the last launch.
 - Once the workflow has completed, the run keeps its result even when the
   session can't give a valid final answer: Wardby builds it from the
   script's returned value (`replyField`, `prTitle` and `prBody`), and
@@ -149,5 +155,6 @@ request costs, or lower the agent's `maxOutputTokens`.
 
 - [Repository instructions and skills](repo-instructions-and-skills.md)
 - [Multi-repository runs](multi-repository-runs.md)
+- [Join a running run](join-runs.md#workflow-runs)
 - Errors: [`coding_failure_workflow_unavailable`](errors/coding-workflow-unavailable.md),
   [`coding_failure_workflow_failed`](errors/coding-workflow-failed.md)

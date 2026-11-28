@@ -109,6 +109,8 @@ const WARDBY_COMMAND_TOOL = "mcp__wardby_tools__run_command";
 const STRUCTURED_OUTPUT_TOOL = CLAUDE_RESULT_TOOL;
 /** Claude Code's Workflow tool (#582): allowed only for a workflow session. */
 const WORKFLOW_TOOL = "Workflow";
+/** Claude Code's TaskStop (#657): a joinable workflow run's lead may stop its own workflow; the worker's guard checks which. */
+const TASK_STOP_TOOL = "TaskStop";
 /** Claude Code's Skill tool: allowed only for a session whose run has repository skills in native mode (#582). */
 export const SKILL_TOOL = "Skill";
 /** The thinking.display values Claude Code's workflow sub-agents send (#582). */
@@ -882,6 +884,7 @@ function validateApprovedTool(value: unknown, mcpTools: ReadonlySet<string>, wor
   if (tool.name === STRUCTURED_OUTPUT_TOOL) return validateStructuredOutputTool(tool);
   if (typeof tool.name === "string" && mcpTools.has(tool.name)) return validateMcpTool(tool);
   if (workflow && tool.name === WORKFLOW_TOOL) return validateWorkflowTool(tool);
+  if (workflow && tool.name === TASK_STOP_TOOL) return validateWorkflowTool(tool);
   if (skills && tool.name === SKILL_TOOL) return validateSkillTool(tool);
   throw new CodingProxyError(400, "tools_not_allowed");
 }
@@ -903,6 +906,8 @@ function validateToolUseBlock(
   }
   // A workflow session's earlier Workflow call, replayed in the conversation history (#582).
   if (workflow && value.name === WORKFLOW_TOOL) return void record(value.input, "unsupported_anthropic_feature");
+  // A workflow session's earlier TaskStop call (#657), replayed in the conversation history.
+  if (workflow && value.name === TASK_STOP_TOOL) return void record(value.input, "unsupported_anthropic_feature");
   // A skills session's earlier Skill call, replayed in the conversation history.
   if (skills && value.name === SKILL_TOOL) return void record(value.input, "unsupported_anthropic_feature");
   throw new CodingProxyError(400, "unsupported_anthropic_feature");
@@ -1098,9 +1103,9 @@ function parseAnthropicRequest(
   }
   if (body.tools !== undefined) {
     // run_command and StructuredOutput, plus one per pinned MCP tool.
-    // A workflow session also has the Workflow tool (#582).
+    // A workflow session also has the Workflow tool (#582) and TaskStop (#657).
     // A skills session also has the Skill tool.
-    if (!Array.isArray(body.tools) || body.tools.length > 2 + mcpTools.size + (workflow ? 1 : 0) + (skills ? 1 : 0)) {
+    if (!Array.isArray(body.tools) || body.tools.length > 2 + mcpTools.size + (workflow ? 2 : 0) + (skills ? 1 : 0)) {
       throw new CodingProxyError(400, "tools_not_allowed");
     }
     const names = new Set<string>();

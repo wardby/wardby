@@ -1833,24 +1833,141 @@ describe("runClaudeCodingWorker join (phase 1)", () => {
     expect(join.stopped).toBe(true);
   });
 
-  it("keeps a workflow run's string prompt: nobody can join it", async () => {
-    let captured: ClaudeQueryOptions | undefined;
-    const join = new FakeJoin();
-    await runClaudeCodingWorker({
-      input: { ...input, workflow: { name: "fix-bug", args: {} } },
-      proxyBaseUrl: "http://wardby-proxy:8787/",
-      capability: "rrp_worker_capability",
-      signal: new AbortController().signal,
-      contextRoot: await mkdtemp(join_(tmpdir(), "wardby-join-")),
-      createQuery: (options) => {
+  describe("workflow runs (#657)", () => {
+    const script = { path: ".claude/workflows/fix-bug.js", content: "export const meta = { name: 'fix-bug' }\n" };
+    const workflowInput: CodingTaskInput = {
+      ...input,
+      claudeBareMode: false,
+      claudeContext: { files: [script] },
+      workflow: { name: "fix-bug", args: { ticket: "X-1" } },
+      deadlineAt: "2999-01-01T00:00:00.000Z",
+    };
+    const started = (id: string) => ({
+      type: "system",
+      subtype: "task_started",
+      task_type: "local_workflow",
+      task_id: id,
+    });
+    const ended = (id: string, status: string) => ({
+      type: "system",
+      subtype: "task_notification",
+      task_id: id,
+      status,
+    });
+    const progress = (id: string) => ({
+      type: "system",
+      subtype: "task_progress",
+      task_id: id,
+      workflow_progress: [
+        { type: "workflow_phase", index: 1, title: "Draft" },
+        { type: "workflow_phase", index: 2, title: "Review" },
+        { type: "workflow_agent", agentId: "a1", label: "draft", phaseIndex: 1, state: "completed" },
+        { type: "workflow_agent", agentId: "a2", label: "review", phaseIndex: 2, state: "running" },
+      ],
+    });
+    const placeholder = answer("Workflow running");
+
+    const runWorkflow = async (join: JoinSource, createQuery: ClaudeQueryFactory) => {
+      const root = await mkdtemp(join_(tmpdir(), "wardby-join-wf-"));
+      try {
+        return await runClaudeCodingWorker({
+          input: workflowInput,
+          proxyBaseUrl: "http://wardby-proxy:8787/",
+          capability: "rrp_worker_capability",
+          signal: new AbortController().signal,
+          contextRoot: join_(root, "ctx"),
+          createQuery,
+          join,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    };
+
+    it("streams a workflow run's input, keeps it open while the workflow runs, and ends after the lead's answer", async () => {
+      const join = new FakeJoin();
+      let captured: ClaudeQueryOptions | undefined;
+      let inputDone = false;
+      const result = await runWorkflow(join, (options) => {
         captured = options;
         return (async function* () {
-          yield { type: "result", subtype: "success", result: "{}" };
+          const iterator = (options.input as AsyncIterable<ClaudeUserMessage>)[Symbol.asyncIterator]();
+          await iterator.next();
+          yield started("w1");
+          yield placeholder;
+          // Nobody joined, but the workflow runs: the input must still be open.
+          const pending = iterator.next().then((next) => (inputDone = next.done === true));
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          expect(inputDone).toBe(false);
+          yield ended("w1", "completed");
+          yield answer("Done.", "changes_ready");
+          await pending;
         })();
-      },
-      join,
-    }).catch(() => undefined);
-    expect(captured?.input).toBeUndefined();
-    expect(join.events).toBeUndefined();
+      });
+      expect(captured?.input).toBeDefined();
+      expect(captured?.prompt).toContain("TaskStop");
+      expect(result).toMatchObject({ outcome: "changes_ready", summary: "Done." });
+      expect(inputDone).toBe(true);
+      expect(join.stopped).toBe(true);
+    });
+
+    it("adds the workflow's status to a joined message, stops and restarts it, and keeps the last launch's answer", async () => {
+      const join = new FakeJoin();
+      const seen: ClaudeUserMessage[] = [];
+      let control: ClaudeQueryOptions["workflow"] | undefined;
+      const result = await runWorkflow(join, (options) => {
+        control = options.workflow;
+        return sessionOf((_message, index) => {
+          if (index === 0) {
+            join.joined(true);
+            later(() => join.send("How is it going?"));
+            return [started("w1"), progress("w1"), placeholder];
+          }
+          if (index === 1) {
+            later(() => join.send("Stop it and start it again."));
+            return [placeholder];
+          }
+          // The lead stops w1 and launches w2; a sub-agent's own command task ends first (ignored).
+          later(() => join.joined(false));
+          return [
+            ended("w1", "stopped"),
+            started("w2"),
+            placeholder,
+            ended("b7", "completed"),
+            ended("w2", "completed"),
+            answer("Second launch done.", "changes_ready"),
+          ];
+        }, seen)(options);
+      });
+      expect(seen[1].message.content[0].text).toBe(
+        `${joinedMessageText("How is it going?")}\n\nWorkflow status: running (task id w1); phase 2 of 2 (Review); agents: 1 completed, 1 running.`,
+      );
+      expect(seen[2].message.content[0].text).toContain("Workflow status: running (task id w1)");
+      expect(result).toMatchObject({ outcome: "changes_ready", summary: "Second launch done." });
+      // TaskStop may name either launch's task, and only those; no launch runs any more.
+      expect(control?.control?.ownsTask("w1")).toBe(true);
+      expect(control?.control?.ownsTask("w2")).toBe(true);
+      expect(control?.control?.ownsTask("b7")).toBe(false);
+      expect(control?.control?.running()).toBe(false);
+    });
+
+    it("never takes a sub-agent's notice for the workflow's end, and fails a run whose last launch was stopped", async () => {
+      const join = new FakeJoin();
+      await expect(
+        runWorkflow(join, (options) =>
+          (async function* () {
+            const iterator = (options.input as AsyncIterable<ClaudeUserMessage>)[Symbol.asyncIterator]();
+            await iterator.next();
+            yield started("w1");
+            yield placeholder;
+            yield ended("b1", "completed");
+            // Still running: a result now is not the run's answer.
+            expect(options.workflow?.control?.running()).toBe(true);
+            yield ended("w1", "stopped");
+            yield answer("Stopped.");
+          })(),
+        ),
+      ).rejects.toThrow("coding_workflow_failed");
+    });
   });
 });
