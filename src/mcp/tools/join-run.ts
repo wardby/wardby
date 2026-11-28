@@ -1,9 +1,9 @@
 /**
  * Join (src/core/run-steps/join.ts): join_run, send_to_run and leave_run. A person with execute on
- * a run's agent joins one of its running runs, sends the agent messages (picked up at its next step)
+ * a run's agent joins one of its running runs, sends the agent messages (read once it finishes what it is doing now)
  * or an interrupt (stops the current turn, then the message is handled), and leaves. While anyone is
  * joined the run stays open after the agent finishes, until the last person leaves or the run's
- * timeout. Phase 1: Claude Code coding runs that are not workflow runs.
+ * timeout. Native agent runs, and Claude Code coding runs that are not workflow runs.
  *
  * The actions and their access checks are join-actions.ts's, shared with the join API that
  * `wardby join -` calls (join-api.ts); join_run also returns that command's link when this server
@@ -53,7 +53,7 @@ function parse<T>(schema: z.ZodType<T>, raw: unknown, tool: string): T {
 export const JOIN_REFUSALS: Record<string, string> = {
   run_not_running: "run_not_running: only a running run can be joined; this one is not running.",
   join_not_supported:
-    "join_not_supported: joining works on Claude Code coding runs that are not workflow runs; this run is not one.",
+    "join_not_supported: joining works on native agent runs and on Claude Code coding runs that are not workflow runs; this run is not one.",
   join_unavailable:
     "join_unavailable: this run keeps no run steps (WARDBY_RUN_STEPS or the agent's runSteps is off), so it cannot be joined.",
   run_not_joined: "run_not_joined: join the run with join_run before sending it messages.",
@@ -97,7 +97,7 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
   async function terminalLink(ctx: McpRequestContext, runId: string) {
     if (!opts.link) return {};
     const [run, coding] = await Promise.all([
-      ctx.db.run.findUnique({ where: { id: runId }, select: { startedAt: true } }),
+      ctx.db.run.findUnique({ where: { id: runId }, select: { startedAt: true, timeoutSec: true } }),
       ctx.db.codingRun.findUnique({ where: { runId }, select: { timeoutSec: true } }),
     ]);
     const now = (opts.now ?? (() => new Date()))().getTime();
@@ -110,7 +110,8 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
       ...(audience === "stdio" && ctx.operator === true ? { operator: true } : {}),
       // An owner-all admin on HTTP can join from a terminal too; the role is re-checked on every call.
       ...(audience === "http" && isOwnerAll(ctx) ? { ownerAll: true, roles: [...(ctx.roles ?? [])].slice(0, 32) } : {}),
-      exp: joinSessionExpiry(now, run?.startedAt ?? null, coding?.timeoutSec ?? 0),
+      // A coding run's time limit is on its CodingRun, a native run's on the run itself.
+      exp: joinSessionExpiry(now, run?.startedAt ?? null, coding?.timeoutSec ?? run?.timeoutSec ?? 0),
     };
     const link = joinLink(await opts.link.origin(), await mcp.mintRequestState(payload));
     return {
@@ -130,13 +131,13 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
     name: "join_run",
     scope: "runs:trigger",
     description:
-      "Join a running Claude Code coding run so you can send its agent messages (send_to_run) while it works. " +
+      "Join a running native agent run or Claude Code coding run so you can send its agent messages (send_to_run) while it works. " +
       "While anyone is joined the run stays open after the agent finishes its task, until the last person leaves " +
       "(leave_run) or the run's timeout. Follow the agent's replies with get_run_steps. Joining twice is harmless. " +
       "The answer also has terminal, for joining from a terminal chat: command (npx @wardby/cli@latest join with " +
       `the link, ready to copy), pasteCommand (${JOIN_COMMAND}, which asks for the link instead) and link. Give ` +
       "command to the user when they want that (or pasteCommand and link), and do not open the link yourself. " +
-      "Needs execute access to the run's agent. Workflow runs and other coding agents cannot be joined yet.",
+      "Needs execute access to the run's agent. Workflow runs and Codex or Gemini CLI coding runs cannot be joined yet.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -171,7 +172,8 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
     name: "send_to_run",
     scope: "runs:trigger",
     description:
-      "Send a message to the agent of a run you joined (join_run). The agent picks it up at its next step; with " +
+      "Send a message to the agent of a run you joined (join_run). The agent reads it once it finishes what it is " +
+      "doing now (a native agent after its current step, a Claude Code agent after its current answer); with " +
       `interrupt: true it stops what it is doing first and then handles the message. Up to ${MAX_JOIN_MESSAGE_CHARS} ` +
       "characters. The message appears in the run's steps (kind message or interrupt) for everyone who can see the " +
       "run; secret values in it are masked. Needs execute access to the run's agent.",
@@ -186,7 +188,8 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
         },
         interrupt: {
           type: "boolean",
-          description: "Stop the agent's current turn first (default false: it reads the message at its next step).",
+          description:
+            "Stop the agent's current turn first (default false: it reads the message once it finishes what it is doing now).",
         },
       },
       required: ["runId", "message"],
@@ -203,7 +206,7 @@ export function registerJoinRunTools(mcp: WardbyMcpServer, opts: JoinRunToolOpti
         message:
           kind === "interrupt"
             ? "Sent. The agent stops its current turn and then handles your message."
-            : "Sent. The agent picks it up at its next step.",
+            : "Sent. The agent reads it once it finishes what it is doing now.",
       });
     },
   });

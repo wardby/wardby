@@ -3142,11 +3142,6 @@ describe("workflow sessions (#582)", () => {
         ),
       "unsupported_anthropic_feature",
     ],
-    [
-      "the task notification as a string user message",
-      (v) => (v.messages as unknown[]).push({ role: "user", content: "<task-notification>done</task-notification>" }),
-      "invalid_anthropic_request",
-    ],
   ];
 
   for (const [index, [name, change, code]] of shapes.entries()) {
@@ -3163,6 +3158,28 @@ describe("workflow sessions (#582)", () => {
       expect(plain.fetch).not.toHaveBeenCalled();
     });
   }
+
+  it("forwards a user message with plain string content for any session, and refuses one from the assistant", async () => {
+    // Claude Code replays an earlier user turn (a joined message, a workflow's task notification) as
+    // plain string content: text, like one text block.
+    for (const workflow of [true, false]) {
+      const session = await claude(workflow);
+      const replayed = await body((v) =>
+        (v.messages as unknown[]).push(
+          { role: "assistant", content: [{ type: "text", text: "Done." }] },
+          { role: "user", content: "Message from a person who joined this run:\n\nwhat changed?" },
+        ),
+      );
+      await execute(session, `string-user-${workflow}`, new TestSink(), replayed);
+      expect(session.fetch).toHaveBeenCalledTimes(1);
+    }
+    const plain = await claude(false);
+    const assistantString = await body((v) => (v.messages as unknown[]).push({ role: "assistant", content: "Done." }));
+    await expect(execute(plain, "string-assistant", new TestSink(), assistantString)).rejects.toMatchObject({
+      status: 400,
+      code: "invalid_anthropic_request",
+    });
+  });
 
   describe("repository skills in native mode", () => {
     const skillTool = { name: "Skill", description: "Load a skill", input_schema: { type: "object" } };

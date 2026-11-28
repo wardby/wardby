@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../db.js";
-import { joinedPrincipals, joinRefusal, pollJoin } from "./join.js";
+import { interruptPending, joinedPrincipals, joinRefusal, pollJoin } from "./join.js";
 import { RunStepWriter } from "./writer.js";
 import type { AddressInfo } from "node:net";
 import { capabilityHash } from "../../providers/coding-proxy/capability-hash.js";
@@ -103,11 +103,26 @@ describe("join steps (PostgreSQL)", () => {
     expect(Date.now() - held).toBeGreaterThanOrEqual(1_000);
   });
 
-  it("joinRefusal: only a running Claude Code run that is not a workflow run", async () => {
+  it("joinRefusal: a running native run, or a running Claude Code run that is not a workflow run", async () => {
     const done = await newRun({ status: "succeeded" });
     expect(await joinRefusal(db, done.id)).toBe("run_not_running");
     const native = await newRun();
-    expect(await joinRefusal(db, native.id)).toBe("join_not_supported");
+    expect(await joinRefusal(db, native.id)).toBeNull();
+  });
+
+  it("interruptPending sees an undelivered interrupt only, and delivers nothing", async () => {
+    const run = await newRun();
+    const w = writer();
+    await w.recordJoin(run.id, { kind: "join", principalId: "p1" });
+    const { seq: messageSeq } = await w.recordJoin(run.id, { kind: "message", principalId: "p1", text: "hi" });
+    expect(await interruptPending(db, run.id, 0)).toBe(false);
+    const { seq } = await w.recordJoin(run.id, { kind: "interrupt", principalId: "p1", text: "stop" });
+    expect(await interruptPending(db, run.id, messageSeq)).toBe(true);
+    expect(await interruptPending(db, run.id, seq)).toBe(false);
+    const rows = await db.runStep.findMany({ where: { runId: run.id, deliveredAt: { not: null } } });
+    expect(rows).toEqual([]);
+    await pollJoin(db, run.id, { after: 0, joined: true }, { windowMs: 0 });
+    expect(await interruptPending(db, run.id, messageSeq)).toBe(false);
   });
 
   it("the listener's join poll answers the capability's own run, and refuses an unknown capability", async () => {

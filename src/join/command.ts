@@ -5,7 +5,7 @@
  * process list (as `wardby resume` offers both).
  *
  * Shows the run's steps live (the agent's words, its commands with their status, and what people
- * send), sends each line typed, and ends with the run's outcome. `!text` interrupts the agent first;
+ * send), sends each line typed, and ends with the run's outcome. `/interrupt text` (or `/i text`) interrupts the agent first;
  * `/leave` leaves (the run finishes its work); `/quit` stops the agent after a confirmation. Ctrl-C
  * leaves, as /leave does (a second Ctrl-C stops watching); closing the terminal (SIGHUP) or SIGTERM
  * leaves and exits. A poll that fails is retried with backoff; if the server stays unreachable or
@@ -18,7 +18,7 @@
  * never printed or logged; every answer carries a fresh token, kept in memory only. Server text is
  * shown with control characters removed, so it cannot drive the terminal.
  */
-import { createInterface, type Interface } from "node:readline";
+import { clearLine, createInterface, cursorTo, moveCursor, type Interface } from "node:readline";
 import { parseArgs } from "node:util";
 import { JOIN_API_PATHS, parseJoinLink, type JoinApiAction } from "../mcp/tools/join-link.js";
 
@@ -32,12 +32,28 @@ where a link given as an argument stays (its first token works for 10 minutes; t
 memory after that).
 
 In the chat:
-  a line + Enter   send it to the agent (it reads it at its next step)
-  !text            interrupt: the agent stops its current turn, then handles text
-  /leave           leave the run; it finishes its work and wraps up as usual
+  a line + Enter   send it to the agent (it reads it once it finishes what it is doing now)
+  /interrupt text  interrupt: the agent stops its current turn, then handles text
+  /i text          the same, shorter
+  /agent           details of the agent and this run: model, budget, turns, time left, who is joined
+  /prompt          the agent's system prompt
+  /leave, /exit    leave the run; it finishes its work and wraps up as usual
   /quit            stop the agent (asks first): the run ends cancelled, its work is not pushed
   /help            show these commands
   Ctrl-C           leave, as /leave`;
+
+/**
+ * /help in the chat: the chat's commands only (how to start the CLI is no use once joined), each
+ * command bold and its description dimmed.
+ */
+export function chatHelpLines(paint: Paint = PLAIN_PAINT): string[] {
+  const section = JOIN_USAGE.slice(JOIN_USAGE.indexOf("In the chat:"));
+  return section.split("\n").map((line, index) => {
+    if (index === 0) return paint.bold(line);
+    const match = /^( {2})(\S.*?)( {2,})(.*)$/.exec(line);
+    return match ? `${match[1]}${paint.bold(match[2])}${match[3]}${paint.dim(match[4])}` : line;
+  });
+}
 
 export const JOIN_MESSAGES = {
   noLink: "No link was given. Paste the terminal.link that join_run returned.",
@@ -47,7 +63,9 @@ export const JOIN_MESSAGES = {
   linkRejected: "The join link is invalid or has expired. Ask for a new one with join_run.",
   notFound: "The run was not found, or you cannot see it.",
   noAccess: "You need execute access to this run's agent to join it.",
-  joined: "Joined. Type a message and press Enter; /help lists the commands.",
+  joined:
+    "Joined. Type a message and press Enter. /i text interrupts, /leave leaves (the run finishes its work), " +
+    "/agent shows the agent, /quit stops it, /help lists every command.",
   confirmQuit:
     "This stops the agent now: the run ends as cancelled, and its work is not pushed to a result branch or pull request. To let it finish and keep its work, use /leave instead.",
   notStopped: "Not stopped. Still joined.",
@@ -57,8 +75,16 @@ export const JOIN_MESSAGES = {
   lostConnectionNotLeft:
     "Lost the connection to the Wardby server and could not leave the run; it stays open until its timeout. Join it again with a new link from join_run to leave it.",
   sendFailed: "Could not send that",
+  unknownCommand: "Unknown command; nothing was sent. /help lists the commands.",
 } as const;
 
+/**
+ * A lone /word, like /exit: a chat command, never sent to the agent, so a mistyped or unknown
+ * command is not mistaken for a message. A line with more after it ("/tmp is full", "/usr/bin") is a
+ * message, except /interrupt and /i.
+ */
+const UNKNOWN_COMMAND = /^\/[a-z][a-z-]*$/i;
+const INTERRUPT_COMMAND = /^\/(?:interrupt|i)(?:\s+|$)/;
 const MAX_LINK_BYTES = 8192;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -140,28 +166,141 @@ interface Step {
   detail?: string | null;
 }
 
+/**
+ * Colours for the chat's own labels and notices, never for server text (which cleanServerText has
+ * already stripped of escape sequences, so an agent cannot fake a label or recolour the screen).
+ * Only the basic terminal colours, which follow the terminal's own theme.
+ */
+export interface Paint {
+  cyan: (text: string) => string;
+  yellow: (text: string) => string;
+  magenta: (text: string) => string;
+  green: (text: string) => string;
+  red: (text: string) => string;
+  dim: (text: string) => string;
+  bold: (text: string) => string;
+}
+const sgr =
+  (code: number, reset: number) =>
+  (text: string): string =>
+    `\u001b[${code}m${text}\u001b[${reset}m`;
+export const ANSI_PAINT: Paint = {
+  cyan: sgr(36, 39),
+  yellow: sgr(33, 39),
+  magenta: sgr(35, 39),
+  green: sgr(32, 39),
+  red: sgr(31, 39),
+  dim: sgr(2, 22),
+  bold: sgr(1, 22),
+};
+const same = (text: string) => text;
+export const PLAIN_PAINT: Paint = {
+  cyan: same,
+  yellow: same,
+  magenta: same,
+  green: same,
+  red: same,
+  dim: same,
+  bold: same,
+};
+
+/**
+ * Colour in a terminal only: NO_COLOR (any value) turns it off, FORCE_COLOR (not "0") turns it on.
+ * Output a caller captures (deps.out) is always plain.
+ */
+export function colourWanted(env: NodeJS.ProcessEnv, stdoutIsTty: boolean): boolean {
+  if (env.NO_COLOR !== undefined && env.NO_COLOR !== "") return false;
+  if (env.FORCE_COLOR !== undefined && env.FORCE_COLOR !== "" && env.FORCE_COLOR !== "0") return true;
+  return stdoutIsTty;
+}
+
 /** One step as a chat line. */
-export function stepLine(step: Step): string {
+export function stepLine(step: Step, paint: Paint = PLAIN_PAINT): string {
   const summary = cleanServerText(step.summary, 300).replace(/\n/g, " ");
   const text = cleanServerText(step.detail ?? step.summary);
   switch (step.kind) {
     case "join":
-      return "· someone joined";
+      return paint.dim("· someone joined");
     case "leave":
-      return "· someone left";
+      return paint.dim("· someone left");
     case "said":
-      return labelled("agent: ", text);
+      return labelled(paint.cyan("agent: "), text);
     case "message":
-      return labelled("person: ", text);
+      return labelled(paint.yellow("person: "), text);
     case "interrupt":
-      return labelled("person (interrupt): ", text);
+      return labelled(paint.magenta("person (interrupt): "), text);
     case "tool": {
-      const status = step.status ? ` (${cleanServerText(step.status, 40)})` : "";
-      return `  ${cleanServerText(step.tool ?? "tool", 128)}: ${summary}${status}`;
+      const raw = step.status ? cleanServerText(step.status, 40) : "";
+      const tint = raw === "ok" ? paint.green : raw === "error" ? paint.red : same;
+      const status = raw ? ` ${tint(`(${raw})`)}` : "";
+      return `  ${paint.dim(`${cleanServerText(step.tool ?? "tool", 128)}: ${summary}`)}${status}`;
     }
     default:
-      return `  ${summary}`;
+      return `  ${paint.dim(summary)}`;
   }
+}
+
+const str = (value: unknown, max: number): string => cleanServerText(value, max).replace(/\n/g, " ");
+
+/** A duration as "1h 5m", "26m" or "40s". */
+function duration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+const usd = (value: unknown): string => {
+  const n = Number(value);
+  return Number.isFinite(n) ? `$${n.toFixed(4)}` : "?";
+};
+
+/** /agent's answer as chat lines. */
+export function agentLines(answer: Record<string, unknown>, now = Date.now(), paint: Paint = PLAIN_PAINT): string[] {
+  const agent = (answer.agent ?? {}) as Record<string, unknown>;
+  const run = (answer.run ?? {}) as Record<string, unknown>;
+  const lines = [`${paint.bold("Agent:")} ${str(agent.name, 200)} (${str(agent.kind, 40)}, ${str(agent.model, 100)})`];
+  if (agent.repository) lines.push(`  ${paint.dim("Repository:")} ${str(agent.repository, 500)}`);
+  const started = Date.parse(String(run.startedAt));
+  const by = run.startedBy ? ` by ${str(run.startedBy, 200)}` : "";
+  lines.push(
+    `  ${paint.dim("Run:")} ${str(run.status, 40)}${Number.isFinite(started) ? `, started ${duration(now - started)} ago` : ""}${by}`,
+  );
+  lines.push(`  ${paint.dim("Spent:")} ${usd(run.costUsd)} of ${usd(run.budgetUsd)}`);
+  const turns = Number(run.turns);
+  const maxTurns = typeof run.maxTurns === "number" ? ` of ${run.maxTurns} per message` : "";
+  lines.push(`  ${paint.dim("Turns:")} ${Number.isFinite(turns) ? turns : "?"}${maxTurns}`);
+  const deadline = Date.parse(String(run.deadlineAt));
+  if (Number.isFinite(deadline) && typeof run.timeoutSec === "number") {
+    lines.push(`  ${paint.dim("Time left:")} ${duration(deadline - now)} of ${duration(run.timeoutSec * 1000)}`);
+  }
+  const names = (value: unknown): string[] => (Array.isArray(value) ? value.map((v) => str(v, 200)) : []);
+  const list = (label: string, items: string[]) => {
+    if (items.length > 0) lines.push(`  ${paint.dim(`${label}:`)} ${items.join(", ")}`);
+  };
+  list("Tools", names(agent.tools));
+  list(
+    "MCP servers",
+    (Array.isArray(agent.mcpServers) ? (agent.mcpServers as Record<string, unknown>[]) : []).map((m) =>
+      m.host ? `${str(m.name, 200)} (${str(m.host, 200)})` : str(m.name, 200),
+    ),
+  );
+  const subagents = names(agent.subagents);
+  list(agent.parallelDelegations === true ? "Subagents (in parallel)" : "Subagents", subagents);
+  list("Datastores", names(agent.datastores));
+  list("Secrets", names(agent.secrets));
+  list(
+    "Repositories",
+    (Array.isArray(agent.repositories) ? (agent.repositories as Record<string, unknown>[]) : []).map(
+      (r) => `${str(r.repository, 500)} (${str(r.access, 40)})`,
+    ),
+  );
+  if (typeof agent.repoSkills === "boolean") {
+    lines.push(`  ${paint.dim("Repository skills:")} ${agent.repoSkills ? "loaded from the repository" : "off"}`);
+  }
+  const joined = Array.isArray(run.joined) ? run.joined.map((p) => str(p, 200)) : [];
+  lines.push(`  ${paint.dim("Joined:")} ${joined.length > 0 ? joined.join(", ") : "nobody"}`);
+  return lines;
 }
 
 /** The join API, holding the newest token. */
@@ -226,7 +365,29 @@ async function expectOk(session: JoinSession, action: JoinApiAction, body?: unkn
 
 /** Returns the process exit code: 0 the run ended (or you left and it ended), 1 failed, 2 usage. */
 export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<number> {
-  const out = deps.out ?? ((line: string) => process.stdout.write(`${line}\n`));
+  const write = deps.out ?? ((line: string) => process.stdout.write(`${line}\n`));
+  const paint =
+    deps.out === undefined && colourWanted(process.env, process.stdout.isTTY === true) ? ANSI_PAINT : PLAIN_PAINT;
+  /** A failure or refusal, in red. */
+  const fail = (line: string) => out(paint.red(line));
+  /** A notice from the chat itself, dimmed. */
+  const note = (line: string) => out(paint.dim(line));
+  // In a terminal the chat keeps a "> " prompt on the bottom line: a line printed while you type
+  // goes above it, and what you had typed is drawn again below (readline's prompt(true)).
+  let prompter: Interface | undefined;
+  const out = (line: string) => {
+    if (!prompter) return void write(line);
+    clearLine(process.stdout, 0);
+    cursorTo(process.stdout, 0);
+    write(line);
+    prompter.prompt(true);
+  };
+  const stopPrompt = () => {
+    if (!prompter) return;
+    prompter = undefined;
+    clearLine(process.stdout, 0);
+    cursorTo(process.stdout, 0);
+  };
   let parsed;
   try {
     parsed = parseArgs({ args: argv, allowPositionals: true, options: { help: { type: "boolean", short: "h" } } });
@@ -248,7 +409,11 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
   const tty = input === process.stdin && process.stdin.isTTY === true;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const pollMs = deps.pollMs ?? POLL_MS;
-  const rl: Interface = createInterface({ input, terminal: false });
+  // A prompt only when a person is typing into a terminal and watching it; piped input stays plain.
+  const promptMode = tty && deps.out === undefined && process.stdout.isTTY === true;
+  const rl: Interface = promptMode
+    ? createInterface({ input, output: process.stdout, terminal: true, prompt: paint.bold("> ") })
+    : createInterface({ input, terminal: false });
   const lines = rl[Symbol.asyncIterator]();
   try {
     let raw: string;
@@ -268,7 +433,11 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
     }
     const session = new JoinSession(link.origin, link.token, deps.fetch ?? globalThis.fetch);
     const joined = await expectOk(session, "join");
-    out(`${JOIN_MESSAGES.joined} (run ${cleanServerText(joined.runId, 128)})`);
+    out(`${paint.green(JOIN_MESSAGES.joined)} ${paint.dim(`(run ${cleanServerText(joined.runId, 128)})`)}`);
+    if (promptMode) {
+      prompter = rl;
+      rl.prompt();
+    }
 
     let after = 0;
     let ended: Record<string, unknown> | undefined;
@@ -280,8 +449,8 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
       if (left || ended) return leaving;
       left = true;
       leaving = expectOk(session, "leave").then(
-        () => out(JOIN_MESSAGES.left),
-        (err: unknown) => out(err instanceof Error ? err.message : JOIN_MESSAGES.unreachable),
+        () => note(JOIN_MESSAGES.left),
+        (err: unknown) => fail(err instanceof Error ? err.message : JOIN_MESSAGES.unreachable),
       );
       return leaving;
     };
@@ -302,6 +471,8 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         for (const signal of ["SIGINT", "SIGHUP", "SIGTERM"] as const) process.on(signal, () => handler(signal));
       })
     )(onSignal);
+    // A terminal-mode readline takes Ctrl-C itself: pass it on as the signal.
+    if (promptMode) rl.on("SIGINT", () => onSignal("SIGINT"));
 
     // What people type: each line sent while the run is going; input ending only stops sending.
     const typing = (async () => {
@@ -309,9 +480,15 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         const next = await lines.next();
         if (next.done || ended) return;
         try {
+          if (prompter) {
+            // The typed line is shown again as "person: ..." once it is sent: drop the echo.
+            moveCursor(process.stdout, 0, -1);
+            clearLine(process.stdout, 0);
+          }
           await handleLine(String(next.value).trim());
+          prompter?.prompt();
         } catch (err) {
-          out(err instanceof JoinCliError ? err.message : JOIN_MESSAGES.unreachable);
+          fail(err instanceof JoinCliError ? err.message : JOIN_MESSAGES.unreachable);
         }
       }
     })();
@@ -321,32 +498,43 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         if (confirmQuit) {
           confirmQuit = false;
           if (/^y(es)?$/i.test(text)) {
-            out(JOIN_MESSAGES.stopping);
+            note(JOIN_MESSAGES.stopping);
             await expectOk(session, "stop").catch((err: unknown) =>
-              out(err instanceof Error ? err.message : JOIN_MESSAGES.unreachable),
+              fail(err instanceof Error ? err.message : JOIN_MESSAGES.unreachable),
             );
           } else {
-            out(JOIN_MESSAGES.notStopped);
+            note(JOIN_MESSAGES.notStopped);
           }
           return;
         }
         if (text === "") return;
         if (text === "/help") {
-          out(JOIN_USAGE);
-        } else if (text === "/leave") {
+          for (const line of chatHelpLines(paint)) out(line);
+        } else if (text === "/agent") {
+          for (const line of agentLines(await expectOk(session, "agent"), Date.now(), paint)) out(line);
+        } else if (text === "/prompt") {
+          const { systemPrompt } = await expectOk(session, "prompt");
+          out(labelled(paint.bold("System prompt: "), cleanServerText(systemPrompt, 100_000)));
+        } else if (text === "/leave" || text === "/exit") {
           await leave();
         } else if (text === "/quit") {
           confirmQuit = true;
-          out(JOIN_MESSAGES.confirmQuit);
-          out("Stop the agent? (y/N)");
+          out(paint.yellow(JOIN_MESSAGES.confirmQuit));
+          out(paint.bold("Stop the agent? (y/N)"));
+        } else if (UNKNOWN_COMMAND.test(text) && text !== "/i" && text !== "/interrupt") {
+          fail(JOIN_MESSAGES.unknownCommand);
         } else if (left) {
-          out("You left this run; nothing was sent.");
+          note("You left this run; nothing was sent.");
         } else {
-          const interrupt = text.startsWith("!");
-          const message = interrupt ? text.slice(1).trim() : text;
-          if (message === "") return;
+          const command = INTERRUPT_COMMAND.exec(text);
+          const interrupt = command !== null;
+          const message = interrupt ? text.slice(command[0].length).trim() : text;
+          if (message === "") {
+            if (interrupt) fail("Type your message after /interrupt (or /i), on the same line.");
+            return;
+          }
           const { status, json } = await session.call("send", { message, interrupt });
-          if (status !== 200) out(`${JOIN_MESSAGES.sendFailed}: ${refusalText(status, json)}`);
+          if (status !== 200) fail(`${JOIN_MESSAGES.sendFailed}: ${refusalText(status, json)}`);
         }
       }
     }
@@ -362,7 +550,7 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
           const steps = Array.isArray(page.steps) ? (page.steps as Step[]) : [];
           for (const step of steps) {
             if (typeof step.seq !== "number" || step.seq <= after) continue;
-            out(stepLine(step));
+            out(stepLine(step, paint));
             after = step.seq;
           }
           if (page.next === null || page.next === undefined || steps.length === 0) break;
@@ -392,26 +580,29 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
               ),
               sleep(EXIT_LEAVE_MS).then(() => false),
             ])));
-        if (!transient(err)) out(err instanceof JoinCliError ? err.message : JOIN_MESSAGES.unreachable);
-        out(leftOk ? JOIN_MESSAGES.lostConnection : JOIN_MESSAGES.lostConnectionNotLeft);
+        if (!transient(err)) fail(err instanceof JoinCliError ? err.message : JOIN_MESSAGES.unreachable);
+        fail(leftOk ? JOIN_MESSAGES.lostConnection : JOIN_MESSAGES.lostConnectionNotLeft);
         return 1;
       }
     }
+    stopPrompt();
     rl.close();
     await typing.catch(() => undefined);
     const cost = Number(ended.costUsd);
-    out(
-      `Run finished: ${cleanServerText(ended.status, 40)}${Number.isFinite(cost) ? ` (cost $${cost.toFixed(4)})` : ""}`,
-    );
+    const status = cleanServerText(ended.status, 40);
+    const tint =
+      status === "succeeded" ? paint.green : status === "failed" || status === "lost" ? paint.red : paint.yellow;
+    out(`${tint(`Run finished: ${status}`)}${Number.isFinite(cost) ? paint.dim(` (cost $${cost.toFixed(4)})`) : ""}`);
     if (ended.outcome) out(`Outcome: ${cleanServerText(ended.outcome, 40)}. ${cleanServerText(ended.summary, 2_000)}`);
     if (ended.pullRequestUrl) out(`Pull request: ${cleanServerText(ended.pullRequestUrl, 500)}`);
     else if (ended.branch) out(`Branch: ${cleanServerText(ended.branch, 300)}`);
-    if (ended.error) out(`Error: ${cleanServerText(ended.error, 2_000)}`);
+    if (ended.error) out(`${paint.red("Error:")} ${cleanServerText(ended.error, 2_000)}`);
     return 0;
   } catch (err) {
-    out(err instanceof JoinCliError ? err.message : "Something went wrong while joining the run.");
+    fail(err instanceof JoinCliError ? err.message : "Something went wrong while joining the run.");
     return 1;
   } finally {
+    stopPrompt();
     rl.close();
   }
 }

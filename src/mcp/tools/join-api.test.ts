@@ -36,15 +36,38 @@ function setup(
     triggeredById: opts.triggeredById ?? null,
     status: opts.status ?? "running",
     costUsd: { toString: () => "0.012300" },
+    turns: 3,
+    startedAt: new Date("2026-11-28T10:00:00Z"),
+    timeoutSec: null as number | null,
     error: null as string | null,
     agent: { kind: "coding" },
     stopRequestReason: null as string | null,
   };
   const db = {
     resourceGrant: fakeResourceGrants(opts.grants ?? []),
-    authUser: { findUnique: async () => opts.authUser ?? null },
+    authUser: {
+      findUnique: async () => opts.authUser ?? null,
+      findMany: async () => [{ principalId: "g", displayName: "Grace" }],
+    },
     teamMember: { findMany: async () => [] },
-    agent: { findUnique: async () => ({ id: "a1", ownerId: "owner" }) },
+    agent: {
+      findUnique: async () => ({
+        id: "a1",
+        ownerId: "owner",
+        name: "builder",
+        model: "claude-haiku-4-5",
+        budgetUsd: { toString: () => "0.5000" },
+        maxTurns: 10,
+        systemPrompt: "You are a careful builder.",
+        parallelDelegations: true,
+        tools: [{ tool: { name: "web_fetch" } }, { tool: { name: "csv_parse" } }],
+        mcpServers: [{ server: { name: "browserstack", url: "https://mcp.example.com/sse?token=fake-secret" } }],
+        subAgentEdgesAsParent: [{ boundName: "reviewer" }],
+        datastores: [{ boundName: "notes" }],
+        secrets: [{ boundName: "API_TOKEN" }],
+        repositories: [{ provider: "github", repository: "your-org/your-repo", access: "write" }],
+      }),
+    },
     run: {
       findUnique: async ({ where }: { where: { id: string } }) => (where.id === "r1" ? run : null),
       findUniqueOrThrow: async () => run,
@@ -56,6 +79,12 @@ function setup(
         provider: opts.provider ?? "claude-code",
         workflowName: null,
         result: null,
+        model: "claude-sonnet-5-5",
+        repository: "your-org/your-repo",
+        timeoutSec: 1800,
+        maxTurns: 200,
+        budgetBaseUsd: { toString: () => "1.0000" },
+        repoSkills: true,
       }),
     },
     runStep: {
@@ -238,7 +267,59 @@ describe("join API", () => {
     expect(result().status).toBe(405);
   });
 
+  it("shows the agent and the run with /agent, and the system prompt with /prompt, to someone with execute", async () => {
+    const t = setup({ grants: EXECUTE, triggeredById: "g" });
+    await call(t.deps, "join", await mint(payload()));
+    const agent = await call(t.deps, "agent", await mint(payload()));
+    expect(agent.status).toBe(200);
+    expect(agent.json).toMatchObject({
+      agent: {
+        id: "a1",
+        name: "builder",
+        kind: "claude-code",
+        model: "claude-sonnet-5-5",
+        repository: "your-org/your-repo",
+        tools: ["csv_parse", "web_fetch"],
+        mcpServers: [{ name: "browserstack", host: "mcp.example.com" }],
+        subagents: ["reviewer"],
+        parallelDelegations: true,
+        datastores: ["notes"],
+        secrets: ["API_TOKEN"],
+        repositories: [{ repository: "github:your-org/your-repo", access: "write" }],
+        repoSkills: true,
+      },
+      run: {
+        status: "running",
+        startedBy: "you",
+        costUsd: "0.012300",
+        budgetUsd: "1.0000",
+        turns: 3,
+        maxTurns: 200,
+        timeoutSec: 1800,
+        deadlineAt: "2026-11-28T10:30:00.000Z",
+        joined: ["you"],
+      },
+    });
+    // An MCP server's URL is cut to its host: a query string can carry a credential.
+    expect(JSON.stringify(agent.json)).not.toContain("fake-secret");
+    const prompt = await call(t.deps, "prompt", await mint(payload()));
+    expect(prompt.json).toMatchObject({ systemPrompt: "You are a careful builder." });
+  });
+
+  it("refuses /agent and /prompt without execute on the agent", async () => {
+    const t = setup({
+      grants: [{ resourceType: "agent", resourceId: "a1", principalId: "g", level: "read" }],
+      triggeredById: "g",
+    });
+    expect((await call(t.deps, "agent", await mint(payload()))).status).toBe(403);
+    expect((await call(t.deps, "prompt", await mint(payload()))).status).toBe(403);
+    const none = setup({ grants: [] });
+    expect((await call(none.deps, "prompt", await mint(payload()))).json).toEqual({ error: "not_found" });
+  });
+
   it("maps paths to actions", () => {
+    expect(joinApiAction("/join/api/agent")).toBe("agent");
+    expect(joinApiAction("/join/api/prompt")).toBe("prompt");
     expect(joinApiAction("/join/api/send")).toBe("send");
     expect(joinApiAction("/join/api/nope")).toBeUndefined();
     expect(joinApiAction("/join")).toBeUndefined();

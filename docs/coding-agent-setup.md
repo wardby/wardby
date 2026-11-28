@@ -1667,17 +1667,20 @@ For a coding agent whose owner sets `runSteps` to `detail`, also set
 
 People with execute access to a Claude Code agent can join one of its running
 runs and talk to the agent while it works: `join_run`, then `send_to_run` with a
-message (picked up at the agent's next step) or `interrupt: true` (stops the
-current turn first), and `leave_run`. Follow the agent's replies with
-`get_run_steps`. Workflow runs, Codex runs and native agents cannot be joined
-yet.
+message (the agent reads it as soon as it finishes its current answer, which in
+a coding run can be near the end of the task) or `interrupt: true` (stops the
+current turn first and handles the message at once), and `leave_run`. Follow the agent's replies with
+`get_run_steps`. Native agent runs can be joined the same way (from 0.11.3;
+see [Join a running run](../help/join-runs.md)). Workflow runs and Codex runs
+cannot be joined yet.
 
 From a terminal (0.11.1 or later): `join_run`'s answer also carries
 `terminal.command` (from 0.11.2, `npx @wardby/cli@latest join '<link>'`, ready
 to copy), `terminal.pasteCommand` (`npx @wardby/cli@latest join -`, which asks
 for the link so it stays out of shell history and the process list) and
 `terminal.link`. Either command opens a terminal chat with the run (a line
-sends a message, `!text` interrupts, `/leave` leaves, `/quit` stops the agent
+sends a message, `/interrupt text` (or `/i text`) interrupts, `/agent` shows the agent (model, tools, MCP servers, subagents, datastores, secret
+names, repositories, repository skills on or off) and the run's budget, turns and time left, `/prompt` shows the system prompt, `/leave` leaves, `/quit` stops the agent
 after a confirmation, Ctrl-C leaves). The link is `<server origin>/join#<token>`;
 the CLI sends the token only as `Authorization: Bearer` to the server's
 `/join/api/*` routes, which check the person's access on every call, and each

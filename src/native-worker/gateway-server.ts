@@ -17,6 +17,7 @@
  */
 
 import { NativeStreamSteps, recordStreamSteps } from "../core/run-steps/native.js";
+import { interruptPending, JOIN_POLL_WINDOW_MS, pollJoin } from "../core/run-steps/join.js";
 import type { RunStepSink } from "../core/run-steps/types.js";
 import {
   createNativeRunTools,
@@ -65,6 +66,8 @@ export interface GatewayServerDeps {
   providers: NativeRunProviders;
   /** Delegation long-poll window; tests shorten it. */
   pollWindowMs?: number;
+  /** Join long-poll window (join.poll with wait); tests shorten it. */
+  joinPollWindowMs?: number;
   /** Serves POST /coding-mcp on the same listener (remote MCP servers for coding runs); unset → 404. */
   codingMcp?: CodingMcpDeps;
   /** Serves POST /native-gateway/v1/canary (Substrate startup canaries' verdicts); unset → 404. */
@@ -256,6 +259,22 @@ async function handle(
   }
   if ((await runDrivability(db, session.runId)) !== "drivable") {
     throw new GatewayError("run_not_drivable", "This run is no longer running.");
+  }
+
+  // Join reads only the run's steps: no tools to rebuild. The text was masked against the run's
+  // secrets when it was recorded (RunStepWriter.recordJoin) and is never logged here.
+  if (request.method === "join.poll") {
+    const p = params as GatewayParams<"join.poll">;
+    const answer = await pollJoin(
+      db,
+      session.runId,
+      { after: p.after, joined: p.joined },
+      { windowMs: p.wait ? (deps.joinPollWindowMs ?? JOIN_POLL_WINDOW_MS) : 0 },
+    );
+    return ok({ ...answer, now: Date.now() });
+  }
+  if (request.method === "join.peek") {
+    return ok(await interruptPending(db, session.runId, (params as GatewayParams<"join.peek">).after));
   }
 
   const ctx = await rebuild(deps, session);

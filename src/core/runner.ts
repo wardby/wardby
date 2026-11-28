@@ -26,7 +26,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { Prisma, type PrismaClient, type Run, type RunTrigger } from "#prisma";
 import type { ProviderRegistry } from "../providers/index.js";
-import type { EngineProgress, EngineResult, LoadedTool } from "../providers/engine/types.js";
+import type { EngineJoin, EngineProgress, EngineResult, LoadedTool } from "../providers/engine/types.js";
 import {
   RunOwnershipLostError,
   STEPS_CHANGED_REASON,
@@ -49,6 +49,7 @@ import {
 } from "./coding-repository-set.js";
 import { delegationLimitRefusal, delegationSlot, priorDelegationSlots } from "./delegation-slots.js";
 import { runStepsHook } from "./run-steps/native.js";
+import { interruptPending, JOIN_POLL_WINDOW_MS, pollJoin } from "./run-steps/join.js";
 import type { RunStepSink } from "./run-steps/types.js";
 
 import type { PrivilegedHost } from "../sandbox/host-functions.js";
@@ -341,6 +342,7 @@ const DELEGATION_CHILD_SELECT = {
   ownerId: true,
   nativeExecutionMode: true,
   runSteps: true,
+  timeoutSec: true,
   codingProfile: {
     select: { allowWebhookTaskOverride: true, timeoutSec: true, repository: true, baseRef: true, workflowName: true },
   },
@@ -537,6 +539,7 @@ export type RunnerDb = Pick<
   | "workItem"
   | "deferredReview"
   | "runAttribution"
+  | "runStep"
   | "planSet"
   // The plan build chain's builder check (host events, plans/approval.ts).
   | "principal"
@@ -962,6 +965,7 @@ export async function createRun(db: RunnerDb, agentName: string, trigger: RunTri
       trigger,
       nativeExecutionMode: agent.nativeExecutionMode,
       runStepsLevel: dispatchRunStepsLevel(agent),
+      timeoutSec: agent.timeoutSec,
     },
   });
 }
@@ -1899,6 +1903,7 @@ export function createNativeRunTools(options: NativeRunToolsOptions) {
                 triggeredById: existingRun.triggeredById,
                 nativeExecutionMode: childAgent.nativeExecutionMode,
                 runStepsLevel: dispatchRunStepsLevel(childAgent),
+                timeoutSec: childAgent.kind === "native" ? childAgent.timeoutSec : null,
               },
             });
           } catch (err) {
@@ -2741,11 +2746,22 @@ export async function createSandboxSession(options: {
 
   await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data: { status: "running" } });
   const capability = randomBytes(32).toString("base64url");
+  // The run's own time limit, never past the sandbox ceiling; the worker's engine gets it to stop
+  // waiting for joined messages in time.
+  const deadlineAt = Math.min(
+    now.getTime() + SANDBOX_RUN_MAX_SEC * 1000,
+    nativeRunDeadline(existingRun) ?? Number.POSITIVE_INFINITY,
+  );
+  input = {
+    ...input,
+    deadlineAt,
+    join: providers.runSteps?.recordJoin !== undefined && existingRun.runStepsLevel !== "off",
+  };
   const snapshot: SandboxSessionSnapshot = { input, loaded };
   const session = await ledger.createSession({
     runId,
     capabilityHash: sandboxCapabilityHash(capability),
-    deadlineAt: new Date(now.getTime() + SANDBOX_RUN_MAX_SEC * 1000),
+    deadlineAt: new Date(deadlineAt),
     budgetUsd: loaded.agent.budgetUsd,
     snapshot: snapshot as unknown as Prisma.InputJsonValue,
     networkReadyAt: options.networkReady === false ? null : now,
@@ -2872,6 +2888,22 @@ async function executeTrackedRun(
   await db.run.updateMany({ where: { id: runId, status: { in: [...DRIVABLE] } }, data: { status: "running" } });
 
   const finishContext: NativeRunFinishContext = { runId, db, providers, reviewHosts, repoAccess, issueTrackers };
+  // The run's time limit (Run.timeoutSec, the agent's when the run was created): at the deadline the
+  // run fails with NATIVE_RUN_TIMEOUT, the conditional write a stop also makes, so the engine ends at
+  // its next step (stopAwareStep) and tool calls in flight abort (watchRunStop).
+  const deadlineAt = nativeRunDeadline(existingRun);
+  // Past its deadline before it started (queued that long): it fails without spending anything.
+  if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+    return finishEarly(nativeRunTimeoutReason(existingRun.timeoutSec ?? 0));
+  }
+  const timeout =
+    deadlineAt === undefined
+      ? undefined
+      : armNativeRunTimeout(deadlineAt, () =>
+          failNativeRun(finishContext, new Error(nativeRunTimeoutReason(existingRun.timeoutSec ?? 0))),
+        );
+  // Only where join steps are recorded (a run-steps writer with recordJoin): elsewhere nobody can join.
+  const join = providers.runSteps?.recordJoin ? nativeRunJoin(db, runId, existingRun.runStepsLevel) : undefined;
   try {
     const tools = createNativeRunTools({
       runId,
@@ -2896,7 +2928,12 @@ async function executeTrackedRun(
       // The turn loop runs in a worker; this process serves its calls from the same tools and LLM.
       const engineResult = await runSandboxedEngine({
         runId,
-        input: sandboxWorkerInput(runId, loaded, tools),
+        input: {
+          ...sandboxWorkerInput(runId, loaded, tools),
+          ...(deadlineAt !== undefined ? { deadlineAt } : {}),
+          ...(join ? { join: true } : {}),
+        },
+        ...(join ? { join } : {}),
         ctx: { providers: { llm }, onText, onProgress },
         builtinHandler: tools.builtinHandler,
         privilegedHostFor: tools.privilegedHostFor,
@@ -2921,6 +2958,8 @@ async function executeTrackedRun(
       onText,
       onProgress,
       ...(onTurn ? { onTurn } : {}),
+      ...(join ? { join } : {}),
+      ...(deadlineAt !== undefined ? { deadlineAt } : {}),
       step,
     });
 
@@ -2942,7 +2981,59 @@ async function executeTrackedRun(
     // cannot continue: it ends lost, not failed, through the same settle path.
     if (err instanceof StepReplayMismatchError) return loseNativeRun(finishContext, STEPS_CHANGED_REASON);
     return failNativeRun(finishContext, err);
+  } finally {
+    timeout?.cancel();
   }
+}
+
+/** A native run's time limit passed (help/errors/native-run-timeout.md). */
+export const NATIVE_RUN_TIMEOUT = "native_run_timeout";
+
+export const nativeRunTimeoutReason = (timeoutSec: number): string =>
+  `${NATIVE_RUN_TIMEOUT}: the run passed its time limit of ${timeoutSec} s (the agent's timeoutSec).`;
+
+/** A native run's deadline (epoch ms): when it started plus its time limit. None for a run without one. */
+export function nativeRunDeadline(run: { startedAt: Date; timeoutSec: number | null }): number | undefined {
+  return run.timeoutSec && run.timeoutSec > 0 ? run.startedAt.getTime() + run.timeoutSec * 1000 : undefined;
+}
+
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/** Calls `onDeadline` once at `deadlineAt` (at once if it has passed), unless cancelled first. A failure is logged. */
+export function armNativeRunTimeout(
+  deadlineAt: number,
+  onDeadline: () => Promise<unknown>,
+  now: () => number = Date.now,
+): { cancel: () => void } {
+  const timer = setTimeout(
+    () => {
+      onDeadline().catch((err: unknown) =>
+        runnerLog.warn({ errorName: err instanceof Error ? err.name : typeof err }, "native run timeout write failed"),
+      );
+    },
+    Math.min(Math.max(deadlineAt - now(), 0), MAX_TIMER_MS),
+  );
+  timer.unref?.();
+  return { cancel: () => clearTimeout(timer) };
+}
+
+/**
+ * Join for a native run in the control plane: the engine reads joined messages straight from the
+ * run's steps. None when the run records no steps (nobody can join it: recordJoin refuses).
+ */
+export function nativeRunJoin(
+  db: Pick<RunnerDb, "runStep">,
+  runId: string,
+  level: string | null,
+): EngineJoin | undefined {
+  if (level === "off") return undefined;
+  return {
+    poll: async ({ after, joined, wait }) => {
+      const answer = await pollJoin(db, runId, { after, joined }, { windowMs: wait ? JOIN_POLL_WINDOW_MS : 0 });
+      return { ...answer, now: Date.now() };
+    },
+    interruptPending: (after) => interruptPending(db, runId, after),
+  };
 }
 
 /**

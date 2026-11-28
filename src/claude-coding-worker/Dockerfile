@@ -49,6 +49,7 @@ COPY --from=build /build/dist/claude-coding-worker ./claude-coding-worker
 COPY --from=build /build/dist/coding-worker/artifact.js ./coding-worker/artifact.js
 COPY --from=build /build/dist/coding-worker/errors.js ./coding-worker/errors.js
 COPY --from=build /build/dist/coding-worker/debug-trace.js ./coding-worker/debug-trace.js
+COPY --from=build /build/dist/core/join-wording.js ./core/join-wording.js
 COPY --from=build /build/dist/coding-worker/keeper.js ./coding-worker/keeper.js
 COPY --from=build /build/dist/coding-worker/task-note.js ./coding-worker/task-note.js
 # The wardby_mcp server settings shared with the Codex worker (remote MCP servers); imports nothing.

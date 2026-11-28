@@ -838,6 +838,13 @@ The gateway also records sandbox runs' steps (see
 `WARDBY_RUN_STEPS` (including `detail`) or `RUN_STEP_RETENTION_DAYS`, set them on
 the gateway as well as the server.
 
+From 0.11.3 people with execute access can join a running sandbox run (see
+[Join a running run](../help/join-runs.md)). The worker asks the gateway for
+their messages: while someone is joined, that request is held for up to 20
+seconds, so anything between the worker and the gateway must allow idle
+requests of at least 30 seconds. Nothing new is opened in the worker's network
+policy; it still reaches only the gateway.
+
 ## Limits and deadline
 
 - Each worker is limited by `NATIVE_SANDBOX_CPUS`, `NATIVE_SANDBOX_MEMORY_MB`,
@@ -850,8 +857,10 @@ the gateway as well as the server.
   reports the worker's exit) and the worker itself. Together they use roughly
   140 to 215 MB, so a 512 MiB template leaves modest room for tools; raise
   `NATIVE_SANDBOX_MEMORY_MB` if they need more.
-- A sandbox run has a maximum lifetime of 60 minutes. Past it the worker is
-  stopped and the run fails with `native_sandbox_deadline_exceeded`. On
+- A sandbox run's deadline is the agent's run time limit (`timeoutSec`,
+  default 1800 seconds, at most 3600) from when the run was created, and never
+  more than 60 minutes. Past it the worker is stopped and the run fails with
+  `native_sandbox_deadline_exceeded`. On
   Substrate the actor has no platform deadline of its own (Kubernetes pods get
   `activeDeadlineSeconds`): the gateway refuses every call after the run's
   deadline, the server stops the actor, and if no server is watching then,
@@ -943,7 +952,7 @@ because nothing was generated.
 | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [`native_sandbox_unavailable`](../help/errors/native-sandbox-unavailable.md)                   | Agent is in `sandbox` mode but the server has no native sandbox. Fails before any spend.                                                                                                                                                                                                                                                                | Configure the sandbox (steps above) or set the agent back to `control-plane`.                                                                                            |
 | [`native_sandbox_worker_exited`](../help/errors/native-sandbox-worker-exited.md)               | The worker ended without producing a result.                                                                                                                                                                                                                                                                                                            | Check the tool code and the worker's memory and PID limits; run again.                                                                                                   |
-| [`native_sandbox_deadline_exceeded`](../help/errors/native-sandbox-deadline-exceeded.md)       | The run passed its 60-minute maximum; the worker was stopped.                                                                                                                                                                                                                                                                                           | Split the work into smaller runs or sub-agents.                                                                                                                          |
+| [`native_sandbox_deadline_exceeded`](../help/errors/native-sandbox-deadline-exceeded.md)       | The run passed its deadline (the agent's `timeoutSec`, at most 60 minutes); the worker was stopped.                                                                                                                                                                                                                                                     | Split the work into smaller runs or sub-agents.                                                                                                                          |
 | [`native_sandbox_worker_lost`](../help/errors/native-sandbox-worker-lost.md)                   | The worker container or pod disappeared (for example its host or node restarted). It is never relaunched.                                                                                                                                                                                                                                               | Trigger the run again; check the Docker host or node stability.                                                                                                          |
 | [`native_sandbox_image_not_pinned`](../help/errors/native-sandbox-image-not-pinned.md)         | `NATIVE_SANDBOX_WORKER_IMAGE` is a mutable tag.                                                                                                                                                                                                                                                                                                         | Use a `repo@sha256:...` digest or a local image id.                                                                                                                      |
 | [`native_sandbox_docker_failed`](../help/errors/native-sandbox-docker-failed.md)               | A Docker command (pull, network create, connect, run) failed.                                                                                                                                                                                                                                                                                           | Read the message, then check the Docker daemon, image availability, and gateway name.                                                                                    |

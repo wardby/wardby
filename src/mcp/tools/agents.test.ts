@@ -3357,6 +3357,33 @@ describe("nativeExecutionMode", () => {
     await client.close();
   });
 
+  it("timeoutSec: stored for a native agent within 60-3600, refused out of range and on a coding agent", async () => {
+    const client = await setup(true, [seed()]);
+    const created = await client.callTool({ name: "create_agent", arguments: { ...base, timeoutSec: 600 } });
+    expect(created.isError).toBeFalsy();
+    expect(body(created).timeoutSec).toBe(600);
+    for (const timeoutSec of [59, 3601, 1.5]) {
+      const bad = await client.callTool({ name: "create_agent", arguments: { ...base, name: "bad", timeoutSec } });
+      expect(bad.isError).toBe(true);
+    }
+    const coding = await client.callTool({
+      name: "create_agent",
+      arguments: {
+        ...base,
+        name: "coder",
+        timeoutSec: 600,
+        kind: "coding",
+        codingProfile: { provider: "claude-code", repository: "your-org/your-repo" },
+      },
+    });
+    expect(coding.isError).toBe(true);
+    expect(JSON.stringify(coding)).toMatch(/timeoutSec is only valid for native agents/);
+    const updated = await client.callTool({ name: "update_agent", arguments: { id: "a1", timeoutSec: 120 } });
+    expect(updated.isError).toBeFalsy();
+    expect(body(updated).timeoutSec).toBe(120);
+    await client.close();
+  });
+
   it("update_agent switches modes, and refuses sandbox without executor support", async () => {
     const supported = await setup(true, [seed()]);
     const set = await supported.callTool({

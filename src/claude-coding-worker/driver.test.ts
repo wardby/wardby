@@ -1,3 +1,4 @@
+import { JOIN_INSTRUCTIONS_BASE, JOINED_MESSAGE_PREFIX } from "../core/join-wording.js";
 import { access, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -22,7 +23,6 @@ import {
 import { callGitCheck, callResultBundle } from "./tool-socket.js";
 import {
   JOIN_DEADLINE_MARGIN_MS,
-  JOINED_MESSAGE_PREFIX,
   joinedMessageText,
   type ClaudeUserMessage,
   type JoinEvents,
@@ -1709,6 +1709,8 @@ describe("runClaudeCodingWorker join (phase 1)", () => {
       return sessionOf(() => [answer("First.")], [])(options);
     });
     expect(instructions).toContain(JOINED_MESSAGE_PREFIX);
+    // The wording shared with native agents: joined messages come from people allowed to direct the run.
+    expect(instructions).toContain(JOIN_INSTRUCTIONS_BASE);
     expect(CLAUDE_WORKER_SECURITY_INSTRUCTIONS).not.toContain(JOINED_MESSAGE_PREFIX);
   });
 
@@ -1733,7 +1735,7 @@ describe("runClaudeCodingWorker join (phase 1)", () => {
       type: "user",
       message: { role: "user", content: [{ type: "text", text: joinedMessageText("Please also update the README.") }] },
       parent_tool_use_id: null,
-      priority: "next",
+      priority: "later",
     });
     expect(join.stopped).toBe(true);
   });

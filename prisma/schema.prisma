@@ -54,6 +54,9 @@ model Agent {
   maxDelegationsPerRun Int         @default(1)
   /// Native leads: the delegate_to_* calls of one model turn run at the same time. False = one after another.
   parallelDelegations  Boolean     @default(false)
+  /// Native agents: a run's time limit in seconds, from when it starts (60-3600). Coding agents use
+  /// CodingAgentProfile.timeoutSec instead.
+  timeoutSec           Int         @default(1800)
 
   // Phase 4: ownership. Null = owner-less, a transition state only: access
   // then comes from ResourceGrant rows alone (the migration gives everyone
@@ -444,6 +447,9 @@ model Run {
   /// The run steps level this run records, fixed at dispatch: min(WARDBY_RUN_STEPS, Agent.runSteps
   /// or summary). Null on runs from before the field (they record at most summary).
   runStepsLevel        RunStepsLevel?
+  /// Native runs: the agent's timeoutSec when the run was created; the run's deadline is startedAt
+  /// plus this. Null on coding runs (CodingRun.timeoutSec) and on runs from before the field.
+  timeoutSec           Int?
   steps                RunStep[]
 
   /// Un-phased: sub-agent dispatch (see AgentSubAgent). Null for a

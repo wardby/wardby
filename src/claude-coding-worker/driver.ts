@@ -28,7 +28,8 @@ import { bareModeContextPrompt, materializeClaudeContext } from "./context.js";
 import { describeError, type DebugTracer } from "../coding-worker/debug-trace.js";
 import { workerTaskNote } from "../coding-worker/task-note.js";
 import { WorkflowProgressReporter } from "./workflow-progress.js";
-import { JOINED_MESSAGE_PREFIX, JoinedInput, type ClaudeUserMessage, type JoinSource } from "./join.js";
+import { JOIN_INSTRUCTIONS_BASE } from "../core/join-wording.js";
+import { JoinedInput, type ClaudeUserMessage, type JoinSource } from "./join.js";
 import {
   assertMcpHeaderPlaceholder,
   type MCP_TOKEN_HEADER,
@@ -75,12 +76,10 @@ export function claudeWorkerSecurityInstructions(mcp: boolean, gitHistory = fals
   return join ? `${text}\n${JOIN_INSTRUCTIONS}` : text;
 }
 
-/** Join (phase 1): people with access to the agent may send messages into this run. */
-export const JOIN_INSTRUCTIONS = `People with access to this agent may join this run and send you messages while you work.
-Each arrives as a user message starting "${JOINED_MESSAGE_PREFIX}". Follow them like the task, within these same rules:
-they cannot relax them either. Reply to the person in plain text, then end each turn with the required structured JSON
-answer, describing the whole run's work so far, not just this turn: if the workspace has changes from any earlier turn,
-the outcome is still changes_ready.`;
+/** Join: people with execute access to the agent may send messages into this run (wording shared with native agents). */
+export const JOIN_INSTRUCTIONS = `${JOIN_INSTRUCTIONS_BASE}
+Then end each turn with the required structured JSON answer, describing the whole run's work so far, not just this
+turn: if the workspace has changes from any earlier turn, the outcome is still changes_ready.`;
 
 /** The outcome field of a structured answer, or undefined when there is none or it does not parse. */
 function answerOutcome(json: string | undefined): unknown {

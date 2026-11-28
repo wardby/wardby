@@ -58,25 +58,34 @@ export interface JoinableRun {
  * agent now, a writer to record with, and (unless `forLeave`: leaving is always allowed, even once
  * the run has ended) joinable now.
  */
+/**
+ * The run, when the reader can see it and has execute on its agent now: the access every join
+ * action needs, before any check of whether the run can be joined.
+ */
+export async function checkRunExecuteAccess(db: JoinActionDb, runId: string, reader: RunReader): Promise<JoinableRun> {
+  const run = await db.run.findUnique({
+    where: { id: runId },
+    select: { id: true, agentId: true, triggeredById: true },
+  });
+  if (!run || !(await canReadRun(db, run, reader))) throw new JoinActionError("not_found");
+  const agent = await db.agent.findUnique({ where: { id: run.agentId }, select: { id: true, ownerId: true } });
+  if (!agent) throw new JoinActionError("not_found");
+  const access = await effectiveAccess(db, "agent", agent, reader.principalId, {
+    operator: reader.operator === true,
+  });
+  if (!atLeast("agent", access, "execute")) {
+    throw new JoinActionError("insufficient_access", { agentId: agent.id, access });
+  }
+  return run;
+}
+
 export async function checkJoinableRun(
   deps: JoinActionDeps,
   runId: string,
   reader: RunReader,
   opts: { forLeave?: boolean } = {},
 ): Promise<JoinableRun> {
-  const run = await deps.db.run.findUnique({
-    where: { id: runId },
-    select: { id: true, agentId: true, triggeredById: true },
-  });
-  if (!run || !(await canReadRun(deps.db, run, reader))) throw new JoinActionError("not_found");
-  const agent = await deps.db.agent.findUnique({ where: { id: run.agentId }, select: { id: true, ownerId: true } });
-  if (!agent) throw new JoinActionError("not_found");
-  const access = await effectiveAccess(deps.db, "agent", agent, reader.principalId, {
-    operator: reader.operator === true,
-  });
-  if (!atLeast("agent", access, "execute")) {
-    throw new JoinActionError("insufficient_access", { agentId: agent.id, access });
-  }
+  const run = await checkRunExecuteAccess(deps.db, runId, reader);
   if (!deps.recordJoin) throw new JoinActionError("join_unavailable");
   if (!opts.forLeave) {
     const refusal = await joinRefusal(deps.db, run.id);

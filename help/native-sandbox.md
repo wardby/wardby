@@ -158,7 +158,7 @@ are in [Native sandbox](../docs/native-sandbox.md#warm-pool).
   gateway: an older server starts the child unresolved (a Codex child on the
   default image without its instructions, a Claude Code child failing with
   `coding_provider_not_configured:claude-code`).
-- A sandbox run has a 60-minute maximum lifetime.
+- A sandbox run's deadline is the agent's `timeoutSec` (default 1800 seconds), never more than 60 minutes.
 - `stop_run` stops a sandbox run: its gateway session ends so the worker exits
   at its next call, and a worker still running after 5 seconds is killed and
   removed (a warm pool worker is discarded, never reused). Search help for
