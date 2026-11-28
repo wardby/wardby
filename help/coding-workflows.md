@@ -113,7 +113,9 @@ returned. To use one of the script's fields word for word instead, name it:
   collection decides from the workspace whether anything changed.
 - The run's result is the session's answer after the workflow finishes. If
   the workflow fails, is stopped or never starts, the run fails with
-  [`coding_failure_workflow_failed`](errors/coding-workflow-failed.md).
+  [`coding_failure_workflow_failed`](errors/coding-workflow-failed.md). A
+  workflow a joined person had stopped, and not started again, ends the run
+  cancelled instead (see [join](join-runs.md#workflow-runs)).
 - The run's steps are grouped by the script's phases and sub-agents
   (`get_run_steps` returns `workflow` and each sub-agent step's `agent`); see
   [run steps](run-steps.md#workflow-runs).

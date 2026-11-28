@@ -1051,6 +1051,11 @@ export interface ContainerExecutionStore {
     audit?: CodingFailureAudit,
   ): Promise<boolean>;
   /**
+   * Who sent the run's latest joined message or interrupt (a principal id), or null. Optional:
+   * without it a run stopped from a joined chat (#657) is described without a name.
+   */
+  latestJoinSender?(runId: string): Promise<string | null>;
+  /**
    * Copies the proxy session's first budget refusal (CodingProxySession.budgetRefusal, written by the
    * proxy, which has no access to RunBudgetEvent) into the run's budget events, once per run, whatever
    * status the run ends with. A session that never recorded one adds nothing. Optional: without it no
@@ -1843,6 +1848,15 @@ export class PrismaContainerExecutionStore implements ContainerExecutionStore {
 
   topUpBudget(runId: string): Promise<{ outcome: TopUpOutcome; near?: boolean }> {
     return topUpCodingBudget(this.db, runId);
+  }
+
+  async latestJoinSender(runId: string): Promise<string | null> {
+    const step = await this.db.runStep.findFirst({
+      where: { runId, kind: { in: ["message", "interrupt"] }, fromPrincipalId: { not: null } },
+      orderBy: { seq: "desc" },
+      select: { fromPrincipalId: true },
+    });
+    return step?.fromPrincipalId ?? null;
   }
 
   async terminate(
@@ -3129,6 +3143,17 @@ export class ContainerExecutor implements Executor {
           await this.options.store.terminate(run.runId, "budget_exhausted", failure.error, failure.audit);
           await this.terminal(run, "budget_exhausted", failure.audit);
           outcome = "budget_exhausted";
+          return;
+        }
+        // A joined person had the lead stop the workflow and not start it again (#657): a stop,
+        // not a failure. Ended cancelled, like stop(); nothing is collected or pushed.
+        if (jobState !== "lost" && reason === WORKFLOW_STOPPED_ERROR) {
+          const sender = await this.options.store.latestJoinSender?.(run.runId).catch(() => null);
+          const failure = this.failure("cancelled", { cancelled: true });
+          await this.recordRefusal(run.runId, sessionId);
+          await this.options.store.terminate(run.runId, "cancelled", workflowStoppedError(sender), failure.audit);
+          await this.terminal(run, "cancelled", failure.audit);
+          // The continuation comment says what stop() says for a cancelled run (outcome stays "failed").
           return;
         }
         const status = jobState === "lost" ? "lost" : "failed";
@@ -5821,6 +5846,15 @@ async function removeResultBundles(slots: readonly RepositorySlot[]): Promise<vo
  * (a failed PR lookup or create after the push, a token mint) under
  * "workspace" because "github" contains "git".
  */
+/** The Claude worker's code for a workflow a joined person had stopped and not restarted (#657). */
+export const WORKFLOW_STOPPED_ERROR = "coding_workflow_stopped";
+
+/** The run's error when it ended cancelled that way: fixed text, naming the sender when known. */
+export function workflowStoppedError(sender: string | null | undefined): string {
+  const who = sender && /^[A-Za-z0-9_.:@-]{1,128}$/.test(sender) ? `Stopped by ${sender}` : "Stopped";
+  return `${who} from a joined chat: the workflow was stopped and not started again.`;
+}
+
 export const CATEGORY_BY_PREFIX: ReadonlyArray<readonly [prefix: string, category: string]> = [
   // A workflow run (#582) whose script could not be read: fails before any model call.
   ["coding_workflow_unavailable", "workflow_unavailable"],

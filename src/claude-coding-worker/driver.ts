@@ -234,6 +234,8 @@ export interface WorkflowControl {
   running(): boolean;
   /** `taskId` is a launch of the run's own workflow (TaskStop may stop only those). */
   ownsTask(taskId: string): boolean;
+  /** The TaskStop guard allowed the lead to stop `taskId` (a joined person asked it to). */
+  stopping?(taskId: string): void;
 }
 
 export type ClaudeQueryFactory = (options: ClaudeQueryOptions) => AsyncIterable<ClaudeSdkMessage>;
@@ -735,11 +737,18 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
     tree: null as ReturnType<typeof workflowTreeOf>,
     // The lead has answered since the latest launch ended (its final turn came).
     resultAfterEnd: false,
+    // Launches the lead stopped through the TaskStop guard, and whether the latest ended that way.
+    stopsAllowed: new Set<string>(),
+    stoppedByLead: false,
   };
   const workflowRunning = () => workflowState.started && workflowState.ended === undefined;
   const workflowControl: WorkflowControl | undefined =
     workflow && joinable
-      ? { running: workflowRunning, ownsTask: (taskId) => workflowState.taskIds.has(taskId) }
+      ? {
+          running: workflowRunning,
+          ownsTask: (taskId) => workflowState.taskIds.has(taskId),
+          stopping: (taskId) => void workflowState.stopsAllowed.add(taskId),
+        }
       : undefined;
   // A joinable run streams its input: the task, then each joined message (join.ts). Only fixed event
   // names reach the trace, never a message's text.
@@ -855,6 +864,7 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
           workflowState.outputFile = undefined;
           workflowState.tree = null;
           workflowState.resultAfterEnd = false;
+          workflowState.stoppedByLead = false;
           workflowState.launches += 1;
           workflowState.taskId = taskId;
           if (taskId) workflowState.taskIds.add(taskId);
@@ -867,6 +877,8 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
           workflowState.ended =
             task.status === "completed" ? "completed" : task.status === "stopped" ? "stopped" : "failed";
           if (typeof task.output_file === "string") workflowState.outputFile = task.output_file;
+          workflowState.stoppedByLead =
+            workflowState.ended === "stopped" && taskId !== undefined && workflowState.stopsAllowed.has(taskId);
           // The launch ended: with nobody joined, the input may close once the lead has answered.
           joined?.recheck();
         }
@@ -955,6 +967,11 @@ export async function runClaudeCodingWorker(options: ClaudeWorkerRunOptions): Pr
   if (turnLimit) throw new Error("coding_turn_limit");
   if (toolUnreachable) throw new Error("worker_tool_runner_unreachable");
   if (failed) throw new Error(apiError ?? "coding_turn_failed");
+  // A joined person had the lead stop the workflow, and it was not started again (#657): the run ends
+  // cancelled, as a stop would (the executor maps the code), and nothing is collected.
+  if (workflow && workflowState.ended === "stopped" && workflowState.stoppedByLead) {
+    throw new Error("coding_workflow_stopped");
+  }
   // The workflow never started, never ended, or ended failed or stopped: the run did not do its work.
   if (workflow && workflowState.ended !== "completed") throw new Error("coding_workflow_failed");
   // The workflow finished: an answer the session could not give, or gave invalid, is rebuilt from

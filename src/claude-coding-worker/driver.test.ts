@@ -1951,6 +1951,24 @@ describe("runClaudeCodingWorker join (phase 1)", () => {
       expect(control?.control?.running()).toBe(false);
     });
 
+    it("reports coding_workflow_stopped when the lead stopped the workflow for a joined person and did not restart it", async () => {
+      const join = new FakeJoin();
+      await expect(
+        runWorkflow(join, (options) =>
+          (async function* () {
+            const iterator = (options.input as AsyncIterable<ClaudeUserMessage>)[Symbol.asyncIterator]();
+            await iterator.next();
+            yield started("w1");
+            yield placeholder;
+            // The TaskStop guard allowed the lead's stop of w1.
+            options.workflow?.control?.stopping?.("w1");
+            yield ended("w1", "stopped");
+            yield answer("Stopped as asked.");
+          })(),
+        ),
+      ).rejects.toThrow("coding_workflow_stopped");
+    });
+
     it("never takes a sub-agent's notice for the workflow's end, and fails a run whose last launch was stopped", async () => {
       const join = new FakeJoin();
       await expect(

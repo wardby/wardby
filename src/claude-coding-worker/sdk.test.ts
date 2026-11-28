@@ -306,9 +306,12 @@ describe("joinable workflow runs (#657)", () => {
   });
 
   it("lets TaskStop stop only a running launch of the run's own workflow", async () => {
-    const guard = taskStopGuard(control);
+    const stopped: string[] = [];
+    const guard = taskStopGuard({ ...control, stopping: (id) => void stopped.push(id) });
     state.running = true;
     expect((await guard({ tool_input: { task_id: "w1" } })).hookSpecificOutput?.permissionDecision).toBe("allow");
+    // The driver hears of each allowed stop (a refused one is not reported).
+    expect(stopped).toEqual(["w1"]);
     for (const toolInput of [{ task_id: "b9" }, { shell_id: "w1" }, { task_id: "w1", extra: 1 }, {}]) {
       expect((await guard({ tool_input: toolInput })).hookSpecificOutput?.permissionDecision).toBe("deny");
     }

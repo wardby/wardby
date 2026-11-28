@@ -16,7 +16,8 @@ diagnostic id. The run's workflow script didn't complete:
 
 - the script threw an error, or one of its steps failed in a way the script
   didn't handle;
-- the workflow was stopped;
+- the workflow was stopped (except at the request of someone who
+  [joined the run](../join-runs.md#workflow-runs): that run ends cancelled);
 - the session never started it.
 
 Wardby uses a workflow run's result only after the workflow completes, so a

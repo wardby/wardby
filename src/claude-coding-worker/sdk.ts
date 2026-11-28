@@ -109,6 +109,7 @@ export function taskStopGuard(
     const keys = Object.keys(toolInput);
     const taskId = toolInput.task_id;
     const allowed = keys.length === 1 && typeof taskId === "string" && control.ownsTask(taskId) && control.running();
+    if (allowed) control.stopping?.(taskId);
     return {
       hookSpecificOutput: allowed
         ? { hookEventName: "PreToolUse", permissionDecision: "allow" }

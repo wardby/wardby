@@ -91,6 +91,7 @@ import {
   type ProvisioningClaim,
   type WorkspaceBase,
   storedTests,
+  workflowStoppedError,
 } from "./container.js";
 import { CODING_FOLLOW_UP_KINDS } from "./container-follow-ups.js";
 import { ExecutorClosingError } from "./types.js";
@@ -3930,6 +3931,36 @@ describe("ContainerExecutor", () => {
       const within = await harness({ budgetUsd: 0.1, budgetBaseUsd: 0.05 });
       await within.executor.start("run-1");
       expect(within.vcs.notifyFinishedCalls[0]).not.toHaveProperty("overrunSentence");
+    });
+
+    it("ends a run cancelled, naming who, when a joined person had its workflow stopped and not restarted (#657)", async () => {
+      const created = await harness({});
+      (created.store as unknown as { latestJoinSender: () => Promise<string | null> }).latestJoinSender = async () =>
+        "principal-9";
+      created.jobs.statusValue = { state: "failed" };
+      created.jobs.result = { exitCode: 1, reason: "failed", diagnostic: "coding_workflow_stopped" };
+      await created.executor.start("run-1");
+      expect(created.store.run.status).toBe("cancelled");
+      expect(created.store.terminations).toEqual([
+        {
+          status: "cancelled",
+          error: "Stopped by principal-9 from a joined chat: the workflow was stopped and not started again.",
+          // The same category a stop() records: both pass "cancelled".
+          audit: {
+            failureCategory: failureCategory("cancelled"),
+            diagnosticId: expect.stringMatching(/^coding_diag_/),
+          },
+        },
+      ]);
+    });
+
+    it("describes a workflow stopped from a joined chat without a name when the sender is unknown", () => {
+      expect(workflowStoppedError(null)).toBe(
+        "Stopped from a joined chat: the workflow was stopped and not started again.",
+      );
+      expect(workflowStoppedError("bad name\nwith newline")).toBe(
+        "Stopped from a joined chat: the workflow was stopped and not started again.",
+      );
     });
 
     it("names the base budget and allowed overrun when a run with an overrun is out of budget", async () => {
