@@ -54,7 +54,8 @@ function setup(latest: number | null) {
   return { banner, panel, host };
 }
 
-const approve = (panel: HTMLElement) => [...panel.querySelectorAll("button")].find((b) => b.textContent === "Approve")!;
+const approve = (panel: HTMLElement) =>
+  [...panel.querySelectorAll("button")].find((b) => /^Approve v\d+$/.test(b.textContent ?? ""))!;
 
 describe("ReviewPanel: a verdict that lost the race", () => {
   it("shows the changes and names the newer version once the refetch finds it", async () => {
@@ -118,10 +119,47 @@ describe("ReviewPanel: the verdicts offered", () => {
   it("in review: hides the verdict the viewer already gave on this version", () => {
     const { host, panel } = setup(null);
     const p = new ReviewPanel(host, { ...payload(2), reviewers: mine("approved") }, 2);
-    expect(buttons(panel)).toEqual(["Request changes"]);
+    expect(buttons(panel)).toEqual(["Request changes on v2"]);
     p.apply({ ...payload(2), state: "changes_requested", reviewers: mine("changes_requested") });
-    expect(buttons(panel)).toEqual(["Approve"]);
+    expect(buttons(panel)).toEqual(["Approve v2"]);
     expect(panel.querySelector(".rv-verdict")?.textContent).toContain("You requested changes on v2");
+  });
+});
+
+describe("ReviewPanel: the version the page shows", () => {
+  const buttons = (el: HTMLElement) => [...el.querySelectorAll(".rv-verdict button")].map((b) => b.textContent);
+  const asked = (n: number): ReviewPayload => ({
+    ...payload(n),
+    state: "changes_requested",
+    reviewers: [{ ...payload(n).reviewers[0], verdict: "changes_requested", versionNumber: 1, current: false }],
+  });
+
+  it("a newer version the page shows counts as read: verdicts on it, and Show changes since the viewer's last", () => {
+    const { host, panel, banner } = setup(null);
+    const p = new ReviewPanel(host, asked(1), 1);
+    p.apply(asked(2));
+    p.showing(2);
+    expect(buttons(panel)).toEqual(["Approve v2", "Request changes on v2", "Show changes since v1"]);
+    expect(banner.textContent).not.toContain("was published while you were reviewing");
+    [...panel.querySelectorAll("button")].find((b) => b.textContent === "Show changes since v1")!.click();
+    expect(host.showChanges).toHaveBeenCalledWith(1, 2);
+    expect(host.loadLatest).not.toHaveBeenCalled();
+  });
+
+  it("a newer version the page did not show (unsaved edits, a conflict) keeps the Review vN gate", () => {
+    const { host, panel, banner } = setup(null);
+    const p = new ReviewPanel(host, asked(1), 1);
+    p.apply(asked(2));
+    expect(buttons(panel)).toEqual(["Review v2"]);
+    expect(banner.textContent).toContain("v2 was published while you were reviewing v1");
+  });
+
+  it("no earlier verdict: no changes link", () => {
+    const { host, panel } = setup(null);
+    const p = new ReviewPanel(host, payload(1), 1);
+    p.apply(payload(2));
+    p.showing(2);
+    expect(buttons(panel)).toEqual(["Approve v2", "Request changes on v2"]);
   });
 });
 
@@ -447,7 +485,7 @@ describe("ReviewPanel: Choose this option", () => {
     button(panel, "Choose this option")!.click();
     // A focused step: none of the other actions beside it.
     expect(button(panel, "Choose this option")).toBeUndefined();
-    expect(button(panel, "Approve")).toBeUndefined();
+    expect(button(panel, /^Approve v/)).toBeUndefined();
     expect(panel.querySelector("h3")?.textContent).toBe("Choose option-a-tree/");
     const rows = [...panel.querySelectorAll<HTMLLabelElement>(".rv-choose label")].map((l) => [
       l.querySelector("input")!.checked,

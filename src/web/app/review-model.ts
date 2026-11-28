@@ -237,10 +237,11 @@ export const newerNote = (read: number, current: number) =>
 export const raceNote = (verdict: "approve" | "request_changes", current: number) =>
   `v${current} was published just before your ${verdict === "approve" ? "approval" : "request for changes"}, so it wasn't recorded. Here's what changed.`;
 
-export const verdictLabels = (read: number, raced: boolean) =>
-  raced
-    ? { approve: `Approve v${read}`, changes: `Request changes on v${read}` }
-    : { approve: "Approve", changes: "Request changes" };
+/** The verdict buttons name the version they judge: the page follows new versions live, so it is the one shown. */
+export const verdictLabels = (read: number) => ({
+  approve: `Approve v${read}`,
+  changes: `Request changes on v${read}`,
+});
 
 type MyVerdict = ReviewerPayload["verdict"];
 
@@ -248,18 +249,25 @@ type MyVerdict = ReviewerPayload["verdict"];
 export const myCurrentVerdict = (r: ReviewPayload): MyVerdict =>
   r.reviewers.find((x) => x.me && x.current)?.verdict ?? "none";
 
+/** The version the viewer last gave a verdict on, or null when they have given none. */
+export const myVerdictVersion = (r: ReviewPayload): number | null =>
+  r.reviewers.find((x) => x.me && x.verdict !== "none")?.versionNumber ?? null;
+
 /**
  * What a reviewer is offered, as labels (null: not shown). `review` ("Review vN") replaces everything
- * while a newer version than the one read is current. Approved: only Request changes, unless a force
- * approval made it (final: no buttons). In review or
- * changes requested: the verdict the viewer has not already given on the current version, with a
- * status line for the one they have. A repeat verdict would change nothing, so it is never offered.
+ * while a newer version than the one read is current (the page has not shown it: unsaved edits, a
+ * conflict). Approved: only Request changes, unless a force approval made it (final: no buttons). In
+ * review or changes requested: the verdict the viewer has not already given on the current version, with
+ * a status line for the one they have. A repeat verdict would change nothing, so it is never offered.
+ * `since` ("Show changes since vM") sits beside the verdicts when the viewer's last verdict was on an
+ * older version M.
  */
 export interface VerdictControls {
   review: string | null;
   status: string | null;
   approve: string | null;
   changes: string | null;
+  since: string | null;
 }
 
 export function verdictControls(i: {
@@ -270,16 +278,20 @@ export function verdictControls(i: {
   raced: boolean;
   /** The approval is a force approval, which is final: no verdict is offered. */
   forced?: boolean;
+  /** The version of the viewer's last verdict (myVerdictVersion), if any. */
+  earlier?: number | null;
 }): VerdictControls {
-  const out: VerdictControls = { review: null, status: null, approve: null, changes: null };
+  const out: VerdictControls = { review: null, status: null, approve: null, changes: null, since: null };
   if (i.state !== "in_review" && i.state !== "changes_requested" && i.state !== "approved") return out;
   if (i.current !== i.read && !i.raced) return { ...out, review: `Review v${i.current}` };
   if (i.mine === "approved") out.status = `You approved v${i.current}`;
   if (i.mine === "changes_requested") out.status = `You requested changes on v${i.current}`;
   if (i.forced && i.state === "approved") return out;
-  const labels = verdictLabels(i.read, i.raced || i.state === "approved");
+  const labels = verdictLabels(i.read);
   if (i.state !== "approved" && i.mine !== "approved") out.approve = labels.approve;
   if (i.mine !== "changes_requested") out.changes = labels.changes;
+  const earlier = i.earlier ?? null;
+  if (earlier !== null && earlier < i.current) out.since = `Show changes since v${earlier}`;
   return out;
 }
 

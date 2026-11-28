@@ -4,6 +4,7 @@ import {
   bannerText,
   isReopenCopy,
   myCurrentVerdict,
+  myVerdictVersion,
   newerNote,
   pendingLines,
   raceNote,
@@ -109,8 +110,7 @@ describe("review model", () => {
     expect(raceNote("request_changes", 5)).toBe(
       "v5 was published just before your request for changes, so it wasn't recorded. Here's what changed.",
     );
-    expect(verdictLabels(5, false)).toEqual({ approve: "Approve", changes: "Request changes" });
-    expect(verdictLabels(5, true)).toEqual({ approve: "Approve v5", changes: "Request changes on v5" });
+    expect(verdictLabels(5)).toEqual({ approve: "Approve v5", changes: "Request changes on v5" });
   });
 
   it("lists who a force would override", () => {
@@ -137,21 +137,34 @@ describe("review model", () => {
     ).toBe("none");
   });
 
+  it("finds the version of the viewer's last verdict, counting or not", () => {
+    expect(
+      myVerdictVersion(review({ reviewers: [rv({ me: true, verdict: "changes_requested", versionNumber: 2 })] })),
+    ).toBe(2);
+    expect(myVerdictVersion(review({ reviewers: [rv({ me: true })] }))).toBeNull();
+    expect(myVerdictVersion(review({ reviewers: [rv({ verdict: "approved", versionNumber: 3 })] }))).toBeNull();
+  });
+
   describe("verdict controls for every state and verdict", () => {
-    const none = { review: null, status: null, approve: null, changes: null };
+    const none = { review: null, status: null, approve: null, changes: null, since: null };
     const at = (state: ReviewPayload["state"], mine: "none" | "approved" | "changes_requested", raced = false) =>
       verdictControls({ state, mine, read: 4, current: 4, raced });
 
     it("in review and changes requested", () => {
       for (const state of ["in_review", "changes_requested"] as const) {
-        expect(at(state, "none")).toEqual({ ...none, approve: "Approve", changes: "Request changes" });
-        expect(at(state, "approved")).toEqual({ ...none, status: "You approved v4", changes: "Request changes" });
+        // The buttons name the version they judge.
+        expect(at(state, "none")).toEqual({ ...none, approve: "Approve v4", changes: "Request changes on v4" });
+        expect(at(state, "approved")).toEqual({
+          ...none,
+          status: "You approved v4",
+          changes: "Request changes on v4",
+        });
         expect(at(state, "changes_requested")).toEqual({
           ...none,
           status: "You requested changes on v4",
-          approve: "Approve",
+          approve: "Approve v4",
         });
-        // A lost race names the version on the buttons.
+        // A lost race (the read version moved to the current one) names it too.
         expect(at(state, "none", true)).toEqual({ ...none, approve: "Approve v4", changes: "Request changes on v4" });
         expect(at(state, "approved", true)).toEqual({
           ...none,
@@ -190,6 +203,39 @@ describe("review model", () => {
       for (const state of ["draft", "archived"] as const) {
         for (const mine of ["none", "approved", "changes_requested"] as const) expect(at(state, mine)).toEqual(none);
       }
+    });
+
+    it("a verdict on an older version: Show changes since vM beside the verdicts, none for this version", () => {
+      const with_ = (earlier: number | null, mine: "none" | "changes_requested" = "none") =>
+        verdictControls({ state: "changes_requested", mine, read: 4, current: 4, raced: false, earlier });
+      expect(with_(1)).toEqual({
+        ...none,
+        approve: "Approve v4",
+        changes: "Request changes on v4",
+        since: "Show changes since v1",
+      });
+      expect(with_(null)).toEqual({ ...none, approve: "Approve v4", changes: "Request changes on v4" });
+      expect(with_(4, "changes_requested")).toEqual({
+        ...none,
+        status: "You requested changes on v4",
+        approve: "Approve v4",
+      });
+      // Behind the Review vN gate: nothing but it.
+      expect(
+        verdictControls({ state: "in_review", mine: "none", read: 3, current: 4, raced: false, earlier: 1 }),
+      ).toEqual({ ...none, review: "Review v4" });
+      // A final approval offers nothing.
+      expect(
+        verdictControls({
+          state: "approved",
+          mine: "none",
+          read: 4,
+          current: 4,
+          raced: false,
+          forced: true,
+          earlier: 1,
+        }),
+      ).toEqual(none);
     });
 
     it("a newer version than the one read: only Review vN, whatever the state and verdict", () => {

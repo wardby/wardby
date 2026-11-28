@@ -278,7 +278,9 @@ export class EditsTray {
     clear(this.bar);
     this.bar.hidden = false;
     const latest = this.host.latest();
-    const canRestore = this.host.canRestore() && v.number !== latest.number;
+    // The latest version itself (the review's changes since a verdict): nothing to go back to, only Done.
+    const atLatest = v.number === latest.number;
+    const canRestore = this.host.canRestore() && !atLatest;
     if (v.confirm) {
       append(
         this.bar,
@@ -308,7 +310,7 @@ export class EditsTray {
         h(
           "span",
           { class: "vb-text" },
-          h("b", {}, `Viewing v${v.number}`),
+          h("b", {}, `Viewing v${v.number}${atLatest ? " (latest)" : ""}`),
           v.since === null ? " — the first version" : ` — changes since v${v.since}`,
         ),
         h("span", { class: "vb-key" }, h("span", { class: "diff-ins" }, "added"), " ", h("del", {}, "removed")),
@@ -326,7 +328,11 @@ export class EditsTray {
               "Restore this version",
             )
           : null,
-        h("button", { type: "button", class: "primary", onClick: () => this.back() }, "Back to latest"),
+        h(
+          "button",
+          { type: "button", class: "primary", onClick: () => this.back() },
+          atLatest ? "Done" : "Back to latest",
+        ),
       );
     }
     if (v.error) this.bar.append(h("span", { class: "err", role: "alert" }, v.error));

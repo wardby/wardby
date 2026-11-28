@@ -1077,6 +1077,7 @@ function mount(
       warnings = next.version.warnings ?? [];
       renderChecks();
       applyPayload(next);
+      review.showing(baseNumber);
       return;
     }
     // Someone else's version: the earlier saves' entries say nothing about it.
@@ -1096,6 +1097,8 @@ function mount(
     warnings = next.version.warnings ?? [];
     renderChecks();
     applyPayload(next);
+    // The viewer sees this version now: verdicts are on it.
+    review.showing(baseNumber);
     void runFidelity(baseNumber);
   };
 

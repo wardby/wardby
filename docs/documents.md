@@ -292,8 +292,9 @@ version before the row: added text highlighted, removed text struck through
 where it was. Changes are compared word by word on the document's text, so a
 new heading or list item shows as added text and formatting-only changes are
 not marked. Comment highlights are hidden while you look at an earlier
-version; **Back to latest** (or Esc) returns to the editor. New versions keep
-arriving in the list while you look.
+version; **Back to latest** (or Esc) returns to the editor. On the latest
+version itself the bar reads "Viewing vN (latest)" and the button is **Done**.
+New versions keep arriving in the list while you look.
 
 **Restore this version** (members with `write`) publishes that version's
 Markdown as a new version with the summary "Restored v<N>"; nothing is
@@ -348,8 +349,12 @@ otherwise in review. Publishing a new version while the document is in review or
 has changes requested recomputes it, so earlier verdicts stop counting. A
 reviewer's verdict names the version they read (`review_document` takes
 `versionNumber`); if a newer version was published first it is refused with
-`document_version_conflict`, and the page offers **Review vN** to see what
-changed. A reviewer is offered only the verdict they have not already given on
+`document_version_conflict`. On the page, the version read is the one shown:
+live updates show a newer version in place, and the buttons name it (**Approve
+vN**, **Request changes on vN**), with **Show changes since vM** when the
+reviewer's last verdict was on an older version vM. Only when the page cannot
+show the newer version (unsaved edits or a save conflict) does it offer
+**Review vN** instead, to see what changed. A reviewer is offered only the verdict they have not already given on
 the current version (on a document every reviewer approved, only **Request
 changes on vN**; on a force approval, nothing); repeating a verdict changes
 nothing and records no event.

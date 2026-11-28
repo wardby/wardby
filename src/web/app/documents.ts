@@ -567,6 +567,8 @@ function mount(
     surface.reset();
     comments.apply(next);
     review.apply(next.review);
+    // The viewer sees this version now: verdicts are on it.
+    review.showing(baseNumber);
   };
 
   /** Refetches the document and threads; a newer version loads in place unless there are unsaved edits. */
@@ -605,6 +607,8 @@ function mount(
     }
     comments.apply(next);
     review.apply(next.review);
+    // Live, the editor shows the new version: it counts as read (a banner or deferred load keeps the Review vN gate).
+    if (act === "load") review.showing(baseNumber);
     // A refused save whose refetch finds it open again (reopened since): the edits wait for the next edit.
     if (refusedLocked) {
       refusedLocked = false;

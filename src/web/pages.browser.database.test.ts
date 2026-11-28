@@ -921,7 +921,10 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await expect.poll(() => page.locator(".tp-row").count()).toBe(1);
     await page.locator('.tp-row[data-version="1"]').click();
     await expect.poll(() => page.locator(".overlay.version-view").isVisible()).toBe(true);
-    expect(await page.getByRole("button", { name: "Back to latest" }).count()).toBe(1);
+    // v1 is the latest: nothing to go back to, so the bar offers Done, and no Restore.
+    expect(await page.locator(".vbar").textContent()).toContain("Viewing v1 (latest)");
+    expect(await page.getByRole("button", { name: "Done" }).count()).toBe(1);
+    expect(await page.getByRole("button", { name: "Restore this version" }).count()).toBe(0);
     await context.close();
   }, 60_000);
 });

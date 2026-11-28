@@ -1,9 +1,11 @@
 /**
  * The review banner (under the title) and the Review tab, shared by the Markdown page and the design
  * page. Names and notes are set as text (dom.ts). Actions are shown only to those allowed (`can`, from
- * the server). The newer-version flow (spec "Page"): the panel remembers the version the viewer read;
- * when a newer one is current the verdict buttons become "Review vN"; when a verdict loses the race
- * the page says so inline, keeps the typed note, shows the changes and relabels the buttons.
+ * the server). The newer-version flow (spec "Page"): the panel remembers the version the viewer read,
+ * which follows the version the page shows (live updates show a newer one in place); when a newer one
+ * is current but not shown (unsaved edits, a conflict) the verdict buttons become "Review vN"; when a
+ * verdict loses the race the page says so inline, keeps the typed note, shows the changes and relabels
+ * the buttons.
  */
 import { ApiError, errorMessage, type Api, type ReviewAction, type ReviewPayload, type ReviewState } from "./api.js";
 import { relativeTime } from "./comments.js";
@@ -28,6 +30,7 @@ import {
   isReopenCopy,
   matchesQuery,
   myCurrentVerdict,
+  myVerdictVersion,
   newerNote,
   PICKER,
   pendingLines,
@@ -128,6 +131,13 @@ export class ReviewPanel {
 
   /** The viewer published this version themselves: they have read it. */
   markRead(n: number): void {
+    this.read = n;
+    this.render();
+  }
+
+  /** The page now shows this version (a live update loaded it in place): it counts as read. */
+  showing(n: number): void {
+    if (n === this.read) return;
     this.read = n;
     this.render();
   }
@@ -279,6 +289,7 @@ export class ReviewPanel {
       current: r.currentVersion,
       raced: this.raced !== null,
       forced: r.forced !== null,
+      earlier: myVerdictVersion(r),
     });
     if (c.status) box.append(h("div", { class: "rv-mine", role: "status" }, c.status));
     if (!c.review && !c.approve && !c.changes) return box;
@@ -300,6 +311,16 @@ export class ReviewPanel {
     if (c.approve)
       row.append(this.button(c.approve, () => void this.verdict("approve"), choose ? "neutral" : "primary", "approve"));
     if (c.changes) row.append(this.button(c.changes, () => void this.verdict("request_changes"), "neutral", "changes"));
+    // Secondary: what changed since the viewer's last verdict, in History.
+    const earlier = myVerdictVersion(r);
+    if (c.since && earlier !== null)
+      row.append(
+        h(
+          "button",
+          { type: "button", class: "link", onClick: () => this.host.showChanges(earlier, r.currentVersion) },
+          c.since,
+        ),
+      );
     box.append(row);
     return box;
   }
