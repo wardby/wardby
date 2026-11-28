@@ -185,15 +185,27 @@ describe("wardby join -", () => {
     ]);
   });
 
-  it("interrupts with /interrupt or /i, sends a leading ! as plain text, and needs text after /interrupt", async () => {
-    const { out, seen } = await run([LINK, "/interrupt stop now", "!ls", "/interrupt", "/ideas please", "/leave"]);
+  it("interrupts with /interrupt or /i, sends a leading ! as plain text, needs text after /interrupt, and never sends an unknown /word", async () => {
+    const { out, seen } = await run([
+      LINK,
+      "/interrupt stop now",
+      "!ls",
+      "/interrupt",
+      "/ideas please",
+      "/usr/bin is missing",
+      "/exit",
+    ]);
     const sends = seen.filter((s) => s.path === "/join/api/send").map((s) => s.body);
     expect(sends).toEqual([
       { message: "stop now", interrupt: true },
       { message: "!ls", interrupt: false },
-      { message: "/ideas please", interrupt: false },
+      { message: "/usr/bin is missing", interrupt: false },
     ]);
     expect(out).toContain("Type your message after /interrupt (or /i), on the same line.");
+    expect(out).toContain(JOIN_MESSAGES.unknownCommand);
+    // /exit leaves, as /leave does.
+    expect(seen.some((s) => s.path === "/join/api/leave")).toBe(true);
+    expect(out).toContain(JOIN_MESSAGES.left);
   });
 
   it("shows the agent with /agent and its system prompt with /prompt, prompt lines indented", async () => {

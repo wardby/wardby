@@ -86,11 +86,12 @@ MCP client's agent:
 3. The chat shows the run's steps as they happen. Type a line and press Enter
    to send it; start it with `/interrupt` (or `/i`) to interrupt. `/agent` shows the agent and
    the run (model, budget and spend, turns, time left, who is joined) and `/prompt` the agent's
-   system prompt; both need execute access to the agent, as joining does. `/leave` leaves (the run
-   finishes its work); `/quit` stops the agent after asking you to confirm:
+   system prompt; both need execute access to the agent, as joining does. `/leave` (or `/exit`)
+   leaves (the run finishes its work); `/quit` stops the agent after asking you to confirm:
    the run then ends cancelled and its work is not pushed. Ctrl-C leaves, as
    `/leave` does. After leaving, the chat keeps showing the run until it
-   ends; press Ctrl-C (again) to stop watching.
+   ends; press Ctrl-C (again) to stop watching. Any other `/word` is a chat
+   command too: an unknown one is never sent to the agent.
 
 Closing the terminal leaves the run too. If the connection to the server drops,
 the chat retries for about a minute, then leaves the run on its way out so it

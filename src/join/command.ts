@@ -37,7 +37,7 @@ In the chat:
   /i text          the same, shorter
   /agent           details of the agent and this run: model, budget, turns, time left, who is joined
   /prompt          the agent's system prompt
-  /leave           leave the run; it finishes its work and wraps up as usual
+  /leave, /exit    leave the run; it finishes its work and wraps up as usual
   /quit            stop the agent (asks first): the run ends cancelled, its work is not pushed
   /help            show these commands
   Ctrl-C           leave, as /leave`;
@@ -62,8 +62,15 @@ export const JOIN_MESSAGES = {
   lostConnectionNotLeft:
     "Lost the connection to the Wardby server and could not leave the run; it stays open until its timeout. Join it again with a new link from join_run to leave it.",
   sendFailed: "Could not send that",
+  unknownCommand: "Unknown command; nothing was sent. /help lists the commands.",
 } as const;
 
+/**
+ * A word after a slash, like /exit: a chat command, never sent to the agent, so a mistyped or
+ * unknown command is not mistaken for a message. A path such as /usr/bin is still text.
+ */
+const UNKNOWN_COMMAND = /^\/[a-z][a-z-]*(?:\s|$)/i;
+const INTERRUPT_COMMAND = /^\/(?:interrupt|i)(?:\s+|$)/;
 const MAX_LINK_BYTES = 8192;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -414,16 +421,18 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         } else if (text === "/prompt") {
           const { systemPrompt } = await expectOk(session, "prompt");
           out(labelled("System prompt: ", cleanServerText(systemPrompt, 100_000)));
-        } else if (text === "/leave") {
+        } else if (text === "/leave" || text === "/exit") {
           await leave();
         } else if (text === "/quit") {
           confirmQuit = true;
           out(JOIN_MESSAGES.confirmQuit);
           out("Stop the agent? (y/N)");
+        } else if (UNKNOWN_COMMAND.test(text) && !INTERRUPT_COMMAND.test(text)) {
+          out(JOIN_MESSAGES.unknownCommand);
         } else if (left) {
           out("You left this run; nothing was sent.");
         } else {
-          const command = /^\/(?:interrupt|i)(?:\s+|$)/.exec(text);
+          const command = INTERRUPT_COMMAND.exec(text);
           const interrupt = command !== null;
           const message = interrupt ? text.slice(command[0].length).trim() : text;
           if (message === "") {
