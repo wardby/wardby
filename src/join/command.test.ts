@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { PassThrough } from "node:stream";
-import { cleanServerText, joinCommand, JOIN_MESSAGES, stepLine } from "./command.js";
+import {
+  ANSI_PAINT,
+  agentLines,
+  cleanServerText,
+  colourWanted,
+  joinCommand,
+  JOIN_MESSAGES,
+  stepLine,
+} from "./command.js";
 
 // Fake values only.
 const LINK_TOKEN = "fake-join-token-0001";
@@ -176,6 +184,35 @@ describe("chat lines", () => {
 
   it("removes bidirectional override characters", () => {
     expect(cleanServerText("abc\u202edcba\u2066x\u2069")).toBe("abcdcbax");
+  });
+});
+
+describe("chat colours", () => {
+  it("colours in a terminal, never with NO_COLOR, and always with FORCE_COLOR", () => {
+    expect(colourWanted({}, true)).toBe(true);
+    expect(colourWanted({}, false)).toBe(false);
+    expect(colourWanted({ NO_COLOR: "1" }, true)).toBe(false);
+    expect(colourWanted({ FORCE_COLOR: "1" }, false)).toBe(true);
+    expect(colourWanted({ FORCE_COLOR: "0" }, true)).toBe(true);
+    expect(colourWanted({ FORCE_COLOR: "0" }, false)).toBe(false);
+    expect(colourWanted({ NO_COLOR: "1", FORCE_COLOR: "1" }, true)).toBe(false);
+  });
+
+  it("colours the chat's labels only, never the server's text, which stays stripped of escapes", () => {
+    const said = stepLine({ seq: 1, kind: "said", summary: "x", detail: "hi \u001b[32mgreen\u001b[0m" }, ANSI_PAINT);
+    expect(said).toBe("\u001b[36magent: \u001b[39mhi green");
+    const tool = stepLine({ seq: 2, kind: "tool", tool: "Bash", summary: "npm test", status: "error" }, ANSI_PAINT);
+    expect(tool).toBe("  \u001b[2mBash: npm test\u001b[22m \u001b[31m(error)\u001b[39m");
+    expect(stepLine({ seq: 3, kind: "interrupt", summary: "stop" }, ANSI_PAINT)).toBe(
+      "\u001b[35mperson (interrupt): \u001b[39mstop",
+    );
+    const lines = agentLines({ agent: { name: "w\u001b[31mx", kind: "native", model: "m" }, run: {} }, 0, ANSI_PAINT);
+    expect(lines[0]).toBe("\u001b[1mAgent:\u001b[22m wx (native, m)");
+  });
+
+  it("prints no colour codes when the output is captured", async () => {
+    const { out } = await run([LINK, "/agent", "/nope", "/leave"]);
+    expect(out.join("\n")).not.toContain("\u001b[");
   });
 });
 

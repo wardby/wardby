@@ -153,27 +153,77 @@ interface Step {
   detail?: string | null;
 }
 
+/**
+ * Colours for the chat's own labels and notices, never for server text (which cleanServerText has
+ * already stripped of escape sequences, so an agent cannot fake a label or recolour the screen).
+ * Only the basic terminal colours, which follow the terminal's own theme.
+ */
+export interface Paint {
+  cyan: (text: string) => string;
+  yellow: (text: string) => string;
+  magenta: (text: string) => string;
+  green: (text: string) => string;
+  red: (text: string) => string;
+  dim: (text: string) => string;
+  bold: (text: string) => string;
+}
+const sgr =
+  (code: number, reset: number) =>
+  (text: string): string =>
+    `\u001b[${code}m${text}\u001b[${reset}m`;
+export const ANSI_PAINT: Paint = {
+  cyan: sgr(36, 39),
+  yellow: sgr(33, 39),
+  magenta: sgr(35, 39),
+  green: sgr(32, 39),
+  red: sgr(31, 39),
+  dim: sgr(2, 22),
+  bold: sgr(1, 22),
+};
+const same = (text: string) => text;
+export const PLAIN_PAINT: Paint = {
+  cyan: same,
+  yellow: same,
+  magenta: same,
+  green: same,
+  red: same,
+  dim: same,
+  bold: same,
+};
+
+/**
+ * Colour in a terminal only: NO_COLOR (any value) turns it off, FORCE_COLOR (not "0") turns it on.
+ * Output a caller captures (deps.out) is always plain.
+ */
+export function colourWanted(env: NodeJS.ProcessEnv, stdoutIsTty: boolean): boolean {
+  if (env.NO_COLOR !== undefined && env.NO_COLOR !== "") return false;
+  if (env.FORCE_COLOR !== undefined && env.FORCE_COLOR !== "" && env.FORCE_COLOR !== "0") return true;
+  return stdoutIsTty;
+}
+
 /** One step as a chat line. */
-export function stepLine(step: Step): string {
+export function stepLine(step: Step, paint: Paint = PLAIN_PAINT): string {
   const summary = cleanServerText(step.summary, 300).replace(/\n/g, " ");
   const text = cleanServerText(step.detail ?? step.summary);
   switch (step.kind) {
     case "join":
-      return "· someone joined";
+      return paint.dim("· someone joined");
     case "leave":
-      return "· someone left";
+      return paint.dim("· someone left");
     case "said":
-      return labelled("agent: ", text);
+      return labelled(paint.cyan("agent: "), text);
     case "message":
-      return labelled("person: ", text);
+      return labelled(paint.yellow("person: "), text);
     case "interrupt":
-      return labelled("person (interrupt): ", text);
+      return labelled(paint.magenta("person (interrupt): "), text);
     case "tool": {
-      const status = step.status ? ` (${cleanServerText(step.status, 40)})` : "";
-      return `  ${cleanServerText(step.tool ?? "tool", 128)}: ${summary}${status}`;
+      const raw = step.status ? cleanServerText(step.status, 40) : "";
+      const tint = raw === "ok" ? paint.green : raw === "error" ? paint.red : same;
+      const status = raw ? ` ${tint(`(${raw})`)}` : "";
+      return `  ${paint.dim(`${cleanServerText(step.tool ?? "tool", 128)}: ${summary}`)}${status}`;
     }
     default:
-      return `  ${summary}`;
+      return `  ${paint.dim(summary)}`;
   }
 }
 
@@ -193,27 +243,27 @@ const usd = (value: unknown): string => {
 };
 
 /** /agent's answer as chat lines. */
-export function agentLines(answer: Record<string, unknown>, now = Date.now()): string[] {
+export function agentLines(answer: Record<string, unknown>, now = Date.now(), paint: Paint = PLAIN_PAINT): string[] {
   const agent = (answer.agent ?? {}) as Record<string, unknown>;
   const run = (answer.run ?? {}) as Record<string, unknown>;
-  const lines = [`Agent: ${str(agent.name, 200)} (${str(agent.kind, 40)}, ${str(agent.model, 100)})`];
-  if (agent.repository) lines.push(`  Repository: ${str(agent.repository, 500)}`);
+  const lines = [`${paint.bold("Agent:")} ${str(agent.name, 200)} (${str(agent.kind, 40)}, ${str(agent.model, 100)})`];
+  if (agent.repository) lines.push(`  ${paint.dim("Repository:")} ${str(agent.repository, 500)}`);
   const started = Date.parse(String(run.startedAt));
   const by = run.startedBy ? ` by ${str(run.startedBy, 200)}` : "";
   lines.push(
-    `  Run: ${str(run.status, 40)}${Number.isFinite(started) ? `, started ${duration(now - started)} ago` : ""}${by}`,
+    `  ${paint.dim("Run:")} ${str(run.status, 40)}${Number.isFinite(started) ? `, started ${duration(now - started)} ago` : ""}${by}`,
   );
-  lines.push(`  Spent: ${usd(run.costUsd)} of ${usd(run.budgetUsd)}`);
+  lines.push(`  ${paint.dim("Spent:")} ${usd(run.costUsd)} of ${usd(run.budgetUsd)}`);
   const turns = Number(run.turns);
   const maxTurns = typeof run.maxTurns === "number" ? ` of ${run.maxTurns} per message` : "";
-  lines.push(`  Turns: ${Number.isFinite(turns) ? turns : "?"}${maxTurns}`);
+  lines.push(`  ${paint.dim("Turns:")} ${Number.isFinite(turns) ? turns : "?"}${maxTurns}`);
   const deadline = Date.parse(String(run.deadlineAt));
   if (Number.isFinite(deadline) && typeof run.timeoutSec === "number") {
-    lines.push(`  Time left: ${duration(deadline - now)} of ${duration(run.timeoutSec * 1000)}`);
+    lines.push(`  ${paint.dim("Time left:")} ${duration(deadline - now)} of ${duration(run.timeoutSec * 1000)}`);
   }
   const names = (value: unknown): string[] => (Array.isArray(value) ? value.map((v) => str(v, 200)) : []);
   const list = (label: string, items: string[]) => {
-    if (items.length > 0) lines.push(`  ${label}: ${items.join(", ")}`);
+    if (items.length > 0) lines.push(`  ${paint.dim(`${label}:`)} ${items.join(", ")}`);
   };
   list("Tools", names(agent.tools));
   list(
@@ -233,10 +283,10 @@ export function agentLines(answer: Record<string, unknown>, now = Date.now()): s
     ),
   );
   if (typeof agent.repoSkills === "boolean") {
-    lines.push(`  Repository skills: ${agent.repoSkills ? "loaded from the repository" : "off"}`);
+    lines.push(`  ${paint.dim("Repository skills:")} ${agent.repoSkills ? "loaded from the repository" : "off"}`);
   }
   const joined = Array.isArray(run.joined) ? run.joined.map((p) => str(p, 200)) : [];
-  lines.push(`  Joined: ${joined.length > 0 ? joined.join(", ") : "nobody"}`);
+  lines.push(`  ${paint.dim("Joined:")} ${joined.length > 0 ? joined.join(", ") : "nobody"}`);
   return lines;
 }
 
@@ -303,6 +353,12 @@ async function expectOk(session: JoinSession, action: JoinApiAction, body?: unkn
 /** Returns the process exit code: 0 the run ended (or you left and it ended), 1 failed, 2 usage. */
 export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<number> {
   const write = deps.out ?? ((line: string) => process.stdout.write(`${line}\n`));
+  const paint =
+    deps.out === undefined && colourWanted(process.env, process.stdout.isTTY === true) ? ANSI_PAINT : PLAIN_PAINT;
+  /** A failure or refusal, in red. */
+  const fail = (line: string) => out(paint.red(line));
+  /** A notice from the chat itself, dimmed. */
+  const note = (line: string) => out(paint.dim(line));
   // In a terminal the chat keeps a "> " prompt on the bottom line: a line printed while you type
   // goes above it, and what you had typed is drawn again below (readline's prompt(true)).
   let prompter: Interface | undefined;
@@ -343,7 +399,7 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
   // A prompt only when a person is typing into a terminal and watching it; piped input stays plain.
   const promptMode = tty && deps.out === undefined && process.stdout.isTTY === true;
   const rl: Interface = promptMode
-    ? createInterface({ input, output: process.stdout, terminal: true, prompt: "> " })
+    ? createInterface({ input, output: process.stdout, terminal: true, prompt: paint.bold("> ") })
     : createInterface({ input, terminal: false });
   const lines = rl[Symbol.asyncIterator]();
   try {
@@ -364,7 +420,7 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
     }
     const session = new JoinSession(link.origin, link.token, deps.fetch ?? globalThis.fetch);
     const joined = await expectOk(session, "join");
-    out(`${JOIN_MESSAGES.joined} (run ${cleanServerText(joined.runId, 128)})`);
+    out(`${paint.green(JOIN_MESSAGES.joined)} ${paint.dim(`(run ${cleanServerText(joined.runId, 128)})`)}`);
     if (promptMode) {
       prompter = rl;
       rl.prompt();
@@ -380,8 +436,8 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
       if (left || ended) return leaving;
       left = true;
       leaving = expectOk(session, "leave").then(
-        () => out(JOIN_MESSAGES.left),
-        (err: unknown) => out(err instanceof Error ? err.message : JOIN_MESSAGES.unreachable),
+        () => note(JOIN_MESSAGES.left),
+        (err: unknown) => fail(err instanceof Error ? err.message : JOIN_MESSAGES.unreachable),
       );
       return leaving;
     };
@@ -419,7 +475,7 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
           await handleLine(String(next.value).trim());
           prompter?.prompt();
         } catch (err) {
-          out(err instanceof JoinCliError ? err.message : JOIN_MESSAGES.unreachable);
+          fail(err instanceof JoinCliError ? err.message : JOIN_MESSAGES.unreachable);
         }
       }
     })();
@@ -429,12 +485,12 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         if (confirmQuit) {
           confirmQuit = false;
           if (/^y(es)?$/i.test(text)) {
-            out(JOIN_MESSAGES.stopping);
+            note(JOIN_MESSAGES.stopping);
             await expectOk(session, "stop").catch((err: unknown) =>
-              out(err instanceof Error ? err.message : JOIN_MESSAGES.unreachable),
+              fail(err instanceof Error ? err.message : JOIN_MESSAGES.unreachable),
             );
           } else {
-            out(JOIN_MESSAGES.notStopped);
+            note(JOIN_MESSAGES.notStopped);
           }
           return;
         }
@@ -442,30 +498,30 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
         if (text === "/help") {
           out(JOIN_USAGE);
         } else if (text === "/agent") {
-          for (const line of agentLines(await expectOk(session, "agent"))) out(line);
+          for (const line of agentLines(await expectOk(session, "agent"), Date.now(), paint)) out(line);
         } else if (text === "/prompt") {
           const { systemPrompt } = await expectOk(session, "prompt");
-          out(labelled("System prompt: ", cleanServerText(systemPrompt, 100_000)));
+          out(labelled(paint.bold("System prompt: "), cleanServerText(systemPrompt, 100_000)));
         } else if (text === "/leave" || text === "/exit") {
           await leave();
         } else if (text === "/quit") {
           confirmQuit = true;
-          out(JOIN_MESSAGES.confirmQuit);
-          out("Stop the agent? (y/N)");
+          out(paint.yellow(JOIN_MESSAGES.confirmQuit));
+          out(paint.bold("Stop the agent? (y/N)"));
         } else if (UNKNOWN_COMMAND.test(text) && text !== "/i" && text !== "/interrupt") {
-          out(JOIN_MESSAGES.unknownCommand);
+          fail(JOIN_MESSAGES.unknownCommand);
         } else if (left) {
-          out("You left this run; nothing was sent.");
+          note("You left this run; nothing was sent.");
         } else {
           const command = INTERRUPT_COMMAND.exec(text);
           const interrupt = command !== null;
           const message = interrupt ? text.slice(command[0].length).trim() : text;
           if (message === "") {
-            if (interrupt) out("Type your message after /interrupt (or /i), on the same line.");
+            if (interrupt) fail("Type your message after /interrupt (or /i), on the same line.");
             return;
           }
           const { status, json } = await session.call("send", { message, interrupt });
-          if (status !== 200) out(`${JOIN_MESSAGES.sendFailed}: ${refusalText(status, json)}`);
+          if (status !== 200) fail(`${JOIN_MESSAGES.sendFailed}: ${refusalText(status, json)}`);
         }
       }
     }
@@ -481,7 +537,7 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
           const steps = Array.isArray(page.steps) ? (page.steps as Step[]) : [];
           for (const step of steps) {
             if (typeof step.seq !== "number" || step.seq <= after) continue;
-            out(stepLine(step));
+            out(stepLine(step, paint));
             after = step.seq;
           }
           if (page.next === null || page.next === undefined || steps.length === 0) break;
@@ -511,8 +567,8 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
               ),
               sleep(EXIT_LEAVE_MS).then(() => false),
             ])));
-        if (!transient(err)) out(err instanceof JoinCliError ? err.message : JOIN_MESSAGES.unreachable);
-        out(leftOk ? JOIN_MESSAGES.lostConnection : JOIN_MESSAGES.lostConnectionNotLeft);
+        if (!transient(err)) fail(err instanceof JoinCliError ? err.message : JOIN_MESSAGES.unreachable);
+        fail(leftOk ? JOIN_MESSAGES.lostConnection : JOIN_MESSAGES.lostConnectionNotLeft);
         return 1;
       }
     }
@@ -520,16 +576,17 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
     rl.close();
     await typing.catch(() => undefined);
     const cost = Number(ended.costUsd);
-    out(
-      `Run finished: ${cleanServerText(ended.status, 40)}${Number.isFinite(cost) ? ` (cost $${cost.toFixed(4)})` : ""}`,
-    );
+    const status = cleanServerText(ended.status, 40);
+    const tint =
+      status === "succeeded" ? paint.green : status === "failed" || status === "lost" ? paint.red : paint.yellow;
+    out(`${tint(`Run finished: ${status}`)}${Number.isFinite(cost) ? paint.dim(` (cost $${cost.toFixed(4)})`) : ""}`);
     if (ended.outcome) out(`Outcome: ${cleanServerText(ended.outcome, 40)}. ${cleanServerText(ended.summary, 2_000)}`);
     if (ended.pullRequestUrl) out(`Pull request: ${cleanServerText(ended.pullRequestUrl, 500)}`);
     else if (ended.branch) out(`Branch: ${cleanServerText(ended.branch, 300)}`);
-    if (ended.error) out(`Error: ${cleanServerText(ended.error, 2_000)}`);
+    if (ended.error) out(`${paint.red("Error:")} ${cleanServerText(ended.error, 2_000)}`);
     return 0;
   } catch (err) {
-    out(err instanceof JoinCliError ? err.message : "Something went wrong while joining the run.");
+    fail(err instanceof JoinCliError ? err.message : "Something went wrong while joining the run.");
     return 1;
   } finally {
     stopPrompt();

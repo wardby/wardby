@@ -95,6 +95,7 @@ MCP client's agent:
    ends; press Ctrl-C (again) to stop watching. A line that is only
    a `/word` is always a chat command, so an unknown one is never sent to the
    agent; a message such as "/tmp is full" is sent as usual.
+   In a terminal the chat is coloured; set `NO_COLOR` to turn colour off.
 
 Closing the terminal leaves the run too. If the connection to the server drops,
 the chat retries for about a minute, then leaves the run on its way out so it
