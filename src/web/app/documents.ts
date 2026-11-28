@@ -530,7 +530,8 @@ function mount(
   const restingSaveText = () => {
     if (locked) {
       // Edits from before the lock wait, unsaved, for a reopen.
-      const word = lockState === "archived" ? "Read only: archived" : "Read only: approved";
+      // The lock's own state (approved, rejected or archived), as the design page says it.
+      const word = `Read only: ${lockState}`;
       return dirty ? `${word} · unsaved changes` : word;
     }
     if (editable && !lossyLocked && coedit) return "Live";
