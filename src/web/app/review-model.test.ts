@@ -13,6 +13,8 @@ import {
   EVENT_LABEL,
   isLockedState,
   STATE_LABEL,
+  alternativeSets,
+  choiceResult,
   chooseCandidates,
   optionFamily,
   optionSets,
@@ -269,5 +271,44 @@ describe("option sets", () => {
     expect(optionSetWords("option-")).toEqual({ title: "Options", noun: "option", pick: "Pick an option" });
     expect(optionSetWords("layout-")).toEqual({ title: "Layout options", noun: "layout", pick: "Pick a layout" });
     expect(optionSetWords("icon-").pick).toBe("Pick an icon");
+  });
+});
+
+describe("native option sets", () => {
+  const d = (id: string, path: string, current = false, reviewState = "in_review") => ({
+    id,
+    title: `Title ${path}`,
+    path,
+    reviewState,
+    removed: false,
+    current,
+  });
+
+  it("are one set of alternatives whatever the labels, from two members", () => {
+    const docs = [{ path: "concept-a" }, { path: "go" }, { path: "plan.md" }];
+    expect(alternativeSets(docs, "options")).toEqual([{ family: "option-", docs }]);
+    expect(alternativeSets([{ path: "concept-a" }], "options")).toEqual([]);
+    // A plan still groups by option family.
+    expect(alternativeSets(docs)).toEqual([]);
+  });
+
+  it("tick every other open member to reject, plan.md or not", () => {
+    const ticks = chooseCandidates(
+      [d("a", "concept-a", true), d("b", "go"), d("p", "plan.md"), d("x", "old", false, "draft")],
+      "options",
+    ).map((c) => [c.path, c.ticked]);
+    expect(ticks).toEqual([
+      ["go", true],
+      ["plan.md", true],
+    ]);
+  });
+
+  it("say what the choice did without a plan to build", () => {
+    const base = { chosenPath: "concept-b", chosenApproved: true, rejectedPaths: ["concept-a"], waitingPaths: [] };
+    expect(choiceResult({ ...base, kind: "options" })).toBe("You chose concept-b. Rejected: concept-a.");
+    expect(choiceResult({ ...base, kind: "options", waitingPaths: ["concept-c"] })).toBe(
+      "You chose concept-b. Rejected: concept-a. Still waiting: concept-c.",
+    );
+    expect(choiceResult(base)).toBe("You chose concept-b. Rejected: concept-a. The plan is ready to build.");
   });
 });

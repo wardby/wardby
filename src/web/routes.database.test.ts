@@ -1955,6 +1955,72 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       }
     });
 
+    it("gives a native option set's member the set bar: its options by label, filtered per viewer", async () => {
+      const writer = await db.agent.create({
+        data: {
+          name: `option-bar-${randomUUID().slice(0, 8)}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+        },
+      });
+      const set = await db.documentSet.create({
+        data: { agentId: writer.id, ownerId: owner.id, name: "landing", createdByRunId: `run-${writer.id}` },
+      });
+      const option = async (label: string) => {
+        const id = await newDoc();
+        await db.document.update({ where: { id }, data: { setId: set.id, option: label } });
+        return id;
+      };
+      const [a, b] = [await option("concept-a"), await option("concept-b")];
+      try {
+        const o = await session(owner.id);
+        const page = (await (await call(`/d/api/${a}`, { jar: o.jar })).json()) as any;
+        expect(page.planLinks).toBeUndefined();
+        expect(page.planSet).toMatchObject({ kind: "options", name: "landing", approved: 0, counted: 2 });
+        expect(page.planSet.partial).toBeUndefined();
+        expect(page.planSet.documents.map((d: any) => [d.id, d.path, d.current, d.pagePath])).toEqual([
+          [a, "concept-a", true, `/d/${a}`],
+          [b, "concept-b", false, `/d/${b}`],
+        ]);
+        // A member who can read only concept-b sees only it.
+        await db.resourceGrant.create({
+          data: {
+            resourceType: "document",
+            resourceId: b,
+            granteeKind: "principal",
+            granteePrincipalId: outsider.id,
+            granteeKey: `principal:${outsider.id}`,
+            level: "read",
+          },
+        });
+        const out = await session(outsider.id);
+        const theirs = (await (await call(`/d/api/${b}`, { jar: out.jar })).json()) as any;
+        expect(theirs.planSet.documents.map((d: any) => d.id)).toEqual([b]);
+        expect(theirs.planSet.counted).toBe(1);
+        // A guest on a link to concept-a: only it, no member route, and no count.
+        const link = await createShareLink(db, {
+          documentId: a,
+          viewer: { kind: "principal", principalId: owner.id },
+          permission: "view",
+        });
+        const jar = new Jar();
+        jar.take(await call(`/s/${link.token}`, { jar }));
+        const guest = (await (
+          await call(`/d/api/${a}`, { jar, headers: { "x-wardby-share": link.token } })
+        ).json()) as any;
+        expect(guest.planSet).toMatchObject({ kind: "options", partial: true });
+        expect(guest.planSet.documents.map((d: any) => [d.id, d.pagePath])).toEqual([[a, ""]]);
+        expect(JSON.stringify(guest)).not.toContain(b);
+      } finally {
+        await db.resourceGrant.deleteMany({ where: { resourceId: b } });
+        await db.document.deleteMany({ where: { id: { in: [a, b] } } });
+        await db.documentSet.delete({ where: { id: set.id } });
+        await db.agent.delete({ where: { id: writer.id } });
+      }
+    });
+
     it("lets a guest reviewer on a comment link approve through the page API", async () => {
       const id = await newDoc();
       const o = await session(owner.id);

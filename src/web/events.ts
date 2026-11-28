@@ -13,7 +13,8 @@
  *   access-checked API). `status` and `resync` follow the documents bus's
  *   LISTEN connection, as on the Viewer stream.
  * - A plan document's stream also carries the `review` and `version` events of
- *   the other documents in its plan set (for the plan bar), each only after
+ *   the other documents in its plan set (for the plan bar; a native option set's
+ *   member, those of the other options of its set), each only after
  *   checking that the document is still in the set and that this viewer can
  *   read it — a share-link guest hears only about documents they can open.
  * - Every heartbeat re-validates the session without refreshing it (expired,
@@ -70,11 +71,25 @@ export function createDocumentStreams(options: {
 /** Events of the other documents of a plan set that the page's plan bar follows. */
 const SET_EVENT_KINDS = new Set<DocumentEvent["kind"]>(["review", "version"]);
 
-/** Whether another document is in the stream's plan set and the viewer can read it (checked per event, never cached). */
-async function inSetAndReadable(deps: WebDeps, planSetId: string, documentId: string, viewer: Viewer) {
+/** The set the page's bar shows (api.ts documentPayload): a plan by its plan set, else a native option set. */
+type BarSet = { planSetId: string } | { planSetId: null; setId: string };
+
+function barSetOf(doc: { planSetId: string | null; setId: string | null } | null): BarSet | null {
+  if (doc?.planSetId) return { planSetId: doc.planSetId };
+  return doc?.setId ? { planSetId: null, setId: doc.setId } : null;
+}
+
+const sameSet = (a: BarSet | null, b: BarSet) =>
+  a !== null && (b.planSetId !== null ? a.planSetId === b.planSetId : "setId" in a && a.setId === b.setId);
+
+/** Whether another document is in the stream's set and the viewer can read it (checked per event, never cached). */
+async function inSetAndReadable(deps: WebDeps, set: BarSet, documentId: string, viewer: Viewer) {
   try {
-    const doc = await deps.db.document.findUnique({ where: { id: documentId }, select: { planSetId: true } });
-    if (doc?.planSetId !== planSetId) return false;
+    const doc = await deps.db.document.findUnique({
+      where: { id: documentId },
+      select: { planSetId: true, setId: true },
+    });
+    if (!sameSet(barSetOf(doc), set)) return false;
     return (await documentAccess(deps.db, documentId, viewer)) !== "none";
   } catch {
     return false;
@@ -93,15 +108,17 @@ export async function openDocumentStream(
   if (ctx.kind === "none") throw new Error("web_session_required");
   const viewer = await requestViewer(req, deps, ctx);
   await requireDocumentAccess(deps.db, documentId, viewer, "read");
-  const planSetId =
-    (await deps.db.document.findUnique({ where: { id: documentId }, select: { planSetId: true } }))?.planSetId ?? null;
+  const barSet = barSetOf(
+    await deps.db.document.findUnique({ where: { id: documentId }, select: { planSetId: true, setId: true } }),
+  );
   // The set's document ids, a cheap pre-filter ahead of the per-event check (which still decides). Refreshed
   // on the stream's own events and each heartbeat, so a document that joins the set is followed soon after.
   let setIds = new Set<string>();
   const refreshSetIds = async () => {
-    if (!planSetId) return;
+    if (!barSet) return;
     try {
-      const rows = await deps.db.document.findMany({ where: { planSetId }, select: { id: true } });
+      const where = barSet.planSetId !== null ? { planSetId: barSet.planSetId } : { setId: barSet.setId };
+      const rows = await deps.db.document.findMany({ where, select: { id: true } });
       setIds = new Set(rows.map((r) => r.id));
     } catch {
       // Keep the previous snapshot.
@@ -149,9 +166,9 @@ export async function openDocumentStream(
           if (event.kind === "version") await refreshSetIds();
         });
       }
-      if (!planSetId || !SET_EVENT_KINDS.has(event.kind) || !setIds.has(event.documentId)) return;
+      if (!barSet || !SET_EVENT_KINDS.has(event.kind) || !setIds.has(event.documentId)) return;
       enqueue(async () => {
-        if (await inSetAndReadable(deps, planSetId, event.documentId, viewer)) forward(event);
+        if (await inSetAndReadable(deps, barSet, event.documentId, viewer)) forward(event);
       });
     }),
   );

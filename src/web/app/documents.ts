@@ -41,6 +41,7 @@ import { planLinkTargets } from "./extensions.js";
 import {
   planBarHost,
   planDocumentsOf,
+  planKindOf,
   renderPlanBar,
   requestedTab,
   setPlanBarChooser,
@@ -234,7 +235,8 @@ function mount(
     renderPlanBar(planBar, p.planSet);
     planTargets = planLinkTargets(p.planLinks);
     clear(planWarnings);
-    const unresolved = p.planSet ? (p.planLinks?.unresolved ?? []) : [];
+    // An option set has no links (api.ts), so never a plan's warning.
+    const unresolved = p.planSet && p.planSet.kind !== "options" ? (p.planLinks?.unresolved ?? []) : [];
     planWarnings.hidden = unresolved.length === 0;
     if (p.planSet && unresolved.length > 0)
       append(
@@ -625,6 +627,7 @@ function mount(
       api,
       banner: reviewBanner,
       planDocuments: () => planDocumentsOf(planBar),
+      planKind: () => planKindOf(planBar),
       panel: reviewPanel,
       showReviewTab: () => showTray("review"),
       showChanges: (from, to) => {

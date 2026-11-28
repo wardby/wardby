@@ -303,3 +303,71 @@ describe("several option sets", () => {
     expect(chooser).toHaveBeenCalledWith("cb", { action: "choose", versionNumber: 2, reject: ["ca"] });
   });
 });
+
+describe("a native option set's bar", () => {
+  const opt = (id: string, option: string, reviewState = "in_review", removed = false) => ({
+    id,
+    title: `Title of ${option}`,
+    kind: "document" as const,
+    reviewState,
+    path: option,
+    removed,
+    current: id === "a",
+    versionNumber: 2,
+    pagePath: `/d/${id}`,
+  });
+  const SET: PlanSetPayload = {
+    kind: "options",
+    name: "landing",
+    number: 0,
+    approved: 0,
+    counted: 2,
+    documents: [opt("a", "concept-a"), opt("b", "concept-b")],
+  };
+  const button = (host: HTMLElement, label: string | RegExp) =>
+    [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      typeof label === "string" ? b.textContent === label : label.test(b.textContent ?? ""),
+    );
+
+  it("is titled by the set's name and lists each option by its label", () => {
+    const host = document.createElement("nav");
+    renderPlanBar(host, { ...SET, documents: [...SET.documents, opt("c", "concept-c", "rejected", true)] });
+    expect(host.querySelector(".plan-count")?.textContent).toBe("landing · 0 of 2 approved");
+    expect([...host.querySelectorAll(".plan-group-head h3")].map((x) => x.textContent)).toEqual(["Options"]);
+    expect([...host.querySelectorAll(".plan-title")].map((t) => t.textContent)).toEqual([
+      "concept-a",
+      "concept-b",
+      "concept-c",
+    ]);
+    expect(host.querySelector(".plan-out summary")?.textContent).toBe("Out of the set (1)");
+    expect(host.querySelector('[aria-current="page"]')?.getAttribute("href")).toBe("/d/a");
+    // A guest's partial bar: the name only.
+    renderPlanBar(host, { ...SET, partial: true });
+    expect(host.querySelector(".plan-count")?.textContent).toBe("landing");
+  });
+
+  it("picks between all open options, ticks the others, and says what the choice did", async () => {
+    const host = document.createElement("nav");
+    document.body.replaceChildren(host);
+    const chooser = vi.fn(() => Promise.resolve({ review: { state: "approved" } }));
+    setPlanBarChooser(host, chooser);
+    renderPlanBar(host, SET);
+    button(host, "Pick an option")!.click();
+    expect(host.querySelector(".plan-pick h3")?.textContent).toBe("Which option should be kept?");
+    const radios = [...host.querySelectorAll<HTMLInputElement>('.plan-pick input[type="radio"]')];
+    expect(radios.map((r) => r.parentElement!.querySelector("span")!.textContent)).toEqual(["concept-a", "concept-b"]);
+    radios[1].checked = true;
+    radios[1].dispatchEvent(new Event("change"));
+    const ticks = [...host.querySelectorAll<HTMLInputElement>('.plan-pick input[type="checkbox"]')].map((b) => [
+      b.parentElement!.querySelector("span")!.textContent,
+      b.checked,
+    ]);
+    expect(ticks).toEqual([["concept-a", true]]);
+    // An option set is never built: no "ready to build" sentence.
+    expect(host.querySelector(".ch-summary")!.textContent).toBe("This approves concept-b and rejects concept-a.");
+    button(host, /^Approve and reject/)!.click();
+    await vi.waitFor(() => expect(host.querySelector(".plan-result")).not.toBeNull());
+    expect(chooser).toHaveBeenCalledWith("b", { action: "choose", versionNumber: 2, reject: ["a"] });
+    expect(host.querySelector(".plan-result span")!.textContent).toBe("You chose concept-b. Rejected: concept-a.");
+  });
+});

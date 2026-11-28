@@ -17,10 +17,13 @@ import {
   ASK_TO_REOPEN,
   REJECT_EXPLAIN,
   REJECTED_NOTE,
+  OPTION_REJECT_EXPLAIN,
+  OPTION_REJECTED_NOTE,
+  alternativeSets,
   chooseCandidates,
-  planAlternatives,
   choiceResult,
   type ChooseCandidate,
+  type SetKind,
   isLockedState,
   isReopenCopy,
   matchesQuery,
@@ -61,6 +64,8 @@ export interface ReviewHost {
   onState(state: ReviewState): void;
   /** The plan's documents (the plan bar's), for "Choose this option"; none outside a plan. */
   planDocuments?(): PlanSetPayload["documents"];
+  /** The kind of set the plan bar shows (a native option set's "options"); "plan" when absent. */
+  planKind?(): SetKind;
 }
 
 type Form = "none" | "submit" | "force" | "reject" | "choose" | "reopen" | "archive";
@@ -356,9 +361,9 @@ export class ReviewPanel {
         const ev = r.events.find((e) => e.kind === "rejected");
         return card(
           "out",
-          "Out of the plan",
+          this.options() ? "Out of the set" : "Out of the plan",
           text(ev?.note ? `Rejected: “${ev.note}”` : "Rejected."),
-          can.reopen ? null : text(REJECTED_NOTE),
+          can.reopen ? null : text(this.options() ? OPTION_REJECTED_NOTE : REJECTED_NOTE),
         );
       }
       case "archived":
@@ -377,7 +382,11 @@ export class ReviewPanel {
         );
       default: {
         if (can.review) {
-          const prompt = choosable ? "Pick this option for the plan, or give your review." : "Give your review.";
+          const prompt = !choosable
+            ? "Give your review."
+            : this.options()
+              ? "Pick this option, or give your review."
+              : "Pick this option for the plan, or give your review.";
           return card("todo", "Your next step", text(prompt), this.verdictBox(choosable));
         }
         const waiting = r.reviewers.filter((x) => !(x.verdict === "approved" && x.current)).map((x) => x.name);
@@ -406,7 +415,7 @@ export class ReviewPanel {
     if (can.choose && r.state === "approved" && this.chooseOptions().length > 0)
       plan.push(this.button("Choose this option", () => this.open("choose"), "neutral", "choose"));
     if (can.reject) plan.push(this.button("Reject", () => this.open("reject"), "neutral", "reject"));
-    section("Plan", plan);
+    section(this.options() ? "Options" : "Plan", plan);
     const manage: HTMLElement[] = [];
     if (can.submit && r.state !== "draft")
       manage.push(this.button(PICKER.edit, () => void this.openSubmit(), "neutral", "reviewers"));
@@ -639,16 +648,25 @@ export class ReviewPanel {
     return form;
   }
 
+  /** Whether the bar shows a native option set (every open member an alternative, nothing built). */
+  private options(): boolean {
+    return this.host.planKind?.() === "options";
+  }
+
   /** The documents a choice may reject now (see chooseCandidates). */
   private chooseOptions(): ChooseCandidate[] {
     const documents = this.host.planDocuments?.() ?? [];
-    // Only an alternative is chosen (option-b/ among option-a/, option-c/), never a shared part such as screens/.
+    const kind = this.host.planKind?.() ?? "plan";
+    // Only an alternative is chosen (option-b/ among option-a/, option-c/), never a shared part such as screens/;
+    // in an option set every open member is one.
     const open = documents.filter(
       (d) =>
-        !d.removed && d.path !== "plan.md" && ["in_review", "changes_requested", "approved"].includes(d.reviewState),
+        !d.removed &&
+        (kind === "options" || d.path !== "plan.md") &&
+        ["in_review", "changes_requested", "approved"].includes(d.reviewState),
     );
-    if (!planAlternatives(open).some((d) => d.current)) return [];
-    return chooseCandidates(documents);
+    if (!alternativeSets(open, kind).some((s) => s.docs.some((d) => d.current))) return [];
+    return chooseCandidates(documents, kind);
   }
 
   private chooseForm(): HTMLElement {
@@ -665,9 +683,13 @@ export class ReviewPanel {
         chosenPath: path,
         chosenApproved: approved,
         candidates: this.chooseOptions(),
+        // An option set is never built: no "ready to build" sentence.
         readyAfter: (rejectIds) =>
-          chosenEndsApproved &&
-          documents.every((d) => d.current || d.removed || rejectIds.has(d.id) || d.reviewState === "approved"),
+          this.options()
+            ? null
+            : chosenEndsApproved &&
+              documents.every((d) => d.current || d.removed || rejectIds.has(d.id) || d.reviewState === "approved"),
+        ...(this.options() ? { keepText: "stays in the set" } : {}),
         state: this.chooseState,
         busy: this.busy,
         onConfirm: (reject, note) => void this.choose(reject, note),
@@ -695,13 +717,17 @@ export class ReviewPanel {
       chosenApproved: this.review.state === "approved",
       rejectedPaths: documents.filter((d) => ids.has(d.id)).map((d) => d.path),
       waitingPaths: waiting,
+      kind: this.host.planKind?.() ?? "plan",
     });
     this.render();
   }
 
   private rejectForm(): HTMLElement {
     const form = h("div", { class: "rv-form", role: "group", aria: { label: "Reject" } });
-    form.append(h("h3", {}, "Reject this document"), h("p", {}, REJECT_EXPLAIN));
+    form.append(
+      h("h3", {}, "Reject this document"),
+      h("p", {}, this.options() ? OPTION_REJECT_EXPLAIN : REJECT_EXPLAIN),
+    );
     const note = h("textarea", {
       attrs: { placeholder: "Why (required), for example: Option B was chosen", rows: "3" },
       aria: { label: "Reject note" },

@@ -50,6 +50,7 @@ import {
 import {
   planBarHost,
   planDocumentsOf,
+  planKindOf,
   renderPlanBar,
   requestedTab,
   setPlanBarChooser,
@@ -1169,6 +1170,7 @@ function mount(
       api,
       banner: reviewBanner,
       planDocuments: () => planDocumentsOf(planBar),
+      planKind: () => planKindOf(planBar),
       panel: reviewPanelEl,
       showReviewTab: () => showTab("review"),
       showChanges: (from, to) => {

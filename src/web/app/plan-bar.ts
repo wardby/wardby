@@ -4,10 +4,19 @@
  * chip is marked; removed documents come last, struck through. Titles are set as text (dom.ts h()).
  * The chips carry the side-panel tab open on this page (`?tab=`), so moving between a plan's documents
  * keeps the reviewer on Review (or whichever tab they were on); the next page opens it if it has it.
+ * A native option set (`kind: "options"`) shows in the same bar: "<set name> · 1 of 2 approved", one chip per
+ * option by its label, all of them one set of alternatives to pick between.
  */
 import type { PlanSetPayload } from "../../core/plans/page-payload.js";
 import { append, clear, h } from "./dom.js";
-import { choiceResult, chooseCandidates, optionSets, optionSetWords, STATE_LABEL } from "./review-model.js";
+import {
+  alternativeSets,
+  choiceResult,
+  chooseCandidates,
+  optionSetWords,
+  STATE_LABEL,
+  type SetKind,
+} from "./review-model.js";
 import { errorMessage, type ReviewAction, type ReviewState } from "./api.js";
 import { chooseStep, type ChooseStepState } from "./choose-ui.js";
 import { icon } from "./icons.js";
@@ -49,15 +58,18 @@ export function setPlanBarChooser(host: HTMLElement, chooser: PlanChooser): void
 
 const OPEN = new Set(["in_review", "changes_requested", "approved"]);
 
-/** The documents a pick can choose between: still in the plan, not plan.md, undecided or approved. */
+const kindOf = (plan: PlanSetPayload | undefined): SetKind => (plan?.kind === "options" ? "options" : "plan");
+
+/** The documents a pick can choose between: still in the set, not plan.md, undecided or approved. */
 function pickable(plan: PlanSetPayload): PlanSetPayload["documents"] {
+  const options = kindOf(plan) === "options";
   return plan.documents.filter(
-    (d) => !d.removed && d.path !== "plan.md" && OPEN.has(d.reviewState) && d.versionNumber !== undefined,
+    (d) => !d.removed && (options || d.path !== "plan.md") && OPEN.has(d.reviewState) && d.versionNumber !== undefined,
   );
 }
 
 /** The option sets a pick can choose in (two or more of a set still open). */
-const pickableSets = (plan: PlanSetPayload) => optionSets(pickable(plan));
+const pickableSets = (plan: PlanSetPayload) => alternativeSets(pickable(plan), kindOf(plan));
 
 /** The rail's pick step for one option set: which of the set to build, then the shared choose step for it. */
 function pickPanel(
@@ -68,14 +80,16 @@ function pickPanel(
   family: string,
 ): HTMLElement {
   const rerender = () => renderPlanBar(host, shown.get(host));
+  const kind = kindOf(plan);
   const choices = pickableSets(plan).find((s) => s.family === family)?.docs ?? [];
   const words = optionSetWords(family);
+  const verb = kind === "options" ? "kept" : "built";
   const panel = h(
     "div",
     { class: "plan-pick rv-form", role: "group", aria: { label: words.pick } },
-    h("h3", {}, `Which ${words.noun} should be built?`),
+    h("h3", {}, `Which ${words.noun} should be ${verb}?`),
   );
-  const radios = h("fieldset", { class: "rv-choose" }, h("legend", {}, "Build"));
+  const radios = h("fieldset", { class: "rv-choose" }, h("legend", {}, kind === "options" ? "Keep" : "Build"));
   for (const d of choices) {
     const radio = h("input", {
       type: "radio",
@@ -85,7 +99,7 @@ function pickPanel(
         const asChosen = plan.documents.map((x) => ({ ...x, current: x.id === d.id }));
         pick.step = {
           ticks: new Set(
-            chooseCandidates(asChosen)
+            chooseCandidates(asChosen, kind)
               .filter((c) => c.ticked)
               .map((c) => c.id),
           ),
@@ -115,7 +129,11 @@ function pickPanel(
 
   if (!chosen) {
     panel.append(
-      h("p", { class: "muted" }, `Pick the ${words.noun} to build; the others can then be rejected in the same step.`),
+      h(
+        "p",
+        { class: "muted" },
+        `Pick the ${words.noun} to ${kind === "options" ? "keep" : "build"}; the others can then be rejected in the same step.`,
+      ),
       h("div", { class: "rv-actions" }, h("button", { type: "button", class: "neutral", onClick: cancel }, "Cancel")),
     );
     return panel;
@@ -126,12 +144,14 @@ function pickPanel(
     chooseStep({
       chosenPath: chosen.path,
       chosenApproved,
-      candidates: chooseCandidates(asChosen),
-      // Whether the chosen option's own approval completes it is not known here (its other reviewers).
+      candidates: chooseCandidates(asChosen, kind),
+      // Whether the chosen option's own approval completes it is not known here (its other reviewers). An option
+      // set is never built, so there is no "ready to build" to say.
       readyAfter: (rejectIds) =>
-        chosenApproved
+        chosenApproved && kind === "plan"
           ? plan.documents.every((d) => d.removed || rejectIds.has(d.id) || d.reviewState === "approved")
           : null,
+      ...(kind === "options" ? { keepText: "stays in the set" } : {}),
       state: pick.step,
       busy: pick.busy,
       onConfirm: (reject, note) => {
@@ -157,6 +177,7 @@ function pickPanel(
                 waitingPaths: plan.documents
                   .filter((d) => d.id !== chosen.id && !d.removed && !ids.has(d.id) && d.reviewState !== "approved")
                   .map((d) => d.path),
+                kind,
               }),
             });
             rerender();
@@ -179,12 +200,18 @@ export function planDocumentsOf(host: HTMLElement): PlanSetPayload["documents"] 
   return shown.get(host)?.documents ?? [];
 }
 
+/** The kind of set `host` shows now: "options" for a native option set, else "plan". */
+export function planKindOf(host: HTMLElement): SetKind {
+  return kindOf(shown.get(host));
+}
+
 /** Renders the bar into `host`, or hides it when the document is not in a plan set. */
 export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefined): void {
   clear(host);
   shown.set(host, plan);
   host.hidden = !plan;
   if (!plan) return;
+  const kind = kindOf(plan);
   // A row: the name opens the document (on the side-panel tab open now); the state opens it on its Review tab.
   const row = (d: PlanSetPayload["documents"][number]) => {
     const link = h(
@@ -199,7 +226,8 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
         title: `${d.path} (${d.kind})`,
       },
       h("span", { class: "plan-kind", aria: { hidden: "true" } }, icon(d.kind === "design" ? "design" : "page")),
-      h("span", { class: "plan-title" }, d.title),
+      // An option set's chip names the option by its label (the title when it has none, api.ts).
+      h("span", { class: "plan-title" }, kind === "options" ? d.path : d.title),
     );
     const stateText = d.removed ? (d.reviewState === "rejected" ? "Rejected" : "Removed") : stateLabel(d.reviewState);
     const state = h(
@@ -218,11 +246,16 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
   // The plan as an outline: plan.md, the alternatives (when the plan offers some), the other documents, and
   // what left the plan, folded away.
   const live = plan.documents.filter((d) => !d.removed);
-  const planMd = live.filter((d) => d.path === "plan.md");
-  // One group per option set (layout-a/, layout-b/ apart from color-a/, color-b/), each picked on its own.
-  const sets = optionSets(live.filter((d) => d.path !== "plan.md"));
+  const isPlanMd = (d: PlanSetPayload["documents"][number]) => kind === "plan" && d.path === "plan.md";
+  const planMd = live.filter(isPlanMd);
+  // One group per option set (layout-a/, layout-b/ apart from color-a/, color-b/), each picked on its own; an
+  // option set is one group of all its options.
+  const sets = alternativeSets(
+    live.filter((d) => !isPlanMd(d)),
+    kind,
+  );
   const inSets = new Set(sets.flatMap((s) => s.docs.map((d) => d.id)));
-  const others = live.filter((d) => d.path !== "plan.md" && !inSets.has(d.id));
+  const others = live.filter((d) => !isPlanMd(d) && !inSets.has(d.id));
   const out = plan.documents.filter((d) => d.removed);
   const group = (title: string | null, docs: PlanSetPayload["documents"], extra?: HTMLElement) =>
     docs.length === 0
@@ -233,25 +266,22 @@ export function renderPlanBar(host: HTMLElement, plan: PlanSetPayload | undefine
           title ? h("div", { class: "plan-group-head" }, h("h3", {}, title), extra ?? null) : null,
           h("ul", { class: "plan-chips" }, ...docs.map(row)),
         );
+  const name = kind === "options" ? plan.name || "Options" : `Plan ${plan.number}`;
   host.append(
-    h(
-      "div",
-      { class: "plan-count" },
-      plan.partial ? `Plan ${plan.number}` : `Plan ${plan.number} · ${plan.approved} of ${plan.counted} approved`,
-    ),
+    h("div", { class: "plan-count" }, plan.partial ? name : `${name} · ${plan.approved} of ${plan.counted} approved`),
   );
   const pickSlots = new Map(sets.map((s) => [s.family, h("span", { class: "plan-pick-slot" })]));
   append(
     host,
     group(null, planMd),
     ...sets.map((s) => group(optionSetWords(s.family).title, s.docs, pickSlots.get(s.family))),
-    group(sets.length ? "Other documents" : "Documents", others),
+    group(sets.length ? "Other documents" : kind === "options" ? "Options" : "Documents", others),
   );
   if (out.length) {
     const fold = h(
       "details",
       { class: "plan-group plan-out" },
-      h("summary", {}, `Out of the plan (${out.length})`),
+      h("summary", {}, `Out of the ${kind === "options" ? "set" : "plan"} (${out.length})`),
       h("ul", { class: "plan-chips" }, ...out.map(row)),
     );
     // Open while the current page is one of them, so "you are here" is never folded away.

@@ -41,18 +41,80 @@ export async function readablePlanSet(
     },
   });
   if (!set) return null;
+  return {
+    number: set.number,
+    documents: await readableMembers(
+      db,
+      set.documents.map((d) => ({ ...d, path: d.planPath ?? "" })),
+      viewer,
+    ),
+  };
+}
+
+/**
+ * A native option set as one viewer sees it: its name and the members that viewer can read, each with its
+ * option label as its path (the title when it has none), in label order.
+ */
+export async function readableOptionSet(
+  db: PrismaClient,
+  setId: string,
+  viewer: Viewer,
+): Promise<{ name: string | null; documents: PlanSetDocumentView[] } | null> {
+  const set = await db.documentSet.findUnique({
+    where: { id: setId },
+    select: {
+      name: true,
+      documents: {
+        orderBy: [{ option: "asc" }, { createdAt: "asc" }],
+        select: {
+          id: true,
+          title: true,
+          kind: true,
+          option: true,
+          reviewState: true,
+          removedFromPlan: true,
+          currentVersion: { select: { number: true } },
+        },
+      },
+    },
+  });
+  if (!set) return null;
+  return {
+    name: set.name,
+    documents: await readableMembers(
+      db,
+      set.documents.map((d) => ({ ...d, path: d.option ?? d.title })),
+      viewer,
+    ),
+  };
+}
+
+/** The members `viewer` can read (documentAccess per document), as the set views list them. */
+async function readableMembers(
+  db: PrismaClient,
+  members: Array<{
+    id: string;
+    title: string;
+    kind: string;
+    path: string;
+    reviewState: string;
+    removedFromPlan: boolean;
+    currentVersion: { number: number } | null;
+  }>,
+  viewer: Viewer,
+): Promise<PlanSetDocumentView[]> {
   const documents: PlanSetDocumentView[] = [];
-  for (const d of set.documents) {
+  for (const d of members) {
     if ((await documentAccess(db, d.id, viewer)) === "none") continue;
     documents.push({
       id: d.id,
       title: d.title,
       kind: d.kind === "design" ? "design" : "document",
-      path: d.planPath ?? "",
+      path: d.path,
       reviewState: d.reviewState,
       versionNumber: d.currentVersion?.number ?? 0,
       removed: d.removedFromPlan,
     });
   }
-  return { number: set.number, documents };
+  return documents;
 }

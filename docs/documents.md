@@ -722,7 +722,14 @@ start the router never fails or undoes the person's action.
 **Option sets.** A native writer can put documents in an option set with
 `doc_create` `set` (a name) and `option` (a label). A person picks one with
 **Choose this option** (or `choose_plan_option`); the choice is one action for
-the router.
+the router. Each option's page shows the set in the same rail as a plan,
+titled by the set's name ("landing · 1 of 2 approved") with one row per option
+by its label, and the same **Choose this option** and **Pick an option** steps.
+In an option set every open option is an alternative to the others, whatever
+its label, so all the others start ticked to reject; there is no `plan.md`,
+no plan links and nothing to build, so the result says only what was rejected
+and what still waits for approval. A share-link guest sees only the option
+their link opens, with no count.
 
 **The note.** `submit_for_review`, an approval, a choice and a request for
 changes take an optional `note` (up to the review-note limit). It reaches the

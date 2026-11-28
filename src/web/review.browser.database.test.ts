@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createThread } from "../core/documents/comments.js";
-import { publishVersion } from "../core/documents/service.js";
+import { createDocument, publishVersion } from "../core/documents/service.js";
 import { reopenDocument, reviewDocument, setArchived, submitForReview } from "../core/documents/review.js";
 import { startTestWebServer, TEST_CIPHER, type BrowserCookie, type TestWebServer } from "./test-server.test-support.js";
 
@@ -205,6 +205,78 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         await server.db.run.deleteMany({ where: { agentId: { in: [router.id, child.id] } } });
         await server.db.document.update({ where: { id: d.documentId }, data: { routerAgentId: null } });
         await server.db.agent.deleteMany({ where: { id: { in: [router.id, child.id] } } });
+      }
+    }, 90_000);
+
+    it("a native option set shows the set bar on each option, and Choose on one rejects the other", async () => {
+      const d = await server.design({
+        title: "Concept A title",
+        kind: "document",
+        markdown: "# A\n\nx\n",
+        access: "owner",
+      });
+      const ownerId = d.principalIds.owner;
+      const b = (
+        await createDocument(server.db, TEST_CIPHER, { ownerId, title: "Concept B title", markdown: "# B\n\ny\n" })
+      ).id;
+      const writer = await server.db.agent.create({
+        data: { name: `options-${b}`, systemPrompt: "p", model: "m", budgetUsd: 1, ownerId },
+      });
+      try {
+        const set = await server.db.documentSet.create({
+          data: { agentId: writer.id, ownerId, name: "landing", createdByRunId: `run-${b}` },
+        });
+        for (const [id, option] of [
+          [d.documentId, "concept-a"],
+          [b, "concept-b"],
+        ] as const) {
+          await server.db.document.update({ where: { id }, data: { setId: set.id, option } });
+          await submitForReview(server.db, TEST_CIPHER, {
+            documentId: id,
+            viewer: owner(d.principalIds),
+            reviewers: [ownerId],
+          });
+        }
+
+        // concept-a's page: the set bar lists both options by label.
+        const a = await open(d.ownerCookie, d.documentId);
+        const barA = a.getByRole("navigation", { name: "Plan" });
+        await expect.poll(() => barA.locator(".plan-count").textContent()).toBe("landing · 0 of 2 approved");
+        expect(await barA.locator(".plan-title").allTextContents()).toEqual(["concept-a", "concept-b"]);
+        expect(await barA.locator('[aria-current="page"] .plan-title').textContent()).toBe("concept-a");
+        await a.context().close();
+
+        // concept-b's page: Choose this option, with a note; concept-a is rejected.
+        const p = await open(d.ownerCookie, b);
+        const bar = p.getByRole("navigation", { name: "Plan" });
+        await expect.poll(() => bar.locator(".plan-count").textContent()).toBe("landing · 0 of 2 approved");
+        await p.getByRole("tab", { name: "Review" }).click();
+        await p.locator(".rv-panel").getByRole("button", { name: "Choose this option" }).click();
+        const step = p.locator(".rv-form");
+        expect(await step.locator("h3").first().textContent()).toBe("Choose concept-b");
+        expect(await step.getByRole("checkbox", { name: /concept-a/ }).isChecked()).toBe(true);
+        expect(await step.locator(".ch-summary").textContent()).toBe("This approves concept-b and rejects concept-a.");
+        await step.getByRole("textbox", { name: "Choice note" }).fill("cleaner layout");
+        await step.getByRole("button", { name: "Approve and reject 1" }).click();
+        await expect
+          .poll(() => p.locator(".rv-card").first().textContent())
+          .toContain("You chose concept-b. Rejected: concept-a.");
+        expect(await p.locator(".rv-card").first().textContent()).not.toContain("plan");
+        // The bar follows: concept-b approved, concept-a out of the set.
+        await expect.poll(() => bar.locator(".plan-count").textContent()).toBe("landing · 1 of 1 approved");
+        expect(await bar.locator(".plan-out summary").textContent()).toBe("Out of the set (1)");
+        expect(await bar.locator(".plan-out .plan-state").textContent()).toBe("Rejected");
+        const rejected = await server.db.document.findUniqueOrThrow({ where: { id: d.documentId } });
+        expect(rejected).toMatchObject({ reviewState: "rejected", removedFromPlan: true });
+        const ev = await server.db.documentReviewEvent.findFirstOrThrow({
+          where: { documentId: d.documentId, kind: "rejected" },
+        });
+        expect(ev.note).toContain("cleaner layout");
+        await p.context().close();
+      } finally {
+        await server.db.document.deleteMany({ where: { id: b } });
+        await server.db.documentSet.deleteMany({ where: { agentId: writer.id } });
+        await server.db.agent.delete({ where: { id: writer.id } });
       }
     }, 90_000);
 

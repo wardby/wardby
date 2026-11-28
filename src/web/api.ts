@@ -52,7 +52,7 @@ import type { VersionWarning } from "../core/documents/warnings.js";
 import { getVersion, listVersions, MAX_VERSIONS_PAGE, restoreVersion } from "../core/documents/versions.js";
 import { resolvePlanLinks } from "../core/plans/links.js";
 import type { PlanLinksPayload, PlanSetPayload } from "../core/plans/page-payload.js";
-import { readablePlanSet } from "../core/plans/set-view.js";
+import { readableOptionSet, readablePlanSet, type PlanSetDocumentView } from "../core/plans/set-view.js";
 import { sendWebJson, WebError, type WebDeps } from "./context.js";
 
 export type { PlanLinksPayload, PlanSetPayload } from "../core/plans/page-payload.js";
@@ -133,7 +133,9 @@ export async function documentPayload(deps: WebDeps, documentId: string, viewer:
         viewer,
         content.format === "markdown" ? content.markdown : null,
       )
-    : null;
+    : document.setId
+      ? await optionSetPayload(deps, document.setId, documentId, viewer)
+      : null;
   return {
     document: {
       id: document.id,
@@ -177,27 +179,7 @@ async function planPayload(
   const set = await readablePlanSet(deps.db, planSetId, viewer);
   if (!set) return null;
   const guest = viewer.kind === "guest";
-  const counted = set.documents.filter((d) => !d.removed);
-  const documents = [...set.documents]
-    .sort((a, b) => Number(a.removed) - Number(b.removed))
-    .map((d) => ({
-      id: d.id,
-      title: d.title,
-      kind: d.kind,
-      reviewState: d.reviewState,
-      path: d.path,
-      removed: d.removed,
-      current: d.id === documentId,
-      versionNumber: d.versionNumber,
-      pagePath: guest ? "" : `/d/${d.id}`,
-    }));
-  const planSet: PlanSetPayload = {
-    number: set.number,
-    approved: counted.filter((d) => d.reviewState === "approved").length,
-    counted: counted.length,
-    documents,
-    ...(guest ? { partial: true } : {}),
-  };
+  const planSet: PlanSetPayload = { number: set.number, ...setBar(set.documents, documentId, viewer) };
   if (markdown === null) return { planSet };
   // A guest always sees a partial set; warned versus plain links would tell them which files are in it.
   if (guest) return { planSet, planLinks: { links: [], unresolved: [] } };
@@ -213,6 +195,52 @@ async function planPayload(
   );
   const readable = new Set(set.documents.map((d) => d.id));
   return { planSet, planLinks: { links: links.filter((l) => readable.has(l.documentId)), unresolved } };
+}
+
+/**
+ * A native option set's bar (doc_create `set` + `option`): the plan bar's payload with `kind: "options"`,
+ * its members' option labels as their paths, and no links (an option set has no plan.md to resolve).
+ */
+async function optionSetPayload(
+  deps: WebDeps,
+  setId: string,
+  documentId: string,
+  viewer: Viewer,
+): Promise<{ planSet: PlanSetPayload } | null> {
+  const set = await readableOptionSet(deps.db, setId, viewer);
+  if (!set) return null;
+  return {
+    planSet: { kind: "options", name: set.name, number: 0, ...setBar(set.documents, documentId, viewer) },
+  };
+}
+
+/** The bar's documents and count, shared by plans and option sets: removed last; a guest's bar is partial. */
+function setBar(
+  members: PlanSetDocumentView[],
+  documentId: string,
+  viewer: Viewer,
+): Omit<PlanSetPayload, "number" | "kind" | "name"> {
+  const guest = viewer.kind === "guest";
+  const counted = members.filter((d) => !d.removed);
+  const documents = [...members]
+    .sort((a, b) => Number(a.removed) - Number(b.removed))
+    .map((d) => ({
+      id: d.id,
+      title: d.title,
+      kind: d.kind,
+      reviewState: d.reviewState,
+      path: d.path,
+      removed: d.removed,
+      current: d.id === documentId,
+      versionNumber: d.versionNumber,
+      pagePath: guest ? "" : `/d/${d.id}`,
+    }));
+  return {
+    approved: counted.filter((d) => d.reviewState === "approved").length,
+    counted: counted.length,
+    documents,
+    ...(guest ? { partial: true } : {}),
+  };
 }
 
 /** The `review` payload of the page API. */

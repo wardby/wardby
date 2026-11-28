@@ -23,6 +23,8 @@ export interface ChooseStepInput {
   readyAfter: (rejectIds: Set<string>) => boolean | null;
   state: ChooseStepState;
   busy: boolean;
+  /** What an unticked document is told (default "stays in the plan"; an option set's "stays in the set"). */
+  keepText?: string;
   onConfirm(rejectIds: string[], note: string | undefined): void;
   onCancel(): void;
 }
@@ -70,7 +72,7 @@ export function chooseStep(input: ChooseStepInput): HTMLElement {
       },
     });
     box.checked = state.ticks.has(c.id);
-    const keep = h("span", { class: "ch-keep muted" }, "stays in the plan");
+    const keep = h("span", { class: "ch-keep muted" }, input.keepText ?? "stays in the plan");
     keepNotes.set(c.id, keep);
     list.append(
       h(

@@ -515,6 +515,86 @@ describe("ReviewPanel: Choose this option", () => {
   });
 });
 
+describe("ReviewPanel: Choose this option in a native option set", () => {
+  const can = (over: Partial<ReviewPayload["can"]>): ReviewPayload["can"] => ({
+    submit: false,
+    review: false,
+    force: false,
+    reopen: false,
+    archive: false,
+    unarchive: false,
+    ...over,
+  });
+  const opt = (id: string, option: string, reviewState = "in_review", current = false) => ({
+    id,
+    title: `Title of ${option}`,
+    kind: "document" as const,
+    reviewState,
+    path: option,
+    removed: false,
+    current,
+    pagePath: `/d/${id}`,
+  });
+  function mount(review: ReviewPayload, documents: ReturnType<typeof opt>[]) {
+    document.body.replaceChildren();
+    const banner = document.createElement("div");
+    const panel = document.createElement("div");
+    document.body.append(banner, panel);
+    const reviewCall = vi.fn((_body: unknown) =>
+      Promise.resolve({ review: { ...review, state: "approved" as const } }),
+    );
+    const host: ReviewHost = {
+      api: { review: reviewCall } as unknown as Api,
+      banner,
+      panel,
+      showReviewTab: vi.fn(),
+      showChanges: vi.fn(),
+      loadLatest: vi.fn(() => Promise.resolve()),
+      onLock: vi.fn(),
+      onState: vi.fn(),
+      planDocuments: () => documents,
+      planKind: () => "options",
+    };
+    new ReviewPanel(host, review, review.currentVersion);
+    return { panel, reviewCall };
+  }
+  const button = (panel: HTMLElement, label: string | RegExp) =>
+    [...panel.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      typeof label === "string" ? b.textContent === label : label.test(b.textContent ?? ""),
+    );
+
+  it("treats every open member as an alternative, ticks them all, and words the result without a plan", async () => {
+    // Labels in no option family: still alternatives of one another.
+    const docs = [opt("a", "go", "in_review", true), opt("b", "no-go"), opt("c", "maybe")];
+    const { panel, reviewCall } = mount({ ...payload(1), can: can({ choose: true, review: true }) }, docs);
+    expect(panel.textContent).toContain("Pick this option, or give your review.");
+    expect(panel.textContent).not.toContain("for the plan");
+    button(panel, "Choose this option")!.click();
+    expect(panel.querySelector("h3")?.textContent).toBe("Choose go");
+    const rows = [...panel.querySelectorAll<HTMLInputElement>(".rv-choose input")].map((b) => b.checked);
+    expect(rows).toEqual([true, true]);
+    expect(panel.querySelector(".ch-summary")!.textContent).toBe("This approves go and rejects no-go and maybe.");
+    const box = panel.querySelectorAll<HTMLInputElement>(".rv-choose input")[1];
+    box.checked = false;
+    box.dispatchEvent(new Event("change"));
+    expect(panel.querySelector(".ch-keep:not([hidden])")?.textContent).toBe("stays in the set");
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    button(panel, /^Approve and reject/)!.click();
+    await vi.waitFor(() => expect(reviewCall).toHaveBeenCalled());
+    expect(reviewCall.mock.calls[0][0]).toEqual({ action: "choose", versionNumber: 1, reject: ["b", "c"] });
+    await vi.waitFor(() => expect(panel.textContent).toContain("You chose go. Rejected: no-go and maybe."));
+    expect(panel.textContent).not.toContain("ready to build");
+  });
+
+  it("says a rejected option is out of the set, with no builder", () => {
+    const { panel } = mount({ ...payload(1), state: "rejected", can: can({}) }, [opt("a", "go", "rejected", true)]);
+    expect(panel.textContent).toContain("Out of the set");
+    expect(panel.textContent).toContain("no longer one of the set's options");
+    expect(panel.textContent).not.toContain("builder");
+  });
+});
+
 describe("ReviewPanel: steps have the panel to themselves", () => {
   const can = (over: Partial<ReviewPayload["can"]>): ReviewPayload["can"] => ({
     submit: false,

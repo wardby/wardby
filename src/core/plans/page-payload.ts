@@ -4,6 +4,14 @@
  */
 
 export interface PlanSetPayload {
+  /**
+   * "options" for a native writer's option set (doc_create `set` + `option`): every open member is an
+   * alternative, each member's `path` is its option label, and the bar is titled by `name`. Absent for a plan.
+   */
+  kind?: "plan" | "options";
+  /** The option set's name (an option set only; null when it has none). */
+  name?: string | null;
+  /** The plan's number; 0 for an option set, which the page never shows. */
   number: number;
   /** Counted documents (not removed) that are approved. */
   approved: number;

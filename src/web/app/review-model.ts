@@ -40,6 +40,18 @@ export const REJECTED_NOTE =
 export const REJECT_EXPLAIN =
   "This takes the document out of the plan: it stops counting toward the plan's approval and is not given to a builder. It stays here, read-only, as the record. Reopen brings it back.";
 
+/**
+ * The kind of set the page's bar shows (PlanSetPayload.kind): a plan, or a native writer's option set, where
+ * every open member is an alternative and nothing is built.
+ */
+export type SetKind = "plan" | "options";
+
+/** REJECTED_NOTE and REJECT_EXPLAIN for an option set: no plan, no builder. */
+export const OPTION_REJECTED_NOTE =
+  "Rejected: it is no longer one of the set's options. Someone who can edit it can reopen it.";
+export const OPTION_REJECT_EXPLAIN =
+  "This takes the option out of its set: it stops counting toward the set's approval. It stays here, read-only, as the record. Reopen brings it back.";
+
 const listOf = (items: string[]) =>
   items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 
@@ -87,6 +99,18 @@ export function planAlternatives<T extends { path: string }>(docs: T[]): T[] {
   return docs.filter((d) => (sizes.get(optionFamily(d.path) ?? "") ?? 0) >= 2);
 }
 
+/**
+ * The alternatives a bar groups and picks between: a plan's option sets (optionSets), or, for a native option set,
+ * all the given documents as one set ("option-", so Options / Pick an option) when there are two or more.
+ */
+export function alternativeSets<T extends { path: string }>(
+  docs: T[],
+  kind: SetKind = "plan",
+): Array<{ family: string; docs: T[] }> {
+  if (kind === "plan") return optionSets(docs);
+  return docs.length >= 2 ? [{ family: "option-", docs }] : [];
+}
+
 /** The plan's option sets (planAlternatives grouped by family), in the order their first document comes. */
 export function optionSets<T extends { path: string }>(docs: T[]): Array<{ family: string; docs: T[] }> {
   const sets = new Map<string, T[]>();
@@ -105,16 +129,21 @@ export function optionSetWords(family: string): { title: string; noun: string; p
   return { title: `${noun[0].toUpperCase()}${noun.slice(1)} options`, noun, pick: `Pick ${article} ${noun}` };
 }
 
-/** What a choice did, said after it lands: rejected, and what the plan still waits for (or that it is ready). */
+/**
+ * What a choice did, said after it lands: rejected, and what the plan still waits for (or that it is ready). An
+ * option set is never built, so it says only what is still waiting.
+ */
 export function choiceResult(input: {
   chosenPath: string;
   chosenApproved: boolean;
   rejectedPaths: string[];
   waitingPaths: string[];
+  kind?: SetKind;
 }): string {
   const head = `You chose ${input.chosenPath}. Rejected: ${listOf(input.rejectedPaths)}.`;
   const waiting = [...(input.chosenApproved ? [] : [`${input.chosenPath} (more approvals)`]), ...input.waitingPaths];
-  return waiting.length ? `${head} Still waiting: ${listOf(waiting)}.` : `${head} The plan is ready to build.`;
+  if (waiting.length) return `${head} Still waiting: ${listOf(waiting)}.`;
+  return input.kind === "options" ? head : `${head} The plan is ready to build.`;
 }
 
 /** One document the "Choose this option" checklist offers. */
@@ -123,7 +152,7 @@ export interface ChooseCandidate {
   title: string;
   path: string;
   reviewState: string;
-  /** Ticked at first: named like the chosen one (option-b/ beside option-a/). */
+  /** Ticked at first: named like the chosen one (option-b/ beside option-a/); every other option of an option set. */
   ticked: boolean;
 }
 
@@ -132,7 +161,8 @@ const OPEN_FOR_CHOICE = new Set(["in_review", "changes_requested", "approved"]);
 /**
  * The other documents of the plan a choice can reject: still in the plan, not plan.md, not the chosen one,
  * and in a state Reject takes. Those in the chosen one's option family (optionFamily: option-b-cards/ beside
- * option-a-tree/) start ticked; the rest (shared screens, other parts) start unticked.
+ * option-a-tree/) start ticked; the rest (shared screens, other parts) start unticked. In an option set every
+ * other open member is an alternative, so all start ticked (and no member is a plan.md).
  */
 export function chooseCandidates(
   documents: Array<{
@@ -143,18 +173,20 @@ export function chooseCandidates(
     removed: boolean;
     current: boolean;
   }>,
+  kind: SetKind = "plan",
 ): ChooseCandidate[] {
   const chosen = documents.find((d) => d.current);
   if (!chosen) return [];
+  const options = kind === "options";
   const family = optionFamily(chosen.path);
   return documents
-    .filter((d) => !d.current && !d.removed && d.path !== "plan.md" && OPEN_FOR_CHOICE.has(d.reviewState))
+    .filter((d) => !d.current && !d.removed && (options || d.path !== "plan.md") && OPEN_FOR_CHOICE.has(d.reviewState))
     .map((d) => ({
       id: d.id,
       title: d.title,
       path: d.path,
       reviewState: d.reviewState,
-      ticked: family !== null && optionFamily(d.path) === family,
+      ticked: options || (family !== null && optionFamily(d.path) === family),
     }));
 }
 
