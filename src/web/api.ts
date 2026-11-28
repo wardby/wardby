@@ -26,7 +26,7 @@ import {
   setThreadStatus,
 } from "../core/documents/comments.js";
 import { MAX_THREADS_PER_SEND } from "../core/documents/agent-loop.js";
-import { documentLinkSendable } from "../core/documents/agent-link.js";
+import { documentLinkSendable, nativeWriterSendable } from "../core/documents/agent-link.js";
 import { BOARD_ID } from "../core/documents/boards/ids.js";
 import { versionFrames } from "../core/documents/boards/frames.js";
 import { MANIFEST_PATH, parseManifest } from "../core/documents/boards/format.js";
@@ -124,7 +124,8 @@ export async function documentPayload(deps: WebDeps, documentId: string, viewer:
   const planSet = document.planSetId
     ? await deps.db.planSet.findUnique({ where: { id: document.planSetId }, select: { store: true, agentId: true } })
     : null;
-  const linked = documentLinkSendable(document, planSet);
+  // A repository or plan link, or a native writer (Send to agent starts its native run, agent-loop.ts).
+  const linked = documentLinkSendable(document, planSet) || (await nativeWriterSendable(deps.db, document));
   const plan = document.planSetId
     ? await planPayload(
         deps,

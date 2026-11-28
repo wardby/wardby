@@ -1720,6 +1720,37 @@ describe.skipIf(!process.env.DATABASE_URL)("web routes (database)", () => {
       expect([back.state, back.currentVersion]).toEqual(["in_review", 2]);
     });
 
+    it("offers send on a native writer's document while the writer can still write it", async () => {
+      const writer = await db.agent.create({
+        data: {
+          name: `rv-web-native-${s}`,
+          systemPrompt: "p",
+          model: "m",
+          budgetUsd: 1,
+          ownerId: owner.id,
+          kind: "native",
+          documentTools: { access: "write", reviewers: [owner.id], finalApproverId: null, maxNewPerRun: 5, plans: [] },
+        },
+      });
+      try {
+        const doc = await newDoc();
+        await db.document.update({ where: { id: doc }, data: { agentId: writer.id } });
+        const o = await session(owner.id);
+        const canSend = async () =>
+          ((await (await call(`/d/api/${doc}`, { jar: o.jar })).json()) as any).document.canSend;
+        expect(await canSend()).toBe(true);
+        // A writer turned down to read access can no longer revise it: no offer.
+        await db.agent.update({
+          where: { id: writer.id },
+          data: { documentTools: { access: "read", reviewers: [], finalApproverId: null, maxNewPerRun: 0, plans: [] } },
+        });
+        expect(await canSend()).toBe(false);
+        await db.document.delete({ where: { id: doc } });
+      } finally {
+        await db.agent.delete({ where: { id: writer.id } });
+      }
+    });
+
     it("offers send on a wardby plan document and design, but not when removed, locked or to a commenter", async () => {
       const planner = await db.agent.create({
         data: {

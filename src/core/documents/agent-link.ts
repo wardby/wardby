@@ -129,6 +129,24 @@ export function documentLinkSendable(
   return !!doc.repository && !!doc.path && (doc.kind !== "design" || !!doc.baseRef);
 }
 
+/**
+ * Whether Send to agent can reach a document's native writer (the page's offer; agent-loop's send runs the same
+ * checks): its agent is native with documentTools, the document is in no plan, and the owner may still run it as a
+ * writer (assertNativeWriter).
+ */
+export async function nativeWriterSendable(
+  db: Pick<PrismaClient, "agent" | "resourceGrant">,
+  doc: { agentId: string | null; ownerId: string; planSetId: string | null },
+): Promise<boolean> {
+  if (!doc.agentId || doc.planSetId) return false;
+  try {
+    await assertNativeWriter(db, doc.ownerId, doc.agentId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** A native writer: the linker may execute it, and its documentTools allow write. Throws document_agent_unavailable. */
 export async function assertNativeWriter(
   db: Pick<PrismaClient, "agent" | "resourceGrant">,
