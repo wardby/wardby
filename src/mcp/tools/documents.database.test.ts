@@ -983,6 +983,40 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
     );
   });
 
+  it("deleted comments: a placeholder with no text or author; an emptied thread is not found", async () => {
+    const call = await connect(owner);
+    const doc = (await call("create_document", { title: "Del", markdown: "hello world" })).json;
+    const { createThread, deleteComment, reply } = await import("../../core/documents/comments.js");
+    const viewer = { kind: "principal" as const, principalId: owner.id };
+    const t = await createThread(db, cipher, { documentId: doc.documentId, viewer, anchor, body: "Deleted words" });
+    const first = await db.comment.findFirstOrThrow({ where: { threadId: t.threadId } });
+    const r = await reply(db, cipher, { threadId: t.threadId, viewer, body: "the reply" });
+    await deleteComment(db, { commentId: first.id, viewer });
+    const one = await call("get_comment_thread", { threadId: t.threadId });
+    expect(one.json.threads[0].commentIds).toEqual([r.commentId]);
+    expect(one.json.threads[0].deletedComments).toEqual([
+      { id: first.id, deleted: true, createdAt: first.createdAt.toISOString() },
+    ]);
+    expect(one.json.threadsText).toContain(`- Comment deleted (comment ${first.id})\n- `);
+    expect(one.json.threadsText).toContain("the reply");
+    expect(one.text).not.toContain("Deleted words");
+
+    const emptied = await createThread(db, cipher, { documentId: doc.documentId, viewer, anchor, body: "only" });
+    const only = await db.comment.findFirstOrThrow({ where: { threadId: emptied.threadId } });
+    await deleteComment(db, { commentId: only.id, viewer });
+    const listed = await call("list_comment_threads", { documentId: doc.documentId, filter: "all" });
+    expect(listed.json.threads.map((x: { id: string }) => x.id)).toEqual([t.threadId]);
+    for (const [tool, args] of [
+      ["get_comment_thread", { threadId: emptied.threadId }],
+      ["reply_to_thread", { threadId: emptied.threadId, body: "late" }],
+      ["resolve_thread", { threadId: emptied.threadId }],
+    ] as const) {
+      const out = await call(tool, args);
+      expect(out.isError).toBe(true);
+      expect(out.text).toContain("comment_not_found");
+    }
+  });
+
   it("stores agent secret values redacted so MCP output never carries them", async () => {
     const secret = `fake-secret-${s}-value`;
     const secretRow = await db.secret.create({

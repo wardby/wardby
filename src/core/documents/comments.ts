@@ -32,7 +32,28 @@ export interface CommentView {
   createdAt: Date;
   editedAt: Date | null;
   mine: boolean;
+  deleted?: false;
 }
+
+/**
+ * A deleted comment with a live comment after it, kept in its place so the replies keep their
+ * context. Only its id and when it was written: never its body, author or edit time.
+ */
+export interface DeletedCommentView {
+  id: string;
+  deleted: true;
+  createdAt: Date;
+}
+
+export type ThreadCommentView = CommentView | DeletedCommentView;
+
+/**
+ * A thread with at least one comment not deleted. A thread whose comments are all deleted is left
+ * out of every read and refused like an unknown thread (its rows stay; its number is not reused).
+ */
+export const HAS_LIVE_COMMENT = {
+  comments: { some: { deletedAt: null } },
+} as const satisfies Prisma.CommentThreadWhereInput;
 
 /**
  * A comment's author for plain-text renderings (MCP tool output, the agent's task): name, "via"
@@ -51,7 +72,10 @@ export interface ThreadView {
   status: string;
   anchor: Anchor;
   sentAt: Date | null;
-  comments: CommentView[];
+  /** Whether the viewer wrote the thread's first comment, deleted or not (the starter's rights). */
+  startedByMe: boolean;
+  /** Live comments, and a placeholder for each deleted one that has a live comment after it. */
+  comments: ThreadCommentView[];
 }
 
 const FORMER_MEMBER = "Former member";
@@ -99,6 +123,17 @@ async function mentionsWithoutAccess(db: CommentDb, documentId: string, body: st
     if (access === "none") missing.push(id);
   }
   return missing;
+}
+
+/** Whether `viewer` wrote this comment as itself (an agent's comment is never a person's). */
+function wroteAsSelf(
+  c: { authorId: string | null; guestId: string | null; runId: string | null },
+  viewer: Viewer,
+): boolean {
+  if (viewer.kind === "agent") return false;
+  return (
+    c.runId === null && (viewer.kind === "principal" ? c.authorId === viewer.principalId : c.guestId === viewer.guestId)
+  );
 }
 
 function authorFields(viewer: Viewer): { authorId: string | null; guestId: string | null; runId?: string } {
@@ -157,7 +192,7 @@ export async function reply(
   cipher: Cipher,
   input: { threadId: string; viewer: Viewer; body: string },
 ): Promise<{ commentId: string; mentionsWithoutAccess: string[] }> {
-  const thread = await db.commentThread.findUnique({ where: { id: input.threadId } });
+  const thread = await db.commentThread.findFirst({ where: { id: input.threadId, ...HAS_LIVE_COMMENT } });
   if (!thread) throw new Error("comment_not_found");
   const doc = await requireDocumentAccess(db, thread.documentId, input.viewer, "comment");
   checkBody(input.body);
@@ -205,19 +240,21 @@ export async function setThreadStatus(
   db: CommentDb,
   input: { threadId: string; viewer: Viewer; status: "open" | "resolved" },
 ): Promise<void> {
-  const thread = await db.commentThread.findUnique({
-    where: { id: input.threadId },
-    include: { comments: { orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 1 } },
+  // The starter is whoever wrote the first comment, deleted or not; a thread with no live comment is not found.
+  const thread = await db.commentThread.findFirst({
+    where: { id: input.threadId, ...HAS_LIVE_COMMENT },
+    include: {
+      comments: {
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        take: 1,
+        select: { authorId: true, guestId: true, runId: true },
+      },
+    },
   });
   if (!thread) throw new Error("comment_not_found");
   await requireDocumentAccess(db, thread.documentId, input.viewer, "read");
   const first = thread.comments[0];
-  const isAuthor =
-    !!first &&
-    input.viewer.kind !== "agent" &&
-    (input.viewer.kind === "principal"
-      ? first.authorId === input.viewer.principalId && first.runId === null
-      : first.guestId === input.viewer.guestId);
+  const isAuthor = !!first && wroteAsSelf(first, input.viewer);
   if (!isAuthor) {
     const access = await documentAccess(db, thread.documentId, input.viewer);
     if (!atLeast("document", access, "write")) throw new Error("document_access_denied");
@@ -238,10 +275,7 @@ async function ownComment(db: CommentDb, commentId: string, viewer: Viewer) {
   const doc = await requireDocumentAccess(db, c.thread.documentId, viewer, "comment");
   // An agent never edits or deletes a comment (its own included).
   if (viewer.kind === "agent") throw new Error("comment_edit_forbidden");
-  const own =
-    c.runId === null &&
-    (viewer.kind === "principal" ? c.authorId === viewer.principalId : c.guestId === viewer.guestId);
-  if (!own) throw new Error("comment_edit_forbidden");
+  if (!wroteAsSelf(c, viewer)) throw new Error("comment_edit_forbidden");
   return { c, doc };
 }
 
@@ -269,19 +303,48 @@ export async function listThreads(
 ): Promise<ThreadView[]> {
   const viewer = input.viewer;
   const doc = await requireDocumentAccess(db, input.documentId, viewer, "read");
+  // Comments without their bodies: a body is read below only for comments not deleted, so a deleted
+  // comment's text is never loaded, let alone returned.
   const threads = await db.commentThread.findMany({
     where: {
       documentId: input.documentId,
+      ...HAS_LIVE_COMMENT,
       ...(input.filter === "open" || input.filter === "resolved" ? { status: input.filter } : {}),
       ...(input.filter === "sent" ? { sentAt: { not: null } } : {}),
     },
     orderBy: { number: "asc" },
-    include: { comments: { where: { deletedAt: null }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] } },
+    select: {
+      id: true,
+      number: true,
+      status: true,
+      anchor: true,
+      sentAt: true,
+      comments: {
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          createdAt: true,
+          editedAt: true,
+          deletedAt: true,
+          authorId: true,
+          guestId: true,
+          runId: true,
+          viaId: true,
+        },
+      },
+    },
   });
+  const liveIds = threads.flatMap((t) => t.comments.flatMap((c) => (c.deletedAt === null ? [c.id] : [])));
+  const bodies = liveIds.length
+    ? await db.comment.findMany({ where: { id: { in: liveIds }, deletedAt: null }, select: { id: true, body: true } })
+    : [];
+  // A comment deleted between the two reads has no body here and counts as deleted.
+  const bodyOf = new Map(bodies.map((b) => [b.id, b.body]));
   const guestIds = new Set<string>();
   const principalIds: string[] = [];
   for (const t of threads) {
     for (const c of t.comments) {
+      if (!bodyOf.has(c.id)) continue;
       if (c.guestId) guestIds.add(c.guestId);
       if (c.runId) {
         if (c.viaId) principalIds.push(c.viaId);
@@ -296,13 +359,14 @@ export async function listThreads(
   ]);
   const guestName = new Map(guests.map((g) => [g.id, g.name]));
   const isMine = (c: { authorId: string | null; guestId: string | null; runId: string | null }) =>
-    viewer.kind === "agent"
-      ? c.runId === viewer.runId
-      : c.runId === null &&
-        (viewer.kind === "principal" ? c.authorId === viewer.principalId : c.guestId === viewer.guestId);
+    viewer.kind === "agent" ? c.runId === viewer.runId : wroteAsSelf(c, viewer);
 
   const fmt = formatFor(doc.kind);
   const views: ThreadView[] = threads.flatMap((t) => {
+    // Deleted comments after the last live one are left out; a thread with none live is left out whole.
+    let lastLive = t.comments.length - 1;
+    while (lastLive >= 0 && !bodyOf.has(t.comments[lastLive].id)) lastLive--;
+    if (lastLive < 0) return [];
     let anchor: Anchor;
     try {
       anchor = fmt.parseAnchor(t.anchor);
@@ -318,7 +382,10 @@ export async function listThreads(
         status: t.status,
         anchor,
         sentAt: t.sentAt,
-        comments: t.comments.map((c): CommentView => {
+        startedByMe: wroteAsSelf(t.comments[0], viewer),
+        comments: t.comments.slice(0, lastLive + 1).map((c): ThreadCommentView => {
+          const body = bodyOf.get(c.id);
+          if (body === undefined) return { id: c.id, deleted: true, createdAt: c.createdAt };
           let author: CommentView["author"];
           if (c.runId) {
             author = { kind: "agent", name: "Agent" };
@@ -328,12 +395,20 @@ export async function listThreads(
           } else {
             author = { kind: "member", name: (c.authorId && names.get(c.authorId)) || FORMER_MEMBER };
           }
-          return { id: c.id, author, body: c.body, createdAt: c.createdAt, editedAt: c.editedAt, mine: isMine(c) };
+          return { id: c.id, author, body, createdAt: c.createdAt, editedAt: c.editedAt, mine: isMine(c) };
         }),
       },
     ];
   });
-  return input.filter === "mine" ? views.filter((t) => t.comments.some((c) => c.mine)) : views;
+  // "Mine": threads I started (even if I deleted that comment since) or have a live comment on.
+  return input.filter === "mine"
+    ? views.filter((t) => t.startedByMe || t.comments.some((c) => !c.deleted && c.mine))
+    : views;
+}
+
+/** The live comments of a thread view (placeholders for deleted ones left out). */
+export function liveComments(t: Pick<ThreadView, "comments">): CommentView[] {
+  return t.comments.filter((c): c is CommentView => !c.deleted);
 }
 
 export async function mentionCandidates(
@@ -413,12 +488,19 @@ export async function mentionedGuestNames(
  * <sender>". The body is the agent's own text: it is redacted here by exact
  * value against `secretValues` (the agent's secrets) and token shape, then
  * cut to MAX_COMMENT_CHARS. No access check: only the agent loop calls this,
- * for threads whose sentRunId is this run.
+ * for threads whose sentRunId is this run. A thread whose comments were all
+ * deleted gets no reply (commentId null).
  */
 export async function postAgentReply(
   db: CommentDb,
   input: { threadId: string; runId: string; viaId: string | null; body: string; secretValues: readonly string[] },
-): Promise<{ commentId: string }> {
+): Promise<{ commentId: string | null }> {
+  // A thread whose comments were all deleted is gone for everyone: the agent's reply is not posted.
+  const live = await db.commentThread.findFirst({
+    where: { id: input.threadId, ...HAS_LIVE_COMMENT },
+    select: { id: true },
+  });
+  if (!live) return { commentId: null };
   const body = cutUntrustedText(redactSecrets(input.body, input.secretValues), MAX_COMMENT_CHARS).text;
   const c = await db.comment.create({
     data: { threadId: input.threadId, runId: input.runId, viaId: input.viaId, body },

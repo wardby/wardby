@@ -6,7 +6,7 @@
  */
 import type { Editor } from "@tiptap/core";
 import { anchorForRange, docText, rangeForAnchor, type TextAnchor } from "./anchors.js";
-import type { Anchor, ThreadView } from "./api.js";
+import { liveComments, type Anchor, type ThreadView } from "./api.js";
 import { previewText, stackBadges } from "./comments.js";
 import { clear, h, placeAt } from "./dom.js";
 import { getHighlights, setHighlights, type Highlight } from "./editor.js";
@@ -326,17 +326,18 @@ export class TextSurface implements AnchorSurface {
       BADGE_GAP,
     );
     items.forEach(({ t }, i) => {
+      const live = liveComments(t);
       const b = h(
         "button",
         {
           type: "button",
           class: `mbadge${this.active === t.id ? " on" : ""}`,
-          title: this.preview(t.comments[0]?.body ?? ""),
-          aria: { label: `Thread ${t.number}, ${t.comments.length} message${t.comments.length === 1 ? "" : "s"}` },
+          title: this.preview(live[0]?.body ?? ""),
+          aria: { label: `Thread ${t.number}, ${live.length} message${live.length === 1 ? "" : "s"}` },
           onClick: () => this.handlers?.activate(t.id),
         },
         h("span", {}, String(t.number)),
-        h("small", {}, String(t.comments.length)),
+        h("small", {}, String(live.length)),
       );
       b.style.top = `${Math.round(ys[i])}px`;
       margin.append(b);

@@ -23,7 +23,8 @@ directory.
   ⌘⌥M) to start a comment thread; threads anchor to the quoted text and
   follow it across versions. If the text is deleted, the thread is marked
   outdated; it still takes replies.
-- Replies, resolve and reopen, edit and delete your own comments, and
+- Replies, resolve and reopen, edit and delete your own comments (see
+  [Deleted comments](#deleted-comments)), and
   `@`-mentions (stored and highlighted; Wardby sends no notification in this
   phase). Members can mention members and the guests who have commented on
   the document (shown as "Name (guest)"); share-link guests get no list of
@@ -580,6 +581,28 @@ cannot be reached while it is open, and comments pause); **Restore this
 version** (members with `write`) publishes its files as a new version, with the
 same `document_version_conflict` and `document_version_is_latest` checks as for
 documents. Over MCP use `list_document_versions` and `restore_document_version`.
+
+## Deleted comments
+
+People delete only their own comments; agents never delete comments. Rows are
+kept in the database, but what was deleted is never shown again:
+
+- A deleted comment that has at least one remaining comment after it is shown
+  in its place as "Comment deleted": no text, author, avatar or edit time. MCP
+  `list_comment_threads` and `get_comment_thread` list it under
+  `deletedComments` (`id`, `deleted: true`, `createdAt`) and as "Comment
+  deleted" in `threadsText`; `commentIds` lists the remaining comments. The
+  agent tools `doc_list_threads` and `doc_get_thread` give it as
+  `{ id, deleted: true, createdAt }`, and a task sent to an agent says
+  "Comment deleted".
+- Deleted comments after the last remaining one are left out.
+- The thread's starter is whoever wrote its first comment, deleted or not:
+  they keep the right to resolve and reopen it, and it stays under **Mine**.
+- A thread whose comments are all deleted is gone for everyone: no highlight or
+  pin, no panel row or count, and it is left out of every listing. Reading,
+  replying to, resolving, reopening or sending it answers `comment_not_found`
+  (the agent tools answer `document_not_found`, as for an unknown thread), and
+  an agent's answer to it is not posted. Its number is not reused.
 
 ## Names and privacy
 

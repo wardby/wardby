@@ -9,6 +9,7 @@ import {
   errorMessage,
   type Anchor,
   type Api,
+  liveComments,
   type DocumentPayload,
   type ThreadView,
   type Viewer,
@@ -28,6 +29,9 @@ import type { AnchorSurface, DraftStart } from "./surface.js";
 
 const RANK: Record<string, number> = { none: 0, read: 1, comment: 2, write: 3, owner: 4 };
 export const atLeast = (access: string, need: string) => (RANK[access] ?? 0) >= RANK[need];
+
+/** "Mine": a thread I started (even if I deleted that comment since) or have a live comment on. */
+const isMine = (t: ThreadView) => t.startedByMe || liveComments(t).some((c) => c.mine);
 
 type Filter = "open" | "all" | "resolved" | "sent" | "mine";
 const FILTERS: [Filter, string][] = [
@@ -128,12 +132,12 @@ export class CommentsUI {
     return this.viewer.kind === "anonymous" || !!this.pop?.changingName;
   }
   private canResolve(t: ThreadView): boolean {
-    return this.canWrite || (this.viewer.kind !== "anonymous" && t.comments[0]?.mine === true);
+    return this.canWrite || (this.viewer.kind !== "anonymous" && t.startedByMe);
   }
   private working(t: ThreadView): boolean {
     if (!t.sentAt || t.status === "resolved") return false;
     const sent = Date.parse(t.sentAt);
-    return !t.comments.some((c) => c.author.kind === "agent" && Date.parse(c.createdAt) >= sent);
+    return !liveComments(t).some((c) => c.author.kind === "agent" && Date.parse(c.createdAt) >= sent);
   }
 
   // ---- data -----------------------------------------------------------------
@@ -424,6 +428,18 @@ export class CommentsUI {
     if (t?.comments.length) {
       const msgs = h("div", { class: "msgs" });
       for (const c of t.comments) {
+        if (c.deleted) {
+          // A deleted comment with replies after it: only that it was there (no text, author or initials).
+          msgs.append(
+            h(
+              "div",
+              { class: "msg deleted" },
+              h("div", { class: "av av-deleted", aria: { hidden: "true" } }, "–"),
+              h("div", {}, h("div", { class: "body" }, "Comment deleted")),
+            ),
+          );
+          continue;
+        }
         const agent = c.author.kind === "agent";
         const who = agent ? `Agent · via ${c.author.viaName ?? "Former member"}` : c.author.name;
         msgs.append(
@@ -544,13 +560,13 @@ export class CommentsUI {
   }
 
   private lastOwn(t: ThreadView) {
-    return [...t.comments].reverse().find((c) => c.mine);
+    return [...liveComments(t)].reverse().find((c) => c.mine);
   }
 
   private composer(isDraft: boolean, keptSend: boolean): HTMLElement {
     const pop = this.pop!;
     const t = this.popThread();
-    const editing = pop.editing ? t?.comments.find((c) => c.id === pop.editing) : undefined;
+    const editing = pop.editing && t ? liveComments(t).find((c) => c.id === pop.editing) : undefined;
     const ta = h("textarea", {
       aria: { label: isDraft ? "Comment" : editing ? "Edit comment" : "Reply" },
       attrs: {
@@ -784,7 +800,7 @@ export class CommentsUI {
         // Matched on the anchor itself: labels can repeat (two pins on elements with the same words).
         // The server redacts secret values out of an anchor, so failing that, the one new thread of mine.
         const anchor = anchorKey(pop.start!.anchor);
-        const mine = this.threads.filter((t) => !before.has(t.id) && t.comments[0]?.mine);
+        const mine = this.threads.filter((t) => !before.has(t.id) && t.startedByMe);
         const created = mine.find((t) => anchorKey(t.anchor) === anchor) ?? (mine.length === 1 ? mine[0] : undefined);
         if (created) return this.afterCreate(created.id, errorMessage(err));
       }
@@ -848,6 +864,8 @@ export class CommentsUI {
     try {
       await this.host.api.deleteComment(commentId);
       await this.reload();
+      // That was the thread's last comment: the thread is gone, so its popover goes too.
+      if (this.pop?.kind === "thread" && !this.popThread()) this.closePop();
     } catch (err) {
       this.setError(errorMessage(err));
     }
@@ -880,7 +898,7 @@ export class CommentsUI {
       if (t.status === "resolved") c.resolved++;
       else c.open++;
       if (t.sentAt) c.sent++;
-      if (t.comments.some((x) => x.mine)) c.mine++;
+      if (isMine(t)) c.mine++;
     }
     return c;
   }
@@ -894,7 +912,7 @@ export class CommentsUI {
           ? t.status === "resolved"
           : this.filter === "sent"
             ? !!t.sentAt
-            : t.comments.some((c) => c.mine),
+            : isMine(t),
     );
   }
 
@@ -998,8 +1016,9 @@ export class CommentsUI {
       );
     }
     for (const t of list) {
-      const first = t.comments[0];
-      const last = t.comments[t.comments.length - 1];
+      const live = liveComments(t);
+      const first = live[0];
+      const last = live[live.length - 1];
       const located = t.status === "open" && this.surface.located(t.id);
       const row = h(
         "div",
@@ -1040,7 +1059,7 @@ export class CommentsUI {
         h(
           "div",
           { class: "m" },
-          h("span", {}, `${t.comments.length} message${t.comments.length === 1 ? "" : "s"}`),
+          h("span", {}, `${live.length} message${live.length === 1 ? "" : "s"}`),
           last ? h("span", {}, `· ${relativeTime(last.createdAt)}`) : null,
           t.sentAt ? h("span", { class: "chip sent" }, this.working(t) ? "✦ working" : "✦ sent") : null,
           t.status === "outdated" || (t.status === "open" && !located)

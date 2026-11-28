@@ -22,6 +22,7 @@ const thread = (id: string, a: ElementAnchor): ThreadView => ({
   number: Number(id),
   status: "open",
   sentAt: null,
+  startedByMe: false,
   anchor: a,
   comments: [],
 });

@@ -19,6 +19,7 @@ import {
   editComment,
   guestMentionCandidates,
   listThreads,
+  liveComments,
   mentionCandidates,
   mentionedGuestNames,
   principalNames,
@@ -116,7 +117,7 @@ export async function documentPayload(deps: WebDeps, documentId: string, viewer:
   const mentionedGuests = await mentionedGuestNames(
     deps.db,
     documentId,
-    threads.flatMap((t) => t.comments.map((c) => c.body)),
+    threads.flatMap((t) => liveComments(t).map((c) => c.body)),
   );
   const member = viewer.kind === "principal";
   const design = document.kind === "design";

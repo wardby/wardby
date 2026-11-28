@@ -55,6 +55,8 @@ describe.skipIf(!process.env.DATABASE_URL)("document versions (database)", () =>
           sentRunId: number === 1 ? runId : `other-${s}`,
           answeredRunId: number === 2 ? runId : null,
           sentById: number === 1 ? sender.id : null,
+          // Every thread has a comment (one whose comments were all deleted is left out).
+          comments: { create: { body: "x", authorId: owner.id } },
         },
       });
     }

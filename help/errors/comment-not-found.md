@@ -9,6 +9,6 @@ appliesTo: ">=0.10.0"
 
 # Comment or thread not found
 
-`comment_not_found` (HTTP 404). The id does not match a thread or comment you can see, it was deleted, or a send listed no threads (or more than 50). Take ids from `list_comment_threads`.
+`comment_not_found` (HTTP 404). The id does not match a thread or comment you can see, it was deleted, every comment of the thread was deleted (such a thread is gone for everyone: it cannot be read, replied to, resolved, reopened or sent), or a send listed no threads (or more than 50). Take ids from `list_comment_threads`.
 
 See [Documents](../documents.md).

@@ -40,7 +40,7 @@ import {
   reconcileTooLargeReply,
   lockedEditReply,
 } from "./agent-loop.js";
-import { createThread, listThreads, setThreadStatus } from "./comments.js";
+import { createThread, deleteComment, listThreads, liveComments, reply, setThreadStatus } from "./comments.js";
 import { createDocumentEventBus, type DocumentEvent } from "./events.js";
 import { BOARD_FORMAT_RULES } from "./boards/rules.js";
 import { anchorForElement, type ElementLike } from "./element-anchors.js";
@@ -413,11 +413,11 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     const [v1, v2] = threads;
     expect(v1.status).toBe("resolved");
     expect(v2.status).toBe("open");
-    const agentReply = v1.comments.at(-1)!;
+    const agentReply = liveComments(v1).at(-1)!;
     expect(agentReply.author).toEqual({ kind: "agent", name: "Agent", viaName: "Wren Writer" });
     expect(agentReply.body).not.toContain(SECRET);
     expect(agentReply.body).toContain("[REDACTED]");
-    expect(v2.comments.at(-1)!.body).toBe("Left as is: already short.");
+    expect(liveComments(v2).at(-1)!.body).toBe("Left as is: already short.");
     const stored = await db.comment.findMany({ where: { runId } });
     expect(stored).toHaveLength(2);
     expect(stored.every((c) => c.viaId === writer.id && c.authorId === null)).toBe(true);
@@ -520,9 +520,45 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     await onDocumentRunFinished(db, deps, runId);
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
     expect(v.status).toBe("open");
-    expect(v.comments.at(-1)!.author.kind).toBe("agent");
-    expect(v.comments.at(-1)!.body).toMatch(/did not reply/);
+    expect(liveComments(v).at(-1)!.author.kind).toBe("agent");
+    expect(liveComments(v).at(-1)!.body).toMatch(/did not reply/);
     expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(1);
+  });
+
+  it("deleted comments: an emptied thread is not sent or answered; a placeholder keeps its place in the task", async () => {
+    const docId = await linkedDoc();
+    const firstId = async (threadId: string) =>
+      (await db.comment.findFirstOrThrow({ where: { threadId }, orderBy: { createdAt: "asc" } })).id;
+    const emptied = await thread(docId, "hello", "Gone entirely");
+    await deleteComment(db, { commentId: await firstId(emptied.threadId), viewer: asWriter() });
+    await expect(
+      sendThreadsToAgent(db, deps, { documentId: docId, viewer: asWriter(), threadIds: [emptied.threadId] }),
+    ).rejects.toThrow("comment_not_found");
+
+    const kept = await thread(docId, "second", "Deleted words here");
+    await reply(db, cipher, {
+      threadId: kept.threadId,
+      viewer: { kind: "principal", principalId: commenter.id },
+      body: "Shorter please",
+    });
+    await deleteComment(db, { commentId: await firstId(kept.threadId), viewer: asWriter() });
+    const { runId } = await sendThreadsToAgent(db, deps, {
+      documentId: docId,
+      viewer: asWriter(),
+      threadIds: [kept.threadId],
+    });
+    const task = (await db.codingRun.findUniqueOrThrow({ where: { runId } })).request!;
+    expect(task).toContain("- Comment deleted\n");
+    expect(task).toContain("Shorter please");
+    expect(task).not.toContain("Deleted words here");
+
+    // Emptied while the run worked: the agent's answer is not posted on it.
+    const [reply1] = await db.comment.findMany({ where: { threadId: kept.threadId, deletedAt: null } });
+    await db.comment.update({ where: { id: reply1.id }, data: { deletedAt: new Date() } });
+    await finish(runId, "succeeded", "Done.", false);
+    await onDocumentRunFinished(db, deps, runId);
+    expect(await db.comment.count({ where: { threadId: kept.threadId, runId } })).toBe(0);
+    expect(await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" })).toEqual([]);
   });
 
   it("an edit published without a replies block says the agent edited it; the thread stays open", async () => {
@@ -540,7 +576,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(doc.currentVersion).toMatchObject({ number: 2, via: "agent", runId });
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
     expect(v.status).toBe("open");
-    expect(v.comments.at(-1)!.body).toBe(AGENT_EDITED_NO_REPLY);
+    expect(liveComments(v).at(-1)!.body).toBe(AGENT_EDITED_NO_REPLY);
   });
 
   it("a failed run posts the failure reply on each thread and publishes no version", async () => {
@@ -615,7 +651,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     });
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
     expect(v.status).toBe("resolved");
-    expect(v.comments.at(-1)!.body).toBe("Warmer now.");
+    expect(liveComments(v).at(-1)!.body).toBe("Warmer now.");
     expect(await runsOf()).toBe(before);
   });
 
@@ -658,7 +694,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(await runsOf()).toBe(before);
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
     expect(v.status).toBe("resolved");
-    expect(v.comments.at(-1)!.body).toBe("Warmer.");
+    expect(liveComments(v).at(-1)!.body).toBe("Warmer.");
   });
 
   it("a Markdown paragraph both sides edited is a conflict: one reconcile run", async () => {
@@ -749,7 +785,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(task.match(new RegExp(`</${UNTRUSTED_CONTEXT_TAG}>`, "g"))).toHaveLength(1);
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
     expect(v.status).toBe("open");
-    expect(v.comments.at(-1)!.body).toBe(reconcilingReply(2));
+    expect(liveComments(v).at(-1)!.body).toBe(reconcilingReply(2));
     expect(reconcilingReply(3)).toBe(
       "The document changed while the agent worked, so it is re-applying its edit on version 3.",
     );
@@ -780,7 +816,11 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     });
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
     expect(v.status).toBe("resolved");
-    expect(v.comments.map((c) => c.body).slice(-2)).toEqual([reconcilingReply(2), "Re-applied."]);
+    expect(
+      liveComments(v)
+        .map((c) => c.body)
+        .slice(-2),
+    ).toEqual([reconcilingReply(2), "Re-applied."]);
   });
 
   it("a reconcile run that conflicts again tries the merge, then gets the conflict reply: no third run", async () => {
@@ -804,7 +844,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(doc.currentVersion).toMatchObject({ number: 3, via: "editor" });
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
     expect(v.status).toBe("open");
-    expect(v.comments.at(-1)!.body).toBe(versionConflictReply(`wardby/run-${reconcile}`));
+    expect(liveComments(v).at(-1)!.body).toBe(versionConflictReply(`wardby/run-${reconcile}`));
     expect(versionConflictReply("b")).toBe(
       "The document changed after this was sent, so the agent's edit was not applied. It is on branch b.",
     );
@@ -1154,7 +1194,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     await onDocumentRunFinished(db, deps, runId);
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
     expect(v.status).toBe("open");
-    expect(v.comments.at(-1)!.body).toBe(`Warmed it.\n\n${EDIT_NOT_APPLIED_NOTE}`);
+    expect(liveComments(v).at(-1)!.body).toBe(`Warmed it.\n\n${EDIT_NOT_APPLIED_NOTE}`);
     expect(EDIT_NOT_APPLIED_NOTE).toBe("(The edit could not be applied.)");
     expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(1);
   });
@@ -1408,7 +1448,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(await runsOf()).toBe(runs);
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
     expect(v.status).toBe("open");
-    expect(v.comments.at(-1)!.body).toBe(lockedEditReply("approved", `wardby/run-${runId}`));
+    expect(liveComments(v).at(-1)!.body).toBe(lockedEditReply("approved", `wardby/run-${runId}`));
     expect(lockedEditReply("approved", "b")).toBe(
       "The document was approved while the agent worked, so its edit was not applied. It is on branch b.",
     );
@@ -1447,7 +1487,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     expect(threads).toHaveLength(2);
     for (const v of threads) {
       expect(v.status).toBe("open");
-      expect(v.comments.at(-1)!.body).toBe(lockedEditReply("approved", `wardby/run-${runId}`));
+      expect(liveComments(v).at(-1)!.body).toBe(lockedEditReply("approved", `wardby/run-${runId}`));
     }
   });
 
@@ -1464,7 +1504,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     files.set(`${sha}:${path}`, "hello lovely world\n\nsecond para");
     await onDocumentRunFinished(db, deps, runId);
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
-    expect(v.comments.at(-1)!.body).toBe(
+    expect(liveComments(v).at(-1)!.body).toBe(
       `The document was archived while the agent worked, so its edit was not applied. It is on branch wardby/run-${runId}.`,
     );
   });
@@ -1482,7 +1522,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a coding agent (data
     await finish(runId, "succeeded", `\`\`\`wardby-thread-replies\n${JSON.stringify(replies)}\n\`\`\``, false);
     await onDocumentRunFinished(db, deps, runId);
     const [v] = await listThreads(db, { documentId: docId, viewer: asWriter(), filter: "all" });
-    expect(v.comments.at(-1)!.body).toBe("Yes, as written.");
+    expect(liveComments(v).at(-1)!.body).toBe("Yes, as written.");
   });
 });
 
@@ -1808,7 +1848,7 @@ describe.skipIf(!process.env.DATABASE_URL)("designs", { timeout: 30_000 }, () =>
     expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(1);
     const [v] = await listThreads(db, { documentId: docId, viewer: asOwner(), filter: "all" });
     expect(v.status).toBe("resolved");
-    expect(v.comments.at(-1)!.body).toBe("Already fine.");
+    expect(liveComments(v).at(-1)!.body).toBe("Already fine.");
   });
 
   it("an agent board with an external reference is not published: the reply says so, the thread stays open", async () => {
@@ -1822,7 +1862,7 @@ describe.skipIf(!process.env.DATABASE_URL)("designs", { timeout: 30_000 }, () =>
     expect(await db.documentVersion.count({ where: { documentId: docId } })).toBe(1);
     const [v] = await listThreads(db, { documentId: docId, viewer: asOwner(), filter: "all" });
     expect(v.status).toBe("open");
-    expect(v.comments.at(-1)!.body).toBe(`Added a photo.\n\n${EDIT_NOT_APPLIED_NOTE}`);
+    expect(liveComments(v).at(-1)!.body).toBe(`Added a photo.\n\n${EDIT_NOT_APPLIED_NOTE}`);
   });
 
   const HOME_H1 = "Good coffee, a quiet corner, and pastries worth setting an alarm for.";
@@ -1901,7 +1941,7 @@ describe.skipIf(!process.env.DATABASE_URL)("designs", { timeout: 30_000 }, () =>
     expect(context.split("YOUR EARLIER EDIT")[1]).not.toContain(ABOUT_H1);
     expect(context).toContain("New intro please");
     const [v] = await listThreads(db, { documentId: docId, viewer: asOwner(), filter: "all" });
-    expect(v.comments.at(-1)!.body).toBe(reconcilingReply(2));
+    expect(liveComments(v).at(-1)!.body).toBe(reconcilingReply(2));
 
     // The reconcile run's own edit publishes normally.
     const sha2 = await finish(
@@ -2026,7 +2066,7 @@ describe.skipIf(!process.env.DATABASE_URL)("designs", { timeout: 30_000 }, () =>
     expect(stored["boards/menu.html"]).not.toContain(DESIGN_SECRET);
     expect(stored["boards/menu.html"]).toContain("The key is [REDACTED] here.");
     const [v] = await listThreads(db, { documentId: docId, viewer: asOwner(), filter: "all" });
-    expect(v.comments.at(-1)!.body).toBe("Added key [REDACTED].");
+    expect(liveComments(v).at(-1)!.body).toBe("Added key [REDACTED].");
   });
 
   it("refuses a design linked without a base ref: document_not_agent_linked, nothing sent", async () => {
@@ -2223,7 +2263,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan documents", { timeout: 30_000 }
     expect(api.currentVersion).toMatchObject({ number: 1, runId, markdown: "# API\n\nGET /things\n" });
     const [v] = await listThreads(db, { documentId: planId, viewer: asOwner(), filter: "all" });
     expect(v.status).toBe("resolved");
-    expect(v.comments.at(-1)!.body).toBe("Added the API section.");
+    expect(liveComments(v).at(-1)!.body).toBe("Added the API section.");
   });
 
   it("redacts a JSON-escaped and an HTML-escaped secret from the revision's input files and task", async () => {
@@ -2343,7 +2383,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan documents", { timeout: 30_000 }
     const inputs = await loadPlanFiles(db, reconcile.id, "input");
     expect(inputs.find((f) => f.path === "plan.md")!.content).toContain("Ship it next week.");
     const [v] = await listThreads(db, { documentId: planId, viewer: asOwner(), filter: "all" });
-    expect(v.comments.at(-1)!.body).toBe(reconcilingReply(2));
+    expect(liveComments(v).at(-1)!.body).toBe(reconcilingReply(2));
   });
 
   /** A thread on the design's home board. */
@@ -2391,7 +2431,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan documents", { timeout: 30_000 }
     expect(await db.documentVersion.count({ where: { documentId: screensId } })).toBe(1);
     expect(await db.documentVersion.count({ where: { runId } })).toBe(0);
     const [v] = await listThreads(db, { documentId: screensId, viewer: asOwner(), filter: "all" });
-    expect(v.comments.at(-1)!.body).toBe(AGENT_NO_REPLY);
+    expect(liveComments(v).at(-1)!.body).toBe(AGENT_NO_REPLY);
   });
 
   it("a revision that deletes an approved design leaves it approved and in the set", async () => {
@@ -2429,7 +2469,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan documents", { timeout: 30_000 }
     expect(plan.removedFromPlan).toBe(false);
     expect(plan.currentVersion!.number).toBe(1);
     const [v] = await listThreads(db, { documentId: planId, viewer: asOwner(), filter: "all" });
-    expect(v.comments.at(-1)!.body).toBe(`Removed it.\n\n${EDIT_NOT_APPLIED_NOTE}`);
+    expect(liveComments(v).at(-1)!.body).toBe(`Removed it.\n\n${EDIT_NOT_APPLIED_NOTE}`);
   });
 
   it("refuses a send on a document removed from its plan: document_locked, nothing sent", async () => {
@@ -2493,7 +2533,7 @@ describe.skipIf(!process.env.DATABASE_URL)("plan documents", { timeout: 30_000 }
     expect(coding.planPublishStatus).toBe("published");
     const [v] = await listThreads(db, { documentId: planId, viewer: asOwner(), filter: "all" });
     expect(v.status).toBe("open");
-    expect(v.comments.at(-1)!.body).toBe(`Sooner.\n\n${EDIT_NOT_APPLIED_NOTE}`);
+    expect(liveComments(v).at(-1)!.body).toBe(`Sooner.\n\n${EDIT_NOT_APPLIED_NOTE}`);
   });
 
   it("a revision whose input files no longer pass the layout writes no other existing document", async () => {

@@ -67,7 +67,7 @@ import {
   validDocumentBaseRef,
   wardbyPlanLink,
 } from "./agent-link.js";
-import { authorLabel, listThreads, postAgentReply } from "./comments.js";
+import { authorLabel, HAS_LIVE_COMMENT, listThreads, postAgentReply } from "./comments.js";
 import { contentHash, type VersionContent } from "./content.js";
 import { notifyDocumentChange } from "./events.js";
 import { holdsVersionState } from "./live/store.js";
@@ -185,7 +185,7 @@ const THREADS_CUT_MARKER = "\n\n[comment threads cut to fit the task]";
 function threadsText(threads: Awaited<ReturnType<typeof listThreads>>, fmt: DocumentFormat): string {
   return threads
     .map((t) => {
-      const lines = t.comments.map((c) => `- ${authorLabel(c.author)}: ${c.body}`);
+      const lines = t.comments.map((c) => (c.deleted ? "- Comment deleted" : `- ${authorLabel(c.author)}: ${c.body}`));
       return [`Thread #${t.number} on ${fmt.anchorLabel(t.anchor)}:`, ...lines].join("\n");
     })
     .join("\n\n");
@@ -512,14 +512,16 @@ export async function sendThreadsToAgent(
   const ids = [...new Set(input.threadIds)];
   if (ids.length === 0 || ids.length > MAX_THREADS_PER_SEND) throw new Error("comment_not_found");
   const select = { id: true, status: true, sentRunId: true, answeredRunId: true } as const;
-  let rows = await db.commentThread.findMany({ where: { id: { in: ids }, documentId: doc.id }, select });
+  // A thread whose comments were all deleted is not found, like an unknown one.
+  const where = { id: { in: ids }, documentId: doc.id, ...HAS_LIVE_COMMENT };
+  let rows = await db.commentThread.findMany({ where, select });
   if (rows.length !== ids.length) throw new Error("comment_not_found");
   const previous = await stillSent(db, rows);
   if (previous.running) throw new Error("comment_thread_already_sent");
   if (previous.unanswered.length > 0) {
     // An earlier run ended but its answer is still due: give it now, so this send cannot replace it.
     for (const runId of previous.unanswered) await onDocumentRunFinished(db, deps, runId);
-    rows = await db.commentThread.findMany({ where: { id: { in: ids }, documentId: doc.id }, select });
+    rows = await db.commentThread.findMany({ where, select });
     // Answering it may have started a reconcile run for these threads.
     if ((await stillSent(db, rows)).running) throw new Error("comment_thread_already_sent");
   }

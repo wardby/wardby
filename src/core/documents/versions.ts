@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 import type { PrismaClient } from "#prisma";
 import type { loadAgentSecretValues } from "../secret-guard.js";
 import { requireDocumentAccess, type Viewer } from "./access.js";
-import { principalNames } from "./comments.js";
+import { HAS_LIVE_COMMENT, principalNames } from "./comments.js";
 import { publishVersion, type PublishVia } from "./service.js";
 import type { VersionContent } from "./content.js";
 import { loadContent } from "./files.js";
@@ -82,6 +82,7 @@ export async function listVersions(
         where: {
           documentId: input.documentId,
           OR: [{ sentRunId: { in: runIds } }, { answeredRunId: { in: runIds } }],
+          ...HAS_LIVE_COMMENT,
         },
         orderBy: { number: "asc" },
         select: { number: true, sentRunId: true, answeredRunId: true, sentById: true },

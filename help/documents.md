@@ -3,7 +3,18 @@ id: documents
 title: Documents and designs - write, comment and review Markdown or HTML boards with people and a coding agent
 summary: Create Markdown documents or designs (HTML boards), share them with people or by link, collect anchored comments, export them, and send open threads to a coding agent that edits the files in a repository.
 audience: operator
-tags: [documents, markdown, comments, create_document, publish_version, share, send_threads_to_agent, live updates]
+tags:
+  [
+    documents,
+    markdown,
+    comments,
+    deleted comments,
+    create_document,
+    publish_version,
+    share,
+    send_threads_to_agent,
+    live updates,
+  ]
 appliesTo: ">=0.10.0"
 ---
 
@@ -34,6 +45,10 @@ They need the `documents:read` and `documents:write` scopes; `send_threads_to_ag
 ## Designs
 
 A design is a document of kind `design`: HTML boards you edit visually, comment on with pins, view in Overview, click through in Play, export, and send to a coding agent. Start with [Designs](designs.md) and the [board format](design-boards-format.md).
+
+## Deleting comments
+
+You can delete your own comments (from a thread's ⋯ menu, or over the page API). Deleting a comment that has replies after it leaves "Comment deleted" in its place, so the replies keep their context; its text and author are no longer shown anywhere, and whoever started the thread keeps the right to resolve and reopen it. A deleted comment after the last remaining one simply goes. When every comment of a thread is deleted, the thread is gone for everyone: no highlight or pin, no row in the comments panel, and the MCP and agent tools treat it as unknown ([`comment_not_found`](errors/comment-not-found.md)). Its number is not reused.
 
 ## Mentions
 

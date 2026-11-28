@@ -42,7 +42,7 @@ A [design](designs.md) links to a repository **directory** instead of a file: `k
 
 ## Sending
 
-A person with `write` access selects open threads in the page and chooses "send to agent", or calls `send_threads_to_agent` with `documentId` and `threadIds` (up to 50). Wardby starts one coding run with trigger `comment`, gives the agent the current Markdown, the threads and the file path (all wrapped as untrusted content), and asks it to edit the file. The task text is redacted against the agent's current secret values at send time. A document that is approved, rejected or archived cannot be sent (`document_locked`).
+A person with `write` access selects open threads in the page and chooses "send to agent", or calls `send_threads_to_agent` with `documentId` and `threadIds` (up to 50). Wardby starts one coding run with trigger `comment`, gives the agent the current Markdown, the threads and the file path (all wrapped as untrusted content), and asks it to edit the file. The task text is redacted against the agent's current secret values at send time. A document that is approved, rejected or archived cannot be sent (`document_locked`). A deleted comment with replies after it goes in the task as "Comment deleted", with no text or author; a thread whose comments were all deleted cannot be sent ([`comment_not_found`](errors/comment-not-found.md)), and if that happens while the agent works, the agent's reply on it is not posted.
 
 When the run ends:
 

@@ -39,7 +39,17 @@ export interface CommentView {
   createdAt: string;
   editedAt: string | null;
   mine: boolean;
+  deleted?: false;
 }
+
+/** A deleted comment with a live comment after it: shown as "Comment deleted", with no text or author. */
+export interface DeletedCommentView {
+  id: string;
+  deleted: true;
+  createdAt: string;
+}
+
+export type ThreadCommentView = CommentView | DeletedCommentView;
 
 export interface ThreadView {
   id: string;
@@ -47,7 +57,14 @@ export interface ThreadView {
   status: string;
   anchor: Anchor;
   sentAt: string | null;
-  comments: CommentView[];
+  /** Whether the viewer wrote the thread's first comment, deleted or not. */
+  startedByMe: boolean;
+  comments: ThreadCommentView[];
+}
+
+/** A thread's live comments (no placeholders). */
+export function liveComments(t: Pick<ThreadView, "comments">): CommentView[] {
+  return t.comments.filter((c): c is CommentView => !c.deleted);
 }
 
 export interface DocumentPayload {

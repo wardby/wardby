@@ -9,6 +9,7 @@ const thread = (id: string, status = "open"): ThreadView => ({
   number: Number(id),
   status,
   sentAt: null,
+  startedByMe: true,
   anchor: { type: "text", quote: `q${id}`, prefix: "", suffix: "" },
   comments: [
     {

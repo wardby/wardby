@@ -5,7 +5,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createThread } from "../core/documents/comments.js";
+import { createThread, reply } from "../core/documents/comments.js";
 import { createDocument, publishVersion } from "../core/documents/service.js";
 import { reopenDocument, reviewDocument, setArchived, submitForReview } from "../core/documents/review.js";
 import { startTestWebServer, TEST_CIPHER, type BrowserCookie, type TestWebServer } from "./test-server.test-support.js";
@@ -360,6 +360,59 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
         .poll(() => o.locator(".rv-panel").textContent())
         .toContain("No router: review actions start nothing.");
     }, 90_000);
+
+    it("a deleted comment before a reply shows as Comment deleted; deleting a thread's only comment removes it", async () => {
+      const d = await server.design({
+        title: "Del",
+        kind: "document",
+        markdown: "# D\n\nhello world\n\nsecond line\n",
+        access: "comment",
+      });
+      const me = { kind: "principal" as const, principalId: d.principalIds.first };
+      const withReply = await createThread(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: me,
+        anchor: { type: "text", quote: "hello world", prefix: "", suffix: "" },
+        body: "Deleted words",
+      });
+      await reply(server.db, TEST_CIPHER, {
+        threadId: withReply.threadId,
+        viewer: owner(d.principalIds),
+        body: "Owner answer",
+      });
+      const alone = await createThread(server.db, TEST_CIPHER, {
+        documentId: d.documentId,
+        viewer: me,
+        anchor: { type: "text", quote: "second line", prefix: "", suffix: "" },
+        body: "Only comment",
+      });
+      const a = await open(d.cookie, d.documentId);
+      const deleteMine = async () => {
+        await a.locator(".cpop [data-act=menu]").click();
+        await a.getByRole("menuitem", { name: "Delete my comment" }).click();
+        await a.locator(".cpop .confirm").getByRole("button", { name: "Delete" }).click();
+      };
+
+      await a.locator(".tp-row", { hasText: "Deleted words" }).click();
+      await deleteMine();
+      const msgs = a.locator(".cpop .msg");
+      await expect.poll(() => msgs.first().textContent(), { timeout: 10_000 }).toBe("–Comment deleted");
+      expect(await msgs.nth(1).textContent()).toContain("Owner answer");
+      expect(await a.locator(".cpop").textContent()).not.toContain("Deleted words");
+      // I started it, so Resolve is still mine to use.
+      expect(await a.locator(".cpop .resolvebtn").count()).toBe(1);
+      await a.locator(".cpop [data-act=close]").click();
+      const row = a.locator(".tp-row", { hasText: "Owner answer" });
+      expect(await row.textContent()).toContain("1 message");
+
+      expect(await a.locator(`.comment-mark[data-comment-id="${alone.threadId}"]`).count()).toBe(1);
+      await a.locator(".tp-row", { hasText: "Only comment" }).click();
+      await deleteMine();
+      await expect.poll(() => a.locator(".tp-row", { hasText: "Only comment" }).count(), { timeout: 10_000 }).toBe(0);
+      expect(await a.locator(`.comment-mark[data-comment-id="${alone.threadId}"]`).count()).toBe(0);
+      expect(await a.locator(".cpop").count()).toBe(0);
+      expect(await a.locator(".tp-row").count()).toBe(1);
+    }, 60_000);
 
     it("an outdated thread takes a reply from the page", async () => {
       const d = await server.design({

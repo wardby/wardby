@@ -17,7 +17,7 @@ import { logger } from "./logger.js";
 import { requireDocumentAccess, type Viewer } from "./documents/access.js";
 import { MAX_SEND_MARKDOWN_CHARS } from "./documents/agent-formats.js";
 import { MAX_COMMENT_CHARS } from "./documents/limits.js";
-import { listThreads, reply, setThreadStatus } from "./documents/comments.js";
+import { HAS_LIVE_COMMENT, listThreads, reply, setThreadStatus } from "./documents/comments.js";
 import { listDocumentsForAgent } from "./documents/list.js";
 import type { Cipher } from "./documents/review.js";
 import { getReviewView, submitForReview } from "./documents/review.js";
@@ -144,7 +144,7 @@ export const DOCUMENT_READ_TOOL_DEFS: LoadedTool[] = [
   },
   {
     name: "doc_list_threads",
-    description: `Lists a document's comment threads with their comments (author, body, time). A design's threads are pins with a board and element anchor. ${DATA_NOTE}`,
+    description: `Lists a document's comment threads with their comments (author, body, time). A deleted comment with replies after it is { id, deleted: true, createdAt } with no body or author; a thread whose comments were all deleted is left out. A design's threads are pins with a board and element anchor. ${DATA_NOTE}`,
     jsonSchema: {
       type: "object",
       properties: {
@@ -157,7 +157,7 @@ export const DOCUMENT_READ_TOOL_DEFS: LoadedTool[] = [
   },
   {
     name: "doc_get_thread",
-    description: `Reads one comment thread: its anchor, status and every comment with its author's name. ${DATA_NOTE}`,
+    description: `Reads one comment thread: its anchor, status and every comment with its author's name (a deleted comment with replies after it is { id, deleted: true, createdAt }, with no body or author). ${DATA_NOTE}`,
     jsonSchema: {
       type: "object",
       properties: { threadId: idProp("The thread id from doc_list_threads.") },
@@ -355,8 +355,12 @@ export async function handleDocumentTool(name: string, argsJson: string, ctx: Do
         const a = parse(GetThreadArgs);
         if (typeof a === "string") return a;
         if (!setting) return errorResult("document_not_found");
-        const row = await db.commentThread.findUnique({ where: { id: a.threadId }, select: { documentId: true } });
-        // A missing thread looks like an unreadable document: no way to probe for thread ids.
+        const row = await db.commentThread.findFirst({
+          where: { id: a.threadId, ...HAS_LIVE_COMMENT },
+          select: { documentId: true },
+        });
+        // A missing thread (or one whose comments were all deleted) looks like an unreadable document: no way to
+        // probe for thread ids.
         if (!row) return errorResult("document_not_found");
         const threads = await listThreads(db, { documentId: row.documentId, viewer, filter: "all" });
         const thread = threads.find((t) => t.id === a.threadId);
@@ -486,13 +490,18 @@ function threadJson(t: Awaited<ReturnType<typeof listThreads>>[number]) {
     number: t.number,
     status: t.status,
     anchor: t.anchor,
-    comments: t.comments.map((c) => ({
-      id: c.id,
-      author: c.author.viaName ? `${c.author.name} via ${c.author.viaName}` : c.author.name,
-      authorKind: c.author.kind,
-      body: c.body,
-      createdAt: c.createdAt,
-      mine: c.mine,
-    })),
+    // A deleted comment with replies after it: only that it was there, never its text or author.
+    comments: t.comments.map((c) =>
+      c.deleted
+        ? { id: c.id, deleted: true as const, createdAt: c.createdAt }
+        : {
+            id: c.id,
+            author: c.author.viaName ? `${c.author.name} via ${c.author.viaName}` : c.author.name,
+            authorKind: c.author.kind,
+            body: c.body,
+            createdAt: c.createdAt,
+            mine: c.mine,
+          },
+    ),
   };
 }

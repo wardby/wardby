@@ -520,6 +520,15 @@ img.ProseMirror-separator {
 .av.av-agent {
   background: #1d2330;
 }
+.av.av-deleted {
+  background: transparent;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+}
+.cpop .deleted .body {
+  color: var(--muted);
+  font-style: italic;
+}
 .cpop .who {
   font-weight: 600;
   font-size: 0.85rem;

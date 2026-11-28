@@ -5,7 +5,15 @@ import { createPrismaClient } from "../db.js";
 import { agentGranteeKey } from "../grants.js";
 import { attachSecret, createSecret } from "../secrets.js";
 import type { Viewer } from "./access.js";
-import { createThread, listThreads, reply, setThreadStatus, editComment, deleteComment } from "./comments.js";
+import {
+  createThread,
+  listThreads,
+  liveComments,
+  reply,
+  setThreadStatus,
+  editComment,
+  deleteComment,
+} from "./comments.js";
 import { requestRenderedExport } from "./exports.js";
 import { listDocumentsForAgent } from "./list.js";
 import { forceApprove, getReviewView, reopenDocument, reviewDocument, setArchived, submitForReview } from "./review.js";
@@ -73,11 +81,11 @@ describe.skipIf(!process.env.DATABASE_URL)("document services accept the agent v
     expect(row.body).not.toContain(SECRET);
     expect(row.body).toContain("see ");
     const threads = await listThreads(db, { documentId: d, viewer: agentViewer(), filter: "all" });
-    const mine = threads[0].comments.find((c) => c.id === res.commentId)!;
+    const mine = liveComments(threads[0]).find((c) => c.id === res.commentId)!;
     expect(mine.author.kind).toBe("agent");
     expect(mine.mine).toBe(true);
     const others = await listThreads(db, { documentId: d, viewer: agentViewer(A, "run-2"), filter: "all" });
-    expect(others[0].comments.find((c) => c.id === res.commentId)!.mine).toBe(false);
+    expect(liveComments(others[0]).find((c) => c.id === res.commentId)!.mine).toBe(false);
   });
 
   it("redacts the viewer agent's own secret on a document not linked to it", async () => {

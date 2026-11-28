@@ -25,7 +25,7 @@ import { createPrismaClient } from "./db.js";
 import { agentGranteeKey, principalGranteeKey } from "./grants.js";
 import type { Viewer } from "./documents/access.js";
 import { attachSecret, createSecret } from "./secrets.js";
-import { createThread, listThreads } from "./documents/comments.js";
+import { createThread, deleteComment, listThreads, reply } from "./documents/comments.js";
 import { anchorForElement, type ElementLike } from "./documents/element-anchors.js";
 import { chooseOption, reviewDocument, submitForReview } from "./documents/review.js";
 import { MAX_SEND_MARKDOWN_CHARS } from "./documents/agent-formats.js";
@@ -219,6 +219,41 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* read tools (database)", () => 
       authorKind: "member",
     });
     expect((await call("doc_get_thread", { threadId: designThread })).thread.id).toBe(designThread);
+  });
+
+  it("doc_*_thread tools: a deleted comment before a reply is a placeholder; an emptied thread is not found", async () => {
+    const t = await createThread(db, cipher, {
+      documentId: linked,
+      viewer: owner(),
+      anchor: { type: "text", quote: "hello", prefix: "", suffix: " world" },
+      body: "Deleted words",
+    });
+    const first = await db.comment.findFirstOrThrow({ where: { threadId: t.threadId } });
+    await reply(db, cipher, { threadId: t.threadId, viewer: owner(), body: "the reply" });
+    await deleteComment(db, { commentId: first.id, viewer: owner() });
+    const one = await call("doc_get_thread", { threadId: t.threadId });
+    expect(one.thread.comments[0]).toEqual({ id: first.id, deleted: true, createdAt: first.createdAt.toISOString() });
+    expect(one.thread.comments[1]).toMatchObject({ body: "the reply", author: "Olive Owner" });
+    expect(JSON.stringify(one)).not.toContain("Deleted words");
+
+    const emptied = await createThread(db, cipher, {
+      documentId: linked,
+      viewer: owner(),
+      anchor: { type: "text", quote: "hello", prefix: "", suffix: " world" },
+      body: "only",
+    });
+    const only = await db.comment.findFirstOrThrow({ where: { threadId: emptied.threadId } });
+    await deleteComment(db, { commentId: only.id, viewer: owner() });
+    const listed = await call("doc_list_threads", { documentId: linked, filter: "all" });
+    expect(listed.threads.map((x: { id: string }) => x.id)).not.toContain(emptied.threadId);
+    expect(listed.threads.map((x: { id: string }) => x.id)).toContain(t.threadId);
+    expect(await call("doc_get_thread", { threadId: emptied.threadId })).toMatchObject({ error: "document_not_found" });
+    expect(await call("doc_reply_to_thread", { threadId: emptied.threadId, body: "x" })).toMatchObject({
+      error: "document_not_found",
+    });
+    expect(await call("doc_resolve_thread", { threadId: emptied.threadId })).toMatchObject({
+      error: "document_not_found",
+    });
   });
 
   it("a document the agent cannot read is document_not_found, for every read tool", async () => {

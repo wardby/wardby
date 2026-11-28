@@ -84,6 +84,12 @@ it, and detach the old one.
 Document and comment text reaches the model as untrusted data, never as
 instructions.
 
+In `doc_list_threads` and `doc_get_thread`, a deleted comment that has replies
+after it appears in its place as `{ "id", "deleted": true, "createdAt" }`, with
+no body or author. A thread whose comments were all deleted is left out, and
+`doc_get_thread`, `doc_reply_to_thread` and `doc_resolve_thread` answer
+`document_not_found` for it, as for an unknown thread.
+
 ## Which documents the agent can touch
 
 An agent never gets its owner's access. Only these give it any:

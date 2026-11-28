@@ -18,7 +18,7 @@ import {
   type ElementAnchor,
   type ElementLike,
 } from "../../core/documents/element-anchors.js";
-import type { Anchor, ThreadView } from "./api.js";
+import { liveComments, type Anchor, type ThreadView } from "./api.js";
 import type { BoardsEditor } from "./boards-editor.js";
 import { previewText } from "./comments.js";
 import { h, placeAt } from "./dom.js";
@@ -391,11 +391,9 @@ export class DesignSurface implements AnchorSurface {
       this.marks.append(pin);
     }
     pin.className = `pin${t.status !== "open" ? " resolved" : ""}${this.active === t.id ? " on" : ""}`;
-    pin.title = this.preview(t.comments[0]?.body ?? "");
-    pin.setAttribute(
-      "aria-label",
-      `Thread ${t.number}, ${t.comments.length} message${t.comments.length === 1 ? "" : "s"}`,
-    );
+    const live = liveComments(t);
+    pin.title = this.preview(live[0]?.body ?? "");
+    pin.setAttribute("aria-label", `Thread ${t.number}, ${live.length} message${live.length === 1 ? "" : "s"}`);
     const num = String(t.number);
     if (pin.textContent !== num) pin.replaceChildren(h("span", {}, num));
     return pin;

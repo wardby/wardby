@@ -10,6 +10,7 @@ import {
   editComment,
   guestMentionCandidates,
   listThreads,
+  liveComments,
   MAX_MENTIONS_CHECKED,
   mentionCandidates,
   mentionedGuestNames,
@@ -215,11 +216,11 @@ describe.skipIf(!process.env.DATABASE_URL)("comment service (database)", () => {
 
     const all = await listThreads(db, { documentId: d, viewer: asOwner(), filter: "all" });
     expect(all.map((t) => t.number)).toEqual([1, 2]);
-    const c0 = all[0].comments;
+    const c0 = liveComments(all[0]);
     expect(c0[0]).toMatchObject({ author: { kind: "member", name: "Olive Owner" }, mine: true });
     expect(c0[1].author).toEqual({ kind: "member", name: `@memb-${s.slice(0, 6)}` });
     expect(c0[1].mine).toBe(false);
-    const c1 = all[1].comments;
+    const c1 = liveComments(all[1]);
     expect(c1[1].author).toEqual({ kind: "member", name: "Former member" });
     expect(c1[2].author).toEqual({ kind: "agent", name: "Agent", viaName: `@memb-${s.slice(0, 6)}` });
     expect(c1[3].author).toEqual({ kind: "guest", name: "Gus (guest)" });
@@ -232,10 +233,123 @@ describe.skipIf(!process.env.DATABASE_URL)("comment service (database)", () => {
     expect(await names("mine")).toEqual([1]); // agent replies are not the viewer's own
     const memberMine = await listThreads(db, { documentId: d, viewer: asMember(), filter: "mine" });
     expect(memberMine.map((t) => t.number)).toEqual([1, 2]);
-    expect(memberMine[0].comments.map((c) => c.mine)).toEqual([false, true]);
+    expect(liveComments(memberMine[0]).map((c) => c.mine)).toEqual([false, true]);
     await expect(
       listThreads(db, { documentId: d, viewer: { kind: "principal", principalId: outsider.id }, filter: "all" }),
     ).rejects.toThrow("document_not_found");
+  });
+
+  describe("deleted comments", () => {
+    /** A fresh document the member can comment on, so thread numbers and lists start empty. */
+    const freshDoc = async () => {
+      const d = (await createDocument(db, cipher, { ownerId: owner.id, title: "Del", markdown: "hello world" })).id;
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "document",
+          resourceId: d,
+          granteeKind: "principal",
+          granteePrincipalId: member.id,
+          granteeKey: `principal:${member.id}`,
+          level: "comment",
+        },
+      });
+      // A second commenter, on this document only.
+      await db.resourceGrant.create({
+        data: {
+          resourceType: "document",
+          resourceId: d,
+          granteeKind: "principal",
+          granteePrincipalId: outsider.id,
+          granteeKey: `principal:${outsider.id}`,
+          level: "comment",
+        },
+      });
+      return d;
+    };
+    const asOther = (): Viewer => ({ kind: "principal", principalId: outsider.id });
+    const idsOf = async (threadId: string) =>
+      (await db.comment.findMany({ where: { threadId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] })).map(
+        (c) => c.id,
+      );
+
+    it("deleting a thread's only comment hides the thread: no list, reply, resolve or reopen", async () => {
+      const d = await freshDoc();
+      const t = await createThread(db, cipher, { documentId: d, viewer: asMember(), anchor, body: "only one" });
+      const kept = await createThread(db, cipher, { documentId: d, viewer: asMember(), anchor, body: "kept" });
+      const [only] = await idsOf(t.threadId);
+      await deleteComment(db, { commentId: only, viewer: asMember() });
+      for (const filter of ["all", "open", "mine"] as const) {
+        const list = await listThreads(db, { documentId: d, viewer: asOwner(), filter });
+        expect(list.map((x) => x.id)).not.toContain(t.threadId);
+      }
+      expect((await listThreads(db, { documentId: d, viewer: asMember(), filter: "mine" })).map((x) => x.id)).toEqual([
+        kept.threadId,
+      ]);
+      await expect(reply(db, cipher, { threadId: t.threadId, viewer: asOwner(), body: "late" })).rejects.toThrow(
+        "comment_not_found",
+      );
+      await expect(
+        setThreadStatus(db, { threadId: t.threadId, viewer: asOwner(), status: "resolved" }),
+      ).rejects.toThrow("comment_not_found");
+      await expect(setThreadStatus(db, { threadId: t.threadId, viewer: asOwner(), status: "open" })).rejects.toThrow(
+        "comment_not_found",
+      );
+      // Nothing more is erased: the rows stay, and the next thread takes a new number.
+      expect(await db.commentThread.count({ where: { id: t.threadId } })).toBe(1);
+      const next = await createThread(db, cipher, { documentId: d, viewer: asOwner(), anchor, body: "next" });
+      expect(next.number).toBe(3);
+    });
+
+    it("a deleted first comment is a placeholder; replies stay and the starter keeps resolve", async () => {
+      const d = await freshDoc();
+      const t = await createThread(db, cipher, { documentId: d, viewer: asMember(), anchor, body: "secret plan" });
+      await reply(db, cipher, { threadId: t.threadId, viewer: asOther(), body: "other reply" });
+      await reply(db, cipher, { threadId: t.threadId, viewer: asOwner(), body: "owner reply" });
+      const [first] = await idsOf(t.threadId);
+      await deleteComment(db, { commentId: first, viewer: asMember() });
+
+      const [view] = await listThreads(db, { documentId: d, viewer: asMember(), filter: "all" });
+      expect(view.comments).toHaveLength(3);
+      expect(view.comments[0]).toEqual({ id: first, deleted: true, createdAt: expect.any(Date) });
+      expect(JSON.stringify(view)).not.toContain("secret plan");
+      expect(liveComments(view).map((c) => c.body)).toEqual(["other reply", "owner reply"]);
+      expect(view.startedByMe).toBe(true);
+      expect((await listThreads(db, { documentId: d, viewer: asOther(), filter: "all" }))[0].startedByMe).toBe(false);
+      // The member still started it (the "mine" filter too), though their only comment is deleted.
+      expect((await listThreads(db, { documentId: d, viewer: asMember(), filter: "mine" })).map((x) => x.id)).toEqual([
+        t.threadId,
+      ]);
+      // The next author is only a commenter: not the starter, so no resolve.
+      await expect(
+        setThreadStatus(db, { threadId: t.threadId, viewer: asOther(), status: "resolved" }),
+      ).rejects.toThrow("document_access_denied");
+      await setThreadStatus(db, { threadId: t.threadId, viewer: asMember(), status: "resolved" });
+      await setThreadStatus(db, { threadId: t.threadId, viewer: asMember(), status: "open" });
+    });
+
+    it("a deleted middle comment is a placeholder in its place", async () => {
+      const d = await freshDoc();
+      const t = await createThread(db, cipher, { documentId: d, viewer: asOwner(), anchor, body: "one" });
+      await reply(db, cipher, { threadId: t.threadId, viewer: asMember(), body: "two" });
+      await reply(db, cipher, { threadId: t.threadId, viewer: asOwner(), body: "three" });
+      const [, middle] = await idsOf(t.threadId);
+      await deleteComment(db, { commentId: middle, viewer: asMember() });
+      const [view] = await listThreads(db, { documentId: d, viewer: asOwner(), filter: "all" });
+      expect(view.comments.map((c) => (c.deleted ? "(deleted)" : c.body))).toEqual(["one", "(deleted)", "three"]);
+      expect(view.comments[1]).toEqual({ id: middle, deleted: true, createdAt: expect.any(Date) });
+    });
+
+    it("deleted comments after the last live one are left out, with no placeholder", async () => {
+      const d = await freshDoc();
+      const t = await createThread(db, cipher, { documentId: d, viewer: asOwner(), anchor, body: "one" });
+      await reply(db, cipher, { threadId: t.threadId, viewer: asMember(), body: "two" });
+      await reply(db, cipher, { threadId: t.threadId, viewer: asMember(), body: "three" });
+      const [, second, third] = await idsOf(t.threadId);
+      await deleteComment(db, { commentId: third, viewer: asMember() });
+      await deleteComment(db, { commentId: second, viewer: asMember() });
+      const [view] = await listThreads(db, { documentId: d, viewer: asOwner(), filter: "all" });
+      expect(view.comments.map((c) => (c.deleted ? "(deleted)" : c.body))).toEqual(["one"]);
+    });
   });
 
   it("lists mention candidates: owner, grantees, and profiles for everyone grants", async () => {
