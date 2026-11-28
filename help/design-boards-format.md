@@ -21,7 +21,7 @@ A [design](designs.md) is stored as plain files: a `manifest.json`, one HTML fil
 6. CSS variables on `body`, not `:root`; longhand properties when a value uses `var()` (`background-color`, `border-color`, not `background: var(--x)` or `border: 2px solid var(--x)`).
 7. Under 40 KB per board (512 KB is the hard limit).
 
-Wardby sends these same rules to a coding agent in every design task, so an agent needs no extra setup. A repository that also wants agents to follow them outside Wardby tasks can add the skill below.
+Wardby sends these same rules to a coding agent in every design task, and to a native agent in the `doc_create` and `doc_publish_version` tool descriptions, so an agent needs no extra setup. A repository that also wants agents to follow them outside Wardby tasks can add the skill below.
 
 ## What is removed and what is refused
 

@@ -84,6 +84,11 @@ it, and detach the old one.
 Document and comment text reaches the model as untrusted data, never as
 instructions.
 
+`doc_create` and `doc_publish_version` describe the
+[board format](design-boards-format.md) a design's files must follow. When a
+design's files break it, the result is `board_format_invalid` with the first
+10 `problems`, so the agent can fix them and try again.
+
 In `doc_list_threads` and `doc_get_thread`, a deleted comment that has replies
 after it appears in its place as `{ "id", "deleted": true, "createdAt" }`, with
 no body or author. A thread whose comments were all deleted is left out, and

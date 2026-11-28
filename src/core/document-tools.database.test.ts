@@ -464,7 +464,18 @@ describe.skipIf(!process.env.DATABASE_URL)("doc_* write tools (database)", () =>
   it("doc_create on a design refuses a bad board and strips a script with a warning; pins survive on unchanged boards", async () => {
     expect(await call("doc_create", { kind: "design", title: "Bad", files: { "manifest.json": "{}" } })).toMatchObject({
       error: "board_format_invalid",
+      // What is wrong, so the agent can fix it: the same list the MCP tools return.
+      problems: expect.arrayContaining([expect.stringMatching(/^manifest\.json /)]),
     });
+    const external = coffee();
+    external["boards/about.html"] = external["boards/about.html"].replace(
+      "</body>",
+      `<img src="https://example.com/${SECRET}.png"></body>`,
+    );
+    const refused = await call("doc_create", { kind: "design", title: "External", files: external });
+    expect(refused.error).toBe("board_format_invalid");
+    expect(refused.problems.length).toBeGreaterThan(0);
+    expect(JSON.stringify(refused)).not.toContain(SECRET);
     const files = coffee();
     files["boards/about.html"] = files["boards/about.html"].replace("</body>", "<script>alert(1)</script></body>");
     const made = await call("doc_create", { kind: "design", title: "Coffee", files }, "run-design");

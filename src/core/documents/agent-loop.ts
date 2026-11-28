@@ -57,6 +57,7 @@ import {
   agentEditFormat,
   REPLIES_FENCE,
   THREADS_HEADING,
+  UNDONE_REPLY_NOTE,
   type AgentEditFormat,
   type EarlierEditForm,
 } from "./agent-formats.js";
@@ -364,6 +365,7 @@ export function nativeSendTask(documentId: string, versionNumber: number, thread
     "Read each thread with doc_get_thread and the document with doc_get.",
     "Publish one revision with doc_publish_version (baseNumber = the version you read), then reply to each thread with doc_reply_to_thread.",
     "If doc_publish_version reports document_version_conflict, read the document again and retry once; if it still fails, say so in your replies.",
+    UNDONE_REPLY_NOTE,
   ].join("\n");
 }
 

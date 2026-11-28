@@ -153,6 +153,7 @@ describe.skipIf(!process.env.DATABASE_URL)("send threads to a native writer (dat
         "Read each thread with doc_get_thread and the document with doc_get.",
         "Publish one revision with doc_publish_version (baseNumber = the version you read), then reply to each thread with doc_reply_to_thread.",
         "If doc_publish_version reports document_version_conflict, read the document again and retry once; if it still fails, say so in your replies.",
+        "If you could not do something a thread asked for, say so plainly in your reply to it and why; never say it is done.",
       ].join("\n"),
     );
     for (const r of await db.commentThread.findMany({ where: { id: { in: ids } } })) {

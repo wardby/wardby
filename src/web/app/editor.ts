@@ -8,6 +8,7 @@ import Collaboration from "@tiptap/extension-collaboration";
 import CollaborationCaret from "@tiptap/extension-collaboration-caret";
 import type * as Y from "yjs";
 import { Markdown } from "@tiptap/markdown";
+import { keepPlainText } from "../../core/documents/markdown-text.js";
 import { Plugin, PluginKey, type EditorState, type Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { documentExtensions, type PlanLinkTargets } from "./extensions.js";
@@ -108,7 +109,7 @@ export function createEditor(
   planLinks?: () => PlanLinkTargets | null,
   collab?: CollabOptions,
 ): Editor {
-  return new Editor({
+  const editor = new Editor({
     element,
     // The page's CSP allows no inline <style>; the editor's base styles are in styles.css.
     injectCSS: false,
@@ -131,6 +132,9 @@ export function createEditor(
     ],
     ...(collab ? {} : { content: markdown, contentType: "markdown" as const }),
   });
+  // Saves write "&" as "&", not "&amp;" (markdown-text.ts); the server's live documents do the same.
+  if (editor.markdown) keepPlainText(editor.markdown);
+  return editor;
 }
 
 export function getHighlights(editor: Editor): Highlight[] {

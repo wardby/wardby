@@ -27,6 +27,8 @@ import { ensureNamedSet } from "./documents/sets.js";
 import { redactExactSecretValues } from "./secret-spans.js";
 import { parseStoredDocumentTools, type DocumentToolsSetting } from "./documents/tools-setting.js";
 import { getVersion } from "./documents/versions.js";
+import { BoardFormatError } from "./documents/boards/errors.js";
+import { boardFormatRulesText } from "./documents/boards/rules.js";
 
 const log = logger.child({ module: "document-tools" });
 
@@ -74,6 +76,8 @@ function errorResult(code: string, extra?: Record<string, unknown>): string {
 function toolError(name: string, err: unknown): string {
   const code = err instanceof Error && KNOWN.has(err.message) ? err.message : "document_tool_failed";
   if (code === "document_tool_failed") log.warn({ tool: name, code }, "document tool failed");
+  // The same first ten problems the MCP tools and the web page return, so the agent can fix its files.
+  if (err instanceof BoardFormatError) return errorResult(code, { problems: err.problems.slice(0, 10) });
   return errorResult(code);
 }
 
@@ -118,6 +122,7 @@ const filesProp = {
   description:
     'A design\'s files by path ("manifest.json" and "boards/<id>.html"). Use this for designs, markdown for documents; never both.',
 };
+const DESIGN_RULES = `A design's files must follow these rules:\n${boardFormatRulesText()}`;
 
 export const DOCUMENT_READ_TOOL_DEFS: LoadedTool[] = [
   {
@@ -170,7 +175,7 @@ export const DOCUMENT_READ_TOOL_DEFS: LoadedTool[] = [
 export const DOCUMENT_WRITE_TOOL_DEFS: LoadedTool[] = [
   {
     name: "doc_create",
-    description: `Creates a new document or design linked to this agent, as a first version, in draft. Give markdown for a document or files for a design. A run may create only a limited number of documents. ${DATA_NOTE}`,
+    description: `Creates a new document or design linked to this agent, as a first version, in draft. Give markdown for a document or files for a design. A run may create only a limited number of documents. ${DATA_NOTE}\n\n${DESIGN_RULES}`,
     jsonSchema: {
       type: "object",
       properties: {
@@ -198,7 +203,7 @@ export const DOCUMENT_WRITE_TOOL_DEFS: LoadedTool[] = [
   },
   {
     name: "doc_publish_version",
-    description: `Publishes a new version of a document this agent can write, on top of baseNumber (the latest version you read). If the document has a newer version it fails with document_version_conflict (read it again with doc_get and redo the edit), except on a document or design being edited live, where your change is merged with what was published since. An approved or archived document is locked. ${DATA_NOTE}`,
+    description: `Publishes a new version of a document this agent can write, on top of baseNumber (the latest version you read). If the document has a newer version it fails with document_version_conflict (read it again with doc_get and redo the edit), except on a document or design being edited live, where your change is merged with what was published since. An approved or archived document is locked. ${DATA_NOTE}\n\n${DESIGN_RULES}`,
     jsonSchema: {
       type: "object",
       properties: {

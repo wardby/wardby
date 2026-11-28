@@ -47,7 +47,7 @@ A person with `write` access selects open threads in the page and chooses "send 
 When the run ends:
 
 1. Wardby reads the file at the run's head ref and publishes it as the next version, if the document is still at the version that was sent. If someone published meanwhile, see [When the document changed while the agent worked](#when-the-document-changed-while-the-agent-worked).
-2. The agent replies on each thread, and resolves the ones it addressed. A failed run posts one fixed reply; the threads stay open.
+2. The agent replies on each thread, and resolves the ones it addressed. Where it could not do what a thread asked, its task tells it to say so in the reply, never that it is done. A failed run posts one fixed reply; the threads stay open.
 
 Open pages show the new version, the agent's replies and the resolved threads as they land, without a refresh (see [live updates](documents.md#live-updates)). A sent thread reads **✦ working** in the comments panel ("Agent is working on it…" in the thread) until the agent replies, then **✦ replied** ("Agent replied" in the thread's header).
 

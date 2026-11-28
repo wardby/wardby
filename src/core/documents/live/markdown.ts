@@ -9,13 +9,14 @@ import { Node as PMNode } from "@tiptap/pm/model";
 import { prosemirrorJSONToYDoc, yXmlFragmentToProsemirrorJSON } from "@tiptap/y-tiptap";
 import type * as Y from "yjs";
 import { editorBaseExtensions } from "../editor-schema.js";
+import { keepPlainText } from "../markdown-text.js";
 
 export const LIVE_FIELD = "default";
 
 const extensions = editorBaseExtensions();
 export const liveSchema = getSchema(extensions);
 // Built as web/app/history.ts builds its manager (flattened kits), so parse and serialize match the page.
-const markdown = new MarkdownManager({ extensions: resolveExtensions(extensions) });
+const markdown = keepPlainText(new MarkdownManager({ extensions: resolveExtensions(extensions) }));
 
 export function markdownToDoc(source: string): PMNode {
   return PMNode.fromJSON(liveSchema, markdown.parse(source));

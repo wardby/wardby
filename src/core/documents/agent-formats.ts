@@ -122,11 +122,15 @@ export const THREADS_HEADING = "COMMENT THREADS:";
  * pull request description (checklist, how to try it), and without this it ends with that template and
  * leaves the block out, so its replies are lost.
  */
+/** Shared by every writer's comment task, native and coding: a reply never claims work that failed. */
+export const UNDONE_REPLY_NOTE =
+  "If you could not do something a thread asked for, say so plainly in your reply to it and why; never say it is done.";
 const REPLIES_INSTRUCTION =
   `Your final summary (the summary field, when you are asked for one) must end with a fenced code block tagged ${REPLIES_FENCE} ` +
   'holding a JSON array with one entry per thread: [{"thread": <number>, "reply": "<your reply to the thread>", "resolved": true|false}]. ' +
   "Put it after everything else, including any checklist or how-to-try section: without it the people on the threads get no reply. " +
-  "Set resolved to true only for a thread you fully addressed. Keep the rest of the summary short.";
+  "Set resolved to true only for a thread you fully addressed. Keep the rest of the summary short. " +
+  UNDONE_REPLY_NOTE;
 const threadsSent = (numbers: number[]) => `Threads sent: ${numbers.map((n) => `#${n}`).join(", ")}.`;
 
 /** The largest document (current version, in characters) that can be sent to an agent in phase 1. */
