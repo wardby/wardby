@@ -66,10 +66,11 @@ export const JOIN_MESSAGES = {
 } as const;
 
 /**
- * A word after a slash, like /exit: a chat command, never sent to the agent, so a mistyped or
- * unknown command is not mistaken for a message. A path such as /usr/bin is still text.
+ * A lone /word, like /exit: a chat command, never sent to the agent, so a mistyped or unknown
+ * command is not mistaken for a message. A line with more after it ("/tmp is full", "/usr/bin") is a
+ * message, except /interrupt and /i.
  */
-const UNKNOWN_COMMAND = /^\/[a-z][a-z-]*(?:\s|$)/i;
+const UNKNOWN_COMMAND = /^\/[a-z][a-z-]*$/i;
 const INTERRUPT_COMMAND = /^\/(?:interrupt|i)(?:\s+|$)/;
 const MAX_LINK_BYTES = 8192;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -427,7 +428,7 @@ export async function joinCommand(argv: string[], deps: JoinDeps = {}): Promise<
           confirmQuit = true;
           out(JOIN_MESSAGES.confirmQuit);
           out("Stop the agent? (y/N)");
-        } else if (UNKNOWN_COMMAND.test(text) && !INTERRUPT_COMMAND.test(text)) {
+        } else if (UNKNOWN_COMMAND.test(text) && text !== "/i" && text !== "/interrupt") {
           out(JOIN_MESSAGES.unknownCommand);
         } else if (left) {
           out("You left this run; nothing was sent.");

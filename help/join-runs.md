@@ -90,8 +90,9 @@ MCP client's agent:
    leaves (the run finishes its work); `/quit` stops the agent after asking you to confirm:
    the run then ends cancelled and its work is not pushed. Ctrl-C leaves, as
    `/leave` does. After leaving, the chat keeps showing the run until it
-   ends; press Ctrl-C (again) to stop watching. Any other `/word` is a chat
-   command too: an unknown one is never sent to the agent.
+   ends; press Ctrl-C (again) to stop watching. A line that is only
+   a `/word` is always a chat command, so an unknown one is never sent to the
+   agent; a message such as "/tmp is full" is sent as usual.
 
 Closing the terminal leaves the run too. If the connection to the server drops,
 the chat retries for about a minute, then leaves the run on its way out so it
