@@ -455,6 +455,18 @@ img.ProseMirror-separator {
   border-radius: 6px;
   color: var(--muted);
 }
+.cpop .resolvebtn {
+  border: 1px solid var(--border);
+  background: transparent;
+  padding: 0.1rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+.cpop .resolvebtn:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
 .cpop .iconbtn:hover {
   background: color-mix(in srgb, var(--text) 8%, transparent);
   color: var(--text);

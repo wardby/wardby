@@ -624,11 +624,14 @@ describe.skipIf(!process.env.DATABASE_URL || !existsSync(chromium.executablePath
     await pickBoard(page, "Menu");
     await expect.poll(() => tipInside(pin1, h1), { timeout: 10_000 }).toBe(true);
     expect(await outdated("Make the prices bigger").count()).toBe(0);
-    // Resolve from the ⋯ menu: the pin hides; selecting the thread in the panel shows it again.
+    // Resolve from the thread's header, beside ⋯ (no longer in the menu): the pin hides; selecting the thread in
+    // the panel shows it again.
     await pin1.click();
     await expect.poll(() => head.textContent()).toContain("#1 on");
     await page.locator(".cpop [data-act=menu]").click();
-    await page.getByRole("menuitem", { name: "✓ Resolve" }).click();
+    expect(await page.getByRole("menuitem", { name: "✓ Resolve" }).count()).toBe(0);
+    await page.locator(".cpop [data-act=menu]").click();
+    await page.locator(".cpop").getByRole("button", { name: "✓ Resolve" }).click();
     await expect.poll(() => pin1.count()).toBe(0);
     await expect.poll(() => count("Menu").count()).toBe(0);
     await page.getByRole("tab", { name: /^Resolved/ }).click();

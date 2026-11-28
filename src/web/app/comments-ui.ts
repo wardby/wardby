@@ -380,6 +380,22 @@ export class CommentsUI {
           h("b", {}, this.surface.label(isDraft ? pop.start! : t!, 60)),
         ),
         status ? h("span", { class: `status ${status[0]}` }, status[1]) : null,
+        // Resolve (or Reopen) is one click, beside the menu that holds the rest.
+        t && this.canResolve(t)
+          ? h(
+              "button",
+              {
+                type: "button",
+                class: "resolvebtn",
+                data: { act: t.status === "resolved" ? "reopen" : "resolve" },
+                onClick: (e) => {
+                  e.stopPropagation();
+                  void this.menuAction(t.status === "resolved" ? "reopen" : "resolve");
+                },
+              },
+              t.status === "resolved" ? "↺ Reopen" : "✓ Resolve",
+            )
+          : null,
         menuItems.length
           ? this.iconButton("menu", "More actions", "⋯", { haspopup: "menu", expanded: String(!!pop.menuOpen) })
           : null,
@@ -518,7 +534,6 @@ export class CommentsUI {
 
   private menuItems(t: ThreadView): [string, string, boolean?][] {
     const items: [string, string, boolean?][] = [];
-    if (this.canResolve(t)) items.push(t.status === "resolved" ? ["reopen", "↺ Reopen"] : ["resolve", "✓ Resolve"]);
     if (this.canSend && t.status !== "resolved" && !this.working(t)) items.push(["send", "✦ Send to agent"]);
     items.push(["link", "🔗 Copy link"]);
     if (this.lastOwn(t)) {
