@@ -123,6 +123,42 @@ describe("CommentsUI with a surface", () => {
     expect(document.querySelector(".cpop")).toBeNull();
   });
 
+  it("offers Send to agent on a reply; ticked, the reply is posted and then the thread is sent", async () => {
+    const { api, payload, ui, handlers } = setup([thread("1"), thread("2", "resolved")]);
+    (payload as { document: { canSend: boolean } }).document.canSend = true;
+    const calls: string[] = [];
+    Object.assign(api, {
+      reply: vi.fn(async (id: string) => void calls.push(`reply ${id}`)),
+      send: vi.fn(async (ids: string[]) => void calls.push(`send ${ids.join(",")}`)),
+    });
+    ui.apply(payload);
+    const sendBox = () => document.querySelector<HTMLLabelElement>(".cpop label:has(input[data-send])");
+    handlers().activate("2");
+    expect(sendBox()?.hidden ?? true).toBe(true); // a resolved thread is not sent
+    handlers().activate("1");
+    expect(sendBox()?.hidden).toBe(false);
+    const pop = document.querySelector(".cpop")!;
+    pop.querySelector("textarea")!.value = "Still too long";
+    pop.querySelector<HTMLInputElement>("input[data-send]")!.checked = true;
+    pop.querySelector<HTMLButtonElement>("button.primary")!.click();
+    await vi.waitFor(() => expect(calls).toEqual(["reply 1", "send 1"]));
+  });
+
+  it("a reply without the box ticked is only a reply; an edit never offers Send to agent", async () => {
+    const { api, payload, ui, handlers } = setup([thread("1")]);
+    (payload as { document: { canSend: boolean } }).document.canSend = true;
+    const reply = vi.fn(async () => undefined);
+    const send = vi.fn(async () => undefined);
+    Object.assign(api, { reply, send, editComment: vi.fn(async () => undefined) });
+    ui.apply(payload);
+    handlers().activate("1");
+    const pop = document.querySelector(".cpop")!;
+    pop.querySelector("textarea")!.value = "Thanks";
+    pop.querySelector<HTMLButtonElement>("button.primary")!.click();
+    await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("finds a thread created before a failed send by its anchor, not its label", async () => {
     const element = (path: string) => ({
       type: "element" as const,

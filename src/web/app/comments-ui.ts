@@ -619,9 +619,11 @@ export class CommentsUI {
         ),
       );
     }
+    // A new comment, or a reply on a thread Send to agent could send now (as the ⋯ menu offers it); never an edit.
+    const canSendHere = this.canSend && !editing && (isDraft || (!!t && t.status !== "resolved" && !this.working(t)));
     const send = h(
       "label",
-      { hidden: !(isDraft && this.canSend) },
+      { hidden: !canSendHere },
       h("input", { type: "checkbox", data: { send: "1" } }),
       "Send to agent",
     );
@@ -635,7 +637,7 @@ export class CommentsUI {
         "div",
         { class: "actions" },
         send,
-        h("span", { class: `kbd${isDraft && this.canSend ? "" : " grow-left"}` }, "⌘↵"),
+        h("span", { class: `kbd${canSendHere ? "" : " grow-left"}` }, "⌘↵"),
         h(
           "button",
           {
@@ -777,7 +779,20 @@ export class CommentsUI {
         await this.host.api.editComment(pop.editing, body);
         pop.editing = undefined;
       } else {
+        const send = this.canSend && pop.el.querySelector<HTMLInputElement>("input[data-send]")?.checked === true;
         await this.host.api.reply(t.id, body);
+        if (send) {
+          // The reply is stored; a refused send shows its reason on the thread, with the reply in it.
+          ta.value = "";
+          pop.picked = [];
+          try {
+            await this.host.api.send([t.id]);
+          } catch (err) {
+            await this.reload().catch(() => undefined);
+            this.setError(errorMessage(err));
+            return;
+          }
+        }
       }
       ta.value = "";
       pop.picked = [];
