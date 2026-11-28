@@ -3047,7 +3047,7 @@ model DocumentReviewEvent {
   actorGuestId     String?
   /// The run when an agent acted (doc_submit_for_review); actorPrincipalId is then null.
   actorRunId       String?
-  /// submitted | reviewers_changed | approved | changes_requested | force_approved | reopened | archived | unarchived
+  /// submitted | reviewers_changed | revised | approved | changes_requested | force_approved | reopened | archived | unarchived
   kind             String
   fromState        String
   toState          String

@@ -14,6 +14,7 @@ export const isLockedState = (s: ReviewState) => s === "approved" || s === "reje
 export const EVENT_LABEL: Record<string, string> = {
   submitted: "submitted for review",
   reviewers_changed: "changed the reviewers",
+  revised: "published a revision",
   approved: "approved",
   changes_requested: "requested changes",
   force_approved: "force approved",

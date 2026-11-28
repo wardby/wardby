@@ -496,7 +496,7 @@ async function publishSet(
     },
   });
   const review = await planReviewers(db, { id: agentId, ownerId }, set.accessAgentId ?? agentId, setting);
-  // Every submit's events: routed once, after the last submit (#646), so the router starts once for the set.
+  // Every submit's and revision's events: routed once, after the last (#646), so the router starts once for the set.
   const submitted: string[] = [];
   const submit = (documentId: string) =>
     submitForReview(db, deps.cipher, {
@@ -630,6 +630,8 @@ async function publishSet(
         runId,
         summary: `Plan ${number}: updated by run ${runId}`,
         expectedNumber: existing.currentVersion?.number ?? 0,
+        // A revision answering requested changes routes with the publish's submits, once at the end.
+        deferRouting: { eventIds: submitted },
       });
     } catch (err) {
       // A newer version (a person's edit) is never overwritten: reported as not updated.
@@ -682,7 +684,7 @@ async function publishSet(
       failure ??= asError(err);
     }
   }
-  // One review action for the router: every document this publish submitted, made as the owner for this run, so
+  // One review action for the router: every document this publish submitted or revised, made as the owner for this run, so
   // it continues the run's job. Before a failure is thrown, so what was submitted still routes. Never throws.
   const [firstEvent] = submitted;
   if (firstEvent) {

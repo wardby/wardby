@@ -241,7 +241,8 @@ async function record(
   tx: Tx,
   input: {
     documentId: string;
-    viewer: Viewer;
+    /** null: a publish with no known author (recomputeAfterPublish). */
+    viewer: Viewer | null;
     kind: ReviewEventKind;
     from: string;
     to: ReviewState;
@@ -259,9 +260,9 @@ async function record(
     select: { id: true },
     data: {
       documentId: input.documentId,
-      actorPrincipalId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
-      actorGuestId: input.viewer.kind === "guest" ? input.viewer.guestId : null,
-      actorRunId: input.viewer.kind === "agent" ? input.viewer.runId : null,
+      actorPrincipalId: input.viewer?.kind === "principal" ? input.viewer.principalId : null,
+      actorGuestId: input.viewer?.kind === "guest" ? input.viewer.guestId : null,
+      actorRunId: input.viewer?.kind === "agent" ? input.viewer.runId : null,
       kind: input.kind,
       fromState: input.from,
       toState: input.to,
@@ -402,6 +403,11 @@ export async function submitForReview(
         }
       }
       if (approver) await ensureCommentAccess(tx, doc, approver, grantedBy);
+      // A resubmit that changes nothing (same reviewers and final approver, no note) is no review action: a
+      // revision is recorded when its version is published (recomputeAfterPublish), so it routes once.
+      const added = principalIds.length + guestIds.length - keep.length;
+      const approverChanged = approver !== undefined && approver !== doc.finalApproverId;
+      if (doc.reviewState !== "draft" && drop.length === 0 && added === 0 && !approverChanged && !note) return;
       const next = await readReview(tx, doc.id);
       const id = await record(tx, {
         documentId: doc.id,
@@ -419,12 +425,15 @@ export async function submitForReview(
     eventIds,
   );
   await notifyDocumentChange(db, input.documentId, "review");
-  await runReviewHooks(db, {
-    documentId: input.documentId,
-    eventIds,
-    actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
-    ...(input.deferRouting ? { deferRouting: true } : {}),
-  });
+  // A resubmit that changed nothing recorded no event: no hook runs.
+  if (eventIds.length) {
+    await runReviewHooks(db, {
+      documentId: input.documentId,
+      eventIds,
+      actorId: input.viewer.kind === "principal" ? input.viewer.principalId : null,
+      ...(input.deferRouting ? { deferRouting: true } : {}),
+    });
+  }
   input.deferRouting?.eventIds.push(...eventIds);
   return getReviewView(db, input.documentId, input.viewer, cipher);
 }
@@ -860,13 +869,36 @@ export async function assertNotLocked(tx: Tx, documentId: string): Promise<void>
 
 /**
  * In publishVersion's transaction, after the new version is current: while in review, the state is
- * recomputed (older verdicts stop counting). No event row: a publish is not a review action.
+ * recomputed (older verdicts stop counting). A publish onto a document with changes requested answers them: it is
+ * the review action "revised" (#646), recorded once per round of requested changes, and its event id is returned
+ * for the caller's review hooks. Any other publish records no event.
  */
-export async function recomputeAfterPublish(tx: Tx, documentId: string): Promise<void> {
-  const { doc, rule } = await readReview(tx, documentId);
-  if (doc.reviewState !== "in_review" && doc.reviewState !== "changes_requested") return;
+export async function recomputeAfterPublish(
+  tx: Tx,
+  documentId: string,
+  author: { principalId?: string; runId?: string; agentId?: string | null } = {},
+): Promise<string | null> {
+  const { doc, rule, lastEventAt } = await readReview(tx, documentId);
+  if (doc.reviewState !== "in_review" && doc.reviewState !== "changes_requested") return null;
   const to = computeReviewState(rule);
-  if (to !== doc.reviewState) await tx.document.update({ where: { id: documentId }, data: { reviewState: to } });
+  if (doc.reviewState === "in_review") {
+    if (to !== doc.reviewState) await tx.document.update({ where: { id: documentId }, data: { reviewState: to } });
+    return null;
+  }
+  const viewer: Viewer | null = author.runId
+    ? { kind: "agent", agentId: author.agentId ?? doc.agentId ?? "", runId: author.runId }
+    : author.principalId
+      ? { kind: "principal", principalId: author.principalId }
+      : null;
+  return record(tx, {
+    documentId,
+    viewer,
+    kind: "revised",
+    from: doc.reviewState,
+    to,
+    versionNumber: rule.currentVersion,
+    at: await actionTime(tx, lastEventAt),
+  });
 }
 
 /** The stored state, or null when the document does not exist. */

@@ -36,7 +36,7 @@ A whole [document](documents.md) or [design](designs.md) has a review state. Com
 | Rejected          | A document of a plan that was turned down (see [Reject](#reject)). Locked, and out of the plan. |
 | Archived          | Set aside by the owner. Locked. Unarchive returns it to the state it had before.                |
 
-Only verdicts on the **current version** count, so publishing a new version while the document is in review or has changes requested recomputes the state: earlier verdicts show as "on an older version" and nobody has approved yet (changes requested on v3 becomes in review on v4).
+Only verdicts on the **current version** count, so publishing a new version while the document is in review or has changes requested recomputes the state: earlier verdicts show as "on an older version" and nobody has approved yet (changes requested on v3 becomes in review on v4). The first version published after changes were requested is recorded as the review event **revised** ("published a revision"); later versions in the same round record no event. Submitting for review again with the same reviewers, final approver and no note changes nothing and records no event.
 
 ## Roles
 

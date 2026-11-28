@@ -5,7 +5,7 @@
  *
  * A set routes as one piece of work (spec §3.1): an action made only of approvals routes only when it completed
  * the set's approval (a plan set's is claimed by the plan hook, which runs first; a native option set's is claimed
- * here), a choice (chooseOption) routes once, a submit routes only when the set first enters review, and every
+ * here), a choice (chooseOption) routes once, a submit routes only when the set enters review (once per round), and every
  * other action routes once as that action on the set. An action that continues a job (an agent's own, or a plan
  * publish's submits for the planner run) is one more start of that job, counted against the router's limit.
  */
@@ -127,8 +127,8 @@ async function route(db: PrismaClient, deps: ReviewRouterDeps, action: ReviewAct
     const claim = await claimSetApproval(db, { kind: "documents", setId: set.id }, action.actorId);
     if (approvalsOnly && claim?.approved !== true) return;
   }
-  // A set enters review once (spec §3.1): a submit after another member's routes nothing.
-  if (set && kinds.every((k) => k === "submitted") && (await setAlreadySubmitted(db, doc, events[0]))) return;
+  // A set enters review once per round (spec §3.1): a submit after another member's in the same round routes nothing.
+  if (set && kinds.every(entersReview) && (await setAlreadySubmitted(db, doc, events[0]))) return;
 
   // Checked before any job is claimed: a router its person can no longer run is no router.
   const routerAgentId = await resolveRouter(
@@ -254,9 +254,19 @@ async function route(db: PrismaClient, deps: ReviewRouterDeps, action: ReviewAct
   }
 }
 
+/** A submit, or a revision answering requested changes: the set (re-)enters review. */
+const entersReview = (kind: string) => kind === "submitted" || kind === "revised";
+
 /**
- * Whether another member of the document's set has a submitted event before this one (by time, then id): the set
- * entered review then. Plan sets by planSetId, native option sets by setId.
+ * A decision that sends a set member back for work: the set's next submit or revision starts a new review round.
+ * Approvals do not: an approval while the set is still being submitted ends no round.
+ */
+const ROUND_ENDING_KINDS = ["changes_requested", "rejected", "reopened", "archived", "unarchived"];
+
+/**
+ * Whether another member of the document's set was submitted or revised earlier in this review round (by time,
+ * then id): the set entered review then. A round starts after the last decision on any member
+ * (ROUND_ENDING_KINDS), so a revision after changes were requested routes again, once for the set. Plan sets by planSetId, native option sets by setId.
  */
 async function setAlreadySubmitted(
   db: PrismaClient,
@@ -269,11 +279,32 @@ async function setAlreadySubmitted(
   });
   const others = members.map((m) => m.id).filter((id) => id !== doc.id);
   if (others.length === 0) return false;
+  const before = (at: { id: string; createdAt: Date }) => [
+    { createdAt: { lt: at.createdAt } },
+    { createdAt: at.createdAt, id: { lt: at.id } },
+  ];
+  const decision = await db.documentReviewEvent.findFirst({
+    where: { documentId: { in: members.map((m) => m.id) }, kind: { in: ROUND_ENDING_KINDS }, OR: before(first) },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { id: true, createdAt: true },
+  });
   const earlier = await db.documentReviewEvent.findFirst({
     where: {
       documentId: { in: others },
-      kind: "submitted",
-      OR: [{ createdAt: { lt: first.createdAt } }, { createdAt: first.createdAt, id: { lt: first.id } }],
+      kind: { in: ["submitted", "revised"] },
+      AND: [
+        { OR: before(first) },
+        ...(decision
+          ? [
+              {
+                OR: [
+                  { createdAt: { gt: decision.createdAt } },
+                  { createdAt: decision.createdAt, id: { gt: decision.id } },
+                ],
+              },
+            ]
+          : []),
+      ],
     },
     select: { id: true },
   });

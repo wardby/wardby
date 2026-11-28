@@ -21,7 +21,7 @@ import {
   submitForReview,
 } from "../documents/review.js";
 import { documentSecretValues } from "../documents/redact.js";
-import { createDocument } from "../documents/service.js";
+import { createDocument, publishVersion } from "../documents/service.js";
 import { createPlanReviewHook, setPlanReviewHook } from "../plans/approval.js";
 import { createPlanSetFixture } from "../plans/build.test-support.js";
 import { publishPlanFromRun } from "../plans/publish.js";
@@ -222,6 +222,73 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     expect(set.approvedAt).not.toBeNull();
     const job = await db.reviewJob.findUniqueOrThrow({ where: { id: calls[0].jobId } });
     expect(job).toMatchObject({ setId, documentId: null });
+  });
+
+  it("a set's revision after requested changes starts a new round: it routes once, however many members come back", async () => {
+    install();
+    const setId = await nativeSet(`Rounds ${s}`);
+    const a = await doc({ setId, option: "a" });
+    const b = await doc({ setId, option: "b" });
+    const c = await doc({ setId, option: "c" });
+    const requestChanges = (id: string) =>
+      reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "request_changes", versionNumber: 1 });
+    const revise = (id: string, text: string) =>
+      publishVersion(db, cipher, {
+        documentId: id,
+        markdown: `# Spec\n\n${text}`,
+        via: "editor",
+        createdById: owner.id,
+      });
+    await submit(a);
+    // Neither changing reviewers nor an approval while the set is still being submitted starts a new round.
+    await submitForReview(db, cipher, { documentId: a, viewer: as(owner), reviewers: [ann.id, owner.id] });
+    await approve(a);
+    await submit(b);
+    await submit(c);
+    await settle();
+    expect(calls.filter((x) => x.task.includes("Review action: submitted"))).toHaveLength(1);
+    calls = [];
+    // Changes on two members; both are revised: the second round routes once, on the first revision.
+    await requestChanges(b);
+    await requestChanges(c);
+    await settle();
+    calls = [];
+    await revise(b, "shorter");
+    await revise(c, "shorter too");
+    // A resubmit that changes nothing is no action, and a later publish in the same round is no revision.
+    await submitForReview(db, cipher, { documentId: b, viewer: as(owner), reviewers: [ann.id] });
+    await revise(b, "shorter still");
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].task).toContain(`Review action: revised on Rounds ${s} (version 2).`);
+    expect((await eventsOf(b)).map((e) => e.kind)).toEqual(["submitted", "changes_requested", "revised"]);
+    expect((await db.document.findUniqueOrThrow({ where: { id: b } })).reviewState).toBe("in_review");
+    calls = [];
+    // Another request for changes starts a third round.
+    await reviewDocument(db, cipher, { documentId: c, viewer: as(ann), verdict: "request_changes", versionNumber: 2 });
+    await settle();
+    calls = [];
+    await revise(c, "third");
+    await settle();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a single document's revision after requested changes routes as revised, once", async () => {
+    install();
+    const id = await doc({ title: "Pricing" });
+    await routed(id);
+    await submit(id);
+    await reviewDocument(db, cipher, { documentId: id, viewer: as(ann), verdict: "request_changes", versionNumber: 1 });
+    await settle();
+    calls = [];
+    const child = await db.run.create({ data: { agentId: writer } });
+    await publishVersion(db, cipher, { documentId: id, markdown: "# Spec\n\nv2", via: "agent", runId: child.id });
+    await publishVersion(db, cipher, { documentId: id, markdown: "# Spec\n\nv3", via: "agent", runId: child.id });
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].task).toContain("Review action: revised on Pricing (version 2).");
+    const revised = (await eventsOf(id)).find((e) => e.kind === "revised")!;
+    expect(revised).toMatchObject({ actorRunId: child.id, actorPrincipalId: null, fromState: "changes_requested" });
   });
 
   it("chooseOption routes once: the chosen option, the rejected ones, and the person's note", async () => {
@@ -581,7 +648,7 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
   });
 
   /** A planner run under `parentRunId` whose stored output is the given plan files (as a coding run stores them). */
-  async function plannerRun(plannerId: string, parentRunId: string, paths: string[]) {
+  async function plannerRun(plannerId: string, parentRunId: string, paths: string[], number?: number, revision = "") {
     const run = await db.run.create({
       data: { agentId: plannerId, status: "succeeded", trigger: "manual", parentRunId },
     });
@@ -598,14 +665,14 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
         protectedPaths: [],
         budgetReservedUsd: 0.1,
         collectPlanFiles: true,
-        planNumber: ++planNumber,
+        planNumber: number ?? ++planNumber,
         issueProvider: "github",
         issueKey: `o/rr-${s}#${planNumber}`,
         planFilesStatus: "stored",
       },
     });
     await db.codingRunPlanFile.createMany({
-      data: paths.map((path) => ({ runId: run.id, direction: "output", path, content: `# ${path}\n` })),
+      data: paths.map((path) => ({ runId: run.id, direction: "output", path, content: `# ${path}\n${revision}` })),
     });
     return run.id;
   }
@@ -646,6 +713,41 @@ describe.skipIf(!process.env.DATABASE_URL)("review router hook (database)", { ti
     expect((await db.reviewJob.findUniqueOrThrow({ where: { id: root.id } })).startsUsed).toBe(1);
     const jobs = await db.reviewJob.findMany({ where: { routerAgentId: router, createdAt: { gte: root.createdAt } } });
     expect(jobs.filter((j) => j.rootJobId === null).map((j) => j.id)).toEqual([root.id]);
+  });
+
+  it("a plan republished after changes were requested routes its revision once", async () => {
+    install();
+    const plannerId = await agent({
+      kind: "coding",
+      reviewRouterId: router,
+      codingProfile: {
+        create: {
+          repository: `o/rr-${s}`,
+          protectedPaths: [],
+          planDocument: { store: "wardby", reviewers: [owner.id], onApproved: "notify" },
+        },
+      },
+    });
+    const top = await db.run.create({ data: { agentId: plannerId, status: "succeeded", trigger: "manual" } });
+    const first = await plannerRun(plannerId, top.id, ["plan.md", "api.md"]);
+    const number = (await db.codingRun.findUniqueOrThrow({ where: { runId: first } })).planNumber!;
+    await publishPlanFromRun(db, { cipher, origin: null }, first);
+    await settle();
+    expect(calls).toHaveLength(1);
+    const api = await db.document.findFirstOrThrow({ where: { planSet: { agentId: plannerId }, planPath: "api.md" } });
+    await reviewDocument(db, cipher, {
+      documentId: api.id,
+      viewer: as(owner),
+      verdict: "request_changes",
+      versionNumber: 1,
+    });
+    await settle();
+    calls = [];
+    const second = await plannerRun(plannerId, top.id, ["plan.md", "api.md"], number, "revised\n");
+    await publishPlanFromRun(db, { cipher, origin: null }, second);
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].task).toContain("Review action: revised on Plan");
   });
 
   it("agent-made review actions inside one job stop at the router's maxStartsPerDecision", async () => {

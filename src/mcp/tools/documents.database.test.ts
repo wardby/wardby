@@ -1101,9 +1101,10 @@ describe.skipIf(!process.env.DATABASE_URL)("document MCP tools (database)", () =
 
       const got = (await callOwner("get_document", { documentId: id })).json;
       expect(got).toMatchObject({ reviewState: "approved", number: 2, finalApproverId: null });
-      // submitted, changes_requested, approved: a publish adds no event
-      expect(got.events).toHaveLength(3);
+      // submitted, changes_requested, revised (the publish answering the changes), approved
+      expect(got.events).toHaveLength(4);
       expect(got.events[0]).toMatchObject({ kind: "approved", toState: "approved", versionNumber: 2 });
+      expect(got.events[1]).toMatchObject({ kind: "revised", fromState: "changes_requested", versionNumber: 2 });
       const listed = (await callOwner("list_documents", { ownedOnly: true })).json.documents;
       expect(listed.find((d: any) => d.documentId === id).reviewState).toBe("approved");
     }, 60_000);

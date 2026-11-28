@@ -706,11 +706,14 @@ that fails the check is skipped, as if it were not set; when none is left,
 nothing starts. Documents in a set route through the set and take no router of
 their own (`link_document` refuses `routerAgentId` for them).
 
-**Which actions.** Every review action: submitted, approved (and force
-approved), option chosen, changes requested, rejected, reopened, archived,
-unarchived and reviewers changed. In a set, the set entering review (its first
-submit: a later member's submit routes nothing, and a published plan's documents
-enter review together), the approval that completes the set, a choice (once,
+**Which actions.** Every review action: submitted, revised (the first version
+published after changes were requested), approved (and force approved), option
+chosen, changes requested, rejected, reopened, archived, unarchived and
+reviewers changed. In a set, the set entering review once per round: its first
+submit or revision routes, a later member's in the same round routes nothing,
+and a published plan's documents enter review together. A round ends when a
+member gets changes requested, is rejected, reopened, archived or unarchived
+(an approval ends none). Then the approval that completes the set, a choice (once,
 not once per document) and each other action once. A plan approval routes only
 for the action that completed it, and an approval completed without a review
 action (for example removing the last waiting document) does not route. Each action routes once; a failure to

@@ -10,6 +10,7 @@ tags:
     route work,
     request_work,
     review actions,
+    revised,
     onApproved,
     choose option agent,
     which agent,
@@ -49,9 +50,9 @@ The router is checked again when each action happens: it must still be `router: 
 
 ## Which actions route
 
-Every review action: submitted, approved (and force approved), option chosen, changes requested, rejected, reopened, archived, unarchived and reviewers changed. The router decides when nothing is needed.
+Every review action: submitted, revised (the first version published after changes were requested, by a writer, a person or a republished plan), approved (and force approved), option chosen, changes requested, rejected, reopened, archived, unarchived and reviewers changed. The router decides when nothing is needed.
 
-Documents in a set (a plan set, or an option set made with `doc_create` `set` and `option`) route as one piece of work: the set entering review (its first submit; a later member's submit routes nothing, and a published plan's documents enter review together), the approval that completes the set, a choice (once, not once per document), and each other action once. A plan approval routes only for the action that completed it. Each action routes once: a repeated click or a retried hook starts nothing more.
+Documents in a set (a plan set, or an option set made with `doc_create` `set` and `option`) route as one piece of work: the set entering review once per round (its first submit or revision; a later member's in the same round routes nothing, and a published plan's documents enter review together; a round ends when a member gets changes requested, is rejected, reopened, archived or unarchived, not on an approval), the approval that completes the set, a choice (once, not once per document), and each other action once. A plan approval routes only for the action that completed it. Each action routes once: a repeated click or a retried hook starts nothing more.
 
 A person can add a `note` to `submit_for_review`, an approval, a choice or a request for changes. It reaches the router labelled as that person's.
 

@@ -14,6 +14,7 @@ import { documentSecretValues } from "./redact.js";
 import { mergeFilesIntoLatest, mergeIntoLatest } from "./live/merge-latest.js";
 import { isLocked } from "./review-state.js";
 import { assertNotLocked, recomputeAfterPublish } from "./review.js";
+import { runReviewHooks } from "./review-hooks.js";
 import { stageVersion, versionColumns, writeVersion, type PublishVia } from "./version-write.js";
 import type { VersionWarning } from "./warnings.js";
 
@@ -123,6 +124,8 @@ export async function publishVersion(
      * based on an older version with everything published since (mergeIntoLatest).
      */
     strictBase?: boolean;
+    /** Plan publish: a revision's review hooks skip routing and its event id is added here (as submitForReview). */
+    deferRouting?: { eventIds: string[] };
   },
 ): Promise<{
   versionId: string;
@@ -174,8 +177,12 @@ export async function publishVersion(
             summary,
             expectedNumber,
           });
-          await recomputeAfterPublish(tx, input.documentId);
-          return { ...written, warnings: prepared.warnings };
+          const revisedEventId = await recomputeAfterPublish(tx, input.documentId, {
+            principalId: input.createdById,
+            runId: input.runId,
+            agentId: doc.agentId,
+          });
+          return { ...written, warnings: prepared.warnings, revisedEventId };
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
@@ -183,7 +190,19 @@ export async function publishVersion(
   );
   // After the commit: the editor, MCP and the agent loop all publish here.
   await notifyDocumentChange(db, input.documentId, "version");
-  return published;
+  const { revisedEventId, ...result } = published;
+  if (revisedEventId) {
+    // A revision that answers requested changes is a review action (#646): its hooks run as any action's do.
+    await notifyDocumentChange(db, input.documentId, "review");
+    await runReviewHooks(db, {
+      documentId: input.documentId,
+      eventIds: [revisedEventId],
+      actorId: input.runId ? null : (input.createdById ?? null),
+      ...(input.deferRouting ? { deferRouting: true } : {}),
+    });
+    input.deferRouting?.eventIds.push(revisedEventId);
+  }
+  return result;
 }
 
 export async function getDocument(

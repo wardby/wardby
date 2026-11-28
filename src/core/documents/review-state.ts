@@ -19,6 +19,7 @@ export type Verdict = "none" | "approved" | "changes_requested";
 export const REVIEW_EVENT_KINDS = [
   "submitted",
   "reviewers_changed",
+  "revised",
   "approved",
   "changes_requested",
   "force_approved",
